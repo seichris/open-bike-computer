@@ -72,29 +72,23 @@ More info under [4.2](https://gemini.google.com/u/2/app/bbf4be62d0d00c6b)
 
 ```mermaid
 graph TD
-    subgraph "🚴 ESP32-S3 (Bike Computer)"
-        UI
-        BLE_P
-        
-        UI -- "User Taps Start" --> BLE_P
-        BLE_P -- "Update Screen<br/>(Dist, Icon, Street)" --> UI
+    subgraph "🚴 Bike Computer (ESP32-S3)"
+        User[User Input] -->|Touch/Button| UI[LVGL UI]
+        UI -->|Triggers| BLE_P
+        BLE_P -->|Updates| UI
     end
 
-    subgraph "📱 iOS App (Swift)"
-        BLE_C
-        Map
-        Health
-        Loc
-
-        BLE_C -- "Subscribes to" --> BLE_P
-        BLE_P -. "Notify: Start Button".-> BLE_C
+    subgraph "📱 iOS Companion App"
+        BLE_C -->|Subscribe| BLE_P
+        BLE_P -.->|Notify: 'Start Workout'| BLE_C
         
-        BLE_C -- "Write: Turn Instructions" --> BLE_P
+        Loc[CoreLocation] -->|GPS Updates| Map[MapKit Logic]
         
-        BLE_C -- "Trigger Start" --> Health
+        Map -->|Extracts| NavData{Nav Instruction}
+        NavData -->|"Turn Right, 100m"| BLE_C
+        BLE_C -->|Write Characteristic| BLE_P
         
-        Map -- "Calculate Route" --> Loc
-        Loc -- "User Moved" --> Map
-        Map -- "Extract Instruction" --> BLE_C
+        BLE_C -->|Trigger| HK
+        HK -->|Start Activity| Watch
     end
 ```
