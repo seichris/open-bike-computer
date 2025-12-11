@@ -199,4 +199,5 @@ Baidu has a traffic light API: https://lbsyun.baidu.com/faq/api?title=webapi/cou
 
 ---
 
-Lets first build the iOs app + server + red light indicator thing. Outside of xiaozhi
+Lets first build the iOs app + server + red light indicator thing. Outside of xiaozhi.
+Keep one esp32 for AI, and one for biking.
