@@ -1,7 +1,7 @@
 # esp32-bike-computer
 A good-looking bike computer that shows data from Apple Workout & Apple Maps
 
-Inspired by [Velo 2](https://beeline.co/products/beeline-velo-2)
+Inspired by [Velo 2](https://beeline.co/products/beeline-velo-2) which doesn't work in China
 
 <img width="1888" height="832" alt="image" src="https://github.com/user-attachments/assets/188c5d40-f092-40e8-91ef-d65f645233e7" />
 
@@ -73,6 +73,9 @@ More info under [4.2](https://gemini.google.com/u/2/app/bbf4be62d0d00c6b)
 - Predictive Interpolation, to offset latency
 - Offline Scenarios
 
+<details>
+  <summary># Flow chart</summary>
+    
 ```mermaid
 graph TD
     subgraph "🚴 Bike Computer (ESP32-S3)"
@@ -95,10 +98,13 @@ graph TD
         HK -->|Start Activity| Watch
     end
 ```
+</details>
 
 ---
 
-# Board specs
+<details>
+  <summary># Board specs</summary>
+
 
 <img width="559" height="685" alt="image" src="https://github.com/user-attachments/assets/280c03e8-c557-42e9-b19b-b3355f3d89bd" />
 
@@ -155,6 +161,7 @@ The AIDA64 secondary screen and weather clock functions require network configur
 After powering on, the device automatically opens an AP named "My-Ap" with the password "12345678". Connect your phone to this AP. A network configuration page will pop up shortly, automatically searching for nearby hotspots. Select your hotspot, enter the password, and the configuration will be complete. After configuration, the screen will obtain an IP address, which can be viewed in the WiFi settings page.
 Note: Some phones may automatically disconnect from the AP and switch to 5G if the hotspot has no internet connection. In this case, reconnect to the AP. If the configuration page does not pop up, enter "192.168.4.1" in your phone's browser to access it.
 
+</details>
 
 ---
 
