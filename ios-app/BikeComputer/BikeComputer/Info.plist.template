@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 
+	Info.plist Configuration Template for BikeComputer
+	
+	IMPORTANT: Copy these entries to your Info.plist or configure in Xcode:
+	1. Select your target
+	2. Go to "Info" tab
+	3. Add these keys under "Custom iOS Target Properties"
+	-->
+	
+	<!-- Location Permissions -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>BikeComputer needs your location to provide turn-by-turn navigation while you ride.</string>
+	
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>BikeComputer needs your location to provide turn-by-turn navigation.</string>
+	
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>BikeComputer needs background location access to continue navigation when the app is not visible.</string>
+	
+	<!-- Bluetooth Permission -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>BikeComputer uses Bluetooth to connect to your ESP32 bike computer display.</string>
+	
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>BikeComputer uses Bluetooth to communicate with your bike computer display.</string>
+	
+	<!-- Background Modes -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>location</string>
+	</array>
+	
+	<!-- Location Accuracy -->
+	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+	<dict>
+		<key>Navigation</key>
+		<string>BikeComputer needs precise location for accurate turn-by-turn navigation.</string>
+	</dict>
+	
+	<!-- Required Background Fetch -->
+	<key>UIApplicationExitsOnSuspend</key>
+	<false/>
+	
+	<!-- Supported Interface Orientations -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	
+	<!-- App Transport Security (allow local development) -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+	</dict>
+	
+	<!-- Launch Screen -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIImageName</key>
+		<string>LaunchImage</string>
+	</dict>
+</dict>
+</plist>
