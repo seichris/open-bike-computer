@@ -1546,6 +1546,7 @@ struct RouteInputView: View {
     @FocusState private var isDestinationFieldFocused: Bool
     
     @State private var hasSelectedDestination = false
+    @State private var isSelectingFromSuggestion = false
     @State private var selectedTransportType: MKDirectionsTransportType = {
         if #available(iOS 18.0, *) {
             return .cycling
@@ -1567,9 +1568,15 @@ struct RouteInputView: View {
                         .textContentType(.fullStreetAddress)
                             .focused($isDestinationFieldFocused)
                             .onChange(of: destinationAddress) { newValue in
+                                // Skip processing if we're programmatically selecting from suggestions
+                                if isSelectingFromSuggestion {
+                                    isSelectingFromSuggestion = false
+                                    return
+                                }
+                                
                                 destinationCompleter.search(query: newValue)
                                 // Reset selection state when user starts typing again
-                                if hasSelectedDestination && newValue != destinationAddress {
+                                if hasSelectedDestination {
                                     hasSelectedDestination = false
                                 }
                             }
@@ -1683,6 +1690,7 @@ struct RouteInputView: View {
         List(suggestions, id: \.self) { suggestion in
             Button(action: {
                 let fullAddress = "\(suggestion.title), \(suggestion.subtitle)"
+                isSelectingFromSuggestion = true
                 destinationAddress = fullAddress
                 hasSelectedDestination = true
                 isDestinationFieldFocused = false
@@ -1741,4 +1749,3 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
-
