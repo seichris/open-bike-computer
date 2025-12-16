@@ -17,3 +17,7 @@ ios-app/*.dSYM
 
 .vscode/
 esp32-bike-computer.code-workspace
+
+IceNav-v3/
+
+OSM_Extract/
