@@ -13,9 +13,123 @@ lv_obj_t *ui_LabelDistance = NULL;
 lv_obj_t *ui_LabelInstruction = NULL;
 lv_obj_t *ui_IconPlaceholder = NULL;
 
-// event funtions
+// Canvas buffer for drawing arrows
+static lv_color_t *canvas_buf = NULL;
 
-// build funtions
+// Arrow drawing functions
+void draw_up_arrow(lv_color_t color) {
+    if (!ui_IconPlaceholder || !canvas_buf) return;
+
+    // Clear canvas with transparent background
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+
+    // Draw up arrow: triangle pointing up with stem
+    static lv_point_t arrow_points[] = {
+        {40, 15},  // Top point
+        {25, 35},  // Bottom left
+        {30, 35},  // Bottom left inner
+        {30, 65},  // Stem bottom left
+        {50, 65},  // Stem bottom right
+        {50, 35},  // Bottom right inner
+        {55, 35},  // Bottom right
+    };
+
+    // Create draw descriptor for filled arrow
+    static lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_color = color;
+    draw_dsc.bg_opa = LV_OPA_COVER;
+
+    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+}
+
+void draw_left_arrow(lv_color_t color) {
+    if (!ui_IconPlaceholder || !canvas_buf) return;
+
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+
+    static lv_point_t arrow_points[] = {
+        {25, 40},  // Left point
+        {45, 25},  // Top right
+        {45, 30},  // Top right inner
+        {75, 30},  // Stem top right
+        {75, 50},  // Stem bottom right
+        {45, 50},  // Bottom right inner
+        {45, 55},  // Bottom right
+    };
+
+    // Create draw descriptor for filled arrow
+    static lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_color = color;
+    draw_dsc.bg_opa = LV_OPA_COVER;
+
+    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+}
+
+void draw_right_arrow(lv_color_t color) {
+    if (!ui_IconPlaceholder || !canvas_buf) return;
+
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+
+    static lv_point_t arrow_points[] = {
+        {55, 40},  // Right point
+        {35, 25},  // Top left
+        {35, 30},  // Top left inner
+        {5, 30},   // Stem top left
+        {5, 50},   // Stem bottom left
+        {35, 50},  // Bottom left inner
+        {35, 55},  // Bottom left
+    };
+
+    // Create draw descriptor for filled arrow
+    static lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_color = color;
+    draw_dsc.bg_opa = LV_OPA_COVER;
+
+    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow_points, 7, &draw_dsc);
+}
+
+void draw_u_turn_arrow(lv_color_t color) {
+    if (!ui_IconPlaceholder || !canvas_buf) return;
+
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+
+    // Draw a curved U-turn arrow (simplified as two left arrows)
+    static lv_point_t arrow1_points[] = {
+        {15, 30},  // Left point 1
+        {35, 15},  // Top right 1
+        {35, 20},  // Top right inner 1
+        {65, 20},  // Stem top right 1
+        {65, 40},  // Stem bottom right 1
+        {35, 40},  // Bottom right inner 1
+        {35, 45},  // Bottom right 1
+    };
+
+    static lv_point_t arrow2_points[] = {
+        {25, 50},  // Left point 2
+        {45, 35},  // Top right 2
+        {45, 40},  // Top right inner 2
+        {75, 40},  // Stem top right 2
+        {75, 60},  // Stem bottom right 2
+        {45, 60},  // Bottom right inner 2
+        {45, 65},  // Bottom right 2
+    };
+
+    // Create draw descriptor for filled arrow
+    static lv_draw_rect_dsc_t draw_dsc;
+    lv_draw_rect_dsc_init(&draw_dsc);
+    draw_dsc.bg_color = color;
+    draw_dsc.bg_opa = LV_OPA_COVER;
+
+    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow1_points, 7, &draw_dsc);
+    lv_canvas_draw_polygon(ui_IconPlaceholder, arrow2_points, 7, &draw_dsc);
+}
+
+// event functions
+
+// build functions
 
 void ui_Screen1_screen_init(void)
 {
@@ -60,18 +174,24 @@ lv_obj_set_style_text_font(ui_LabelPSRAMFree, &lv_font_montserrat_14, LV_PART_MA
 
 // ========== Navigation Section (Center) ==========
 
-// Icon/Arrow Placeholder (Large circular placeholder)
-ui_IconPlaceholder = lv_obj_create(ui_Screen1);
-lv_obj_set_width(ui_IconPlaceholder, 120);
-lv_obj_set_height(ui_IconPlaceholder, 120);
+// Navigation Arrow/Icon Display (Canvas for vector arrows)
+ui_IconPlaceholder = lv_canvas_create(ui_Screen1);
+lv_obj_set_width(ui_IconPlaceholder, 80);
+lv_obj_set_height(ui_IconPlaceholder, 80);
 lv_obj_set_x(ui_IconPlaceholder, 0);
 lv_obj_set_y(ui_IconPlaceholder, -20);
 lv_obj_set_align(ui_IconPlaceholder, LV_ALIGN_CENTER);
 lv_obj_clear_flag(ui_IconPlaceholder, LV_OBJ_FLAG_SCROLLABLE);
-lv_obj_set_style_radius(ui_IconPlaceholder, 60, LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_bg_color(ui_IconPlaceholder, lv_color_hex(0x2196F3), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_border_color(ui_IconPlaceholder, lv_color_hex(0x1976D2), LV_PART_MAIN | LV_STATE_DEFAULT);
-lv_obj_set_style_border_width(ui_IconPlaceholder, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+// Allocate canvas buffer (80x80 pixels) with error checking
+canvas_buf = (lv_color_t *)lv_mem_alloc(80 * 80 * sizeof(lv_color_t));
+if (canvas_buf != NULL) {
+    lv_canvas_set_buffer(ui_IconPlaceholder, canvas_buf, 80, 80, LV_IMG_CF_TRUE_COLOR);
+    lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+} else {
+    // Canvas buffer allocation failed - hide the placeholder
+    lv_obj_add_flag(ui_IconPlaceholder, LV_OBJ_FLAG_HIDDEN);
+}
 
 // Distance Label (Large, below icon)
 ui_LabelDistance = lv_label_create(ui_Screen1);
@@ -102,6 +222,12 @@ lv_label_set_long_mode(ui_LabelInstruction, LV_LABEL_LONG_WRAP);
 void ui_Screen1_screen_destroy(void)
 {
    if (ui_Screen1) lv_obj_del(ui_Screen1);
+
+// Free canvas buffer
+if (canvas_buf) {
+    lv_mem_free(canvas_buf);
+    canvas_buf = NULL;
+}
 
 // NULL screen variables
 ui_Screen1 = NULL;

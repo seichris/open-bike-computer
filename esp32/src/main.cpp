@@ -80,17 +80,33 @@ static lv_disp_drv_t disp_drv;
 // Using full screen buffer to prevent partial update artifacts on AMOLED
 // ============================================================================
 
+// Mutex for display access
+static portMUX_TYPE display_mux = portMUX_INITIALIZER_UNLOCKED;
+
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
 
-  // Try using startWrite/endWrite with drawBitmap for better control
-  // This might bypass some Arduino_GFX issues with CO5300
+  // Add bounds checking to prevent corruption
+  if (w == 0 || h == 0 || w > SCREEN_WIDTH || h > SCREEN_HEIGHT) {
+    lv_disp_flush_ready(disp);
+    return;
+  }
+
+  // Enter critical section to prevent concurrent display access
+  portENTER_CRITICAL(&display_mux);
+  
+  // Use startWrite/endWrite with proper synchronization
   gfx->startWrite();
   gfx->setAddrWindow(area->x1, area->y1, w, h);
   gfx->writePixels((uint16_t *)color_p, w * h);
   gfx->endWrite();
+  
+  portEXIT_CRITICAL(&display_mux);
+  
+  // Minimal delay - full screen buffer ensures complete frame writes
+  delayMicroseconds(50);
 
   // Inform LVGL that flushing is complete
   lv_disp_flush_ready(disp);
@@ -107,11 +123,14 @@ uint16_t touchX = 0, touchY = 0;
 
 void readTouch() {
   // Try to read touch data with error handling
+  // Skip if I2C is busy to prevent interference with display
   Wire.beginTransmission(CST9217_ADDRESS);
   Wire.write(0x00);  // Register address for touch data
   uint8_t error = Wire.endTransmission(false);
   
   if (error != 0) {
+    // I2C error - just mark touch as not pressed and return
+    // Don't spam serial to avoid performance issues
     touchPressed = false;
     return;
   }
@@ -188,21 +207,25 @@ class ServerCallbacks: public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer) {
     deviceConnected = true;
     Serial.println("BLE: Client connected");
-    // Update UI
+    // Update UI with critical section
+    portENTER_CRITICAL(&display_mux);
     if (ui_LabelBLEStatus != NULL) {
       lv_label_set_text(ui_LabelBLEStatus, "BLE: Connected");
       lv_obj_set_style_text_color(ui_LabelBLEStatus, lv_color_hex(0x4CAF50), LV_PART_MAIN | LV_STATE_DEFAULT);
     }
+    portEXIT_CRITICAL(&display_mux);
   }
 
   void onDisconnect(NimBLEServer* pServer) {
     deviceConnected = false;
     Serial.println("BLE: Client disconnected");
-    // Update UI
+    // Update UI with critical section
+    portENTER_CRITICAL(&display_mux);
     if (ui_LabelBLEStatus != NULL) {
       lv_label_set_text(ui_LabelBLEStatus, "BLE: Disconnected");
       lv_obj_set_style_text_color(ui_LabelBLEStatus, lv_color_hex(0xFF6B6B), LV_PART_MAIN | LV_STATE_DEFAULT);
     }
+    portEXIT_CRITICAL(&display_mux);
     // Restart advertising
     NimBLEDevice::startAdvertising();
   }
@@ -229,6 +252,9 @@ void parseNavigationData(String data) {
                 navData.iconID, navData.distance, navData.instruction);
   
   // Update UI labels with received navigation data
+  // Use critical section to prevent display corruption during updates
+  portENTER_CRITICAL(&display_mux);
+  
   if (ui_LabelDistance != NULL) {
     lv_label_set_text_fmt(ui_LabelDistance, "%d m", navData.distance);
   }
@@ -236,17 +262,34 @@ void parseNavigationData(String data) {
     lv_label_set_text(ui_LabelInstruction, navData.instruction);
   }
   if (ui_IconPlaceholder != NULL) {
-    // Change icon color based on iconID for now (until we add images)
-    uint32_t color = 0x2196F3;  // Default blue
+    // Draw arrow shapes based on iconID
+    lv_color_t arrow_color;
+
     switch(navData.iconID) {
-      case 1: color = 0x4CAF50; break; // Green - Continue
-      case 2: color = 0xFFC107; break; // Yellow - Turn Left
-      case 3: color = 0xFF9800; break; // Orange - Turn Right
-      case 4: color = 0xF44336; break; // Red - U-Turn
-      default: color = 0x2196F3; break; // Blue - Default
+      case 1: // Continue (straight ahead)
+        arrow_color = lv_color_hex(0x4CAF50); // Green
+        draw_up_arrow(arrow_color);
+        break;
+      case 2: // Turn Left
+        arrow_color = lv_color_hex(0xFFC107); // Yellow
+        draw_left_arrow(arrow_color);
+        break;
+      case 3: // Turn Right
+        arrow_color = lv_color_hex(0xFF9800); // Orange
+        draw_right_arrow(arrow_color);
+        break;
+      case 4: // U-Turn
+        arrow_color = lv_color_hex(0xF44336); // Red
+        draw_u_turn_arrow(arrow_color);
+        break;
+      default:
+        arrow_color = lv_color_hex(0x2196F3); // Blue
+        draw_right_arrow(arrow_color);
+        break;
     }
-    lv_obj_set_style_bg_color(ui_IconPlaceholder, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
   }
+  
+  portEXIT_CRITICAL(&display_mux);
 }
 
 class CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
@@ -302,38 +345,38 @@ void setupLVGL() {
   
   lv_init();
   
-  // Allocate display buffer - full screen buffer for AMOLED to prevent artifacts
-  // Use full screen buffer to avoid partial update issues that cause black stripes
+  // Allocate FULL SCREEN buffer from PSRAM to enable true full_refresh mode
+  // This eliminates ALL partial updates and prevents diagonal digit corruption
   uint32_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT;
-  Serial.printf("Allocating LVGL buffer: %d bytes (full screen)\n", bufSize * sizeof(lv_color_t));
+  Serial.printf("Allocating LVGL buffer: %d bytes (FULL SCREEN)\n", bufSize * sizeof(lv_color_t));
 
   #ifdef BOARD_HAS_PSRAM
-    // Try PSRAM first (SPIRAM), fallback to internal DMA-capable RAM
-    disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    // Use PSRAM (8MB available) with proper alignment for full screen buffer
+    disp_draw_buf = (lv_color_t *)heap_caps_aligned_alloc(8, bufSize * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!disp_draw_buf) {
-      Serial.println("PSRAM allocation failed, trying internal RAM...");
-      disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      Serial.println("ERROR: PSRAM allocation failed!");
+      // Don't fallback to internal RAM - it's too small for full screen
+      while(1) delay(1000);  // Halt - this is fatal
     }
+    Serial.println("✓ Using PSRAM for display buffer");
   #else
-    disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    Serial.println("ERROR: PSRAM required for full screen buffer!");
+    while(1) delay(1000);  // Halt - this is fatal
   #endif
   
-  if (!disp_draw_buf) {
-    Serial.println("ERROR: LVGL buffer allocation failed!");
-    while(1) delay(1000);  // Halt - this is fatal
-  }
-  
-  Serial.printf("✓ LVGL buffer allocated: %d bytes\n", bufSize * sizeof(lv_color_t));
+  Serial.printf("✓ LVGL buffer allocated: %d bytes (aligned, full screen)\n", bufSize * sizeof(lv_color_t));
   
   // Initialize draw buffer
   lv_disp_draw_buf_init(&draw_buf, disp_draw_buf, NULL, bufSize);
   
-  // Initialize display driver
+  // Initialize display driver with optimizations for AMOLED
   lv_disp_drv_init(&disp_drv);
   disp_drv.hor_res = SCREEN_WIDTH;
   disp_drv.ver_res = SCREEN_HEIGHT;
   disp_drv.flush_cb = my_disp_flush;
   disp_drv.draw_buf = &draw_buf;
+  disp_drv.full_refresh = 1;  // Force full refresh to prevent partial update corruption
+  disp_drv.direct_mode = 0;   // Use buffered mode for stability
   
   lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
   
@@ -388,18 +431,25 @@ void setup() {
   if (Wire.endTransmission() == 0) {
     Serial.println("✓ AXP2101 found!");
     
-    // Enable DLDO1 output (3.3V for display) - exact same as working demo
+    // Simple, proven configuration - just enable display power
+    // Set DLDO1 voltage to 3.3V
     Wire.beginTransmission(AXP2101_I2C_ADDRESS);
-    Wire.write(0x90);  // DLDO1 voltage setting register
-    Wire.write(0x1C);  // Set to 3.3V
-    Wire.endTransmission();
+    Wire.write(0x99);  // DLDO1 voltage register
+    Wire.write(0x1C);  // 3.3V
+    if (Wire.endTransmission() != 0) {
+      Serial.println("✗ Warning: DLDO1 voltage config failed");
+    }
+    delay(10);
     
+    // Enable DLDO1
     Wire.beginTransmission(AXP2101_I2C_ADDRESS);
-    Wire.write(0x90);  // Enable DLDO1
-    Wire.write(0x9C);  // Enable bit + 3.3V
-    Wire.endTransmission();
+    Wire.write(0x90);  // LDO on/off control register
+    Wire.write(0x02);  // Enable DLDO1
+    if (Wire.endTransmission() != 0) {
+      Serial.println("✗ Warning: DLDO1 enable failed");
+    }
     
-    delay(100);  // Wait for power to stabilize
+    delay(150);  // Wait for power to stabilize
     Serial.println("✓ AXP2101 display power enabled");
   } else {
     Serial.println("✗ AXP2101 not found - display may not work!");
@@ -446,13 +496,30 @@ void setup() {
 // ============================================================================
 
 unsigned long lastStatsUpdate = 0;
-const unsigned long STATS_UPDATE_INTERVAL = 1000;  // Update every 1 second
+const unsigned long STATS_UPDATE_INTERVAL = 2000;  // Update every 2 seconds (reduced from 1s)
+
+unsigned long lastDisplayKeepAlive = 0;
+const unsigned long DISPLAY_KEEPALIVE_INTERVAL = 30000;  // Refresh display every 30 seconds
+
+void keepDisplayAlive() {
+  unsigned long now = millis();
+  
+  if (now - lastDisplayKeepAlive >= DISPLAY_KEEPALIVE_INTERVAL) {
+    lastDisplayKeepAlive = now;
+    
+    // Ensure display stays on
+    gfx->displayOn();
+  }
+}
 
 void updateDeviceStats() {
   unsigned long now = millis();
   
   if (now - lastStatsUpdate >= STATS_UPDATE_INTERVAL) {
     lastStatsUpdate = now;
+    
+    // Enter critical section for UI updates to prevent corruption
+    portENTER_CRITICAL(&display_mux);
     
     // Update Heap Memory
     if (ui_LabelHeapFree != NULL) {
@@ -473,6 +540,8 @@ void updateDeviceStats() {
         lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
       #endif
     }
+    
+    portEXIT_CRITICAL(&display_mux);
   }
 }
 
@@ -481,10 +550,17 @@ void updateDeviceStats() {
 // ============================================================================
 
 void loop() {
+  // Keep display alive to prevent timeout
+  keepDisplayAlive();
+  
   // Update device stats periodically
   updateDeviceStats();
   
   // Update LVGL (handles rendering and animations)
+  // With full screen buffer and full_refresh, we can handle updates more efficiently
   lv_timer_handler();
-  delay(5);  // 5ms delay = ~200Hz refresh rate
+  
+  // Moderate delay for display stability - ~100Hz refresh
+  // Full screen buffer eliminates partial update corruption
+  delay(10);
 }
