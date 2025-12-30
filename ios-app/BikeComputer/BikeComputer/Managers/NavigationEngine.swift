@@ -115,6 +115,8 @@ class NavigationEngine: NSObject, ObservableObject {
         simulatedPosition = nil
     }
     
+    private var lastSimulatedPosition: CLLocationCoordinate2D?  // Track for heading calculation
+    
     private func updateSimulation() {
         guard let route = currentRoute, let lastUpdate = lastSimulationUpdate else { return }
         
@@ -142,8 +144,17 @@ class NavigationEngine: NSObject, ObservableObject {
         if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
             simulatedPosition = position
             
-            // Send to ESP32
-            bleManager?.sendGPSPosition(lat: position.latitude, lon: position.longitude)
+            // Calculate heading from last position to current position
+            var heading: Double = 0
+            if let lastPos = lastSimulatedPosition {
+                heading = calculateBearing(from: lastPos, to: position)
+            }
+            lastSimulatedPosition = position
+            
+            // Send to ESP32 with heading
+            // Simulation points are from Apple Maps route (GCJ-02), so convert to WGS-84
+            let convertedPos = CoordinateConverter.gcj02ToWGS84(coordinate: position)
+            bleManager?.sendGPSPosition(lat: convertedPos.latitude, lon: convertedPos.longitude, heading: heading)
             
             // Trigger geometry update if needed
             let location = CLLocation(latitude: position.latitude, longitude: position.longitude)
@@ -152,6 +163,21 @@ class NavigationEngine: NSObject, ObservableObject {
             // Also process location for navigation instructions
             processLocation(location)
         }
+    }
+    
+    /// Calculate bearing (heading) from one coordinate to another
+    private func calculateBearing(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> Double {
+        let lat1 = from.latitude * .pi / 180
+        let lat2 = to.latitude * .pi / 180
+        let dLon = (to.longitude - from.longitude) * .pi / 180
+        
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        var bearing = atan2(y, x) * 180 / .pi
+        
+        // Normalize to 0-360
+        if bearing < 0 { bearing += 360 }
+        return bearing
     }
     
     private func interpolatePositionAlongRoute(progress: Double) -> CLLocationCoordinate2D? {
@@ -544,14 +570,20 @@ extension NavigationEngine {
     /// Compress route points to binary format for efficient BLE transfer
     /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
     /// Uses microdegrees (lat * 1,000,000) for ~0.1m precision
+    /// Apple Maps returns routes in GCJ-02 in China, convert to WGS-84 for map tiles
     private func compressRoutePoints(_ points: [CLLocationCoordinate2D]) -> Data {
         guard let first = points.first else { return Data() }
+        
+        // Convert first point from GCJ-02 (Apple Maps) to WGS-84 (our map tiles)
+        let firstConverted = CoordinateConverter.gcj02ToWGS84(coordinate: first)
+        
+        print("Route: Raw(\(first.latitude), \(first.longitude)) -> WGS(\(firstConverted.latitude), \(firstConverted.longitude))")
         
         var data = Data()
         
         // Start point: 4 bytes lat, 4 bytes lon (scaled Int32 in microdegrees)
-        let startLat = Int32(first.latitude * 1_000_000)
-        let startLon = Int32(first.longitude * 1_000_000)
+        let startLat = Int32(firstConverted.latitude * 1_000_000)
+        let startLon = Int32(firstConverted.longitude * 1_000_000)
         
         // Append as little-endian (ESP32 is little-endian)
         withUnsafeBytes(of: startLat.littleEndian) { data.append(contentsOf: $0) }
@@ -563,8 +595,10 @@ extension NavigationEngine {
         var prevLon = startLon
         
         for point in points.dropFirst() {
-            let lat = Int32(point.latitude * 1_000_000)
-            let lon = Int32(point.longitude * 1_000_000)
+            // Convert each point from GCJ-02 (Apple Maps) to WGS-84
+            let converted = CoordinateConverter.gcj02ToWGS84(coordinate: point)
+            let lat = Int32(converted.latitude * 1_000_000)
+            let lon = Int32(converted.longitude * 1_000_000)
             
             // Clamp deltas to Int16 range (-32768 to 32767)
             // This gives us ~3.2km range per step at 0.1m precision

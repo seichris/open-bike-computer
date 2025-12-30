@@ -126,22 +126,32 @@ class BLEManager: NSObject, ObservableObject {
         print("Sent route geometry: \(data.count) bytes")
     }
     
-    /// Send GPS position to ESP32 (for simulation mode)
-    func sendGPSPosition(lat: Double, lon: Double) {
+    /// Send GPS position to ESP32
+    /// Format: [Lat:4][Lon:4][Heading:2] = 10 bytes
+    /// GPS coordinates are sent as-is (WGS-84) but with a calibration nudge for map alignment
+    func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
         guard let peripheral = connectedPeripheral,
               let characteristic = gpsPositionCharacteristic,
               isConnected else {
             return
         }
         
-        // Format: [Lat:4][Lon:4] Int32 microdegrees
+        // Apply calibration (nudge) to align with map tiles
+        let calibrated = CoordinateConverter.applyCalibration(lat: lat, lon: lon)
+        
+        // Format: [Lat:4][Lon:4][Heading:2] Int32 microdegrees + UInt16 degrees
+        // GPS coordinates stay in WGS-84 (no conversion needed - map tiles are WGS-84)
         var data = Data()
         
-        let latInt = Int32(lat * 1_000_000)
-        let lonInt = Int32(lon * 1_000_000)
+        let latInt = Int32(calibrated.lat * 1_000_000)
+        let lonInt = Int32(calibrated.lon * 1_000_000)
+        
+        // Heading: 0-359 degrees (UInt16), -1 means invalid
+        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
         
         withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
     }

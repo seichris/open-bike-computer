@@ -156,8 +156,13 @@ class BikeComputerCoordinator: ObservableObject {
             .combineLatest(bleManager.$isGPSReady)
             .sink { [weak self] location, ready in
                 guard let self = self, ready, let loc = location else { return }
-                // Send current position to device to update map/waiting screen
-                self.bleManager.sendGPSPosition(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
+                // Send current position and heading to device to update map
+                // CLLocation.course is -1 if invalid, 0-359 if valid
+                self.bleManager.sendGPSPosition(
+                    lat: loc.coordinate.latitude, 
+                    lon: loc.coordinate.longitude,
+                    heading: loc.course
+                )
             }
             .store(in: &cancellables)
     }

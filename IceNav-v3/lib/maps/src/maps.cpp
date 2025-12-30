@@ -1818,7 +1818,7 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
     // = north)
     // CORRECTION: Drag UP (screen dy -ve) -> maps dy +ve. map moves UP. View
     // moves SOUTH (Increase Y). So we need to ADD dy.
-    Maps::point.y += (int32_t)(dy * zoom);
+    Maps::point.y -= (int32_t)(dy * zoom);
     ESP_LOGI(TAG, "scrollMap (Vector): dx=%d dy=%d zoom=%d -> point(%d, %d)",
              dx, dy, zoom, Maps::point.x, Maps::point.y);
     Maps::isPosMoved = true;

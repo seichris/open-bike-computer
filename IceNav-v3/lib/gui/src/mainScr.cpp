@@ -175,6 +175,30 @@ void updateMainScreen(lv_timer_t *t) {
 #ifdef ENABLE_COMPASS
       heading = compass.getHeading();
 #endif
+      // Track last heading for Course-Up auto-rotation
+      static uint16_t lastHeading = 0;
+      uint16_t currentHeading = gps.gpsData.heading;
+
+      // In Course-Up mode, redraw map when heading changes significantly (> 5
+      // degrees)
+      if (mapView.rotationMode == Maps::ROT_COURSE_UP) {
+        int headingDiff = abs((int)currentHeading - (int)lastHeading);
+        // Handle wrap-around (e.g., 355 to 5 = 10 degrees, not 350)
+        if (headingDiff > 180)
+          headingDiff = 360 - headingDiff;
+
+        if (headingDiff > 5) {
+          log_i("Course-Up: Heading changed from %d to %d (diff=%d), "
+                "triggering redraw",
+                lastHeading, currentHeading, headingDiff);
+          mapView.isPosMoved = true; // Force map regeneration with new rotation
+          lastHeading = currentHeading;
+        }
+      } else {
+        lastHeading = currentHeading; // Track heading even in North-Up for
+                                      // smooth transition
+      }
+
       if (gps.hasLocationChange()) {
         // If we are following GPS, center the map
         if (mapView.followGps) {

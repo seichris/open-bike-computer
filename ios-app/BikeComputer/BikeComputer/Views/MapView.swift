@@ -63,7 +63,15 @@ struct MapViewContainer: UIViewRepresentable {
            !context.coordinator.hasSetInitialRegion,
            context.coordinator.lastRoute == nil {
              // Use simulated position if available and in simulation mode
-             let center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
+             var center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
+             
+             // In China, Apple Maps uses GCJ-02 for its view region
+             // Convert WGS-84 -> GCJ-02 so the map centers correctly on the visual location (blue dot)
+             // Only convert for REAL GPS (which is WGS-84). Simulated position (from MKRoute) is already GCJ-02.
+             if !isSimulationMode && CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
+                 let converted = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
+                 center = converted
+             }
              
             let region = MKCoordinateRegion(
                 center: center,
