@@ -952,21 +952,18 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
         // TODO: Expand screen_bbox_mc to cover rotated view.
 
         auto transformPoint = [&](Point16 p) -> Point16 {
-          // 1. Center relative in pixels
+          // 1. Convert from map coords to screen-space offset (Y inverted)
           double dx = (double)(p.x - screen_center_mc.x) / zoom;
-          double dy = (double)(p.y - screen_center_mc.y) / zoom;
+          double dy = -(double)(p.y - screen_center_mc.y) /
+                      zoom; // Invert Y to screen space
 
-          // 2. Rotate
+          // 2. Rotate in screen space (same as route overlay)
           double rx = dx * cosA - dy * sinA;
           double ry = dx * sinA + dy * cosA;
 
-          // 3. Screen offset
-          // Screen Y is inverted (Map Y Up -> Screen Y Down) using
-          // "mapScrHeight - val". With rotation, ry is "North" component
-          // relative to center. So ScreenY = CenterY - ry.
-
+          // 3. Translate to screen center
           int16_t sx = round(rx) + halfW;
-          int16_t sy = halfH - round(ry);
+          int16_t sy = round(ry) + halfH;
 
           return Point16(sx, sy);
         };
@@ -1020,12 +1017,14 @@ void Maps::readVectorMap(Maps::ViewPort &viewPort, Maps::MemCache &memCache,
 
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {
+          // Convert to screen-space offset (Y inverted), rotate, translate
           double dx = (double)(p.x - screen_center_mc.x) / zoom;
-          double dy = (double)(p.y - screen_center_mc.y) / zoom;
+          double dy = -(double)(p.y - screen_center_mc.y) /
+                      zoom; // Invert Y to screen space
           double rx = dx * cosA - dy * sinA;
           double ry = dx * sinA + dy * cosA;
           int16_t sx = round(rx) + halfW;
-          int16_t sy = halfH - round(ry);
+          int16_t sy = round(ry) + halfH;
           return Point16(sx, sy);
         };
 

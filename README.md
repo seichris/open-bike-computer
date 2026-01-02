@@ -1,5 +1,5 @@
 
-- How does map rotation currently work? It is switched by clicking on the red dot in the device: The default mode (showing red dot) always shows north. The other mode shows a blue dot, and shows into the direction where i am driving in (?!?) based on what?
+
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
 
