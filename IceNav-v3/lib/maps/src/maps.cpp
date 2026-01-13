@@ -1038,9 +1038,9 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     // map.fillTriangle(...)
     ESP_LOGI(TAG, "Draw done! %i", millis());
 
-    MapBlock *firstBlock = memCache.blocks.front();
-    delete firstBlock;
-    memCache.blocks.erase(memCache.blocks.begin());
+    // NOTE: Block caching is now handled by getMapBlocks() eviction logic.
+    // Previously, this code deleted the first block after every render,
+    // which defeated caching and forced SD card reads every frame.
 
     Maps::totalBounds.lat_min = Maps::mercatorY2lat(viewPort.bbox.min.y);
     Maps::totalBounds.lat_max = Maps::mercatorY2lat(viewPort.bbox.max.y);
