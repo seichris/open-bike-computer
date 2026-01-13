@@ -18,8 +18,6 @@ Route parsed: 30 points from 124 bytes
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
 
-- rotate everything on the device by 90 degrees left, so the device's usb port faces the user. Is setRotation the native way to do this?
-Can we add a setting in the app for this? It should be saved on the device, so it keeps its set rotation after a restart.
 - rerouting logic in the iOS app (after taking a wrong path)
 also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 

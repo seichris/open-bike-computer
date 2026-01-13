@@ -24,6 +24,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var minPolygonSize: Double = 0
     @Published var detailLevel: Int = 2
     @Published var routeLineWidth: Double = 4
+    @Published var displayRotation: Int = 0  // 0-3: 0°, 90°, 180°, 270°
     
     // MARK: - BLE UUIDs (matching ESP32)
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
@@ -55,6 +56,7 @@ class BLEManager: NSObject, ObservableObject {
         static let minPolygonSize = "mapSettings.minPolygonSize"
         static let detailLevel = "mapSettings.detailLevel"
         static let routeLineWidth = "mapSettings.routeLineWidth"
+        static let displayRotation = "mapSettings.displayRotation"
     }
     
     // MARK: - Initialization
@@ -69,6 +71,7 @@ class BLEManager: NSObject, ObservableObject {
         minPolygonSize = defaults.double(forKey: SettingsKeys.minPolygonSize)
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
+        displayRotation = defaults.object(forKey: SettingsKeys.displayRotation) as? Int ?? 0
     }
     
     func saveSettings() {
@@ -76,6 +79,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(minPolygonSize, forKey: SettingsKeys.minPolygonSize)
         defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
+        defaults.set(displayRotation, forKey: SettingsKeys.displayRotation)
     }
     
     // MARK: - Public Methods

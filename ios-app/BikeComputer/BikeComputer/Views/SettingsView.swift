@@ -63,6 +63,19 @@ struct SettingsView: View {
                             }
                     }
                 }
+                
+                Section(header: Text("Display Rotation"), footer: Text("Rotate the display. Requires device reboot to apply.")) {
+                    Picker("Rotation", selection: $bleManager.displayRotation) {
+                        Text("0°").tag(0)
+                        Text("90°").tag(1)
+                        Text("180°").tag(2)
+                        Text("270°").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: bleManager.displayRotation) { newValue in
+                        bleManager.sendSetting(id: 4, value: Int32(newValue))
+                    }
+                }
             }
             .navigationTitle("Map Settings")
             .navigationBarTitleDisplayMode(.inline)

@@ -8,6 +8,7 @@
 
 #ifdef USE_ARDUINO_GFX
 
+#include <Preferences.h>
 #include <Wire.h>
 
 // Include HAL for pin definitions
@@ -74,6 +75,8 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
 
 extern lv_display_t *display;
 static lv_color_t *disp_draw_buf = NULL;
+static uint8_t displayRotation =
+    0; // Global rotation for touch coordinate transform
 
 // ============================================================================
 // LVGL 9 DISPLAY FLUSH CALLBACK
@@ -212,8 +215,25 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
 
   if (touchPressed) {
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = touchX;
-    data->point.y = touchY;
+    // Rotate touch coordinates to match display rotation
+    uint16_t rotatedX = touchX;
+    uint16_t rotatedY = touchY;
+    switch (displayRotation) {
+    case 1: // 90° CCW: swap X/Y and flip new X
+      rotatedX = touchY;
+      rotatedY = 465 - touchX;
+      break;
+    case 2: // 180°: flip both
+      rotatedX = 465 - touchX;
+      rotatedY = 465 - touchY;
+      break;
+    case 3: // 270° CCW: swap X/Y and flip new Y
+      rotatedX = 465 - touchY;
+      rotatedY = touchX;
+      break;
+    }
+    data->point.x = rotatedX;
+    data->point.y = rotatedY;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
@@ -229,6 +249,40 @@ void setupDisplay() {
   // Initialize display
   gfx->begin();
   delay(100); // Let display stabilize
+
+  // Load rotation from NVS (default to 0 if not set)
+  Preferences prefs;
+  prefs.begin("mapSettings", true); // read-only
+  uint8_t rotation = prefs.getUChar("rotation", 0);
+  prefs.end();
+  displayRotation = rotation; // Store globally for touch coordinate rotation
+  Serial.printf("Loaded rotation from NVS: %d\n", rotation);
+
+  // Attempt raw MADCTL command for rotation
+  // CO5300 MADCTL register (0x36) bits:
+  // - Standard panels use: 0x80=MY, 0x40=MX, 0x20=MV (row/col exchange)
+  // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP
+  // Let's try adding 0x20 (MV) to see if true rotation works
+  if (rotation != 0) {
+    uint8_t madctl = 0x00; // Start with RGB color order
+    switch (rotation) {
+    case 1:                 // 90° CCW - try MV + adjustments
+      madctl = 0x20 | 0x02; // MV + X_FLIP
+      break;
+    case 2:                 // 180°
+      madctl = 0x02 | 0x05; // X_FLIP + Y_FLIP
+      break;
+    case 3:                 // 270° CCW
+      madctl = 0x20 | 0x05; // MV + Y_FLIP
+      break;
+    }
+    Serial.printf("Sending raw MADCTL: 0x%02X for rotation %d\n", madctl,
+                  rotation);
+    gfx->startWrite();
+    // Use bus writeC8D8 to send raw command (0x36 is MADCTL register)
+    bus->writeC8D8(0x36, madctl);
+    gfx->endWrite();
+  }
 
   // Turn on display and set brightness (CRITICAL for AMOLED!)
   Serial.println("Turning on display and setting brightness...");

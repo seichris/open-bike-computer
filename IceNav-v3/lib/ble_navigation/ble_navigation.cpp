@@ -10,6 +10,7 @@
 #include "../gui/src/waitingScr.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 extern Gps gps;
 
@@ -29,16 +30,22 @@ struct NavigationData {
 
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
- * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth
+ * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
+ * 4=displayRotation
  */
 struct MapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
   uint8_t routeLineWidth = 4; // 2-8: Route overlay line width in pixels
+  uint8_t displayRotation =
+      0; // 0-3: Display rotation (0=0°, 1=90°, 2=180°, 3=270°)
 };
 
 // Global map render settings (accessible from maps.cpp)
 MapRenderSettings mapRenderSettings;
+
+// NVS Preferences for persistent settings
+static Preferences settingsPrefs;
 
 // Global navigation data
 static NavigationData currentNavData = {0, 0, ""};
@@ -192,6 +199,16 @@ public:
             (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)8);
         Serial.printf("BLE Settings: routeLineWidth = %d\n",
                       mapRenderSettings.routeLineWidth);
+        break;
+      case 4: // displayRotation (0-3, requires reboot to apply)
+        mapRenderSettings.displayRotation =
+            (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("rotation", mapRenderSettings.displayRotation);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: displayRotation = %d (reboot to apply)\n",
+                      mapRenderSettings.displayRotation);
         break;
       default:
         Serial.printf("BLE Settings: Unknown setting ID %d\n", settingId);
