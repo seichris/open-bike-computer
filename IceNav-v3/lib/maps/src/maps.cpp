@@ -522,6 +522,8 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     }
     // File descriptor was already closed via ::close(fd) after reading
     free(file);
+    // Build spatial grid for polygon culling optimization
+    buildPolygonGrid(mblock);
     return mblock;
   }
 }
@@ -601,7 +603,52 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   }
 
   Maps::isMapFound = true;
+  // Build spatial grid for polygon culling optimization
+  buildPolygonGrid(mblock);
   return mblock;
+}
+
+/**
+ * @brief Build spatial grid index for polygon culling optimization.
+ * Divides block into 16x16 grid cells and assigns polygon indices to cells
+ * based on bounding box overlap. This reduces polygon iteration from O(n)
+ * to O(cells_in_viewport * polygons_per_cell).
+ *
+ * @param mblock The map block to build the grid for
+ */
+void Maps::buildPolygonGrid(MapBlock *mblock) {
+  // Initialize grid with GRID_SIZE * GRID_SIZE cells (16x16 = 256 cells)
+  mblock->polygonGrid.clear();
+  mblock->polygonGrid.resize(GRID_SIZE * GRID_SIZE);
+
+  for (uint16_t i = 0; i < mblock->polygons.size(); i++) {
+    const auto &poly = mblock->polygons[i];
+
+    // Calculate which grid cells this polygon's bounding box overlaps
+    // CELL_SHIFT converts from block coords (0-4095) to cell index (0-15)
+    int minCX = std::max(0, (int)(poly.bbox.min.x >> CELL_SHIFT));
+    int maxCX = std::min(GRID_SIZE - 1, (int)(poly.bbox.max.x >> CELL_SHIFT));
+    int minCY = std::max(0, (int)(poly.bbox.min.y >> CELL_SHIFT));
+    int maxCY = std::min(GRID_SIZE - 1, (int)(poly.bbox.max.y >> CELL_SHIFT));
+
+    // Add polygon index to all overlapping cells
+    for (int cy = minCY; cy <= maxCY; cy++) {
+      for (int cx = minCX; cx <= maxCX; cx++) {
+        mblock->polygonGrid[cy * GRID_SIZE + cx].push_back(i);
+      }
+    }
+  }
+
+  // Log grid stats for debugging
+  size_t totalEntries = 0;
+  for (const auto &cell : mblock->polygonGrid) {
+    totalEntries += cell.size();
+  }
+  log_d("Built polygon grid: %d polygons -> %d cell entries (%.1fx expansion)",
+        mblock->polygons.size(), totalEntries,
+        mblock->polygons.size() > 0
+            ? (float)totalEntries / mblock->polygons.size()
+            : 0.0f);
 }
 
 /**
@@ -922,77 +969,96 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           viewPort.bbox -
           mblock->offset; // screen boundaries with features coordinates
 
-      ////// Polygons
+      ////// Polygons - Grid-based spatial culling for performance
       int poly_total = mblock->polygons.size();
       int poly_drawn = 0;
-      for (const auto &polygon : mblock->polygons) {
-        // DISABLE ZOOM FILTER to see map
-        /*
-        if (zoom > polygon.maxZoom) {
-          continue;
+      int poly_checked = 0;
+
+      // Calculate which grid cells overlap the viewport bounding box
+      // screen_bbox_mc is in block-local coordinates (0-4095 range)
+      int minCX = std::max(0, (int)(screen_bbox_mc.min.x >> CELL_SHIFT));
+      int maxCX =
+          std::min(GRID_SIZE - 1, (int)(screen_bbox_mc.max.x >> CELL_SHIFT));
+      int minCY = std::max(0, (int)(screen_bbox_mc.min.y >> CELL_SHIFT));
+      int maxCY =
+          std::min(GRID_SIZE - 1, (int)(screen_bbox_mc.max.y >> CELL_SHIFT));
+
+      // Bitset to track visited polygons (avoid processing same polygon twice
+      // if it spans multiple cells)
+      std::vector<bool> visited(poly_total, false);
+
+      // Define transform lambda once, outside the loop
+      auto transformPoint = [&](Point16 p) -> Point16 {
+        // 1. Convert from map coords to screen-space offset (Y inverted)
+        double dx = (double)(p.x - screen_center_mc.x) / zoom;
+        double dy = -(double)(p.y - screen_center_mc.y) /
+                    zoom; // Invert Y to screen space
+
+        // 2. Rotate in screen space (same as route overlay)
+        double rx = dx * cosA - dy * sinA;
+        double ry = dx * sinA + dy * cosA;
+
+        // 3. Translate to screen center
+        int16_t sx = round(rx) + halfW;
+        int16_t sy = round(ry) + halfH;
+
+        return Point16(sx, sy);
+      };
+
+      // Iterate only through cells that overlap the viewport
+      for (int cy = minCY; cy <= maxCY; cy++) {
+        for (int cx = minCX; cx <= maxCX; cx++) {
+          int cellIdx = cy * GRID_SIZE + cx;
+
+          // Check bounds on polygonGrid access
+          if (cellIdx < 0 || cellIdx >= (int)mblock->polygonGrid.size())
+            continue;
+
+          for (uint16_t polyIdx : mblock->polygonGrid[cellIdx]) {
+            // Skip if already processed (polygon spans multiple cells)
+            if (visited[polyIdx])
+              continue;
+            visited[polyIdx] = true;
+            poly_checked++;
+
+            const auto &polygon = mblock->polygons[polyIdx];
+
+            // Fine-grained intersection test with viewport
+            if (!polygon.bbox.intersects(screen_bbox_mc)) {
+              continue;
+            }
+
+            poly_drawn++;
+            newPolygon.color = polygon.color;
+
+            // Transform points to screen coordinates
+            newPolygon.points.clear();
+            int16_t minX = 32000, maxX = -32000, minY = 32000, maxY = -32000;
+
+            for (const auto &p : polygon.points) {
+              Point16 tp = transformPoint(p);
+              newPolygon.points.push_back(tp);
+              if (tp.x < minX)
+                minX = tp.x;
+              if (tp.x > maxX)
+                maxX = tp.x;
+              if (tp.y < minY)
+                minY = tp.y;
+              if (tp.y > maxY)
+                maxY = tp.y;
+            }
+
+            newPolygon.bbox.min.x = minX;
+            newPolygon.bbox.max.x = maxX;
+            newPolygon.bbox.min.y = minY;
+            newPolygon.bbox.max.y = maxY;
+
+            Maps::fillPolygon(newPolygon, canvas);
+          }
         }
-        */
-        if (!polygon.bbox.intersects(screen_bbox_mc)) {
-          continue;
-        }
-
-        poly_drawn++;
-        newPolygon.color = polygon.color;
-
-        // Transform BBox for culling?
-        // For simplicity, we keep original BBox check against non-rotated
-        // screen_bbox_mc which might cause culling issues at corners when
-        // rotated.
-        // TODO: Expand screen_bbox_mc to cover rotated view.
-
-        auto transformPoint = [&](Point16 p) -> Point16 {
-          // 1. Convert from map coords to screen-space offset (Y inverted)
-          double dx = (double)(p.x - screen_center_mc.x) / zoom;
-          double dy = -(double)(p.y - screen_center_mc.y) /
-                      zoom; // Invert Y to screen space
-
-          // 2. Rotate in screen space (same as route overlay)
-          double rx = dx * cosA - dy * sinA;
-          double ry = dx * sinA + dy * cosA;
-
-          // 3. Translate to screen center
-          int16_t sx = round(rx) + halfW;
-          int16_t sy = round(ry) + halfH;
-
-          return Point16(sx, sy);
-        };
-
-        // Note: bounding box of newPolygon is used by fillPolygon?
-        // fillPolygon sorts nodes, so min/max in newPolygon.bbox might not be
-        // strictly needed if we just pass points? fillPolygon uses
-        // p.bbox.min.y/max.y for loop limits. So we MUST calculate the bbox of
-        // projected points.
-
-        newPolygon.points.clear();
-        int16_t minX = 32000, maxX = -32000, minY = 32000, maxY = -32000;
-
-        for (const auto &p : polygon.points) {
-          Point16 tp = transformPoint(p);
-          newPolygon.points.push_back(tp);
-          if (tp.x < minX)
-            minX = tp.x;
-          if (tp.x > maxX)
-            maxX = tp.x;
-          if (tp.y < minY)
-            minY = tp.y;
-          if (tp.y > maxY)
-            maxY = tp.y;
-        }
-
-        newPolygon.bbox.min.x = minX;
-        newPolygon.bbox.max.x = maxX;
-        newPolygon.bbox.min.y = minY;
-        newPolygon.bbox.max.y = maxY;
-
-        Maps::fillPolygon(newPolygon, canvas);
       }
-      Serial.printf("[Maps] Block polygons: Total=%d, Drawn=%d\n", poly_total,
-                    poly_drawn);
+      Serial.printf("[Maps] Block polygons: Total=%d, Checked=%d, Drawn=%d\n",
+                    poly_total, poly_checked, poly_drawn);
       log_i("Block polygons done %i ms", millis() - blockTime);
       blockTime = millis();
 

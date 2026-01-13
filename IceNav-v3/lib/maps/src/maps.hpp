@@ -65,6 +65,12 @@ private:
     uint16_t color;
     uint8_t maxZoom;
   };
+  // Spatial grid constants for polygon culling optimization
+  static const int GRID_BITS = 4;              // 16x16 grid
+  static const int GRID_SIZE = 1 << GRID_BITS; // 16 cells per axis
+  static const int CELL_SHIFT =
+      MAPBLOCK_SIZE_BITS - GRID_BITS; // Shift to get cell index
+
   struct MapBlock // Map square area of aprox 4096 meters side. Correspond to
                   // one single map file.
   {
@@ -72,6 +78,10 @@ private:
     bool inView = false;
     std::vector<Polyline> polylines;
     std::vector<Polygon> polygons;
+
+    // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
+    // indices
+    std::vector<std::vector<uint16_t>> polygonGrid;
   };
   struct ViewPort // Vector map viewport structure
   {
@@ -105,6 +115,8 @@ private:
   BBox parseBbox(String str);
   MapBlock *readMapBlock(String fileName);
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
+  void
+  buildPolygonGrid(MapBlock *mblock); // Build spatial grid for polygon culling
   void fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color);
