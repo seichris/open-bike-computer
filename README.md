@@ -1,7 +1,7 @@
 
 ## TODO: Performance Optimizations
 
-### 3. BLE Route Geometry Debouncing
+### BLE Route Geometry Debouncing
 Multiple route geometry updates arrive during a single map render cycle:
 ```
 BLE Route geometry received: 124 bytes
@@ -12,12 +12,23 @@ Route parsed: 30 points from 124 bytes
 **Fix:** Debounce/batch route updates - only parse the latest geometry after rendering completes.
 **Files:** `lib/ble_navigation/ble_navigation.cpp`, `lib/route_overlay/route_overlay.cpp`
 
+### Display Rotation Issues (Legacy / Hardware Limitation)
+We implemented 90° rotation, but encountered hardware limitations with the CO5300 driver/panel.
+- **Problem:** When rotating 90° (MADCTL 0x22), a thin green strip appears at the bottom of the display.
+- **Cause:** Likely a mismatch between the CO5300's internal 480x480 panel and our 466x466 display window when row/col swap (MV) is active. The driver's `writeAddrWindow` offsets may need custom adjustment for rotated modes.
+- **Status:** 
+    - 0°: Works perfectly.
+    - 90°: Functional (touch & map correct), but has visual green artifact at bottom.
+    - 180°/270°: Not supported by hardware (mirroring issues).
+- **Tried fixes:** `fillScreen` after rotation, custom constructor offsets (made it worse), various MADCTL bits.
+- **Future fix ideas:** Modify `Arduino_CO5300` driver to handle rotation offsets dynamically, or use LVGL software rotation.
+
 ---
 
 ## Other TODOs
 
 - it says the GPS follow mode is activated by default, but it doesnt seem so?!
-
+- zoom, also as setting in the app
 - rerouting logic in the iOS app (after taking a wrong path)
 also when starting a navigation, it should default to starting from the actual current gps location. Is that possible? vs right now it 'converts' our current location into a location name. And sometimes thats not accurately at our actual location. 
 

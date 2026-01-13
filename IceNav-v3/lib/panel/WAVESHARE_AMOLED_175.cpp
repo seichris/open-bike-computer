@@ -63,7 +63,8 @@ Arduino_ESP32QSPI *bus = new Arduino_ESP32QSPI(12, // CS
                                                7   // D3
 );
 
-// CO5300 Display Driver - Use minimal constructor like working demo
+// CO5300 Display Driver - Use minimal constructor (works for 0° mode)
+// Note: Explicit offsets caused green edges, so use defaults
 Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
                                          39, // RST
                                          0   // Rotation
@@ -258,36 +259,73 @@ void setupDisplay() {
   displayRotation = rotation; // Store globally for touch coordinate rotation
   Serial.printf("Loaded rotation from NVS: %d\n", rotation);
 
-  // Attempt raw MADCTL command for rotation
+  // ============================================================================
+  // DISPLAY ROTATION VIA RAW MADCTL COMMAND
+  // ============================================================================
   // CO5300 MADCTL register (0x36) bits:
   // - Standard panels use: 0x80=MY, 0x40=MX, 0x20=MV (row/col exchange)
   // - CO5300 uses different bits: 0x02=X_FLIP, 0x05=Y_FLIP, 0x20=MV
   //
-  // IMPORTANT: CO5300 hardware only supports 0° and 90° rotation correctly!
+  // IMPORTANT: CO5300 hardware only supports 0° and 90° rotation!
   // 180° and 270° attempts all resulted in mirroring or wrong direction.
   //
-  // What we tried for 180° (all failed):
+  // === 180° ROTATION ATTEMPTS (all failed): ===
   // - 0x07 (X_FLIP + Y_FLIP): shows 0° mirrored
   // - 0x27 (MV + X_FLIP + Y_FLIP): shows same as 90°
   // - 0x25 (MV + Y_FLIP): shows 270° mirrored
   // - 0x05 (Y_FLIP only): shows same as 0°
   //
-  // What we tried for 270° (all failed):
+  // === 270° ROTATION ATTEMPTS (all failed): ===
   // - 0x25 (MV + Y_FLIP): mirrored
   // - 0x02 (X_FLIP only): shows 0° mirrored
   // - 0x07 (X_FLIP + Y_FLIP): shows 0° mirrored
   // - 0x20 (MV only): correct direction but mirrored
   //
+  // ============================================================================
+  // KNOWN ISSUE: 90° ROTATION HAS GREEN EDGE AT BOTTOM
+  // ============================================================================
+  // When 90° rotation is enabled, a thin green strip appears at the bottom
+  // of the display. The map and touch work correctly, but this visual artifact
+  // persists during all map operations.
+  //
+  // === WHAT WE TRIED TO FIX THE GREEN EDGE (all failed): ===
+  // 1. fillScreen(BLACK) after MADCTL - still shows green
+  // 2. fillScreen(BLACK) after rotation in LVGL setup - still shows green
+  // 3. Explicit constructor with 466x466 dimensions and 7px offsets
+  //    (center in 480x480 panel) - made it worse, added green to 0° mode too
+  // 4. Various MADCTL bit combinations - didn't help
+  //
+  // === POSSIBLE ROOT CAUSES (for future investigation): ===
+  // - CO5300 panel is 480x480, we use 466x466 window
+  // - When MV (row/col swap) is set, the address window offsets may not
+  //   adjust correctly in the Arduino_CO5300 driver
+  // - The driver's writeAddrWindow() adds _xStart/_yStart offsets which
+  //   may not be correct for rotated mode
+  // - LVGL or map buffer may not be fully covering the rotated display area
+  //
+  // === POTENTIAL FIXES TO TRY IN FUTURE: ===
+  // - Modify Arduino_CO5300 driver to handle rotation offsets properly
+  // - Send custom CASET/PASET commands after MADCTL to adjust window
+  // - Use LVGL's software rotation (lv_display_set_rotation) with proper
+  //   render mode configuration
+  // - Investigate if the green is from uninitialized PSRAM buffer
+  //
+  // For now, the iOS app still offers 90° rotation option with this known
+  // visual artifact (green strip at bottom). Touch and map work correctly.
+  // ============================================================================
+  //
   if (rotation == 1) {
-    // 90° CCW - MV + X_FLIP (verified working!)
+    // 90° CCW - MV + X_FLIP (rotation works, touch works, but green edge issue)
     uint8_t madctl = 0x20 | 0x02; // MV + X_FLIP = 0x22
     Serial.printf("Sending raw MADCTL: 0x%02X for 90° rotation\n", madctl);
     gfx->startWrite();
     bus->writeC8D8(0x36, madctl);
     gfx->endWrite();
+    // Clear display RAM with new rotation coordinate system
+    gfx->fillScreen(0x0000); // BLACK - important to clear after rotation!
   }
   // Note: rotation values 2 (180°) and 3 (270°) are not supported by CO5300
-  // The iOS app now only offers 0° and 90° options
+  // The iOS app only offers 0° and 90° options
 
   // Turn on display and set brightness (CRITICAL for AMOLED!)
   Serial.println("Turning on display and setting brightness...");

@@ -185,19 +185,31 @@ public:
       case 1: // minPolygonSize
         mapRenderSettings.minPolygonSize =
             (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
-        Serial.printf("BLE Settings: minPolygonSize = %d\n",
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("minPolySize", mapRenderSettings.minPolygonSize);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: minPolygonSize = %d (saved)\n",
                       mapRenderSettings.minPolygonSize);
         break;
       case 2: // detailLevel
         mapRenderSettings.detailLevel =
             (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
-        Serial.printf("BLE Settings: detailLevel = %d\n",
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("detailLevel", mapRenderSettings.detailLevel);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: detailLevel = %d (saved)\n",
                       mapRenderSettings.detailLevel);
         break;
       case 3: // routeLineWidth
         mapRenderSettings.routeLineWidth =
             (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)8);
-        Serial.printf("BLE Settings: routeLineWidth = %d\n",
+        // Save to NVS for persistence across reboots
+        settingsPrefs.begin("mapSettings", false);
+        settingsPrefs.putUChar("routeWidth", mapRenderSettings.routeLineWidth);
+        settingsPrefs.end();
+        Serial.printf("BLE Settings: routeLineWidth = %d (saved)\n",
                       mapRenderSettings.routeLineWidth);
         break;
       case 4: // displayRotation (0-3, requires reboot to apply)
@@ -230,11 +242,35 @@ public:
 // BLE Navigation Server Implementation
 // ============================================================================
 
+/**
+ * @brief Load all map settings from NVS at startup
+ */
+static void loadSettingsFromNVS() {
+  Preferences prefs;
+  prefs.begin("mapSettings", true); // read-only
+
+  mapRenderSettings.minPolygonSize = prefs.getUChar("minPolySize", 0);
+  mapRenderSettings.detailLevel = prefs.getUChar("detailLevel", 2);
+  mapRenderSettings.routeLineWidth = prefs.getUChar("routeWidth", 4);
+  mapRenderSettings.displayRotation = prefs.getUChar("rotation", 0);
+
+  prefs.end();
+
+  Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
+                "detailLevel=%d, routeWidth=%d, rotation=%d\n",
+                mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
+                mapRenderSettings.routeLineWidth,
+                mapRenderSettings.displayRotation);
+}
+
 void BLENavigationServer::init(const char *deviceName) {
   if (initialized) {
     Serial.println("BLE: Already initialized");
     return;
   }
+
+  // Load persisted settings from NVS
+  loadSettingsFromNVS();
 
   Serial.println("BLE: Initializing NimBLE server...");
 

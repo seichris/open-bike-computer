@@ -22,7 +22,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Map Rendering"), footer: Text("Skip polygons smaller than this size to improve performance. Higher values = faster rendering but less detail.")) {
+                Section(header: Text("Map Rendering"), footer: Text("Higher values = faster rendering but less detail.")) {
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Min Polygon Size")
@@ -64,17 +64,27 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Display Rotation"), footer: Text("Rotate the display. Requires device reboot to apply.")) {
-                    Picker("Rotation", selection: $bleManager.displayRotation) {
-                        Text("0°").tag(0)
-                        Text("90°").tag(1)
-                        Text("180°").tag(2)
-                        Text("270°").tag(3)
+                Section(header: Text("Display Rotation"), footer: Text("Rotate display 90° CCW. Requires reboot.\n(Note: 180°/270° not supported by CO5300 hardware)")) {
+                    Toggle("Rotate 90°", isOn: Binding(
+                        get: { bleManager.displayRotation == 1 },
+                        set: { newValue in
+                            bleManager.displayRotation = newValue ? 1 : 0
+                            bleManager.sendSetting(id: 4, value: Int32(bleManager.displayRotation))
+                        }
+                    ))
+                }
+                
+                Section(header: Text("Device")) {
+                    Button(action: {
+                        bleManager.sendSetting(id: 5, value: 1) // Reboot command
+                    }) {
+                        HStack {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Reboot Device")
+                        }
+                        .foregroundColor(.blue)
                     }
-                    .pickerStyle(.segmented)
-                    .onChange(of: bleManager.displayRotation) { newValue in
-                        bleManager.sendSetting(id: 4, value: Int32(newValue))
-                    }
+                    .disabled(!bleManager.isConnected)
                 }
             }
             .navigationTitle("Map Settings")
