@@ -6,8 +6,10 @@
 //
 
 import Foundation
-import HealthKit
 import Combine
+
+#if HEALTHKIT_ENABLED && canImport(HealthKit)
+import HealthKit
 
 class HealthKitManager: NSObject, ObservableObject {
     @Published var isAuthorized = false
@@ -226,3 +228,53 @@ class HealthKitManager: NSObject, ObservableObject {
     }
 }
 
+#else
+
+/// Stub implementation used when HealthKit is not enabled for this build.
+/// This keeps the rest of the app compiling/running without HealthKit entitlements.
+class HealthKitManager: NSObject, ObservableObject {
+    @Published var isAuthorized = false
+    @Published var isWorkoutActive = false
+    @Published var workoutElapsedTime: TimeInterval = 0
+    @Published var workoutStartTime: Date?
+    @Published var heartRate: Double = 0
+    @Published var currentSpeed: Double = 0 // m/s
+    @Published var distanceTraveled: Double = 0 // meters
+
+    weak var locationManager: CurrentLocationManager?
+
+    // MARK: - Computed Properties
+
+    var currentSpeedKmh: Double { currentSpeed * 3.6 }
+    var distanceKm: Double { distanceTraveled / 1000.0 }
+    var formattedElapsedTime: String { TimeFormatter.format(workoutElapsedTime) }
+    var heartRateInt: Int? { heartRate > 0 ? Int(heartRate) : nil }
+
+    override init() {
+        super.init()
+        isAuthorized = false
+    }
+
+    func requestAuthorization() {
+        isAuthorized = false
+    }
+
+    func updateLocation(speed: Double, distance: Double) {
+        DispatchQueue.main.async {
+            self.currentSpeed = speed
+            self.distanceTraveled = distance
+        }
+    }
+
+    func startBikeWorkout() {
+        // No-op in builds without HealthKit.
+        isAuthorized = false
+        isWorkoutActive = false
+    }
+
+    func endBikeWorkout() {
+        isWorkoutActive = false
+    }
+}
+
+#endif
