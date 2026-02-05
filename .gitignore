@@ -35,6 +35,7 @@ IceNav-v3/assets
 IceNav-v3/tools/*.raw
 IceNav-v3/tools/*.png
 waveshare_test/.pio
+waveshare_test/
 
 # OSM_Extract/
 OSM_Extract/maps/
