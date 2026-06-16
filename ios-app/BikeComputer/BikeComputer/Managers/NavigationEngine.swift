@@ -362,12 +362,7 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func endpointLocation(for step: MKRoute.Step) -> CLLocation? {
-        let pointCount = step.polyline.pointCount
-        guard pointCount > 0 else { return nil }
-
-        var coordinate = CLLocationCoordinate2D()
-        step.polyline.getCoordinates(&coordinate, range: NSRange(location: pointCount - 1, length: 1))
-        return CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        RoutePolylineEndpoint.location(for: step.polyline)
     }
     
     /// Extract clean instruction text from MKRoute.Step
@@ -390,17 +385,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Map instruction text to icon ID for ESP32 display
     private func mapInstructionToIconID(_ instruction: String) -> Int {
-        let lower = instruction.lowercased()
-        
-        if lower.contains("u-turn") || lower.contains("uturn") {
-            return NavigationIconID.uTurn
-        } else if lower.contains("left") {
-            return NavigationIconID.left
-        } else if lower.contains("right") {
-            return NavigationIconID.right
-        } else {
-            return NavigationIconID.straight
-        }
+        NavigationInstructionMapper.iconID(for: instruction)
     }
     
     /// Determine if update should be sent (data changed significantly)

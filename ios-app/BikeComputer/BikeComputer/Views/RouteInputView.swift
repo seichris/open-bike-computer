@@ -255,7 +255,10 @@ struct RouteInputView: View {
                 // Go button (only shown after destination is selected & NOT editing)
                 if hasSelectedDestination && !isEditingSource {
                     Button(action: {
-                        let sourceEndpoint: RouteEndpoint = hasSelectedSource ? .query(sourceAddress) : .currentLocation
+                        let sourceEndpoint = RouteEndpointSelection.sourceEndpoint(
+                            hasSelectedSource: hasSelectedSource,
+                            sourceAddress: sourceAddress
+                        )
                         onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
                         dismiss()
                     }) {

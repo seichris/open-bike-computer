@@ -12,13 +12,12 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
+#include "navigation_protocol.h"
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <lvgl.h>
-#include <ctype.h>
-#include <stdlib.h>
 
 // Include SquareLine Studio generated UI
 extern "C" {
@@ -202,19 +201,10 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 
 #define SERVICE_UUID "1819"        // Navigation Service
 #define CHARACTERISTIC_UUID "2A6E" // Navigation Data Characteristic
-static constexpr size_t NAV_PAYLOAD_MAX_LEN = 96;
-static constexpr size_t NAV_INSTRUCTION_MAX_LEN = 63;
 
 NimBLEServer *pServer = nullptr;
 NimBLECharacteristic *pCharacteristic = nullptr;
 bool deviceConnected = false;
-
-// Navigation Data Structure
-struct NavigationData {
-  uint8_t iconID;
-  uint32_t distance;
-  char instruction[64];
-};
 
 NavigationData navData = {1, 0, ""};
 volatile bool uiUpdateNeeded = false;
@@ -223,10 +213,6 @@ volatile bool bleStateChanged = false;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingNavPayload[NAV_PAYLOAD_MAX_LEN + 1] = "";
 volatile bool navPayloadPending = false;
-
-bool isValidNavigationIcon(uint8_t iconID) {
-  return iconID >= 1 && iconID <= 4;
-}
 
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -265,70 +251,6 @@ void queueNavigationPayload(const std::string &value) {
   portEXIT_CRITICAL(&navPayloadMux);
 }
 
-bool parseUnsignedField(const char *start, const char *end, uint32_t maxValue, uint32_t *out) {
-  if (start == nullptr || end == nullptr || start >= end) {
-    return false;
-  }
-
-  uint32_t value = 0;
-  for (const char *cursor = start; cursor < end; cursor++) {
-    if (!isdigit((unsigned char)*cursor)) {
-      return false;
-    }
-
-    uint32_t digit = (uint32_t)(*cursor - '0');
-    if (value > (maxValue - digit) / 10) {
-      return false;
-    }
-
-    value = (value * 10) + digit;
-  }
-
-  *out = value;
-  return true;
-}
-
-// Parse incoming navigation data: "IconID|Distance|Instruction"
-bool parseNavigationData(const char *payload, NavigationData *parsed) {
-  if (payload == nullptr || parsed == nullptr) {
-    Serial.println("Invalid navigation payload: empty");
-    return false;
-  }
-
-  const char *firstPipe = strchr(payload, '|');
-  const char *secondPipe = firstPipe == nullptr ? nullptr : strchr(firstPipe + 1, '|');
-  if (firstPipe == nullptr || secondPipe == nullptr || strchr(secondPipe + 1, '|') != nullptr) {
-    Serial.println("Invalid navigation payload: expected IconID|Distance|Instruction");
-    return false;
-  }
-
-  uint32_t iconValue = 0;
-  uint32_t distanceValue = 0;
-  if (!parseUnsignedField(payload, firstPipe, UINT8_MAX, &iconValue) ||
-      !parseUnsignedField(firstPipe + 1, secondPipe, UINT32_MAX, &distanceValue)) {
-    Serial.println("Invalid navigation payload: icon and distance must be unsigned integers");
-    return false;
-  }
-
-  if (!isValidNavigationIcon((uint8_t)iconValue)) {
-    Serial.printf("Invalid navigation icon ID: %lu\n", (unsigned long)iconValue);
-    return false;
-  }
-
-  const char *instruction = secondPipe + 1;
-  if (*instruction == '\0') {
-    Serial.println("Invalid navigation payload: instruction is empty");
-    return false;
-  }
-
-  parsed->iconID = (uint8_t)iconValue;
-  parsed->distance = (uint32_t)distanceValue;
-  strncpy(parsed->instruction, instruction, NAV_INSTRUCTION_MAX_LEN);
-  parsed->instruction[NAV_INSTRUCTION_MAX_LEN] = '\0';
-
-  return true;
-}
-
 void processPendingNavigationPayload() {
   char payload[NAV_PAYLOAD_MAX_LEN + 1];
 
@@ -344,6 +266,7 @@ void processPendingNavigationPayload() {
 
   NavigationData parsed;
   if (!parseNavigationData(payload, &parsed)) {
+    Serial.println("Invalid navigation payload: expected IconID|Distance|Instruction with unsigned numeric fields");
     return;
   }
 
