@@ -32,7 +32,7 @@ void draw_up_arrow(lv_color_t color) {
   if (!ui_IconPlaceholder || !canvas_buf)
     return;
 
-  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_COVER);
 
   lv_draw_line_dsc_t line_dsc;
   lv_draw_line_dsc_init(&line_dsc);
@@ -58,7 +58,7 @@ void draw_left_arrow(lv_color_t color) {
   if (!ui_IconPlaceholder || !canvas_buf)
     return;
 
-  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_COVER);
 
   lv_draw_line_dsc_t line_dsc;
   lv_draw_line_dsc_init(&line_dsc);
@@ -84,7 +84,7 @@ void draw_right_arrow(lv_color_t color) {
   if (!ui_IconPlaceholder || !canvas_buf)
     return;
 
-  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_COVER);
 
   lv_draw_line_dsc_t line_dsc;
   lv_draw_line_dsc_init(&line_dsc);
@@ -110,7 +110,7 @@ void draw_u_turn_arrow(lv_color_t color) {
   if (!ui_IconPlaceholder || !canvas_buf)
     return;
 
-  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_TRANSP);
+  lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0), LV_OPA_COVER);
 
   lv_draw_line_dsc_t line_dsc;
   lv_draw_line_dsc_init(&line_dsc);
@@ -220,7 +220,7 @@ void ui_Screen1_screen_init(void) {
     lv_canvas_set_buffer(ui_IconPlaceholder, canvas_buf, 80, 80,
                          LV_IMG_CF_TRUE_COLOR);
     lv_canvas_fill_bg(ui_IconPlaceholder, lv_color_make(0, 0, 0),
-                      LV_OPA_TRANSP);
+                      LV_OPA_COVER);
   } else {
     // Canvas buffer allocation failed - hide the placeholder
     lv_obj_add_flag(ui_IconPlaceholder, LV_OBJ_FLAG_HIDDEN);

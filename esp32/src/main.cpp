@@ -96,8 +96,15 @@ static lv_disp_drv_t disp_drv;
 
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area,
                    lv_color_t *color_p) {
-  uint32_t w = (area->x2 - area->x1 + 1);
-  uint32_t h = (area->y2 - area->y1 + 1);
+  if (area->x1 < 0 || area->y1 < 0 || area->x2 < area->x1 ||
+      area->y2 < area->y1 || area->x2 >= SCREEN_WIDTH ||
+      area->y2 >= SCREEN_HEIGHT) {
+    lv_disp_flush_ready(disp);
+    return;
+  }
+
+  uint32_t w = (uint32_t)(area->x2 - area->x1 + 1);
+  uint32_t h = (uint32_t)(area->y2 - area->y1 + 1);
 
   // Add bounds checking to prevent corruption
   if (w == 0 || h == 0 || w > SCREEN_WIDTH || h > SCREEN_HEIGHT) {
@@ -527,8 +534,10 @@ void listSDFiles() {
       Serial.print("  SIZE: ");
       Serial.println(file.size());
     }
+    file.close();
     file = root.openNextFile();
   }
+  root.close();
 }
 
 // ============================================================================
@@ -712,7 +721,7 @@ void setup() {
   Serial.println("Turning on display and setting brightness...");
   gfx->displayOn();
   delay(50);
-  gfx->setBrightness(255); // Maximum brightness 0-255
+  gfx->setBrightness(DEFAULT_DISPLAY_BRIGHTNESS);
   delay(50);
 
   // Clear screen for LVGL
@@ -787,7 +796,11 @@ void keepDisplayAlive() {
 }
 
 void updateDeviceStats() {
+#if ENABLE_DEBUG_STATS
   unsigned long now = millis();
+  static uint32_t lastHeapFree = UINT32_MAX;
+  static uint32_t lastPsramFree = UINT32_MAX;
+  static bool lastPsramAvailable = true;
 
   if (now - lastStatsUpdate >= STATS_UPDATE_INTERVAL) {
     lastStatsUpdate = now;
@@ -795,7 +808,10 @@ void updateDeviceStats() {
     // Update Heap Memory
     if (ui_LabelHeapFree != NULL) {
       uint32_t heapFree = ESP.getFreeHeap() / 1024; // Convert to KB
-      lv_label_set_text_fmt(ui_LabelHeapFree, "Heap: %lu KB", heapFree);
+      if (heapFree != lastHeapFree) {
+        lastHeapFree = heapFree;
+        lv_label_set_text_fmt(ui_LabelHeapFree, "Heap: %lu KB", heapFree);
+      }
     }
 
     // Update PSRAM Memory
@@ -803,18 +819,42 @@ void updateDeviceStats() {
 #ifdef BOARD_HAS_PSRAM
       if (psramFound()) {
         uint32_t psramFree = ESP.getFreePsram() / 1024; // Convert to KB
-        lv_label_set_text_fmt(ui_LabelPSRAMFree, "PSRAM: %lu KB", psramFree);
+        if (!lastPsramAvailable || psramFree != lastPsramFree) {
+          lastPsramAvailable = true;
+          lastPsramFree = psramFree;
+          lv_label_set_text_fmt(ui_LabelPSRAMFree, "PSRAM: %lu KB", psramFree);
+        }
       } else {
-        lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
+        if (lastPsramAvailable) {
+          lastPsramAvailable = false;
+          lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
+        }
       }
 #else
-      lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
+      if (lastPsramAvailable) {
+        lastPsramAvailable = false;
+        lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
+      }
 #endif
     }
   }
+#else
+  static bool debugLabelsHidden = false;
+  if (debugLabelsHidden) {
+    return;
+  }
+  if (ui_LabelHeapFree != NULL) {
+    lv_obj_add_flag(ui_LabelHeapFree, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (ui_LabelPSRAMFree != NULL) {
+    lv_obj_add_flag(ui_LabelPSRAMFree, LV_OBJ_FLAG_HIDDEN);
+  }
+  debugLabelsHidden = true;
+#endif
 }
 
 void demoSDCardReading() {
+#if ENABLE_SD_DEMO
   unsigned long now = millis();
   static unsigned long lastSDDemo = 0;
   const unsigned long SD_DEMO_INTERVAL =
@@ -851,6 +891,7 @@ void demoSDCardReading() {
       Serial.println("=== End SD Demo ===\n");
     }
   }
+#endif
 }
 
 // ============================================================================
