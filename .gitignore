@@ -19,7 +19,6 @@ ios-app/*.xcuserstate
 ios-app/xcuserdata/
 ios-app/BikeComputer.xcuserdata/
 *.xcuserdatad/
-ios-app/BikeComputer/BikeComputer.xcodeproj/project.pbxproj
 
 .vscode/
 esp32-bike-computer.code-workspace

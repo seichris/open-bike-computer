@@ -15,7 +15,6 @@ lines:
       secondary: []
       tertiary: []
       secondary_link: []
-      tertiary: []
       motorway: []
       trunk: []
       motorway_link: []
@@ -27,7 +26,7 @@ lines:
 # Some features are defined just by a tag, like railway.
   tags: 
     - railway
-    - natural]
+    - natural
 
 
 ##### Polygons #####

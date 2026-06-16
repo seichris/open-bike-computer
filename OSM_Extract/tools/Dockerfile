@@ -1,14 +1,13 @@
 FROM ubuntu:20.04
-MAINTAINER arestabrucs
+LABEL maintainer="arestabrucs"
 
-ENV DEBIAN_FRONTEND=nonintercative
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update -qq && apt install -y --no-install-recommends \
     curl \
     git \
     wget \
     zip unzip \
     gpg-agent \
-    python3-mapnik \
     mapnik-utils \
     python3-mapnik \
     python3-psycopg2 \
