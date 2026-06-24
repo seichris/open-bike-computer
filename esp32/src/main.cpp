@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
+#include "navigation_payload_queue.h"
 #include "navigation_protocol.h"
 #include <SD.h>
 #include <SPI.h>
@@ -211,8 +212,7 @@ volatile bool uiUpdateNeeded = false;
 volatile bool bleConnectedState = false;
 volatile bool bleStateChanged = false;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
-char pendingNavPayload[NAV_PAYLOAD_MAX_LEN + 1] = "";
-volatile bool navPayloadPending = false;
+NavigationPayloadQueue navPayloadQueue;
 
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -245,9 +245,7 @@ void queueNavigationPayload(const std::string &value) {
   }
 
   portENTER_CRITICAL(&navPayloadMux);
-  memcpy(pendingNavPayload, value.data(), value.length());
-  pendingNavPayload[value.length()] = '\0';
-  navPayloadPending = true;
+  navPayloadQueue.enqueue(value);
   portEXIT_CRITICAL(&navPayloadMux);
 }
 
@@ -255,14 +253,11 @@ void processPendingNavigationPayload() {
   char payload[NAV_PAYLOAD_MAX_LEN + 1];
 
   portENTER_CRITICAL(&navPayloadMux);
-  if (!navPayloadPending) {
-    portEXIT_CRITICAL(&navPayloadMux);
+  bool hasPayload = navPayloadQueue.dequeue(payload, sizeof(payload));
+  portEXIT_CRITICAL(&navPayloadMux);
+  if (!hasPayload) {
     return;
   }
-  strncpy(payload, pendingNavPayload, sizeof(payload));
-  payload[sizeof(payload) - 1] = '\0';
-  navPayloadPending = false;
-  portEXIT_CRITICAL(&navPayloadMux);
 
   NavigationData parsed;
   if (!parseNavigationData(payload, &parsed)) {

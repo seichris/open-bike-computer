@@ -182,7 +182,7 @@ struct StartWorkoutView: View {
                         .padding(.horizontal)
                 }
             } else {
-                Text("Workout tracking is unavailable in this build")
+                Text("Workout tracking is unavailable on this device")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)

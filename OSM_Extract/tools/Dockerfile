@@ -20,5 +20,5 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     software-properties-common \
     build-essential \
     gdal-bin \
-  && pip install pillow shapely matplotlib pyyaml \
+  && pip install pillow shapely "matplotlib<3.6" pyyaml \
   && rm -rf /var/lib/apt/lists/*

@@ -10,14 +10,17 @@ import Foundation
 import Combine
 import CoreBluetooth
 
+struct NavigationWriteEndpoint {
+    let maximumWriteLength: Int
+    let canSend: () -> Bool
+    let write: (Data) -> Void
+}
+
 class BLEManager: NSObject, ObservableObject {
-    private static let navigationProtocolMaxBytes = 96
-    
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
     @Published var isConnected: Bool = false
-    @Published var isGPSReady: Bool = false // Ready to send GPS data
-    @Published var isRouteReady: Bool = false // Ready to send Route data
+    @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published var peripheralName: String = ""
     @Published var signalStrength: Int = 0
@@ -43,8 +46,8 @@ class BLEManager: NSObject, ObservableObject {
     private var centralManager: CBCentralManager!
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
-    private var pendingNavigationWrites: [Data] = []
-    private let maxQueuedNavigationWrites = 16
+    private var navigationWriteEndpoint: NavigationWriteEndpoint?
+    private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
     private var isConnecting: Bool = false
     
     private var autoReconnect: Bool = true
@@ -156,39 +159,27 @@ class BLEManager: NSObject, ObservableObject {
     }
     
     /// Send navigation data to ESP32
-    func sendNavigationData(_ data: String) {
-        guard let peripheral = connectedPeripheral,
-              let characteristic = navigationCharacteristic,
-              isConnected else {
+    @discardableResult
+    func sendNavigationData(_ data: String) -> Bool {
+        guard let endpoint = navigationWriteEndpoint,
+              isConnected,
+              isNavigationReady else {
             print("Cannot send: not connected or characteristic not found")
-            return
+            return false
         }
         
-        let maxLength = min(peripheral.maximumWriteValueLength(for: .withoutResponse), Self.navigationProtocolMaxBytes)
-        guard let dataToSend = navigationPacketData(from: data, maxLength: maxLength) else {
+        let maxLength = min(endpoint.maximumWriteLength, NavigationPacketBuilder.protocolMaxBytes)
+        guard let dataToSend = NavigationPacketBuilder.data(from: data, maxLength: maxLength) else {
             print("Failed to encode data")
-            return
+            return false
         }
         
-        enqueueNavigationWrite(dataToSend, for: characteristic, on: peripheral)
+        enqueueNavigationWrite(dataToSend, endpoint: endpoint)
         print("Queued navigation packet: \(dataToSend.count) bytes")
+        return true
     }
     
-    /// Send route geometry data to ESP32 (binary format)
-    func sendRouteGeometry(_ data: Data) {
-        print("Route geometry BLE characteristic is not supported by the current ESP32 firmware; skipped \(data.count) bytes")
-    }
-    
-    /// Send GPS position to ESP32
-    /// Format: [Lat:4][Lon:4][Heading:2] = 10 bytes
-    /// GPS coordinates are sent as-is (WGS-84) but with a calibration nudge for map alignment
-    func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
-        print("GPS BLE characteristic is not supported by the current ESP32 firmware; skipped lat=\(lat), lon=\(lon), heading=\(heading)")
-    }
-    
-    /// Send a setting to ESP32 (runtime map configuration)
-    /// Format: [settingId:1][value:4] = 5 bytes
-    /// Setting IDs: 1=minPolygonSize (0-50), 2=detailLevel (0-2), 3=routeLineWidth (2-8)
+    /// Persist a local map setting. The current ESP32 firmware exposes navigation data only.
     func sendSetting(id: UInt8, value: Int32) {
         saveSettings()
         print("Settings BLE characteristic is not supported by the current ESP32 firmware; saved local setting id=\(id), value=\(value)")
@@ -243,49 +234,43 @@ class BLEManager: NSObject, ObservableObject {
 
         stopScanning()
         connectedPeripheral = peripheral
+        navigationCharacteristic = nil
+        navigationWriteEndpoint = nil
+        isNavigationReady = false
+        navigationWriteQueue.removeAll()
         peripheral.delegate = self
         isConnecting = true
         centralManager.connect(peripheral, options: nil)
         print("Connecting to: \(peripheral.name ?? "Unknown")")
     }
 
-    private func navigationPacketData(from packet: String, maxLength: Int) -> Data? {
-        guard maxLength > 0 else { return nil }
-
-        if let data = packet.data(using: .utf8), data.count <= maxLength {
-            return data
-        }
-
-        let parts = packet.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3 else { return nil }
-
-        let prefix = "\(parts[0])|\(parts[1])|"
-        guard let prefixData = prefix.data(using: .utf8), prefixData.count < maxLength else {
-            return nil
-        }
-
-        var instruction = String(parts[2])
-        while let data = "\(prefix)\(instruction)".data(using: .utf8), data.count > maxLength {
-            guard !instruction.isEmpty else { return nil }
-            instruction.removeLast()
-        }
-
-        return "\(prefix)\(instruction)".data(using: .utf8)
+    private func clearConnectionState() {
+        isConnected = false
+        isConnecting = false
+        supportsDeviceSettings = false
+        connectedPeripheral = nil
+        navigationCharacteristic = nil
+        navigationWriteEndpoint = nil
+        isNavigationReady = false
+        navigationWriteQueue.removeAll()
+        stopMonitoringRSSI()
     }
 
-    private func enqueueNavigationWrite(_ data: Data, for characteristic: CBCharacteristic, on peripheral: CBPeripheral) {
-        pendingNavigationWrites.append(data)
-        if pendingNavigationWrites.count > maxQueuedNavigationWrites {
-            pendingNavigationWrites.removeFirst(pendingNavigationWrites.count - maxQueuedNavigationWrites)
-        }
-
-        flushPendingNavigationWrites(for: characteristic, on: peripheral)
+    func installNavigationWriteEndpoint(_ endpoint: NavigationWriteEndpoint) {
+        navigationWriteEndpoint = endpoint
     }
 
-    private func flushPendingNavigationWrites(for characteristic: CBCharacteristic, on peripheral: CBPeripheral) {
-        while !pendingNavigationWrites.isEmpty && peripheral.canSendWriteWithoutResponse {
-            let data = pendingNavigationWrites.removeFirst()
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+    private func enqueueNavigationWrite(_ data: Data, endpoint: NavigationWriteEndpoint) {
+        if navigationWriteQueue.enqueue(data) {
+            print("Navigation write queue full; dropped oldest packet")
+        }
+
+        flushPendingNavigationWrites(endpoint: endpoint)
+    }
+
+    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
+        navigationWriteQueue.flush(canSend: endpoint.canSend) { data in
+            endpoint.write(data)
             print("Sent navigation packet: \(data.count) bytes")
         }
     }
@@ -300,7 +285,7 @@ extension BLEManager: CBCentralManagerDelegate {
         case .poweredOn:
             print("Bluetooth powered on")
             // Attempt to reconnect to last device, or start scanning
-            if let uuid = lastConnectedPeripheralIdentifier {
+            if lastConnectedPeripheralIdentifier != nil {
                 reconnectToLastDevice()
             } else {
                 startScanning()
@@ -308,29 +293,36 @@ extension BLEManager: CBCentralManagerDelegate {
             
         case .poweredOff:
             print("Bluetooth powered off")
-            isConnected = false
             isScanning = false
-            isConnecting = false
-            connectedPeripheral = nil
-            navigationCharacteristic = nil
-            pendingNavigationWrites.removeAll()
+            clearConnectionState()
             resetReconnectionState()
-            stopMonitoringRSSI()
             
         case .resetting:
             print("Bluetooth resetting")
+            isScanning = false
+            clearConnectionState()
             
         case .unauthorized:
             print("Bluetooth unauthorized")
+            isScanning = false
+            clearConnectionState()
+            resetReconnectionState()
             
         case .unsupported:
             print("Bluetooth unsupported")
+            isScanning = false
+            clearConnectionState()
+            resetReconnectionState()
             
         case .unknown:
             print("Bluetooth unknown state")
+            isScanning = false
+            clearConnectionState()
             
         @unknown default:
             print("Bluetooth unknown state")
+            isScanning = false
+            clearConnectionState()
         }
     }
     
@@ -354,6 +346,7 @@ extension BLEManager: CBCentralManagerDelegate {
         
         isConnecting = false
         isConnected = true
+        isNavigationReady = false
         peripheralName = peripheral.name ?? "BikeComputer"
         lastConnectedPeripheralIdentifier = peripheral.identifier
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
@@ -377,12 +370,11 @@ extension BLEManager: CBCentralManagerDelegate {
         
         isConnected = false
         isConnecting = false
-        isGPSReady = false
-        isRouteReady = false
         supportsDeviceSettings = false
         connectedPeripheral = nil
         navigationCharacteristic = nil
-        pendingNavigationWrites.removeAll()
+        isNavigationReady = false
+        navigationWriteQueue.removeAll()
         stopMonitoringRSSI()
         
         // Auto-reconnect if enabled with exponential backoff
@@ -428,7 +420,7 @@ extension BLEManager: CBCentralManagerDelegate {
                        didFailToConnect peripheral: CBPeripheral, 
                        error: Error?) {
         print("Failed to connect to: \(peripheral.name ?? "Unknown")")
-        isConnecting = false
+        clearConnectionState()
         
         if let error = error {
             print("Connection error: \(error.localizedDescription)")
@@ -483,6 +475,17 @@ extension BLEManager: CBPeripheralDelegate {
                 }
 
                 navigationCharacteristic = characteristic
+                installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                    maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse),
+                    canSend: { [weak peripheral] in
+                        peripheral?.canSendWriteWithoutResponse == true
+                    },
+                    write: { [weak peripheral, weak characteristic] data in
+                        guard let peripheral, let characteristic else { return }
+                        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+                    }
+                ))
+                isNavigationReady = true
                 print("Navigation characteristic ready!")
                 
                 // Optional: Enable notifications if ESP32 sends updates
@@ -494,8 +497,8 @@ extension BLEManager: CBPeripheralDelegate {
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        guard let characteristic = navigationCharacteristic else { return }
-        flushPendingNavigationWrites(for: characteristic, on: peripheral)
+        guard isNavigationReady, let endpoint = navigationWriteEndpoint else { return }
+        flushPendingNavigationWrites(endpoint: endpoint)
     }
     
     func peripheral(_ peripheral: CBPeripheral, 

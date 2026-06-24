@@ -41,6 +41,8 @@ class BikeComputerCoordinator: ObservableObject {
 
     // Workout
     @Published var isWorkoutActive: Bool = false
+    @Published var isHealthKitAuthorized: Bool = false
+    @Published var isHealthKitAvailable: Bool = false
     @Published var workoutElapsedTime: TimeInterval = 0
     @Published var currentSpeedKmh: Double = 0
     @Published var distanceKm: Double = 0
@@ -66,13 +68,7 @@ class BikeComputerCoordinator: ObservableObject {
     private var ongoingSourceSearch: MKLocalSearch?
     private var ongoingDestinationSearch: MKLocalSearch?
     private var ongoingDirections: MKDirections?
-    private var transportType: MKDirectionsTransportType = {
-        if #available(iOS 18.0, *) {
-            return .cycling
-        } else {
-            return .walking
-        }
-    }()
+    private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
 
     // MARK: - Initialization
 
@@ -119,6 +115,12 @@ class BikeComputerCoordinator: ObservableObject {
             .assign(to: &$currentIconID)
 
         // Bind health kit manager state
+        healthKitManager.$isAuthorized
+            .assign(to: &$isHealthKitAuthorized)
+
+        healthKitManager.$isHealthKitAvailable
+            .assign(to: &$isHealthKitAvailable)
+
         healthKitManager.$isWorkoutActive
             .sink { [weak self] active in
                 self?.isWorkoutActive = active
@@ -159,25 +161,7 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.$currentAddress
             .assign(to: &$currentAddress)
 
-        // Send GPS to device whenever location updates and we are connected AND ready
-        locationManager.$currentLocation
-            .combineLatest(bleManager.$isGPSReady)
-            .sink { [weak self] location, ready in
-                guard let self = self, ready, let loc = location else { return }
-                // Send current position and heading to device to update map
-                // CLLocation.course is -1 if invalid, 0-359 if valid
-
-                // Calibrate real GPS using standard converter
-                // Should align with simulation behavior (Lat+0.00090, Lon+0.0)
-                let calibrated = CoordinateConverter.applyCalibration(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
-
-                self.bleManager.sendGPSPosition(
-                    lat: calibrated.lat,
-                    lon: calibrated.lon,
-                    heading: loc.course
-                )
-            }
-            .store(in: &cancellables)
+        // Current firmware exposes only the navigation packet characteristic.
     }
 
     private func setupManagers() {
@@ -233,18 +217,11 @@ class BikeComputerCoordinator: ObservableObject {
 
         let destination = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
         destination.name = "Selected Location"
+        transportType = RouteTransportTypes.cycling
         calculateRoute(from: .mapItem(source), to: .mapItem(destination))
     }
 
     // MARK: - Public API: Workout
-
-    var isHealthKitAuthorized: Bool {
-        healthKitManager.isAuthorized
-    }
-
-    var isHealthKitAvailable: Bool {
-        healthKitManager.isHealthKitAvailable
-    }
 
     func startWorkout() {
         healthKitManager.startBikeWorkout()
@@ -418,8 +395,12 @@ extension BikeComputerCoordinator {
             // Store the route for map display
             self.currentRoute = route
 
-            // Start navigation
-            self.navEngine.startNavigation(with: route, isTestMode: isTestMode)
+            // Start navigation from the same source MapKit used to calculate the route.
+            self.navEngine.startNavigation(
+                with: route,
+                isTestMode: isTestMode,
+                initialLocation: RouteInitialLocation.location(for: sourceItem.placemark.coordinate)
+            )
 
             // Enable location tracking for navigation
             self.locationManager.setNavigating(!isTestMode)

@@ -30,7 +30,7 @@ Current firmware (`esp32/src/main.cpp`) implements:
 - Characteristic UUID `2A6E` (write without response)
 - Payload (UTF-8): `IconID|DistanceMeters|Instruction`
 
-The iOS app currently also defines `2A6F` (route geometry), `2A72` (GPS), `2A73` (settings). If you add/remove/rename characteristics, update both:
+The iOS app currently uses only that navigation characteristic. If you add/remove/rename BLE characteristics, update both:
 - `esp32/src/main.cpp`
 - `ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift`
 

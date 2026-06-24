@@ -66,13 +66,7 @@ struct RouteInputView: View {
     @State private var hasSelectedSource = false
     
     @State private var isTestMode = false
-    @State private var selectedTransportType: MKDirectionsTransportType = {
-        if #available(iOS 18.0, *) {
-            return .cycling
-        } else {
-            return .walking  // Fall back to walking for pre-iOS 18
-        }
-    }()
+    @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     
     var body: some View {
         NavigationView {
@@ -181,15 +175,13 @@ struct RouteInputView: View {
                 // Transport Type Selection (only shown after destination is selected)
                 if hasSelectedDestination && !isEditingSource {
                     HStack(spacing: 12) {
-                        if #available(iOS 18.0, *) {
-                            TransportButton(
-                                icon: "bicycle",
-                                label: "Bike",
-                                isSelected: selectedTransportType == .cycling,
-                                action: { selectedTransportType = .cycling }
-                            )
-                        }
-                        
+                        TransportButton(
+                            icon: "bicycle",
+                            label: "Bike",
+                            isSelected: selectedTransportType == RouteTransportTypes.cycling,
+                            action: { selectedTransportType = RouteTransportTypes.cycling }
+                        )
+
                         TransportButton(
                             icon: "car.fill",
                             label: "Drive",

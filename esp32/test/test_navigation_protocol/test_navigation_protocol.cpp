@@ -14,6 +14,7 @@
 #define TEST_ASSERT_EQUAL_STRING(expected, actual) do { if (strcmp((expected), (actual)) != 0) { fprintf(stderr, "string mismatch at %s:%d\n", __FILE__, __LINE__); exit(1); } } while (0)
 #define TEST_ASSERT_EQUAL_CHAR(expected, actual) do { if ((expected) != (actual)) { fprintf(stderr, "char mismatch at %s:%d\n", __FILE__, __LINE__); exit(1); } } while (0)
 #endif
+#include "navigation_payload_queue.h"
 #include "navigation_protocol.h"
 
 void test_accepts_valid_payload() {
@@ -66,6 +67,30 @@ void test_instruction_is_truncated_to_display_contract() {
   TEST_ASSERT_EQUAL_CHAR('\0', parsed.instruction[NAV_INSTRUCTION_MAX_LEN]);
 }
 
+void test_payload_queue_replaces_pending_payload() {
+  NavigationPayloadQueue queue;
+  char payload[NAV_PAYLOAD_MAX_LEN + 1] = {};
+
+  TEST_ASSERT_FALSE(queue.hasPending());
+  TEST_ASSERT_TRUE(queue.enqueue("1|10|Continue"));
+  TEST_ASSERT_TRUE(queue.enqueue("2|20|Turn Left"));
+  TEST_ASSERT_TRUE(queue.hasPending());
+  TEST_ASSERT_TRUE(queue.dequeue(payload, sizeof(payload)));
+  TEST_ASSERT_EQUAL_STRING("2|20|Turn Left", payload);
+  TEST_ASSERT_FALSE(queue.hasPending());
+  TEST_ASSERT_FALSE(queue.dequeue(payload, sizeof(payload)));
+}
+
+void test_payload_queue_rejects_empty_and_oversized_payloads() {
+  NavigationPayloadQueue queue;
+  std::string oversized(NAV_PAYLOAD_MAX_LEN + 1, 'x');
+  char payload[NAV_PAYLOAD_MAX_LEN + 1] = {};
+
+  TEST_ASSERT_FALSE(queue.enqueue(""));
+  TEST_ASSERT_FALSE(queue.enqueue(oversized));
+  TEST_ASSERT_FALSE(queue.dequeue(payload, sizeof(payload)));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_accepts_valid_payload);
@@ -73,5 +98,7 @@ int main() {
   RUN_TEST(test_rejects_invalid_icons);
   RUN_TEST(test_distance_supports_uint32_and_rejects_overflow);
   RUN_TEST(test_instruction_is_truncated_to_display_contract);
+  RUN_TEST(test_payload_queue_replaces_pending_payload);
+  RUN_TEST(test_payload_queue_rejects_empty_and_oversized_payloads);
   return UNITY_END();
 }

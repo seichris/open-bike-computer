@@ -19,7 +19,7 @@ class HealthKitManager: NSObject, ObservableObject {
     @Published var heartRate: Double = 0
     @Published var currentSpeed: Double = 0 // m/s
     @Published var distanceTraveled: Double = 0 // meters
-    let isHealthKitAvailable = true
+    @Published var isHealthKitAvailable = false
 
     private let healthStore = HKHealthStore()
     private var workoutTimer: Timer?
@@ -50,11 +50,15 @@ class HealthKitManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        requestAuthorization()
+        isHealthKitAvailable = HKHealthStore.isHealthDataAvailable()
+        if isHealthKitAvailable {
+            requestAuthorization()
+        }
     }
 
     func requestAuthorization() {
         guard HKHealthStore.isHealthDataAvailable() else {
+            isHealthKitAvailable = false
             print("HealthKit not available on this device")
             return
         }
@@ -103,7 +107,7 @@ class HealthKitManager: NSObject, ObservableObject {
 
     func startBikeWorkout() {
         // Optimization #13: Defensive authorization check
-        guard isAuthorized && HKHealthStore.isHealthDataAvailable() else {
+        guard isAuthorized && isHealthKitAvailable && HKHealthStore.isHealthDataAvailable() else {
             print("HealthKit not authorized or not available")
             return
         }
@@ -186,7 +190,7 @@ class HealthKitManager: NSObject, ObservableObject {
     
     private func fetchLatestHeartRate() {
         // Optimization #13: Guard against unauthorized access
-        guard isAuthorized, HKHealthStore.isHealthDataAvailable() else { return }
+        guard isAuthorized, isHealthKitAvailable, HKHealthStore.isHealthDataAvailable() else { return }
         guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else { return }
         
         let now = Date()
@@ -251,7 +255,7 @@ class HealthKitManager: NSObject, ObservableObject {
     @Published var heartRate: Double = 0
     @Published var currentSpeed: Double = 0 // m/s
     @Published var distanceTraveled: Double = 0 // meters
-    let isHealthKitAvailable = false
+    @Published var isHealthKitAvailable = false
 
     weak var locationManager: CurrentLocationManager?
 
