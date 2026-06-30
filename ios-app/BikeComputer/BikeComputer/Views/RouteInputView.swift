@@ -67,6 +67,9 @@ struct RouteInputView: View {
     
     @State private var isTestMode = false
     @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
+    @State private var recentDestinationSearches: [String] = []
+
+    private let recentDestinationSearchesKey = "routeInput.recentDestinationSearches"
     
     var body: some View {
         NavigationView {
@@ -238,7 +241,10 @@ struct RouteInputView: View {
                             destinationAddress = fullAddress
                             hasSelectedDestination = true
                             isDestinationFieldFocused = false
+                            saveRecentDestinationSearch(fullAddress)
                         }
+                    } else if shouldShowRecentDestinationSearches {
+                        recentDestinationList
                     } else {
                         Spacer()
                     }
@@ -251,6 +257,7 @@ struct RouteInputView: View {
                             hasSelectedSource: hasSelectedSource,
                             sourceAddress: sourceAddress
                         )
+                        saveRecentDestinationSearch(destinationAddress)
                         onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
                         dismiss()
                     }) {
@@ -282,6 +289,7 @@ struct RouteInputView: View {
             .onAppear {
                 // Auto-focus destination field when view appears
                 isDestinationFieldFocused = true
+                recentDestinationSearches = loadRecentDestinationSearches()
                 
                 // Set search region based on user's current location for better results
                 if let location = currentLocation {
@@ -327,6 +335,57 @@ struct RouteInputView: View {
             }
         }
         .listStyle(.plain)
+    }
+
+    private var shouldShowRecentDestinationSearches: Bool {
+        !hasSelectedDestination &&
+        destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !recentDestinationSearches.isEmpty
+    }
+
+    private var recentDestinationList: some View {
+        List {
+            Section(header: Text("Recent Searches")) {
+                ForEach(recentDestinationSearches, id: \.self) { search in
+                    Button(action: {
+                        isSelectingFromSuggestion = true
+                        destinationAddress = search
+                        hasSelectedDestination = true
+                        isDestinationFieldFocused = false
+                        saveRecentDestinationSearch(search)
+                    }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundColor(.secondary)
+
+                            Text(search)
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    private func loadRecentDestinationSearches() -> [String] {
+        UserDefaults.standard.stringArray(forKey: recentDestinationSearchesKey) ?? []
+    }
+
+    private func saveRecentDestinationSearch(_ search: String) {
+        let normalized = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+
+        var searches = loadRecentDestinationSearches()
+        searches.removeAll { $0.caseInsensitiveCompare(normalized) == .orderedSame }
+        searches.insert(normalized, at: 0)
+        searches = Array(searches.prefix(5))
+        UserDefaults.standard.set(searches, forKey: recentDestinationSearchesKey)
+        recentDestinationSearches = searches
     }
 }
 
