@@ -31,7 +31,19 @@ Still work in progress.
 
 ## Setup
 
-This project requires `shapely`, `PyYAML`, and `Pillow`. It is recommended to use a virtual environment:
+The recommended workflow is Docker Compose from this directory:
+
+```bash
+docker compose run --rm tools bash
+```
+
+The container mounts:
+- `./pbf` as `/pbf` (read-only input PBF files)
+- `./maps` as `/maps` (generated outputs)
+- `./scripts` as `/scripts`
+- `./conf` as `/conf` (read-only configuration)
+
+For host-only development, this project requires `shapely`, `PyYAML`, and `Pillow`. Use a virtual environment:
 
 ```bash
 cd scripts
@@ -47,12 +59,12 @@ pip install shapely PyYAML Pillow
 For example: *spain-latest.osm.pbf*
 
 
-2. Clip the pbf to your area:
+2. Clip the PBF to your area:
 
 ```
-/maps/osmium extract --strategy=smart -p ../conf/clip_area.geojson /pbf/spain-latest.osm.pbf -o /pbf/clipped.pbf
+osmium extract --strategy=smart -p /conf/clip_area.geojson /pbf/spain-latest.osm.pbf -o /maps/clipped.pbf
 ```
-It will generate an smaller PBF file of a reduced area, defined by the clipping square in *clip_area.geojson*
+It will generate a smaller PBF file of a reduced area, defined by the clipping square in *clip_area.geojson*.
 
 
 3. Generate the intermediate lines and polygons files extracting only the defined subset of feature types:
@@ -62,13 +74,13 @@ min_lat=123
 max_lon=123
 max_lat=123
 
-./pbf_to_geojson.sh $min_lon $min_lat $max_lon $max_lat /pbf/clipped.pbf /maps/test
+./pbf_to_geojson.sh $min_lon $min_lat $max_lon $max_lat /maps/clipped.pbf /maps/test
 echo "PBF extract done"
 ```
 
 4. And finally generate the compiled map files in a specific output folder:
 ```bash
-./extract_features.py $min_lon $min_lat $max_lon $max_lat prefix_name ../maps/output_folder
+./extract_features.py $min_lon $min_lat $max_lon $max_lat /maps/test /maps/output_folder
 echo "Map files created"
 ```
 
@@ -81,4 +93,3 @@ The script takes 6 arguments:
 6. `output_folder` (Optional): Where the `.fmp` and `.fmb` files will be saved. Defaults to `../maps/shanghai_v2`.
 
 These files will contain the feature types defined in */conf/conf_extract.yaml* of your area, with the visual styles defined in */conf/conf_styles.yaml*
-

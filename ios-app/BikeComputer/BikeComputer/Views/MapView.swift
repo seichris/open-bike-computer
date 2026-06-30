@@ -223,7 +223,7 @@ struct MapViewContainer: UIViewRepresentable {
             }
             
             // Handle destination annotation
-            if let destinationAnnotation = annotation as? DestinationAnnotation {
+            if annotation is DestinationAnnotation {
                 let identifier = "DestinationPin"
                 var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
                 
@@ -261,4 +261,3 @@ struct MapViewContainer: UIViewRepresentable {
         }
     }
 }
-

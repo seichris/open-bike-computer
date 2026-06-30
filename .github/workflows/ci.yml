@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  esp32:
+    name: ESP32
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+      - name: Build firmware
+        run: pio run -e WAVESHARE_AMOLED_175
+
+  ios:
+    name: iOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Swift helper tests
+        run: |
+          swiftc \
+            BikeComputer/BikeComputer/Models/AppModels.swift \
+            BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+            BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
+            BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+            BikeComputer/BikeComputer/Managers/BLEManager.swift \
+            BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
+            BikeComputerTests/NavigationProtocolTests.swift \
+            -o /tmp/NavigationProtocolTests
+          /tmp/NavigationProtocolTests
+        working-directory: ios-app
+      - name: Build app
+        run: |
+          xcodebuild \
+            -project BikeComputer/BikeComputer.xcodeproj \
+            -scheme BikeComputer \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        working-directory: ios-app
+
+  osm:
+    name: OSM Pipeline
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: OSM_Extract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validation dependencies
+        run: python -m pip install --upgrade pyyaml
+      - name: Python syntax
+        run: python -m py_compile scripts/extract_features.py scripts/funcs.py tests/test_config.py
+      - name: YAML/config tests
+        run: python -m unittest discover -s tests
+      - name: Shell syntax
+        run: bash -n scripts/pbf_to_geojson.sh
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./OSM_Extract/scripts
+      - name: Compose config
+        run: docker compose config
+      - name: Build tools image
+        run: docker compose build tools
+      - name: Smoke test tools image
+        run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import shapely; import yaml; from osgeo import ogr"

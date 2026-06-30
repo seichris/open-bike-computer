@@ -71,8 +71,7 @@ For “run on a real iPhone / trust the developer / sharing to others”, see:
 - Characteristic UUID: `2A6E` (write without response)
 - Payload (UTF-8): `IconID|DistanceMeters|Instruction`
   - Example: `2|150|Turn Left onto Main St`
-
-Note: the iOS app currently defines additional characteristics (`2A6F`, `2A72`, `2A73`) for route geometry / GPS / settings, but the firmware under `esp32/` only implements `2A6E` today.
+  - Icon IDs: `1` straight, `2` left, `3` right, `4` u-turn.
 
 ## Create a new offline map (OSM_Extract)
 

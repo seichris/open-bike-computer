@@ -97,6 +97,25 @@ class CoordinateConverter {
         let converted = wgs84ToGCJ02(lat: coordinate.latitude, lon: coordinate.longitude)
         return CLLocationCoordinate2D(latitude: converted.lat, longitude: converted.lon)
     }
+
+    /// Convert a GPS location into the coordinate space used by MapKit routes in mainland China.
+    /// CoreLocation reports GPS coordinates, while Apple map routes/overlays in China align to GCJ-02.
+    static func mapKitRouteLocation(fromGPSLocation location: CLLocation) -> CLLocation {
+        guard isInChina(lat: location.coordinate.latitude, lon: location.coordinate.longitude) else {
+            return location
+        }
+
+        let coordinate = wgs84ToGCJ02(coordinate: location.coordinate)
+        return CLLocation(
+            coordinate: coordinate,
+            altitude: location.altitude,
+            horizontalAccuracy: location.horizontalAccuracy,
+            verticalAccuracy: location.verticalAccuracy,
+            course: location.course,
+            speed: location.speed,
+            timestamp: location.timestamp
+        )
+    }
     
     // MARK: - Private Transform Functions
     

@@ -31,6 +31,10 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.distanceFilter = 5 // Update every 5 meters for better tracking
+        locationManager.activityType = .fitness
+        locationManager.allowsBackgroundLocationUpdates = false
+        locationManager.pausesLocationUpdatesAutomatically = true
+        locationManager.showsBackgroundLocationIndicator = false
         locationManager.requestWhenInUseAuthorization()
         // Don't start by default - wait for explicit need
     }
@@ -60,6 +64,15 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         let shouldTrack = isNavigating || 
                          isViewingMap || 
                          (healthKitManager?.isWorkoutActive == true)
+        let shouldTrackInBackground = isNavigating || (healthKitManager?.isWorkoutActive == true)
+
+        if shouldTrackInBackground && locationManager.authorizationStatus == .authorizedWhenInUse {
+            locationManager.requestAlwaysAuthorization()
+        }
+
+        locationManager.allowsBackgroundLocationUpdates = shouldTrackInBackground
+        locationManager.pausesLocationUpdatesAutomatically = !shouldTrackInBackground
+        locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
         
         if shouldTrack && !isLocationUpdating {
             print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(healthKitManager?.isWorkoutActive == true))")
@@ -169,4 +182,3 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         print("Location error: \(error.localizedDescription)")
     }
 }
-

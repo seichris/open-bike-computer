@@ -148,6 +148,7 @@ struct FullWorkoutView: View {
 
 /// Start workout button view
 struct StartWorkoutView: View {
+    let isHealthKitAvailable: Bool
     let isHealthKitAuthorized: Bool
     let onStartWorkout: () -> Void
     
@@ -157,23 +158,31 @@ struct StartWorkoutView: View {
                 .font(.system(size: 60))
                 .foregroundColor(.green)
             
-            Text("Start Bike Workout")
+            Text(isHealthKitAvailable ? "Start Bike Workout" : "Workout Tracking Unavailable")
                 .font(.title2)
                 .fontWeight(.semibold)
-            
-            Button(action: onStartWorkout) {
-                Label("Start Bike Workout", systemImage: "play.circle.fill")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(isHealthKitAuthorized ? Color.green : Color.gray)
-                    .cornerRadius(15)
-            }
-            .disabled(!isHealthKitAuthorized)
-            
-            if !isHealthKitAuthorized {
-                Text("HealthKit access required for workout tracking")
+
+            if isHealthKitAvailable {
+                Button(action: onStartWorkout) {
+                    Label("Start Bike Workout", systemImage: "play.circle.fill")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(isHealthKitAuthorized ? Color.green : Color.gray)
+                        .cornerRadius(15)
+                }
+                .disabled(!isHealthKitAuthorized)
+
+                if !isHealthKitAuthorized {
+                    Text("HealthKit access required for workout tracking")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+            } else {
+                Text("Workout tracking is unavailable on this device")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -231,4 +240,3 @@ private struct LargeMetricView: View {
         .frame(maxWidth: .infinity)
     }
 }
-

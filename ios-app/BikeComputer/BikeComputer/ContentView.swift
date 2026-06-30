@@ -17,13 +17,7 @@ struct ContentView: View {
     @State private var showingRouteInput = false
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
-    @State private var transportType: MKDirectionsTransportType = {
-        if #available(iOS 18.0, *) {
-            return .cycling
-        } else {
-            return .walking
-        }
-    }()
+    @State private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     @State private var showingSettings = false
     
     var body: some View {
@@ -34,7 +28,7 @@ struct ContentView: View {
                     ConnectionStatusView(
                         isConnected: coordinator.isConnected,
                         signalStrength: coordinator.signalStrength,
-                        onReconnect: { coordinator.disconnect() }
+                        onReconnect: { coordinator.reconnect() }
                     )
                     
                     Button(action: { showingSettings = true }) {
@@ -162,4 +156,3 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
-

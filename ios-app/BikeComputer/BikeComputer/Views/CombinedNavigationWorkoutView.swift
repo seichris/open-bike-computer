@@ -40,22 +40,27 @@ struct CombinedNavigationWorkoutView: View {
                     onStartWorkout: { coordinator.startWorkout() }
                 )
             } else if coordinator.isNavigating {
-                // Start Workout Button (small version during navigation)
-                Button(action: {
-                    coordinator.startWorkout()
-                }) {
-                    Label("Start Workout", systemImage: "play.circle.fill")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 8)
-                        .background(coordinator.isHealthKitAuthorized ? Color.green : Color.gray)
-                        .cornerRadius(10)
-                }
-                .disabled(!coordinator.isHealthKitAuthorized)
-                
-                if !coordinator.isHealthKitAuthorized {
-                    Text("HealthKit access required")
+                if coordinator.isHealthKitAvailable {
+                    Button(action: {
+                        coordinator.startWorkout()
+                    }) {
+                        Label("Start Workout", systemImage: "play.circle.fill")
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
+                            .background(coordinator.isHealthKitAuthorized ? Color.green : Color.gray)
+                            .cornerRadius(10)
+                    }
+                    .disabled(!coordinator.isHealthKitAuthorized)
+
+                    if !coordinator.isHealthKitAuthorized {
+                        Text("HealthKit access required")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("Workout tracking unavailable")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -87,6 +92,7 @@ struct WorkoutOnlyView: View {
                 )
             } else {
                 StartWorkoutView(
+                    isHealthKitAvailable: coordinator.isHealthKitAvailable,
                     isHealthKitAuthorized: coordinator.isHealthKitAuthorized,
                     onStartWorkout: { coordinator.startWorkout() }
                 )
@@ -95,4 +101,3 @@ struct WorkoutOnlyView: View {
         .padding(.horizontal, 30)
     }
 }
-

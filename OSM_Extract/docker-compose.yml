@@ -1,0 +1,11 @@
+services:
+  tools:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile
+    working_dir: /scripts
+    volumes:
+      - ./conf:/conf:ro
+      - ./maps:/maps
+      - ./pbf:/pbf:ro
+      - ./scripts:/scripts

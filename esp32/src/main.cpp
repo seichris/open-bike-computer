@@ -1,787 +1,477 @@
 /**
- * Headless Navigation Bike Computer - ESP32-S3 Firmware
- *
- * Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.75
- * Display: CO5300 (QSPI) - 466x466 pixels
- * Touch: CST9217 (I2C)
- *
- * Architecture: Receives navigation data from iPhone via BLE
- * Data Format: "IconID|Distance|Instruction" (e.g., "2|150|Turn Left")
+ * @file main.cpp
+ * @author Jordi Gauchía (jgauchia@jgauchia.com)
+ * @brief  ICENAV - ESP32 GPS Navigator main code
+ * @version 0.2.2
+ * @date 2025-05
  */
 
 #include <Arduino.h>
-#include <Arduino_GFX_Library.h>
-#include <NimBLEDevice.h>
-#include <SD.h>
 #include <SPI.h>
+#include <WiFi.h>
 #include <Wire.h>
-#include <driver/gpio.h>
-#include <lvgl.h>
-
-// Include SquareLine Studio generated UI
-extern "C" {
-#include "ui.h"
-}
-
-// ============================================================================
-// HARDWARE PIN DEFINITIONS
-// ============================================================================
-
-// QSPI Display Pins (CO5300)
-#define TFT_CS 12
-#define TFT_CLK 38
-#define TFT_D0 4
-#define TFT_D1 5
-#define TFT_D2 6
-#define TFT_D3 7
-#define TFT_RST 39
-
-// I2C Touch Pins (CST9217)
-#define TOUCH_SDA 15
-#define TOUCH_SCL 14
-#define TOUCH_INT 21 // Updated from -1
-
-// I2C Expander (TCA9554)
-#define TCA9554_I2C_ADDRESS 0x20
-
-// Power Management (AXP2101)
-#define AXP2101_I2C_ADDRESS 0x34
-
-// Display Specifications
-#define SCREEN_WIDTH 466
-#define SCREEN_HEIGHT 466
-
-// SD Card Pins (Waveshare ESP32-S3-Touch-AMOLED-1.75) - VERIFIED SPI
-#define SD_SCK 2
-#define SD_MOSI 1
-#define SD_MISO 3
-#define SD_CS 41
-
-// ============================================================================
-// DISPLAY DRIVER SETUP (Arduino_GFX)
-// ============================================================================
-
-// QSPI Bus for CO5300
-Arduino_ESP32QSPI *bus = new Arduino_ESP32QSPI(TFT_CS,  // CS
-                                               TFT_CLK, // SCK
-                                               TFT_D0,  // D0
-                                               TFT_D1,  // D1
-                                               TFT_D2,  // D2
-                                               TFT_D3   // D3
-);
-
-// CO5300 Display Driver - Use minimal constructor like working demo
-Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
-                                         TFT_RST, // RST
-                                         0        // Rotation only
-);
-
-// ============================================================================
-// LVGL DISPLAY BUFFER
-// ============================================================================
-
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t *disp_draw_buf;
-static lv_disp_drv_t disp_drv;
-
-// ============================================================================
-// LVGL DISPLAY FLUSH CALLBACK
-// Using full screen buffer to prevent partial update artifacts on AMOLED
-// ============================================================================
-
-// Mutex for display access
-// Mutex for display access not needed with thread-safe approach
-
-void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area,
-                   lv_color_t *color_p) {
-  uint32_t w = (area->x2 - area->x1 + 1);
-  uint32_t h = (area->y2 - area->y1 + 1);
-
-  // Add bounds checking to prevent corruption
-  if (w == 0 || h == 0 || w > SCREEN_WIDTH || h > SCREEN_HEIGHT) {
-    lv_disp_flush_ready(disp);
-    return;
-  }
-
-  // Use startWrite/endWrite with proper synchronization
-  gfx->startWrite();
-  gfx->setAddrWindow(area->x1, area->y1, w, h);
-  gfx->writePixels((uint16_t *)color_p, w * h);
-  gfx->endWrite();
-
-  // Minimal delay - full screen buffer ensures complete frame writes
-  delayMicroseconds(50);
-
-  // Inform LVGL that flushing is complete
-  lv_disp_flush_ready(disp);
-}
-
-// ============================================================================
-// TOUCH DRIVER (CST9217)
-// ============================================================================
-
-#define CST9217_ADDRESS 0x5A
-
-bool touchPressed = false;
-uint16_t touchX = 0, touchY = 0;
-
-void readTouch() {
-  // Reset sequence for touch is handled by TCA9554 in setup()
-
-  // Try to read touch data with error handling
-  Wire.beginTransmission(CST9217_ADDRESS);
-  Wire.write(0x00); // Register address for touch data
-  uint8_t error = Wire.endTransmission(false);
-
-  if (error != 0) {
-    touchPressed = false;
-    return;
-  }
-
-  // Request 13 bytes of touch data
-  uint8_t bytesReceived =
-      Wire.requestFrom((uint8_t)CST9217_ADDRESS, (uint8_t)13, (uint8_t)true);
-
-  if (bytesReceived >= 7) {
-    uint8_t data[13];
-    for (int i = 0; i < bytesReceived && i < 13; i++) {
-      data[i] = Wire.read();
-    }
-
-    // Parse touch data (CST9217 format)
-    uint8_t touchPoints = data[2] & 0x0F;
-    if (touchPoints > 0) {
-      // Extract raw coordinates (12-bit values)
-      uint16_t rawX = ((data[3] & 0x0F) << 8) | data[4];
-      uint16_t rawY = ((data[5] & 0x0F) << 8) | data[6];
-
-      // Scale and mirror coordinates if necessary
-      // Verified: 466x466 resolution
-      touchX = rawX;
-      touchY = rawY;
-
-      // Clamp to screen bounds
-      if (touchX >= SCREEN_WIDTH)
-        touchX = SCREEN_WIDTH - 1;
-      if (touchY >= SCREEN_HEIGHT)
-        touchY = SCREEN_HEIGHT - 1;
-
-      touchPressed = true;
-    } else {
-      touchPressed = false;
-    }
-  } else {
-    touchPressed = false;
-  }
-}
-
-void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-  readTouch();
-
-  if (touchPressed) {
-    data->state = LV_INDEV_STATE_PR;
-    data->point.x = touchX;
-    data->point.y = touchY;
-  } else {
-    data->state = LV_INDEV_STATE_REL;
-  }
-}
-
-// ============================================================================
-// BLE SERVER (NimBLE)
-// ============================================================================
-
-#define SERVICE_UUID "1819"        // Navigation Service
-#define CHARACTERISTIC_UUID "2A6E" // Navigation Data Characteristic
-
-NimBLEServer *pServer = nullptr;
-NimBLECharacteristic *pCharacteristic = nullptr;
-bool deviceConnected = false;
-
-// Navigation Data Structure
-struct NavigationData {
-  uint8_t iconID;
-  uint16_t distance;
-  char instruction[64];
-};
-
-NavigationData navData = {0, 0, ""};
-volatile bool uiUpdateNeeded = false;
-volatile bool bleConnectedState = false;
-volatile bool bleStateChanged = false;
-
-// BLE Callbacks
-class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer *pServer) {
-    deviceConnected = true;
-    bleConnectedState = true;
-    bleStateChanged = true;
-    Serial.println("BLE: Client connected");
-  }
-
-  void onDisconnect(NimBLEServer *pServer) {
-    deviceConnected = false;
-    bleConnectedState = false;
-    bleStateChanged = true;
-    Serial.println("BLE: Client disconnected");
-    // Restart advertising
-    NimBLEDevice::startAdvertising();
-  }
-};
-
-// Parse incoming navigation data: "IconID|Distance|Instruction"
-void parseNavigationData(String data) {
-  int firstPipe = data.indexOf('|');
-  int secondPipe = data.indexOf('|', firstPipe + 1);
-
-  if (firstPipe == -1 || secondPipe == -1) {
-    Serial.println("Invalid data format");
-    return;
-  }
-
-  // Extract components
-  navData.iconID = data.substring(0, firstPipe).toInt();
-  navData.distance = data.substring(firstPipe + 1, secondPipe).toInt();
-
-  String instruction = data.substring(secondPipe + 1);
-  instruction.toCharArray(navData.instruction, sizeof(navData.instruction));
-
-  Serial.printf("Parsed: Icon=%d, Distance=%dm, Instruction=%s\n",
-                navData.iconID, navData.distance, navData.instruction);
-
-  // Flag for update in main loop
-  uiUpdateNeeded = true;
-}
-
-// Update UI safely from main loop
-void updateNavigationUI() {
-  if (bleStateChanged) {
-    bleStateChanged = false;
-    if (ui_LabelBLEStatus != NULL) {
-      if (bleConnectedState) {
-        lv_label_set_text(ui_LabelBLEStatus, "BLE: Connected");
-        lv_obj_set_style_text_color(
-            ui_LabelBLEStatus, lv_color_hex(0x4CAF50),
-            (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT));
-      } else {
-        lv_label_set_text(ui_LabelBLEStatus, "BLE: Disconnected");
-        lv_obj_set_style_text_color(
-            ui_LabelBLEStatus, lv_color_hex(0xFF6B6B),
-            (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT));
-      }
-    }
-  }
-
-  if (uiUpdateNeeded) {
-    uiUpdateNeeded = false;
-
-    if (ui_LabelDistance != NULL) {
-      lv_label_set_text_fmt(ui_LabelDistance, "%d m", navData.distance);
-    }
-    if (ui_LabelInstruction != NULL) {
-      lv_label_set_text(ui_LabelInstruction, navData.instruction);
-    }
-    if (ui_IconPlaceholder != NULL) {
-      // Draw arrow shapes based on iconID
-      lv_color_t arrow_color;
-
-      switch (navData.iconID) {
-      case 1:                                 // Continue (straight ahead)
-        arrow_color = lv_color_hex(0x4CAF50); // Green
-        draw_up_arrow(arrow_color);
-        break;
-      case 2:                                 // Turn Left
-        arrow_color = lv_color_hex(0xFFC107); // Yellow
-        draw_left_arrow(arrow_color);
-        break;
-      case 3:                                 // Turn Right
-        arrow_color = lv_color_hex(0xFF9800); // Orange
-        draw_right_arrow(arrow_color);
-        break;
-      case 4:                                 // U-Turn
-        arrow_color = lv_color_hex(0xF44336); // Red
-        draw_u_turn_arrow(arrow_color);
-        break;
-      default:
-        arrow_color = lv_color_hex(0x2196F3); // Blue
-        draw_right_arrow(arrow_color);
-        break;
-      }
-    }
-  }
-}
-
-class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic *pCharacteristic) {
-    std::string value = pCharacteristic->getValue();
-    if (value.length() > 0) {
-      String data = String(value.c_str());
-      Serial.println("Received: " + data);
-      parseNavigationData(data);
-    }
-  }
-};
-
-void setupBLE() {
-  Serial.println("Initializing BLE...");
-
-  NimBLEDevice::init("BikeComputer");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
-
-  // Create BLE Server
-  pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
-
-  // Create Service
-  NimBLEService *pService = pServer->createService(SERVICE_UUID);
-
-  // Create Characteristic (WRITE WITHOUT RESPONSE for better performance)
-  pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID,
-                                                   NIMBLE_PROPERTY::WRITE_NR);
-
-  pCharacteristic->setCallbacks(new CharacteristicCallbacks());
-
-  // Start service
-  pService->start();
-
-  // Start advertising
-  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->start();
-
-  Serial.println("BLE Server started, advertising...");
-}
-
-// Global variable to track SD mode
-enum SDMode { SD_NONE, SD_SPI };
-SDMode currentSDMode = SD_NONE;
-
-SPIClass SD_SPI_BUS(HSPI); // Use HSPI to avoid QSPI display conflict
-
-bool initSDCard() {
-  Serial.println("Initializing SD card (SPI mode)...");
-
-  // Pins for SPI SD Card: CS=41, MOSI=1, MISO=3, SCK=2
-  SD_SPI_BUS.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
-  if (SD.begin(SD_CS, SD_SPI_BUS, 4000000, "/sdcard")) {
-    Serial.println("✓ SD card initialized in SPI mode");
-    currentSDMode = SD_SPI;
-
-    uint8_t cardType = SD.cardType();
-    Serial.print("SD Card Type: ");
-    if (cardType == CARD_MMC) {
-      Serial.println("MMC");
-    } else if (cardType == CARD_SD) {
-      Serial.println("SD");
-    } else if (cardType == CARD_SDHC) {
-      Serial.println("SDHC");
-    } else {
-      Serial.println("UNKNOWN");
-    }
-
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("SD Card Size: %llu MB\n", cardSize);
-    return true;
-  } else {
-    Serial.println("❌ SD card initialization failed!");
-    currentSDMode = SD_NONE;
-    return false;
-  }
-}
-
-bool readFileFromSD(const char *filename) {
-  Serial.printf("Reading file: %s\n", filename);
-
-  File file = SD.open(filename);
-  if (!file) {
-    Serial.printf("Failed to open file: %s\n", filename);
-    return false;
-  }
-
-  Serial.printf("File size: %d bytes\n", file.size());
-  Serial.println("File contents:");
-
-  while (file.available()) {
-    String line = file.readStringUntil('\n');
-    Serial.println(line);
-  }
-
-  file.close();
-  Serial.println("File read complete.");
-  return true;
-}
-
-void listSDFiles() {
-  Serial.println("Listing SD card root directory:");
-
-  File root = SD.open("/");
-  if (!root) {
-    Serial.println("Failed to open root directory");
-    return;
-  }
-
-  File file = root.openNextFile();
-  while (file) {
-    if (file.isDirectory()) {
-      Serial.print("  DIR : ");
-      Serial.println(file.name());
-    } else {
-      Serial.print("  FILE: ");
-      Serial.print(file.name());
-      Serial.print("  SIZE: ");
-      Serial.println(file.size());
-    }
-    file = root.openNextFile();
-  }
-}
-
-// ============================================================================
-// LVGL INITIALIZATION
-// ============================================================================
-
-void setupLVGL() {
-  Serial.println("Initializing LVGL...");
-
-  lv_init();
-
-  // Allocate FULL SCREEN buffer from PSRAM to enable true full_refresh mode
-  // This eliminates ALL partial updates and prevents diagonal digit corruption
-  uint32_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT;
-  Serial.printf("Allocating LVGL buffer: %d bytes (FULL SCREEN)\n",
-                bufSize * sizeof(lv_color_t));
-
-#ifdef BOARD_HAS_PSRAM
-  // Use PSRAM (8MB available) with proper alignment for full screen buffer
-  disp_draw_buf = (lv_color_t *)heap_caps_aligned_alloc(
-      8, bufSize * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!disp_draw_buf) {
-    Serial.println("ERROR: PSRAM allocation failed!");
-    // Don't fallback to internal RAM - it's too small for full screen
-    while (1)
-      delay(1000); // Halt - this is fatal
-  }
-  Serial.println("✓ Using PSRAM for display buffer");
-#else
-  Serial.println("ERROR: PSRAM required for full screen buffer!");
-  while (1)
-    delay(1000); // Halt - this is fatal
+#include <esp_bt.h>
+#include <esp_log.h>
+#include <esp_system.h>
+#include <esp_wifi.h>
+#include <stdint.h>
+#ifndef DISABLE_WEB_SERVER
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#endif
+#include <SolarCalculator.h>
+
+// Hardware includes
+#include "gps.hpp"
+#include "hal.hpp"
+#include "storage.hpp"
+#include "tft.hpp"
+
+#ifdef HMC5883L
+#include "compass.hpp"
 #endif
 
-  Serial.printf("✓ LVGL buffer allocated: %d bytes (aligned, full screen)\n",
-                bufSize * sizeof(lv_color_t));
+#ifdef QMC5883
+#include "compass.hpp"
+#endif
 
-  // Initialize draw buffer
-  lv_disp_draw_buf_init(&draw_buf, disp_draw_buf, NULL, bufSize);
+#ifdef IMU_MPU9250
+#include "compass.hpp"
+#endif
 
-  // Initialize display driver with optimizations for AMOLED
-  lv_disp_drv_init(&disp_drv);
-  disp_drv.hor_res = SCREEN_WIDTH;
-  disp_drv.ver_res = SCREEN_HEIGHT;
-  disp_drv.flush_cb = my_disp_flush;
-  disp_drv.draw_buf = &draw_buf;
-  disp_drv.full_refresh =
-      1; // Force full refresh to prevent partial update corruption
-  disp_drv.direct_mode = 0; // Use buffered mode for stability
+#ifdef BME280
+#include "bme.hpp"
+#endif
 
-  lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+#ifdef MPU6050
+#include "imu.hpp"
+#endif
 
-  if (disp == NULL) {
-    Serial.println("ERROR: Display driver registration failed!");
-    while (1)
-      delay(1000); // Halt - this is fatal
-  }
+extern xSemaphoreHandle gpsMutex;
 
-  Serial.println("✓ LVGL Display registered");
+#ifndef DISABLE_WEB_SERVER
+#include "webpage.h"
+#include "webserver.h"
+#endif
 
-  // Initialize touch driver
-  static lv_indev_drv_t indev_drv;
-  lv_indev_drv_init(&indev_drv);
-  indev_drv.type = LV_INDEV_TYPE_POINTER;
-  indev_drv.read_cb = my_touchpad_read;
-  lv_indev_drv_register(&indev_drv);
+#include "battery.hpp"
+#include "gpxParser.hpp"
+#include "power.hpp"
 
-  Serial.println("LVGL initialized");
+#include "maps.hpp"
+
+// BLE Navigation for iOS route overlay
+#include "ble_navigation.hpp"
+#include "mainScr.hpp"
+#include "route_overlay.hpp"
+#include "waitingScr.hpp"
+#ifdef WAVESHARE_AMOLED_175
+#include "WAVESHARE_AMOLED_175.hpp"
+#endif
+
+extern Storage storage;
+extern Battery battery;
+extern Power power;
+extern Maps mapView;
+extern Gps gps;
+#ifdef ENABLE_COMPASS
+Compass compass;
+#endif
+
+std::vector<wayPoint> trackData;
+
+/**
+ * @brief Sunrise and Sunset
+ *
+ */
+static double transit, sunrise, sunset;
+static uint32_t loopCount = 0;
+static uint32_t lastLoopMs = 0;
+static uint32_t maxLoopGapMs = 0;
+static uint32_t lvglHandlerCount = 0;
+static uint32_t lastLvglHandlerMs = 0;
+static uint32_t lastLvglHandlerDurationUs = 0;
+static uint32_t maxLvglHandlerDurationUs = 0;
+
+#include "lvglSetup.hpp"
+#include "settings.hpp"
+#include "tasks.hpp"
+#include "timezone.c"
+
+/**
+ * @brief Calculate Sunrise and Sunset
+ *        Must be a global function
+ *
+ */
+void calculateSun() {
+  calcSunriseSunset(2000 + fix.dateTime.year, fix.dateTime.month,
+                    fix.dateTime.date, gps.gpsData.latitude,
+                    gps.gpsData.longitude, transit, sunrise, sunset);
+  int hours = (int)sunrise + gps.gpsData.UTC;
+  int minutes = (int)round(((sunrise + gps.gpsData.UTC) - hours) * 60);
+  snprintf(gps.gpsData.sunriseHour, 6, "%02d:%02d", hours, minutes);
+  hours = (int)sunset + gps.gpsData.UTC;
+  minutes = (int)round(((sunset + gps.gpsData.UTC) - hours) * 60);
+  snprintf(gps.gpsData.sunsetHour, 6, "%02d:%02d", hours, minutes);
+  log_i("Sunrise: %s", gps.gpsData.sunriseHour);
+  log_i("Sunset: %s", gps.gpsData.sunsetHour);
 }
 
-// ============================================================================
-// ARDUINO SETUP
-// ============================================================================
+static const char *debugTileName(uint8_t tile) {
+  switch (tile) {
+  case COMPASS:
+    return "COMPASS";
+  case MAP:
+    return "MAP";
+  case NAV:
+    return "NAV";
+  case SATTRACK:
+    return "SATTRACK";
+  default:
+    return "UNKNOWN";
+  }
+}
 
+static void logSystemDebugHeartbeat() {
+  static uint32_t lastLogMs = 0;
+  uint32_t now = millis();
+  if (now - lastLogMs < 5000) {
+    return;
+  }
+  lastLogMs = now;
+
+  BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const char *screenName = "unknown";
+  lv_obj_t *activeScreen = lv_scr_act();
+  if (activeScreen == waitingScreen) {
+    screenName = "waiting";
+  } else if (isMainScreen) {
+    screenName = "main";
+  }
+
+  Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+                "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
+                "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
+                "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
+                "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
+                "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu]\n",
+                (unsigned long)(now / 1000),
+                (unsigned long)ESP.getFreeHeap(),
+                (unsigned long)ESP.getFreePsram(), screenName,
+                debugTileName(activeTile), waitScreenRefresh,
+                gpsReceivedFromApp, pendingTransitionToMap,
+                gps.gpsData.latitude, gps.gpsData.longitude,
+                (unsigned)gps.gpsData.heading,
+                (unsigned)routeOverlay.getPointCount(),
+                mapView.debugIsMapFound(),
+                (unsigned)mapView.debugCachedBlockCount(), mapView.isPosMoved,
+                mapView.redrawMap, mapView.followGps, mapSet.vectorMap, zoom,
+#ifdef WAVESHARE_AMOLED_175
+                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
+                (unsigned long)lvglHandlerCount,
+                (unsigned long)lastLvglHandlerMs,
+                (unsigned long)lastLvglHandlerDurationUs,
+                (unsigned long)maxLvglHandlerDurationUs,
+                (unsigned long)displayFlushCount,
+                (unsigned long)lastDisplayFlushMs,
+                (unsigned long)lastDisplayFlushDurationUs,
+                (unsigned long)maxDisplayFlushDurationUs,
+#else
+                (unsigned long)loopCount, (unsigned long)maxLoopGapMs,
+                (unsigned long)lvglHandlerCount,
+                (unsigned long)lastLvglHandlerMs,
+                (unsigned long)lastLvglHandlerDurationUs,
+                (unsigned long)maxLvglHandlerDurationUs, 0UL, 0UL, 0UL, 0UL,
+#endif
+                bleStats.connected, bleStats.authenticated,
+                (unsigned long)bleStats.navPacketCount,
+                (unsigned long)bleStats.routePacketCount,
+                (unsigned long)bleStats.gpsPacketCount,
+                (unsigned long)bleStats.settingsPacketCount);
+}
+
+/**
+ * @brief Setup
+ *
+ */
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\n\n=== Headless Navigation Bike Computer ===");
-  Serial.println("Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.75");
+  gpsMutex = xSemaphoreCreateMutex();
+  esp_log_level_set("*", ESP_LOG_DEBUG);
+  esp_log_level_set("storage", ESP_LOG_DEBUG);
 
-// Report PSRAM status
-#ifdef BOARD_HAS_PSRAM
-  if (psramFound()) {
-    Serial.printf("PSRAM found: %d bytes\n", ESP.getPsramSize());
-    Serial.printf("PSRAM free: %d bytes\n", ESP.getFreePsram());
-  } else {
-    Serial.println("WARNING: PSRAM not found!");
+  // Initialize Serial for debug
+  Serial.begin(115200);
+  Serial.setTxTimeoutMs(0); // Prevent blocking if no host connected
+  delay(2000);              // Give time for USB CDC to attach
+  log_i("Starting Setup...");
+  Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
+                esp_reset_reason());
+
+#ifdef WAVESHARE_AMOLED_175
+  // =========================================================
+  // I2C Bus Recovery - CRITICAL for stuck bus
+  // Must run BEFORE any other I2C/SD operations
+  // =========================================================
+  log_i("Performing I2C bus recovery...");
+
+  // Configure pins as GPIO for manual control (Wire not started yet)
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, OUTPUT);
+
+  // Clock SCL up to 9 times while monitoring SDA
+  // This releases any slave holding SDA low
+  int clockCount = 0;
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(I2C_SCL_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(5);
+    clockCount++;
+
+    // If SDA is released (high), we might be done
+    if (digitalRead(I2C_SDA_PIN) == HIGH) {
+      break;
+    }
   }
-#else
-  Serial.println("PSRAM support not enabled");
+
+  // Generate STOP condition: SDA low-to-high while SCL high
+  pinMode(I2C_SDA_PIN, OUTPUT);
+  digitalWrite(I2C_SDA_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(I2C_SDA_PIN, HIGH);
+  delayMicroseconds(5);
+
+  log_i("I2C bus recovery done (%d clocks)", clockCount);
+#endif
+#ifdef POWER_SAVE
+  pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
+#ifdef ICENAV_BOARD
+  gpio_hold_dis(GPIO_NUM_46);
+  gpio_hold_dis((gpio_num_t)BOARD_BOOT_PIN);
+  gpio_deep_sleep_hold_dis();
+#endif
 #endif
 
-  // Initialize I2C for touch and power management
-  // I2C Recovery: Clock out any stuck transactions
-  pinMode(TOUCH_SCL, OUTPUT);
-  for (int i = 0; i < 16; i++) {
-    digitalWrite(TOUCH_SCL, LOW);
-    delayMicroseconds(5);
-    digitalWrite(TOUCH_SCL, HIGH);
-    delayMicroseconds(5);
-  }
+#ifdef TDECK_ESP32S3
+  pinMode(BOARD_POWERON, OUTPUT);
+  digitalWrite(BOARD_POWERON, HIGH);
+  pinMode(GPIO_NUM_16, INPUT);
+  pinMode(SD_CS, OUTPUT);
+  pinMode(RADIO_CS_PIN, OUTPUT);
+  pinMode(TFT_SPI_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+  digitalWrite(RADIO_CS_PIN, HIGH);
+  digitalWrite(TFT_SPI_CS, HIGH);
+  pinMode(SPI_MISO, INPUT_PULLUP);
+#endif
 
-  Wire.begin(TOUCH_SDA, TOUCH_SCL);
-  Wire.setClock(100000); // Use 100kHz for better stability with CST9217
-  delay(50);             // Give I2C time to stabilize
-  Serial.println("I2C initialized");
+#ifdef ICENAV_BOARD
+  // Initialize SD card CS pin
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+#endif
 
+  Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.begin();
+
+#ifdef WAVESHARE_AMOLED_175
   // Initialize AXP2101 Power Management - CRITICAL for display power!
   Serial.println("Enabling display power via AXP2101...");
-  Wire.beginTransmission(AXP2101_I2C_ADDRESS);
+  Wire.beginTransmission(0x34); // AXP2101 I2C address
   if (Wire.endTransmission() == 0) {
     Serial.println("✓ AXP2101 found!");
 
-    // Set DLDO1 voltage to 3.3V
-    Wire.beginTransmission(AXP2101_I2C_ADDRESS);
-    Wire.write(0x99); // DLDO1 voltage register
-    Wire.write(0x1C); // 3.3V
-    Wire.endTransmission();
-    delay(10);
-
-    // Enable DLDO1
-    Wire.beginTransmission(AXP2101_I2C_ADDRESS);
-    Wire.write(0x90); // LDO on/off control register
-    Wire.write(0x02); // Enable DLDO1
+    // Enable DLDO1 output (3.3V for display) - exact same as working demo
+    Wire.beginTransmission(0x34);
+    Wire.write(0x90); // DLDO1 voltage setting register
+    Wire.write(0x1C); // Set to 3.3V
     Wire.endTransmission();
 
-    // Power cycle ALDO/BLDO sequences from verified port
-    for (uint8_t reg : {0x92, 0x93, 0x94, 0x95, 0x96, 0x97}) {
-      Wire.beginTransmission(AXP2101_I2C_ADDRESS);
+    Wire.beginTransmission(0x34);
+    Wire.write(0x90); // Enable DLDO1
+    Wire.write(0x9C); // Enable bit + 3.3V
+    Wire.endTransmission();
+
+    // Enable other LDOs (ALDO1-4, BLDO1-2) to ensure SD Card and other
+    // peripherals are powered Register map typically: 0x92=ALDO1, 0x93=ALDO2,
+    // 0x94=ALDO3, 0x95=ALDO4, 0x96=BLDO1, 0x97=BLDO2
+
+    uint8_t ldo_regs[] = {0x92, 0x93, 0x94, 0x95, 0x96, 0x97};
+
+    // 1. Turn OFF all peripheral LDOs to force reset
+    Serial.println("Resetting Peripheral Power...");
+    for (uint8_t reg : ldo_regs) {
+      Wire.beginTransmission(0x34);
       Wire.write(reg);
-      Wire.write(0x00); // Disable
+      Wire.write(0x1C); // Disable (Bit 7=0) + Voltage 3.3V (Just in case)
       Wire.endTransmission();
-      delay(5);
-      Wire.beginTransmission(AXP2101_I2C_ADDRESS);
+    }
+    delay(500); // Wait for capacitors to discharge
+
+    // 2. Turn ON all peripheral LDOs
+    Serial.println("Enabling Peripheral Power...");
+    for (uint8_t reg : ldo_regs) {
+      Wire.beginTransmission(0x34);
       Wire.write(reg);
-      Wire.write(0x1F); // Enable max
+      Wire.write(0x1C); // Set to 3.3V
+      Wire.endTransmission();
+
+      Wire.beginTransmission(0x34);
+      Wire.write(reg);
+      Wire.write(0x9C); // Enable (Bit 7=1) + 3.3V
       Wire.endTransmission();
     }
 
-    delay(150); // Wait for power to stabilize
+    delay(500); // Wait for power to stabilize (Longer delay)
     Serial.println("✓ AXP2101 display power enabled");
+    // I2C Bus kept enabled for Touch Controller and Power Management
+
   } else {
     Serial.println("✗ AXP2101 not found - display may not work!");
   }
-
-  // Initialize TCA9554 GPIO Expander for Touch Reset
-  Serial.println("Initializing TCA9554 GPIO Expander...");
-  Wire.beginTransmission(TCA9554_I2C_ADDRESS);
-  if (Wire.endTransmission() == 0) {
-    Serial.println("✓ TCA9554 found!");
-
-    // Configure P0 as Output (Touch RST)
-    Wire.beginTransmission(TCA9554_I2C_ADDRESS);
-    Wire.write(0x03); // Config register
-    Wire.write(0x00); // All pins as output
-    Wire.endTransmission();
-
-    // Reset sequence for touch
-    Wire.beginTransmission(TCA9554_I2C_ADDRESS);
-    Wire.write(0x01); // Output port register
-    Wire.write(0x00); // All pins LOW
-    Wire.endTransmission();
-    delay(20);
-
-    Wire.beginTransmission(TCA9554_I2C_ADDRESS);
-    Wire.write(0x01);
-    Wire.write(0x01); // P0 HIGH
-    Wire.endTransmission();
-    delay(50);
-    Serial.println("✓ Touch controller reset complete");
-  } else {
-    Serial.println("✗ TCA9554 not found!");
-  }
-
-  // Initialize display
-  Serial.println("Initializing display...");
-  gfx->begin();
-  delay(100); // Let display stabilize
-
-  // Turn on display and set brightness (CRITICAL for AMOLED!)
-  Serial.println("Turning on display and setting brightness...");
-  gfx->displayOn();
-  delay(50);
-  gfx->setBrightness(255); // Maximum brightness 0-255
-  delay(50);
-
-  // Clear screen for LVGL
-  gfx->fillScreen(0x0000); // BLACK
-  Serial.println("Display ready for LVGL");
-
-  // Initialize LVGL
-  setupLVGL();
-
-  // Load SquareLine Studio UI
-  Serial.println("Loading UI...");
-  ui_init();
-
-  // Force initial UI refresh
-  lv_obj_invalidate(lv_scr_act());
-  lv_refr_now(NULL);
-
-  Serial.println("✓ UI loaded and displayed");
-
-  // Initialize BLE
-  setupBLE();
-
-  // Initialize SD card
-  if (initSDCard()) {
-    // List files on SD card
-    listSDFiles();
-
-    // Try to read a test file if it exists
-    bool testFileExists = SD.exists("/test.txt");
-
-    if (testFileExists) {
-      readFileFromSD("/test.txt");
-    } else {
-      Serial.println(
-          "Note: Create a 'test.txt' file on the SD card to test file reading");
-    }
-  } else {
-    Serial.println(
-        "SD card not available - continuing without SD functionality");
-  }
-
-  Serial.println("Setup complete!");
-  Serial.println("Waiting for iPhone connection...");
-}
-
-// ============================================================================
-// UPDATE DEVICE STATS ON UI
-// ============================================================================
-
-unsigned long lastStatsUpdate = 0;
-const unsigned long STATS_UPDATE_INTERVAL =
-    2000; // Update every 2 seconds (reduced from 1s)
-
-// SD Card - Commented out
-// unsigned long lastSDDemo = 0;
-// const unsigned long SD_DEMO_INTERVAL = 10000;  // Demo SD reading every 10
-// seconds
-
-unsigned long lastDisplayKeepAlive = 0;
-const unsigned long DISPLAY_KEEPALIVE_INTERVAL =
-    30000; // Refresh display every 30 seconds
-
-void keepDisplayAlive() {
-  unsigned long now = millis();
-
-  if (now - lastDisplayKeepAlive >= DISPLAY_KEEPALIVE_INTERVAL) {
-    lastDisplayKeepAlive = now;
-
-    // Ensure display stays on
-    gfx->displayOn();
-  }
-}
-
-void updateDeviceStats() {
-  unsigned long now = millis();
-
-  if (now - lastStatsUpdate >= STATS_UPDATE_INTERVAL) {
-    lastStatsUpdate = now;
-
-    // Update Heap Memory
-    if (ui_LabelHeapFree != NULL) {
-      uint32_t heapFree = ESP.getFreeHeap() / 1024; // Convert to KB
-      lv_label_set_text_fmt(ui_LabelHeapFree, "Heap: %lu KB", heapFree);
-    }
-
-    // Update PSRAM Memory
-    if (ui_LabelPSRAMFree != NULL) {
-#ifdef BOARD_HAS_PSRAM
-      if (psramFound()) {
-        uint32_t psramFree = ESP.getFreePsram() / 1024; // Convert to KB
-        lv_label_set_text_fmt(ui_LabelPSRAMFree, "PSRAM: %lu KB", psramFree);
-      } else {
-        lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
-      }
-#else
-      lv_label_set_text(ui_LabelPSRAMFree, "PSRAM: N/A");
 #endif
-    }
+
+#ifdef BME280
+  initBME();
+#endif
+
+#ifdef ENABLE_COMPASS
+  compass.init();
+#endif
+
+#ifdef ENABLE_IMU
+  initIMU();
+#endif
+
+  battery.initADC();
+
+  // IMPORTANT: Initialize TFT BEFORE SD card!
+  // The QSPI display init can disrupt SPI bus settings.
+  // By initializing display first, the SPI buses are settled
+  // before we configure the SD card.
+  initTFT();
+
+  // Now initialize SD card after display is fully configured
+  esp_err_t sdResult = storage.initSD();
+  if (sdResult != ESP_OK) {
+    // SD card failed - fall back to internal FFat storage
+    Serial.println("SD Card failed, falling back to FFat...");
+    storage.initSPIFFS();
   }
+
+  createGpxFolders();
+
+  mapView.initMap(TFT_HEIGHT - 100, TFT_WIDTH, TFT_HEIGHT);
+
+  loadPreferences();
+  gps.init();
+  initLVGL();
+  log_i("Checkpoint A: LVGL Init Done");
+
+  // Get init Latitude and Longitude
+  gps.gpsData.latitude = gps.getLat();
+  gps.gpsData.longitude = gps.getLon();
+  log_i("Checkpoint B: GPS Data Retrieved");
+
+  initGpsTask();
+  log_i("Checkpoint C: GPS Task Init Done");
+
+#ifndef DISABLE_CLI
+  initCLI();
+  log_i("Checkpoint D: CLI Init Done");
+  initCLITask();
+  log_i("Checkpoint E: CLI Task Init Done");
+#endif
+
+#ifndef DISABLE_WEB_SERVER
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!MDNS.begin(hostname))
+      log_e("nDNS init error");
+
+    log_i("mDNS initialized");
+  }
+#endif
+
+#ifndef DISABLE_WEB_SERVER
+  if (WiFi.status() == WL_CONNECTED && enableWeb) {
+    configureWebServer();
+    server.begin();
+  }
+#endif
+
+  if (WiFi.getMode() == WIFI_OFF)
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+  log_i("Loading Splash Screen...");
+  splashScreen();
+
+  // Initialize BLE early so device is discoverable while showing waiting screen
+  bleNavServer.init("BikeComputer");
+
+  // Set default coordinates as fallback (will be overwritten by BLE GPS)
+#if defined(DEFAULT_LAT) && defined(DEFAULT_LON)
+  gps.gpsData.latitude = DEFAULT_LAT;
+  gps.gpsData.longitude = DEFAULT_LON;
+  gps.gpsData.satellites = 0;
+  gps.gpsData.fixMode = 0;
+  log_i("Default coordinates set: %f, %f (waiting for app GPS)", DEFAULT_LAT,
+        DEFAULT_LON);
+#endif
+
+  // Show waiting screen - will transition to map when GPS is received via BLE
+  log_i("Loading Waiting Screen...");
+  lv_screen_load(waitingScreen);
+
+  log_i("Setup Complete");
 }
 
-void demoSDCardReading() {
-  unsigned long now = millis();
-  static unsigned long lastSDDemo = 0;
-  const unsigned long SD_DEMO_INTERVAL =
-      10000; // Demo SD reading every 10 seconds
-
-  if (now - lastSDDemo >= SD_DEMO_INTERVAL) {
-    lastSDDemo = now;
-
-    // Only demo if SD card is available
-    if (currentSDMode != SD_NONE) {
-      Serial.println("\n=== SD Card Demo ===");
-
-      // Check for different demo files
-      const char *demoFiles[] = {"/demo.txt", "/test.txt", "/README.txt"};
-      bool foundFile = false;
-
-      for (const char *filename : demoFiles) {
-        if (SD.exists(filename)) {
-          Serial.printf("Found demo file: %s\n", filename);
-          readFileFromSD(filename);
-          foundFile = true;
-          break;
-        }
-      }
-
-      if (!foundFile) {
-        Serial.println(
-            "No demo files found. Create one of these files on your SD card:");
-        for (const char *filename : demoFiles) {
-          Serial.printf("  %s\n", filename);
-        }
-      }
-
-      Serial.println("=== End SD Demo ===\n");
-    }
-  }
-}
-
-// ============================================================================
-// ARDUINO MAIN LOOP
-// ============================================================================
-
+/**
+ * @brief Main Loop
+ *
+ */
 void loop() {
-  // Keep display alive to prevent timeout
-  keepDisplayAlive();
+  uint32_t now = millis();
+  if (lastLoopMs != 0) {
+    uint32_t gap = now - lastLoopMs;
+    if (gap > maxLoopGapMs) {
+      maxLoopGapMs = gap;
+    }
+  }
+  lastLoopMs = now;
+  loopCount++;
 
-  // Update device stats periodically
-  updateDeviceStats();
+  if (!waitScreenRefresh) {
+    uint32_t startUs = micros();
+    lv_timer_handler();
+    lastLvglHandlerDurationUs = micros() - startUs;
+    if (lastLvglHandlerDurationUs > maxLvglHandlerDurationUs) {
+      maxLvglHandlerDurationUs = lastLvglHandlerDurationUs;
+    }
+    lvglHandlerCount++;
+    lastLvglHandlerMs = millis();
+    vTaskDelay(pdMS_TO_TICKS(TASK_SLEEP_PERIOD_MS));
+  }
 
-  // Update UI from Main Loop (Thread Safe)
-  updateNavigationUI();
+  // Process BLE events
+  bleNavServer.process();
 
-  // Demo SD card file reading periodically
-  demoSDCardReading();
+  // Check if we need to transition from waiting screen to map
+  checkPendingMapTransition();
 
-  // Update LVGL (handles rendering and animations)
-  // With full screen buffer and full_refresh, we can handle updates more
-  // efficiently
-  lv_timer_handler();
+  logSystemDebugHeartbeat();
 
-  // Moderate delay for display stability - ~100Hz refresh
-  // Full screen buffer eliminates partial update corruption
-  delay(10);
+#ifndef DISABLE_WEB_SERVER
+  // Deleting recursive directories in webfile server
+  if (enableWeb && deleteDir) {
+    deleteDir = false;
+    if (deleteDirRecursive(deletePath.c_str())) {
+      updateList = true;
+      eventRefresh.send("refresh", nullptr, millis());
+      eventRefresh.send("Folder deleted", "updateStatus", millis());
+    }
+  }
+#endif
 }

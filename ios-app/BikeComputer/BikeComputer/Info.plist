@@ -5,12 +5,12 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
-		<string>bluetooth-peripheral</string>
+		<string>bluetooth-central</string>
 	</array>
 
 	<!-- Location Permissions -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>BikeComputer needs your location to provide turn-by-turn navigation while you ride.</string>
+	<string>BikeComputer needs background location access to continue turn-by-turn navigation and ride tracking while the app is not visible.</string>
 	
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>BikeComputer needs your location to provide turn-by-turn navigation.</string>

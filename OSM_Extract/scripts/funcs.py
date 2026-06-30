@@ -19,10 +19,15 @@ def parse_tags(tags_str):
     """ Extract the tags as dict
     """
     res = dict()
+    if not isinstance(tags_str, str) or not tags_str:
+        return res
+
     tags = tags_str.split('","')
     for tag in tags:
         tag = tag.replace('"','')
-        parts = tag.split('=>')
+        parts = tag.split('=>', 1)
+        if len(parts) != 2 or not parts[0]:
+            continue
         res[parts[0]] = parts[1]
     return res
 

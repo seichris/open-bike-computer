@@ -52,16 +52,11 @@ struct NavigationDetailsView: View {
 enum NavigationIcon {
     static func icon(for iconID: Int) -> String {
         switch iconID {
-        case 1: return "arrow.turn.up.left"        // Slight left
-        case 2: return "arrow.turn.up.left"        // Turn left
-        case 3: return "arrow.turn.up.right"       // Slight right
-        case 4: return "arrow.turn.up.right"       // Turn right
-        case 5: return "arrow.uturn.left"          // U-turn
-        case 6: return "arrow.merge"               // Merge
-        case 7: return "arrow.triangle.2.circlepath" // Roundabout
-        case 8: return "mappin.and.ellipse"        // Destination
-        default: return "arrow.up"                 // Straight
+        case NavigationIconID.left: return "arrow.turn.up.left"
+        case NavigationIconID.right: return "arrow.turn.up.right"
+        case NavigationIconID.uTurn: return "arrow.uturn.left"
+        case NavigationIconID.straight: return "arrow.up"
+        default: return "arrow.up"
         }
     }
 }
-

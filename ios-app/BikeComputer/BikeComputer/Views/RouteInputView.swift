@@ -52,7 +52,7 @@ struct RouteInputView: View {
     let currentAddress: String
     let currentLocation: CLLocation?  // User's exact GPS location for region-biased search
     
-    var onStartNavigation: (String, String, MKDirectionsTransportType, Bool) -> Void
+    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType, Bool) -> Void
     
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @StateObject private var sourceCompleter = AddressSearchCompleter()
@@ -66,13 +66,10 @@ struct RouteInputView: View {
     @State private var hasSelectedSource = false
     
     @State private var isTestMode = false
-    @State private var selectedTransportType: MKDirectionsTransportType = {
-        if #available(iOS 18.0, *) {
-            return .cycling
-        } else {
-            return .walking  // Fall back to walking for pre-iOS 18
-        }
-    }()
+    @State private var selectedTransportType: MKDirectionsTransportType = RouteTransportTypes.cycling
+    @State private var recentDestinationSearches: [String] = []
+
+    private let recentDestinationSearchesKey = "routeInput.recentDestinationSearches"
     
     var body: some View {
         NavigationView {
@@ -181,15 +178,13 @@ struct RouteInputView: View {
                 // Transport Type Selection (only shown after destination is selected)
                 if hasSelectedDestination && !isEditingSource {
                     HStack(spacing: 12) {
-                        if #available(iOS 18.0, *) {
-                            TransportButton(
-                                icon: "bicycle",
-                                label: "Bike",
-                                isSelected: selectedTransportType == .cycling,
-                                action: { selectedTransportType = .cycling }
-                            )
-                        }
-                        
+                        TransportButton(
+                            icon: "bicycle",
+                            label: "Bike",
+                            isSelected: selectedTransportType == RouteTransportTypes.cycling,
+                            action: { selectedTransportType = RouteTransportTypes.cycling }
+                        )
+
                         TransportButton(
                             icon: "car.fill",
                             label: "Drive",
@@ -246,7 +241,10 @@ struct RouteInputView: View {
                             destinationAddress = fullAddress
                             hasSelectedDestination = true
                             isDestinationFieldFocused = false
+                            saveRecentDestinationSearch(fullAddress)
                         }
+                    } else if shouldShowRecentDestinationSearches {
+                        recentDestinationList
                     } else {
                         Spacer()
                     }
@@ -255,9 +253,12 @@ struct RouteInputView: View {
                 // Go button (only shown after destination is selected & NOT editing)
                 if hasSelectedDestination && !isEditingSource {
                     Button(action: {
-                        // Use sourceAddress if custom selected, else currentAddress
-                        let finalSource = hasSelectedSource ? sourceAddress : currentAddress
-                        onStartNavigation(finalSource, destinationAddress, selectedTransportType, isTestMode)
+                        let sourceEndpoint = RouteEndpointSelection.sourceEndpoint(
+                            hasSelectedSource: hasSelectedSource,
+                            sourceAddress: sourceAddress
+                        )
+                        saveRecentDestinationSearch(destinationAddress)
+                        onStartNavigation(sourceEndpoint, .query(destinationAddress), selectedTransportType, isTestMode)
                         dismiss()
                     }) {
                         Text(isTestMode ? "Go (Test)" : "Go")
@@ -288,6 +289,7 @@ struct RouteInputView: View {
             .onAppear {
                 // Auto-focus destination field when view appears
                 isDestinationFieldFocused = true
+                recentDestinationSearches = loadRecentDestinationSearches()
                 
                 // Set search region based on user's current location for better results
                 if let location = currentLocation {
@@ -334,6 +336,57 @@ struct RouteInputView: View {
         }
         .listStyle(.plain)
     }
+
+    private var shouldShowRecentDestinationSearches: Bool {
+        !hasSelectedDestination &&
+        destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !recentDestinationSearches.isEmpty
+    }
+
+    private var recentDestinationList: some View {
+        List {
+            Section(header: Text("Recent Searches")) {
+                ForEach(recentDestinationSearches, id: \.self) { search in
+                    Button(action: {
+                        isSelectingFromSuggestion = true
+                        destinationAddress = search
+                        hasSelectedDestination = true
+                        isDestinationFieldFocused = false
+                        saveRecentDestinationSearch(search)
+                    }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundColor(.secondary)
+
+                            Text(search)
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    private func loadRecentDestinationSearches() -> [String] {
+        UserDefaults.standard.stringArray(forKey: recentDestinationSearchesKey) ?? []
+    }
+
+    private func saveRecentDestinationSearch(_ search: String) {
+        let normalized = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+
+        var searches = loadRecentDestinationSearches()
+        searches.removeAll { $0.caseInsensitiveCompare(normalized) == .orderedSame }
+        searches.insert(normalized, at: 0)
+        searches = Array(searches.prefix(5))
+        UserDefaults.standard.set(searches, forKey: recentDestinationSearchesKey)
+        recentDestinationSearches = searches
+    }
 }
 
 // MARK: - Transport Button Component
@@ -362,4 +415,3 @@ struct TransportButton: View {
         }
     }
 }
-
