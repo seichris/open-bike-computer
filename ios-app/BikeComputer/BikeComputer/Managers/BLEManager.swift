@@ -179,6 +179,7 @@ class BLEManager: NSObject, ObservableObject {
         loadSettings()
         loadLastPeripheralIdentifier()
         updateTrustedPeripheralDescription()
+        log("BLE debug session started")
     }
     
     private func loadSettings() {

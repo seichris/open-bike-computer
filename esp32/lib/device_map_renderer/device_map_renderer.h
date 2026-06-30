@@ -26,6 +26,7 @@ public:
   void clearRoute();
   void setGpsPosition(int32_t latMicro, int32_t lonMicro, uint16_t headingDeg);
   void setSetting(uint8_t settingId, int32_t value);
+  void setStatusDetail(const char *detail);
   void requestRedraw();
   void update();
 
@@ -57,6 +58,7 @@ private:
   GeoPoint gpsPoint;
   bool hasGpsPoint = false;
   uint16_t gpsHeadingDeg = 0;
+  char statusDetail[96] = "";
 
   void draw();
   void drawStatusMessage(const char *message);

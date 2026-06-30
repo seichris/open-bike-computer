@@ -150,6 +150,18 @@ void DeviceMapRenderer::setSetting(uint8_t settingId, int32_t value) {
   requestRedraw();
 }
 
+void DeviceMapRenderer::setStatusDetail(const char *detail) {
+  portENTER_CRITICAL(&stateMux);
+  if (detail == nullptr || detail[0] == '\0') {
+    statusDetail[0] = '\0';
+  } else {
+    strncpy(statusDetail, detail, sizeof(statusDetail) - 1);
+    statusDetail[sizeof(statusDetail) - 1] = '\0';
+  }
+  portEXIT_CRITICAL(&stateMux);
+  requestRedraw();
+}
+
 void DeviceMapRenderer::requestRedraw() { redrawRequested = true; }
 
 void DeviceMapRenderer::update() {
@@ -165,9 +177,12 @@ void DeviceMapRenderer::draw() {
   GeoPoint center;
   bool hasCenter = false;
   DeviceMapSettings localSettings;
+  char localStatusDetail[sizeof(statusDetail)] = "";
 
   portENTER_CRITICAL(&stateMux);
   localSettings = settings;
+  strncpy(localStatusDetail, statusDetail, sizeof(localStatusDetail) - 1);
+  localStatusDetail[sizeof(localStatusDetail) - 1] = '\0';
   if (hasGpsPoint) {
     center = gpsPoint;
     hasCenter = true;
@@ -180,7 +195,14 @@ void DeviceMapRenderer::draw() {
   lv_canvas_fill_bg(canvas, lv_color_hex(0xF4F1E8), LV_OPA_COVER);
 
   if (!hasCenter) {
-    drawStatusMessage("Waiting for route/GPS data");
+    char message[160];
+    if (localStatusDetail[0] != '\0') {
+      snprintf(message, sizeof(message), "Waiting for route/GPS data\n%s",
+               localStatusDetail);
+    } else {
+      snprintf(message, sizeof(message), "Waiting for route/GPS data");
+    }
+    drawStatusMessage(message);
     return;
   }
 

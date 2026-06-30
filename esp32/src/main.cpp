@@ -226,10 +226,15 @@ volatile bool bleConnectedState = false;
 volatile bool bleStateChanged = false;
 volatile bool pendingNavDataReady = false;
 volatile bool pendingShowMap = false;
+volatile uint32_t navPacketsAccepted = 0;
+volatile uint32_t routePacketsAccepted = 0;
+volatile uint32_t gpsPacketsAccepted = 0;
+volatile uint32_t navUiApplies = 0;
 portMUX_TYPE navPayloadMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool ensureSDCardMounted();
 void setDeviceMapVisible(bool mapVisible);
+void updateDeviceDebugStatus(const char *reason);
 
 // BLE Callbacks
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -240,6 +245,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     bleConnectedState = true;
     bleStateChanged = true;
     Serial.println("BLE: Client connected");
+    updateDeviceDebugStatus("ble connected");
   }
 
   void onDisconnect(NimBLEServer *pServer) {
@@ -249,10 +255,26 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     bleConnectedState = false;
     bleStateChanged = true;
     Serial.println("BLE: Client disconnected");
+    updateDeviceDebugStatus("ble disconnected");
     // Restart advertising
     NimBLEDevice::startAdvertising();
   }
 };
+
+void updateDeviceDebugStatus(const char *reason) {
+  char detail[96];
+  snprintf(detail, sizeof(detail), "auth=%u nav=%lu route=%lu gps=%lu ui=%lu",
+           bleSessionAuthenticated ? 1 : 0,
+           (unsigned long)navPacketsAccepted,
+           (unsigned long)routePacketsAccepted,
+           (unsigned long)gpsPacketsAccepted,
+           (unsigned long)navUiApplies);
+  deviceMapRenderer.setStatusDetail(detail);
+  Serial.printf("Device state [%s]: %s pendingNav=%u pendingMap=%u map=%u\n",
+                reason == nullptr ? "unknown" : reason, detail,
+                pendingNavDataReady ? 1 : 0, pendingShowMap ? 1 : 0,
+                deviceMapRenderer.isVisible() ? 1 : 0);
+}
 
 void queueNavigationPayload(const std::string &value) {
   if (value.empty()) {
@@ -283,10 +305,12 @@ void queueNavigationPayload(const std::string &value) {
   portENTER_CRITICAL(&navPayloadMux);
   pendingNavData = parsed;
   pendingNavDataReady = true;
+  navPacketsAccepted++;
   portEXIT_CRITICAL(&navPayloadMux);
 
   Serial.printf("Accepted navigation payload: Icon=%u, Distance=%lum, Instruction=%s\n",
                 parsed.iconID, (unsigned long)parsed.distance, parsed.instruction);
+  updateDeviceDebugStatus("nav accepted");
 }
 
 void processPendingNavigationPayload() {
@@ -304,9 +328,11 @@ void processPendingNavigationPayload() {
   }
 
   navData = parsed;
+  navUiApplies++;
 
   Serial.printf("Applying navigation payload: Icon=%u, Distance=%lum, Instruction=%s\n",
                 navData.iconID, (unsigned long)navData.distance, navData.instruction);
+  updateDeviceDebugStatus("nav applying");
 
   uiUpdateNeeded = true;
 }
@@ -510,6 +536,7 @@ void handleAuthPayload(const std::string &value) {
     snprintf(response, sizeof(response), "OK|%s", nonce);
     notifyAuthResponse(response);
     Serial.println("BLE session authenticated");
+    updateDeviceDebugStatus("auth ok");
     return;
   }
 
@@ -532,7 +559,9 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
                     (unsigned)(value.length() - 4));
       deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data() + 4,
                                           value.length() - 4);
+      routePacketsAccepted++;
       pendingShowMap = true;
+      updateDeviceDebugStatus("fallback route");
       return;
     }
 
@@ -550,6 +579,8 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
         memcpy(&headingDeg, value.data() + 12, sizeof(headingDeg));
       }
       deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
+      gpsPacketsAccepted++;
+      updateDeviceDebugStatus("fallback gps");
       return;
     }
 
@@ -591,7 +622,9 @@ class RouteGeometryCharacteristicCallbacks : public NimBLECharacteristicCallback
     if (!value.empty()) {
       Serial.printf("Received route geometry: %u bytes\n", (unsigned)value.length());
       deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data(), value.length());
+      routePacketsAccepted++;
       pendingShowMap = true;
+      updateDeviceDebugStatus("route");
     }
   }
 };
@@ -618,6 +651,8 @@ class GpsPositionCharacteristicCallbacks : public NimBLECharacteristicCallbacks 
     }
 
     deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
+    gpsPacketsAccepted++;
+    updateDeviceDebugStatus("gps");
   }
 };
 
