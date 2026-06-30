@@ -159,6 +159,7 @@ class BLEManager: NSObject, ObservableObject {
     private var maxReconnectDelay: TimeInterval = 60.0 // Cap at 60 seconds
     private var reconnectTimer: Timer?
     private var rssiTimer: Timer?
+    private var navigationFlushRetryTimer: Timer?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -506,6 +507,8 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
+        navigationFlushRetryTimer?.invalidate()
+        navigationFlushRetryTimer = nil
         stopMonitoringRSSI()
     }
 
@@ -688,6 +691,7 @@ class BLEManager: NSObject, ObservableObject {
         }
 
         flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
     }
 
     private func sendFallbackMapPacket(_ data: Data, label: String) {
@@ -706,6 +710,27 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
             endpoint.write(write.data)
             log("Sent \(write.label): \(write.data.count) bytes")
+        }
+        if navigationWriteQueue.count == 0 {
+            navigationFlushRetryTimer?.invalidate()
+            navigationFlushRetryTimer = nil
+        } else {
+            log("Navigation write queue pending: \(navigationWriteQueue.count)")
+        }
+    }
+
+    private func scheduleNavigationFlushRetryIfNeeded() {
+        guard navigationWriteQueue.count > 0,
+              navigationFlushRetryTimer == nil else { return }
+
+        navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.1,
+                                                         repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.navigationFlushRetryTimer = nil
+            guard self.isNavigationReady,
+                  let endpoint = self.navigationWriteEndpoint else { return }
+            self.flushPendingNavigationWrites(endpoint: endpoint)
+            self.scheduleNavigationFlushRetryIfNeeded()
         }
     }
 }
