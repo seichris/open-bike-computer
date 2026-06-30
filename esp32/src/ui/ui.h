@@ -30,6 +30,7 @@ void draw_up_arrow(lv_color_t color);
 void draw_left_arrow(lv_color_t color);
 void draw_right_arrow(lv_color_t color);
 void draw_u_turn_arrow(lv_color_t color);
+void handle_display_toggle_event(lv_event_t *event);
 
 ///////////////////// SCREENS ////////////////////
 #include "ui_Screen1.h"

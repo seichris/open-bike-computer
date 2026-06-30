@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <NimBLEDevice.h>
+#include "device_map_renderer.h"
 #include "navigation_payload_queue.h"
 #include "navigation_protocol.h"
 #include <mbedtls/md.h>
@@ -204,10 +205,16 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 #define SERVICE_UUID "1819"        // Navigation Service
 #define CHARACTERISTIC_UUID "2A6E" // Navigation Data Characteristic
 #define AUTH_CHARACTERISTIC_UUID "9d7b3f30-3f6a-4d1c-9f6d-1fbf0e8b1001"
+#define ROUTE_GEOMETRY_CHARACTERISTIC_UUID "2A6F"
+#define GPS_POSITION_CHARACTERISTIC_UUID "2A72"
+#define MAP_SETTINGS_CHARACTERISTIC_UUID "2A73"
 
 NimBLEServer *pServer = nullptr;
 NimBLECharacteristic *pCharacteristic = nullptr;
 NimBLECharacteristic *pAuthCharacteristic = nullptr;
+NimBLECharacteristic *pRouteGeometryCharacteristic = nullptr;
+NimBLECharacteristic *pGpsPositionCharacteristic = nullptr;
+NimBLECharacteristic *pMapSettingsCharacteristic = nullptr;
 bool deviceConnected = false;
 bool bleSessionAuthenticated = false;
 char pendingAuthNonce[33] = "";
@@ -500,6 +507,67 @@ class AuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+class RouteGeometryCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (!bleSessionAuthenticated) {
+      Serial.println("Rejected route geometry: BLE session is not authenticated");
+      return;
+    }
+    if (!value.empty()) {
+      Serial.printf("Received route geometry: %u bytes\n", (unsigned)value.length());
+      deviceMapRenderer.setRouteGeometry((const uint8_t *)value.data(), value.length());
+      deviceMapRenderer.setVisible(true);
+    }
+  }
+};
+
+class GpsPositionCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (!bleSessionAuthenticated) {
+      Serial.println("Rejected GPS position: BLE session is not authenticated");
+      return;
+    }
+    if (value.length() < 8) {
+      Serial.println("Rejected GPS position: expected at least 8 bytes");
+      return;
+    }
+
+    int32_t latMicro = 0;
+    int32_t lonMicro = 0;
+    uint16_t headingDeg = 0;
+    memcpy(&latMicro, value.data(), sizeof(latMicro));
+    memcpy(&lonMicro, value.data() + 4, sizeof(lonMicro));
+    if (value.length() >= 10) {
+      memcpy(&headingDeg, value.data() + 8, sizeof(headingDeg));
+    }
+
+    deviceMapRenderer.setGpsPosition(latMicro, lonMicro, headingDeg);
+  }
+};
+
+class MapSettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (!bleSessionAuthenticated) {
+      Serial.println("Rejected map setting: BLE session is not authenticated");
+      return;
+    }
+    if (value.length() < 5) {
+      Serial.println("Rejected map setting: expected 5 bytes");
+      return;
+    }
+
+    uint8_t settingId = (uint8_t)value[0];
+    int32_t settingValue = 0;
+    memcpy(&settingValue, value.data() + 1, sizeof(settingValue));
+    deviceMapRenderer.setSetting(settingId, settingValue);
+    Serial.printf("Map setting updated: id=%u value=%ld\n", settingId,
+                  (long)settingValue);
+  }
+};
+
 void setupBLE() {
   Serial.println("Initializing BLE...");
 
@@ -528,6 +596,21 @@ void setupBLE() {
   pAuthCharacteristic->setCallbacks(new AuthCharacteristicCallbacks());
   pAuthCharacteristic->setValue("LOCKED");
 
+  pRouteGeometryCharacteristic = pService->createCharacteristic(
+      ROUTE_GEOMETRY_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
+  pRouteGeometryCharacteristic->setCallbacks(new RouteGeometryCharacteristicCallbacks());
+
+  pGpsPositionCharacteristic = pService->createCharacteristic(
+      GPS_POSITION_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
+  pGpsPositionCharacteristic->setCallbacks(new GpsPositionCharacteristicCallbacks());
+
+  pMapSettingsCharacteristic = pService->createCharacteristic(
+      MAP_SETTINGS_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
+  pMapSettingsCharacteristic->setCallbacks(new MapSettingsCharacteristicCallbacks());
+
   // Start service
   pService->start();
 
@@ -538,6 +621,25 @@ void setupBLE() {
   pAdvertising->start();
 
   Serial.println("BLE Server started, advertising...");
+}
+
+extern "C" void handle_display_toggle_event(lv_event_t *event) {
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    deviceMapRenderer.toggleVisible();
+    bool mapVisible = deviceMapRenderer.isVisible();
+    lv_obj_t *navObjects[] = {ui_IconPlaceholder, ui_LabelDistance,
+                              ui_LabelInstruction};
+    for (lv_obj_t *object : navObjects) {
+      if (object == NULL) {
+        continue;
+      }
+      if (mapVisible) {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+  }
 }
 
 // Global variable to track SD mode
@@ -820,6 +922,7 @@ void setup() {
   // Load SquareLine Studio UI
   Serial.println("Loading UI...");
   ui_init();
+  deviceMapRenderer.init(ui_Screen1, SCREEN_WIDTH, SCREEN_HEIGHT);
 
   // Force initial UI refresh
   lv_obj_invalidate(lv_scr_act());
@@ -832,6 +935,7 @@ void setup() {
 
   // Initialize SD card
   if (initSDCard()) {
+    deviceMapRenderer.setSdAvailable(true);
     // List files on SD card
     listSDFiles();
 
@@ -845,6 +949,7 @@ void setup() {
           "Note: Create a 'test.txt' file on the SD card to test file reading");
     }
   } else {
+    deviceMapRenderer.setSdAvailable(false);
     Serial.println(
         "SD card not available - continuing without SD functionality");
   }
@@ -994,6 +1099,7 @@ void loop() {
   // Update UI from Main Loop (Thread Safe)
   processPendingNavigationPayload();
   updateNavigationUI();
+  deviceMapRenderer.update();
 
   // Demo SD card file reading periodically
   demoSDCardReading();

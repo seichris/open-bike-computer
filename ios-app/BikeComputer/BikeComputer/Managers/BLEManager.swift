@@ -122,12 +122,18 @@ class BLEManager: NSObject, ObservableObject {
     private let serviceUUID = CBUUID(string: "1819")           // Navigation Service
     private let characteristicUUID = CBUUID(string: "2A6E")    // Navigation Data Characteristic
     private let authCharacteristicUUID = CBUUID(string: "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001")
+    private let routeGeometryCharacteristicUUID = CBUUID(string: "2A6F")
+    private let gpsPositionCharacteristicUUID = CBUUID(string: "2A72")
+    private let settingsCharacteristicUUID = CBUUID(string: "2A73")
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
     private var authCharacteristic: CBCharacteristic?
+    private var routeGeometryCharacteristic: CBCharacteristic?
+    private var gpsPositionCharacteristic: CBCharacteristic?
+    private var settingsCharacteristic: CBCharacteristic?
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(maxCount: 16)
     private var isConnecting: Bool = false
@@ -290,10 +296,63 @@ class BLEManager: NSObject, ObservableObject {
         return true
     }
     
-    /// Persist a local map setting. The current ESP32 firmware exposes navigation data only.
+    /// Send route geometry data to ESP32.
+    /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
+    func sendRouteGeometry(_ data: Data) {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = routeGeometryCharacteristic,
+              isConnected,
+              isNavigationReady else {
+            log("Cannot send geometry: route characteristic not ready")
+            return
+        }
+
+        let maxLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        guard data.count <= maxLength else {
+            log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
+            return
+        }
+
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        log("Sent route geometry: \(data.count) bytes")
+    }
+
+    /// Send GPS position to ESP32.
+    /// Format: [Lat:4][Lon:4][Heading:2] with WGS-84 microdegrees.
+    func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = gpsPositionCharacteristic,
+              isConnected,
+              isNavigationReady else {
+            return
+        }
+
+        var data = Data()
+        let latInt = Int32(lat * 1_000_000)
+        let lonInt = Int32(lon * 1_000_000)
+        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
+        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+    }
+
+    /// Persist and send a runtime map setting to ESP32 when supported.
     func sendSetting(id: UInt8, value: Int32) {
         saveSettings()
-        log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
+        guard let peripheral = connectedPeripheral,
+              let characteristic = settingsCharacteristic,
+              isConnected,
+              isNavigationReady else {
+            log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
+            return
+        }
+
+        var data = Data()
+        data.append(id)
+        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        log("Sent setting: id=\(id), value=\(value)")
     }
     
     /// Send feature visibility bitmask
@@ -374,6 +433,9 @@ class BLEManager: NSObject, ObservableObject {
         connectedPeripheral = peripheral
         navigationCharacteristic = nil
         authCharacteristic = nil
+        routeGeometryCharacteristic = nil
+        gpsPositionCharacteristic = nil
+        settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
@@ -403,6 +465,9 @@ class BLEManager: NSObject, ObservableObject {
         connectedPeripheral = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
+        routeGeometryCharacteristic = nil
+        gpsPositionCharacteristic = nil
+        settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
@@ -528,10 +593,18 @@ class BLEManager: NSObject, ObservableObject {
         authWriteState = .idle
         isPairingMode = false
         isNavigationReady = true
+        supportsDeviceSettings = settingsCharacteristic != nil
         lastConnectedPeripheralIdentifier = peripheral.identifier
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
         updateTrustedPeripheralDescription()
         log("BLE peripheral authenticated")
+        sendVisibilityMask()
+        sendSetting(id: 1, value: Int32(minPolygonSize))
+        sendSetting(id: 2, value: Int32(detailLevel))
+        sendSetting(id: 3, value: Int32(routeLineWidth))
+        sendSetting(id: 4, value: Int32(displayRotation))
+        sendSetting(id: 6, value: Int32(mapRotationMode))
+        sendSetting(id: 7, value: Int32(zoomLevel))
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -694,6 +767,9 @@ extension BLEManager: CBCentralManagerDelegate {
         connectedPeripheral = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
+        routeGeometryCharacteristic = nil
+        gpsPositionCharacteristic = nil
+        settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         pendingAuthNonce = nil
@@ -774,7 +850,13 @@ extension BLEManager: CBPeripheralDelegate {
             
             if service.uuid == serviceUUID {
                 // Discover characteristics for navigation service
-                peripheral.discoverCharacteristics([characteristicUUID, authCharacteristicUUID], for: service)
+                peripheral.discoverCharacteristics([
+                    characteristicUUID,
+                    authCharacteristicUUID,
+                    routeGeometryCharacteristicUUID,
+                    gpsPositionCharacteristicUUID,
+                    settingsCharacteristicUUID
+                ], for: service)
             }
         }
     }
@@ -809,6 +891,31 @@ extension BLEManager: CBPeripheralDelegate {
                 } else {
                     beginAuthenticationIfReady(for: peripheral)
                 }
+            }
+
+            if characteristic.uuid == routeGeometryCharacteristicUUID {
+                guard characteristic.properties.contains(.writeWithoutResponse) else {
+                    log("Route geometry characteristic does not support write without response")
+                    continue
+                }
+                routeGeometryCharacteristic = characteristic
+            }
+
+            if characteristic.uuid == gpsPositionCharacteristicUUID {
+                guard characteristic.properties.contains(.writeWithoutResponse) else {
+                    log("GPS characteristic does not support write without response")
+                    continue
+                }
+                gpsPositionCharacteristic = characteristic
+            }
+
+            if characteristic.uuid == settingsCharacteristicUUID {
+                guard characteristic.properties.contains(.writeWithoutResponse) else {
+                    log("Settings characteristic does not support write without response")
+                    continue
+                }
+                settingsCharacteristic = characteristic
+                supportsDeviceSettings = true
             }
         }
     }

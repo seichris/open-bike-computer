@@ -25,12 +25,20 @@ Bootloader mode: if upload fails, hold **BOOT (GPIO0)** while re-plugging USB.
 
 ## BLE contract
 
-Current firmware (`esp32/src/main.cpp`) implements:
-- Service UUID `1819`
+Current firmware (`esp32/src/main.cpp`) implements BLE service UUID `1819`.
+The full protocol is documented in `docs/ble-protocol.md`.
+
+Core navigation characteristic:
 - Characteristic UUID `2A6E` (write without response)
 - Payload (UTF-8): `IconID|DistanceMeters|Instruction`
 
-The iOS app currently uses only that navigation characteristic. If you add/remove/rename BLE characteristics, update both:
+Map-view characteristics:
+- Route geometry UUID `2A6F`
+- GPS position UUID `2A72`
+- Map settings UUID `2A73`
+- Auth UUID `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1001`
+
+If you add/remove/rename BLE characteristics, update both:
 - `esp32/src/main.cpp`
 - `ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift`
 
