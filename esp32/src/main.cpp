@@ -407,7 +407,7 @@ void notifyAuthResponse(const char *response) {
     return;
   }
 
-  pAuthCharacteristic->setValue(response);
+  pAuthCharacteristic->setValue((uint8_t *)response, strlen(response));
   pAuthCharacteristic->notify();
 }
 

@@ -43,6 +43,20 @@ enum BLEPairingAuthenticator {
         hmacHex("client|\(nonce)")
     }
 
+    static func authMessage(from data: Data) -> String? {
+        let trimmed = data.trimmedTrailingNullsAndWhitespace
+        if let message = String(data: trimmed, encoding: .utf8) {
+            return message
+        }
+
+        let printable = trimmed.filter { byte in
+            byte == 0x0A || byte == 0x0D || (byte >= 0x20 && byte <= 0x7E)
+        }
+        guard !printable.isEmpty else { return nil }
+
+        return String(data: Data(printable), encoding: .utf8)
+    }
+
     private static func hmacHex(_ message: String) -> String {
         let code = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
         return code.map { String(format: "%02x", $0) }.joined()
@@ -58,6 +72,24 @@ enum BLEPairingAuthenticator {
             diff |= left[index] ^ right[index]
         }
         return diff == 0
+    }
+}
+
+private extension Data {
+    var trimmedTrailingNullsAndWhitespace: Data {
+        var end = endIndex
+        while end > startIndex {
+            let byte = self[index(before: end)]
+            guard byte == 0 || byte == 0x0A || byte == 0x0D || byte == 0x20 else {
+                break
+            }
+            end = index(before: end)
+        }
+        return self[startIndex..<end]
+    }
+
+    var hexPreview: String {
+        prefix(64).map { String(format: "%02x", $0) }.joined(separator: " ")
     }
 }
 
@@ -424,10 +456,11 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func handleAuthResponse(_ data: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let message = String(data: data, encoding: .utf8) else {
-            log("Received non-UTF8 BLE auth response")
+        guard let message = BLEPairingAuthenticator.authMessage(from: data) else {
+            log("Received undecodable BLE auth response: \(data.count) bytes hex=\(data.hexPreview)")
             return
         }
+        log("Received BLE auth response: \(message.prefix(16))... (\(data.count) bytes)")
 
         if message == "LOCKED" {
             log("Ignoring initial BLE auth state")
