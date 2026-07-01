@@ -67,6 +67,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "waitingScr.hpp"
 #ifdef WAVESHARE_AMOLED_175
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "waveshare_board.hpp"
 #endif
 
 extern Storage storage;
@@ -209,42 +210,7 @@ void setup() {
                 esp_reset_reason());
 
 #ifdef WAVESHARE_AMOLED_175
-  // =========================================================
-  // I2C Bus Recovery - CRITICAL for stuck bus
-  // Must run BEFORE any other I2C/SD operations
-  // =========================================================
-  log_i("Performing I2C bus recovery...");
-
-  // Configure pins as GPIO for manual control (Wire not started yet)
-  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
-  pinMode(I2C_SCL_PIN, OUTPUT);
-
-  // Clock SCL up to 9 times while monitoring SDA
-  // This releases any slave holding SDA low
-  int clockCount = 0;
-  for (int i = 0; i < 9; i++) {
-    digitalWrite(I2C_SCL_PIN, LOW);
-    delayMicroseconds(5);
-    digitalWrite(I2C_SCL_PIN, HIGH);
-    delayMicroseconds(5);
-    clockCount++;
-
-    // If SDA is released (high), we might be done
-    if (digitalRead(I2C_SDA_PIN) == HIGH) {
-      break;
-    }
-  }
-
-  // Generate STOP condition: SDA low-to-high while SCL high
-  pinMode(I2C_SDA_PIN, OUTPUT);
-  digitalWrite(I2C_SDA_PIN, LOW);
-  delayMicroseconds(5);
-  digitalWrite(I2C_SCL_PIN, HIGH);
-  delayMicroseconds(5);
-  digitalWrite(I2C_SDA_PIN, HIGH);
-  delayMicroseconds(5);
-
-  log_i("I2C bus recovery done (%d clocks)", clockCount);
+  waveshare_board::recoverI2CBus();
 #endif
 #ifdef POWER_SAVE
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
@@ -278,60 +244,7 @@ void setup() {
   Wire.begin();
 
 #ifdef WAVESHARE_AMOLED_175
-  // Initialize AXP2101 Power Management - CRITICAL for display power!
-  Serial.println("Enabling display power via AXP2101...");
-  Wire.beginTransmission(0x34); // AXP2101 I2C address
-  if (Wire.endTransmission() == 0) {
-    Serial.println("✓ AXP2101 found!");
-
-    // Enable DLDO1 output (3.3V for display) - exact same as working demo
-    Wire.beginTransmission(0x34);
-    Wire.write(0x90); // DLDO1 voltage setting register
-    Wire.write(0x1C); // Set to 3.3V
-    Wire.endTransmission();
-
-    Wire.beginTransmission(0x34);
-    Wire.write(0x90); // Enable DLDO1
-    Wire.write(0x9C); // Enable bit + 3.3V
-    Wire.endTransmission();
-
-    // Enable other LDOs (ALDO1-4, BLDO1-2) to ensure SD Card and other
-    // peripherals are powered Register map typically: 0x92=ALDO1, 0x93=ALDO2,
-    // 0x94=ALDO3, 0x95=ALDO4, 0x96=BLDO1, 0x97=BLDO2
-
-    uint8_t ldo_regs[] = {0x92, 0x93, 0x94, 0x95, 0x96, 0x97};
-
-    // 1. Turn OFF all peripheral LDOs to force reset
-    Serial.println("Resetting Peripheral Power...");
-    for (uint8_t reg : ldo_regs) {
-      Wire.beginTransmission(0x34);
-      Wire.write(reg);
-      Wire.write(0x1C); // Disable (Bit 7=0) + Voltage 3.3V (Just in case)
-      Wire.endTransmission();
-    }
-    delay(500); // Wait for capacitors to discharge
-
-    // 2. Turn ON all peripheral LDOs
-    Serial.println("Enabling Peripheral Power...");
-    for (uint8_t reg : ldo_regs) {
-      Wire.beginTransmission(0x34);
-      Wire.write(reg);
-      Wire.write(0x1C); // Set to 3.3V
-      Wire.endTransmission();
-
-      Wire.beginTransmission(0x34);
-      Wire.write(reg);
-      Wire.write(0x9C); // Enable (Bit 7=1) + 3.3V
-      Wire.endTransmission();
-    }
-
-    delay(500); // Wait for power to stabilize (Longer delay)
-    Serial.println("✓ AXP2101 display power enabled");
-    // I2C Bus kept enabled for Touch Controller and Power Management
-
-  } else {
-    Serial.println("✗ AXP2101 not found - display may not work!");
-  }
+  waveshare_board::enablePowerRails();
 #endif
 
 #ifdef BME280

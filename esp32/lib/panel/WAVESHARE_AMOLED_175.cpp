@@ -14,42 +14,11 @@
 
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
+#include "waveshare_board.hpp"
 
 // Define Global Variables declared extern in hal.hpp
 uint8_t GPS_TX = GPIO_NUM_43;
 uint8_t GPS_RX = GPIO_NUM_44;
-
-// Display Pins (CO5300 QSPI Driver) - Defined as extern const in hal.hpp but
-// initialized here? No, they are extern const in hal.hpp, so we need to define
-// them if they aren't constexpr. But wait, in hal.hpp they were constexpr
-// before, then I changed them to extern?? Let me check hal.hpp content from
-// previous view. In step 758 I changed GPS_TX/RX to extern. I didn't change
-// others. The others are 'constexpr' in hal.hpp (Step 717). So they don't need
-// definition. ONLY GPS_TX and GPS_RX need definition because I changed them to
-// extern. And checking linker error from Step 754: undefined reference to
-// `SD_CS`, `SD_MOSI`, `SD_MISO`, `SD_CLK`. This means they ARE extern in
-// hal.hpp? Let me re-read hal.hpp (Step 717). I changed 'extern const ...' to
-// 'constexpr ...' for 'TFT_QSPI_*', 'TCH_*', 'SD_*'. So they are constexpr.
-// Linker shouldn't fail unless code takes their address or ODR use. Wait,
-// libraries use them. 'storage.cpp' uses 'SD_CS'. If 'constexpr' is in header,
-// it should be fine. BUT, 'storage.cpp' might be compiled against 'hal.hpp'
-// where they are 'extern'? No, platformio rebuilds all. The linker error
-// 'undefined reference to SD_CS' implies it expects a symbol. This happens if
-// 'constexpr' is not used (i.e. ifdef logical flow) OR if ODR used. Ah,
-// SD.begin(SD_CS) takes uint8_t which is by value. Maybe 'storage.cpp' is not
-// seeing the 'constexpr' definition? Maybe 'storage.cpp' includes 'hal.hpp' but
-// the macro 'WAVESHARE_AMOLED_175' is NOT defined for 'storage.cpp'? This is
-// the likely culprit! 'storage.cpp' is in a library. Does it receive
-// '-DWAVESHARE_AMOLED_175'? In platformio.ini: 'build_flags =
-// -DWAVESHARE_AMOLED_175'. These flags are global. So 'storage.cpp' should see
-// it. Wait, look at linker error again. undefined reference to `GPS_TX`,
-// `GPS_RX`, `SD_CS`... If they are constexpr, they are internal linkage. If
-// 'storage.cpp' sees `constexpr uint8_t SD_CS = 21;`, it uses 21. Why undefined
-// reference? Maybe 'hal.hpp' has `extern const uint8_t SD_CS;` ? I need to be
-// 100% sure what hal.hpp contains now. I will check hal.hpp content again.
-
-// Assume I will only define GPS_TX/RX for now.
-// Display: change to extern.
 
 // ============================================================================
 // DISPLAY CONFIGURATION (Arduino_GFX)
@@ -114,15 +83,14 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 
 // ============================================================================
 // TOUCH DRIVER (CST9217) - WITH TCA9554 RESET AND I2C BUS RECOVERY
-// See: .agent/workflows/WAVESHARE_HARDWARE.md
+// See WAVESHARE_HARDWARE.md.
 // ============================================================================
 
-#define CST9217_ADDRESS 0x5A
-#define TCA9554_ADDR 0x20
+constexpr uint8_t TCA9554_ADDR = waveshare_board::TCA9554_ADDR;
 #define TCA9554_OUTPUT_REG 0x01
 #define TCA9554_CONFIG_REG 0x03
 #define TCA9554_TOUCH_RST_BIT 0
-#define CST9217_INT_PIN 21
+constexpr uint8_t CST9217_INT_PIN = TCH_I2C_INT;
 #define CST9217_REG_DATA 0xD000
 #define CST9217_ACK 0xAB
 #define CST9217_DATA_LENGTH 10

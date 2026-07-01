@@ -9,6 +9,7 @@
 // Use Arduino_GFX for CO5300 AMOLED (like working esp32 project)
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
+#include "waveshare_board.hpp"
 
 // Display dimensions
 #define SCREEN_WIDTH  466
@@ -26,7 +27,7 @@ extern volatile uint32_t lastDisplayFlushDurationUs;
 extern volatile uint32_t maxDisplayFlushDurationUs;
 
 // Touch handling (CST9217)
-#define CST9217_ADDRESS 0x5A
+constexpr uint8_t CST9217_ADDRESS = waveshare_board::CST9217_ADDR;
 extern bool touchPressed;
 extern uint16_t touchX, touchY;
 

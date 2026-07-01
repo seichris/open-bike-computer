@@ -72,7 +72,7 @@ esp_err_t Storage::initSD() {
   // Waveshare 1.75" AMOLED: Use DEDICATED HSPI bus to avoid conflict with
   // QSPI display. The default SPI (FSPI) shares resources with the display.
   // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See: .agent/workflows/WAVESHARE_HARDWARE.md
+  // See WAVESHARE_HARDWARE.md.
   // Verified working pins: CS=41, MOSI=1, MISO=3, SCK=2
 
   Serial.println("Initializing SD Card (HSPI mode)...");

@@ -175,8 +175,7 @@ constexpr bool TFT_INVERT = true;
 
 /**
  * @brief WAVESHARE ESP32-S3 1.75 AMOLED pin definition
- * CORRECTED from official schematic - See:
- * .agent/workflows/WAVESHARE_HARDWARE.md
+ * Corrected from official schematic. See WAVESHARE_HARDWARE.md.
  */
 #ifdef WAVESHARE_AMOLED_175
 // I2C Bus (Shared by AXP2101, CST9217, TCA9554, RTC, IMU)
@@ -200,13 +199,13 @@ constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_39;
 
 // Touch Pins (CST9217 on shared I2C bus)
 constexpr uint8_t TCH_I2C_SDA = GPIO_NUM_15;
-constexpr uint8_t TCH_I2C_SCL = GPIO_NUM_14; // CORRECTED: Same as main I2C bus
+constexpr uint8_t TCH_I2C_SCL = GPIO_NUM_14; // Same as main I2C bus
 constexpr uint8_t TCH_I2C_INT = GPIO_NUM_21;
 // NOTE: Touch Reset is controlled by TCA9554 I/O Expander (0x20), NOT a GPIO!
 // Do NOT use GPIO 20 - it is USB D+ and will break serial monitor.
 constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)
 
-// SD Card (SPI) - CORRECTED from schematic
+// SD Card (SPI) - verified from schematic
 // NO CONFLICT with Touch - completely separate pins
 constexpr uint8_t SD_CS = GPIO_NUM_41;
 constexpr uint8_t SD_MOSI = GPIO_NUM_1;
