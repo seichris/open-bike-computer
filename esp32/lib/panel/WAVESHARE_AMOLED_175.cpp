@@ -1,7 +1,7 @@
 /**
  * @file WAVESHARE_AMOLED_175.cpp
- * @brief Waveshare 1.75 AMOLED (CO5300) implementation for IceNav using
- * Arduino_GFX
+ * @brief Waveshare AMOLED (CO5300) implementation for IceNav using Arduino_GFX.
+ * Shared by the 1.75 and 2.06 variants.
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
@@ -26,19 +26,19 @@ uint8_t GPS_RX = GPIO_NUM_44;
 // DISPLAY CONFIGURATION (Arduino_GFX)
 // ============================================================================
 
-// QSPI Bus for CO5300 - matches working esp32 project
-Arduino_ESP32QSPI *bus = new Arduino_ESP32QSPI(12, // CS
-                                               38, // SCK
-                                               4,  // D0
-                                               5,  // D1
-                                               6,  // D2
-                                               7   // D3
+// QSPI Bus for CO5300.
+Arduino_ESP32QSPI *bus = new Arduino_ESP32QSPI(TFT_QSPI_CS,  // CS
+                                               TFT_QSPI_CLK, // SCK
+                                               TFT_QSPI_D0,  // D0
+                                               TFT_QSPI_D1,  // D1
+                                               TFT_QSPI_D2,  // D2
+                                               TFT_QSPI_D3   // D3
 );
 
-// CO5300 Display Driver. Match Waveshare's Arduino demos and ESP-IDF BSP:
-// the exposed panel is 466x466 with a 6 px column gap.
+// CO5300 Display Driver. Match the vendor dimensions and panel gap for the
+// selected Waveshare AMOLED variant.
 Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
-                                         39, // RST
+                                         TFT_QSPI_RST, // RST
                                          0,  // Rotation
                                          waveshare_board::display::
                                              LOGICAL_WIDTH,
@@ -156,7 +156,11 @@ static void drawDisplayTestPatterns(uint8_t appliedRotation) {
     drawDisplayTestPatternForRotation(ROTATION_90);
   }
   applyCo5300Rotation(appliedRotation);
+#ifdef WAVESHARE_DISPLAY_PROBE
+  drawVendorWindowMarker(appliedRotation, 0x001F, 0xFFFF);
+#else
   gfx->fillScreen(0x0000);
+#endif
 }
 #endif
 
@@ -189,12 +193,225 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 }
 
 // ============================================================================
-// TOUCH DRIVER (CST9217) - WITH TCA9554 RESET AND I2C BUS RECOVERY
-// See WAVESHARE_HARDWARE.md.
+// TOUCH DRIVER
+// 1.75: CST9217 reset through TCA9554. 2.06: FT3168 direct reset GPIO.
 // ============================================================================
 
 bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
+
+#ifdef WAVESHARE_AMOLED_206
+
+static bool touchInitialized = false;
+static bool touchHintConfigured = false;
+static uint32_t lastTouchInitAttemptMs = 0;
+static uint32_t lastTouchReadMs = 0;
+static uint32_t touchBackoffUntilMs = 0;
+static uint32_t lastTouchErrorLogMs = 0;
+static uint32_t lastTouchDebugLogMs = 0;
+static uint32_t lastValidTouchMs = 0;
+static uint32_t touchFastPollUntilMs = 0;
+static bool lastTouchHintActive = false;
+static bool touchHintStateKnown = false;
+static uint8_t consecutiveTouchReadFailures = 0;
+
+static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
+  return x < waveshare_board::touch::ACTIVE_WIDTH &&
+         y < waveshare_board::touch::ACTIVE_HEIGHT;
+}
+
+static void setTouchPressed(bool pressed) {
+  if (pressed != touchPressed) {
+    if (pressed) {
+      Serial.printf("Touch: press x=%u y=%u\n", touchX, touchY);
+    } else {
+      Serial.println("Touch: release");
+    }
+  }
+  touchPressed = pressed;
+}
+
+static void configureTouchHintPin() {
+  if (touchHintConfigured) {
+    return;
+  }
+  pinMode(waveshare_board::touch::FT3168_INT_PIN, INPUT_PULLUP);
+  touchHintConfigured = true;
+}
+
+static bool isTouchHintActive() {
+  configureTouchHintPin();
+  return digitalRead(waveshare_board::touch::FT3168_INT_PIN) == LOW;
+}
+
+static void updateTouchHintState(bool active, uint32_t now) {
+  bool changed = !touchHintStateKnown || active != lastTouchHintActive;
+  bool heartbeat = now - lastTouchDebugLogMs > 10000;
+  if (changed || heartbeat) {
+    Serial.printf("Touch debug: init=%d ft3168_int=%s pressed=%d\n",
+                  touchInitialized, active ? "LOW(active)" : "HIGH(idle)",
+                  touchPressed);
+    lastTouchDebugLogMs = now;
+  }
+  lastTouchHintActive = active;
+  touchHintStateKnown = true;
+  if (changed && active) {
+    touchFastPollUntilMs =
+        now + waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS;
+  }
+}
+
+static uint32_t touchReadInterval(bool hintActive, uint32_t now) {
+  if (hintActive) {
+    return waveshare_board::touch::HINT_ACTIVE_READ_INTERVAL_MS;
+  }
+  if (touchPressed) {
+    return waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+  }
+  if (now < touchFastPollUntilMs) {
+    return waveshare_board::touch::FAST_FALLBACK_READ_INTERVAL_MS;
+  }
+  return waveshare_board::touch::IDLE_FALLBACK_READ_INTERVAL_MS;
+}
+
+static void noteTouchReadFailure(const char *reason, uint32_t now) {
+  consecutiveTouchReadFailures++;
+  if (now - lastTouchErrorLogMs > 5000) {
+    Serial.printf("Touch read failed: %s (failures=%u)\n", reason,
+                  consecutiveTouchReadFailures);
+    lastTouchErrorLogMs = now;
+  }
+  if (touchPressed &&
+      now - lastValidTouchMs < waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+    touchBackoffUntilMs =
+        now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+    return;
+  }
+  setTouchPressed(false);
+  touchBackoffUntilMs = now + 250;
+  if (consecutiveTouchReadFailures >= 5) {
+    touchInitialized = false;
+    touchBackoffUntilMs = now + waveshare_board::touch::REINIT_BACKOFF_MS;
+    consecutiveTouchReadFailures = 0;
+  }
+}
+
+void initTouchController() {
+  if (touchInitialized) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (lastTouchInitAttemptMs != 0 && now - lastTouchInitAttemptMs < 5000) {
+    return;
+  }
+  lastTouchInitAttemptMs = now;
+  configureTouchHintPin();
+
+  pinMode(waveshare_board::touch::FT3168_RST_PIN, OUTPUT);
+  digitalWrite(waveshare_board::touch::FT3168_RST_PIN, HIGH);
+  delay(1);
+  digitalWrite(waveshare_board::touch::FT3168_RST_PIN, LOW);
+  delay(20);
+  digitalWrite(waveshare_board::touch::FT3168_RST_PIN, HIGH);
+  delay(50);
+
+  if (!waveshare_board::i2c::probe(waveshare_board::touch::FT3168_ADDR,
+                                   "FT3168", 3)) {
+    Serial.println("FT3168: not found");
+    return;
+  }
+
+  uint8_t deviceId = 0;
+  if (waveshare_board::i2c::readRegister8(
+          waveshare_board::touch::FT3168_ADDR,
+          waveshare_board::touch::FT3168_DEVICE_ID_REG, deviceId, "FT3168")) {
+    Serial.printf("FT3168: found deviceId=0x%02X\n", deviceId);
+  } else {
+    Serial.println("FT3168: found");
+  }
+
+  waveshare_board::i2c::writeRegister8(
+      waveshare_board::touch::FT3168_ADDR,
+      waveshare_board::touch::FT3168_POWER_MODE_REG,
+      waveshare_board::touch::FT3168_MONITOR_MODE, "FT3168 power", 3);
+  touchInitialized = true;
+}
+
+void readTouch() {
+  uint32_t now = millis();
+  bool touchHintActive = isTouchHintActive();
+  updateTouchHintState(touchHintActive, now);
+
+  if (now < touchBackoffUntilMs) {
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      return;
+    }
+    setTouchPressed(false);
+    return;
+  }
+
+  if (!touchInitialized) {
+    initTouchController();
+    if (!touchInitialized) {
+      setTouchPressed(false);
+      return;
+    }
+  }
+
+  if (!touchHintActive && !touchPressed && now >= touchFastPollUntilMs) {
+    setTouchPressed(false);
+    return;
+  }
+
+  if (now - lastTouchReadMs < touchReadInterval(touchHintActive, now)) {
+    return;
+  }
+  lastTouchReadMs = now;
+
+  uint8_t data[waveshare_board::touch::FT3168_TOUCH_DATA_LENGTH] = {0};
+  if (!waveshare_board::i2c::readRegisterBlock8(
+          waveshare_board::touch::FT3168_ADDR,
+          waveshare_board::touch::FT3168_FINGER_REG, data, sizeof(data),
+          "FT3168 touch")) {
+    noteTouchReadFailure("data read", now);
+    return;
+  }
+  consecutiveTouchReadFailures = 0;
+
+  uint8_t points = data[0] & 0x0F;
+  if (points == 0) {
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
+    setTouchPressed(false);
+    return;
+  }
+
+  uint16_t rawX = ((data[1] & 0x0F) << 8) | data[2];
+  uint16_t rawY = ((data[3] & 0x0F) << 8) | data[4];
+  if (!isValidTouchCoordinate(rawX, rawY)) {
+    Serial.printf("Touch raw: ignored-invalid raw=(%u,%u) bytes=%02X %02X "
+                  "%02X %02X %02X\n",
+                  rawX, rawY, data[0], data[1], data[2], data[3], data[4]);
+    setTouchPressed(false);
+    return;
+  }
+
+  touchX = rawX;
+  touchY = rawY;
+  lastValidTouchMs = now;
+  touchFastPollUntilMs =
+      now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
+  setTouchPressed(true);
+}
+
+#else
+
 static bool touchInitialized = false;
 static bool touchHintConfigured = false;
 static uint32_t lastTouchInitAttemptMs = 0;
@@ -534,6 +751,8 @@ void readTouch() {
 
   setTouchPressed(true);
 }
+
+#endif // WAVESHARE_AMOLED_206
 
 void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
   readTouch();

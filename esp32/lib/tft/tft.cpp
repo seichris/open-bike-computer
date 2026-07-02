@@ -148,7 +148,7 @@ void initTFT()
   tft.fillScreen(TFT_BLACK);
 
   #ifdef TOUCH_INPUT
-    #ifndef WAVESHARE_AMOLED_175
+    #if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
       touchCalibrate();
     #endif
   #endif

@@ -56,7 +56,8 @@ public:
    */
   void drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
                  int32_t centerMercatorY, uint8_t zoom, uint16_t mapScrWidth,
-                 uint16_t mapScrHeight, double rotationRad = 0.0);
+                 uint16_t mapScrHeight, double rotationRad = 0.0,
+                 int16_t anchorX = -1, int16_t anchorY = -1);
 
   /**
    * @brief Clear all route points
@@ -84,13 +85,14 @@ private:
    * @brief Convert longitude to screen X coordinate
    */
   int16_t geoToScreenX(int32_t lon, int32_t centerLon, uint8_t zoom,
-                       int16_t screenWidth);
+                       int16_t screenWidth, int16_t anchorX);
 
   /**
    * @brief Convert latitude to screen Y coordinate
    */
   int16_t geoToScreenY(int32_t lat, int32_t centerLat, uint8_t zoom,
-                       int16_t screenHeight, int16_t screenWidth);
+                       int16_t screenHeight, int16_t screenWidth,
+                       int16_t anchorY);
 
   /**
    * @brief Draw a single line segment with thickness

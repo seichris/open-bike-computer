@@ -5,7 +5,7 @@
 
 #include "i2c_bus.hpp"
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "waveshare_board.hpp"
 #include <Wire.h>
@@ -258,4 +258,4 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

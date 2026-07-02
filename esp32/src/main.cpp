@@ -62,10 +62,11 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "route_overlay.hpp"
 #include "waitingScr.hpp"
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "WAVESHARE_AMOLED_175.hpp"
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
@@ -145,7 +146,7 @@ static void logSystemDebugHeartbeat() {
   lastLogMs = now;
 
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
   const waveshare_board::rtc::Status &rtcStatus =
       waveshare_board::rtc::status();
@@ -162,7 +163,7 @@ static void logSystemDebugHeartbeat() {
     screenName = "main";
   }
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   Serial.printf("IMU: p=%d cfg=%d valid=%d addr=0x%02X n=%lu zero=%lu fail=%lu "
                 "a=%.0f,%.0f,%.0f g=%.1f,%.1f,%.1f mag=%.0f vib=%.1f "
                 "orient=%s moving=%d\n",
@@ -299,17 +300,35 @@ void setup() {
   digitalWrite(SD_CS, HIGH);
 #endif
 
-#ifdef WAVESHARE_AMOLED_175
+#ifdef WAVESHARE_AMOLED_206
+  // The 2.06 vendor demos bring the CO5300 up before touching the PMU/I2C
+  // stack. Keep that order so display recovery stays close to the proven
+  // HelloWorld baseline.
+  initTFT();
+#ifdef WAVESHARE_DISPLAY_PROBE
+  Serial.println("Waveshare 2.06 display probe complete; holding before I2C/PMU/SD/LVGL/BLE/touch init");
+  while (true) {
+    delay(1000);
+  }
+#endif
+  waveshare_board::recoverI2CBus();
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::i2c::configureBus();
 #else
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
 #endif
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::enablePowerRails();
+#ifdef WAVESHARE_DISPLAY_PROBE
+  Serial.println("Waveshare display probe: skipping RTC and IMU init");
+#else
   waveshare_board::rtc::restoreSystemTimeFromRtc();
   waveshare_board::imu::begin();
+#endif
 #endif
 
 #ifdef BME280
@@ -330,7 +349,16 @@ void setup() {
   // The QSPI display init can disrupt SPI bus settings.
   // By initializing display first, the SPI buses are settled
   // before we configure the SD card.
+#ifndef WAVESHARE_AMOLED_206
   initTFT();
+
+#ifdef WAVESHARE_DISPLAY_PROBE
+  Serial.println("Waveshare display probe complete; holding before SD/LVGL/BLE/touch init");
+  while (true) {
+    delay(1000);
+  }
+#endif
+#endif
 
   // Now initialize SD card after display is fully configured
   esp_err_t sdResult = storage.initSD();
@@ -342,7 +370,8 @@ void setup() {
 
   createGpxFolders();
 
-  mapView.initMap(TFT_HEIGHT - 100, TFT_WIDTH, TFT_HEIGHT);
+  mapView.initMap(gui_layout::mapViewportHeight(TFT_HEIGHT), TFT_WIDTH,
+                  TFT_HEIGHT);
 
   loadPreferences();
   gps.init();
@@ -436,7 +465,7 @@ void loop() {
   // Process BLE events
   bleNavServer.process();
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();
 #endif
 

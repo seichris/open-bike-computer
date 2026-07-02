@@ -1,14 +1,261 @@
-# Waveshare ESP32-S3 Touch AMOLED 1.75" Hardware Reference
+# Waveshare ESP32-S3 Touch AMOLED Hardware Reference
 
-This document contains the definitive hardware pinout for the Waveshare ESP32-S3-Touch-AMOLED-1.75 board, extracted directly from the official schematic.
+This document contains hardware pinouts and bring-up notes for the Waveshare
+ESP32-S3 Touch AMOLED boards supported by this repo.
+
+The 1.75" notes are the most thoroughly app-verified path and were extracted
+from the official schematic. The 2.06" notes combine Waveshare's public
+product/wiki pages, GitHub demo source, downloadable schematic/datasheets, and
+the first connected-device bring-up tests on Chris's Mac.
 
 Official links:
 - https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262
 - https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75
+- https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm
+- https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06
+- https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06
 
 ---
 
-## Core Components
+# ESP32-S3-Touch-AMOLED-2.06 Hardware Reference
+
+## Source Links And Downloadable References
+
+Primary product and project pages:
+- Product page: https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm
+- Wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06
+- GitHub demo repository: https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06
+
+Linked PDFs and component references from the Waveshare wiki:
+- Schematic: https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06/ESP32-S3-Touch-AMOLED-2.06.pdf
+- Dimensional drawing: https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06/Esp32-s3-touch-amoled-2_06_dimensions.pdf
+- ESP32-S3 datasheet: https://files.waveshare.com/wiki/common/Esp32-s3_datasheet_en.pdf
+- ESP32-S3 technical reference manual: https://files.waveshare.com/wiki/common/esp32-s3_technical_reference_manual_en.pdf
+- QMI8658C datasheet: https://files.waveshare.com/wiki/common/QMI8658C.pdf
+- PCF85063A datasheet: https://files.waveshare.com/wiki/common/PCF85063A.pdf
+- AXP2101 datasheet: https://files.waveshare.com/wiki/common/X-power-AXP2101_SWcharge_V1.0.pdf
+- ES8311 datasheet: https://files.waveshare.com/wiki/common/ES8311.DS.pdf
+- ES8311 user guide: https://files.waveshare.com/wiki/common/ES8311%20User%20Guide.pdf
+- FT3168 datasheet: https://files.waveshare.com/wiki/common/FT3168.pdf
+- ES7210 datasheet: https://files.waveshare.com/wiki/common/ES7210-datasheet.pdf
+
+Local reference clone used during bring-up:
+- `/tmp/waveshare-amoled-206`
+- Schematic PDF: `/tmp/waveshare-amoled-206/Schematic/ESP32-S3-Touch-AMOLED-2.06-Schematic-V1.0.pdf`
+- Arduino pin macros: `/tmp/waveshare-amoled-206/examples/Arduino-v3.2.0/libraries/Mylibrary/pin_config.h`
+- Display smoke test: `/tmp/waveshare-amoled-206/examples/Arduino-v3.2.0/examples/01_HelloWorld/01_HelloWorld.ino`
+
+## 2.06 Core Components
+
+| Component | IC / Part | Bus | Address / Notes |
+|---|---|---|---|
+| MCU | ESP32-S3R8 | internal | Dual-core LX7 up to 240 MHz; 8 MB PSRAM; external 32 MB flash |
+| Display Driver | CO5300 | QSPI | 2.06" AMOLED, 410x502, 16.7M colors |
+| Touch Controller | FT3168 | I2C | Vendor `FT3168_DEVICE_ADDRESS` is `0x38`; docs describe 10 kHz-400 kHz I2C support |
+| Power Management | AXP2101 | I2C | PMU, charging, battery management, multiple output rails |
+| RTC | PCF85063ATL | I2C | Address `0x51`; RTC rail is powered through AXP2101/battery path |
+| IMU | QMI8658C | I2C | Schematic ties SDO/SAO low, so expected address is `0x6B` |
+| Audio Codec | ES8311 | I2C/I2S | Audio codec used by vendor `08_ES8311` demo |
+| Audio ADC / Mic Front End | ES7210 | I2S/TDM | Product page advertises dual digital microphone array; schematic includes ES7210 |
+| SD Card Slot | TF / microSD | SPI-style pins | Vendor pin macros use `CLK=2`, `CMD/MOSI=1`, `DATA/MISO=3`, `CS=17` |
+| Battery Header | MX1.25 3.7 V LiPo | PMU | Product page has battery-included and no-battery variants |
+| Buttons | PWR, BOOT | GPIO / PMU | BOOT is GPIO0; PWR drives PMU power key path |
+
+Waveshare documents this as a watch-shaped development board for wearable
+prototyping. The product page and wiki both describe onboard Wi-Fi/BLE 5, a
+Type-C connector, reserved I2C/UART/USB pads, TF card, IMU, RTC, audio, PMU,
+and a 3.7 V lithium battery header.
+
+## 2.06 Pin Assignments
+
+### Shared I2C Bus
+
+| Signal | GPIO | Devices |
+|---|---:|---|
+| SDA | GPIO 15 | AXP2101, FT3168, PCF85063, QMI8658, ES8311/ES7210 control |
+| SCL | GPIO 14 | AXP2101, FT3168, PCF85063, QMI8658, ES8311/ES7210 control |
+
+### Display (CO5300 QSPI AMOLED)
+
+| Signal | GPIO | Source / Notes |
+|---|---:|---|
+| QSPI CS / `LCD_CS` | GPIO 12 | Vendor `pin_config.h` and schematic |
+| QSPI CLK / `LCD_SCLK` | GPIO 11 | Differs from 1.75" GPIO38 |
+| QSPI D0 / `LCD_SDIO0` / `QSPI_SIO0` | GPIO 4 | Vendor `pin_config.h` |
+| QSPI D1 / `LCD_SDIO1` / `QSPI_SI1` | GPIO 5 | Vendor `pin_config.h` |
+| QSPI D2 / `LCD_SDIO2` / `QSPI_SI2` | GPIO 6 | Vendor `pin_config.h` |
+| QSPI D3 / `LCD_SDIO3` / `QSPI_SI3` | GPIO 7 | Vendor `pin_config.h` |
+| Reset / `LCD_RESET` | GPIO 8 | Direct GPIO reset; differs from 1.75" GPIO39 |
+| TE / `LCD_TE` | GPIO 13 | Schematic net; not required by HelloWorld |
+| Panel power enable / `DSI_PWR_EN` | GPIO 39 | Schematic net; current Arduino_GFX app path works without driving it directly |
+
+Vendor Arduino constructor baseline:
+
+```cpp
+Arduino_DataBus *bus = new Arduino_ESP32QSPI(
+  LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+
+Arduino_GFX *gfx = new Arduino_CO5300(
+  bus, LCD_RESET, 0, LCD_WIDTH, LCD_HEIGHT, 22, 0, 0, 0);
+```
+
+The known-good dimensions and gap are `LCD_WIDTH=410`, `LCD_HEIGHT=502`,
+constructor gap `(22,0,0,0)`, rotation `0`.
+
+Connected-device display findings on 2026-07-02:
+- The board enumerated as ESP32-S3 USB CDC/JTAG on `/dev/cu.usbmodem2101`
+  with VID:PID `303A:1001`.
+- A standalone vendor-shaped HelloWorld test using registry Arduino_GFX `1.6.6`
+  reported `gfx->begin() ok` and wrote continuous color fills.
+- A second standalone test using Waveshare's bundled Arduino_GFX `1.6.0`
+  also reported `gfx->begin() ok`; after full USB/battery power removal and
+  USB-only replug, the physical display visibly cycled colors.
+- The full app-linked display probe now visibly cycles white/red/green/blue
+  after matching the vendor init order: bring up CO5300 display first, then
+  configure the shared I2C/PMU stack.
+- The full bike firmware boots on 2.06, initializes LVGL, advertises BLE,
+  connects to the iPhone app, renders the SD-card map, and supports map drag.
+- Therefore the 2.06 panel, QSPI pinout, reset pin, baseline Arduino_GFX
+  constructor, and current repo app integration path are confirmed.
+
+### Touch (FT3168)
+
+| Signal / Field | GPIO / Value | Notes |
+|---|---:|---|
+| I2C SDA | GPIO 15 | Shared I2C bus |
+| I2C SCL | GPIO 14 | Shared I2C bus |
+| I2C address | `0x38` | Vendor `Arduino_DriveBus` constant |
+| INT / `TP_INT` | GPIO 38 | Direct interrupt GPIO |
+| RST / `TP_RESET` | GPIO 9 | Direct reset GPIO; no TCA9554 on 2.06 path |
+
+The vendor Arduino LVGL examples use `Arduino_DriveBus` and construct
+`Arduino_FT3x68` at `FT3168_DEVICE_ADDRESS`; our firmware should treat this as
+an FT3168/FT3x68 family I2C touch controller rather than CST9217.
+
+Connected-device touch findings:
+- Direct GPIO9 reset and FT3168 I2C address `0x38` are confirmed.
+- Idle FT3168 reads can produce Arduino Core 3.x I2C invalid-state errors.
+  The app path gates normal reads on the GPIO38 touch interrupt and observed
+  `i2c[fail=0 recover=0]` over idle serial captures.
+- Map dragging works in the full bike firmware on the 2.06 board.
+
+### SD Card
+
+| Signal | GPIO | Notes |
+|---|---:|---|
+| CS / `SDMMC_CS` / `SDCS` | GPIO 17 | Differs from 1.75" GPIO41 |
+| MOSI / `SDMMC_CMD` | GPIO 1 | Vendor macro calls this `SDMMC_CMD` |
+| MISO / `SDMMC_DATA` | GPIO 3 | Vendor macro calls this `SDMMC_DATA` |
+| SCK / `SDMMC_CLK` | GPIO 2 | Shared numbering with 1.75" SCK |
+
+The vendor macro names look SDMMC-like, but the published Arduino examples use
+these as explicit card pins and the schematic labels the nets `MOSI`, `MISO`,
+`SCK`, and `SDCS`.
+
+Connected-device SD findings:
+- The full bike firmware reads the SD card on `CS=17, MOSI=1, MISO=3, SCK=2`
+  and renders the offline map on the 2.06 board.
+- Keep the SD bus isolated on HSPI, as on the 1.75 board, because the display
+  uses its own QSPI bus.
+
+### RTC And IMU
+
+| Device | Signal | GPIO / Address | Notes |
+|---|---|---:|---|
+| PCF85063ATL | I2C SDA/SCL | GPIO15/GPIO14 | Expected address `0x51` |
+| PCF85063ATL | `RTC_INT` | GPIO21 | Schematic net; app does not currently use this IRQ |
+| QMI8658C | I2C SDA/SCL | GPIO15/GPIO14 | Schematic SDO/SAO low; expected address `0x6B` |
+| QMI8658C | `QMI_INT1` | GPIO18 | Schematic interrupt net |
+| QMI8658C | `QMI_INT2` | not routed for current firmware | Appears as test-point/internal schematic net |
+
+### Audio
+
+| Signal / Function | GPIO / Device | Notes |
+|---|---:|---|
+| I2S MCLK | GPIO 41 | Vendor `08_ES8311` passes this as first `i2s.setPins()` arg |
+| I2S SCLK / BCLK | GPIO 45 | Vendor `08_ES8311` |
+| I2S LRCK / WS | GPIO 40 | Vendor `08_ES8311` |
+| I2S ASDOUT / speaker data out | GPIO 42 | Vendor `08_ES8311` |
+| I2S DSDIN / mic data in | GPIO 16 | Vendor `08_ES8311` |
+| PA control | GPIO 46 | Vendor `08_ES8311` drives this high before codec init |
+| Codec | ES8311 | I2C control plus I2S audio |
+| Mic ADC/front-end | ES7210 | Schematic and product page; not yet brought up here |
+
+Audio is still a separate bring-up track for this repo. Note that GPIO41 is an
+audio MCLK pin on 2.06, while GPIO41 was SD CS on 1.75.
+
+### Buttons, External Pads, And Power
+
+| Function | GPIO / Net | Notes |
+|---|---:|---|
+| BOOT | GPIO0 | Standard ESP32-S3 boot strap / user button |
+| PWR | PMU `PWRON` path | Side power key; not the same behavior as BOOT |
+| UART | U0TXD/U0RXD | Exposed as reserved UART pads per product page/schematic |
+| USB | USB_P/USB_N and reserved USB pads | Type-C connector plus pads |
+| I2C pads | GPIO15/GPIO14 | Shared with onboard devices |
+| Motor | `MOTOR` schematic net | Present in schematic; not implemented |
+| Battery | 3.7 V MX1.25 LiPo header | Product page offers battery-included and battery-not-included variants |
+
+## 2.06 Software Baseline
+
+Waveshare's Arduino wiki path requires Espressif Arduino core `>=3.2.0`.
+The wiki library table names:
+- GFX Library for Arduino `1.6.0`
+- LVGL `9.3.0`
+- SensorLib `0.3.1`
+- XPowersLib `0.2.6` in the wiki table, while the cloned repo currently
+  contains XPowersLib `0.3.0`
+- Arduino_DriveBus for touch
+- `Mylibrary/pin_config.h` for board pin macros
+
+Waveshare's Arduino demos:
+- `01_HelloWorld`: CO5300 display/GFX smoke test; this is the known-good panel
+  baseline we flashed successfully.
+- `02_GFX_AsciiTable`: display character table.
+- `03_LVGL_PCF85063_simpleTime`: RTC with LVGL.
+- `04_LVGL_QMI8658_ui`: IMU line chart.
+- `05_LVGL_AXP2101_ADC_Data`: PMU/ADC status.
+- `06_LVGL_Arduino_v9`: LVGL plus touch through Arduino_DriveBus.
+- `07_LVGL_SD_Test`: TF card file listing/display.
+- `08_ES8311`: ES8311 audio echo/playback.
+
+Waveshare's ESP-IDF demos include AXP2101, LVGL, esp-brookesia, an IMU
+immersive block demo, microphone spectrum analyzer, video playback from TF
+card, and factory firmware.
+
+## 2.06 Current Repo Status
+
+| Feature | Status | Notes |
+|---|---|---|
+| Standalone display baseline | Verified | Vendor-shaped HelloWorld and color-cycle tests work after full power removal/replug |
+| App display integration | Verified | Full app boots after display-first init, BLE advertises/connects, LVGL flushes normally |
+| Panel-specific UI | Implemented | 2.06 keeps the shared map path but uses board-specific GUI geometry and a lower map anchor to show more route ahead on the taller panel |
+| Touch | Verified | FT3168 direct reset/address confirmed; map dragging works; idle reads are interrupt-gated |
+| SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
+| RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
+| IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
+| Audio | Vendor demo exists | ES8311/ES7210/I2S pins known; repo audio support not implemented |
+| Power / Battery | Partially verified | AXP2101 status readable; current app preserves rails during boot; deeper sleep/rail shutdown still needs testing |
+
+## 2.06 Bring-up Rules
+
+- Keep `WAVESHARE_AMOLED_206` separate from `WAVESHARE_AMOLED_175`; the boards
+  are not pin-compatible.
+- Do not copy the 1.75" TCA9554/CST9217 reset path to the 2.06. Touch reset is
+  direct GPIO9.
+- Do not copy 1.75" display CLK/RST pins. 2.06 uses CLK GPIO11 and reset GPIO8.
+- Do not use 1.75" SD CS GPIO41. 2.06 SD CS is GPIO17; GPIO41 is audio MCLK.
+- If the display is black, first flash the standalone vendor-shaped HelloWorld
+  or color-cycle test before debugging app code. The verified baseline is
+  CO5300 `410x502`, gap `(22,0,0,0)`, rotation `0`, QSPI pins
+  `CS=12, SCLK=11, D0=4, D1=5, D2=6, D3=7`, reset `8`.
+- A full USB and battery power removal can matter after failed experiments; the
+  verified standalone display test became visible after power removal and
+  USB-only replug.
+
+---
+
+## ESP32-S3-Touch-AMOLED-1.75 Core Components
 
 | Component | IC | Bus | Address / Notes |
 |---|---|---|---|
@@ -23,7 +270,7 @@ Official links:
 
 ---
 
-## Pin Assignments
+## ESP32-S3-Touch-AMOLED-1.75 Pin Assignments
 
 ### I2C Bus (Shared by AXP2101, CST9217, TCA9554, RTC, IMU)
 

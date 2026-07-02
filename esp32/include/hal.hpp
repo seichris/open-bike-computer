@@ -174,10 +174,10 @@ extern const uint8_t SD_CLK = GPIO_NUM_12;
 constexpr bool TFT_INVERT = true;
 
 /**
- * @brief WAVESHARE ESP32-S3 1.75 AMOLED pin definition
- * Corrected from official schematic. See WAVESHARE_HARDWARE.md.
+ * @brief WAVESHARE ESP32-S3 AMOLED pin definitions.
+ * Corrected from official Waveshare schematics/examples.
  */
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 // I2C Bus (Shared by AXP2101, CST9217, TCA9554, RTC, IMU)
 #define I2C_SDA_PIN GPIO_NUM_15
 #define I2C_SCL_PIN GPIO_NUM_14
@@ -190,25 +190,39 @@ constexpr uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
 
 // Display Pins (CO5300 QSPI Driver)
 constexpr uint8_t TFT_QSPI_CS = GPIO_NUM_12;
+#ifdef WAVESHARE_AMOLED_206
+constexpr uint8_t TFT_QSPI_CLK = GPIO_NUM_11;
+constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_8;
+#else
 constexpr uint8_t TFT_QSPI_CLK = GPIO_NUM_38;
+constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_39;
+#endif
 constexpr uint8_t TFT_QSPI_D0 = GPIO_NUM_4;
 constexpr uint8_t TFT_QSPI_D1 = GPIO_NUM_5;
 constexpr uint8_t TFT_QSPI_D2 = GPIO_NUM_6;
 constexpr uint8_t TFT_QSPI_D3 = GPIO_NUM_7;
-constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_39;
 
-// Touch Pins (CST9217 on shared I2C bus)
+// Touch Pins on shared I2C bus.
 constexpr uint8_t TCH_I2C_SDA = GPIO_NUM_15;
 constexpr uint8_t TCH_I2C_SCL = GPIO_NUM_14; // Same as main I2C bus
+#ifdef WAVESHARE_AMOLED_206
+constexpr uint8_t TCH_I2C_INT = GPIO_NUM_38;
+constexpr uint8_t TCH_I2C_RST = GPIO_NUM_9;
+constexpr uint8_t TCH_I2C_ADDR = 0x38; // FT3168 Address
+#else
 constexpr uint8_t TCH_I2C_INT = GPIO_NUM_21;
 // NOTE: Touch Reset is controlled by TCA9554 I/O Expander (0x20), NOT a GPIO!
 // Do NOT use GPIO 20 - it is USB D+ and will break serial monitor.
 constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)
+#endif
 
-// SD Card (SPI) - verified from schematic
-// NO CONFLICT with Touch - completely separate pins
+// SD Card (SPI) - verified from Waveshare schematics/examples.
+#ifdef WAVESHARE_AMOLED_206
+constexpr uint8_t SD_CS = GPIO_NUM_17;
+#else
 constexpr uint8_t SD_CS = GPIO_NUM_41;
+#endif
 constexpr uint8_t SD_MOSI = GPIO_NUM_1;
 constexpr uint8_t SD_MISO = GPIO_NUM_3;
 constexpr uint8_t SD_CLK = GPIO_NUM_2;
-#endif
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

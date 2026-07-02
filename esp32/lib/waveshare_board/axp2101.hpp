@@ -5,7 +5,7 @@
 
 #pragma once
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
 
@@ -36,4 +36,4 @@ bool restoreDefaultRails();
 
 } // namespace waveshare_board::axp2101
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

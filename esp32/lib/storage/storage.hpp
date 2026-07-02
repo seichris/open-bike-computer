@@ -28,7 +28,7 @@
 #include "SD_MMC.h"
 #endif
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "Arduino.h"
 #include "SD_MMC.h"
 #endif

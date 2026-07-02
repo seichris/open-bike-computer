@@ -59,13 +59,12 @@ Storage::Storage() : isSdLoaded(false), card(nullptr) {}
  * @brief SD Card init with DMA using ESP-IDF
  */
 esp_err_t Storage::initSD() {
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const uint32_t mountStartMs = millis();
-  // Waveshare 1.75" AMOLED: Use DEDICATED HSPI bus to avoid conflict with
+  // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
   // QSPI display. The default SPI (FSPI) shares resources with the display.
   // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See WAVESHARE_HARDWARE.md.
-  // Verified working pins: CS=41, MOSI=1, MISO=3, SCK=2
+  // See WAVESHARE_HARDWARE.md for variant-specific CS pins.
 
   Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
                 "sck=%d]\n",
@@ -346,7 +345,7 @@ bool Storage::getSdLoaded() const { return isSdLoaded; }
  * @return FILE* Pointer to the opened file
  */
 FILE *Storage::open(const char *path, const char *mode) {
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Reconfigure SPI bus before SD access - QSPI display operations may have
   // altered SPI state. This ensures the SD card SPI is properly configured.
   SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
