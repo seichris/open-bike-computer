@@ -155,7 +155,7 @@ When scanning the I2C bus, you should find:
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 reset, coordinate mirroring |
 | SD Card | ✅ Working | **Pins verified: CS=41, MOSI=1, MISO=3, SCK=2** (32GB SDHC tested) |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; PR14 driver added, BLE sync + warm-reset restore verified; full USB power removal loses RTC on current board (`battery=absent`) |
-| IMU | ✅ Detected | QMI8658 @ 0x6A and 0x6B (not integrated yet) |
+| IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; PR15 detects/configures it and samples accel/gyro for diagnostics only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 (controls touch reset) |
 | Audio | ⏳ Untested | ES8311 not detected in scan |
 | GPS | ⏳ Untested | UART on 43/44 |

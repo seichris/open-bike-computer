@@ -31,7 +31,9 @@ Known remaining gaps:
   retention are verified. Full USB power removal does not retain RTC time on
   the current board because AXP2101 reports `battery=absent` and the PCF85063
   voltage-low flag is set after replug.
-- QMI8658 IMU is detected but unused.
+- QMI8658 IMU integration is in progress in PR 15. The first pass detects,
+  configures, and samples the sensor at low rate for diagnostics only;
+  navigation behavior does not depend on it.
 - CO5300 90-degree rotation still has a green-edge/window artifact.
 - CST9217 touch correctly treats GPIO21 as an active-low hint plus throttled
   polling fallback; the next work should measure and centralize that policy, not
@@ -851,6 +853,62 @@ Acceptance criteria:
 Goal: bring up the onboard IMU safely, then decide which product behaviors are
 worth enabling.
 
+Implementation status:
+
+- In progress on branch `qmi8658-imu-integration`.
+- Added a Waveshare-local QMI8658 helper that:
+  - probes primary address `0x6B`, then fallback `0x6A`
+  - validates `WHO_AM_I == 0x05`
+  - records revision/address/configuration status
+  - configures accelerometer to `8g @ 125 Hz`
+  - configures gyroscope to `512 dps @ 112 Hz`
+  - enables accel + gyro via `CTRL7`
+  - reads accel and gyro registers through the shared I2C helper
+- Added a 2 Hz background sample path from the main loop. This is diagnostic
+  only and does not change map, heading, ride, sleep, or navigation behavior.
+- Added derived diagnostic fields:
+  - acceleration magnitude
+  - rough gyro vibration magnitude
+  - rough moving/no-moving flag
+  - preliminary dominant-axis orientation label
+- Added a compact `IMU:` heartbeat before the rate-limited `SYS` heartbeat:
+  `present`, `configured`, latest-sample validity, address, sample count,
+  failed reads, latest accel/gyro values, acceleration magnitude, vibration
+  magnitude, orientation label, and moving flag.
+- Added optional `WAVESHARE_IMU_DEBUG_LOG` build flag for direct QMI8658 sample
+  logs and successful raw register diagnostics. Normal builds keep the sensor
+  visible through the compact `IMU:` heartbeat and keep raw diagnostics for
+  failure cases.
+- Axis orientation was checked on the connected board. The coarse orientation
+  labels match the physical device positions, and product behavior can use this
+  mapping later if we add an IMU-dependent feature.
+- Connected-device notes from PR 15 bring-up:
+  - QMI8658 identifies at `0x6B` with `WHO_AM_I=0x05` and `REVISION=0x7C`
+    after a soft reset.
+  - The Waveshare Arduino SensorLib also expects `WHO_AM_I=0x05`; the earlier
+    observed `0x26` was resolved by matching SensorLib's reset-before-ID order.
+  - A 17-byte timestamp/temp/accel/gyro burst read at 10 Hz caused frequent I2C
+    recovery, so PR 15 narrowed sampling to separate 6-byte accel and gyro reads
+    at 2 Hz.
+  - STOP-style block reads matched SensorLib source shape but caused repeated
+    `i2cRead()` invalid-state failures in this firmware; the shared repeated
+    start helper was safer on the connected board.
+  - The final read path uses repeated-start register reads locally for the
+    QMI8658. STOP-style reads and read/modify/write config preserved stale or
+    garbage bytes after `CTRL1.ADDR_AI` was enabled.
+  - Final connected-device capture showed `CTRL1=0x40`, `CTRL2=0x26`,
+    `CTRL3=0x56`, `CTRL7=0x03`, `STATUS0=0x03`, no zero samples, no IMU read
+    failures, and a static gravity vector around `956 mg`.
+  - Orientation capture showed stable axis signs:
+    - face-down: roughly `+X small`, `+Y small`, `-Z`
+    - right-edge-up: roughly `+X`, `+Y small`, `-Z partial`
+    - left-edge-up: roughly `-X`, `+Y small`, `-Z partial`
+    - USB-up: roughly `+Y`
+    - USB-down: roughly `-Y`
+    - face-up: roughly `+Z`
+  - During the 90-second orientation capture the IMU stayed at `valid=1`,
+    `zero=0`, and `fail=0`.
+
 Scope:
 
 - Add QMI8658 probe for primary address `0x6B`, with `0x6A` as fallback.
@@ -881,15 +939,21 @@ Follow-up candidates:
 
 Validation:
 
-- Static board reports stable gravity vector.
-- Rotating board changes expected axes.
-- Sensor read loop does not degrade touch.
-- Long run does not increase I2C failures.
+- Build the Waveshare firmware.
+- Flash to the connected board and confirm `QMI8658: found`.
+- Static board reports a stable gravity vector near `1000 mg` in the final
+  connected-device capture.
+- Rotating board changes expected axes and the coarse orientation labels match
+  physical device positions.
+- Touch still works while the low-rate sensor read loop is active.
+- Long run should not increase I2C failures materially versus the PR14 baseline;
+  17-byte burst reads failed this, while the reduced 2 Hz path is much safer.
 
 Acceptance criteria:
 
-- IMU is detected and sampled reliably.
-- Axis orientation is documented.
+- IMU is detected and configured reliably.
+- IMU sampling is stable enough for diagnostics.
+- Axis orientation is documented after connected-device testing.
 - No user-facing navigation behavior depends on IMU until the signal is proven.
 
 ## PR 16: SD And Map I/O Tuning

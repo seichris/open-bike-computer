@@ -69,6 +69,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "WAVESHARE_AMOLED_175.hpp"
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
+#include "qmi8658.hpp"
 #include "waveshare_board.hpp"
 #endif
 
@@ -148,6 +149,10 @@ static void logSystemDebugHeartbeat() {
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
   const waveshare_board::rtc::Status &rtcStatus =
       waveshare_board::rtc::status();
+  const waveshare_board::imu::Status &imuStatus =
+      waveshare_board::imu::status();
+  const waveshare_board::imu::Sample &imuSample =
+      waveshare_board::imu::lastSample();
 #endif
   const char *screenName = "unknown";
   lv_obj_t *activeScreen = lv_scr_act();
@@ -158,6 +163,21 @@ static void logSystemDebugHeartbeat() {
   }
 
 #ifdef WAVESHARE_AMOLED_175
+  Serial.printf("IMU: p=%d cfg=%d valid=%d addr=0x%02X n=%lu zero=%lu fail=%lu "
+                "a=%.0f,%.0f,%.0f g=%.1f,%.1f,%.1f mag=%.0f vib=%.1f "
+                "orient=%s moving=%d\n",
+                imuStatus.present, imuStatus.configured, imuStatus.dataValid,
+                imuStatus.address,
+                (unsigned long)imuStatus.sampleCount,
+                (unsigned long)imuStatus.zeroSamples,
+                (unsigned long)imuStatus.failedReads, imuSample.accelMg[0],
+                imuSample.accelMg[1], imuSample.accelMg[2],
+                imuSample.gyroDps[0], imuSample.gyroDps[1],
+                imuSample.gyroDps[2], imuStatus.accelMagnitudeMg,
+                imuStatus.vibrationDps,
+                waveshare_board::imu::orientationName(imuStatus.orientation),
+                imuStatus.moving);
+
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
                 "lon=%.6f heading=%u routePts=%u mapFound=%d mapBlocks=%u "
@@ -289,6 +309,7 @@ void setup() {
 #ifdef WAVESHARE_AMOLED_175
   waveshare_board::enablePowerRails();
   waveshare_board::rtc::restoreSystemTimeFromRtc();
+  waveshare_board::imu::begin();
 #endif
 
 #ifdef BME280
@@ -414,6 +435,10 @@ void loop() {
 
   // Process BLE events
   bleNavServer.process();
+
+#ifdef WAVESHARE_AMOLED_175
+  waveshare_board::imu::process();
+#endif
 
   // Check if we need to transition from waiting screen to map
   checkPendingMapTransition();
