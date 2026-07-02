@@ -362,7 +362,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     /// Send GPS position to ESP32.
-    /// Format: [Lat:4][Lon:4][Heading:2] with WGS-84 microdegrees.
+    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4] with WGS-84 microdegrees.
     func sendGPSPosition(lat: Double, lon: Double, heading: Double = 0) {
         guard let peripheral = connectedPeripheral,
               isConnected,
@@ -374,9 +374,11 @@ class BLEManager: NSObject, ObservableObject {
         let latInt = Int32(lat * 1_000_000)
         let lonInt = Int32(lon * 1_000_000)
         let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
+        let unixTime = UInt32(Date().timeIntervalSince1970)
         withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
 
         if let characteristic = gpsPositionCharacteristic {
             peripheral.writeValue(data, for: characteristic, type: .withoutResponse)

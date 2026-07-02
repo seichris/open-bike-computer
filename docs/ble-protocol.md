@@ -61,10 +61,14 @@ Little-endian binary packet:
 Lat: Int32 microdegrees
 Lon: Int32 microdegrees
 Heading: UInt16 degrees, 0...359
+UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
 ```
 
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
-coordinates are converted from GCJ-02 to WGS-84 before writing.
+coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
+the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, and
+the 14-byte payload with Unix time. The Waveshare firmware uses the optional
+Unix time to sync the onboard PCF85063 RTC.
 
 ## Map Settings (`2A73`)
 

@@ -11,12 +11,15 @@
 #include "../route_overlay/route_overlay.hpp"
 #ifdef WAVESHARE_AMOLED_175
 #include "../waveshare_board/display.hpp"
+#include "../waveshare_board/pcf85063.hpp"
 #endif
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <esp_system.h>
+#include <host/ble_hs_id.h>
 #include <mbedtls/md.h>
 
 extern Gps gps;
@@ -49,6 +52,100 @@ static bool unauthTimeoutDisconnectRequested = false;
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
+#ifdef WAVESHARE_AMOLED_175
+static uint32_t lastBleRtcSyncMs = 0;
+constexpr uint32_t BLE_RTC_SYNC_INTERVAL_MS = 10UL * 60UL * 1000UL;
+#endif
+
+struct BleIdentity {
+  uint8_t address[6] = {};
+  bool created = false;
+};
+
+static void formatBleAddress(const uint8_t *address, char *out,
+                             size_t outSize) {
+  if (address == nullptr || out == nullptr || outSize == 0) {
+    return;
+  }
+
+  snprintf(out, outSize, "%02x:%02x:%02x:%02x:%02x:%02x", address[5],
+           address[4], address[3], address[2], address[1], address[0]);
+}
+
+static bool loadOrCreateStableRandomIdentity(BleIdentity &identity) {
+  Preferences prefs;
+  if (!prefs.begin("bleIdentity", false)) {
+    Serial.println("BLE: Failed to open BLE identity NVS");
+    return false;
+  }
+
+  if (prefs.isKey("addr") &&
+      prefs.getBytesLength("addr") == sizeof(identity.address) &&
+      prefs.getBytes("addr", identity.address, sizeof(identity.address)) ==
+          sizeof(identity.address)) {
+    prefs.end();
+    return true;
+  }
+
+  uint32_t randomA = esp_random();
+  uint32_t randomB = esp_random();
+  memcpy(identity.address, &randomA, sizeof(randomA));
+  memcpy(identity.address + sizeof(randomA), &randomB, 2);
+  identity.address[5] = (identity.address[5] & 0x3F) | 0xC0;
+  identity.created = true;
+
+  bool stored =
+      prefs.putBytes("addr", identity.address, sizeof(identity.address)) ==
+      sizeof(identity.address);
+  prefs.end();
+  if (!stored) {
+    Serial.println("BLE: Failed to persist BLE random static identity");
+  }
+  return stored;
+}
+
+static void initBleIdentityAndSecurity(const char *deviceName) {
+  char advertisedAddress[18] = "";
+#ifdef BLE_DEV_RANDOM_IDENTITY
+  NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, true);
+  NimBLEDevice::init(deviceName);
+  ble_addr_t randomAddress;
+  if (ble_hs_id_gen_rnd(1, &randomAddress) == 0 &&
+      ble_hs_id_set_rnd(randomAddress.val) == 0) {
+    formatBleAddress(randomAddress.val, advertisedAddress,
+                     sizeof(advertisedAddress));
+    Serial.println(
+        "BLE: BLE_DEV_RANDOM_IDENTITY enabled; using fresh random identity");
+  } else {
+    Serial.println("BLE: Failed to configure random identity; using stable "
+                   "controller identity");
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC, false);
+  }
+#else
+  BleIdentity identity;
+  bool hasStableIdentity = loadOrCreateStableRandomIdentity(identity);
+  if (hasStableIdentity) {
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, false);
+  }
+  NimBLEDevice::init(deviceName);
+  if (hasStableIdentity && ble_hs_id_set_rnd(identity.address) == 0) {
+    formatBleAddress(identity.address, advertisedAddress,
+                     sizeof(advertisedAddress));
+    Serial.printf("BLE: Using %s persisted random static identity\n",
+                  identity.created ? "new" : "existing");
+  } else {
+    Serial.println("BLE: Using stable controller identity fallback");
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC, false);
+  }
+#endif
+
+  NimBLEDevice::setSecurityAuth(false, false, false);
+  NimBLEDevice::deleteAllBonds();
+  Serial.printf("BLE: Advertising identity address %s (bonding disabled)\n",
+                advertisedAddress[0] == '\0'
+                    ? NimBLEDevice::getAddress().toString().c_str()
+                    : advertisedAddress);
+}
 
 static uint8_t sanitizeMapDisplayRotation(uint8_t requestedRotation,
                                           const char *source) {
@@ -339,9 +436,36 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     gps.gpsData.heading = headingVal;
   }
 
-  Serial.printf("BLE: %s GPS position received: lat=%ld lon=%ld heading=%u\n",
-                source == nullptr ? "unknown" : source, (long)lat, (long)lon,
-                (unsigned)gps.gpsData.heading);
+#ifdef WAVESHARE_AMOLED_175
+  bool rtcTimestampSynced = false;
+  if (len >= 14) {
+    uint32_t unixTime = 0;
+    memcpy(&unixTime, data + 10, sizeof(unixTime));
+
+    const uint32_t now = millis();
+    const waveshare_board::rtc::Status &rtcStatus =
+        waveshare_board::rtc::status();
+    if (!rtcStatus.timeValid || lastBleRtcSyncMs == 0 ||
+        now - lastBleRtcSyncMs >= BLE_RTC_SYNC_INTERVAL_MS) {
+      rtcTimestampSynced = waveshare_board::rtc::syncFromUnixTime(
+          static_cast<time_t>(unixTime), "BLE GPS timestamp");
+      if (rtcTimestampSynced) {
+        lastBleRtcSyncMs = now;
+      }
+    }
+  }
+#endif
+
+  Serial.printf(
+      "BLE: %s GPS position received: lat=%ld lon=%ld heading=%u rtcSync=%d\n",
+      source == nullptr ? "unknown" : source, (long)lat, (long)lon,
+      (unsigned)gps.gpsData.heading,
+#ifdef WAVESHARE_AMOLED_175
+      rtcTimestampSynced
+#else
+      0
+#endif
+  );
   bleDebugStats.gpsPacketCount++;
   bleDebugStats.lastGpsPacketMs = millis();
 
@@ -643,8 +767,7 @@ void BLENavigationServer::init(const char *deviceName) {
 
   Serial.println("BLE: Initializing NimBLE server...");
 
-  // Initialize NimBLE
-  NimBLEDevice::init(deviceName);
+  initBleIdentityAndSecurity(deviceName);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
   NimBLEDevice::setMTU(512);              // Increase MTU for route geometry
 

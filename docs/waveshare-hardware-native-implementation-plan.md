@@ -27,7 +27,10 @@ Known remaining gaps:
 
 - AXP2101 is handled with raw boot-time writes instead of a real PMU module.
 - I2C recovery is boot-only and not shared by all I2C clients.
-- PCF85063 RTC is detected but unused.
+- PCF85063 RTC integration is in progress in PR 14; BLE sync and warm-reset
+  retention are verified. Full USB power removal does not retain RTC time on
+  the current board because AXP2101 reports `battery=absent` and the PCF85063
+  voltage-low flag is set after replug.
 - QMI8658 IMU is detected but unused.
 - CO5300 90-degree rotation still has a green-edge/window artifact.
 - CST9217 touch correctly treats GPIO21 as an active-low hint plus throttled
@@ -422,9 +425,8 @@ Implementation status:
   recovery attempts, recovered transactions, and missing devices.
 - Migrated current Waveshare AXP2101, TCA9554, and CST9217 register access to
   the shared helper.
-- PCF85063 and QMI8658 do not yet have production accessors in the firmware;
-  they should use the shared helper when PR 14 and PR 15 add RTC/IMU drivers,
-  rather than adding unused reads in PR 11.
+- PCF85063 and QMI8658 should use the shared helper when PR 14 and PR 15 add
+  RTC/IMU drivers, rather than adding unused reads in PR 11.
 - Local build passed on 2026-07-01:
   `PLATFORMIO_CORE_DIR=/tmp/esp32-bike-pio-core-313 /tmp/esp32-bike-pio-313/bin/pio run -e WAVESHARE_AMOLED_175`.
 - Connected-device upload passed four times on 2026-07-01 without manually
@@ -456,7 +458,7 @@ Scope:
   - optional device probe
   - optional debug scan
 - Use helper functions for current AXP2101, TCA9554, and CST9217 access.
-- Keep PCF85063 and QMI8658 on the same helper path when their RTC/IMU drivers
+- Keep PCF85063 and QMI8658 on the same helper path as their RTC/IMU drivers
   are added.
 - Keep polling/logging rate limited to avoid making bus contention worse.
 - Add counters for:
@@ -746,6 +748,63 @@ Acceptance criteria:
 
 Goal: use the onboard RTC for real time before BLE/iOS time is available.
 
+Implementation status:
+
+- In progress on branch `pcf85063-rtc-integration`.
+- Added a Waveshare-local PCF85063 helper that probes `0x51`, clears the stop
+  bit if needed, rejects voltage-low/invalid timestamps, restores ESP32 system
+  time from RTC on boot, and writes UTC time back to the RTC.
+- Extended the existing GPS-position BLE packet with an optional trailing
+  `UInt32` Unix timestamp. Firmware remains backward compatible with the older
+  8-byte and 10-byte payloads.
+- The iOS app now appends current phone Unix time to GPS-position writes. The
+  firmware throttles RTC writes to the first valid phone timestamp and then at
+  most once every 10 minutes.
+- `SYS` heartbeat logs include RTC presence, validity, source, and Unix time.
+- The shared Waveshare I2C helper now serializes transactions with a FreeRTOS
+  mutex. This is required because RTC sync can run from the BLE callback while
+  LVGL/touch is also polling the CST9217 on the same `Wire` bus.
+- RTC sync now reads the PCF85063 back before reporting success, so a failed or
+  corrupted I2C write cannot mark the RTC valid in firmware state.
+- BLE advertising uses a persisted random static identity by default, with
+  bonding disabled and local bonds cleared on boot because this protocol uses
+  app-level authentication. This avoids stale iOS/CoreBluetooth pairing state
+  tied to the ESP32 public address while keeping normal reconnects stable. A
+  commented `BLE_DEV_RANDOM_IDENTITY` build flag remains as a deliberate
+  dev-only escape hatch for repeated firmware reflashes.
+- Local verification on 2026-07-02:
+  - `pio run -e WAVESHARE_AMOLED_175` passed.
+  - iOS simulator build for the `BikeComputer` scheme passed.
+  - Flash to `/dev/cu.usbmodem2101` passed.
+  - Boot logs showed `PCF85063: found`.
+  - The RTC had its voltage-low flag set, so firmware rejected the stored value
+    and heartbeats reported `rtc[present=1 valid=0 source=unknown unix=0]`.
+  - Local Mac BLE injection could not be used because macOS denied Bluetooth
+    access to the Python/Bleak process.
+  - The iPhone dev app initially failed to reconnect with `Peer removed pairing
+    information`; temporarily switching the firmware to a random BLE own-address
+    path allowed the iPhone to connect, authenticate, send settings, and send
+    GPS. The long-term code path now generates one random static BLE identity,
+    persists it in NVS, and gates per-boot fresh identity behind
+    `BLE_DEV_RANDOM_IDENTITY`.
+  - The persisted random static identity path was flashed and tested. First
+    boot created the identity and authenticated from iOS. A reset then logged
+    `BLE: Using existing persisted random static identity`, restored RTC time
+    before BLE, and authenticated from iOS again.
+  - BLE GPS timestamp sync succeeded from the iPhone app:
+    `PCF85063: synced RTC from BLE GPS timestamp`.
+  - A first RTC write path logged success but failed warm-reset restore because
+    the RTC still contained invalid year register `0x07`; this exposed the need
+    for shared I2C serialization plus RTC readback verification.
+  - After adding I2C serialization/readback, reset restore succeeded before BLE
+    reconnect: `PCF85063: restored system time from RTC:
+    2026-07-02T01:23:59Z`, and heartbeats reported
+    `rtc[present=1 valid=1 source=rtc ...]`.
+  - Full USB unplug/replug was tested after a successful BLE RTC sync. On the
+    next boot AXP2101 reported `battery=absent`, PCF85063 reported
+    `voltage-low flag set; RTC time invalid`, and firmware correctly rejected
+    RTC restore. The iPhone then reconnected and resynced the RTC over BLE.
+
 Scope:
 
 - Add a small PCF85063 driver.
@@ -767,10 +826,19 @@ Out of scope:
 
 Validation:
 
-- Boot after prior RTC sync with phone disconnected.
-- Boot after full power removal if backup battery/rail supports RTC.
-- iOS/BLE time updates RTC.
-- Invalid RTC values are rejected safely.
+- Build the Waveshare firmware. Done on 2026-07-02.
+- Flash to the connected board and confirm `PCF85063: found` appears at boot.
+  Done on 2026-07-02.
+- Confirm invalid RTC values are rejected safely by the voltage-low flag/range
+  checks. Done on 2026-07-02 for a voltage-low RTC and an invalid 2007 RTC
+  register set.
+- Connect from iOS, send a route/location update, and confirm the log shows an
+  RTC sync from the BLE GPS timestamp. Done on 2026-07-02.
+- Reboot with the phone disconnected and confirm the ESP32 restores system time
+  from RTC before BLE/iOS reconnects. Warm reset done on 2026-07-02; a
+  phone-disconnected capture is still useful if we want a stricter proof.
+- Boot after full USB power removal. Tested on 2026-07-02: current board does
+  not retain RTC time because no battery/backup source is present.
 
 Acceptance criteria:
 
