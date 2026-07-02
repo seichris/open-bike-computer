@@ -8,6 +8,7 @@
  */
 
 #include "maps.hpp"
+#include "../../gui/src/guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
 // extern Storage storage;
@@ -80,6 +81,14 @@ static inline bool isTypeVisible(uint8_t typeId,
 static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
+
+static int16_t mapAnchorXForWidth(uint16_t width) {
+  return gui_layout::mapAnchorX(width);
+}
+
+static int16_t mapAnchorYForHeight(uint16_t height) {
+  return gui_layout::mapAnchorY(height);
+}
 
 extern Point16::Point16(char *coordsPair) {
   char *next;
@@ -1086,11 +1095,16 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   double cosA = cos(rotation);
   double sinA = sin(rotation);
 
-  // BUGFIX: Use actual canvas dimensions, not mapScrHeight which may differ
-  // from canvas height in fullscreen mode
+  // Use the actual canvas dimensions, not mapScrHeight which may differ from
+  // canvas height in fullscreen mode. The anchor may be board-specific: 1.75
+  // stays centered; 2.06 shifts down to show more route ahead on the tall panel.
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
-  int16_t halfW = draw_buf ? draw_buf->header.w / 2 : Maps::mapScrWidth / 2;
-  int16_t halfH = draw_buf ? draw_buf->header.h / 2 : Maps::mapScrHeight / 2;
+  int16_t screenAnchorX =
+      mapAnchorXForWidth(draw_buf ? draw_buf->header.w : Maps::mapScrWidth);
+  int16_t screenAnchorY = mapAnchorYForHeight(
+      draw_buf ? draw_buf->header.h
+               : (mapSet.mapFullScreen ? Maps::mapScrFull
+                                        : Maps::mapScrHeight));
 
   uint32_t totalTime = millis();
   log_i("readVectorMap: Draw start. isMapFound=%d, Blocks=%d", Maps::isMapFound,
@@ -1167,8 +1181,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         double ry = dx * sinA + dy * cosA;
 
         // 3. Translate to screen center
-        int16_t sx = round(rx) + halfW;
-        int16_t sy = round(ry) + halfH;
+        int16_t sx = round(rx) + screenAnchorX;
+        int16_t sy = round(ry) + screenAnchorY;
 
         return Point16(sx, sy);
       };
@@ -1281,8 +1295,8 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           }
           double rx = dx * cosA - dy * sinA;
           double ry = dx * sinA + dy * cosA;
-          int16_t sx = round(rx) + halfW;
-          int16_t sy = round(ry) + halfH;
+          int16_t sx = round(rx) + screenAnchorX;
+          int16_t sy = round(ry) + screenAnchorY;
           return Point16(sx, sy);
         };
 
@@ -1916,15 +1930,18 @@ void Maps::displayMap() {
   // Update Arrow Position
   if (Maps::canvasArrow) {
     uint16_t h = mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+    const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
+    const int16_t anchorY = mapAnchorYForHeight(h);
     int16_t x, y;
 
     if (Maps::followGps) {
-      // Center of screen when following GPS (48x48 icon, so offset by -24)
-      x = Maps::mapScrWidth / 2 - 24;
-      y = h / 2 - 24;
+      // Board-specific map anchor when following GPS (48x48 icon, so offset
+      // by -24). The 1.75 stays centered; the 2.06 anchor is lower.
+      x = anchorX - 24;
+      y = anchorY - 24;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
-      ESP_LOGI(TAG, "GPS indicator: followGps mode, center screen pos(%d,%d)",
+      ESP_LOGI(TAG, "GPS indicator: followGps mode, anchor screen pos(%d,%d)",
                x, y);
     } else {
       // Calculate position relative to viewport center
@@ -1957,8 +1974,8 @@ void Maps::displayMap() {
 
       // 3. Translate to screen center (centered on arrow)
       // 48x48 icon, so offset by -24
-      x = (round(rx) + Maps::mapScrWidth / 2) - 24;
-      y = (round(ry) + h / 2) - 24;
+      x = (round(rx) + anchorX) - 24;
+      y = (round(ry) + anchorY) - 24;
 
       ESP_LOGI(TAG,
                "GPS indicator: gps(%.6f,%.6f) -> mercator(%d,%d) -> "
@@ -2041,7 +2058,9 @@ void Maps::generateVectorMap(uint8_t zoom) {
         mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     routeOverlay.drawRoute(Maps::canvasMap, Maps::viewPort.center.x,
                            Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
-                           canvasHeight, rotationRad);
+                           canvasHeight, rotationRad,
+                           mapAnchorXForWidth(Maps::mapScrWidth),
+                           mapAnchorYForHeight(canvasHeight));
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
              rotationRad, canvasHeight);
   } else {

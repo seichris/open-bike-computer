@@ -62,6 +62,7 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "route_overlay.hpp"
 #include "waitingScr.hpp"
@@ -369,7 +370,8 @@ void setup() {
 
   createGpxFolders();
 
-  mapView.initMap(TFT_HEIGHT - 100, TFT_WIDTH, TFT_HEIGHT);
+  mapView.initMap(gui_layout::mapViewportHeight(TFT_HEIGHT), TFT_WIDTH,
+                  TFT_HEIGHT);
 
   loadPreferences();
   gps.init();

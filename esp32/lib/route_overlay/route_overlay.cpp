@@ -85,7 +85,10 @@ void RouteOverlay::clear() {
 #endif
 
 int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
-                                   uint8_t zoom, int16_t screenWidth) {
+                                   uint8_t zoom, int16_t screenWidth,
+                                   int16_t anchorX) {
+  (void)screenWidth;
+
   // Convert microdegrees to degrees
   double lon = lonMicro / 1000000.0;
 
@@ -100,14 +103,14 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
   int16_t screenX;
   if (zoom == 0) {
     screenX =
-        (int16_t)(round((worldX - centerWorldX) * 2.0) + (screenWidth / 2.0));
+        (int16_t)(round((worldX - centerWorldX) * 2.0) + anchorX);
   } else if (zoom == 1) {
     screenX =
-        (int16_t)(round((worldX - centerWorldX) * 1.5) + (screenWidth / 2.0));
+        (int16_t)(round((worldX - centerWorldX) * 1.5) + anchorX);
   } else {
     int divisor = zoom - 1;
-    screenX = (int16_t)(round((worldX - centerWorldX) / divisor) +
-                        (screenWidth / 2.0));
+    screenX =
+        (int16_t)(round((worldX - centerWorldX) / divisor) + anchorX);
   }
 
   return screenX;
@@ -115,7 +118,10 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
 
 int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
                                    uint8_t zoom, int16_t screenHeight,
-                                   int16_t screenWidth) {
+                                   int16_t screenWidth, int16_t anchorY) {
+  (void)screenHeight;
+  (void)screenWidth;
+
   // Convert microdegrees to degrees
   double lat = latMicro / 1000000.0;
 
@@ -128,14 +134,14 @@ int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
   int16_t screenY;
   if (zoom == 0) {
     screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 2.0) + (screenHeight / 2.0));
+        (int16_t)(round(-(worldY - centerWorldY) * 2.0) + anchorY);
   } else if (zoom == 1) {
     screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 1.5) + (screenHeight / 2.0));
+        (int16_t)(round(-(worldY - centerWorldY) * 1.5) + anchorY);
   } else {
     int divisor = zoom - 1;
-    screenY = (int16_t)(round(-(worldY - centerWorldY) / divisor) +
-                        (screenHeight / 2.0));
+    screenY =
+        (int16_t)(round(-(worldY - centerWorldY) / divisor) + anchorY);
   }
 
   return screenY;
@@ -209,7 +215,11 @@ void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
 void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
                              int32_t centerMercatorY, uint8_t zoom,
                              uint16_t mapScrWidth, uint16_t mapScrHeight,
-                             double rotationRad) {
+                             double rotationRad, int16_t anchorX,
+                             int16_t anchorY) {
+  (void)mapScrWidth;
+  (void)mapScrHeight;
+
   if (points.size() < 2) {
     Serial.println("RouteOverlay: Not enough points to draw (need >= 2)");
     return; // Need at least 2 points to draw a line
@@ -232,6 +242,12 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
   int32_t bufH = draw_buf->header.h;
   uint32_t stride =
       draw_buf->header.stride / 2; // stride is in bytes, we need pixels
+  if (anchorX < 0) {
+    anchorX = bufW / 2;
+  }
+  if (anchorY < 0) {
+    anchorY = bufH / 2;
+  }
 
   Serial.printf("RouteOverlay: Canvas buffer W=%d H=%d stride=%d\n", bufW, bufH,
                 stride);
@@ -239,32 +255,33 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
   // Pre-calculate rotation values
   double cosA = cos(rotationRad);
   double sinA = sin(rotationRad);
-  int16_t halfW = bufW / 2;
-  int16_t halfH = bufH / 2;
 
   int drawnCount = 0;
   // Draw route segments
   for (size_t i = 0; i < points.size() - 1; i++) {
     // Convert geographic coordinates to screen pixels
-    int16_t x1 = geoToScreenX(points[i].lon, centerMercatorX, zoom, bufW);
-    int16_t y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW);
-    int16_t x2 = geoToScreenX(points[i + 1].lon, centerMercatorX, zoom, bufW);
-    int16_t y2 =
-        geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH, bufW);
+    int16_t x1 =
+        geoToScreenX(points[i].lon, centerMercatorX, zoom, bufW, anchorX);
+    int16_t y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW,
+                              anchorY);
+    int16_t x2 =
+        geoToScreenX(points[i + 1].lon, centerMercatorX, zoom, bufW, anchorX);
+    int16_t y2 = geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH,
+                              bufW, anchorY);
 
     // Apply rotation transform if rotationRad is non-zero
     if (rotationRad != 0.0) {
       // Transform point 1
-      double dx1 = x1 - halfW;
-      double dy1 = y1 - halfH;
-      x1 = (int16_t)(dx1 * cosA - dy1 * sinA + halfW);
-      y1 = (int16_t)(dx1 * sinA + dy1 * cosA + halfH);
+      double dx1 = x1 - anchorX;
+      double dy1 = y1 - anchorY;
+      x1 = (int16_t)(dx1 * cosA - dy1 * sinA + anchorX);
+      y1 = (int16_t)(dx1 * sinA + dy1 * cosA + anchorY);
 
       // Transform point 2
-      double dx2 = x2 - halfW;
-      double dy2 = y2 - halfH;
-      x2 = (int16_t)(dx2 * cosA - dy2 * sinA + halfW);
-      y2 = (int16_t)(dx2 * sinA + dy2 * cosA + halfH);
+      double dx2 = x2 - anchorX;
+      double dy2 = y2 - anchorY;
+      x2 = (int16_t)(dx2 * cosA - dy2 * sinA + anchorX);
+      y2 = (int16_t)(dx2 * sinA + dy2 * cosA + anchorY);
     }
 
     // LOGGING: Debug Center Offset for the first segment
@@ -272,7 +289,7 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
       ESP_LOGI(
           "RouteOverlay",
           "DEBUG_OFFSET: Center(%d,%d) StartPixel(%d,%d) Diff(%d,%d) Rot(%.2f)",
-          halfW, halfH, x1, y1, x1 - halfW, y1 - halfH, rotationRad);
+          anchorX, anchorY, x1, y1, x1 - anchorX, y1 - anchorY, rotationRad);
     }
 
     // Log first few segments for debugging

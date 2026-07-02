@@ -64,6 +64,78 @@ extern Compass compass;
 extern Gps gps;
 bool calculateDST = false; // Calculate DST flag
 
+static uint16_t defaultCompassX() {
+  return (TFT_WIDTH / 2) - (100 * scale);
+}
+
+static uint16_t defaultCompassY() {
+#ifdef WAVESHARE_AMOLED_206
+  return 112;
+#else
+  return 80;
+#endif
+}
+
+static uint16_t defaultCoordX() {
+  return (TFT_WIDTH / 2) - (90 * scale);
+}
+
+static uint16_t defaultCoordY() {
+#ifdef WAVESHARE_AMOLED_206
+  return 42;
+#else
+  return 30;
+#endif
+}
+
+static uint16_t defaultAltitudeX() {
+#ifdef WAVESHARE_AMOLED_206
+  return 12;
+#else
+  return 8;
+#endif
+}
+
+static uint16_t defaultAltitudeY() {
+#ifdef WAVESHARE_AMOLED_206
+  return TFT_HEIGHT - 148;
+#else
+  return TFT_HEIGHT - 170;
+#endif
+}
+
+static uint16_t defaultSpeedX() {
+#ifdef WAVESHARE_AMOLED_206
+  return 12;
+#else
+  return 1;
+#endif
+}
+
+static uint16_t defaultSpeedY() {
+#ifdef WAVESHARE_AMOLED_206
+  return TFT_HEIGHT - 104;
+#else
+  return TFT_HEIGHT - 130;
+#endif
+}
+
+static uint16_t defaultSunX() {
+#ifdef WAVESHARE_AMOLED_206
+  return TFT_WIDTH - 92;
+#else
+  return 170;
+#endif
+}
+
+static uint16_t defaultSunY() {
+#ifdef WAVESHARE_AMOLED_206
+  return TFT_HEIGHT - 154;
+#else
+  return TFT_HEIGHT - 170;
+#endif
+}
+
 /**
  * @brief Load stored preferences
  *
@@ -87,16 +159,16 @@ void loadPreferences() {
   mapSet.showMapScale = cfg.getBool(PKEYS::KMAP_SCALE, true);
   gpsBaud = cfg.getShort(PKEYS::KGPS_SPEED, 4);
   gpsUpdate = cfg.getShort(PKEYS::KGPS_RATE, 3);
-  compassPosX = cfg.getInt(PKEYS::KCOMP_X, (TFT_WIDTH / 2) - (100 * scale));
-  compassPosY = cfg.getInt(PKEYS::KCOMP_Y, 80);
-  coordPosX = cfg.getInt(PKEYS::KCOORD_X, (TFT_WIDTH / 2) - (90 * scale));
-  coordPosY = cfg.getInt(PKEYS::KCOORD_Y, 30);
-  altitudePosX = cfg.getInt(PKEYS::KALTITUDE_X, 8);
-  altitudePosY = cfg.getInt(PKEYS::KALTITUDE_Y, TFT_HEIGHT - 170);
-  speedPosX = cfg.getInt(PKEYS::KSPEED_X, 1);
-  speedPosY = cfg.getInt(PKEYS::KSPEED_Y, TFT_HEIGHT - 130);
-  sunPosX = cfg.getInt(PKEYS::KSUN_X, 170);
-  sunPosY = cfg.getInt(PKEYS::KSUN_Y, TFT_HEIGHT - 170);
+  compassPosX = cfg.getInt(PKEYS::KCOMP_X, defaultCompassX());
+  compassPosY = cfg.getInt(PKEYS::KCOMP_Y, defaultCompassY());
+  coordPosX = cfg.getInt(PKEYS::KCOORD_X, defaultCoordX());
+  coordPosY = cfg.getInt(PKEYS::KCOORD_Y, defaultCoordY());
+  altitudePosX = cfg.getInt(PKEYS::KALTITUDE_X, defaultAltitudeX());
+  altitudePosY = cfg.getInt(PKEYS::KALTITUDE_Y, defaultAltitudeY());
+  speedPosX = cfg.getInt(PKEYS::KSPEED_X, defaultSpeedX());
+  speedPosY = cfg.getInt(PKEYS::KSPEED_Y, defaultSpeedY());
+  sunPosX = cfg.getInt(PKEYS::KSUN_X, defaultSunX());
+  sunPosY = cfg.getInt(PKEYS::KSUN_Y, defaultSunY());
   defBright = cfg.getUInt(PKEYS::KDEF_BRIGT, 254);
   if (mapSet.vectorMap) {
     minZoom = 1;

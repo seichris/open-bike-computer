@@ -229,6 +229,7 @@ card, and factory firmware.
 |---|---|---|
 | Standalone display baseline | Verified | Vendor-shaped HelloWorld and color-cycle tests work after full power removal/replug |
 | App display integration | Verified | Full app boots after display-first init, BLE advertises/connects, LVGL flushes normally |
+| Panel-specific UI | Implemented | 2.06 keeps the shared map path but uses board-specific GUI geometry and a lower map anchor to show more route ahead on the taller panel |
 | Touch | Verified | FT3168 direct reset/address confirmed; map dragging works; idle reads are interrupt-gated |
 | SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |

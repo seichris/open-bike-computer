@@ -8,6 +8,7 @@
 
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -26,14 +27,20 @@ extern Compass compass;
 extern Gps gps;
 extern wayPoint loadWpt;
 
-#ifdef LARGE_SCREEN
-uint8_t toolBarOffset = 100;
-uint8_t toolBarSpace = 60;
-#endif
-#ifndef LARGE_SCREEN
-uint8_t toolBarOffset = 80;
-uint8_t toolBarSpace = 50;
-#endif
+uint8_t toolBarOffset = gui_layout::MAP_TOOLBAR_OFFSET;
+uint8_t toolBarSpace = gui_layout::MAP_TOOLBAR_SPACE;
+
+static void positionMapToolbarButtons(uint16_t mapHeight) {
+  if (!btnFullScreen || !btnZoomOut || !btnZoomIn) {
+    return;
+  }
+
+  const uint8_t inset = gui_layout::MAP_TOOLBAR_INSET;
+  lv_obj_set_pos(btnFullScreen, inset, mapHeight - toolBarOffset);
+  lv_obj_set_pos(btnZoomOut, inset, mapHeight - (toolBarOffset + toolBarSpace));
+  lv_obj_set_pos(btnZoomIn, inset,
+                 mapHeight - (toolBarOffset + (2 * toolBarSpace)));
+}
 
 lv_obj_t *tilesScreen;
 lv_obj_t *compassTile;
@@ -45,6 +52,16 @@ lv_obj_t *btnZoomIn;
 lv_obj_t *btnZoomOut;
 
 Maps mapView;
+
+static int16_t mapInteractionAnchorX() {
+  return gui_layout::mapAnchorX(mapView.mapScrWidth);
+}
+
+static int16_t mapInteractionAnchorY() {
+  const uint16_t mapHeight =
+      mapSet.mapFullScreen ? mapView.mapScrFull : mapView.mapScrHeight;
+  return gui_layout::mapAnchorY(mapHeight);
+}
 
 /**
  * @brief Trigger map redraw (called by BLE when route geometry is received)
@@ -359,19 +376,10 @@ void mapToolBarEvent(lv_event_t *event) {
   canScrollMap = !canScrollMap;
 
   if (!mapSet.mapFullScreen) {
-    lv_obj_set_pos(btnFullScreen, 10, mapView.mapScrHeight - toolBarOffset);
-    lv_obj_set_pos(btnZoomOut, 10,
-                   mapView.mapScrHeight - (toolBarOffset + toolBarSpace));
-    lv_obj_set_pos(btnZoomIn, 10,
-                   mapView.mapScrHeight - (toolBarOffset + (2 * toolBarSpace)));
+    positionMapToolbarButtons(mapView.mapScrHeight);
   } else {
-    lv_obj_set_pos(btnFullScreen, 10,
-                   mapView.mapScrFull - (toolBarOffset + 24));
-    lv_obj_set_pos(btnZoomOut, 10,
-                   mapView.mapScrFull - (toolBarOffset + toolBarSpace + 24));
-    lv_obj_set_pos(btnZoomIn, 10,
-                   mapView.mapScrFull -
-                       (toolBarOffset + (2 * toolBarSpace) + 24));
+    positionMapToolbarButtons(
+        mapView.mapScrFull - gui_layout::MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN);
   }
 
   if (!showMapToolBar) {
@@ -539,11 +547,12 @@ void scrollMapEvent(lv_event_t *event) {
           millis() - pressStartTime < 300) {
         int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
         if (totalMove < 30) {
-          // GPS indicator is always at center when followGps is true
+          // GPS indicator is at the board-specific map anchor when followGps
+          // is true.
           // When followGps is false, it could be anywhere - use center area
           // anyway since user expects to tap the center indicator
-          int centerX = mapView.mapScrWidth / 2;
-          int centerY = mapView.mapScrHeight / 2;
+          int centerX = mapInteractionAnchorX();
+          int centerY = mapInteractionAnchorY();
           int distX = abs(p.x - centerX);
           int distY = abs(p.y - centerY);
           log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
@@ -583,11 +592,7 @@ void fullScreenEvent(lv_event_t *event) {
   mapSet.mapFullScreen = !mapSet.mapFullScreen;
 
   if (!mapSet.mapFullScreen) {
-    lv_obj_set_pos(btnFullScreen, 10, mapView.mapScrHeight - toolBarOffset);
-    lv_obj_set_pos(btnZoomOut, 10,
-                   mapView.mapScrHeight - (toolBarOffset + toolBarSpace));
-    lv_obj_set_pos(btnZoomIn, 10,
-                   mapView.mapScrHeight - (toolBarOffset + (2 * toolBarSpace)));
+    positionMapToolbarButtons(mapView.mapScrHeight);
 
     if (isBarOpen)
       lv_obj_clear_flag(buttonBar, LV_OBJ_FLAG_HIDDEN);
@@ -598,13 +603,8 @@ void fullScreenEvent(lv_event_t *event) {
     lv_obj_clear_flag(notifyBarHour, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(notifyBarIcons, LV_OBJ_FLAG_HIDDEN);
   } else {
-    lv_obj_set_pos(btnFullScreen, 10,
-                   mapView.mapScrFull - (toolBarOffset + 24));
-    lv_obj_set_pos(btnZoomOut, 10,
-                   mapView.mapScrFull - (toolBarOffset + toolBarSpace + 24));
-    lv_obj_set_pos(btnZoomIn, 10,
-                   mapView.mapScrFull -
-                       (toolBarOffset + (2 * toolBarSpace) + 24));
+    positionMapToolbarButtons(
+        mapView.mapScrFull - gui_layout::MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN);
     lv_obj_add_flag(buttonBar, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(menuBtn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(notifyBarHour, LV_OBJ_FLAG_HIDDEN);
