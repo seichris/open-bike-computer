@@ -77,3 +77,4 @@ void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
 
 void createMainScr();
+void toggleNavigationScreen();

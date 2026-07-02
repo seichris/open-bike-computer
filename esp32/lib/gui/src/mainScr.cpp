@@ -678,27 +678,76 @@ void zoomOutEvent(lv_event_t *event) {
  * @param event
  */
 void updateNavEvent(lv_event_t *event) {
-  int wptDistance = (int)calcDist(gps.gpsData.latitude, gps.gpsData.longitude,
-                                  loadWpt.lat, loadWpt.lon);
-  lv_label_set_text_fmt(distNav, "%d m.", wptDistance);
-
-  if (wptDistance == 0) {
-    LV_IMG_DECLARE(navfinish);
-    lv_img_set_src(arrowNav, &navfinish);
-    lv_img_set_angle(arrowNav, 0);
-  } else {
-#ifdef ENABLE_COMPASS
-    double wptCourse = calcCourse(gps.gpsData.latitude, gps.gpsData.longitude,
-                                  loadWpt.lat, loadWpt.lon) -
-                       compass.getHeading();
-#endif
-#ifndef ENABLE_COMPASS
-    double wptCourse = calcCourse(gps.gpsData.latitude, gps.gpsData.longitude,
-                                  loadWpt.lat, loadWpt.lon) -
-                       gps.gpsData.heading;
-#endif
-    lv_img_set_angle(arrowNav, (wptCourse * 10));
+  if (!nameNav || !distNav || !arrowNav) {
+    return;
   }
+
+  LV_IMG_DECLARE(navup);
+  lv_img_set_src(arrowNav, &navup);
+
+  if (!hasCurrentNavigationData()) {
+    lv_label_set_text_static(nameNav, "Waiting for instruction");
+    lv_label_set_text_static(distNav, "--");
+    lv_img_set_angle(arrowNav, 0);
+    return;
+  }
+
+  NavigationData navData = getCurrentNavigationData();
+  lv_label_set_text(nameNav, navData.instruction);
+  if (navData.distance >= 1000) {
+    lv_label_set_text_fmt(distNav, "%.1f km", navData.distance / 1000.0f);
+  } else {
+    lv_label_set_text_fmt(distNav, "%u m", navData.distance);
+  }
+
+  int16_t arrowAngle = 0;
+  switch (navData.iconID) {
+  case 2: // NavigationIconID.left
+    arrowAngle = -900;
+    break;
+  case 3: // NavigationIconID.right
+    arrowAngle = 900;
+    break;
+  case 4: // NavigationIconID.uTurn
+    arrowAngle = 1800;
+    break;
+  case 1: // NavigationIconID.straight
+  default:
+    arrowAngle = 0;
+    break;
+  }
+  lv_img_set_angle(arrowNav, arrowAngle);
+}
+
+static void showNavigationScreen(bool showNavigation) {
+  if (!mapTile || !navTile) {
+    return;
+  }
+
+  if (showNavigation) {
+    activeTile = NAV;
+    canScrollMap = false;
+    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to navigation instruction screen");
+  } else {
+    activeTile = MAP;
+    canScrollMap = true;
+    lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+    mapView.redrawMap = true;
+    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to map screen");
+  }
+}
+
+void toggleNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile) {
+    return;
+  }
+
+  showNavigationScreen(activeTile == MAP);
 }
 
 /**
@@ -716,6 +765,15 @@ void createMainScr() {
   lv_obj_set_pos(mapTile, 0, 0);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_SCROLLABLE);
   activeTile = MAP; // Ensure map logic runs in updateMainScreen
+
+  navTile = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(navTile);
+  lv_obj_set_size(navTile, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_pos(navTile, 0, 0);
+  lv_obj_clear_flag(navTile, LV_OBJ_FLAG_SCROLLABLE);
+  navigationScr(navTile);
+  lv_obj_add_event_cb(navTile, updateNavEvent, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;

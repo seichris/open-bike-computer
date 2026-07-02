@@ -49,6 +49,12 @@ static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
 
+NavigationData getCurrentNavigationData() { return currentNavData; }
+
+bool hasCurrentNavigationData() {
+  return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
+}
+
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;

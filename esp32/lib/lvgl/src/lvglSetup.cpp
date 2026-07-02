@@ -37,6 +37,7 @@ extern bool isReady;
 extern MapSettings mapSet;
 extern uint8_t zoom;
 extern Gps gps;
+extern void toggleNavigationScreen();
 
 #ifndef USE_ARDUINO_GFX
 /**
@@ -229,18 +230,7 @@ void gpioLongEvent(lv_event_t *event) {
 void gpioClickEvent(lv_event_t *event) {
   lv_indev_reset_long_press(lv_indev_active());
   lv_indev_reset(NULL, lv_scr_act());
-  powerMsg = lv_msgbox_create(lv_scr_act());
-  lv_obj_set_width(powerMsg, TFT_WIDTH);
-  lv_obj_set_align(powerMsg, LV_ALIGN_CENTER);
-  lv_obj_set_style_text_font(powerMsg, fontDefault, 0);
-  lv_obj_t *labelText = lv_msgbox_get_content(powerMsg);
-  lv_obj_set_style_text_align(labelText, LV_TEXT_ALIGN_CENTER, 0);
-  lv_msgbox_add_text(powerMsg,
-                     LV_SYMBOL_WARNING " This device will sleep shortly");
-  lv_obj_invalidate(powerMsg);
-  lv_refr_now(display);
-  vTaskDelay(2000);
-  power.deviceSuspend();
+  toggleNavigationScreen();
 }
 
 /**

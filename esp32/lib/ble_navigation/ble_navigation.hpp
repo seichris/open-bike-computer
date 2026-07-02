@@ -49,6 +49,9 @@ struct MapRenderSettings {
 
 extern MapRenderSettings mapRenderSettings;
 
+NavigationData getCurrentNavigationData();
+bool hasCurrentNavigationData();
+
 struct BLEDebugStats {
   bool initialized = false;
   bool connected = false;
