@@ -191,11 +191,19 @@ Full USB power-removal/replug without a battery was tested. On replug, AXP2101
 reported `battery=absent`, the PCF85063 voltage-low flag was set, and the RTC
 time was correctly rejected.
 
-Battery-connected testing later showed `battery=present`, but RTC sync still
-failed readback because the year byte remained `0x07` while the other time
-fields updated. Example invalid register dump for a 2026 timestamp:
-`44 49 04 02 04 07 07`. Treat RTC retention as not validated until the
-PCF85063 year-byte write/readback issue is fixed.
+Battery-connected testing later showed `battery=present`. The first driver
+version sometimes left the year byte at `0x07` while the other time fields
+updated. The fixed path stops the divider while writing time, explicitly writes
+the year register, and retries sync/readback and boot restore around transient
+shared-I2C failures.
+
+Verified after the fix:
+- BLE/iPhone timestamp sync succeeds after retry.
+- Warm reset restores system time from RTC before BLE reconnect.
+- A first boot read can still fail due to shared-I2C instability, so restore
+  must keep retrying before declaring RTC time invalid.
+- Full USB-removal retention with battery connected still needs a final
+  unplug/replug validation after this fix.
 
 ### 7. IMU (QMI8658)
 
@@ -269,7 +277,7 @@ When scanning the I2C bus, you should find:
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 P0 reset, GPIO21 hint + throttled fallback polling |
 | SD Card | ✅ Working | Pins verified: CS=41, MOSI=1, MISO=3, SCK=2; 32 GB SDHC tested; 4 MHz default |
-| RTC | ⚠️ Partial | PCF85063 @ 0x51 detected; invalid/voltage-low values rejected; battery-connected testing found year byte stuck at `0x07`, so sync/retention need a driver fix |
+| RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |
 | Audio | ⏳ Untested | ES8311 not detected in scan; treat as separate future bring-up |

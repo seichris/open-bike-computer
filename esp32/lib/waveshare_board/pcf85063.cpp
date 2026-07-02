@@ -17,7 +17,9 @@ namespace {
 
 constexpr uint8_t REG_CONTROL_1 = 0x00;
 constexpr uint8_t REG_SECONDS = 0x04;
+constexpr uint8_t REG_YEARS = 0x0A;
 constexpr uint8_t CONTROL_1_STOP_BIT = 0x20;
+constexpr uint8_t CONTROL_1_EXT_TEST_BIT = 0x80;
 constexpr uint8_t SECONDS_VL_BIT = 0x80;
 constexpr int64_t MIN_VALID_UNIX_TIME = 1704067200; // 2024-01-01T00:00:00Z
 constexpr int64_t MAX_VALID_UNIX_TIME = 4102444800; // 2100-01-01T00:00:00Z
@@ -118,6 +120,47 @@ void logUtcTime(const char *prefix, time_t unixTime) {
   Serial.printf("PCF85063: %s %s\n", prefix, buffer);
 }
 
+bool setStopBit(bool stopped) {
+  uint8_t control1 = 0;
+  if (!i2c::readRegister8(waveshare_board::PCF85063_ADDR, REG_CONTROL_1,
+                          control1, "PCF85063 ctrl1")) {
+    return false;
+  }
+
+  uint8_t next = control1 & ~CONTROL_1_EXT_TEST_BIT;
+  if (stopped) {
+    next |= CONTROL_1_STOP_BIT;
+  } else {
+    next &= ~CONTROL_1_STOP_BIT;
+  }
+
+  if (next == control1) {
+    return true;
+  }
+
+  return i2c::writeRegister8(waveshare_board::PCF85063_ADDR, REG_CONTROL_1,
+                             next,
+                             stopped ? "PCF85063 stop" : "PCF85063 start", 3);
+}
+
+bool writeRtcRegisters(const uint8_t regs[7]) {
+  bool stopped = setStopBit(true);
+  bool wroteTime =
+      stopped &&
+      i2c::writeRegisterBlock8(waveshare_board::PCF85063_ADDR, REG_SECONDS,
+                               regs, 7, "PCF85063 time set", 3);
+  if (wroteTime) {
+    // Defensive write for the final calendar byte. The connected Waveshare
+    // board accepted seconds through month while leaving year at 0x07 unless
+    // the year register was written explicitly.
+    wroteTime = i2c::writeRegister8(waveshare_board::PCF85063_ADDR, REG_YEARS,
+                                    regs[6], "PCF85063 year set", 3);
+  }
+  bool restarted = setStopBit(false);
+
+  return stopped && wroteTime && restarted;
+}
+
 } // namespace
 
 const char *sourceName(TimeSource source) {
@@ -162,7 +205,22 @@ bool restoreSystemTimeFromRtc() {
   }
 
   time_t rtcTime = 0;
-  if (!readRtcUnixTime(rtcTime)) {
+  constexpr uint8_t RESTORE_ATTEMPTS = 3;
+  bool restored = false;
+  for (uint8_t attempt = 1; attempt <= RESTORE_ATTEMPTS; attempt++) {
+    if (readRtcUnixTime(rtcTime)) {
+      restored = true;
+      break;
+    }
+
+    if (attempt < RESTORE_ATTEMPTS) {
+      Serial.printf("PCF85063: restore read attempt %u/%u failed\n", attempt,
+                    RESTORE_ATTEMPTS);
+      delay(20);
+    }
+  }
+
+  if (!restored) {
     rtcStatus.timeValid = false;
     rtcStatus.source = TimeSource::Unknown;
     rtcStatus.unixTime = 0;
@@ -203,31 +261,40 @@ bool syncFromUnixTime(time_t unixTime, const char *source) {
       decToBcd(static_cast<uint8_t>((utc.tm_year + 1900) - 2000)),
   };
 
-  if (!i2c::writeRegisterBlock8(waveshare_board::PCF85063_ADDR, REG_SECONDS,
-                                regs, sizeof(regs), "PCF85063 time set", 3)) {
-    Serial.printf("PCF85063: failed to sync from %s\n",
-                  source ? source : "unknown");
-    return false;
+  constexpr uint8_t SYNC_ATTEMPTS = 3;
+  for (uint8_t attempt = 1; attempt <= SYNC_ATTEMPTS; attempt++) {
+    if (!writeRtcRegisters(regs)) {
+      Serial.printf("PCF85063: sync write attempt %u/%u failed from %s\n",
+                    attempt, SYNC_ATTEMPTS, source ? source : "unknown");
+      delay(20);
+      continue;
+    }
+
+    delay(20);
+    time_t readBack = 0;
+    if (readRtcUnixTime(readBack) &&
+        llabs(static_cast<long long>(readBack) -
+              static_cast<long long>(unixTime)) <= 2) {
+      setSystemTime(unixTime);
+      rtcStatus.timeValid = true;
+      rtcStatus.source = TimeSource::BLE;
+      rtcStatus.unixTime = unixTime;
+      char logPrefix[80];
+      snprintf(logPrefix, sizeof(logPrefix), "synced RTC from %s:",
+               source ? source : "unknown");
+      logUtcTime(logPrefix, unixTime);
+      return true;
+    }
+
+    Serial.printf("PCF85063: sync readback attempt %u/%u failed from %s\n",
+                  attempt, SYNC_ATTEMPTS, source ? source : "unknown");
+    delay(20);
   }
 
-  delay(5);
-  time_t readBack = 0;
-  if (!readRtcUnixTime(readBack) || llabs(static_cast<long long>(readBack) -
-                                         static_cast<long long>(unixTime)) > 2) {
-    Serial.printf("PCF85063: failed %s readback after sync\n",
-                  source ? source : "unknown");
-    return false;
-  }
-
-  setSystemTime(unixTime);
-  rtcStatus.timeValid = true;
-  rtcStatus.source = TimeSource::BLE;
-  rtcStatus.unixTime = unixTime;
-  char logPrefix[80];
-  snprintf(logPrefix, sizeof(logPrefix), "synced RTC from %s:",
-           source ? source : "unknown");
-  logUtcTime(logPrefix, unixTime);
-  return true;
+  setStopBit(false);
+  Serial.printf("PCF85063: failed %s readback after sync\n",
+                source ? source : "unknown");
+  return false;
 }
 
 } // namespace waveshare_board::rtc
