@@ -153,7 +153,7 @@ When scanning the I2C bus, you should find:
 |---|---|---|
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX |
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 reset, coordinate mirroring |
-| SD Card | ✅ Working | **Pins verified: CS=41, MOSI=1, MISO=3, SCK=2** (32GB SDHC tested) |
+| SD Card | ✅ Working | **Pins verified: CS=41, MOSI=1, MISO=3, SCK=2** (32GB SDHC tested); PR16 keeps 4 MHz default and adds mount/map I/O timings plus configurable frequency testing |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; PR14 driver added, BLE sync + warm-reset restore verified; full USB power removal loses RTC on current board (`battery=absent`) |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; PR15 detects/configures it and samples accel/gyro for diagnostics only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 (controls touch reset) |

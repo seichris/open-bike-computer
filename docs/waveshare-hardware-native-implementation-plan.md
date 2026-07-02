@@ -961,6 +961,52 @@ Acceptance criteria:
 Goal: improve storage startup and map load performance without destabilizing SD
 mounting.
 
+Implementation status:
+
+- In progress on branch `sd-map-io-timing`.
+- Normal Waveshare SD boot no longer prints temporary macro-debug lines or lists
+  the SD root directory by default.
+- Root listing is now opt-in via `WAVESHARE_SD_LIST_ROOT`.
+- Waveshare SD SPI frequency is configurable via `WAVESHARE_SD_SPI_FREQ_HZ`;
+  the default remains the PR 6/PR 7 known-good `4 MHz` baseline.
+- Added concise `SDIO:` timing for SD mount, including bus, frequency, pins,
+  card type, card size, success/failure, and elapsed time.
+- Added concise `MAPIO:` timing for:
+  - map block open/stat/read
+  - binary and ASCII vector parse/grid build
+  - map-block cache hits, loads, evictions, and elapsed time
+  - canvas fill/draw timing per block
+  - full vector generation, route overlay, and display invalidation
+- `MAPIO:` timing is opt-in via `WAVESHARE_MAPIO_TIMING_LOG` after review found
+  unconditional redraw logs could trigger USB CDC write timeouts during normal
+  app-driven map use. Low-volume `SDIO:` mount timing remains always visible.
+- No map-block cache/read-ahead behavior was changed; PR 16 is instrumentation
+  and boot-log cleanup first.
+- Default `4 MHz` Waveshare firmware build passes locally.
+- Default `4 MHz` firmware flashed to the connected board. Boot capture showed
+  `SDIO: mount ok=1 elapsedMs=19 freq=4000000 type=SDHC sizeMB=30436` and no
+  normal root-directory listing.
+- App-driven map loads were captured from the connected iPhone app against the
+  same 32 GB SDHC card and the same Shanghai `4_14.fmb` map block:
+  - `4 MHz`: mount `19 ms`, read `395 ms`, parse/grid `74 ms`, block load
+    `476 ms`, first map generation `507 ms`, cached redraws about `28-30 ms`.
+  - `8 MHz`: mount `18 ms`, read `213 ms`, parse/grid `74 ms`, block load
+    `292 ms`, first map generation `321 ms`, cached redraws about `28-29 ms`.
+  - `12 MHz`: mount `17 ms`, read `159 ms`, parse/grid `74 ms`, block load
+    `237 ms`, first map generation `265 ms`, cached redraws about `28 ms`.
+  - `16 MHz`: mount `16 ms`, read `123 ms`, parse/grid `74 ms`, block load
+    `200-209 ms`, first map generation `229-237 ms`, cached redraws about
+    `28 ms`.
+- The 16 MHz test was stable across reset/app-driven map load in this bench
+  run, but source still keeps `4 MHz` as the default until faster SD SPI is
+  proven across cold boots, repeated real map loads, and more cards.
+- After frequency testing, the connected board was flashed back to the restored
+  default firmware and confirmed `freq=4000000`, SD mount `19 ms`, block load
+  `477 ms`, and first map generation `513 ms`.
+- A 90 second pan/block-boundary capture did not force a second map block load:
+  GPS stayed fixed on the same block with `mapBlocks=1`. Boundary loading still
+  needs a route/location test that crosses a block edge.
+
 Scope:
 
 - Remove or gate normal boot root-directory listing.
@@ -988,12 +1034,20 @@ Out of scope:
 
 Validation:
 
-- Mount the known-good 32 GB SDHC card first, then test additional cards if
-  available.
-- Load known map tiles repeatedly.
-- Pan map across tile boundaries.
-- Long ride simulation with route overlay.
-- Confirm no display corruption during SD reads.
+- Done: mount the known-good 32 GB SDHC card first.
+- Done: build default `4 MHz` firmware.
+- Done: flash default `4 MHz` firmware and capture `SDIO:` / `MAPIO:` timings.
+- Done: rebuild/flash with `WAVESHARE_SD_SPI_FREQ_HZ` set to `8000000`,
+  `12000000`, and `16000000`.
+- Done: load the known Shanghai vector map block repeatedly from the iPhone app
+  path and confirm cached redraw timing.
+- Keep `4 MHz` unless a faster setting is stable across cold boots, repeated
+  map loads, and more than the current single known-good SD card.
+- Still needed: pan or route across map-block boundaries and capture a second
+  `MAPIO: block ok=1` load from a different file path.
+- Still needed: longer ride simulation with route overlay.
+- Still needed: explicit visual confirmation that display output remains clean
+  during repeated SD reads.
 
 Acceptance criteria:
 

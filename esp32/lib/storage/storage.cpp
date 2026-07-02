@@ -30,6 +30,10 @@
 static const char *TAG = "Storage";
 
 namespace {
+#ifndef WAVESHARE_SD_SPI_FREQ_HZ
+#define WAVESHARE_SD_SPI_FREQ_HZ 4000000
+#endif
+
 std::string formatSize(uint64_t size) {
   static const char *suffixes[] = {"B", "KB", "MB", "GB", "TB"};
   int order = 0;
@@ -55,28 +59,17 @@ Storage::Storage() : isSdLoaded(false), card(nullptr) {}
  * @brief SD Card init with DMA using ESP-IDF
  */
 esp_err_t Storage::initSD() {
-  Serial.println("DEBUG: initSD() ENTRY");
 #ifdef WAVESHARE_AMOLED_175
-  Serial.println("DEBUG: Macro WAVESHARE_AMOLED_175 is DEFINED");
-#else
-  Serial.println("DEBUG: Macro WAVESHARE_AMOLED_175 is NOT defined");
-#endif
-
-#ifdef SPI_SHARED
-  Serial.println("DEBUG: Macro SPI_SHARED is DEFINED");
-#else
-  Serial.println("DEBUG: Macro SPI_SHARED is NOT defined");
-#endif
-
-#ifdef WAVESHARE_AMOLED_175
+  const uint32_t mountStartMs = millis();
   // Waveshare 1.75" AMOLED: Use DEDICATED HSPI bus to avoid conflict with
   // QSPI display. The default SPI (FSPI) shares resources with the display.
   // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
   // See WAVESHARE_HARDWARE.md.
   // Verified working pins: CS=41, MOSI=1, MISO=3, SCK=2
 
-  Serial.println("Initializing SD Card (HSPI mode)...");
-  Serial.printf("Pins: CS=%d, MOSI=%d, MISO=%d, SCK=%d\n", SD_CS, SD_MOSI,
+  Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
+                "sck=%d]\n",
+                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, SD_CS, SD_MOSI,
                 SD_MISO, SD_CLK);
 
   // Explicitly set CS as output and deselect before SPI init
@@ -87,8 +80,11 @@ esp_err_t Storage::initSD() {
   static SPIClass hspi(HSPI);
   hspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
-  if (!SD.begin(SD_CS, hspi, 4000000, "/sdcard")) {
+  if (!SD.begin(SD_CS, hspi, WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard")) {
     ESP_LOGE(TAG, "SD Card Mount Failed - check card insertion and format");
+    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu\n",
+                  (unsigned long)(millis() - mountStartMs),
+                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
     isSdLoaded = false;
     return ESP_FAIL;
   }
@@ -96,6 +92,9 @@ esp_err_t Storage::initSD() {
   uint8_t cardType = SD.cardType();
   if (cardType == CARD_NONE) {
     ESP_LOGE(TAG, "No SD card detected");
+    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu card=none\n",
+                  (unsigned long)(millis() - mountStartMs),
+                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
     isSdLoaded = false;
     return ESP_FAIL;
   }
@@ -110,9 +109,13 @@ esp_err_t Storage::initSD() {
 
   ESP_LOGI(TAG, "SD Card Type: %s, Size: %lluMB", typeStr,
            SD.cardSize() / (1024 * 1024));
+  Serial.printf("SDIO: mount ok=1 elapsedMs=%lu freq=%lu type=%s sizeMB=%llu\n",
+                (unsigned long)(millis() - mountStartMs),
+                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, typeStr,
+                SD.cardSize() / (1024 * 1024));
 
-  // Debug: List root directory
-  Serial.println("Listing SD Card Root:");
+#ifdef WAVESHARE_SD_LIST_ROOT
+  Serial.println("SDIO: root listing enabled");
   File root = SD.open("/");
   if (root) {
     File file = root.openNextFile();
@@ -126,6 +129,7 @@ esp_err_t Storage::initSD() {
     }
     root.close();
   }
+#endif
 
   isSdLoaded = true;
   return ESP_OK;
@@ -248,6 +252,7 @@ esp_err_t Storage::initSPIFFS() {
   size_t used = FFat.usedBytes();
   ESP_LOGI(TAG, "FFat Mounted at /sdcard. Total: %d, Used: %d", total, used);
 
+#ifdef WAVESHARE_SD_LIST_ROOT
   // Debug: List files (flat, no recursion to avoid file handle exhaustion)
   File root = FFat.open("/");
   if (root) {
@@ -263,6 +268,7 @@ esp_err_t Storage::initSPIFFS() {
     }
     root.close();
   }
+#endif
 
   return ESP_OK;
 }

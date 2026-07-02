@@ -14,6 +14,16 @@ extern Gps gps;
 extern std::vector<wayPoint> trackData;
 const char *TAG PROGMEM = "Maps";
 
+#ifdef WAVESHARE_MAPIO_TIMING_LOG
+#define MAPIO_LOG(...) Serial.printf(__VA_ARGS__)
+#define MAPIO_TIME_MS() millis()
+#else
+#define MAPIO_LOG(...)                                                        \
+  do {                                                                        \
+  } while (0)
+#define MAPIO_TIME_MS() 0
+#endif
+
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include <esp_heap_caps.h>
@@ -393,11 +403,13 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
   ESP_LOGI(TAG, "readMapBlock: %s", fileName.c_str());
   char str[30];
   MapBlock *mblock = new MapBlock();
+  const uint32_t blockStartMs = MAPIO_TIME_MS();
 
   // Try Binary first (.fmb) then ASCII (.fmp)
   std::string filePath = fileName.c_str() + std::string(".fmb");
   bool isBinary = true;
 
+  const uint32_t openStartMs = MAPIO_TIME_MS();
   int fd = ::open(filePath.c_str(), O_RDONLY);
 
   if (fd < 0) {
@@ -405,9 +417,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     isBinary = false;
     fd = ::open(filePath.c_str(), O_RDONLY);
   }
+  const uint32_t openMs = MAPIO_TIME_MS() - openStartMs;
 
   if (fd < 0) {
     ESP_LOGE(TAG, "Failed to open file: %s", filePath.c_str());
+    MAPIO_LOG("MAPIO: block-open ok=0 base=%s openMs=%lu\n", fileName.c_str(),
+              (unsigned long)openMs);
     Maps::isMapFound = false;
     mblock->inView = false;
     return mblock;
@@ -416,13 +431,18 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
              isBinary ? "Binary" : "ASCII");
     // Get file size
     struct stat st;
+    const uint32_t statStartMs = MAPIO_TIME_MS();
     if (fstat(fd, &st) != 0) {
       ESP_LOGE(TAG, "Failed to get file size: %s", filePath.c_str());
       ::close(fd);
+      MAPIO_LOG("MAPIO: block-stat ok=0 file=%s openMs=%lu statMs=%lu\n",
+                filePath.c_str(), (unsigned long)openMs,
+                (unsigned long)(MAPIO_TIME_MS() - statStartMs));
       Maps::isMapFound = false;
       mblock->inView = false;
       return mblock;
     }
+    const uint32_t statMs = MAPIO_TIME_MS() - statStartMs;
     size_t fileSize = st.st_size;
 
 #ifdef BOARD_HAS_PSRAM
@@ -439,20 +459,38 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       return mblock;
     }
 
+    const uint32_t readStartMs = MAPIO_TIME_MS();
     ssize_t bytesRead = ::read(fd, file, fileSize);
     ::close(fd);
+    const uint32_t readMs = MAPIO_TIME_MS() - readStartMs;
 
     if (bytesRead != (ssize_t)fileSize) {
       ESP_LOGE(TAG, "Failed to read file completely: got %d of %u bytes",
                bytesRead, fileSize);
+      MAPIO_LOG("MAPIO: block-read ok=0 file=%s size=%u got=%d "
+                "openMs=%lu statMs=%lu readMs=%lu\n",
+                filePath.c_str(), (unsigned)fileSize, (int)bytesRead,
+                (unsigned long)openMs, (unsigned long)statMs,
+                (unsigned long)readMs);
       free(file);
       Maps::isMapFound = false;
       return mblock;
     }
 
     if (isBinary) {
+      const uint32_t parseStartMs = MAPIO_TIME_MS();
       delete mblock; // readMapBlockBinary creates a new one
       mblock = readMapBlockBinary(file, fileSize);
+      const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
+      MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
+                "openMs=%lu statMs=%lu readMs=%lu parseGridMs=%lu "
+                "totalMs=%lu polygons=%u lines=%u\n",
+                filePath.c_str(), (unsigned)fileSize, (unsigned long)openMs,
+                (unsigned long)statMs, (unsigned long)readMs,
+                (unsigned long)parseGridMs,
+                (unsigned long)(MAPIO_TIME_MS() - blockStartMs),
+                (unsigned)mblock->polygons.size(),
+                (unsigned)mblock->polylines.size());
       free(file);
       return mblock;
     }
@@ -462,6 +500,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
     uint32_t line = 0;
     Maps::idx = 0;
+    const uint32_t parseStartMs = MAPIO_TIME_MS();
 
     // read polygons
     Maps::parseStrUntil(file, ':', str);
@@ -573,7 +612,19 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     // File descriptor was already closed via ::close(fd) after reading
     free(file);
     // Build spatial grid for polygon culling optimization
+    const uint32_t gridStartMs = MAPIO_TIME_MS();
     buildPolygonGrid(mblock);
+    const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
+    MAPIO_LOG("MAPIO: block ok=1 file=%s format=ascii size=%u openMs=%lu "
+              "statMs=%lu readMs=%lu parseMs=%lu gridMs=%lu totalMs=%lu "
+              "polygons=%u lines=%u\n",
+              filePath.c_str(), (unsigned)fileSize, (unsigned long)openMs,
+              (unsigned long)statMs, (unsigned long)readMs,
+              (unsigned long)(gridStartMs - parseStartMs),
+              (unsigned long)gridMs,
+              (unsigned long)(MAPIO_TIME_MS() - blockStartMs),
+              (unsigned)mblock->polygons.size(),
+              (unsigned)mblock->polylines.size());
     return mblock;
   }
 }
@@ -583,6 +634,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
  * Supports both v1 (legacy) and v2 (with typeId) formats
  */
 Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
+  const uint32_t parseStartMs = MAPIO_TIME_MS();
   MapBlock *mblock = new MapBlock();
   size_t offset = 0;
 
@@ -679,7 +731,16 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
 
   Maps::isMapFound = true;
   // Build spatial grid for polygon culling optimization
+  const uint32_t gridStartMs = MAPIO_TIME_MS();
   buildPolygonGrid(mblock);
+  const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
+  MAPIO_LOG("MAPIO: vector-parse format=binary size=%u version=%u "
+            "polygons=%u lines=%u parseMs=%lu gridMs=%lu totalMs=%lu\n",
+            (unsigned)fileSize, version, (unsigned)mblock->polygons.size(),
+            (unsigned)mblock->polylines.size(),
+            (unsigned long)(gridStartMs - parseStartMs),
+            (unsigned long)gridMs,
+            (unsigned long)(MAPIO_TIME_MS() - parseStartMs));
   return mblock;
 }
 
@@ -891,6 +952,10 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
  */
 void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   ESP_LOGI(TAG, "getMapBlocks %i", millis());
+  const uint32_t blocksStartMs = MAPIO_TIME_MS();
+  uint16_t cacheHits = 0;
+  uint16_t loadedBlocks = 0;
+  uint16_t evictedBlocks = 0;
   for (MapBlock *block : memCache.blocks) {
     block->inView = false;
   }
@@ -935,8 +1000,10 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
       }
     }
 
-    if (found)
+    if (found) {
+      cacheHits++;
       continue;
+    }
 
     ESP_LOGI(TAG, "getMapBlocks loading missing: offset(%d, %d)", req.x, req.y);
 
@@ -963,6 +1030,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
                    (*it)->offset.y);
           delete *it;
           memCache.blocks.erase(it);
+          evictedBlocks++;
           evicted = true;
           break;
         }
@@ -973,6 +1041,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
         ESP_LOGW(TAG, "Cache full and all blocks inView! Evicting front.");
         delete memCache.blocks.front();
         memCache.blocks.erase(memCache.blocks.begin());
+        evictedBlocks++;
       }
     }
 
@@ -981,6 +1050,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
       newBlock->inView = true;
       newBlock->offset = req;
       memCache.blocks.push_back(newBlock);
+      loadedBlocks++;
 
       ESP_LOGI(TAG, "Block loaded: %p, offset(%d, %d)", newBlock, req.x, req.y);
       ESP_LOGI(TAG, "FreeHeap: %d", (int)esp_get_free_heap_size());
@@ -988,6 +1058,12 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   }
 
   ESP_LOGI(TAG, "memCache size: %i %i", memCache.blocks.size(), millis());
+  MAPIO_LOG("MAPIO: blocks required=%u cacheHit=%u loaded=%u evicted=%u "
+            "cache=%u elapsedMs=%lu\n",
+            (unsigned)requiredOffsets.size(), (unsigned)cacheHits,
+            (unsigned)loadedBlocks, (unsigned)evictedBlocks,
+            (unsigned)memCache.blocks.size(),
+            (unsigned long)(MAPIO_TIME_MS() - blocksStartMs));
 }
 
 /**
@@ -1001,7 +1077,10 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation) {
   Polygon newPolygon;
+  const uint32_t drawStartMs = MAPIO_TIME_MS();
+  const uint32_t fillStartMs = MAPIO_TIME_MS();
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
+  const uint32_t fillMs = MAPIO_TIME_MS() - fillStartMs;
 
   // Calculate rotation from passed argument
   double cosA = cos(rotation);
@@ -1021,6 +1100,9 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     log_w("readVectorMap: No map data found for this location!");
     // VISUAL DEBUG: Fill with BLUE to confirm we are here
     lv_canvas_fill_bg(canvas, lv_color_make(0x00, 0x00, 0xFF), LV_OPA_COVER);
+    MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
+              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
+              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
     return;
   }
 
@@ -1045,6 +1127,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           mblock->offset; // screen boundaries with features coordinates
 
       ////// Polygons - Grid-based spatial culling for performance
+      const uint32_t polygonStartMs = millis();
       int poly_total = mblock->polygons.size();
       int poly_drawn = 0;
       int poly_checked = 0;
@@ -1159,8 +1242,9 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       }
       Serial.printf("[Maps] Block polygons: Total=%d, Checked=%d, Drawn=%d\n",
                     poly_total, poly_checked, poly_drawn);
-      log_i("Block polygons done %i ms", millis() - blockTime);
-      blockTime = millis();
+      const uint32_t polygonMs = millis() - polygonStartMs;
+      log_i("Block polygons done %i ms", polygonMs);
+      const uint32_t lineStartMs = millis();
 
       ////// Lines
       // Removed lv_draw_line usage to fix crash
@@ -1210,7 +1294,15 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           p1 = p2;
         }
       }
-      ESP_LOGI(TAG, "Block lines done %i ms", millis() - blockTime);
+      const uint32_t lineMs = millis() - lineStartMs;
+      ESP_LOGI(TAG, "Block lines done %i ms", lineMs);
+      MAPIO_LOG("MAPIO: draw-block offset=%d,%d polygons=%d "
+                "checked=%d drawn=%d lines=%u polygonMs=%lu lineMs=%lu "
+                "totalMs=%lu\n",
+                mblock->offset.x, mblock->offset.y, poly_total, poly_checked,
+                poly_drawn, (unsigned)mblock->polylines.size(),
+                (unsigned long)polygonMs, (unsigned long)lineMs,
+                (unsigned long)(MAPIO_TIME_MS() - blockTime));
     }
     ESP_LOGI(TAG, "Total %i ms", millis() - totalTime);
 
@@ -1261,9 +1353,15 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         uint16_t x, y, x2, y2;
       }
     }
+    MAPIO_LOG("MAPIO: canvas-draw ok=1 blocks=%u fillMs=%lu totalMs=%lu\n",
+              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
+              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
   } else {
     Maps::isMapFound = false;
     lv_canvas_fill_bg(canvas, lv_color_hex(TFT_BLACK), LV_OPA_COVER);
+    MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
+              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
+              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
     //    Maps::showNoMap(map);
     //    ESP_LOGE(TAG, "Map doesn't exist");
   }
@@ -1811,6 +1909,7 @@ void Maps::generateRenderMap(uint8_t zoom) {
  * @brief Display Map (Stub for Vector Maps/Arduino_GFX)
  */
 void Maps::displayMap() {
+  const uint32_t displayStartMs = MAPIO_TIME_MS();
   if (Maps::canvasMap)
     lv_obj_invalidate(Maps::canvasMap);
 
@@ -1880,6 +1979,9 @@ void Maps::displayMap() {
     }
     lv_obj_move_foreground(Maps::canvasArrow);
   }
+  MAPIO_LOG("MAPIO: display invalidateMs=%lu hasCanvas=%d hasArrow=%d\n",
+            (unsigned long)(MAPIO_TIME_MS() - displayStartMs),
+            Maps::canvasMap != nullptr, Maps::canvasArrow != nullptr);
 }
 
 /**
@@ -1888,6 +1990,7 @@ void Maps::displayMap() {
  * @param zoom -> Zoom Level
  */
 void Maps::generateVectorMap(uint8_t zoom) {
+  const uint32_t generateStartMs = MAPIO_TIME_MS();
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
 
@@ -1905,7 +2008,9 @@ void Maps::generateVectorMap(uint8_t zoom) {
   Maps::viewPort.setCenter(Maps::point);
 
   // Get Map Blocks
+  const uint32_t blocksStartMs = MAPIO_TIME_MS();
   Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache);
+  const uint32_t blocksMs = MAPIO_TIME_MS() - blocksStartMs;
 
   ESP_LOGI(TAG,
            "generateVectorMap: zoom=%d center(%d, %d) bbox[(%d, %d), (%d, %d)]",
@@ -1914,10 +2019,13 @@ void Maps::generateVectorMap(uint8_t zoom) {
            Maps::viewPort.bbox.max.x, Maps::viewPort.bbox.max.y);
 
   // Read Vector Map to Canvas (Pass calculated rotation)
+  const uint32_t drawStartMs = MAPIO_TIME_MS();
   Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap, zoom,
                       rotationRad);
+  const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
 
   // Draw route overlay from iOS navigation (if available)
+  const uint32_t routeStartMs = MAPIO_TIME_MS();
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
   if (routeOverlay.hasRoute()) {
@@ -1939,6 +2047,13 @@ void Maps::generateVectorMap(uint8_t zoom) {
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
+  const uint32_t routeMs = MAPIO_TIME_MS() - routeStartMs;
+  MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "
+            "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
+            zoom, (unsigned long)blocksMs, (unsigned long)drawMs,
+            (unsigned long)routeMs,
+            (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
+            (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
 }
