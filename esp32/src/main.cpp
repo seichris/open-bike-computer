@@ -68,6 +68,7 @@ extern xSemaphoreHandle gpsMutex;
 #ifdef WAVESHARE_AMOLED_175
 #include "WAVESHARE_AMOLED_175.hpp"
 #include "i2c_bus.hpp"
+#include "pcf85063.hpp"
 #include "waveshare_board.hpp"
 #endif
 
@@ -145,6 +146,8 @@ static void logSystemDebugHeartbeat() {
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
 #ifdef WAVESHARE_AMOLED_175
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
+  const waveshare_board::rtc::Status &rtcStatus =
+      waveshare_board::rtc::status();
 #endif
   const char *screenName = "unknown";
   lv_obj_t *activeScreen = lv_scr_act();
@@ -162,7 +165,8 @@ static void logSystemDebugHeartbeat() {
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
                 "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu] "
-                "i2c[fail=%lu recover=%lu recovered=%lu missing=%lu]\n",
+                "i2c[fail=%lu recover=%lu recovered=%lu missing=%lu] "
+                "rtc[present=%d valid=%d source=%s unix=%lld]\n",
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)ESP.getFreePsram(), screenName,
@@ -191,7 +195,10 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)i2cStats.failedTransactions,
                 (unsigned long)i2cStats.recoveryAttempts,
                 (unsigned long)i2cStats.recoveredTransactions,
-                (unsigned long)i2cStats.missingDevices);
+                (unsigned long)i2cStats.missingDevices, rtcStatus.present,
+                rtcStatus.timeValid,
+                waveshare_board::rtc::sourceName(rtcStatus.source),
+                static_cast<long long>(rtcStatus.unixTime));
 #else
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d lat=%.6f "
@@ -281,6 +288,7 @@ void setup() {
 
 #ifdef WAVESHARE_AMOLED_175
   waveshare_board::enablePowerRails();
+  waveshare_board::rtc::restoreSystemTimeFromRtc();
 #endif
 
 #ifdef BME280

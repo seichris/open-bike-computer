@@ -9,6 +9,8 @@
 
 #include "waveshare_board.hpp"
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <hal.hpp>
 
 namespace waveshare_board::i2c {
@@ -19,6 +21,34 @@ Stats i2cStats;
 bool busConfigured = false;
 uint32_t activeClockHz = DEFAULT_CLOCK_HZ;
 uint32_t lastFailureLogMs = 0;
+SemaphoreHandle_t busMutex = nullptr;
+
+void ensureMutex() {
+  if (busMutex == nullptr) {
+    busMutex = xSemaphoreCreateMutex();
+  }
+}
+
+class BusLock {
+public:
+  BusLock() {
+    ensureMutex();
+    locked = busMutex != nullptr &&
+             xSemaphoreTake(busMutex, pdMS_TO_TICKS(DEFAULT_TIMEOUT_MS)) ==
+                 pdTRUE;
+  }
+
+  ~BusLock() {
+    if (locked) {
+      xSemaphoreGive(busMutex);
+    }
+  }
+
+  bool ok() const { return locked; }
+
+private:
+  bool locked = false;
+};
 
 void logFailure(const char *label, const char *operation, uint8_t address) {
   uint32_t now = millis();
@@ -55,6 +85,13 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
     attempts = 1;
   }
 
+  BusLock lock;
+  if (!lock.ok()) {
+    i2cStats.failedTransactions++;
+    logFailure(label, operation, address);
+    return false;
+  }
+
   for (uint8_t attempt = 0; attempt < attempts; attempt++) {
     if (fn()) {
       if (attempt > 0) {
@@ -77,6 +114,7 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
 } // namespace
 
 void configureBus(uint32_t clockHz) {
+  ensureMutex();
   activeClockHz = clockHz;
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
@@ -91,6 +129,12 @@ void configureBus(uint32_t clockHz) {
 const Stats &stats() { return i2cStats; }
 
 void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
+  BusLock lock;
+  if (!lock.ok()) {
+    out.println("Waveshare I2C scan: bus busy");
+    return;
+  }
+
   out.println("Waveshare I2C scan:");
   for (uint16_t address = firstAddress; address <= lastAddress; address++) {
     Wire.beginTransmission(address);
@@ -122,6 +166,23 @@ bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
                      });
 }
 
+bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
+                         uint8_t len, const char *label, uint8_t attempts) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+
+  return withRetries(address, label, "writeBlock8", attempts,
+                     [address, reg, data, len]() {
+                       Wire.beginTransmission(address);
+                       Wire.write(reg);
+                       for (uint8_t i = 0; i < len; i++) {
+                         Wire.write(data[i]);
+                       }
+                       return Wire.endTransmission() == 0;
+                     });
+}
+
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {
   return withRetries(address, label, "read8", attempts, [address, reg, &value]() {
@@ -138,6 +199,33 @@ bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
     value = Wire.read();
     return true;
   });
+}
+
+bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
+                        uint8_t len, const char *label, uint8_t attempts) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+
+  return withRetries(address, label, "readBlock8", attempts,
+                     [address, reg, data, len]() {
+                       Wire.beginTransmission(address);
+                       Wire.write(reg);
+                       if (Wire.endTransmission(false) != 0) {
+                         return false;
+                       }
+
+                       delay(2);
+                       if (Wire.requestFrom(address, len,
+                                            static_cast<uint8_t>(true)) != len) {
+                         return false;
+                       }
+
+                       for (uint8_t i = 0; i < len; i++) {
+                         data[i] = Wire.read();
+                       }
+                       return true;
+                     });
 }
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
