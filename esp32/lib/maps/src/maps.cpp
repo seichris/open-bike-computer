@@ -170,6 +170,91 @@ static void *bufMapTemp = nullptr;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
 
+static void plotMarkerPixel(lv_obj_t *canvas, int16_t x, int16_t y,
+                            lv_color_t color) {
+  if (x < 0 || x >= 48 || y < 0 || y >= 48)
+    return;
+
+  lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
+}
+
+static void drawThickMarkerLine(lv_obj_t *canvas, int16_t x0, int16_t y0,
+                                int16_t x1, int16_t y1, lv_color_t color,
+                                uint8_t thickness) {
+  int16_t dx = abs(x1 - x0);
+  int16_t sx = x0 < x1 ? 1 : -1;
+  int16_t dy = -abs(y1 - y0);
+  int16_t sy = y0 < y1 ? 1 : -1;
+  int16_t err = dx + dy;
+  const int16_t radius = thickness / 2;
+
+  while (true) {
+    for (int16_t oy = -radius; oy <= radius; oy++) {
+      for (int16_t ox = -radius; ox <= radius; ox++) {
+        if (ox * ox + oy * oy <= radius * radius)
+          plotMarkerPixel(canvas, x0 + ox, y0 + oy, color);
+      }
+    }
+
+    if (x0 == x1 && y0 == y1)
+      break;
+
+    int16_t e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+static bool isInsideNavigationMarker(int16_t x, int16_t y) {
+  constexpr int16_t px[] = {24, 38, 24, 10};
+  constexpr int16_t py[] = {4, 42, 34, 42};
+  bool inside = false;
+
+  for (uint8_t i = 0, j = 3; i < 4; j = i++) {
+    const bool crosses = ((py[i] > y) != (py[j] > y)) &&
+                         (x < (px[j] - px[i]) * (y - py[i]) /
+                                      (py[j] - py[i]) +
+                                  px[i]);
+    if (crosses)
+      inside = !inside;
+  }
+
+  return inside;
+}
+
+static void drawNavigationMarker(lv_obj_t *canvas) {
+  if (!canvas)
+    return;
+
+  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
+
+  const lv_color_t color = lv_color_white();
+
+  // 24x24 lucide-style navigation polygon scaled to this 48x48 marker:
+  // points="12 2 19 21 12 17 5 21 12 2"
+  for (int16_t y = 0; y < 48; y++) {
+    for (int16_t x = 0; x < 48; x++) {
+      if (isInsideNavigationMarker(x, y))
+        plotMarkerPixel(canvas, x, y, color);
+    }
+  }
+
+  // Stroke the edges in the same color so the filled marker stays crisp.
+  constexpr uint8_t strokeWidth = 3;
+  drawThickMarkerLine(canvas, 24, 4, 38, 42, color, strokeWidth);
+  drawThickMarkerLine(canvas, 38, 42, 24, 34, color, strokeWidth);
+  drawThickMarkerLine(canvas, 24, 34, 10, 42, color, strokeWidth);
+  drawThickMarkerLine(canvas, 10, 42, 24, 4, color, strokeWidth);
+
+  lv_obj_invalidate(canvas);
+}
+
 static int16_t mapAnchorXForWidth(uint16_t width) {
   return gui_layout::mapAnchorX(width);
 }
@@ -1778,7 +1863,9 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   }
 
   if (bufArrow == nullptr) {
-    bufArrow = heap_caps_malloc(48 * 48 * sizeof(lv_color_t),
+    const size_t arrowStride =
+        lv_draw_buf_width_to_stride(48, LV_COLOR_FORMAT_ARGB8888);
+    bufArrow = heap_caps_malloc(arrowStride * 48,
                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   }
 
@@ -1864,20 +1951,8 @@ void Maps::createMapScrSprites() {
       lv_canvas_create(mapTile); // Create on mapTile instead of active screen
   lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
   lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
-                       LV_COLOR_FORMAT_RGB565);
-
-  // Fill with a bright red circle for GPS indicator
-  lv_canvas_fill_bg(Maps::canvasArrow, lv_color_hex(0x000000), LV_OPA_TRANSP);
-  lv_layer_t layer;
-  lv_canvas_init_layer(Maps::canvasArrow, &layer);
-  lv_draw_rect_dsc_t rect_dsc;
-  lv_draw_rect_dsc_init(&rect_dsc);
-  rect_dsc.bg_color = lv_color_hex(0xFF0000); // Bright red
-  rect_dsc.bg_opa = LV_OPA_COVER;
-  rect_dsc.radius = 20;            // Make it circular
-  lv_area_t area = {4, 4, 44, 44}; // 40x40 circle centered in 48x48 canvas
-  lv_draw_rect(&layer, &rect_dsc, &area);
-  lv_canvas_finish_layer(Maps::canvasArrow, &layer);
+                       LV_COLOR_FORMAT_ARGB8888);
+  drawNavigationMarker(Maps::canvasArrow);
 
   // Make arrow clickable to toggle rotation mode
   // lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
@@ -1921,25 +1996,9 @@ void Maps::updateArrowColor() {
   if (!Maps::canvasArrow)
     return;
 
-  // Choose color based on rotation mode
-  // North-Up = Red, Course-Up = Blue
-  uint32_t color = (rotationMode == ROT_NORTH_UP) ? 0xFF0000 : 0x0066FF;
+  drawNavigationMarker(Maps::canvasArrow);
 
-  // Redraw the arrow canvas with new color
-  lv_canvas_fill_bg(Maps::canvasArrow, lv_color_hex(0x000000), LV_OPA_TRANSP);
-  lv_layer_t layer;
-  lv_canvas_init_layer(Maps::canvasArrow, &layer);
-  lv_draw_rect_dsc_t rect_dsc;
-  lv_draw_rect_dsc_init(&rect_dsc);
-  rect_dsc.bg_color = lv_color_hex(color);
-  rect_dsc.bg_opa = LV_OPA_COVER;
-  rect_dsc.radius = 20;
-  lv_area_t area = {4, 4, 44, 44};
-  lv_draw_rect(&layer, &rect_dsc, &area);
-  lv_canvas_finish_layer(Maps::canvasArrow, &layer);
-
-  log_i("Arrow color updated: %s (0x%06X)",
-        (rotationMode == ROT_NORTH_UP) ? "RED" : "BLUE", color);
+  log_i("Arrow marker updated: filled white");
 }
 
 /**
