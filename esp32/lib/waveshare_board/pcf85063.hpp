@@ -5,7 +5,7 @@
 
 #pragma once
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
 #include <time.h>
@@ -33,4 +33,4 @@ const char *sourceName(TimeSource source);
 
 } // namespace waveshare_board::rtc
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

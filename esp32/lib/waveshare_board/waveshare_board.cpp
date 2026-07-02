@@ -5,7 +5,7 @@
 
 #include "waveshare_board.hpp"
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "axp2101.hpp"
 #include <Wire.h>
@@ -50,4 +50,4 @@ void enablePowerRails() {
 
 } // namespace waveshare_board
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

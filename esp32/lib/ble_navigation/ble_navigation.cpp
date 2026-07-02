@@ -9,7 +9,7 @@
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../route_overlay/route_overlay.hpp"
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/display.hpp"
 #include "../waveshare_board/pcf85063.hpp"
 #endif
@@ -52,7 +52,7 @@ static bool unauthTimeoutDisconnectRequested = false;
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static uint32_t lastBleRtcSyncMs = 0;
 constexpr uint32_t BLE_RTC_SYNC_INTERVAL_MS = 10UL * 60UL * 1000UL;
 #endif
@@ -149,7 +149,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
 
 static uint8_t sanitizeMapDisplayRotation(uint8_t requestedRotation,
                                           const char *source) {
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   if (requestedRotation > waveshare_board::display::MAX_SUPPORTED_ROTATION) {
     Serial.printf("BLE Settings: %s displayRotation %u unsupported, clamping "
                   "to 0\n",
@@ -436,7 +436,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     gps.gpsData.heading = headingVal;
   }
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   bool rtcTimestampSynced = false;
   if (len >= 14) {
     uint32_t unixTime = 0;
@@ -460,7 +460,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
       "BLE: %s GPS position received: lat=%ld lon=%ld heading=%u rtcSync=%d\n",
       source == nullptr ? "unknown" : source, (long)lat, (long)lon,
       (unsigned)gps.gpsData.heading,
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       rtcTimestampSynced
 #else
       0

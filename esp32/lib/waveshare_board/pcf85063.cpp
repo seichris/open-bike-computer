@@ -5,7 +5,7 @@
 
 #include "pcf85063.hpp"
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
@@ -299,4 +299,4 @@ bool syncFromUnixTime(time_t unixTime, const char *source) {
 
 } // namespace waveshare_board::rtc
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

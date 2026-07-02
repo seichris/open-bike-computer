@@ -5,7 +5,7 @@
 
 #include "axp2101.hpp"
 
-#ifdef WAVESHARE_AMOLED_175
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
@@ -103,6 +103,9 @@ bool readPowerStatus(PowerStatus &status) {
 
 bool setDisplayPower(bool enabled) {
   uint8_t value = currentLdoEnableValue(AXP2101_KNOWN_GOOD_LDO_ENABLES);
+  Serial.printf("AXP2101: display power request enabled=%d currentLdo=0x%02X "
+                "mask=0x%02X\n",
+                enabled ? 1 : 0, value, AXP2101_DISPLAY_ENABLE_MASK);
   if (enabled) {
     value |= AXP2101_DISPLAY_ENABLE_MASK;
   } else {
@@ -153,6 +156,33 @@ bool restoreDefaultRails() {
 
   Serial.println("AXP2101 found!");
 
+#ifdef WAVESHARE_AMOLED_206
+  // Waveshare's 2.06 Arduino display examples do not program AXP2101 rails
+  // before gfx->begin(). Preserve the PMU state during bring-up instead of
+  // reusing the 1.75 board's known-good LDO mask and voltage sequence.
+  PowerStatus status;
+  if (readPowerStatus(status)) {
+    uint8_t ldoEnable = 0;
+    bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
+    Serial.printf("AXP2101: 2.06 safe mode preserving rails; status1=0x%02X "
+                  "status2=0x%02X vbus=%s battery=%s currentDir=%u "
+                  "charge=%u ldo=0x%02X ldoRead=%d\n",
+                  status.status1, status.status2,
+                  status.vbusGood ? "good" : "not-good",
+                  status.batteryPresent ? "present" : "absent",
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoEnable, ldoReadOk ? 1 : 0);
+  } else {
+    Serial.println("AXP2101: 2.06 safe mode status read failed");
+  }
+
+#ifdef WAVESHARE_206_FORCE_AXP_DISPLAY
+  Serial.println("AXP2101: 2.06 forcing display rail by explicit build flag");
+  return enableDisplayRails();
+#else
+  return true;
+#endif
+#else
   bool ok = writeRegisterChecked("ldo baseline reset", AXP2101_LDO_ENABLE_REG,
                                  AXP2101_KNOWN_GOOD_LDO_RESET);
   ok = writeRegisterChecked("ldo baseline on", AXP2101_LDO_ENABLE_REG,
@@ -181,8 +211,9 @@ bool restoreDefaultRails() {
     Serial.println("! AXP2101 rail setup completed with readback errors");
   }
   return ok;
+#endif
 }
 
 } // namespace waveshare_board::axp2101
 
-#endif // WAVESHARE_AMOLED_175
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
