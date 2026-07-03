@@ -20,6 +20,9 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published var isNavigating: Bool = false
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
+    @Published var routeRemainingDistance: CLLocationDistance?
+    @Published var routeRemainingTime: TimeInterval?
+    @Published var expectedArrivalDate: Date?
     
     // MARK: - Private Properties
     private var currentRoute: MKRoute?
@@ -107,6 +110,7 @@ class NavigationEngine: NSObject, ObservableObject {
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
         resetRideTelemetry(startingAt: initialLocation)
+        updateNavigationSummary(route: route, remainingDistance: route.distance)
         
         print("Navigation started with \(route.steps.count) steps (Test Mode: \(isTestMode))")
         
@@ -134,6 +138,9 @@ class NavigationEngine: NSObject, ObservableObject {
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
         lastIdleGpsSyncTime = .distantPast
+        routeRemainingDistance = nil
+        routeRemainingTime = nil
+        expectedArrivalDate = nil
         resetRideTelemetry(startingAt: nil)
         stopSimulation()
         print("Navigation stopped")
@@ -416,10 +423,30 @@ class NavigationEngine: NSObject, ObservableObject {
         lastRideLocation = gpsLocation
 
         if isNavigating, let route = currentRoute, let routeLocation {
-            lastRouteRemainingMeters = RouteProgress.remainingDistance(from: routeLocation, in: route)
+            let remaining = RouteProgress.remainingDistance(from: routeLocation, in: route)
+            lastRouteRemainingMeters = remaining
+            if let remaining {
+                updateNavigationSummary(route: route, remainingDistance: remaining)
+            }
         } else {
             lastRouteRemainingMeters = nil
         }
+    }
+
+    private func updateNavigationSummary(route: MKRoute, remainingDistance: CLLocationDistance) {
+        let clampedDistance = min(max(remainingDistance, 0), max(route.distance, 0))
+        routeRemainingDistance = clampedDistance
+
+        guard route.distance > 0, route.expectedTravelTime > 0 else {
+            routeRemainingTime = nil
+            expectedArrivalDate = nil
+            return
+        }
+
+        let fractionRemaining = clampedDistance / route.distance
+        let remainingTime = max(route.expectedTravelTime * fractionRemaining, 0)
+        routeRemainingTime = remainingTime
+        expectedArrivalDate = Date().addingTimeInterval(remainingTime)
     }
     
     /// Extract clean instruction text from MKRoute.Step

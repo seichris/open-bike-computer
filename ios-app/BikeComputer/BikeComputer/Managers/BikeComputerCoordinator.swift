@@ -39,6 +39,9 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var currentRoute: MKRoute?
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
+    @Published var routeRemainingDistance: CLLocationDistance?
+    @Published var routeRemainingTime: TimeInterval?
+    @Published var expectedArrivalDate: Date?
 
     // Workout
     @Published var isWorkoutActive: Bool = false
@@ -117,6 +120,15 @@ class BikeComputerCoordinator: ObservableObject {
 
         navEngine.$currentIconID
             .assign(to: &$currentIconID)
+
+        navEngine.$routeRemainingDistance
+            .assign(to: &$routeRemainingDistance)
+
+        navEngine.$routeRemainingTime
+            .assign(to: &$routeRemainingTime)
+
+        navEngine.$expectedArrivalDate
+            .assign(to: &$expectedArrivalDate)
 
         // Bind health kit manager state
         healthKitManager.$isAuthorized

@@ -28,6 +28,12 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     topOverlay
 
+                    if coordinator.isNavigating {
+                        navigationInstructionBanner
+                            .padding(.horizontal, 14)
+                            .padding(.top, 8)
+                    }
+
                     Spacer()
 
                     bottomOverlay(maxHeight: proxy.size.height * 0.68)
@@ -103,13 +109,21 @@ struct ContentView: View {
     }
 
     private var navigationControlPanel: some View {
-        MapNavigationInstructionCard(
-            iconID: coordinator.currentIconID,
-            distanceToManeuver: coordinator.distanceToManeuver,
-            instruction: coordinator.currentInstruction,
+        NavigationMetricsPanel(
+            arrivalDate: coordinator.expectedArrivalDate,
+            remainingTime: coordinator.routeRemainingTime,
+            remainingDistance: coordinator.routeRemainingDistance,
             onStopNavigation: { coordinator.stopNavigation() }
         )
         .padding(.horizontal, 12)
+    }
+
+    private var navigationInstructionBanner: some View {
+        NavigationInstructionBanner(
+            iconID: coordinator.currentIconID,
+            distanceToManeuver: coordinator.distanceToManeuver,
+            instruction: coordinator.currentInstruction
+        )
     }
     
     // MARK: - Map View
@@ -120,6 +134,7 @@ struct ContentView: View {
             route: coordinator.currentRoute,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
+            isNavigating: coordinator.isNavigating,
             onMapTapped: {
                 if isSearchPanelExpanded {
                     isSearchPanelExpanded = false
