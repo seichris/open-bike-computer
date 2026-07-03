@@ -2115,6 +2115,8 @@ void Maps::createMapScrSprites() {
     h = Maps::mapScrFull;
 
   Maps::canvasMap = lv_canvas_create(mapTile);
+  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   // Need buffer for screen canvas
   // We should reallocate if size changes? For now assuming fixed alloc or
@@ -2160,6 +2162,8 @@ void Maps::createMapScrSprites() {
   if (ensureArrowBuffer() != nullptr) {
     Maps::canvasArrow =
         lv_canvas_create(mapTile); // Create on mapTile instead of active screen
+    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
     lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
                          LV_COLOR_FORMAT_ARGB8888);
