@@ -562,27 +562,31 @@ void scrollMapEvent(lv_event_t *event) {
           millis() - pressStartTime < 300) {
         int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
         if (totalMove < 30) {
-          // GPS indicator is at the board-specific map anchor when followGps
-          // is true.
-          // When followGps is false, it could be anywhere - use center area
-          // anyway since user expects to tap the center indicator
-          int centerX = mapInteractionAnchorX();
-          int centerY = mapInteractionAnchorY();
-          int distX = abs(p.x - centerX);
-          int distY = abs(p.y - centerY);
-          log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
-                p.y, centerX, centerY, distX, distY);
-          // Increased hit area to 120px radius (user request to double it)
-          if (distX < 120 && distY < 120) {
-            log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
-            mapView.toggleRotationMode();
+          if (mapRenderSettings.tapToSwitchScreens) {
+            log_i("MAP SHORT TAP: cycling main screen");
+            showNextMainScreen();
+          } else {
+            // GPS indicator is at the board-specific map anchor when followGps
+            // is true. When followGps is false, use the center area since users
+            // expect to tap the center indicator.
+            int centerX = mapInteractionAnchorX();
+            int centerY = mapInteractionAnchorY();
+            int distX = abs(p.x - centerX);
+            int distY = abs(p.y - centerY);
+            log_i("SHORT TAP CHECK: pos(%d,%d) center(%d,%d) dist(%d,%d)", p.x,
+                  p.y, centerX, centerY, distX, distY);
+            // Increased hit area to 120px radius (user request to double it)
+            if (distX < 120 && distY < 120) {
+              log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
+              mapView.toggleRotationMode();
 
-            // Sync back to mapRenderSettings so it persists if we save or app
-            // queries it (though app push is one-way usually)
-            mapRenderSettings.mapRotationMode =
-                (mapView.rotationMode == Maps::ROT_COURSE_UP) ? 1 : 0;
-            log_i("Synced rotation mode to settings: %d",
-                  mapRenderSettings.mapRotationMode);
+              // Sync back to mapRenderSettings so it persists if we save or app
+              // queries it (though app push is one-way usually)
+              mapRenderSettings.mapRotationMode =
+                  (mapView.rotationMode == Maps::ROT_COURSE_UP) ? 1 : 0;
+              log_i("Synced rotation mode to settings: %d",
+                    mapRenderSettings.mapRotationMode);
+            }
           }
         }
       }
@@ -775,6 +779,19 @@ void showNextMainScreen() {
   }
 }
 
+static void tapCycleScreenEvent(lv_event_t *event) {
+  if (!mapRenderSettings.tapToSwitchScreens) {
+    return;
+  }
+
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  log_i("UI: short tap cycling main screen");
+  showNextMainScreen();
+}
+
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile) {
     return;
@@ -804,8 +821,10 @@ void createMainScr() {
   lv_obj_set_size(navTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(navTile, 0, 0);
   lv_obj_clear_flag(navTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_CLICKABLE);
   navigationScr(navTile);
   lv_obj_add_event_cb(navTile, updateNavEvent, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(navTile, tapCycleScreenEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
 
   rideStatsTile = lv_obj_create(mainScreen);
@@ -813,9 +832,12 @@ void createMainScr() {
   lv_obj_set_size(rideStatsTile, TFT_WIDTH, TFT_HEIGHT);
   lv_obj_set_pos(rideStatsTile, 0, 0);
   lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_CLICKABLE);
   rideTelemetryScr(rideStatsTile);
   lv_obj_add_event_cb(rideStatsTile, updateRideTelemetryEvent,
                       LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
+                      NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 
   // Set tilesScreen to same as mapTile for compatibility

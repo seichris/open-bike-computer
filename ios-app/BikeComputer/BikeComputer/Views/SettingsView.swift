@@ -126,6 +126,14 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
+
+                Section(header: Text("Screen Navigation")) {
+                    Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                        .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                            bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
+                        }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
                 
                 Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
                     Picker("Zoom", selection: $bleManager.zoomLevel) {

@@ -39,6 +39,7 @@ struct MapRenderSettings {
   uint8_t displayRotation;
   uint8_t mapRotationMode;
   uint8_t zoomLevel;
+  uint8_t tapToSwitchScreens;
   uint32_t visibilityMask;
 };
 extern MapRenderSettings mapRenderSettings;

@@ -607,6 +607,14 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
                   mapRenderSettings.positionMarkerScale);
     break;
+  case 11:
+    mapRenderSettings.tapToSwitchScreens = settingValue != 0 ? 1 : 0;
+    settingsPrefs.begin("mapSettings", false);
+    settingsPrefs.putUChar("tapSwitch", mapRenderSettings.tapToSwitchScreens);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
+                  mapRenderSettings.tapToSwitchScreens);
+    break;
   case 4:
     mapRenderSettings.displayRotation =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)3);
@@ -844,18 +852,20 @@ static void loadSettingsFromNVS() {
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.zoomLevel = prefs.getUChar("zoomLevel", 4);
+  mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
-                "markerScale=%d, rotation=%d\n",
+                "markerScale=%d, rotation=%d, tapSwitch=%d\n",
                 mapRenderSettings.minPolygonSize, mapRenderSettings.detailLevel,
                 mapRenderSettings.routeLineWidth,
                 mapRenderSettings.streetLineWidthBoost,
                 mapRenderSettings.positionMarkerScale,
-                mapRenderSettings.displayRotation);
+                mapRenderSettings.displayRotation,
+                mapRenderSettings.tapToSwitchScreens);
 }
 
 void BLENavigationServer::init(const char *deviceName) {
