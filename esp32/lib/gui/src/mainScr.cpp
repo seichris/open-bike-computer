@@ -422,6 +422,7 @@ void scrollMapEvent(lv_event_t *event) {
     lv_indev_t *indev = lv_event_get_indev(event);
     static int last_x = 0, last_y = 0;
     static bool isDragging = false;
+    static bool dragStarted = false;
     static uint32_t pressStartTime = 0;
     static bool longPressTriggered = false;
     static int pressStartX = 0, pressStartY = 0;
@@ -477,6 +478,7 @@ void scrollMapEvent(lv_event_t *event) {
       pendingDy = 0;
       lastDragRedrawTime = 0;
       isScrollingMap = true;
+      dragStarted = false;
       log_i("PRESSED: x=%d y=%d", p.x, p.y);
       break;
     }
@@ -502,12 +504,13 @@ void scrollMapEvent(lv_event_t *event) {
       }
 
       const int SCROLL_THRESHOLD = 5;
+      const int DRAG_START_THRESHOLD = 32;
+      int totalMoveX = abs(p.x - pressStartX);
+      int totalMoveY = abs(p.y - pressStartY);
+      int totalMove = totalMoveX + totalMoveY;
 
       // Check for long press (1 second hold without significant movement)
       if (!longPressTriggered && pressStartTime > 0) {
-        int totalMoveX = abs(p.x - pressStartX);
-        int totalMoveY = abs(p.y - pressStartY);
-
         if (totalMoveX < 20 && totalMoveY < 20) {
           // Finger hasn't moved much - check for long press
           if (millis() - pressStartTime > 1800) {
@@ -524,6 +527,20 @@ void scrollMapEvent(lv_event_t *event) {
           // Finger moved - this is a scroll, not a long press
           pressStartTime = 0;
         }
+      }
+
+      if (!dragStarted) {
+        if (totalMove < DRAG_START_THRESHOLD) {
+          break;
+        }
+
+        dragStarted = true;
+        last_x = p.x;
+        last_y = p.y;
+        pressStartTime = 0;
+        log_i("DRAG START: p(%d,%d) start(%d,%d) total=%d", p.x, p.y,
+              pressStartX, pressStartY, totalMove);
+        break;
       }
 
       if (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD) {
@@ -543,7 +560,7 @@ void scrollMapEvent(lv_event_t *event) {
     case LV_EVENT_PRESS_LOST: {
       lv_indev_get_point(indev, &p);
 
-      if (isDragging) {
+      if (isDragging && dragStarted) {
         int dx = p.x - last_x;
         int dy = p.y - last_y;
         const int MAX_JUMP = 400;
@@ -592,6 +609,7 @@ void scrollMapEvent(lv_event_t *event) {
       }
 
       isDragging = false;
+      dragStarted = false;
       isScrollingMap = false;
       pressStartTime = 0;
       log_i("RELEASED/LOST: drag ended%s",
