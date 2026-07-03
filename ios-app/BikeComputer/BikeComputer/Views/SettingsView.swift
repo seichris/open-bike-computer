@@ -103,8 +103,8 @@ struct SettingsView: View {
                 
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
-                        Text("North Up (Red)").tag(0)
-                        Text("Head Up (Blue)").tag(1)
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: bleManager.mapRotationMode) { newValue in

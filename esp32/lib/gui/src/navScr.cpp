@@ -18,7 +18,11 @@ lv_obj_t *arrowNav;
 
 void formatNavigationInstruction(const char *instruction, char *buffer,
                                  size_t bufferSize) {
-  if (!instruction || bufferSize == 0) {
+  if (bufferSize == 0) {
+    return;
+  }
+  buffer[0] = '\0';
+  if (!instruction) {
     return;
   }
 
