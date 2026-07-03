@@ -16,18 +16,23 @@ lv_obj_t *rideElapsedValue;
 lv_obj_t *rideRouteRemainingValue;
 
 static lv_obj_t *createMetricLabel(lv_obj_t *screen, const char *title,
-                                   lv_coord_t x, lv_coord_t y) {
+                                   lv_coord_t x, lv_coord_t y,
+                                   lv_coord_t width) {
   lv_obj_t *titleLabel = lv_label_create(screen);
-  lv_obj_set_style_text_font(titleLabel, fontOptions, 0);
+  lv_obj_set_style_text_font(titleLabel, fontLargeMedium, 0);
   lv_obj_set_style_text_color(titleLabel, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_align(titleLabel, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(titleLabel, title);
+  lv_obj_set_width(titleLabel, width);
   lv_obj_set_pos(titleLabel, x, y);
 
   lv_obj_t *valueLabel = lv_label_create(screen);
-  lv_obj_set_style_text_font(valueLabel, fontLargeMedium, 0);
+  lv_obj_set_style_text_font(valueLabel, fontVeryLarge, 0);
   lv_obj_set_style_text_color(valueLabel, lv_color_white(), 0);
+  lv_obj_set_style_text_align(valueLabel, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(valueLabel, "--");
-  lv_obj_set_pos(valueLabel, x, y + 28);
+  lv_obj_set_width(valueLabel, width);
+  lv_obj_set_pos(valueLabel, x, y + 34);
   return valueLabel;
 }
 
@@ -61,10 +66,10 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
   lv_obj_t *title = lv_label_create(screen);
-  lv_obj_set_style_text_font(title, fontOptions, 0);
+  lv_obj_set_style_text_font(title, fontLargeMedium, 0);
   lv_obj_set_style_text_color(title, lv_color_hex(0xAAAAAA), 0);
   lv_label_set_text_static(title, "Ride stats");
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
   rideSpeedValue = lv_label_create(screen);
   lv_obj_set_style_text_font(rideSpeedValue, fontVeryLarge, 0);
@@ -72,21 +77,25 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_align(rideSpeedValue, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(rideSpeedValue, "0");
   lv_obj_set_width(rideSpeedValue, TFT_WIDTH);
-  lv_obj_align(rideSpeedValue, LV_ALIGN_TOP_MID, 0, 52);
+  lv_obj_align(rideSpeedValue, LV_ALIGN_TOP_MID, 0, 50);
 
   lv_obj_t *speedUnit = lv_label_create(screen);
-  lv_obj_set_style_text_font(speedUnit, fontOptions, 0);
+  lv_obj_set_style_text_font(speedUnit, fontLargeMedium, 0);
   lv_obj_set_style_text_color(speedUnit, lv_color_hex(0xAAAAAA), 0);
   lv_label_set_text_static(speedUnit, "km/h");
-  lv_obj_align(speedUnit, LV_ALIGN_TOP_MID, 0, 118);
+  lv_obj_align(speedUnit, LV_ALIGN_TOP_MID, 0, 112);
 
-  const lv_coord_t leftX = 34;
-  const lv_coord_t rightX = TFT_WIDTH / 2 + 14;
-  rideAltitudeValue = createMetricLabel(screen, "Altitude", leftX, 170);
-  rideDistanceValue = createMetricLabel(screen, "Distance", rightX, 170);
-  rideElapsedValue = createMetricLabel(screen, "Elapsed", leftX, 270);
+  const lv_coord_t colWidth = TFT_WIDTH / 2 - 18;
+  const lv_coord_t leftX = 8;
+  const lv_coord_t rightX = TFT_WIDTH / 2 + 10;
+  rideAltitudeValue =
+      createMetricLabel(screen, "Altitude", leftX, 172, colWidth);
+  rideDistanceValue =
+      createMetricLabel(screen, "Distance", rightX, 172, colWidth);
+  rideElapsedValue =
+      createMetricLabel(screen, "Elapsed", leftX, 334, colWidth);
   rideRouteRemainingValue =
-      createMetricLabel(screen, "Route left", rightX, 270);
+      createMetricLabel(screen, "Route left", rightX, 334, colWidth);
 }
 
 void updateRideTelemetryEvent(lv_event_t *event) {
