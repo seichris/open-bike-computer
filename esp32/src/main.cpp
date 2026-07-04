@@ -163,6 +163,8 @@ static const char *debugTileName(uint8_t tile) {
     return "COMPASS";
   case MAP:
     return "MAP";
+  case MAP_GUIDANCE:
+    return "MAP_GUIDANCE";
   case NAV:
     return "NAV";
   case SATTRACK:

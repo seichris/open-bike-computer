@@ -34,11 +34,12 @@ extern uint8_t activeTile; // Active Tile in TileView control
 extern int heading;        // Heading value (Compass or GPS)
 
 enum tileName {
-  COMPASS,
-  MAP,
-  NAV,
-  SATTRACK,
-  RIDESTATS,
+  COMPASS = 0,
+  MAP = 1,
+  NAV = 2,
+  SATTRACK = 3,
+  RIDESTATS = 4,
+  MAP_GUIDANCE = 5,
 };
 
 /**
