@@ -18,6 +18,7 @@ constexpr uint16_t ROUTE_PREVIEW_SEGMENT_BUDGET = 96;
 constexpr uint16_t ROUTE_COLOR_RGB565 = 0x001F;
 constexpr uint16_t POSITION_COLOR_RGB565 = 0xF800;
 constexpr uint8_t BRIGHTNESS_GESTURE_STEP_PERCENT = 5;
+constexpr uint8_t ROUND_PAGE_COUNT = 5;
 
 double degreesToRadians(double degrees) { return degrees * 0.017453292519943295; }
 
@@ -118,6 +119,9 @@ void RoundUi::update(BLENavigationServer &bleServer, PowerManager &powerManager,
   case RoundPage::Route:
     drawRoutePage(bleServer, mapLite);
     break;
+  case RoundPage::MapGuidance:
+    drawMapGuidancePage(bleServer, mapLite);
+    break;
   case RoundPage::Settings:
     drawSettingsPage(bleServer, powerManager);
     break;
@@ -129,14 +133,17 @@ void RoundUi::update(BLENavigationServer &bleServer, PowerManager &powerManager,
 }
 
 void RoundUi::nextPage() {
-  page = static_cast<RoundPage>((static_cast<uint8_t>(page) + 1) % 4);
+  page = static_cast<RoundPage>((static_cast<uint8_t>(page) + 1) %
+                                ROUND_PAGE_COUNT);
   lastRenderMs = 0;
   Serial.print("RoundUi: page=");
   Serial.println(pageName());
 }
 
 void RoundUi::previousPage() {
-  page = static_cast<RoundPage>((static_cast<uint8_t>(page) + 3) % 4);
+  page = static_cast<RoundPage>((static_cast<uint8_t>(page) +
+                                 ROUND_PAGE_COUNT - 1) %
+                                ROUND_PAGE_COUNT);
   lastRenderMs = 0;
   Serial.print("RoundUi: page=");
   Serial.println(pageName());
@@ -287,7 +294,7 @@ void RoundUi::drawRoutePage(const BLENavigationServer &bleServer,
     const uint32_t frameStartMs = millis();
     display->beginMapFrame();
     mapRendered = mapLite.renderLastProbePreview(*display, frameStartMs);
-    routeSegments = drawRoutePreview(route, gps, stats);
+    routeSegments = drawRoutePreview(route, gps, stats, 0, false, true);
     display->endMapFrame(mapRendered ? "route-map" : "route-preview",
                          millis() - frameStartMs);
   }
@@ -302,6 +309,59 @@ void RoundUi::drawRoutePage(const BLENavigationServer &bleServer,
                : 0UL,
            mapRendered ? "Y" : "N");
   display->drawStatus(line1, line2);
+}
+
+void RoundUi::drawMapGuidancePage(const BLENavigationServer &bleServer,
+                                  MapLite &mapLite) {
+  const bike_ble::NavigationData &nav = bleServer.currentNavigation();
+  const bike_ble::RouteSummary &route = bleServer.currentRoute();
+  const bike_ble::GpsPosition &gps = bleServer.currentGps();
+  const BLEDebugStats stats = bleServer.getDebugStats();
+  const bool hasGps = gpsLooksValid(gps, stats);
+  const bool hasNavigation =
+      route.loaded || nav.distanceMeters > 0 || nav.instruction[0] != '\0';
+  const uint16_t orientationHeading =
+      hasNavigation ? routeHeadingNearGps(route, gps) : 0;
+
+  bool mapRendered = false;
+  uint16_t routeSegments = 0;
+  if (display != nullptr) {
+    const uint32_t frameStartMs = millis();
+    display->beginMapFrame();
+    if (hasGps) {
+      int32_t centerMapMetersX = 0;
+      int32_t centerMapMetersY = 0;
+      if (map_lite_core::gpsToMapMeters(gps.latMicrodegrees,
+                                         gps.lonMicrodegrees,
+                                         centerMapMetersX,
+                                         centerMapMetersY)) {
+        MapRenderViewport viewport;
+        viewport.centered = true;
+        viewport.centerMapMetersX = centerMapMetersX;
+        viewport.centerMapMetersY = centerMapMetersY;
+        viewport.headingDegrees = orientationHeading;
+        viewport.courseUp = hasNavigation;
+        mapRendered =
+            mapLite.renderLastProbePreview(*display, frameStartMs, viewport);
+      }
+    } else {
+      mapRendered = mapLite.renderLastProbePreview(*display, frameStartMs);
+    }
+    routeSegments =
+        drawRoutePreview(route, gps, stats, orientationHeading, hasNavigation,
+                         false);
+    display->drawCenteredPositionMarker(hasNavigation);
+    display->drawNavigationGuidanceOverlay(nav.iconId, nav.distanceMeters);
+    display->endMapFrame(mapRendered ? "guidance-map" : "guidance-preview",
+                         millis() - frameStartMs);
+  }
+
+  Serial.print("RoundUi: guidance map=");
+  Serial.print(mapRendered ? "Y" : "N");
+  Serial.print(" route_segments=");
+  Serial.print(routeSegments);
+  Serial.print(" heading=");
+  Serial.println(orientationHeading);
 }
 
 void RoundUi::drawSettingsPage(const BLENavigationServer &bleServer,
@@ -323,7 +383,9 @@ void RoundUi::drawSettingsPage(const BLENavigationServer &bleServer,
 
 uint16_t RoundUi::drawRoutePreview(const bike_ble::RouteSummary &route,
                                    const bike_ble::GpsPosition &gps,
-                                   const BLEDebugStats &stats) {
+                                   const BLEDebugStats &stats,
+                                   uint16_t orientationHeading, bool courseUp,
+                                   bool drawMarker) {
   if (display == nullptr || route.storedPointCount < 2) {
     return 0;
   }
@@ -335,6 +397,9 @@ uint16_t RoundUi::drawRoutePreview(const bike_ble::RouteSummary &route,
       centerOnGps ? gps.lonMicrodegrees : route.points[0].lonMicrodegrees;
   const double cosLat =
       cos(degreesToRadians(static_cast<double>(centerLat) / 1000000.0));
+  const double headingRadians = degreesToRadians(orientationHeading);
+  const double sinHeading = sin(headingRadians);
+  const double cosHeading = cos(headingRadians);
   uint16_t drawnSegments = 0;
 
   for (uint16_t i = 0; i + 1 < route.storedPointCount &&
@@ -342,14 +407,24 @@ uint16_t RoundUi::drawRoutePreview(const bike_ble::RouteSummary &route,
        i++) {
     const bike_ble::RoutePoint &a = route.points[i];
     const bike_ble::RoutePoint &b = route.points[i + 1];
-    const double ax = static_cast<double>(a.lonMicrodegrees - centerLon) *
-                      METERS_PER_MICRODEGREE_LAT * cosLat;
-    const double ay = static_cast<double>(a.latMicrodegrees - centerLat) *
-                      METERS_PER_MICRODEGREE_LAT;
-    const double bx = static_cast<double>(b.lonMicrodegrees - centerLon) *
-                      METERS_PER_MICRODEGREE_LAT * cosLat;
-    const double by = static_cast<double>(b.latMicrodegrees - centerLat) *
-                      METERS_PER_MICRODEGREE_LAT;
+    double ax = static_cast<double>(a.lonMicrodegrees - centerLon) *
+                METERS_PER_MICRODEGREE_LAT * cosLat;
+    double ay = static_cast<double>(a.latMicrodegrees - centerLat) *
+                METERS_PER_MICRODEGREE_LAT;
+    double bx = static_cast<double>(b.lonMicrodegrees - centerLon) *
+                METERS_PER_MICRODEGREE_LAT * cosLat;
+    double by = static_cast<double>(b.latMicrodegrees - centerLat) *
+                METERS_PER_MICRODEGREE_LAT;
+    if (courseUp) {
+      const double rotatedAx = (ax * cosHeading) - (ay * sinHeading);
+      const double rotatedAy = (ax * sinHeading) + (ay * cosHeading);
+      const double rotatedBx = (bx * cosHeading) - (by * sinHeading);
+      const double rotatedBy = (bx * sinHeading) + (by * cosHeading);
+      ax = rotatedAx;
+      ay = rotatedAy;
+      bx = rotatedBx;
+      by = rotatedBy;
+    }
 
     if ((fabs(ax) > ROUTE_PREVIEW_RADIUS_METERS &&
          fabs(bx) > ROUTE_PREVIEW_RADIUS_METERS &&
@@ -367,7 +442,7 @@ uint16_t RoundUi::drawRoutePreview(const bike_ble::RouteSummary &route,
     drawnSegments++;
   }
 
-  if (centerOnGps) {
+  if (centerOnGps && drawMarker) {
     const int16_t center = DisplayRound::width / 2;
     display->drawLine(center - 4, center, center + 4, center,
                       POSITION_COLOR_RGB565);
@@ -471,6 +546,8 @@ const char *RoundUi::pageName() const {
     return "navigation";
   case RoundPage::Route:
     return "route";
+  case RoundPage::MapGuidance:
+    return "map-guidance";
   case RoundPage::Settings:
     return "settings";
   }

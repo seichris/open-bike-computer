@@ -179,6 +179,11 @@ bool MapLite::printDirectory(const char *path, uint8_t maxEntries) {
 }
 
 bool MapLite::renderLastProbePreview(DisplayRound &display, uint32_t nowMs) {
+  return renderLastProbePreview(display, nowMs, MapRenderViewport{});
+}
+
+bool MapLite::renderLastProbePreview(DisplayRound &display, uint32_t nowMs,
+                                     const MapRenderViewport &viewport) {
   if (!currentStatus.hasProbe || !currentStatus.lastResult.found ||
       currentStatus.lastResult.path[0] == '\0' ||
       currentStatus.lastResult.decision != MapLiteDecision::Candidate) {
@@ -186,7 +191,8 @@ bool MapLite::renderLastProbePreview(DisplayRound &display, uint32_t nowMs) {
   }
   if (currentStatus.lastRenderedProbeCount == currentStatus.probeCount &&
       currentStatus.lastRenderAtMs != 0 &&
-      nowMs - currentStatus.lastRenderAtMs < MAP_LITE_RENDER_MIN_INTERVAL_MS) {
+      nowMs - currentStatus.lastRenderAtMs < MAP_LITE_RENDER_MIN_INTERVAL_MS &&
+      !viewport.centered) {
     return false;
   }
 
@@ -205,7 +211,8 @@ bool MapLite::renderLastProbePreview(DisplayRound &display, uint32_t nowMs) {
     if (header.headerValid && skipPolygonRecords(file, header)) {
       valid = renderPolylineRecords(file, display, header, featureCount,
                                     segmentCount, skippedSegmentCount,
-                                    budgetExceeded);
+                                    budgetExceeded,
+                                    viewport.centered ? &viewport : nullptr);
     }
     file.close();
   }
@@ -372,12 +379,51 @@ bool MapLite::skipPolygonRecords(SdFile &file,
   return true;
 }
 
+bool centeredPointToScreen(const MapRenderViewport &viewport,
+                           int32_t blockOriginX, int32_t blockOriginY,
+                           int16_t localX, int16_t localY, int16_t &screenX,
+                           int16_t &screenY, double &rotatedX,
+                           double &rotatedY) {
+  double dx = static_cast<double>(blockOriginX + localX -
+                                  viewport.centerMapMetersX);
+  double dy = static_cast<double>(blockOriginY + localY -
+                                  viewport.centerMapMetersY);
+  if (viewport.courseUp) {
+    const double radians =
+        static_cast<double>(viewport.headingDegrees) * 0.017453292519943295;
+    const double sinHeading = sin(radians);
+    const double cosHeading = cos(radians);
+    const double courseX = (dx * cosHeading) - (dy * sinHeading);
+    const double courseY = (dx * sinHeading) + (dy * cosHeading);
+    dx = courseX;
+    dy = courseY;
+  }
+
+  rotatedX = dx;
+  rotatedY = dy;
+  const double center = (DisplayRound::width - 1) / 2.0;
+  const double scale = center / viewport.radiusMeters;
+  auto clampScreen = [](int32_t value) -> int16_t {
+    if (value < 0) {
+      return 0;
+    }
+    if (value >= DisplayRound::width) {
+      return DisplayRound::width - 1;
+    }
+    return static_cast<int16_t>(value);
+  };
+  screenX = clampScreen(static_cast<int32_t>(center + (dx * scale) + 0.5));
+  screenY = clampScreen(static_cast<int32_t>(center - (dy * scale) + 0.5));
+  return fabs(dx) <= viewport.radiusMeters || fabs(dy) <= viewport.radiusMeters;
+}
+
 bool MapLite::renderPolylineRecords(SdFile &file, DisplayRound &display,
                                     const MapBlockProbeResult &result,
                                     uint16_t &featureCount,
                                     uint16_t &segmentCount,
                                     uint16_t &skippedSegmentCount,
-                                    bool &budgetExceeded) {
+                                    bool &budgetExceeded,
+                                    const MapRenderViewport *viewport) {
   uint16_t polylineCount = 0;
   if (!readU16(file, polylineCount)) {
     return false;
@@ -413,6 +459,12 @@ bool MapLite::renderPolylineRecords(SdFile &file, DisplayRound &display,
       return false;
     }
     bool featureDrewSegment = false;
+    const int32_t blockOriginX =
+        map_lite_core::blockCoordForMapMeters(currentStatus.lastMapMetersX) *
+        map_lite_core::MAPBLOCK_SIZE_METERS;
+    const int32_t blockOriginY =
+        map_lite_core::blockCoordForMapMeters(currentStatus.lastMapMetersY) *
+        map_lite_core::MAPBLOCK_SIZE_METERS;
     for (uint16_t pointIndex = 1; pointIndex < pointCount; pointIndex++) {
       int16_t currentX = 0;
       int16_t currentY = 0;
@@ -421,13 +473,43 @@ bool MapLite::renderPolylineRecords(SdFile &file, DisplayRound &display,
       }
       if (featureCount < map_lite_core::RENDER_FEATURE_BUDGET &&
           segmentCount < map_lite_core::RENDER_SEGMENT_BUDGET) {
-        display.drawLine(map_lite_core::localMapCoordToScreen(previousX, false),
-                         map_lite_core::localMapCoordToScreen(previousY, true),
-                         map_lite_core::localMapCoordToScreen(currentX, false),
-                         map_lite_core::localMapCoordToScreen(currentY, true),
-                         color);
-        segmentCount++;
-        featureDrewSegment = true;
+        int16_t previousScreenX = 0;
+        int16_t previousScreenY = 0;
+        int16_t currentScreenX = 0;
+        int16_t currentScreenY = 0;
+        bool shouldDraw = true;
+        if (viewport != nullptr) {
+          double previousRotatedX = 0.0;
+          double previousRotatedY = 0.0;
+          double currentRotatedX = 0.0;
+          double currentRotatedY = 0.0;
+          centeredPointToScreen(*viewport, blockOriginX, blockOriginY,
+                                previousX, previousY, previousScreenX,
+                                previousScreenY, previousRotatedX,
+                                previousRotatedY);
+          centeredPointToScreen(*viewport, blockOriginX, blockOriginY,
+                                currentX, currentY, currentScreenX,
+                                currentScreenY, currentRotatedX,
+                                currentRotatedY);
+          shouldDraw =
+              !((fabs(previousRotatedX) > viewport->radiusMeters &&
+                 fabs(currentRotatedX) > viewport->radiusMeters &&
+                 ((previousRotatedX < 0.0) == (currentRotatedX < 0.0))) ||
+                (fabs(previousRotatedY) > viewport->radiusMeters &&
+                 fabs(currentRotatedY) > viewport->radiusMeters &&
+                 ((previousRotatedY < 0.0) == (currentRotatedY < 0.0))));
+        } else {
+          previousScreenX = map_lite_core::localMapCoordToScreen(previousX, false);
+          previousScreenY = map_lite_core::localMapCoordToScreen(previousY, true);
+          currentScreenX = map_lite_core::localMapCoordToScreen(currentX, false);
+          currentScreenY = map_lite_core::localMapCoordToScreen(currentY, true);
+        }
+        if (shouldDraw) {
+          display.drawLine(previousScreenX, previousScreenY, currentScreenX,
+                           currentScreenY, color);
+          segmentCount++;
+          featureDrewSegment = true;
+        }
       } else {
         skippedSegmentCount++;
         budgetExceeded = true;

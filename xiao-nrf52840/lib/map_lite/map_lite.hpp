@@ -55,6 +55,15 @@ struct MapLiteStatus {
   MapBlockProbeResult lastResult;
 };
 
+struct MapRenderViewport {
+  bool centered = false;
+  int32_t centerMapMetersX = 0;
+  int32_t centerMapMetersY = 0;
+  uint16_t headingDegrees = 0;
+  bool courseUp = false;
+  double radiusMeters = 500.0;
+};
+
 class MapLite {
 public:
   bool begin();
@@ -62,6 +71,8 @@ public:
   bool updateForGps(int32_t latMicrodegrees, int32_t lonMicrodegrees,
                     uint32_t nowMs);
   bool renderLastProbePreview(DisplayRound &display, uint32_t nowMs);
+  bool renderLastProbePreview(DisplayRound &display, uint32_t nowMs,
+                              const MapRenderViewport &viewport);
   bool printDirectory(const char *path = "/", uint8_t maxEntries = 24);
   bool isReady() const { return sdReady; }
   MapLiteStatus status() const;
@@ -82,7 +93,8 @@ private:
                              const MapBlockProbeResult &result,
                              uint16_t &featureCount, uint16_t &segmentCount,
                              uint16_t &skippedSegmentCount,
-                             bool &budgetExceeded);
+                             bool &budgetExceeded,
+                             const MapRenderViewport *viewport);
   bool readHeader(SdFile &file, MapBlockProbeResult &result);
   bool scanFeatures(SdFile &file, MapBlockProbeResult &result);
 

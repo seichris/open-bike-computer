@@ -16,6 +16,8 @@ public:
   void beginMapFrame();
   void drawLine(int16_t x1, int16_t y1, int16_t x2, int16_t y2,
                 uint16_t color);
+  void drawCenteredPositionMarker(bool courseUp);
+  void drawNavigationGuidanceOverlay(uint8_t iconId, uint16_t distanceMeters);
   void endMapFrame(const char *label, uint32_t elapsedMs);
 
 private:

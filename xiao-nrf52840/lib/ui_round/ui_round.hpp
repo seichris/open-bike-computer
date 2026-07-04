@@ -13,7 +13,8 @@ enum class RoundPage : uint8_t {
   Ride = 0,
   Navigation = 1,
   Route = 2,
-  Settings = 3,
+  MapGuidance = 3,
+  Settings = 4,
 };
 
 enum class TouchGesture : uint8_t {
@@ -46,11 +47,15 @@ private:
                     const PowerManager &powerManager);
   void drawNavigationPage(const BLENavigationServer &bleServer);
   void drawRoutePage(const BLENavigationServer &bleServer, MapLite &mapLite);
+  void drawMapGuidancePage(const BLENavigationServer &bleServer,
+                           MapLite &mapLite);
   void drawSettingsPage(const BLENavigationServer &bleServer,
                         const PowerManager &powerManager);
   uint16_t drawRoutePreview(const bike_ble::RouteSummary &route,
                             const bike_ble::GpsPosition &gps,
-                            const BLEDebugStats &stats);
+                            const BLEDebugStats &stats,
+                            uint16_t orientationHeading, bool courseUp,
+                            bool drawMarker);
   uint16_t speedKmhX10(const bike_ble::GpsPosition &gps);
   uint16_t routeHeadingNearGps(const bike_ble::RouteSummary &route,
                                const bike_ble::GpsPosition &gps) const;
