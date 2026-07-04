@@ -53,7 +53,14 @@ lv_obj_t *btnFullScreen;
 lv_obj_t *btnZoomIn;
 lv_obj_t *btnZoomOut;
 
+static lv_obj_t *mapGuidanceOverlay;
+static lv_obj_t *mapGuidanceArrow;
+static lv_obj_t *mapGuidanceDistance;
+static lv_obj_t *mapGuidanceUnit;
+
 Maps mapView;
+
+static void tapCycleScreenEvent(lv_event_t *event);
 
 static int16_t mapInteractionAnchorX() {
   return gui_layout::mapAnchorX(mapView.mapScrWidth);
@@ -72,6 +79,90 @@ static uint16_t currentCourseUpHeading() {
     return routeHeading;
   }
   return gps.gpsData.heading;
+}
+
+static bool isMapBackedTile(uint8_t tile) {
+  return tile == MAP || tile == MAP_GUIDANCE;
+}
+
+static bool isGuidanceNavigating() { return routeOverlay.hasRoute(); }
+
+static int16_t navigationArrowAngle(uint8_t iconID) {
+  switch (iconID) {
+  case 2: // NavigationIconID.left
+    return -900;
+  case 3: // NavigationIconID.right
+    return 900;
+  case 4: // NavigationIconID.uTurn
+    return 1800;
+  case 1: // NavigationIconID.straight
+  default:
+    return 0;
+  }
+}
+
+static void applyMapRotationForActiveTile() {
+  if (activeTile == MAP_GUIDANCE) {
+    const Maps::RotationMode desiredMode =
+        isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
+    if (mapView.rotationMode != desiredMode) {
+      mapView.rotationMode = desiredMode;
+      if (desiredMode == Maps::ROT_NORTH_UP) {
+        mapView.rotationRad = 0;
+      }
+      mapView.updateArrowColor();
+      mapView.isPosMoved = true;
+      log_i("Map guidance: rotation switched to %s",
+            desiredMode == Maps::ROT_COURSE_UP ? "Course Up" : "North Up");
+    }
+    return;
+  }
+
+  if (activeTile != MAP) {
+    return;
+  }
+
+  if (mapRenderSettings.mapRotationMode == 1 &&
+      mapView.rotationMode != Maps::ROT_COURSE_UP) {
+    mapView.rotationMode = Maps::ROT_COURSE_UP;
+    mapView.updateArrowColor();
+    mapView.isPosMoved = true;
+    log_i("Creating Map: Syncing rotation to Course Up (from settings)");
+  } else if (mapRenderSettings.mapRotationMode == 0 &&
+             mapView.rotationMode != Maps::ROT_NORTH_UP) {
+    mapView.rotationMode = Maps::ROT_NORTH_UP;
+    mapView.rotationRad = 0;
+    mapView.updateArrowColor();
+    mapView.isPosMoved = true;
+    log_i("Creating Map: Syncing rotation to North Up (from settings)");
+  }
+}
+
+static void updateMapGuidanceOverlay() {
+  if (!mapGuidanceArrow || !mapGuidanceDistance || !mapGuidanceUnit) {
+    return;
+  }
+
+  LV_IMG_DECLARE(navup);
+  lv_img_set_src(mapGuidanceArrow, &navup);
+
+  if (!hasCurrentNavigationData()) {
+    lv_img_set_angle(mapGuidanceArrow, 0);
+    lv_label_set_text_static(mapGuidanceDistance, "--");
+    lv_label_set_text_static(mapGuidanceUnit, "");
+    return;
+  }
+
+  NavigationData navData = getCurrentNavigationData();
+  lv_img_set_angle(mapGuidanceArrow, navigationArrowAngle(navData.iconID));
+  if (navData.distance >= 1000) {
+    lv_label_set_text_fmt(mapGuidanceDistance, "%.1f",
+                          navData.distance / 1000.0f);
+    lv_label_set_text_static(mapGuidanceUnit, "km");
+  } else {
+    lv_label_set_text_fmt(mapGuidanceDistance, "%u", navData.distance);
+    lv_label_set_text_static(mapGuidanceUnit, "m");
+  }
 }
 
 /**
@@ -175,31 +266,17 @@ void scrollTile(lv_event_t *event) {
 void updateMainScreen(lv_timer_t *t) {
   // Handle BLE-triggered map updates OUTSIDE of isScrolled check
   // This ensures continuous updates even when user hasn't dragged
-  if (isMainScreen && activeTile == MAP &&
+  if (isMainScreen && isMapBackedTile(activeTile) &&
       (mapView.isPosMoved || mapView.redrawMap)) {
 
-    // Check if settings changed externally (via BLE) and sync map state
-    // If setting says CourseUp but map is NorthUp, switch it
-    if (mapRenderSettings.mapRotationMode == 1 &&
-        mapView.rotationMode != Maps::ROT_COURSE_UP) {
-      mapView.rotationMode = Maps::ROT_COURSE_UP;
-      mapView.updateArrowColor();
-      mapView.isPosMoved = true; // Force redraw
-      log_i("Creating Map: Syncing rotation to Course Up (from settings)");
-    } else if (mapRenderSettings.mapRotationMode == 0 &&
-               mapView.rotationMode != Maps::ROT_NORTH_UP) {
-      mapView.rotationMode = Maps::ROT_NORTH_UP;
-      mapView.rotationRad = 0;
-      mapView.updateArrowColor();
-      mapView.isPosMoved = true; // Force redraw
-      log_i("Creating Map: Syncing rotation to North Up (from settings)");
-    }
+    applyMapRotationForActiveTile();
 
     log_i("BLE map update: isPosMoved=%d redrawMap=%d followGps=%d",
           mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
 
     // Re-center on GPS if in follow mode
-    if (mapView.followGps) {
+    if (mapView.followGps || activeTile == MAP_GUIDANCE) {
+      mapView.followGps = true;
       mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
     }
 
@@ -230,13 +307,20 @@ void updateMainScreen(lv_timer_t *t) {
         lv_obj_send_event(speedLabel, LV_EVENT_VALUE_CHANGED, NULL);
       break;
 
-    case MAP: {
+    case MAP:
+    case MAP_GUIDANCE: {
       // SIMULATE GPS MOVEMENT - TEST MODE
       // Removed legacy simulation code - controlled via BLE now
 
 #ifdef ENABLE_COMPASS
       heading = compass.getHeading();
 #endif
+      applyMapRotationForActiveTile();
+      if (activeTile == MAP_GUIDANCE) {
+        mapView.followGps = true;
+        updateMapGuidanceOverlay();
+      }
+
       // Track last heading for Course-Up auto-rotation
       static uint16_t lastHeading = 0;
       uint16_t currentHeading = currentCourseUpHeading();
@@ -269,14 +353,17 @@ void updateMainScreen(lv_timer_t *t) {
             "MAP case: Flags detected! isPosMoved=%d redrawMap=%d followGps=%d",
             mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
         // Only re-center on GPS if in follow mode
-        if (mapView.followGps) {
+        if (mapView.followGps || activeTile == MAP_GUIDANCE) {
+          mapView.followGps = true;
           mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
         }
         mapView.redrawMap = true;
       }
 
       // Also handle hardware GPS location changes (when in follow mode)
-      if (gps.hasLocationChange() && mapView.followGps) {
+      if (gps.hasLocationChange() &&
+          (mapView.followGps || activeTile == MAP_GUIDANCE)) {
+        mapView.followGps = true;
         mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
         mapView.redrawMap = true;
       }
@@ -417,6 +504,16 @@ void mapToolBarEvent(lv_event_t *event) {
  * @param event
  */
 void scrollMapEvent(lv_event_t *event) {
+  if (!canScrollMap) {
+    if (activeTile == MAP_GUIDANCE &&
+        lv_event_get_code(event) == LV_EVENT_CLICKED &&
+        mapRenderSettings.tapToSwitchScreens) {
+      log_i("MAP GUIDANCE SHORT TAP: cycling main screen");
+      showNextMainScreen();
+    }
+    return;
+  }
+
   if (canScrollMap) {
     lv_event_code_t code = lv_event_get_code(event);
     lv_indev_t *indev = lv_event_get_indev(event);
@@ -730,38 +827,74 @@ void updateNavEvent(lv_event_t *event) {
     lv_label_set_text_fmt(distNav, "%u m", navData.distance);
   }
 
-  int16_t arrowAngle = 0;
-  switch (navData.iconID) {
-  case 2: // NavigationIconID.left
-    arrowAngle = -900;
-    break;
-  case 3: // NavigationIconID.right
-    arrowAngle = 900;
-    break;
-  case 4: // NavigationIconID.uTurn
-    arrowAngle = 1800;
-    break;
-  case 1: // NavigationIconID.straight
-  default:
-    arrowAngle = 0;
-    break;
-  }
-  lv_img_set_angle(arrowNav, arrowAngle);
+  lv_img_set_angle(arrowNav, navigationArrowAngle(navData.iconID));
+}
+
+static void createMapGuidanceOverlay() {
+  const uint16_t overlayHeight = TFT_HEIGHT / 3;
+
+  mapGuidanceOverlay = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(mapGuidanceOverlay);
+  lv_obj_set_size(mapGuidanceOverlay, TFT_WIDTH, overlayHeight);
+  lv_obj_set_pos(mapGuidanceOverlay, 0, TFT_HEIGHT - overlayHeight);
+  lv_obj_clear_flag(mapGuidanceOverlay, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(mapGuidanceOverlay, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(mapGuidanceOverlay, 230, 0);
+  lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
+  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_CLICKED,
+                      NULL);
+
+  mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
+  LV_IMG_DECLARE(navup);
+  lv_img_set_src(mapGuidanceArrow, &navup);
+  lv_img_set_zoom(mapGuidanceArrow,
+                  TFT_HEIGHT > 320 ? iconScale * 2 : iconScale);
+  lv_img_set_pivot(mapGuidanceArrow, 50, 50);
+  lv_obj_align(mapGuidanceArrow, LV_ALIGN_LEFT_MID, 20, 0);
+
+  mapGuidanceDistance = lv_label_create(mapGuidanceOverlay);
+  lv_obj_set_style_text_font(mapGuidanceDistance, fontVeryLarge, 0);
+  lv_obj_set_style_text_color(mapGuidanceDistance, lv_color_white(), 0);
+  lv_obj_set_style_text_align(mapGuidanceDistance, LV_TEXT_ALIGN_LEFT, 0);
+  lv_label_set_text_static(mapGuidanceDistance, "--");
+  lv_obj_align(mapGuidanceDistance, LV_ALIGN_CENTER, 46, -10);
+
+  mapGuidanceUnit = lv_label_create(mapGuidanceOverlay);
+  lv_obj_set_style_text_font(mapGuidanceUnit, fontOptions, 0);
+  lv_obj_set_style_text_color(mapGuidanceUnit, lv_color_white(), 0);
+  lv_label_set_text_static(mapGuidanceUnit, "");
+  lv_obj_align_to(mapGuidanceUnit, mapGuidanceDistance, LV_ALIGN_OUT_BOTTOM_LEFT,
+                  4, -8);
+
+  lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void showMainTile(tileName tile) {
-  if (!mapTile || !navTile || !rideStatsTile) {
+  if (!mapTile || !navTile || !rideStatsTile || !mapGuidanceOverlay) {
     return;
   }
 
   lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
   activeTile = tile;
   canScrollMap = tile == MAP;
 
   switch (tile) {
+  case MAP_GUIDANCE:
+    lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(mapGuidanceOverlay);
+    mapView.followGps = true;
+    applyMapRotationForActiveTile();
+    updateMapGuidanceOverlay();
+    mapView.redrawMap = true;
+    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to map guidance screen");
+    break;
   case NAV:
     lv_obj_clear_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -791,6 +924,9 @@ void showNextMainScreen() {
     showMainTile(RIDESTATS);
     break;
   case RIDESTATS:
+    showMainTile(MAP_GUIDANCE);
+    break;
+  case MAP_GUIDANCE:
   default:
     showMainTile(MAP);
     break;
@@ -811,7 +947,8 @@ static void tapCycleScreenEvent(lv_event_t *event) {
 }
 
 void toggleNavigationScreen() {
-  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile) {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !mapGuidanceOverlay) {
     return;
   }
 
@@ -858,6 +995,8 @@ void createMainScr() {
   lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+
+  createMapGuidanceOverlay();
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;

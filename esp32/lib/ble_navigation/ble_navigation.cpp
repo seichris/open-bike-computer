@@ -55,6 +55,11 @@ bool hasCurrentNavigationData() {
   return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
 }
 
+static void clearCurrentNavigationData() {
+  currentNavData = {0, 0, ""};
+  navDataUpdated = true;
+}
+
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
@@ -400,6 +405,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     bleDebugStats.routePacketCount++;
     bleDebugStats.lastRoutePacketMs = millis();
     routeOverlay.clear();
+    clearCurrentNavigationData();
     triggerMapRedraw();
     return;
   }
