@@ -33,4 +33,3 @@ ENV MAP_PLATFORM_SOURCE_INDEX=/app/backend/config/source-regions.json
 
 EXPOSE 8080
 CMD ["uvicorn", "map_platform.api:app", "--host", "0.0.0.0", "--port", "8080"]
-

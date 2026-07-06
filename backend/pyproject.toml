@@ -21,4 +21,3 @@ map-platform = "map_platform.cli:main"
 
 [tool.setuptools]
 packages = ["map_platform"]
-

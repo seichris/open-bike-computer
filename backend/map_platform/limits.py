@@ -38,4 +38,3 @@ class JobLimits:
         active_count = sum(1 for job in jobs if job.status in ACTIVE_STATUSES)
         if active_count >= self.max_active_jobs:
             raise LimitError(f"too many active jobs: {active_count} >= {self.max_active_jobs}")
-

@@ -3,6 +3,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from map_platform.geometry import normalize_geometry
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
 
@@ -58,6 +59,49 @@ class ManifestTests(unittest.TestCase):
                 compress_types[f"VECTMAP/{map_id}/+0032+0008/123_456.fmb"],
                 zipfile.ZIP_STORED,
             )
+
+    def test_map_id_includes_custom_polygon_geometry(self):
+        first = fake_job()
+        first.geometry = normalize_geometry(
+            {
+                "mode": "custom_polygon",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [103.0, 1.0],
+                            [104.0, 1.0],
+                            [104.0, 2.0],
+                            [103.0, 2.0],
+                            [103.0, 1.0],
+                        ]
+                    ],
+                },
+            }
+        )
+
+        second = fake_job()
+        second.geometry = normalize_geometry(
+            {
+                "mode": "custom_polygon",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [103.0, 1.0],
+                            [104.0, 1.0],
+                            [103.5, 1.5],
+                            [104.0, 2.0],
+                            [103.0, 2.0],
+                            [103.0, 1.0],
+                        ]
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(first.geometry.bounds, second.geometry.bounds)
+        self.assertNotEqual(stable_map_id(first), stable_map_id(second))
 
 
 if __name__ == "__main__":

@@ -47,4 +47,3 @@ class DownloadSigner:
     def _signature(self, map_id: str, path: Path, expires_at: int) -> str:
         payload = f"{map_id}\n{path}\n{expires_at}".encode("utf-8")
         return hmac.new(self.secret, payload, hashlib.sha256).hexdigest()
-

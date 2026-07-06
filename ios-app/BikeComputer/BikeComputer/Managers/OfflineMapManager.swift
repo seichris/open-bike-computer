@@ -132,7 +132,12 @@ final class OfflineMapManager: ObservableObject {
                 }
 
                 let baseURL = try await self.enableDeviceTransferMode(bleManager: bleManager)
-                let archive = try OfflineMapPackArchive(url: packURL)
+                defer {
+                    bleManager.requestMapTransferMode(enabled: false)
+                }
+                let archive = try await Task.detached(priority: .userInitiated) {
+                    try OfflineMapPackArchive(url: packURL)
+                }.value
                 let sessionId = UUID().uuidString.lowercased()
                 let client = MapTransferDeviceClient(baseURL: baseURL)
                 self.transferProgress = 0

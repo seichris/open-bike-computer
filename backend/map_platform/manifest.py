@@ -24,7 +24,18 @@ class PipelineMetadata:
 def stable_map_id(job: MapJob) -> str:
     display_name = str(job.request.get("displayName", "custom-map"))
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", display_name).strip("-").lower() or "custom-map"
-    source = f"{job.geometry.mode.value}:{job.geometry.bounds.to_list()}:{job.source_region.id}"
+    source = json.dumps(
+        {
+            "mode": job.geometry.mode.value,
+            "bounds": job.geometry.bounds.to_list(),
+            "geometry": job.geometry.geometry,
+            "routePointCount": job.geometry.route_point_count,
+            "corridorWidthM": job.geometry.corridor_width_m,
+            "sourceRegion": job.source_region.id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:10]
     return f"{slug}-{digest}"
 

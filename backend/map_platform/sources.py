@@ -53,4 +53,3 @@ def intersects_bounds(a: Bounds, b: Bounds) -> bool:
         or a.max_lat <= b.min_lat
         or a.min_lat >= b.max_lat
     )
-

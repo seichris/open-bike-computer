@@ -202,15 +202,15 @@ struct OfflineMapPackArchive {
     let url: URL
     let entries: [OfflineMapPackEntry]
 
-    var manifestEntry: OfflineMapPackEntry? {
+    nonisolated var manifestEntry: OfflineMapPackEntry? {
         entries.first { $0.path == "manifest.json" }
     }
 
-    var mapFileEntries: [OfflineMapPackEntry] {
+    nonisolated var mapFileEntries: [OfflineMapPackEntry] {
         entries.filter { $0.path.hasPrefix("VECTMAP/") }
     }
 
-    init(url: URL) throws {
+    nonisolated init(url: URL) throws {
         self.url = url
         self.entries = try Self.readEntries(url: url)
         guard manifestEntry != nil else {
@@ -221,7 +221,7 @@ struct OfflineMapPackArchive {
         }
     }
 
-    func data(for entry: OfflineMapPackEntry) throws -> Data {
+    nonisolated func data(for entry: OfflineMapPackEntry) throws -> Data {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         try handle.seek(toOffset: entry.offset)
@@ -232,7 +232,7 @@ struct OfflineMapPackArchive {
         return data
     }
 
-    private static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {
+    private nonisolated static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard let fileSize = (attributes[.size] as? NSNumber)?.uint64Value else {
             throw OfflineMapPlatformError.invalidPack("file size unavailable")
@@ -307,7 +307,7 @@ struct OfflineMapPackArchive {
         return entries
     }
 
-    private static func isSafePackPath(_ path: String) -> Bool {
+    private nonisolated static func isSafePackPath(_ path: String) -> Bool {
         guard !path.isEmpty,
               !path.hasPrefix("/"),
               !path.contains("\\"),
@@ -333,11 +333,10 @@ struct MapTransferDeviceClient {
     let baseURL: URL
     var session: URLSession = .shared
 
-    @MainActor
-    func upload(
+    nonisolated func upload(
         archive: OfflineMapPackArchive,
         sessionId: String,
-        progress: @escaping (_ completed: Int, _ total: Int, _ path: String) -> Void
+        progress: @escaping @MainActor (_ completed: Int, _ total: Int, _ path: String) -> Void
     ) async throws {
         guard let manifest = archive.manifestEntry else {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
@@ -347,11 +346,11 @@ struct MapTransferDeviceClient {
         for (index, entry) in uploadEntries.enumerated() {
             let data = try archive.data(for: entry)
             try await put(sessionId: sessionId, path: entry.path, data: data)
-            progress(index + 1, uploadEntries.count, entry.path)
+            await progress(index + 1, uploadEntries.count, entry.path)
         }
     }
 
-    func activate(sessionId: String) async throws {
+    nonisolated func activate(sessionId: String) async throws {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
             sessionId: sessionId,
@@ -361,7 +360,7 @@ struct MapTransferDeviceClient {
         _ = try await send(request: request, data: nil)
     }
 
-    private func put(sessionId: String, path: String, data: Data) async throws {
+    private nonisolated func put(sessionId: String, path: String, data: Data) async throws {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
             sessionId: sessionId,
@@ -372,7 +371,7 @@ struct MapTransferDeviceClient {
         _ = try await send(request: request, data: data)
     }
 
-    private func send(request: URLRequest, data: Data?) async throws -> Data {
+    private nonisolated func send(request: URLRequest, data: Data?) async throws -> Data {
         let response: (Data, URLResponse)
         if let data {
             response = try await session.upload(for: request, from: data)
