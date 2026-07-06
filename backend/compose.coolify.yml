@@ -7,10 +7,18 @@ services:
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+      MAP_PLATFORM_API_TOKEN: ${MAP_PLATFORM_API_TOKEN:?set MAP_PLATFORM_API_TOKEN in Coolify secrets}
+      MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
+      MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
     volumes:
       - map-platform-data:/data
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   map-platform-worker:
@@ -22,6 +30,9 @@ services:
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+      MAP_PLATFORM_API_TOKEN: ${MAP_PLATFORM_API_TOKEN:?set MAP_PLATFORM_API_TOKEN in Coolify secrets}
+      MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
+      MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
     volumes:
       - map-platform-data:/data
     restart: unless-stopped

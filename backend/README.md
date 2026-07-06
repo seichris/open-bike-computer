@@ -61,13 +61,16 @@ Use `backend/compose.coolify.yml` as the first Coolify deployment shape. The
 service stores mutable state in the `map-platform-data` volume. The host needs
 enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
+Required Coolify secrets:
+
+- `MAP_PLATFORM_API_TOKEN`: bearer token used by the iOS app for job creation,
+  job polling, maintenance, and signed download URL creation.
+- `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
+  Use a separate long random value so signed URLs survive API restarts without
+  reusing the API token as the signing key.
+
 Useful production environment variables:
 
-- `MAP_PLATFORM_API_TOKEN`: optional bearer token required for mutating API
-  routes when set.
-- `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
-  If unset, the API uses a random per-process secret and signed URLs are
-  invalidated on restart.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
 

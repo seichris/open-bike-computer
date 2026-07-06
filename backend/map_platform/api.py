@@ -60,11 +60,11 @@ def create_app():
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/v1/map-jobs")
+    @app.get("/v1/map-jobs", dependencies=[Depends(require_api_token)])
     def list_map_jobs() -> dict[str, Any]:
         return {"jobs": [job.to_dict() for job in service.list_jobs()]}
 
-    @app.get("/v1/map-jobs/{job_id}")
+    @app.get("/v1/map-jobs/{job_id}", dependencies=[Depends(require_api_token)])
     def get_map_job(job_id: str) -> dict[str, Any]:
         try:
             return service.get_job(job_id).to_dict()
@@ -121,7 +121,7 @@ def create_app():
     def cleanup_work() -> dict[str, int]:
         return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
 
-    @app.get("/v1/map-packs/{map_id}")
+    @app.get("/v1/map-packs/{map_id}", dependencies=[Depends(require_api_token)])
     def get_map_pack(map_id: str) -> dict[str, Any]:
         job = service.find_by_map_id(map_id)
         if not job:
