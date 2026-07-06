@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .manifest import PipelineMetadata, build_manifest, stable_map_id, write_pack_archive
 from .models import JobStatus, MapJob
+from .source_cache import SourceCache
 
 
 @dataclass(frozen=True)
@@ -28,9 +29,10 @@ class CommandRunner:
 
 
 class MapBuildPipeline:
-    def __init__(self, paths: PipelinePaths, runner: CommandRunner | None = None):
+    def __init__(self, paths: PipelinePaths, runner: CommandRunner | None = None, source_cache: SourceCache | None = None):
         self.paths = paths
         self.runner = runner or CommandRunner()
+        self.source_cache = source_cache or SourceCache(paths.repo_root)
 
     def build(self, job: MapJob, on_status=None) -> tuple[str, Path]:
         map_id = stable_map_id(job)
@@ -67,14 +69,7 @@ class MapBuildPipeline:
         return map_id, archive_path
 
     def _source_pbf_path(self, job: MapJob) -> Path:
-        if not job.source_region.local_path:
-            raise FileNotFoundError(f"source region {job.source_region.id} has no localPath configured")
-        source = Path(job.source_region.local_path)
-        if not source.is_absolute():
-            source = self.paths.repo_root / source
-        if not source.exists():
-            raise FileNotFoundError(f"source PBF is missing: {source}")
-        return source
+        return self.source_cache.ensure(job.source_region).path
 
     def _extract_pbf(self, job: MapJob, source_pbf: Path, clipped_pbf: Path) -> None:
         bounds = job.geometry.bounds

@@ -5,6 +5,7 @@ __all__ = [
     "jobs",
     "manifest",
     "pipeline",
+    "source_cache",
     "sources",
+    "worker",
 ]
-

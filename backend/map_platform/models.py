@@ -23,6 +23,7 @@ class JobStatus(str, Enum):
     READY = "ready"
     FAILED = "failed"
     EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
 
 def utc_now_iso() -> str:
@@ -123,6 +124,12 @@ class MapJob:
     error: str | None = None
     map_id: str | None = None
     pack_path: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    worker_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +143,12 @@ class MapJob:
             "error": self.error,
             "mapId": self.map_id,
             "packPath": self.pack_path,
+            "attempts": self.attempts,
+            "maxAttempts": self.max_attempts,
+            "workerId": self.worker_id,
+            "startedAt": self.started_at,
+            "finishedAt": self.finished_at,
+            "events": self.events,
         }
 
     @classmethod
@@ -161,5 +174,10 @@ class MapJob:
             error=data.get("error"),
             map_id=data.get("mapId"),
             pack_path=data.get("packPath"),
+            attempts=int(data.get("attempts", 0)),
+            max_attempts=int(data.get("maxAttempts", 3)),
+            worker_id=data.get("workerId"),
+            started_at=data.get("startedAt"),
+            finished_at=data.get("finishedAt"),
+            events=list(data.get("events", [])),
         )
-

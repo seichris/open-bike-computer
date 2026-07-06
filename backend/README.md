@@ -44,9 +44,16 @@ Run a job:
 python -m map_platform.cli run-job <job-id>
 ```
 
+Run the production-style queue worker:
+
+```sh
+python -m map_platform.cli worker-loop
+```
+
 The configured source PBF must exist under `backend/data/source-pbf/` before a
-worker can run. The source index stores the Geofabrik URLs to fetch into that
-cache.
+worker can run, or the worker will download it into the configured data root
+through the source cache. The source index stores the Geofabrik URLs to fetch
+into that cache.
 
 ## Coolify
 
@@ -56,4 +63,3 @@ enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
 Tailscale SSH can still be used for bootstrap and incident response when browser
 authorization has been completed, but normal deploys should go through Coolify.
-

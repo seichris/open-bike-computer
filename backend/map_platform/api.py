@@ -6,7 +6,9 @@ from typing import Any
 
 from .jobs import JobStore, MapJobService
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .source_cache import SourceCache, SourceCacheError
 from .sources import SourceIndex
+from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 
 def create_app():
@@ -21,8 +23,10 @@ def create_app():
     )
     data_root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", repo_root / "backend" / "data"))
     service = MapJobService(SourceIndex.from_json(source_index_path), JobStore(data_root / "jobs"))
+    source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(
-        PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs")
+        PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
+        source_cache=source_cache,
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
@@ -61,6 +65,48 @@ def create_app():
             raise HTTPException(status_code=404, detail="job not found") from exc
         return run_job(service.store, pipeline, job_id).to_dict()
 
+    @app.post("/v1/map-jobs/{job_id}/cancel")
+    def cancel_map_job(job_id: str) -> dict[str, Any]:
+        try:
+            return service.cancel_job(job_id).to_dict()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+
+    @app.post("/v1/workers/run-next")
+    def run_next_job() -> dict[str, Any]:
+        result = MapWorker(service.store, pipeline).run_next()
+        return {
+            "workerId": result.worker_id,
+            "processed": result.processed,
+            "job": result.job.to_dict() if result.job else None,
+        }
+
+    @app.post("/v1/source-regions/{region_id}/cache")
+    def cache_source_region(region_id: str) -> dict[str, Any]:
+        matches = [region for region in service.source_index.regions if region.id == region_id]
+        if not matches:
+            raise HTTPException(status_code=404, detail="source region not found")
+        try:
+            cached = source_cache.ensure(matches[0], force=True)
+        except SourceCacheError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "regionId": cached.region_id,
+            "path": str(cached.path),
+            "bytes": cached.bytes,
+            "sha256": cached.sha256,
+            "cachedAt": cached.cached_at,
+        }
+
+    @app.post("/v1/maintenance/expire")
+    def expire_map_packs(payload: dict[str, Any] | None = None) -> dict[str, int]:
+        older_than_days = int((payload or {}).get("olderThanDays", 30))
+        return {"expired": expire_ready_jobs(service.store, older_than_days=older_than_days)}
+
+    @app.post("/v1/maintenance/cleanup-work")
+    def cleanup_work() -> dict[str, int]:
+        return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
+
     @app.get("/v1/map-packs/{map_id}")
     def get_map_pack(map_id: str) -> dict[str, Any]:
         matches = [job for job in service.list_jobs() if job.map_id == map_id]
@@ -79,4 +125,3 @@ def create_app():
 
 
 app = create_app()
-

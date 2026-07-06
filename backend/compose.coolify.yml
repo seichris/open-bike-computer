@@ -13,6 +13,18 @@ services:
       - "8080:8080"
     restart: unless-stopped
 
+  map-platform-worker:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    command: ["map-platform", "worker-loop", "--idle-sleep-seconds", "10"]
+    environment:
+      MAP_PLATFORM_REPO_ROOT: /app
+      MAP_PLATFORM_DATA_ROOT: /data
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+    volumes:
+      - map-platform-data:/data
+    restart: unless-stopped
+
 volumes:
   map-platform-data:
-
