@@ -61,5 +61,15 @@ Use `backend/compose.coolify.yml` as the first Coolify deployment shape. The
 service stores mutable state in the `map-platform-data` volume. The host needs
 enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 
+Useful production environment variables:
+
+- `MAP_PLATFORM_API_TOKEN`: optional bearer token required for mutating API
+  routes when set.
+- `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
+  If unset, the API uses a random per-process secret and signed URLs are
+  invalidated on restart.
+- `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
+  API, default `25`.
+
 Tailscale SSH can still be used for bootstrap and incident response when browser
 authorization has been completed, but normal deploys should go through Coolify.

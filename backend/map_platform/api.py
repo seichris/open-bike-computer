@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
+from .downloads import DownloadSigner, DownloadTokenError
 from .jobs import JobStore, MapJobService
+from .limits import JobLimits
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .source_cache import SourceCache, SourceCacheError
 from .sources import SourceIndex
@@ -13,7 +16,8 @@ from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 def create_app():
     try:
-        from fastapi import FastAPI, HTTPException
+        from fastapi import Depends, FastAPI, Header, HTTPException
+        from fastapi.responses import FileResponse
     except ImportError as exc:
         raise RuntimeError("Install backend API dependencies with `pip install -e backend[api]`") from exc
 
@@ -22,7 +26,11 @@ def create_app():
         os.environ.get("MAP_PLATFORM_SOURCE_INDEX", repo_root / "backend" / "config" / "source-regions.json")
     )
     data_root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", repo_root / "backend" / "data"))
-    service = MapJobService(SourceIndex.from_json(source_index_path), JobStore(data_root / "jobs"))
+    api_token = os.environ.get("MAP_PLATFORM_API_TOKEN")
+    download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or api_token or secrets.token_urlsafe(32)
+    download_signer = DownloadSigner(download_secret)
+    limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
+    service = MapJobService(SourceIndex.from_json(source_index_path), JobStore(data_root / "jobs"), limits=limits)
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
@@ -30,6 +38,12 @@ def create_app():
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
+
+    def require_api_token(authorization: str | None = Header(default=None)) -> None:
+        if not api_token:
+            return
+        if authorization != f"Bearer {api_token}":
+            raise HTTPException(status_code=401, detail="invalid API token")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -39,7 +53,7 @@ def create_app():
     def source_regions() -> dict[str, Any]:
         return service.source_index.to_dict()
 
-    @app.post("/v1/map-jobs")
+    @app.post("/v1/map-jobs", dependencies=[Depends(require_api_token)])
     def create_map_job(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return service.create_job(payload).to_dict()
@@ -57,7 +71,7 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
-    @app.post("/v1/map-jobs/{job_id}/run")
+    @app.post("/v1/map-jobs/{job_id}/run", dependencies=[Depends(require_api_token)])
     def run_map_job(job_id: str) -> dict[str, Any]:
         try:
             service.get_job(job_id)
@@ -65,14 +79,14 @@ def create_app():
             raise HTTPException(status_code=404, detail="job not found") from exc
         return run_job(service.store, pipeline, job_id).to_dict()
 
-    @app.post("/v1/map-jobs/{job_id}/cancel")
+    @app.post("/v1/map-jobs/{job_id}/cancel", dependencies=[Depends(require_api_token)])
     def cancel_map_job(job_id: str) -> dict[str, Any]:
         try:
             return service.cancel_job(job_id).to_dict()
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
-    @app.post("/v1/workers/run-next")
+    @app.post("/v1/workers/run-next", dependencies=[Depends(require_api_token)])
     def run_next_job() -> dict[str, Any]:
         result = MapWorker(service.store, pipeline).run_next()
         return {
@@ -81,7 +95,7 @@ def create_app():
             "job": result.job.to_dict() if result.job else None,
         }
 
-    @app.post("/v1/source-regions/{region_id}/cache")
+    @app.post("/v1/source-regions/{region_id}/cache", dependencies=[Depends(require_api_token)])
     def cache_source_region(region_id: str) -> dict[str, Any]:
         matches = [region for region in service.source_index.regions if region.id == region_id]
         if not matches:
@@ -98,28 +112,48 @@ def create_app():
             "cachedAt": cached.cached_at,
         }
 
-    @app.post("/v1/maintenance/expire")
+    @app.post("/v1/maintenance/expire", dependencies=[Depends(require_api_token)])
     def expire_map_packs(payload: dict[str, Any] | None = None) -> dict[str, int]:
         older_than_days = int((payload or {}).get("olderThanDays", 30))
         return {"expired": expire_ready_jobs(service.store, older_than_days=older_than_days)}
 
-    @app.post("/v1/maintenance/cleanup-work")
+    @app.post("/v1/maintenance/cleanup-work", dependencies=[Depends(require_api_token)])
     def cleanup_work() -> dict[str, int]:
         return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
 
     @app.get("/v1/map-packs/{map_id}")
     def get_map_pack(map_id: str) -> dict[str, Any]:
-        matches = [job for job in service.list_jobs() if job.map_id == map_id]
-        if not matches:
+        job = service.find_by_map_id(map_id)
+        if not job:
             raise HTTPException(status_code=404, detail="map pack not found")
-        return matches[0].to_dict()
+        return job.to_dict()
 
-    @app.post("/v1/map-packs/{map_id}/download-url")
+    @app.post("/v1/map-packs/{map_id}/download-url", dependencies=[Depends(require_api_token)])
     def create_download_url(map_id: str) -> dict[str, Any]:
-        matches = [job for job in service.list_jobs() if job.map_id == map_id]
-        if not matches or not matches[0].pack_path:
+        job = service.find_by_map_id(map_id)
+        if not job or not job.pack_path:
             raise HTTPException(status_code=404, detail="map pack not ready")
-        return {"mapId": map_id, "url": Path(matches[0].pack_path).as_uri(), "expiresInSeconds": 900}
+        signed = download_signer.sign(map_id, job.pack_path, ttl_seconds=900)
+        return {
+            "mapId": map_id,
+            "url": f"/v1/map-packs/{map_id}/download?{signed.query()}",
+            "expiresAt": signed.expires_at,
+            "expiresInSeconds": 900,
+        }
+
+    @app.get("/v1/map-packs/{map_id}/download")
+    def download_map_pack(map_id: str, expires: int, signature: str):
+        job = service.find_by_map_id(map_id)
+        if not job or not job.pack_path:
+            raise HTTPException(status_code=404, detail="map pack not ready")
+        try:
+            download_signer.verify(map_id, job.pack_path, expires_at=expires, signature=signature)
+        except DownloadTokenError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        pack_path = Path(job.pack_path)
+        if not pack_path.exists():
+            raise HTTPException(status_code=404, detail="map pack file not found")
+        return FileResponse(pack_path, media_type="application/zip", filename=pack_path.name)
 
     return app
 

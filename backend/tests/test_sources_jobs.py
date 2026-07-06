@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from map_platform.jobs import JobStore, MapJobService
+from map_platform.limits import JobLimits
 from map_platform.models import Bounds, SourceRegion
 from map_platform.sources import SourceIndex, SourceResolutionError
 
@@ -55,7 +56,26 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertEqual(loaded.source_region.id, "sg")
             self.assertEqual(loaded.request["displayName"], "Singapore central")
 
+    def test_create_job_enforces_active_job_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)), limits=JobLimits(max_active_jobs=1))
+            service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "displayName": "Singapore central",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            with self.assertRaises(ValueError):
+                service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "displayName": "Singapore north",
+                        "bbox": [103.75, 1.37, 103.93, 1.47],
+                    }
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
-

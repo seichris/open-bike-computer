@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .geometry import GeometryError, normalize_geometry
+from .limits import JobLimits, LimitError
 from .models import JobStatus, MapJob, utc_now_iso
 from .sources import SourceIndex, SourceResolutionError
 
@@ -196,15 +197,18 @@ class JobStore:
 
 
 class MapJobService:
-    def __init__(self, source_index: SourceIndex, store: JobStore):
+    def __init__(self, source_index: SourceIndex, store: JobStore, limits: JobLimits | None = None):
         self.source_index = source_index
         self.store = store
+        self.limits = limits or JobLimits()
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         try:
             geometry = normalize_geometry(request)
+            self.limits.validate_geometry(geometry)
+            self.limits.validate_active_jobs(self.store.list())
             source = self.source_index.resolve_for_bounds(geometry.bounds)
-        except (GeometryError, SourceResolutionError) as exc:
+        except (GeometryError, LimitError, SourceResolutionError) as exc:
             raise ValueError(str(exc)) from exc
         job = MapJob(
             job_id=self._new_job_id(),
@@ -221,6 +225,12 @@ class MapJobService:
 
     def list_jobs(self) -> list[MapJob]:
         return self.store.list()
+
+    def find_by_map_id(self, map_id: str) -> MapJob | None:
+        for job in self.store.list():
+            if job.map_id == map_id:
+                return job
+        return None
 
     def cancel_job(self, job_id: str) -> MapJob:
         job = self.store.get(job_id)

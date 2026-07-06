@@ -2,7 +2,9 @@
 
 __all__ = [
     "geometry",
+    "downloads",
     "jobs",
+    "limits",
     "manifest",
     "pipeline",
     "source_cache",
