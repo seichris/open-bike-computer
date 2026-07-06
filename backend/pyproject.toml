@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-bike-map-platform"
+version = "0.1.0"
+description = "Offline map generation backend for Open Bike Computer"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1"
+]
+test = []
+
+[project.scripts]
+map-platform = "map_platform.cli:main"
+
+[tool.setuptools]
+packages = ["map_platform"]
+

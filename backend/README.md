@@ -1,0 +1,59 @@
+# Offline Map Platform Backend
+
+This backend creates ESP32-compatible offline map packs from OpenStreetMap PBF
+sources. It implements the production contract described in
+`docs/offline-map-platform-implementation-plan.md`.
+
+## What is implemented
+
+- `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
+  corridor requests.
+- Source-region resolution from `backend/config/source-regions.json`.
+- File-backed job storage for local/Coolify deployment.
+- Worker wrapper for `osmium extract` plus `OSM_Extract`.
+- Map-pack manifest generation with file hashes and OSM attribution.
+- Local `.zip` artifact packaging.
+- Coolify-oriented compose file and Dockerfile.
+
+## Local API
+
+```sh
+cd backend
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ".[api]"
+uvicorn map_platform.api:app --reload --port 8080
+```
+
+Create a custom bbox job:
+
+```sh
+curl -s http://localhost:8080/v1/map-jobs \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "custom_bbox",
+    "displayName": "Singapore central",
+    "bbox": [103.75, 1.24, 103.93, 1.37],
+    "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
+  }'
+```
+
+Run a job:
+
+```sh
+python -m map_platform.cli run-job <job-id>
+```
+
+The configured source PBF must exist under `backend/data/source-pbf/` before a
+worker can run. The source index stores the Geofabrik URLs to fetch into that
+cache.
+
+## Coolify
+
+Use `backend/compose.coolify.yml` as the first Coolify deployment shape. The
+service stores mutable state in the `map-platform-data` volume. The host needs
+enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
+
+Tailscale SSH can still be used for bootstrap and incident response when browser
+authorization has been completed, but normal deploys should go through Coolify.
+

@@ -1,0 +1,32 @@
+{
+  "regions": [
+    {
+      "id": "geofabrik-asia-malaysia-singapore-brunei",
+      "provider": "geofabrik",
+      "name": "Malaysia, Singapore, and Brunei",
+      "url": "https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf",
+      "bounds": [98.0, -1.8, 120.2, 7.6],
+      "localPath": "backend/data/source-pbf/malaysia-singapore-brunei-latest.osm.pbf",
+      "license": "ODbL-1.0"
+    },
+    {
+      "id": "geofabrik-europe-germany",
+      "provider": "geofabrik",
+      "name": "Germany",
+      "url": "https://download.geofabrik.de/europe/germany-latest.osm.pbf",
+      "bounds": [5.5, 47.0, 15.5, 55.2],
+      "localPath": "backend/data/source-pbf/germany-latest.osm.pbf",
+      "license": "ODbL-1.0"
+    },
+    {
+      "id": "geofabrik-asia-taiwan",
+      "provider": "geofabrik",
+      "name": "Taiwan",
+      "url": "https://download.geofabrik.de/asia/taiwan-latest.osm.pbf",
+      "bounds": [119.0, 21.7, 123.0, 25.8],
+      "localPath": "backend/data/source-pbf/taiwan-latest.osm.pbf",
+      "license": "ODbL-1.0"
+    }
+  ]
+}
+

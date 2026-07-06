@@ -5,6 +5,7 @@ esp32/.vscode/launch.json
 esp32/.vscode/ipch
 
 **/.DS_Store
+**/__pycache__/
 ios-app/*.swp
 ios-app/*.xcuserstate
 ios-app/xcuserdata/
@@ -42,6 +43,10 @@ OSM_Extract/maps/
 OSM_Extract/pbf
 OSM_Extract/__pycache__
 OSM_Extract/conf/test*
+
+backend/.venv/
+backend/data/*
+!backend/data/.gitkeep
 
 # waveshare_demo/
 waveshare_demo//IceNav-v3/
