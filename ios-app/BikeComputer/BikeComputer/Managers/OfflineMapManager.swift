@@ -15,6 +15,7 @@ private enum OfflineMapDefaults {
     nonisolated static let centerLatitudeKey = "offlineMap.centerLatitude"
     nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
+    nonisolated static let packDisplayNamesKey = "offlineMap.packDisplayNames"
     nonisolated static let legacyServerURLs = [
         "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
     ]
@@ -51,9 +52,11 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private let defaults: UserDefaults
+    private var packDisplayNames: [String: String]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.packDisplayNames = defaults.dictionary(forKey: OfflineMapDefaults.packDisplayNamesKey) as? [String: String] ?? [:]
         self.serverURLString = Self.resolvedServerURL(defaults: defaults)
         self.apiToken = Self.resolvedAPIToken(defaults: defaults)
         self.centerLatitude = defaults.string(forKey: OfflineMapDefaults.centerLatitudeKey) ?? "35.16755"
@@ -164,9 +167,48 @@ final class OfflineMapManager: ObservableObject {
     func transferDownloadedPack(bleManager: BLEManager) {
         Task {
             await runBusy {
-                try await self.transferReadyPack(bleManager: bleManager)
+                guard let packURL = self.downloadedPackURL else {
+                    throw OfflineMapPlatformError.missingDownloadURL
+                }
+                try await self.transferPack(at: packURL, bleManager: bleManager)
             }
         }
+    }
+
+    func transferCachedPack(at packURL: URL, bleManager: BLEManager) {
+        Task {
+            await runBusy {
+                try await self.transferPack(at: packURL, bleManager: bleManager)
+            }
+        }
+    }
+
+    func deleteCachedPack(at packURL: URL) {
+        do {
+            if FileManager.default.fileExists(atPath: packURL.path) {
+                try FileManager.default.removeItem(at: packURL)
+            }
+            packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
+            persistPackDisplayNames()
+            if downloadedPackURL == packURL {
+                downloadedPackURL = nil
+                transferProgress = 0
+            }
+            refreshCachedPacks()
+        } catch {
+            errorMessage = diagnosticMessage(for: error)
+        }
+    }
+
+    func displayName(forCachedPack packURL: URL) -> String {
+        if let displayName = packDisplayNames[packURL.lastPathComponent], !displayName.isEmpty {
+            return displayName
+        }
+        if currentJob?.mapId == packURL.deletingPathExtension().lastPathComponent,
+           let displayName = displayNameForCurrentJob() {
+            return displayName
+        }
+        return packURL.deletingPathExtension().lastPathComponent
     }
 
     func makeCustomBBoxRequest() throws -> OfflineMapJobRequest {
@@ -278,6 +320,10 @@ final class OfflineMapManager: ObservableObject {
         }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
         downloadedPackURL = destination
+        if let displayName = displayNameForCurrentJob() {
+            packDisplayNames[destination.lastPathComponent] = displayName
+            persistPackDisplayNames()
+        }
         refreshCachedPacks()
         downloadProgress = 1
         downloadByteProgress = nil
@@ -289,7 +335,11 @@ final class OfflineMapManager: ObservableObject {
         guard let packURL = downloadedPackURL else {
             throw OfflineMapPlatformError.missingDownloadURL
         }
+        try await transferPack(at: packURL, bleManager: bleManager)
+    }
 
+    private func transferPack(at packURL: URL, bleManager: BLEManager) async throws {
+        downloadedPackURL = packURL
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
         defer {
             bleManager.requestMapTransferMode(enabled: false)
@@ -310,6 +360,28 @@ final class OfflineMapManager: ObservableObject {
         transferProgress = 1
         statusMessage = "map installed"
         bleManager.requestMapTransferStatus()
+    }
+
+    private func displayNameForCurrentJob() -> String? {
+        if let regionName = currentJob?.sourceRegion?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+           !regionName.isEmpty {
+            return Self.cleanDisplayName(regionName)
+        }
+        if let mapId = currentJob?.mapId, !mapId.isEmpty {
+            return mapId
+        }
+        return nil
+    }
+
+    private static func cleanDisplayName(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "-latest.osm.pbf", with: "")
+            .replacingOccurrences(of: ".osm.pbf", with: "")
+            .replacingOccurrences(of: ".zip", with: "")
+    }
+
+    private func persistPackDisplayNames() {
+        defaults.set(packDisplayNames, forKey: OfflineMapDefaults.packDisplayNamesKey)
     }
 
     private func cachedPackURL(mapId: String) throws -> URL {

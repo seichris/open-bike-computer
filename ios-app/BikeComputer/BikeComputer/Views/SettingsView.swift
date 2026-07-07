@@ -113,6 +113,7 @@ private struct OfflineMapSelectionSettingsSection: View {
 }
 
 private struct DownloadedMapsSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
@@ -122,10 +123,8 @@ private struct DownloadedMapsSettingsSection: View {
                     .foregroundColor(.secondary)
             } else {
                 ForEach(manager.cachedPackURLs, id: \.self) { packURL in
-                    SettingsValueRow(
-                        title: packURL == manager.downloadedPackURL ? "Current Pack" : "Pack",
-                        value: packURL.lastPathComponent
-                    )
+                    DownloadedMapRow(manager: manager, packURL: packURL)
+                        .environmentObject(bleManager)
                 }
             }
 
@@ -145,6 +144,41 @@ private struct DownloadedMapsSettingsSection: View {
     }
 }
 
+private struct DownloadedMapRow: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: OfflineMapManager
+    let packURL: URL
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(manager.displayName(forCachedPack: packURL))
+                .lineLimit(2)
+
+            Spacer()
+
+            Button {
+                manager.transferCachedPack(at: packURL, bleManager: bleManager)
+            } label: {
+                Image(systemName: "arrow.up.circle")
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .disabled(manager.isBusy || !bleManager.isNavigationReady)
+            .accessibilityLabel("Transfer map to device")
+
+            Button(role: .destructive) {
+                manager.deleteCachedPack(at: packURL)
+            } label: {
+                Image(systemName: "trash")
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .disabled(manager.isBusy)
+            .accessibilityLabel("Delete map")
+        }
+    }
+}
+
 private struct OfflineMapDeviceTransferSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
@@ -160,18 +194,8 @@ private struct OfflineMapDeviceTransferSettingsSection: View {
                 value: bleManager.mapTransferStatusDescription
             )
             if let localURL = manager.downloadedPackURL {
-                SettingsValueRow(title: "Pack", value: localURL.lastPathComponent)
+                SettingsValueRow(title: "Selected Map", value: manager.displayName(forCachedPack: localURL))
             }
-
-            Button(action: { bleManager.requestMapTransferMode(enabled: true) }) {
-                Label("Enable Transfer Mode", systemImage: "wifi")
-            }
-            .disabled(!bleManager.isNavigationReady)
-
-            Button(action: { manager.transferDownloadedPack(bleManager: bleManager) }) {
-                Label("Upload to Device", systemImage: "sdcard")
-            }
-            .disabled(manager.isBusy || !bleManager.isNavigationReady || manager.downloadedPackURL == nil)
 
             if manager.transferProgress > 0 && manager.transferProgress < 1 {
                 ProgressView(value: manager.transferProgress)
