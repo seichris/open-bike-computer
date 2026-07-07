@@ -8,6 +8,9 @@
 import CoreLocation
 import Combine
 import Foundation
+#if os(iOS)
+import NetworkExtension
+#endif
 
 private enum OfflineMapDefaults {
     nonisolated static let serverURLKey = "offlineMap.serverURL"
@@ -350,6 +353,8 @@ final class OfflineMapManager: ObservableObject {
         }.value
         statusMessage = "requesting device transfer mode"
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
+        try await joinDeviceTransferNetworkIfNeeded(bleManager: bleManager,
+                                                    baseURL: baseURL)
         defer {
             bleManager.requestMapTransferMode(enabled: false)
         }
@@ -486,6 +491,69 @@ final class OfflineMapManager: ObservableObject {
             try await Task.sleep(nanoseconds: 250_000_000)
         }
         throw OfflineMapPlatformError.missingTransferBaseURL
+    }
+
+    private func joinDeviceTransferNetworkIfNeeded(bleManager: BLEManager,
+                                                   baseURL: URL) async throws {
+        guard baseURL.host == "192.168.4.1",
+              let ssid = bleManager.mapTransferAccessPointSSID,
+              !ssid.isEmpty else {
+            return
+        }
+
+#if os(iOS)
+        statusMessage = "joining device Wi-Fi"
+        let configuration = NEHotspotConfiguration(ssid: ssid)
+        configuration.joinOnce = true
+
+        do {
+            try await withCheckedThrowingContinuation { continuation in
+                NEHotspotConfigurationManager.shared.apply(configuration) { error in
+                    if let error = error as NSError? {
+                        let message = error.localizedDescription
+                        if message.localizedCaseInsensitiveContains("already") {
+                            continuation.resume()
+                        } else {
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    continuation.resume()
+                }
+            }
+        } catch {
+            if await isDeviceTransferServerReachable(baseURL: baseURL) {
+                return
+            }
+            throw OfflineMapPlatformError.transferWiFiJoinFailed(
+                ssid,
+                "\(error.localizedDescription). Join \(ssid) in iOS Wi-Fi Settings, then retry."
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        if await isDeviceTransferServerReachable(baseURL: baseURL) {
+            return
+        }
+        throw OfflineMapPlatformError.transferWiFiJoinFailed(
+            ssid,
+            "Join \(ssid) in iOS Wi-Fi Settings, then retry."
+        )
+#endif
+    }
+
+    private func isDeviceTransferServerReachable(baseURL: URL) async -> Bool {
+        let url = baseURL.appendingPathComponent("map-transfer/status")
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 3
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {

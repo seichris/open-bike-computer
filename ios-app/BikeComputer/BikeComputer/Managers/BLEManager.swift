@@ -215,6 +215,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var debugEvents: [String] = []
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
+    @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
@@ -790,6 +791,7 @@ class BLEManager: NSObject, ObservableObject {
         isNavigationReady = false
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
+        mapTransferAccessPointSSID = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         deviceHasSDCard = nil
@@ -1319,6 +1321,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isNavigationReady = false
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
+        mapTransferAccessPointSSID = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         deviceHasSDCard = nil
@@ -1603,6 +1606,7 @@ extension BLEManager: CBPeripheralDelegate {
         } else {
             mapTransferBaseURL = nil
         }
+        mapTransferAccessPointSSID = object["apSsid"] as? String
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool

@@ -166,6 +166,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case missingDownloadURL
     case transferCommandNotSent
     case missingTransferBaseURL
+    case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
@@ -183,6 +184,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device did not accept the map transfer command over BLE"
         case .missingTransferBaseURL:
             return "Device map transfer mode is not ready"
+        case .transferWiFiJoinFailed(let ssid, let message):
+            return "Could not join device Wi-Fi \(ssid): \(message)"
         case .invalidPack(let message):
             return "Invalid map pack: \(message)"
         case .unsupportedPackCompression(let path):
