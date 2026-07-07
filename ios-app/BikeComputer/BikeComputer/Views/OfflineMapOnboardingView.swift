@@ -118,7 +118,7 @@ struct OfflineMapOnboardingView: View {
                         .multilineTextAlignment(.center)
                 } else {
                     Button(action: onChooseArea) {
-                        Label("Choose Area on Map", systemImage: "rectangle.dashed")
+                        Label("Choose Area", systemImage: "rectangle.dashed")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -159,7 +159,7 @@ private enum OfflineMapOnboardingStep {
         case .device:
             return "Connect Your Bike Computer"
         case .download:
-            return "Choose Map Area"
+            return "Download Map"
         }
     }
 
@@ -170,7 +170,7 @@ private enum OfflineMapOnboardingStep {
         case .device:
             return "Boot the device and keep it nearby. The app will continue when BLE is connected."
         case .download:
-            return "Move the map to frame the area you want, then download that exact cut-out to this iPhone."
+            return "Download your current area to your Bike Computer."
         }
     }
 }

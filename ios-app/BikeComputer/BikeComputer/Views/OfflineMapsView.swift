@@ -22,9 +22,12 @@ struct OfflineMapsView: View {
                 }
             }
 
-            Section(header: Text("Map Selection")) {
+            Section(header: Text("Download Map")) {
+                Text("Move the map to frame the area you want to download to your Bike Computer.")
+                    .foregroundColor(.secondary)
+
                 Button(action: manager.beginMapAreaSelection) {
-                    Label("Choose Area on Map", systemImage: "rectangle.dashed")
+                    Label("Choose Area", systemImage: "rectangle.dashed")
                 }
                 .disabled(manager.isBusy)
 
