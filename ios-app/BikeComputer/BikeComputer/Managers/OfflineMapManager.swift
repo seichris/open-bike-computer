@@ -16,6 +16,7 @@ private enum OfflineMapDefaults {
     nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
     nonisolated static let packDisplayNamesKey = "offlineMap.packDisplayNames"
+    nonisolated static let mapJobPollAttempts = 1800
     nonisolated static let legacyServerURLs = [
         "http://rhi0maej6bwo33hn0im6h4lf.178.18.245.246.sslip.io"
     ]
@@ -280,7 +281,7 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.invalidResponse
         }
 
-        for _ in 0..<180 {
+        for _ in 0..<OfflineMapDefaults.mapJobPollAttempts {
             let job = try await client.job(id: jobId)
             currentJob = job
             statusMessage = job.status
@@ -293,7 +294,10 @@ final class OfflineMapManager: ObservableObject {
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        throw OfflineMapPlatformError.serverStatus(408, "Map job did not finish in time")
+        throw OfflineMapPlatformError.serverStatus(
+            408,
+            "Map job is still running. Larger areas can take a long time to prepare."
+        )
     }
 
     private func downloadReadyPack(client: OfflineMapPlatformClient) async throws {
@@ -486,6 +490,10 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func diagnosticMessage(for error: Error) -> String {
+        if error is OfflineMapPlatformError {
+            return error.localizedDescription
+        }
+
         let nsError = error as NSError
         var parts = [error.localizedDescription]
         if nsError.domain != NSCocoaErrorDomain || nsError.code != 0 {
