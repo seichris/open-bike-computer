@@ -53,6 +53,7 @@ static volatile bool navDataUpdated = false;
 static bool bleSessionAuthenticated = false;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
+static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
@@ -508,6 +509,9 @@ static std::string mapTransferStatusJson() {
 }
 
 static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
   if (pChar == nullptr) {
     return;
   }
@@ -1010,6 +1014,25 @@ class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
+
+    if (hasPrefix(value, "MTRN")) {
+      if (!requireAuthenticated("native map transfer control")) {
+        return;
+      }
+      handleMapTransferControlPayload((const uint8_t *)value.data() + 4,
+                                      value.length() - 4,
+                                      mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "MSTS")) {
+      if (!requireAuthenticated("native map transfer status")) {
+        return;
+      }
+      notifyMapTransferStatus(mapTransferStatusCharacteristic);
+      return;
+    }
+
     if (!requireAuthenticated("map setting")) {
       return;
     }
@@ -1102,6 +1125,7 @@ void BLENavigationServer::init(const char *deviceName) {
       NIMBLE_PROPERTY::WRITE_NR |
           NIMBLE_PROPERTY::NOTIFY // Added NOTIFY support just in case
   );
+  mapTransferStatusCharacteristic = pNavCharacteristic;
   pNavCharacteristic->setCallbacks(new MyNavCharacteristicCallbacks());
 
   // Create local auth characteristic required by the current iOS app before it

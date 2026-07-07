@@ -702,12 +702,19 @@ class BLEManager: NSObject, ObservableObject {
     func requestMapTransferMode(enabled: Bool) -> Bool {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
+        if sendNativeMapTransferPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit") {
+            return true
+        }
         return sendFallbackMapPacket(packet, label: enabled ? "map transfer enter" : "map transfer exit")
     }
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
-        sendFallbackMapPacket(Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8), label: "map transfer status")
+        let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
+        if sendNativeMapTransferPacket(packet, label: "map transfer status") {
+            return true
+        }
+        return sendFallbackMapPacket(packet, label: "map transfer status")
     }
 
     func sendDebugNavigationPacket() {
@@ -1124,6 +1131,39 @@ class BLEManager: NSObject, ObservableObject {
 
         enqueueNavigationWrite(data, endpoint: endpoint, label: "fallback \(label)")
         log("Queued fallback \(label): \(data.count) bytes")
+        return true
+    }
+
+    @discardableResult
+    private func sendNativeMapTransferPacket(_ data: Data, label: String) -> Bool {
+        guard isConnected,
+              isNavigationReady,
+              let peripheral = connectedPeripheral,
+              let characteristic = settingsCharacteristic,
+              data.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+            return false
+        }
+
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        log("Sent native \(label): \(data.count) bytes")
+        return true
+    }
+
+    func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while navigationWriteQueue.count > 0 {
+            if let endpoint = navigationWriteEndpoint {
+                flushPendingNavigationWrites(endpoint: endpoint)
+            }
+            if navigationWriteQueue.count == 0 {
+                return true
+            }
+            if Date() >= deadline {
+                log("Navigation write queue did not drain before timeout")
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         return true
     }
 

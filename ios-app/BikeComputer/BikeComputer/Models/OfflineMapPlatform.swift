@@ -164,6 +164,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case invalidBaseURL
     case missingMapId
     case missingDownloadURL
+    case transferCommandNotSent
     case missingTransferBaseURL
     case invalidPack(String)
     case unsupportedPackCompression(String)
@@ -178,6 +179,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Map pack is not ready"
         case .missingDownloadURL:
             return "Download URL is not ready"
+        case .transferCommandNotSent:
+            return "Device did not accept the map transfer command over BLE"
         case .missingTransferBaseURL:
             return "Device map transfer mode is not ready"
         case .invalidPack(let message):

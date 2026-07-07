@@ -473,6 +473,9 @@ final class OfflineMapManager: ObservableObject {
         guard bleManager.requestMapTransferStatus() else {
             throw OfflineMapPlatformError.missingTransferBaseURL
         }
+        guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
+            throw OfflineMapPlatformError.transferCommandNotSent
+        }
         for attempt in 0..<32 {
             if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
                 return baseURL
