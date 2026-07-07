@@ -21,6 +21,9 @@ struct ContentView: View {
     @State private var openOfflineMapsInSettings = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
+    @State private var offlineMapSelectionSideLength: CGFloat?
+    @State private var offlineMapSelectionCenterY: CGFloat?
+    @State private var offlineMapSelectionDragStartFrame: CGRect?
     
     var body: some View {
         GeometryReader { proxy in
@@ -88,6 +91,10 @@ struct ContentView: View {
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false
+                offlineMapSelectionSideLength = nil
+                offlineMapSelectionCenterY = nil
+            } else {
+                offlineMapSelectionDragStartFrame = nil
             }
         }
     }
@@ -265,14 +272,18 @@ struct ContentView: View {
     }
 
     private func offlineMapSelectionFrame(in size: CGSize) -> CGRect {
-        let width = min(max(size.width - 48, 180), 360)
-        let height = min(width * 0.72, size.height * 0.42)
+        let sideLength = offlineMapSelectionSideLength ?? defaultOfflineMapSelectionSideLength(in: size)
+        let centerY = offlineMapSelectionCenterY ?? size.height / 2
         return CGRect(
-            x: (size.width - width) / 2,
-            y: (size.height - height) / 2,
-            width: width,
-            height: height
+            x: (size.width - sideLength) / 2,
+            y: centerY - sideLength / 2,
+            width: sideLength,
+            height: sideLength
         )
+    }
+
+    private func defaultOfflineMapSelectionSideLength(in size: CGSize) -> CGFloat {
+        min(max(size.width - 48, 180), min(360, size.height * 0.46))
     }
 
     private func offlineMapSelectionOverlay(selectionFrame: CGRect) -> some View {
@@ -291,6 +302,12 @@ struct ContentView: View {
                 .position(x: selectionFrame.midX, y: selectionFrame.midY)
                 .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 2)
                 .allowsHitTesting(false)
+
+            offlineMapSelectionResizeHandle(edge: .top, selectionFrame: selectionFrame)
+                .position(x: selectionFrame.midX, y: selectionFrame.minY)
+
+            offlineMapSelectionResizeHandle(edge: .bottom, selectionFrame: selectionFrame)
+                .position(x: selectionFrame.midX, y: selectionFrame.maxY)
 
             HStack(spacing: 12) {
                 Button {
@@ -316,6 +333,76 @@ struct ContentView: View {
         .ignoresSafeArea()
         .zIndex(20)
     }
+
+    private func offlineMapSelectionResizeHandle(
+        edge: OfflineMapSelectionResizeEdge,
+        selectionFrame: CGRect
+    ) -> some View {
+        Capsule()
+            .fill(.regularMaterial)
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.8), lineWidth: 1)
+            )
+            .frame(width: 92, height: 28)
+            .overlay(
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.primary)
+            )
+            .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 2)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        resizeOfflineMapSelection(
+                            edge: edge,
+                            translation: value.translation.height,
+                            currentFrame: selectionFrame
+                        )
+                    }
+                    .onEnded { _ in
+                        offlineMapSelectionDragStartFrame = nil
+                    }
+            )
+            .accessibilityLabel(edge == .top ? "Resize map area top edge" : "Resize map area bottom edge")
+    }
+
+    private func resizeOfflineMapSelection(
+        edge: OfflineMapSelectionResizeEdge,
+        translation: CGFloat,
+        currentFrame: CGRect
+    ) {
+        let startFrame = offlineMapSelectionDragStartFrame ?? currentFrame
+        if offlineMapSelectionDragStartFrame == nil {
+            offlineMapSelectionDragStartFrame = startFrame
+        }
+
+        let minSideLength: CGFloat = 160
+        let maxSideLength = min(UIScreen.main.bounds.width - 32, UIScreen.main.bounds.height - 180, 420)
+        let rawSideLength: CGFloat
+        let fixedEdge: CGFloat
+
+        switch edge {
+        case .top:
+            fixedEdge = startFrame.maxY
+            rawSideLength = startFrame.height - translation
+            let sideLength = min(max(rawSideLength, minSideLength), maxSideLength)
+            offlineMapSelectionSideLength = sideLength
+            offlineMapSelectionCenterY = fixedEdge - sideLength / 2
+        case .bottom:
+            fixedEdge = startFrame.minY
+            rawSideLength = startFrame.height + translation
+            let sideLength = min(max(rawSideLength, minSideLength), maxSideLength)
+            offlineMapSelectionSideLength = sideLength
+            offlineMapSelectionCenterY = fixedEdge + sideLength / 2
+        }
+    }
+}
+
+private enum OfflineMapSelectionResizeEdge {
+    case top
+    case bottom
 }
 
 // MARK: - Preview
