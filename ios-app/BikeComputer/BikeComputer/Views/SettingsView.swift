@@ -150,8 +150,10 @@ private struct DownloadedMapRow: View {
     let packURL: URL
 
     var body: some View {
+        let displayName = manager.displayName(forCachedPack: packURL)
+
         HStack(spacing: 12) {
-            Text(manager.displayName(forCachedPack: packURL))
+            Text(displayName)
                 .lineLimit(2)
 
             Spacer()
@@ -164,7 +166,7 @@ private struct DownloadedMapRow: View {
             }
             .buttonStyle(.borderless)
             .disabled(manager.isBusy || !bleManager.isNavigationReady)
-            .accessibilityLabel("Transfer map to device")
+            .accessibilityLabel("Transfer \(displayName) to device")
 
             Button(role: .destructive) {
                 manager.deleteCachedPack(at: packURL)
@@ -174,7 +176,7 @@ private struct DownloadedMapRow: View {
             }
             .buttonStyle(.borderless)
             .disabled(manager.isBusy)
-            .accessibilityLabel("Delete map")
+            .accessibilityLabel("Delete \(displayName)")
         }
     }
 }

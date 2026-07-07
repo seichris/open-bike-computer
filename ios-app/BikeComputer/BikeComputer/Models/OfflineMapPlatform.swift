@@ -198,6 +198,16 @@ struct OfflineMapPackEntry: Equatable {
     let byteCount: Int
 }
 
+struct OfflineMapPackManifest: Decodable, Equatable {
+    struct Source: Decodable, Equatable {
+        let region: String?
+        let url: String?
+    }
+
+    let displayName: String?
+    let source: Source?
+}
+
 struct OfflineMapPackArchive {
     let url: URL
     let entries: [OfflineMapPackEntry]
@@ -230,6 +240,13 @@ struct OfflineMapPackArchive {
             throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
         }
         return data
+    }
+
+    func manifest() throws -> OfflineMapPackManifest {
+        guard let manifestEntry else {
+            throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
+        }
+        return try JSONDecoder().decode(OfflineMapPackManifest.self, from: data(for: manifestEntry))
     }
 
     private nonisolated static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {

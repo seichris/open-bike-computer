@@ -185,6 +185,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         print("NavigationProtocolTests passed")
     }
@@ -411,6 +412,37 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+    }
+
+    static func testOfflineMapManifestDecoding() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-manifest-test-\(UUID().uuidString).zip")
+        let manifest = Data("""
+        {
+          "schemaVersion": 1,
+          "displayName": "custom-map",
+          "source": {
+            "region": "geofabrik-asia-malaysia-singapore-brunei",
+            "url": "https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf"
+          }
+        }
+        """.utf8)
+        let zip = makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8))
+        ])
+        try? zip.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let archive = try? OfflineMapPackArchive(url: url),
+              let decoded = try? archive.manifest() else {
+            assert(false, "stored zip manifest should decode")
+            return
+        }
+
+        assertEqual(decoded.displayName, "custom-map", "manifest exposes display name")
+        assertEqual(decoded.source?.region, "geofabrik-asia-malaysia-singapore-brunei", "manifest exposes source region")
+        assertEqual(decoded.source?.url, "https://download.geofabrik.de/asia/malaysia-singapore-brunei-latest.osm.pbf", "manifest exposes source URL")
     }
 
     static func testMapTransferUploadURLEncodesPlusPathComponents() {

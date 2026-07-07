@@ -339,14 +339,14 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func transferPack(at packURL: URL, bleManager: BLEManager) async throws {
-        downloadedPackURL = packURL
+        let archive = try await Task.detached(priority: .userInitiated) {
+            try OfflineMapPackArchive(url: packURL)
+        }.value
         let baseURL = try await enableDeviceTransferMode(bleManager: bleManager)
         defer {
             bleManager.requestMapTransferMode(enabled: false)
         }
-        let archive = try await Task.detached(priority: .userInitiated) {
-            try OfflineMapPackArchive(url: packURL)
-        }.value
+        downloadedPackURL = packURL
         let sessionId = UUID().uuidString.lowercased()
         let client = MapTransferDeviceClient(baseURL: baseURL)
         transferProgress = 0
@@ -378,6 +378,7 @@ final class OfflineMapManager: ObservableObject {
             .replacingOccurrences(of: "-latest.osm.pbf", with: "")
             .replacingOccurrences(of: ".osm.pbf", with: "")
             .replacingOccurrences(of: ".zip", with: "")
+            .replacingOccurrences(of: "geofabrik-", with: "")
     }
 
     private func persistPackDisplayNames() {
@@ -403,7 +404,7 @@ final class OfflineMapManager: ObservableObject {
     private func refreshCachedPacks() {
         do {
             let directory = try cachedPackDirectory()
-            cachedPackURLs = try FileManager.default.contentsOfDirectory(
+            let packURLs = try FileManager.default.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey],
                 options: [.skipsHiddenFiles]
@@ -414,9 +415,44 @@ final class OfflineMapManager: ObservableObject {
                 let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return lhsDate > rhsDate
             }
+            cacheMissingDisplayNames(for: packURLs)
+            cachedPackURLs = packURLs
         } catch {
             cachedPackURLs = []
         }
+    }
+
+    private func cacheMissingDisplayNames(for packURLs: [URL]) {
+        var didChange = false
+        for packURL in packURLs where packDisplayNames[packURL.lastPathComponent]?.isEmpty != false {
+            guard let displayName = manifestDisplayName(for: packURL) else { continue }
+            packDisplayNames[packURL.lastPathComponent] = displayName
+            didChange = true
+        }
+        if didChange {
+            persistPackDisplayNames()
+        }
+    }
+
+    private func manifestDisplayName(for packURL: URL) -> String? {
+        guard let archive = try? OfflineMapPackArchive(url: packURL),
+              let manifest = try? archive.manifest() else {
+            return nil
+        }
+        let candidates = [
+            manifest.source?.url.flatMap { URL(string: $0)?.lastPathComponent },
+            manifest.source?.region,
+            manifest.displayName
+        ]
+        for candidate in candidates {
+            guard let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  !value.hasPrefix("custom-map-") else {
+                continue
+            }
+            return Self.cleanDisplayName(value)
+        }
+        return nil
     }
 
     private func enableDeviceTransferMode(bleManager: BLEManager) async throws -> URL {
