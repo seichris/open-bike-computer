@@ -20,7 +20,8 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
-    @State private var offlineMapSelectionSideLength: CGFloat?
+    @State private var offlineMapSelectionWidth: CGFloat?
+    @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
     @State private var offlineMapSelectionDragStartFrame: CGRect?
     
@@ -87,7 +88,8 @@ struct ContentView: View {
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false
-                offlineMapSelectionSideLength = nil
+                offlineMapSelectionWidth = nil
+                offlineMapSelectionHeight = nil
                 offlineMapSelectionCenterY = nil
             } else {
                 offlineMapSelectionDragStartFrame = nil
@@ -266,13 +268,15 @@ struct ContentView: View {
     }
 
     private func offlineMapSelectionFrame(in size: CGSize) -> CGRect {
-        let sideLength = offlineMapSelectionSideLength ?? defaultOfflineMapSelectionSideLength(in: size)
+        let defaultLength = defaultOfflineMapSelectionSideLength(in: size)
+        let width = offlineMapSelectionWidth ?? defaultLength
+        let height = offlineMapSelectionHeight ?? defaultLength
         let centerY = offlineMapSelectionCenterY ?? size.height / 2
         return CGRect(
-            x: (size.width - sideLength) / 2,
-            y: centerY - sideLength / 2,
-            width: sideLength,
-            height: sideLength
+            x: (size.width - width) / 2,
+            y: centerY - height / 2,
+            width: width,
+            height: height
         )
     }
 
@@ -372,24 +376,26 @@ struct ContentView: View {
             offlineMapSelectionDragStartFrame = startFrame
         }
 
-        let minSideLength: CGFloat = 160
-        let maxSideLength = min(UIScreen.main.bounds.width - 32, UIScreen.main.bounds.height - 180, 420)
-        let rawSideLength: CGFloat
+        let minHeight: CGFloat = 160
+        let maxHeight = min(UIScreen.main.bounds.height - 180, 640)
+        let rawHeight: CGFloat
         let fixedEdge: CGFloat
 
         switch edge {
         case .top:
             fixedEdge = startFrame.maxY
-            rawSideLength = startFrame.height - translation
-            let sideLength = min(max(rawSideLength, minSideLength), maxSideLength)
-            offlineMapSelectionSideLength = sideLength
-            offlineMapSelectionCenterY = fixedEdge - sideLength / 2
+            rawHeight = startFrame.height - translation
+            let height = min(max(rawHeight, minHeight), maxHeight)
+            offlineMapSelectionWidth = startFrame.width
+            offlineMapSelectionHeight = height
+            offlineMapSelectionCenterY = fixedEdge - height / 2
         case .bottom:
             fixedEdge = startFrame.minY
-            rawSideLength = startFrame.height + translation
-            let sideLength = min(max(rawSideLength, minSideLength), maxSideLength)
-            offlineMapSelectionSideLength = sideLength
-            offlineMapSelectionCenterY = fixedEdge + sideLength / 2
+            rawHeight = startFrame.height + translation
+            let height = min(max(rawHeight, minHeight), maxHeight)
+            offlineMapSelectionWidth = startFrame.width
+            offlineMapSelectionHeight = height
+            offlineMapSelectionCenterY = fixedEdge + height / 2
         }
     }
 }
