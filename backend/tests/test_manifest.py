@@ -44,17 +44,25 @@ class ManifestTests(unittest.TestCase):
             folder.mkdir(parents=True)
             (folder / "123_456.fmb").write_bytes(b"map-block")
             (folder / "123_456.fmp").write_text("map-preview")
+            test_image_folder = root / "VECTMAP" / map_id / "test_imgs"
+            test_image_folder.mkdir()
+            (test_image_folder / "block_232_63-10_10.png").write_bytes(b"not-for-device")
 
             manifest = build_manifest(job, root, PipelineMetadata(osmium_version="osmium 1.0"))
             archive = write_pack_archive(root, manifest, root / "out.zip")
 
             self.assertEqual(manifest["mapId"], map_id)
             self.assertEqual(len(manifest["files"]), 2)
+            self.assertNotIn(
+                f"VECTMAP/{map_id}/test_imgs/block_232_63-10_10.png",
+                [file["path"] for file in manifest["files"]],
+            )
             self.assertTrue(archive.exists())
             self.assertGreater(archive.stat().st_size, 0)
             with zipfile.ZipFile(archive) as zip_archive:
                 compress_types = {info.filename: info.compress_type for info in zip_archive.infolist()}
             self.assertEqual(compress_types["manifest.json"], zipfile.ZIP_STORED)
+            self.assertNotIn(f"VECTMAP/{map_id}/test_imgs/block_232_63-10_10.png", compress_types)
             self.assertEqual(
                 compress_types[f"VECTMAP/{map_id}/+0032+0008/123_456.fmb"],
                 zipfile.ZIP_STORED,

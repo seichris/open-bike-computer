@@ -55,6 +55,8 @@ def collect_map_files(map_root: Path, map_id: str) -> list[dict[str, Any]]:
         if not path.is_file():
             continue
         relative = path.relative_to(map_root).as_posix()
+        if not is_pack_map_file(relative):
+            continue
         validate_pack_path(relative)
         files.append({"path": relative, "bytes": path.stat().st_size, "sha256": hash_file(path)})
     if not files:
@@ -62,10 +64,14 @@ def collect_map_files(map_root: Path, map_id: str) -> list[dict[str, Any]]:
     return files
 
 
+def is_pack_map_file(relative_path: str) -> bool:
+    return bool(ALLOWED_PACK_FILE_RE.match(relative_path))
+
+
 def validate_pack_path(relative_path: str) -> None:
     if ".." in Path(relative_path).parts or relative_path.startswith("/"):
         raise ValueError(f"unsafe map pack path: {relative_path}")
-    if not ALLOWED_PACK_FILE_RE.match(relative_path):
+    if not is_pack_map_file(relative_path):
         raise ValueError(f"unexpected map pack file path: {relative_path}")
 
 
@@ -116,8 +122,14 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
         "OpenStreetMap data is licensed under the Open Data Commons Open Database License (ODbL).\n"
     )
 
+    archived_paths = {
+        "manifest.json",
+        "ATTRIBUTION.txt",
+        "LICENSES/OpenStreetMap-ODbL.txt",
+        *(file["path"] for file in manifest["files"]),
+    }
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
-        for path in sorted(map_root.rglob("*")):
-            if path.is_file():
-                archive.write(path, path.relative_to(map_root).as_posix())
+        for relative in sorted(archived_paths):
+            path = map_root / relative
+            archive.write(path, relative)
     return archive_path
