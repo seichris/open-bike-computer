@@ -28,11 +28,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                connectionSummary
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
-
                 if !locationAuthorized {
                     Section {
                         Button {
@@ -256,59 +251,11 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("BLE Debug")) {
-                    HStack {
-                        Text("Central")
-                        Spacer()
-                        Text(bleManager.centralStateDescription)
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("Navigation")
-                        Spacer()
-                        Text(bleManager.isNavigationReady ? "Ready" : "Not Ready")
-                            .foregroundColor(bleManager.isNavigationReady ? .green : .secondary)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Trusted Device")
-                        Text(bleManager.trustedPeripheralDescription)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                    }
-
-                    Button(action: {
-                        bleManager.reconnect()
-                    }) {
-                        Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-
-                    Button(action: {
-                        bleManager.sendDebugNavigationPacket()
-                    }) {
-                        Label("Send Test Navigation", systemImage: "arrow.turn.up.left")
-                    }
-                    .disabled(!bleManager.isNavigationReady)
-
-                    Button(role: .destructive, action: {
-                        bleManager.forgetTrustedPeripheral()
-                    }) {
-                        Label("Forget Device", systemImage: "trash")
-                    }
-
-                    Button(action: {
-                        UIPasteboard.general.string = bleManager.debugLogText
-                    }) {
-                        Label("Copy Debug Log", systemImage: "doc.on.doc")
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(bleManager.debugEvents.enumerated()), id: \.offset) { _, event in
-                            Text(event)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .textSelection(.enabled)
-                        }
+                Section {
+                    NavigationLink {
+                        DeveloperSettingsView()
+                    } label: {
+                        Label("Developer Settings", systemImage: "wrench.and.screwdriver")
                     }
                 }
             }
@@ -324,6 +271,77 @@ struct SettingsView: View {
             .navigationTitle("Map Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+}
+
+private struct DeveloperSettingsView: View {
+    @EnvironmentObject private var bleManager: BLEManager
+
+    var body: some View {
+        Form {
+            connectionSummary
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+
+            Section {
+                HStack {
+                    Text("Central")
+                    Spacer()
+                    Text(bleManager.centralStateDescription)
+                        .foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Navigation")
+                    Spacer()
+                    Text(bleManager.isNavigationReady ? "Ready" : "Not Ready")
+                        .foregroundColor(bleManager.isNavigationReady ? .green : .secondary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Trusted Device")
+                    Text(bleManager.trustedPeripheralDescription)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Button(action: {
+                    bleManager.reconnect()
+                }) {
+                    Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
+                }
+
+                Button(action: {
+                    bleManager.sendDebugNavigationPacket()
+                }) {
+                    Label("Send Test Navigation", systemImage: "arrow.turn.up.left")
+                }
+                .disabled(!bleManager.isNavigationReady)
+
+                Button(role: .destructive, action: {
+                    bleManager.forgetTrustedPeripheral()
+                }) {
+                    Label("Forget Device", systemImage: "trash")
+                }
+
+                Button(action: {
+                    UIPasteboard.general.string = bleManager.debugLogText
+                }) {
+                    Label("Copy Debug Log", systemImage: "doc.on.doc")
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(bleManager.debugEvents.enumerated()), id: \.offset) { _, event in
+                        Text(event)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Developer Settings")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var connectionSummary: some View {
