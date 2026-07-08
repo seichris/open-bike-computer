@@ -187,6 +187,7 @@ struct NavigationProtocolTests {
         testOfflineMapStoredZipReader()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
+        testMapTransferDeviceStatusDecodesActivationFailure()
         print("NavigationProtocolTests passed")
     }
 
@@ -458,6 +459,35 @@ struct NavigationProtocolTests {
             "http://192.168.4.20:8080/map-transfer/sessions/session-1/VECTMAP/map-1/%2B0032%2B0008/123_456.fmb",
             "upload URL percent-encodes plus signs so firmware does not decode them as spaces"
         )
+    }
+
+    static func testMapTransferDeviceStatusDecodesActivationFailure() {
+        let body = Data("""
+        {
+          "enabled": true,
+          "activeMapId": "old-map",
+          "activation": {
+            "status": "failed",
+            "sessionId": "new-map",
+            "mapId": "new-map",
+            "error": {
+              "code": "file_sha256",
+              "message": "sha mismatch for VECTMAP/new-map/1.fmb"
+            }
+          }
+        }
+        """.utf8)
+
+        guard let status = try? JSONDecoder().decode(MapTransferDeviceStatus.self, from: body) else {
+            assert(false, "device transfer status should decode activation failure")
+            return
+        }
+
+        assertEqual(status.enabled, true, "status exposes transfer mode")
+        assertEqual(status.activeMapId, "old-map", "status exposes active map id")
+        assertEqual(status.activation?.status, "failed", "status exposes activation state")
+        assertEqual(status.activation?.error?.code, "file_sha256", "status exposes activation error code")
+        assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
     }
 
     static func testNavigationPacketBuilder() {

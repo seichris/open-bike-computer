@@ -223,31 +223,45 @@ void MapTransferHttpServer::configure(std::string storageRoot, uint16_t port) {
 bool MapTransferHttpServer::setEnabled(bool enabled) {
   if (!configured_)
     configure(storageRoot_, port_);
-  if (enabled && !enabled_) {
+  lockState();
+  const bool wasEnabled = enabled_;
+  const bool wasStartedAp = startedAp_;
+  unlockState();
+
+  if (enabled && !wasEnabled) {
     if (WiFi.status() != WL_CONNECTED) {
-      apSsid_ = "BikeComputer-Map";
+      const std::string apSsid = "BikeComputer-Map";
       WiFi.mode(WIFI_AP);
-      if (!WiFi.softAP(apSsid_.c_str())) {
+      if (!WiFi.softAP(apSsid.c_str())) {
+        lockState();
         rememberError("wifi_ap", "could not start transfer Wi-Fi");
+        unlockState();
         return false;
       }
+      lockState();
       startedAp_ = true;
+      apSsid_ = apSsid;
+      unlockState();
       Serial.printf("MAP_TRANSFER_HTTP: started AP ssid=%s ip=%s\n",
-                    apSsid_.c_str(), WiFi.softAPIP().toString().c_str());
+                    apSsid.c_str(), WiFi.softAPIP().toString().c_str());
     }
     server_.begin();
     server_.setNoDelay(true);
   }
-  if (!enabled && enabled_) {
+  if (!enabled && wasEnabled) {
     server_.stop();
-    if (startedAp_) {
+    if (wasStartedAp) {
       WiFi.softAPdisconnect(true);
       WiFi.mode(WIFI_OFF);
+      lockState();
       startedAp_ = false;
       apSsid_.clear();
+      unlockState();
     }
   }
+  lockState();
   enabled_ = enabled;
+  unlockState();
   return true;
 }
 
@@ -269,19 +283,29 @@ void MapTransferHttpServer::process() {
 }
 
 HttpTransferStatus MapTransferHttpServer::status() const {
+  lockState();
+  const bool configured = configured_;
+  const bool enabled = enabled_;
+  const bool startedAp = startedAp_;
+  const uint16_t port = port_;
+  const std::string apSsid = apSsid_;
+  const std::string lastErrorCode = lastErrorCode_;
+  const std::string lastErrorMessage = lastErrorMessage_;
+  unlockState();
+
   std::string baseUrl;
-  if (enabled_) {
+  if (enabled) {
     IPAddress ip =
-        startedAp_ ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
-                                            ? WiFi.localIP()
-                                            : IPAddress());
+        startedAp ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
+                                           ? WiFi.localIP()
+                                           : IPAddress());
     if (ip != IPAddress()) {
       baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
-                std::to_string(port_);
+                std::to_string(port);
     }
   }
-  return {configured_, enabled_, port_, baseUrl, apSsid_, lastErrorCode_,
-          lastErrorMessage_};
+  return {configured, enabled, port, baseUrl, apSsid, lastErrorCode,
+          lastErrorMessage};
 }
 
 void MapTransferHttpServer::handleClient(WiFiClient &client) {
@@ -481,10 +505,18 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   std::string activeMapId;
   InstallStatus active = installer_.readActiveMapId(activeMapId);
+  lockState();
+  const bool configured = configured_;
+  const bool enabled = enabled_;
+  const uint16_t port = port_;
+  const std::string lastErrorCode = lastErrorCode_;
+  const std::string lastErrorMessage = lastErrorMessage_;
+  unlockState();
+
   std::string body = std::string("{\"configured\":") +
-                     (configured_ ? "true" : "false") + ",\"enabled\":" +
-                     (enabled_ ? "true" : "false") + ",\"port\":" +
-                     std::to_string(port_);
+                     (configured ? "true" : "false") + ",\"enabled\":" +
+                     (enabled ? "true" : "false") + ",\"port\":" +
+                     std::to_string(port);
   if (active.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
   } else {
@@ -492,9 +524,9 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";
   }
   body += ",\"activation\":" + activationStatusJson();
-  if (!lastErrorCode_.empty()) {
-    body += ",\"lastError\":{\"code\":\"" + jsonEscape(lastErrorCode_) +
-            "\",\"message\":\"" + jsonEscape(lastErrorMessage_) + "\"}";
+  if (!lastErrorCode.empty()) {
+    body += ",\"lastError\":{\"code\":\"" + jsonEscape(lastErrorCode) +
+            "\",\"message\":\"" + jsonEscape(lastErrorMessage) + "\"}";
   }
   body += "}";
   sendJson(client, 200, body);
@@ -535,7 +567,9 @@ void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
 void MapTransferHttpServer::sendError(WiFiClient &client, int status,
                                       const std::string &code,
                                       const std::string &message) {
+  lockState();
   rememberError(code, message);
+  unlockState();
   sendJson(client, status,
            std::string("{\"ok\":false,\"error\":{\"code\":\"") +
                jsonEscape(code) + "\",\"message\":\"" + jsonEscape(message) +

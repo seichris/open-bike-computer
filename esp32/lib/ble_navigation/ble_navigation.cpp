@@ -78,20 +78,23 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   uint8_t defaultScreen =
       rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION
           ? (uint8_t)rawDefault
-          : (uint8_t)DEVICE_SCREEN_MAP;
+          : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
     return defaultScreen;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_MAP_PLUS_NAVIGATION)) {
+    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_RIDE_STATS)) {
+    return DEVICE_SCREEN_RIDE_STATS;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
     return DEVICE_SCREEN_MAP;
   }
-  for (uint8_t screen = DEVICE_SCREEN_MAP;
-       screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION; screen++) {
-    if (enabledScreensMask & deviceScreenBit(screen)) {
-      return screen;
-    }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
+    return DEVICE_SCREEN_NAVIGATION;
   }
-  return DEVICE_SCREEN_MAP;
+  return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
 
 static void clearCurrentNavigationData() {
@@ -1086,7 +1089,7 @@ static void loadSettingsFromNVS() {
       normalizedEnabledScreensMask(prefs.getUChar("screenMask",
                                                  DEVICE_SCREEN_SUPPORTED_MASK));
   mapRenderSettings.defaultScreen = normalizedDefaultScreen(
-      prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP),
+      prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP_PLUS_NAVIGATION),
       mapRenderSettings.enabledScreensMask);
   mapRenderSettings.visibilityMask = prefs.getUInt("visMask", 0xFFFFFFFF);
 

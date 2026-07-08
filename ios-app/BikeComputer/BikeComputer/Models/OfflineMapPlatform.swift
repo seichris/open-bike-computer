@@ -168,6 +168,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case missingTransferBaseURL
     case deviceSDCardUnavailable
     case mapActivationTimedOut
+    case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
@@ -190,6 +191,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device SD card is not mounted"
         case .mapActivationTimedOut:
             return "Timed out while activating map on device"
+        case .mapActivationFailed(let message):
+            return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
         case .invalidPack(let message):
@@ -221,9 +224,22 @@ struct OfflineMapPackManifest: Decodable, Equatable {
     let source: Source?
 }
 
-struct MapTransferDeviceStatus: Decodable, Equatable {
+nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
+    struct TransferError: Decodable, Equatable {
+        let code: String?
+        let message: String?
+    }
+
+    struct Activation: Decodable, Equatable {
+        let status: String?
+        let sessionId: String?
+        let mapId: String?
+        let error: TransferError?
+    }
+
     let enabled: Bool?
     let activeMapId: String?
+    let activation: Activation?
 }
 
 struct OfflineMapPackArchive {

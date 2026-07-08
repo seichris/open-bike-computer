@@ -374,9 +374,9 @@ final class OfflineMapManager: ObservableObject {
             try await client.activate(sessionId: sessionId)
         } catch {
             if isActivationResponseLoss(error),
-               await confirmActivatedMap(expectedMapId: expectedMapId,
-                                         client: client,
-                                         bleManager: bleManager) {
+               try await confirmActivatedMap(expectedMapId: expectedMapId,
+                                             client: client,
+                                             bleManager: bleManager) {
                 transferProgress = 1
                 statusMessage = "map installed"
                 bleManager.requestMapTransferStatus()
@@ -384,9 +384,9 @@ final class OfflineMapManager: ObservableObject {
             }
             throw error
         }
-        guard await confirmActivatedMap(expectedMapId: expectedMapId,
-                                        client: client,
-                                        bleManager: bleManager) else {
+        guard try await confirmActivatedMap(expectedMapId: expectedMapId,
+                                            client: client,
+                                            bleManager: bleManager) else {
             throw OfflineMapPlatformError.mapActivationTimedOut
         }
         transferProgress = 1
@@ -417,16 +417,23 @@ final class OfflineMapManager: ObservableObject {
 
     private func confirmActivatedMap(expectedMapId: String?,
                                      client: MapTransferDeviceClient,
-                                     bleManager: BLEManager) async -> Bool {
+                                     bleManager: BLEManager) async throws -> Bool {
         guard let expectedMapId, !expectedMapId.isEmpty else {
             return false
         }
 
         statusMessage = "checking installed map"
         for attempt in 0..<240 {
-            if let status = try? await client.status(),
-               status.activeMapId == expectedMapId {
-                return true
+            if let status = try? await client.status() {
+                if status.activeMapId == expectedMapId {
+                    return true
+                }
+                if status.activation?.status == "failed" {
+                    let message = status.activation?.error?.message ??
+                        status.activation?.error?.code ??
+                        "device reported activation failure"
+                    throw OfflineMapPlatformError.mapActivationFailed(message)
+                }
             }
             bleManager.requestMapTransferStatus()
             if bleManager.mapTransferActiveMapId == expectedMapId {

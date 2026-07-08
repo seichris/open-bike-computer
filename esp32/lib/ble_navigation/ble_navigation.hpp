@@ -59,7 +59,8 @@ struct MapRenderSettings {
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
       DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
-  uint8_t defaultScreen = DEVICE_SCREEN_MAP; // DeviceScreenSetting value
+  uint8_t defaultScreen =
+      DEVICE_SCREEN_MAP_PLUS_NAVIGATION; // DeviceScreenSetting value
   uint32_t visibilityMask =
       0xFFFFFFFF; // Bits: 0 buildings, 1 green, 2 paths, 3 major roads,
                   // 4 local streets, 5 water, 6 rail, 7 other areas,

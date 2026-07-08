@@ -132,21 +132,24 @@ static uint8_t normalizedDefaultDeviceScreen() {
   const uint8_t mask = normalizedEnabledScreensMask();
   uint8_t defaultScreen = mapRenderSettings.defaultScreen;
   if (defaultScreen > DEVICE_SCREEN_MAP_PLUS_NAVIGATION) {
-    defaultScreen = DEVICE_SCREEN_MAP;
+    defaultScreen = DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   }
   if (mask & deviceScreenBit(defaultScreen)) {
     return defaultScreen;
   }
+  if (mask & deviceScreenBit(DEVICE_SCREEN_MAP_PLUS_NAVIGATION)) {
+    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  }
+  if (mask & deviceScreenBit(DEVICE_SCREEN_RIDE_STATS)) {
+    return DEVICE_SCREEN_RIDE_STATS;
+  }
   if (mask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
     return DEVICE_SCREEN_MAP;
   }
-  for (uint8_t screen = DEVICE_SCREEN_MAP;
-       screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION; screen++) {
-    if (mask & deviceScreenBit(screen)) {
-      return screen;
-    }
+  if (mask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
+    return DEVICE_SCREEN_NAVIGATION;
   }
-  return DEVICE_SCREEN_MAP;
+  return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
 
 static tileName configuredDefaultTile() {
