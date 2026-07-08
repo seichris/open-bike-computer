@@ -21,6 +21,7 @@ class MapTransferHttpServer {
 public:
   void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080);
   bool setEnabled(bool enabled);
+  void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
 
@@ -39,8 +40,10 @@ private:
   void handleClient(WiFiClient &client);
   bool handlePut(const std::string &path, uint64_t contentLength,
                  WiFiClient &client);
+  bool handleHead(const std::string &path, WiFiClient &client);
   bool handleActivate(const std::string &path, WiFiClient &client);
   void handleStatus(WiFiClient &client);
+  void sendHead(WiFiClient &client, int status, uint64_t contentLength = 0);
   void sendJson(WiFiClient &client, int status, const std::string &body);
   void sendError(WiFiClient &client, int status, const std::string &code,
                  const std::string &message);

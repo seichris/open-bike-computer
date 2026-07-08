@@ -534,6 +534,13 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter") {
+    if (!storage.getSdLoaded()) {
+      mapTransferHttp.setLastError("sd_unavailable",
+                                   "SD card is not mounted");
+      Serial.println("BLE Map Transfer: enter rejected, SD card is not mounted");
+      notifyMapTransferStatus(pChar);
+      return;
+    }
     bool enabled = mapTransferHttp.setEnabled(true);
     Serial.printf("BLE Map Transfer: enter requested, enabled=%d\n", enabled);
     notifyMapTransferStatus(pChar);

@@ -95,6 +95,14 @@ static bool safeUploadPath(const std::string &path) {
   return startsWith(path, "VECTMAP/") && safeRelativePath(path);
 }
 
+static bool fileSize(const std::string &path, uint64_t &size) {
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+    return false;
+  size = static_cast<uint64_t>(st.st_size);
+  return true;
+}
+
 static bool mkdirs(const std::string &path) {
   if (path.empty())
     return false;
@@ -235,6 +243,11 @@ bool MapTransferHttpServer::setEnabled(bool enabled) {
   return true;
 }
 
+void MapTransferHttpServer::setLastError(const std::string &code,
+                                         const std::string &message) {
+  rememberError(code, message);
+}
+
 void MapTransferHttpServer::process() {
   if (!enabled_)
     return;
@@ -299,11 +312,37 @@ void MapTransferHttpServer::handleClient(WiFiClient &client) {
     sendError(client, 403, "transfer_disabled", "map transfer mode is disabled");
     return;
   }
+  Serial.printf("MAP_TRANSFER_HTTP: %s %s length=%llu\n", method.c_str(),
+                path.c_str(), static_cast<unsigned long long>(contentLength));
+  if (method == "HEAD" && handleHead(path, client))
+    return;
   if (method == "PUT" && handlePut(path, contentLength, client))
     return;
   if (method == "POST" && handleActivate(path, client))
     return;
   sendError(client, 404, "not_found", "map transfer endpoint not found");
+}
+
+bool MapTransferHttpServer::handleHead(const std::string &path,
+                                       WiFiClient &client) {
+  std::string sessionId;
+  std::string relativePath;
+  if (!parseSessionPath(path, sessionId, relativePath))
+    return false;
+  if (!safeUploadPath(relativePath)) {
+    sendHead(client, 400);
+    return true;
+  }
+
+  const std::string stagedPath =
+      joinPath(installer_.stagingRoot(sessionId), relativePath);
+  uint64_t size = 0;
+  if (!fileSize(stagedPath, size)) {
+    sendHead(client, 404);
+    return true;
+  }
+  sendHead(client, 200, size);
+  return true;
 }
 
 bool MapTransferHttpServer::handlePut(const std::string &path,
@@ -368,6 +407,9 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     return true;
   }
 
+  Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
+                sessionId.c_str(), relativePath.c_str(),
+                static_cast<unsigned long long>(contentLength));
   sendJson(client, 200,
            std::string("{\"ok\":true,\"sessionId\":\"") +
                jsonEscape(sessionId) + "\",\"path\":\"" +
@@ -384,17 +426,24 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
   if (action != "activate")
     return false;
 
+  Serial.printf("MAP_TRANSFER_HTTP: activate session=%s\n", sessionId.c_str());
   MapManifest manifest;
   InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
   if (!validated.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: activate validation failed code=%s message=%s\n",
+                  validated.code.c_str(), validated.message.c_str());
     sendError(client, 400, validated.code, validated.message);
     return true;
   }
   InstallStatus activated = installer_.activateStagedMap(sessionId, manifest);
   if (!activated.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: activate failed code=%s message=%s\n",
+                  activated.code.c_str(), activated.message.c_str());
     sendError(client, 500, activated.code, activated.message);
     return true;
   }
+  Serial.printf("MAP_TRANSFER_HTTP: activated mapId=%s session=%s\n",
+                manifest.mapId.c_str(), sessionId.c_str());
   sendJson(client, 200,
            std::string("{\"ok\":true,\"sessionId\":\"") +
                jsonEscape(sessionId) + "\",\"mapId\":\"" +
@@ -421,6 +470,19 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   }
   body += "}";
   sendJson(client, 200, body);
+}
+
+void MapTransferHttpServer::sendHead(WiFiClient &client, int status,
+                                     uint64_t contentLength) {
+  const char *reason = status == 200   ? "OK"
+                       : status == 400 ? "Bad Request"
+                       : status == 403 ? "Forbidden"
+                       : status == 404 ? "Not Found"
+                                       : "Internal Server Error";
+  client.printf("HTTP/1.1 %d %s\r\n", status, reason);
+  client.print("Connection: close\r\n");
+  client.printf("Content-Length: %llu\r\n\r\n",
+                static_cast<unsigned long long>(contentLength));
 }
 
 void MapTransferHttpServer::sendJson(WiFiClient &client, int status,

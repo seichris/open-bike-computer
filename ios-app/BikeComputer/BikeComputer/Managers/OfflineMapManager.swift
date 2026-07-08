@@ -364,9 +364,10 @@ final class OfflineMapManager: ObservableObject {
         let client = MapTransferDeviceClient(baseURL: baseURL)
         transferProgress = 0
         statusMessage = "uploading to device"
-        try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path in
+        try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path, didUpload in
             self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
-            self.statusMessage = "uploaded \(completed)/\(total): \(path)"
+            let prefix = didUpload ? "uploaded" : "already on device"
+            self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
         }
         statusMessage = "activating map"
         do {
@@ -543,6 +544,9 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.transferCommandNotSent
         }
         for attempt in 0..<32 {
+            if bleManager.deviceHasSDCard == false {
+                throw OfflineMapPlatformError.deviceSDCardUnavailable
+            }
             if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
                 return baseURL
             }

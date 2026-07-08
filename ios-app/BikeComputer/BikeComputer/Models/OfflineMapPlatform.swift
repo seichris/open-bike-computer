@@ -166,6 +166,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case missingDownloadURL
     case transferCommandNotSent
     case missingTransferBaseURL
+    case deviceSDCardUnavailable
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
@@ -184,6 +185,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device did not accept the map transfer command over BLE"
         case .missingTransferBaseURL:
             return "Device map transfer mode is not ready"
+        case .deviceSDCardUnavailable:
+            return "Device SD card is not mounted"
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
         case .invalidPack(let message):
@@ -365,7 +368,7 @@ struct MapTransferDeviceClient {
     nonisolated func upload(
         archive: OfflineMapPackArchive,
         sessionId: String,
-        progress: @escaping @MainActor (_ completed: Int, _ total: Int, _ path: String) -> Void
+        progress: @escaping @MainActor (_ completed: Int, _ total: Int, _ path: String, _ didUpload: Bool) -> Void
     ) async throws {
         guard let manifest = archive.manifestEntry else {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
@@ -373,9 +376,13 @@ struct MapTransferDeviceClient {
 
         let uploadEntries = [manifest] + archive.mapFileEntries.sorted { $0.path < $1.path }
         for (index, entry) in uploadEntries.enumerated() {
+            if try await stagedByteCount(sessionId: sessionId, path: entry.path) == entry.byteCount {
+                await progress(index + 1, uploadEntries.count, entry.path, false)
+                continue
+            }
             let data = try archive.data(for: entry)
             try await put(sessionId: sessionId, path: entry.path, data: data)
-            await progress(index + 1, uploadEntries.count, entry.path)
+            await progress(index + 1, uploadEntries.count, entry.path, true)
         }
     }
 
@@ -409,6 +416,33 @@ struct MapTransferDeviceClient {
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
         _ = try await send(request: request, data: data)
+    }
+
+    private nonisolated func stagedByteCount(sessionId: String, path: String) async throws -> Int? {
+        var request = URLRequest(url: Self.uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: path
+        ))
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 3
+
+        let response = try await session.data(for: request)
+        guard let http = response.1 as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        if http.statusCode == 404 {
+            return nil
+        }
+        guard 200..<300 ~= http.statusCode else {
+            return nil
+        }
+        guard let value = http.value(forHTTPHeaderField: "Content-Length"),
+              let count = Int(value) else {
+            return nil
+        }
+        return count
     }
 
     private nonisolated func send(request: URLRequest, data: Data?) async throws -> Data {
