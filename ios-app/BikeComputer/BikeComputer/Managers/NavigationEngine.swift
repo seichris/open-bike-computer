@@ -87,8 +87,8 @@ class NavigationEngine: NSObject, ObservableObject {
         } else {
             acceptedRouteLocation = nil
         }
-        updateRideTelemetry(gpsLocation: location, routeLocation: acceptedRouteLocation)
         if isNavigating {
+            updateRideTelemetry(gpsLocation: location, routeLocation: acceptedRouteLocation)
             sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
         } else {
             lastDeviceGpsLocation = (location, false)
@@ -390,7 +390,8 @@ class NavigationEngine: NSObject, ObservableObject {
         guard let lastDeviceGpsLocation else { return }
 
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
-                              convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute)
+                              convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute,
+                              includeRideTelemetry: isNavigating)
     }
 
     private func sendIdleDeviceTimeSyncIfNeeded(_ location: CLLocation) {
@@ -398,7 +399,7 @@ class NavigationEngine: NSObject, ObservableObject {
         guard now.timeIntervalSince(lastIdleGpsSyncTime) >= idleGpsSyncInterval else { return }
         guard let bleManager, bleManager.isConnected, bleManager.isNavigationReady else { return }
 
-        sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: false, includeRideTelemetry: false)
         lastIdleGpsSyncTime = now
     }
 
@@ -494,7 +495,7 @@ class NavigationEngine: NSObject, ObservableObject {
         print("Sent to ESP32: \(snapshot.packet)")
     }
 
-    private func sendDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
+    private func sendDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool, includeRideTelemetry: Bool = true) {
         lastDeviceGpsLocation = (location, convertFromMapKitRoute)
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
@@ -503,11 +504,11 @@ class NavigationEngine: NSObject, ObservableObject {
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,
-                                    speedMetersPerSecond: location.speed,
-                                    altitudeMeters: location.altitude,
-                                    distanceTraveledMeters: rideDistanceMeters,
-                                    elapsedSeconds: rideStartDate.map { Date().timeIntervalSince($0) },
-                                    routeRemainingMeters: lastRouteRemainingMeters)
+                                    speedMetersPerSecond: includeRideTelemetry ? location.speed : nil,
+                                    altitudeMeters: includeRideTelemetry ? location.altitude : nil,
+                                    distanceTraveledMeters: includeRideTelemetry ? rideDistanceMeters : nil,
+                                    elapsedSeconds: includeRideTelemetry ? rideStartDate.map { Date().timeIntervalSince($0) } : nil,
+                                    routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil)
     }
 
     private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {

@@ -79,6 +79,7 @@ func assertCoordinate(
 final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
     var sentRouteGeometry: [Data] = []
+    var sentGPSPositions: [Data] = []
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Keep CoreBluetooth startup callbacks from changing test-controlled state.
@@ -99,6 +100,32 @@ final class TestBLEManager: BLEManager {
         }
 
         sentRouteGeometry.append(data)
+    }
+
+    override func sendGPSPosition(
+        lat: Double,
+        lon: Double,
+        heading: Double = 0,
+        speedMetersPerSecond: Double? = nil,
+        altitudeMeters: Double? = nil,
+        distanceTraveledMeters: Double? = nil,
+        elapsedSeconds: TimeInterval? = nil,
+        routeRemainingMeters: Double? = nil
+    ) {
+        guard isConnected, isNavigationReady else {
+            return
+        }
+
+        sentGPSPositions.append(DeviceGPSPacketBuilder.data(
+            lat: lat,
+            lon: lon,
+            heading: heading,
+            speedMetersPerSecond: speedMetersPerSecond,
+            altitudeMeters: altitudeMeters,
+            distanceTraveledMeters: distanceTraveledMeters,
+            elapsedSeconds: elapsedSeconds,
+            routeRemainingMeters: routeRemainingMeters
+        ))
     }
 }
 
@@ -179,6 +206,7 @@ struct NavigationProtocolTests {
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
+        testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapCreateJobURLRequest()
@@ -921,6 +949,38 @@ struct NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
+    }
+
+    static func testNavigationEngineOmitsRideTelemetryWhenIdle() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let idleLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            altitude: 42,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 90,
+            speed: 5,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(idleLocation)
+
+        assertEqual(manager.sentGPSPositions.count, 1, "idle GPS sync should still send position/time")
+        let packet = manager.sentGPSPositions[0]
+        assertEqual(readUInt16LE(packet, offset: 14),
+                    DeviceGPSPacketBuilder.invalidSpeedCmps,
+                    "idle GPS sync should omit speed telemetry")
+        assertEqual(readInt16LE(packet, offset: 16), 0, "idle GPS sync should omit altitude telemetry")
+        assertEqual(readUInt32LE(packet, offset: 18), 0, "idle GPS sync should omit distance telemetry")
+        assertEqual(readUInt32LE(packet, offset: 22), 0, "idle GPS sync should omit elapsed telemetry")
+        assertEqual(readUInt32LE(packet, offset: 26),
+                    DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
+                    "idle GPS sync should omit route remaining telemetry")
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
