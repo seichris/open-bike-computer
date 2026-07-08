@@ -67,6 +67,8 @@ private:
   void handleFinalize(WiFiClient &client);
   void handleCancel(WiFiClient &client);
   void resetUploadState();
+  void reject(WiFiClient &client, int httpStatus, const std::string &code,
+              const std::string &message);
   void fail(WiFiClient &client, int httpStatus, const std::string &code,
             const std::string &message);
   void rememberError(const std::string &code, const std::string &message);

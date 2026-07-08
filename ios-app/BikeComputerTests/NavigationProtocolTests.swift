@@ -102,6 +102,57 @@ final class TestBLEManager: BLEManager {
     }
 }
 
+final class FirmwareRequestCaptureProtocol: URLProtocol {
+    static var handler: ((URLRequest, Data) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else {
+                throw FirmwareUpdateError.serverError("missing test handler")
+            }
+            let (response, data) = try handler(request, Self.bodyData(from: request))
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: bufferSize)
+            if count <= 0 {
+                break
+            }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
+
 final class TestRouteStep: MKRoute.Step {
     private let storedInstructions: String
     private let storedPolyline: MKPolyline
@@ -192,6 +243,7 @@ struct NavigationProtocolTests {
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
+        testFirmwareDeviceClientSendsSignedBeginRequest()
         print("NavigationProtocolTests passed")
     }
 
@@ -571,6 +623,94 @@ struct NavigationProtocolTests {
         assertEqual(manager.statusMessage,
                     "device rebooting",
                     "firmware manager restores pending reboot status after app relaunch")
+    }
+
+    static func testFirmwareDeviceClientSendsSignedBeginRequest() {
+        let manifest = FirmwareReleaseManifest(
+            schemaVersion: 1,
+            target: "WAVESHARE_AMOLED_175",
+            version: "0.4.0",
+            build: 87,
+            gitSha: "abcdef123456",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.4.0/WAVESHARE_AMOLED_175.bin")!,
+            minUpdaterProtocol: 1,
+            signature: "MEUCIQCoFhwd6SnmvltHkUu5jfNQce/pPk87c84AcHt2u9DmDQIgfwklONo1MEyfgfX0VhlTDyi/B+dGZdsvckb/rFEGOM8="
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+
+        FirmwareRequestCaptureProtocol.handler = { request, body in
+            assertEqual(request.httpMethod, "POST", "begin request uses POST")
+            assertEqual(request.url?.path, "/firmware-update/begin", "begin request uses firmware path")
+            assertEqual(request.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"), "token-123", "begin request includes transfer token")
+            assertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json", "begin request declares JSON")
+            guard let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                assert(false, "begin request body should be JSON")
+                throw FirmwareUpdateError.invalidManifest
+            }
+            assertEqual(object["target"] as? String, manifest.target, "begin request sends target")
+            assertEqual(object["gitSha"] as? String, manifest.gitSha, "begin request sends git SHA")
+            assertEqual(object["manifestSignature"] as? String, manifest.signature, "begin request sends manifest signature")
+            assertEqual(object["releaseUrl"] as? String, manifest.url.absoluteString, "begin request sends release URL")
+            assertEqual(object["allowDowngrade"] as? Bool, true, "begin request sends developer downgrade flag")
+
+            let data = Data("""
+            {
+              "status": "receiving",
+              "target": "WAVESHARE_AMOLED_175",
+              "runningVersion": "0.2.2",
+              "runningBuild": 86,
+              "runningPartition": "ota_0",
+              "inactivePartition": "ota_1",
+              "otaState": "valid",
+              "maxImageBytes": 3145728,
+              "receivedBytes": 0,
+              "totalBytes": 3,
+              "sha256": null,
+              "lastError": null
+            }
+            """.utf8)
+            let response = HTTPURLResponse(url: request.url!,
+                                           statusCode: 200,
+                                           httpVersion: nil,
+                                           headerFields: nil)!
+            return (response, data)
+        }
+
+        runAsyncTest {
+            let client = FirmwareUpdateDeviceClient(
+                baseURL: URL(string: "http://192.168.4.1:8080")!,
+                sessionToken: "token-123",
+                session: session
+            )
+            let status = try await client.begin(manifest: manifest, allowDowngrade: true)
+            assertEqual(status.status, "receiving", "begin response decodes firmware status")
+            assertEqual(status.totalBytes, 3, "begin response decodes expected byte count")
+        }
+    }
+
+    static func runAsyncTest(_ operation: @escaping () async throws -> Void) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var failure: Error?
+        Task {
+            do {
+                try await operation()
+            } catch {
+                failure = error
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        if let failure {
+            assert(false, "async test failed: \(failure)")
+        }
     }
 
     static func testNavigationPacketBuilder() {

@@ -358,18 +358,18 @@ bool FirmwareUpdateHttpServer::handleRequest(
   Serial.printf("FIRMWARE_UPDATE_HTTP: %s %s length=%llu\n",
                 request.method.c_str(), request.path.c_str(),
                 static_cast<unsigned long long>(request.contentLength));
-  if (request.method == "GET" && request.path == kStatusPath) {
-    handleStatus(client);
-    return true;
-  }
   if (transferServer_->status().mode != "firmware") {
-    fail(client, 403, "transfer_mode_mismatch",
-         "firmware transfer mode is not active");
+    reject(client, 403, "transfer_mode_mismatch",
+           "firmware transfer mode is not active");
     return true;
   }
   if (!transferServer_->isRequestAuthorized(request)) {
-    fail(client, 401, "transfer_token_invalid",
-         "firmware transfer token is missing or invalid");
+    reject(client, 401, "transfer_token_invalid",
+           "firmware transfer token is missing or invalid");
+    return true;
+  }
+  if (request.method == "GET" && request.path == kStatusPath) {
+    handleStatus(client);
     return true;
   }
   if (request.method == "POST" && request.path == kBeginPath) {
@@ -388,7 +388,7 @@ bool FirmwareUpdateHttpServer::handleRequest(
     handleCancel(client);
     return true;
   }
-  fail(client, 404, "not_found", "firmware update endpoint not found");
+  reject(client, 404, "not_found", "firmware update endpoint not found");
   return true;
 }
 
@@ -661,6 +661,13 @@ void FirmwareUpdateHttpServer::resetUploadState() {
   if (otaOpen) {
     esp_ota_abort(handle);
   }
+}
+
+void FirmwareUpdateHttpServer::reject(WiFiClient &client, int httpStatus,
+                                      const std::string &code,
+                                      const std::string &message) {
+  transferServer_->setLastError(code, message);
+  device_transfer::sendHttpError(client, httpStatus, code, message);
 }
 
 void FirmwareUpdateHttpServer::fail(WiFiClient &client, int httpStatus,

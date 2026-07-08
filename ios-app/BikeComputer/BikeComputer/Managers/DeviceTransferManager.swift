@@ -56,6 +56,7 @@ final class DeviceTransferManager {
                 )
                 await joinDeviceNetworkIfNeeded(session: session,
                                                 statusPath: "map-transfer/status",
+                                                sessionToken: session.sessionToken,
                                                 status: status)
                 return session
             }
@@ -103,6 +104,7 @@ final class DeviceTransferManager {
                 )
                 await joinDeviceNetworkIfNeeded(session: session,
                                                 statusPath: "firmware-update/status",
+                                                sessionToken: session.sessionToken,
                                                 status: status)
                 return session
             }
@@ -121,6 +123,7 @@ final class DeviceTransferManager {
     private func joinDeviceNetworkIfNeeded(
         session: DeviceTransferSession,
         statusPath: String,
+        sessionToken: String?,
         status: @escaping @MainActor (String) -> Void
     ) async {
         guard session.baseURL.host == "192.168.4.1",
@@ -151,7 +154,8 @@ final class DeviceTransferManager {
             }
         } catch {
             if await isTransferServerReachable(baseURL: session.baseURL,
-                                               statusPath: statusPath) {
+                                               statusPath: statusPath,
+                                               sessionToken: sessionToken) {
                 return
             }
             status("using device Wi-Fi")
@@ -160,18 +164,24 @@ final class DeviceTransferManager {
 
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         if await isTransferServerReachable(baseURL: session.baseURL,
-                                           statusPath: statusPath) {
+                                           statusPath: statusPath,
+                                           sessionToken: sessionToken) {
             return
         }
         status("using device Wi-Fi")
 #endif
     }
 
-    private func isTransferServerReachable(baseURL: URL, statusPath: String) async -> Bool {
+    private func isTransferServerReachable(baseURL: URL,
+                                           statusPath: String,
+                                           sessionToken: String?) async -> Bool {
         let url = baseURL.appendingPathComponent(statusPath)
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 3
+        if let sessionToken, !sessionToken.isEmpty {
+            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        }
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

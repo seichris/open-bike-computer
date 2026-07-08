@@ -64,7 +64,7 @@ struct FirmwareReleaseManifest: Codable, Equatable {
     let target: String
     let version: String
     let build: Int
-    let gitSha: String?
+    let gitSha: String
     let size: Int
     let sha256: String
     let url: URL
@@ -126,7 +126,7 @@ enum FirmwareManifestSignatureVerifier {
             "target=\(manifest.target)",
             "version=\(manifest.version)",
             "build=\(manifest.build)",
-            "gitSha=\(manifest.gitSha ?? "")",
+            "gitSha=\(manifest.gitSha)",
             "size=\(manifest.size)",
             "sha256=\(manifest.sha256)",
             "url=\(manifest.url.absoluteString)",
@@ -272,6 +272,13 @@ final class FirmwareUpdateManager: ObservableObject {
         }
         guard manifest.target == bleManager.firmwareTarget else {
             throw FirmwareUpdateError.targetMismatch
+        }
+        guard !manifest.version.isEmpty,
+              !manifest.gitSha.isEmpty,
+              manifest.size > 0,
+              !manifest.sha256.isEmpty,
+              manifest.signature?.isEmpty == false else {
+            throw FirmwareUpdateError.invalidManifest
         }
         guard FirmwareManifestSignatureVerifier.verify(manifest) else {
             throw FirmwareUpdateError.invalidManifestSignature
@@ -420,7 +427,7 @@ struct FirmwareUpdateDeviceClient {
             "version": manifest.version,
             "build": manifest.build,
             "target": manifest.target,
-            "gitSha": manifest.gitSha ?? "",
+            "gitSha": manifest.gitSha,
             "size": manifest.size,
             "sha256": manifest.sha256,
             "minUpdaterProtocol": manifest.minUpdaterProtocol,
