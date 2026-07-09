@@ -8,14 +8,14 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 - `garmin-mount.stl`: Source Garmin male mount geometry used by the Garmin bottom plate generator.
 - `waveshare_amoled_175_bottom_board_garmin.py`: Blender Python source that combines the plain bottom plate with the Garmin mount locking features.
 - `waveshare_amoled_175_bottom_board_garmin.stl`: Printable bottom plate with the Garmin mount, using the tested no-extra-base design and 0.5 mm tighter top connector cutouts.
-- `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: Printable Garmin bottom plate variant with screw and connector cutouts closed.
+- `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: Printable Garmin bottom plate variant with the three rectangular cutouts closed and screw holes retained.
 - `*.png`: Rendered previews generated from the STL files.
 
 ## Screws
 
 - `waveshare_amoled_175_bottom_board.stl`: uses three M2x3.5 screws.
 - `waveshare_amoled_175_bottom_board_garmin.stl`: uses three M2x6 screws.
-- `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: no bottom-plate screw holes.
+- `waveshare_amoled_175_bottom_board_garmin_no_holes.stl`: uses three M2x6 screws.
 
 ## STL Previews
 
@@ -24,7 +24,7 @@ This folder contains the source and printable CAD files for the Waveshare ESP32-
 | `waveshare_amoled_175_bottom_board.stl` | ![Plain Waveshare bottom plate](waveshare_amoled_175_bottom_board.png) |
 | `garmin-mount.stl` | ![Garmin male mount source geometry](garmin-mount.png) |
 | `waveshare_amoled_175_bottom_board_garmin.stl` = `waveshare_amoled_175_bottom_board.stl` + `garmin-mount.stl` | ![Waveshare bottom plate with Garmin mount](waveshare_amoled_175_bottom_board_garmin.png) |
-| `waveshare_amoled_175_bottom_board_garmin_no_holes.stl` = closed-hole `waveshare_amoled_175_bottom_board_garmin.stl` | ![Waveshare bottom plate with Garmin mount and closed holes](waveshare_amoled_175_bottom_board_garmin_no_holes.png) |
+| `waveshare_amoled_175_bottom_board_garmin_no_holes.stl` = `waveshare_amoled_175_bottom_board_garmin.stl` with the three rectangular cutouts closed | ![Waveshare bottom plate with Garmin mount and closed rectangular cutouts](waveshare_amoled_175_bottom_board_garmin_no_holes.png) |
 
 Regenerate the printable files from this folder with Blender:
 
