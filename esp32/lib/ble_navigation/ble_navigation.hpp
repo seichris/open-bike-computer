@@ -33,7 +33,7 @@ struct NavigationData {
  * Settings IDs: 1=minPolygonSize, 2=detailLevel, 3=routeLineWidth,
  * 4=displayRotation, 6=mapRotationMode, 7=zoomLevel, 8=visibilityMask,
  * 9=streetLineWidthBoost, 10=positionMarkerScale, 11=tapToSwitchScreens,
- * 13=enabledScreensMask, 14=defaultScreen
+ * 13=enabledScreensMask, 14=defaultScreen, 15=disconnectedSleepTimeoutSeconds
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
@@ -61,6 +61,8 @@ struct MapRenderSettings {
       DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
   uint8_t defaultScreen =
       DEVICE_SCREEN_MAP_PLUS_NAVIGATION; // DeviceScreenSetting value
+  uint32_t disconnectedSleepTimeoutSeconds =
+      120; // 0=never auto-sleep while disconnected
   uint32_t visibilityMask =
       0xFFFFFFFF; // Bits: 0 buildings, 1 green, 2 paths, 3 major roads,
                   // 4 local streets, 5 water, 6 rail, 7 other areas,

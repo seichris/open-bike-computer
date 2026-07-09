@@ -105,6 +105,7 @@ Current setting IDs:
 | `12` | Device brightness | `5...100` percent on supported hardware |
 | `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation. Invalid or empty masks fall back to all supported screens. |
 | `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation. Invalid or disabled defaults fall back to Map if enabled, otherwise the first enabled screen. |
+| `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. |
 
 Feature visibility toggles are authoritative for their classes. Detail level
 controls small-area density without overriding the visibility mask: high uses

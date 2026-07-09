@@ -252,6 +252,7 @@ struct NavigationProtocolTests {
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
+        testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
         testNavigationSendTrackerReadinessRetry()
@@ -896,6 +897,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
+        assertEqual(DeviceBLEProtocol.disconnectedSleepTimeoutSettingID, 15, "disconnected sleep timeout uses firmware setting ID 15")
         assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
         assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
@@ -904,6 +906,12 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.displayOrder[0], .mapPlusNavigation, "Map + Navigation is the first device screen in settings")
         assertEqual(DeviceScreen.displayOrder[1], .rideStats, "Ride Stats is the second device screen in settings")
         assertEqual(DeviceScreen.allScreensMask, 0x0F, "all supported device screens use the low four mask bits")
+        assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
+        assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
+        assertEqual(DisconnectedSleepTimeout.fiveMinutes.settingValue, 300, "five-minute sleep timeout sends seconds")
+        assertEqual(DisconnectedSleepTimeout.tenMinutes.settingValue, 600, "ten-minute sleep timeout sends seconds")
+        assertEqual(DisconnectedSleepTimeout.never.settingValue, 0, "never sleep sends zero seconds")
+        assertEqual(DisconnectedSleepTimeout.normalized(rawValue: 999), .twoMinutes, "unknown sleep timeout falls back to two minutes")
     }
 
     static func testDeviceScreenValidation() {
@@ -1047,6 +1055,34 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[2], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
     }
 
+    static func testBLEManagerSendsDisconnectedSleepTimeoutSetting() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.disconnectedSleepTimeout = .fiveMinutes
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                            value: manager.disconnectedSleepTimeout.settingValue)
+
+        assertEqual(sentPackets.count, 1, "sleep timeout setting should send one fallback packet")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8),
+                    DeviceBLEProtocol.settingsFallbackPrefix,
+                    "sleep timeout fallback uses MSET prefix")
+        assertEqual(sentPackets[0][4],
+                    DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                    "sleep timeout uses setting ID 15")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5),
+                    DisconnectedSleepTimeout.fiveMinutes.settingValue,
+                    "sleep timeout fallback includes little-endian seconds")
+    }
+
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
@@ -1155,7 +1191,8 @@ struct NavigationProtocolTests {
             "mapSettings.zoomLevel",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
-            "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
+            "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
+            "deviceSettings.disconnectedSleepTimeoutSeconds"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
 
@@ -1172,6 +1209,7 @@ struct NavigationProtocolTests {
         manager.zoomLevel = 5
         manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
         manager.defaultDeviceScreen = .mapPlusNavigation
+        manager.disconnectedSleepTimeout = .tenMinutes
         manager.saveSettings()
 
         let reloaded = BLEManager()
@@ -1181,6 +1219,7 @@ struct NavigationProtocolTests {
                     DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
                     "enabled device screens should persist across BLEManager reloads")
         assertEqual(reloaded.defaultDeviceScreen, .mapPlusNavigation, "default device screen should persist across BLEManager reloads")
+        assertEqual(reloaded.disconnectedSleepTimeout, .tenMinutes, "disconnected sleep timeout should persist across BLEManager reloads")
 
         keys.forEach { defaults.removeObject(forKey: $0) }
     }

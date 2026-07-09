@@ -42,6 +42,7 @@ enum DeviceBLEProtocol {
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
     static let defaultScreenSettingID: UInt8 = 14
+    static let disconnectedSleepTimeoutSettingID: UInt8 = 15
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -108,6 +109,39 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
             return candidate
         }
         return displayOrder.first { mask & $0.bit != 0 } ?? .mapPlusNavigation
+    }
+}
+
+enum DisconnectedSleepTimeout: Int, CaseIterable, Identifiable {
+    case oneMinute = 60
+    case twoMinutes = 120
+    case fiveMinutes = 300
+    case tenMinutes = 600
+    case never = 0
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .oneMinute:
+            return "1 min"
+        case .twoMinutes:
+            return "2 min"
+        case .fiveMinutes:
+            return "5 min"
+        case .tenMinutes:
+            return "10 min"
+        case .never:
+            return "Never"
+        }
+    }
+
+    var settingValue: Int32 {
+        Int32(rawValue)
+    }
+
+    static func normalized(rawValue: Int) -> DisconnectedSleepTimeout {
+        DisconnectedSleepTimeout(rawValue: rawValue) ?? .twoMinutes
     }
 }
 
@@ -250,6 +284,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
+    @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -336,6 +371,7 @@ class BLEManager: NSObject, ObservableObject {
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
+        static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
@@ -395,6 +431,9 @@ class BLEManager: NSObject, ObservableObject {
             defaults.set(true, forKey: SettingsKeys.defaultDeviceScreenMigrated)
         }
         deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
+        disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
+            rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
+        )
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -434,6 +473,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(enabledDeviceScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
         defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
+        defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
@@ -1124,6 +1164,8 @@ class BLEManager: NSObject, ObservableObject {
         sendEnabledDeviceScreensMask()
         sendDefaultDeviceScreen()
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
+        sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                    value: disconnectedSleepTimeout.settingValue)
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
