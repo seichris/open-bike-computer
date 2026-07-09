@@ -181,7 +181,7 @@ final class FirmwareUpdateManager: ObservableObject {
                 self.statusMessage = "checking firmware manifest"
                 let manifest = try await self.fetchLatestManifest(bleManager: bleManager)
                 self.latestManifest = manifest
-                self.statusMessage = self.isUpdateAllowed(manifest, bleManager: bleManager) ? "firmware update available" : "firmware is current"
+                self.statusMessage = self.availabilityMessage(for: manifest, bleManager: bleManager)
             }
         }
     }
@@ -295,14 +295,43 @@ final class FirmwareUpdateManager: ObservableObject {
         guard manifest.target == bleManager.firmwareTarget else {
             throw FirmwareUpdateError.targetMismatch
         }
+        if isCurrentFirmware(manifest, bleManager: bleManager) {
+            throw FirmwareUpdateError.updateNotAvailable
+        }
         if manifest.build <= bleManager.firmwareBuild && !allowDeveloperDowngrade {
             throw FirmwareUpdateError.updateNotAvailable
         }
     }
 
     func isUpdateAllowed(_ manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> Bool {
+        guard manifest.target == bleManager.firmwareTarget,
+              !isCurrentFirmware(manifest, bleManager: bleManager) else {
+            return false
+        }
+        return manifest.build > bleManager.firmwareBuild || allowDeveloperDowngrade
+    }
+
+    func availabilityMessage(for manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> String {
+        guard manifest.target == bleManager.firmwareTarget else {
+            return "firmware target mismatch"
+        }
+        if isCurrentFirmware(manifest, bleManager: bleManager) {
+            return "firmware is current"
+        }
+        if manifest.build > bleManager.firmwareBuild {
+            return "firmware update available"
+        }
+        if allowDeveloperDowngrade {
+            return "developer firmware install available"
+        }
+        return "firmware is current"
+    }
+
+    private func isCurrentFirmware(_ manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> Bool {
         manifest.target == bleManager.firmwareTarget &&
-        (manifest.build > bleManager.firmwareBuild || allowDeveloperDowngrade)
+        manifest.version == bleManager.firmwareVersion &&
+        manifest.build == bleManager.firmwareBuild &&
+        manifest.gitSha == bleManager.firmwareGitSha
     }
 
     private func downloadFirmware(manifest: FirmwareReleaseManifest) async throws -> Data {

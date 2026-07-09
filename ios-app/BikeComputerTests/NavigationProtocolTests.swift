@@ -243,6 +243,7 @@ struct NavigationProtocolTests {
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
+        testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
         print("NavigationProtocolTests passed")
     }
@@ -624,6 +625,78 @@ struct NavigationProtocolTests {
         assertEqual(manager.statusMessage,
                     "device rebooting",
                     "firmware manager restores pending reboot status after app relaunch")
+    }
+
+    @MainActor
+    static func testFirmwareUpdateAvailabilitySemantics() {
+        let suiteName = "FirmwareUpdateAvailabilityTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.firmwareTarget = "WAVESHARE_AMOLED_206"
+        bleManager.firmwareVersion = "0.2.4"
+        bleManager.firmwareBuild = 88
+        bleManager.firmwareGitSha = "abcdef123456"
+
+        let current = FirmwareReleaseManifest(
+            schemaVersion: 1,
+            target: "WAVESHARE_AMOLED_206",
+            version: "0.2.4",
+            build: 88,
+            gitSha: "abcdef123456",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.2.4/WAVESHARE_AMOLED_206.bin")!,
+            minUpdaterProtocol: 1,
+            signature: "signature"
+        )
+        manager.allowDeveloperDowngrade = true
+        assert(!manager.isUpdateAllowed(current, bleManager: bleManager),
+               "exactly installed firmware should not be installable as an update even with developer downgrade enabled")
+        assertEqual(manager.availabilityMessage(for: current, bleManager: bleManager),
+                    "firmware is current",
+                    "exactly installed firmware reports current")
+
+        let newer = FirmwareReleaseManifest(
+            schemaVersion: current.schemaVersion,
+            target: current.target,
+            version: "0.2.5",
+            build: 89,
+            gitSha: "bbbbbb123456",
+            size: current.size,
+            sha256: current.sha256,
+            url: current.url,
+            minUpdaterProtocol: current.minUpdaterProtocol,
+            signature: current.signature
+        )
+        assert(manager.isUpdateAllowed(newer, bleManager: bleManager),
+               "newer build should be installable")
+        assertEqual(manager.availabilityMessage(for: newer, bleManager: bleManager),
+                    "firmware update available",
+                    "newer build reports update available")
+
+        let older = FirmwareReleaseManifest(
+            schemaVersion: current.schemaVersion,
+            target: current.target,
+            version: "0.2.3",
+            build: 87,
+            gitSha: "aaaaaa123456",
+            size: current.size,
+            sha256: current.sha256,
+            url: current.url,
+            minUpdaterProtocol: current.minUpdaterProtocol,
+            signature: current.signature
+        )
+        assert(manager.isUpdateAllowed(older, bleManager: bleManager),
+               "older build remains installable behind developer downgrade")
+        assertEqual(manager.availabilityMessage(for: older, bleManager: bleManager),
+                    "developer firmware install available",
+                    "developer downgrade is not labeled as a normal update")
     }
 
     static func testFirmwareDeviceClientSendsSignedBeginRequest() {
