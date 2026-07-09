@@ -1,4 +1,6 @@
 import math
+import sys
+import tempfile
 from pathlib import Path
 
 import bpy
@@ -6,10 +8,16 @@ from mathutils import Vector
 
 
 OUT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(OUT_DIR))
+
+import waveshare_amoled_175_bottom_plate
+
 BOTTOM_PLATE_STL = OUT_DIR / "waveshare_amoled_175_bottom_board.stl"
 GARMIN_STL = OUT_DIR / "garmin-mount.stl"
 COMBINED_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.stl"
+TIGHT_TOP_HOLES_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_top_holes_tighter.stl"
 GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE = 3.00
+TOP_CONNECTOR_TOP_INSET_MM = 0.50
 
 
 def clean_scene():
@@ -138,7 +146,7 @@ def create_joined_duplicate(name, parts, hidden=True):
     return combined
 
 
-def build_scene():
+def build_scene(bottom_plate_stl=BOTTOM_PLATE_STL, combined_stl_path=COMBINED_STL_PATH, variant_note=""):
     clean_scene()
     setup_units()
 
@@ -146,7 +154,7 @@ def build_scene():
     garmin_mat = material("garmin_male_mount_blue_reference", (0.05, 0.19, 0.55, 1.0))
     note_mat = material("scene_note_gray", (0.22, 0.22, 0.22, 1.0))
 
-    plate = import_stl(BOTTOM_PLATE_STL, "waveshare_bottom_plate_usb_front")
+    plate = import_stl(bottom_plate_stl, "waveshare_bottom_plate_usb_front")
     plate.data.materials.append(plate_mat)
     set_origin_to_bounds_center(plate)
     center_xy(plate)
@@ -193,13 +201,16 @@ def build_scene():
     bpy.context.collection.objects.link(root)
     root["bottom_plate_dia_mm"] = 51.0
     root["bottom_plate_thickness_mm"] = round(plate_max.z, 3)
+    root["bottom_plate_source_stl"] = str(bottom_plate_stl)
     root["garmin_source_stl"] = str(GARMIN_STL)
     root["garmin_native_bounds_mm"] = native_garmin_bounds
     root["garmin_upper_source_cut_z_mm"] = round(upper_source_cut_z, 3)
     root["garmin_rotated_original_bounds_mm"] = rotated_garmin_bounds
     root["garmin_rotation_euler_deg"] = "-90, 0, 90"
     root["usb_front_direction"] = "-Y"
-    root["printable_combined_stl"] = str(COMBINED_STL_PATH)
+    root["printable_combined_stl"] = str(combined_stl_path)
+    if variant_note:
+        root["variant_note"] = variant_note
 
     note = add_text(
         "orientation_note",
@@ -233,10 +244,29 @@ def build_scene():
     combined.hide_viewport = False
     combined.select_set(True)
     bpy.context.view_layer.objects.active = combined
-    bpy.ops.wm.stl_export(filepath=str(COMBINED_STL_PATH), export_selected_objects=True)
+    bpy.ops.wm.stl_export(filepath=str(combined_stl_path), export_selected_objects=True)
     combined.hide_viewport = True
     combined.select_set(False)
 
 
+def build_tight_top_holes_variant():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tight_bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_top_holes_tighter.stl"
+        waveshare_amoled_175_bottom_plate.build_model(
+            stl_path=tight_bottom_plate_stl,
+            top_connector_top_inset_mm=TOP_CONNECTOR_TOP_INSET_MM,
+            save_blend=False,
+        )
+        build_scene(
+            bottom_plate_stl=tight_bottom_plate_stl,
+            combined_stl_path=TIGHT_TOP_HOLES_STL_PATH,
+            variant_note=(
+                "Top edge of each top connector cutout moved inward by "
+                f"{TOP_CONNECTOR_TOP_INSET_MM:.2f} mm"
+            ),
+        )
+
+
 if __name__ == "__main__":
     build_scene()
+    build_tight_top_holes_variant()

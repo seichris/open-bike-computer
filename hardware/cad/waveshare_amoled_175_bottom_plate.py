@@ -168,7 +168,12 @@ def add_text(name, text, loc, size=1.45):
     return obj
 
 
-def build_model():
+def build_model(
+    stl_path=STL_PATH,
+    blend_path=BLEND_PATH,
+    top_connector_top_inset_mm=0.0,
+    save_blend=True,
+):
     clean_scene()
     setup_units()
 
@@ -232,11 +237,16 @@ def build_model():
 
     # Two small top connector windows for the speaker/battery connectors visible
     # near the top of the bottom-plate image.
+    top_connector_len = PARAMS["connector_cutout_len"] - top_connector_top_inset_mm
+    if top_connector_len <= 0:
+        raise ValueError("top_connector_top_inset_mm must be smaller than connector_cutout_len")
+    top_connector_center_y = PARAMS["top_connector_center_y"] - top_connector_top_inset_mm / 2.0
+
     for idx, x in enumerate((-PARAMS["top_connector_spacing_x"] / 2.0, PARAMS["top_connector_spacing_x"] / 2.0), start=1):
         conn_cut = make_rounded_box_cutter(
             f"rear_connector_access_cutout_cutter_{idx}",
-            (PARAMS["connector_cutout_width"], PARAMS["connector_cutout_len"], t + 1.0),
-            (x, PARAMS["top_connector_center_y"], t / 2.0),
+            (PARAMS["connector_cutout_width"], top_connector_len, t + 1.0),
+            (x, top_connector_center_y, t / 2.0),
             0.45,
         )
         bool_difference(plate, conn_cut, "rear_connector_access_cutout")
@@ -272,6 +282,7 @@ def build_model():
         root[key] = value
     root["screw_countersink_depth"] = countersink_depth
     root["screw_centers_xy_mm"] = str(SCREW_CENTERS)
+    root["top_connector_top_inset_mm"] = top_connector_top_inset_mm
 
     camera_data = bpy.data.cameras.new("Camera")
     camera = bpy.data.objects.new("Camera", camera_data)
@@ -293,12 +304,13 @@ def build_model():
     bpy.context.scene.view_settings.view_transform = "Filmic"
     bpy.context.scene.view_settings.look = "Medium High Contrast"
 
-    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH))
+    if save_blend:
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
 
     bpy.ops.object.select_all(action="DESELECT")
     plate.select_set(True)
     bpy.context.view_layer.objects.active = plate
-    bpy.ops.wm.stl_export(filepath=str(STL_PATH), export_selected_objects=True)
+    bpy.ops.wm.stl_export(filepath=str(stl_path), export_selected_objects=True)
 
 
 if __name__ == "__main__":
