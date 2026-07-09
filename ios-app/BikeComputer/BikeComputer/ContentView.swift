@@ -164,7 +164,7 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
             }
         }
-        .padding(.bottom, 12)
+        .padding(.bottom, 24)
         .animation(.spring(response: 0.34, dampingFraction: 0.88), value: isSearchPanelExpanded)
         .animation(.easeInOut(duration: 0.2), value: coordinator.routeCalculation.isCalculating)
         .animation(.easeInOut(duration: 0.2), value: coordinator.isNavigating)

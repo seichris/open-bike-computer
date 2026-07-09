@@ -76,12 +76,6 @@ struct RouteSearchPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 38, height: 5)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
-
             if isExpanded {
                 expandedContent
             } else {
@@ -146,7 +140,7 @@ struct RouteSearchPanel: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, 14)
+        .padding(.vertical, 14)
     }
 
     private var destinationSearchField: some View {
