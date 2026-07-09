@@ -15,6 +15,7 @@ import waveshare_amoled_175_bottom_plate
 BOTTOM_PLATE_STL = OUT_DIR / "waveshare_amoled_175_bottom_board.stl"
 GARMIN_STL = OUT_DIR / "garmin-mount.stl"
 COMBINED_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin.stl"
+NO_HOLES_STL_PATH = OUT_DIR / "waveshare_amoled_175_bottom_board_garmin_no_holes.stl"
 GARMIN_UPPER_SOURCE_CUT_ABOVE_PLATE = 3.00
 TOP_CONNECTOR_TOP_INSET_MM = 0.50
 
@@ -266,5 +267,21 @@ def build_canonical_garmin_plate():
         )
 
 
+def build_no_holes_garmin_plate():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        bottom_plate_stl = Path(tmp_dir) / "waveshare_amoled_175_bottom_board_no_holes.stl"
+        waveshare_amoled_175_bottom_plate.build_model(
+            stl_path=bottom_plate_stl,
+            include_cutouts=False,
+            save_blend=False,
+        )
+        build_scene(
+            bottom_plate_stl=bottom_plate_stl,
+            combined_stl_path=NO_HOLES_STL_PATH,
+            variant_note="Solid bottom plate with screw and connector cutouts closed",
+        )
+
+
 if __name__ == "__main__":
     build_canonical_garmin_plate()
+    build_no_holes_garmin_plate()

@@ -172,6 +172,7 @@ def build_model(
     stl_path=STL_PATH,
     blend_path=BLEND_PATH,
     top_connector_top_inset_mm=0.0,
+    include_cutouts=True,
     save_blend=True,
 ):
     clean_scene()
@@ -194,67 +195,69 @@ def build_model(
     )
     add_bevel(plate, PARAMS["bevel_radius"], segments=4)
 
-    cutters = []
     countersink_depth = (
         PARAMS["screw_countersink_outer_dia"] - PARAMS["m2_through_dia"]
     ) / (2.0 * math.tan(math.radians(PARAMS["screw_countersink_angle_deg"] / 2.0)))
 
-    for idx, (x, y) in enumerate(SCREW_CENTERS, start=1):
-        through = add_cylinder(
-            f"m2_through_hole_cutter_{idx}",
-            PARAMS["m2_through_dia"] / 2.0,
-            t + 1.0,
-            (x, y, t / 2.0),
-            vertices=72,
-            mat=cutter_mat,
-        )
-        bool_difference(plate, through, "m2_through_hole")
-        cutters.append(through)
+    if include_cutouts:
+        cutters = []
 
-        countersink = add_frustum(
-            f"m2_90deg_countersink_cutter_{idx}",
-            PARAMS["screw_countersink_outer_dia"] / 2.0,
-            PARAMS["m2_through_dia"] / 2.0,
-            t + 0.03,
-            t - countersink_depth - 0.03,
-            (x, y),
-            vertices=128,
-            mat=cutter_mat,
-        )
-        bool_difference(plate, countersink, "m2_90deg_countersink")
-        cutters.append(countersink)
+        for idx, (x, y) in enumerate(SCREW_CENTERS, start=1):
+            through = add_cylinder(
+                f"m2_through_hole_cutter_{idx}",
+                PARAMS["m2_through_dia"] / 2.0,
+                t + 1.0,
+                (x, y, t / 2.0),
+                vertices=72,
+                mat=cutter_mat,
+            )
+            bool_difference(plate, through, "m2_through_hole")
+            cutters.append(through)
 
-    # Bottom header opening: the STEP reference shows this as one continuous
-    # rectangular opening, not eight separate pin apertures.
-    header_opening = make_rounded_box_cutter(
-        "rear_8pin_header_single_opening_cutter",
-        (PARAMS["header_opening_width"], PARAMS["header_opening_len"], t + 1.0),
-        (0.0, PARAMS["header_center_y"], t / 2.0),
-        0.45,
-    )
-    bool_difference(plate, header_opening, "rear_8pin_header_single_opening")
-    cutters.append(header_opening)
+            countersink = add_frustum(
+                f"m2_90deg_countersink_cutter_{idx}",
+                PARAMS["screw_countersink_outer_dia"] / 2.0,
+                PARAMS["m2_through_dia"] / 2.0,
+                t + 0.03,
+                t - countersink_depth - 0.03,
+                (x, y),
+                vertices=128,
+                mat=cutter_mat,
+            )
+            bool_difference(plate, countersink, "m2_90deg_countersink")
+            cutters.append(countersink)
 
-    # Two small top connector windows for the speaker/battery connectors visible
-    # near the top of the bottom-plate image.
-    top_connector_len = PARAMS["connector_cutout_len"] - top_connector_top_inset_mm
-    if top_connector_len <= 0:
-        raise ValueError("top_connector_top_inset_mm must be smaller than connector_cutout_len")
-    top_connector_center_y = PARAMS["top_connector_center_y"] - top_connector_top_inset_mm / 2.0
-
-    for idx, x in enumerate((-PARAMS["top_connector_spacing_x"] / 2.0, PARAMS["top_connector_spacing_x"] / 2.0), start=1):
-        conn_cut = make_rounded_box_cutter(
-            f"rear_connector_access_cutout_cutter_{idx}",
-            (PARAMS["connector_cutout_width"], top_connector_len, t + 1.0),
-            (x, top_connector_center_y, t / 2.0),
+        # Bottom header opening: the STEP reference shows this as one continuous
+        # rectangular opening, not eight separate pin apertures.
+        header_opening = make_rounded_box_cutter(
+            "rear_8pin_header_single_opening_cutter",
+            (PARAMS["header_opening_width"], PARAMS["header_opening_len"], t + 1.0),
+            (0.0, PARAMS["header_center_y"], t / 2.0),
             0.45,
         )
-        bool_difference(plate, conn_cut, "rear_connector_access_cutout")
-        cutters.append(conn_cut)
+        bool_difference(plate, header_opening, "rear_8pin_header_single_opening")
+        cutters.append(header_opening)
 
-    for cutter in cutters:
-        cutter.hide_viewport = True
-        cutter.hide_render = True
+        # Two small top connector windows for the speaker/battery connectors visible
+        # near the top of the bottom-plate image.
+        top_connector_len = PARAMS["connector_cutout_len"] - top_connector_top_inset_mm
+        if top_connector_len <= 0:
+            raise ValueError("top_connector_top_inset_mm must be smaller than connector_cutout_len")
+        top_connector_center_y = PARAMS["top_connector_center_y"] - top_connector_top_inset_mm / 2.0
+
+        for idx, x in enumerate((-PARAMS["top_connector_spacing_x"] / 2.0, PARAMS["top_connector_spacing_x"] / 2.0), start=1):
+            conn_cut = make_rounded_box_cutter(
+                f"rear_connector_access_cutout_cutter_{idx}",
+                (PARAMS["connector_cutout_width"], top_connector_len, t + 1.0),
+                (x, top_connector_center_y, t / 2.0),
+                0.45,
+            )
+            bool_difference(plate, conn_cut, "rear_connector_access_cutout")
+            cutters.append(conn_cut)
+
+        for cutter in cutters:
+            cutter.hide_viewport = True
+            cutter.hide_render = True
 
     # Non-printing reference rings so the plate can be checked against the
     # internal PCB/display dimensions without adding them to the STL.
@@ -283,6 +286,7 @@ def build_model(
     root["screw_countersink_depth"] = countersink_depth
     root["screw_centers_xy_mm"] = str(SCREW_CENTERS)
     root["top_connector_top_inset_mm"] = top_connector_top_inset_mm
+    root["include_cutouts"] = include_cutouts
 
     camera_data = bpy.data.cameras.new("Camera")
     camera = bpy.data.objects.new("Camera", camera_data)
