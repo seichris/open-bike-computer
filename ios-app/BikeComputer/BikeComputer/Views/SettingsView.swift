@@ -584,6 +584,7 @@ private struct HardwareCustomizationSettingsView: View {
             .disabled(!bleManager.supportsDeviceSettings)
 
             DeviceSoundsSettingsSection()
+                .disabled(!bleManager.supportsDeviceSounds)
 
             Section(header: Text("Power")) {
                 Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {

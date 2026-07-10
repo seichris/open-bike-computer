@@ -5,6 +5,9 @@
 #include "../waveshare_board/i2c_bus.hpp"
 
 #include <audio_codec_ctrl_if.h>
+#include <audio_codec_data_if.h>
+#include <audio_codec_gpio_if.h>
+#include <audio_codec_if.h>
 #include <driver/gpio.h>
 #include <driver/i2s_std.h>
 #include <es8311_codec.h>
@@ -52,11 +55,13 @@ WireControlInterface wireControl;
 i2s_chan_handle_t txChannel = nullptr;
 i2s_chan_handle_t rxChannel = nullptr;
 const audio_codec_if_t *codecInterface = nullptr;
+const audio_codec_data_if_t *dataInterface = nullptr;
+const audio_codec_gpio_if_t *gpioInterface = nullptr;
 esp_codec_dev_handle_t speakerDevice = nullptr;
 QueueHandle_t soundQueue = nullptr;
 bool initialized = false;
 
-struct PlaybackRequest {
+struct QueuedPlaybackRequest {
   uint8_t sound;
   uint8_t volumePercent;
 };
@@ -109,6 +114,46 @@ void configureWireControl() {
   wireControl.base.close = wireControlClose;
 }
 
+void releaseCodecResources() {
+  initialized = false;
+
+  if (speakerDevice != nullptr) {
+    esp_codec_dev_delete(speakerDevice);
+    speakerDevice = nullptr;
+  }
+  if (codecInterface != nullptr) {
+    audio_codec_delete_codec_if(codecInterface);
+    codecInterface = nullptr;
+  }
+  if (dataInterface != nullptr) {
+    audio_codec_delete_data_if(dataInterface);
+    dataInterface = nullptr;
+  }
+  if (gpioInterface != nullptr) {
+    audio_codec_delete_gpio_if(gpioInterface);
+    gpioInterface = nullptr;
+  }
+
+  if (txChannel != nullptr) {
+    i2s_channel_disable(txChannel);
+    i2s_del_channel(txChannel);
+    txChannel = nullptr;
+  }
+  if (rxChannel != nullptr) {
+    i2s_channel_disable(rxChannel);
+    i2s_del_channel(rxChannel);
+    rxChannel = nullptr;
+  }
+
+  gpio_set_level(PA_ENABLE, 0);
+}
+
+bool failInitialization(const char *message) {
+  Serial.println(message);
+  releaseCodecResources();
+  return false;
+}
+
 bool initializeCodec() {
   if (initialized) {
     return true;
@@ -119,12 +164,14 @@ bool initializeCodec() {
     return false;
   }
 
+  gpio_set_direction(PA_ENABLE, GPIO_MODE_OUTPUT);
+  gpio_set_level(PA_ENABLE, 0);
+
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   channelConfig.auto_clear = true;
   if (i2s_new_channel(&channelConfig, &txChannel, &rxChannel) != ESP_OK) {
-    Serial.println("Speaker: failed to allocate I2S channels");
-    return false;
+    return failInitialization("Speaker: failed to allocate I2S channels");
   }
 
   i2s_std_config_t standardConfig{};
@@ -141,20 +188,17 @@ bool initializeCodec() {
       i2s_channel_enable(txChannel) != ESP_OK ||
       i2s_channel_init_std_mode(rxChannel, &standardConfig) != ESP_OK ||
       i2s_channel_enable(rxChannel) != ESP_OK) {
-    Serial.println("Speaker: failed to configure I2S");
-    return false;
+    return failInitialization("Speaker: failed to configure I2S");
   }
 
   audio_codec_i2s_cfg_t i2sConfig{};
   i2sConfig.port = I2S_NUM_0;
   i2sConfig.rx_handle = rxChannel;
   i2sConfig.tx_handle = txChannel;
-  const audio_codec_data_if_t *dataInterface =
-      audio_codec_new_i2s_data(&i2sConfig);
-  const audio_codec_gpio_if_t *gpioInterface = audio_codec_new_gpio();
+  dataInterface = audio_codec_new_i2s_data(&i2sConfig);
+  gpioInterface = audio_codec_new_gpio();
   if (dataInterface == nullptr || gpioInterface == nullptr) {
-    Serial.println("Speaker: failed to create codec interfaces");
-    return false;
+    return failInitialization("Speaker: failed to create codec interfaces");
   }
 
   configureWireControl();
@@ -177,8 +221,7 @@ bool initializeCodec() {
 
   codecInterface = es8311_codec_new(&codecConfig);
   if (codecInterface == nullptr) {
-    Serial.println("Speaker: failed to initialize ES8311");
-    return false;
+    return failInitialization("Speaker: failed to initialize ES8311");
   }
 
   esp_codec_dev_cfg_t deviceConfig{};
@@ -187,8 +230,7 @@ bool initializeCodec() {
   deviceConfig.data_if = dataInterface;
   speakerDevice = esp_codec_dev_new(&deviceConfig);
   if (speakerDevice == nullptr) {
-    Serial.println("Speaker: failed to create codec device");
-    return false;
+    return failInitialization("Speaker: failed to create codec device");
   }
 
   esp_codec_dev_sample_info_t sampleInfo{};
@@ -200,8 +242,7 @@ bool initializeCodec() {
   if (esp_codec_dev_set_out_vol(speakerDevice, DEFAULT_VOLUME_PERCENT) !=
           ESP_CODEC_DEV_OK ||
       esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
-    Serial.println("Speaker: failed to open codec device");
-    return false;
+    return failInitialization("Speaker: failed to open codec device");
   }
 
   initialized = true;
@@ -297,7 +338,7 @@ bool playNow(Sound sound) {
 }
 
 void speakerTask(void *) {
-  PlaybackRequest request{};
+  QueuedPlaybackRequest request{};
   while (true) {
     if (xQueueReceive(soundQueue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -313,13 +354,16 @@ void speakerTask(void *) {
         ESP_CODEC_DEV_OK) {
       Serial.printf("Speaker: failed to set volume to %u%%\n",
                     request.volumePercent);
-      continue;
+    } else {
+      Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
+                    request.volumePercent);
+      if (!playNow(sound)) {
+        Serial.printf("Speaker: sound %u playback failed\n", request.sound);
+      }
     }
 
-    Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
-                  request.volumePercent);
-    if (!playNow(sound)) {
-      Serial.printf("Speaker: sound %u playback failed\n", request.sound);
+    if (uxQueueMessagesWaiting(soundQueue) == 0) {
+      releaseCodecResources();
     }
   }
 }
@@ -327,14 +371,7 @@ void speakerTask(void *) {
 } // namespace
 
 bool isSupported(Sound sound) {
-  switch (sound) {
-  case Sound::BellDing:
-  case Sound::PlasticBicycleHorn:
-  case Sound::RotatingBicycleBell:
-  case Sound::SqueezeHorn:
-    return true;
-  }
-  return false;
+  return isKnownSound(sound);
 }
 
 bool begin() {
@@ -342,7 +379,7 @@ bool begin() {
     return true;
   }
 
-  soundQueue = xQueueCreate(4, sizeof(PlaybackRequest));
+  soundQueue = xQueueCreate(4, sizeof(QueuedPlaybackRequest));
   if (soundQueue == nullptr) {
     Serial.println("Speaker: failed to create playback queue");
     return false;
@@ -365,7 +402,7 @@ bool requestPlay(Sound sound, uint8_t volumePercent) {
     return false;
   }
 
-  PlaybackRequest request{static_cast<uint8_t>(sound), volumePercent};
+  QueuedPlaybackRequest request{static_cast<uint8_t>(sound), volumePercent};
   return xQueueSend(soundQueue, &request, 0) == pdTRUE;
 }
 

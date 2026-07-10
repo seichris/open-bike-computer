@@ -466,34 +466,28 @@ static std::string trimAscii(const std::string &value) {
 
 static void handleSoundPlayPayload(const uint8_t *data, size_t len,
                                    const char *source) {
-  if (data == nullptr || (len != 1 && len != 2)) {
-    Serial.printf("BLE Sound: rejected %s payload, expected sound ID and "
-                  "optional volume bytes\n",
+  waveshare_board::speaker::PlaybackRequest request{};
+  if (!waveshare_board::speaker::decodePlayPayload(data, len, request)) {
+    Serial.printf("BLE Sound: rejected %s payload\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
 
-  auto sound = static_cast<waveshare_board::speaker::Sound>(data[0]);
-  if (!waveshare_board::speaker::isSupported(sound)) {
-    Serial.printf("BLE Sound: unsupported sound ID %u\n", data[0]);
+  if (!waveshare_board::speaker::isSupported(request.sound)) {
+    Serial.printf("BLE Sound: sound ID %u is unavailable on this hardware\n",
+                  static_cast<unsigned>(request.sound));
     return;
   }
 
-  uint8_t volumePercent = len == 2
-                              ? data[1]
-                              : waveshare_board::speaker::DEFAULT_VOLUME_PERCENT;
-  if (volumePercent > 100) {
-    Serial.printf("BLE Sound: invalid volume %u%%\n", volumePercent);
+  if (!waveshare_board::speaker::requestPlay(request.sound,
+                                             request.volumePercent)) {
+    Serial.printf("BLE Sound: failed to queue sound ID %u\n",
+                  static_cast<unsigned>(request.sound));
     return;
   }
 
-  if (!waveshare_board::speaker::requestPlay(sound, volumePercent)) {
-    Serial.printf("BLE Sound: failed to queue sound ID %u\n", data[0]);
-    return;
-  }
-
-  Serial.printf("BLE Sound: queued sound ID %u at %u%% from %s\n", data[0],
-                volumePercent,
+  Serial.printf("BLE Sound: queued sound ID %u at %u%% from %s\n",
+                static_cast<unsigned>(request.sound), request.volumePercent,
                 source == nullptr ? "unknown" : source);
 }
 
@@ -583,6 +577,11 @@ static std::string genericTransferStatusJson() {
     body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
             "\"";
   }
+#ifdef WAVESHARE_AMOLED_206
+  body += ",\"capabilities\":{\"deviceSounds\":true}";
+#else
+  body += ",\"capabilities\":{\"deviceSounds\":false}";
+#endif
   if (!transferStatus.lastErrorCode.empty()) {
     body += ",\"lastError\":{\"code\":\"" +
             jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +

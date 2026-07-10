@@ -77,6 +77,20 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
     var id: UInt8 { rawValue }
 
     static let defaultSelection: DeviceSound = .plasticBicycleHorn
+    static let defaultVolumePercent: Double = 70
+
+    static func normalizedVolumePercent(_ volumePercent: Double) -> Double {
+        guard volumePercent.isFinite else { return defaultVolumePercent }
+        return min(max(volumePercent, 0), 100)
+    }
+
+    func playPacket(volumePercent: Double) -> Data {
+        let volume = UInt8(Self.normalizedVolumePercent(volumePercent).rounded())
+        var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
+        packet.append(rawValue)
+        packet.append(volume)
+        return packet
+    }
 
     var title: String {
         switch self {
@@ -281,6 +295,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
+    @Published var supportsDeviceSounds: Bool = false
     @Published var peripheralName: String = ""
     @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
@@ -324,7 +339,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceBrightnessPercent: Double = 100
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
-    @Published var deviceSoundVolumePercent: Double = 70
+    @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -481,8 +496,9 @@ class BLEManager: NSObject, ObservableObject {
         selectedDeviceSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
-        let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double ?? 70
-        deviceSoundVolumePercent = min(max(storedSoundVolume, 0), 100)
+        let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
+            ?? DeviceSound.defaultVolumePercent
+        deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
         showBuildings = defaults.object(forKey: SettingsKeys.showBuildings) as? Bool ?? true
         let legacyNature = defaults.object(forKey: SettingsKeys.legacyShowNature) as? Bool ?? true
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
@@ -524,6 +540,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
+        deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
         defaults.set(deviceSoundVolumePercent, forKey: SettingsKeys.deviceSoundVolumePercent)
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
@@ -806,10 +823,13 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func playDeviceSound(_ sound: DeviceSound, volumePercent: Double) -> Bool {
-        let volume = UInt8(min(max(volumePercent.rounded(), 0), 100))
-        var packet = Data(DeviceBLEProtocol.soundPlayPrefix.utf8)
-        packet.append(sound.rawValue)
-        packet.append(volume)
+        guard supportsDeviceSounds else {
+            log("Cannot play device sound: connected device does not advertise sound support")
+            return false
+        }
+
+        let packet = sound.playPacket(volumePercent: volumePercent)
+        let volume = packet.last ?? UInt8(DeviceSound.defaultVolumePercent)
 
         let label = "sound \(sound.rawValue) at \(volume)%"
         if sendNativeMapTransferPacket(packet, label: label) {
@@ -1037,6 +1057,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
         firmwareUpdateLastError = nil
+        supportsDeviceSounds = false
     }
 
     private func updateTrustedPeripheralDescription() {
@@ -1236,6 +1257,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
+        requestDeviceTransferStatus()
     }
 
     private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
@@ -1306,6 +1328,7 @@ class BLEManager: NSObject, ObservableObject {
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
+              peripheral.canSendWriteWithoutResponse,
               data.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
             return false
         }
@@ -1775,6 +1798,8 @@ extension BLEManager: CBPeripheralDelegate {
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
+        let capabilities = object["capabilities"] as? [String: Any]
+        supportsDeviceSounds = capabilities?["deviceSounds"] as? Bool ?? false
 
         if let firmware = object["firmware"] as? [String: Any] {
             firmwareUpdateStatus = firmware["status"] as? String ?? (enabled ? "unknown" : "idle")

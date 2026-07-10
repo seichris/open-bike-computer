@@ -242,11 +242,13 @@ struct NavigationProtocolTests {
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testDeviceBLEProtocolConstants()
+        testDeviceSoundProtocol()
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
+        testBLEManagerSendsDeviceSoundFallback()
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
@@ -255,6 +257,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
+        testBLEManagerPersistsDeviceSoundSettings()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
@@ -929,6 +932,19 @@ struct NavigationProtocolTests {
                     "disabled default follows the device screen display order")
     }
 
+    static func testDeviceSoundProtocol() {
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 3, 5], "sound IDs match firmware assets")
+        assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
+        assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
+
+        let defaultPacket = DeviceSound.plasticBicycleHorn.playPacket(volumePercent: .nan)
+        assertEqual(String(data: defaultPacket.prefix(4), encoding: .utf8), "SNDP", "sound packet uses SNDP prefix")
+        assertEqual(defaultPacket[4], DeviceSound.plasticBicycleHorn.rawValue, "sound packet contains sound ID")
+        assertEqual(defaultPacket[5], 70, "non-finite volume falls back to the default")
+        assertEqual(DeviceSound.bellDing.playPacket(volumePercent: -1)[5], 0, "sound volume clamps below zero")
+        assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
+    }
+
     static func testHardwareLabelPreference() {
         assertEqual(DeviceBLEProtocol.hardwareLabel(model: "BikeComputer-XIAO", hardware: "nRF52840"),
                     "BikeComputer-XIAO",
@@ -1009,6 +1025,31 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[2]) << 16)
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 7, "fallback settings packet includes little-endian value")
+    }
+
+    static func testBLEManagerSendsDeviceSoundFallback() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(!manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+               "sound playback rejects devices without the negotiated capability")
+        assertEqual(sentPackets.count, 0, "unsupported devices receive no sound packet")
+
+        manager.supportsDeviceSounds = true
+        assert(manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+               "sound playback queues when BLE is ready and capability is present")
+        assertEqual(sentPackets.count, 1, "sound playback sends one route-equivalent fallback packet")
+        assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDP", "fallback packet uses SNDP prefix")
+        assertEqual(sentPackets[0][4], DeviceSound.squeezeHorn.rawValue, "fallback packet includes selected sound")
+        assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
     }
 
     static func testBLEManagerSendsMapTransferControlFrames() {
@@ -1103,7 +1144,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_175","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","capabilities":{"deviceSounds":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1112,13 +1153,21 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
-        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_175", "status parser exposes firmware target")
+        assert(manager.supportsDeviceSounds, "status parser exposes negotiated sound capability")
+        assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
         assertEqual(manager.firmwareUpdateStatus, "receiving", "status parser exposes firmware update status")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
+
+        let unsupportedJSON = """
+        {"configured":true,"enabled":false,"capabilities":{"deviceSounds":false}}
+        """
+        let unsupportedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(unsupportedJSON.utf8)
+        assert(manager.handleDeviceTransferStatusNotification(unsupportedPacket), "second DSTS notification should be consumed")
+        assert(!manager.supportsDeviceSounds, "a later unsupported status clears the sound capability")
     }
 
     static func testBLEManagerSendsBrightnessFallbackSetting() {
@@ -1222,6 +1271,35 @@ struct NavigationProtocolTests {
         assertEqual(reloaded.disconnectedSleepTimeout, .tenMinutes, "disconnected sleep timeout should persist across BLEManager reloads")
 
         keys.forEach { defaults.removeObject(forKey: $0) }
+    }
+
+    static func testBLEManagerPersistsDeviceSoundSettings() {
+        let defaults = UserDefaults.standard
+        let soundKey = "deviceSettings.selectedSound"
+        let volumeKey = "deviceSettings.soundVolumePercent"
+        defaults.removeObject(forKey: soundKey)
+        defaults.removeObject(forKey: volumeKey)
+
+        let freshManager = BLEManager()
+        assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
+        assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
+
+        freshManager.selectedDeviceSound = .rotatingBicycleBell
+        freshManager.deviceSoundVolumePercent = 65
+        freshManager.saveSettings()
+
+        let reloaded = BLEManager()
+        assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
+        assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
+
+        defaults.set(4, forKey: soundKey)
+        defaults.set(Double.nan, forKey: volumeKey)
+        let invalidValues = BLEManager()
+        assertEqual(invalidValues.selectedDeviceSound, .plasticBicycleHorn, "unknown sound IDs fall back safely")
+        assertEqual(invalidValues.deviceSoundVolumePercent, 70, "non-finite persisted volume falls back safely")
+
+        defaults.removeObject(forKey: soundKey)
+        defaults.removeObject(forKey: volumeKey)
     }
 
     static func testNavigationSendTrackerReadinessRetry() {

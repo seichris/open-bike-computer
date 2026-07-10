@@ -14,6 +14,7 @@ jobs:
         target:
           - WAVESHARE_AMOLED_175
           - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_SPEAKER_HONK
     defaults:
       run:
         working-directory: esp32
@@ -121,3 +122,9 @@ jobs:
             tools/tests/test_map_transfer.cpp \
             -o /tmp/test_map_transfer
           /tmp/test_map_transfer
+      - name: Sound protocol host tests
+        run: |
+          g++ -std=c++17 \
+            tools/tests/test_sound_protocol.cpp \
+            -o /tmp/test_sound_protocol
+          /tmp/test_sound_protocol

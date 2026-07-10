@@ -52,7 +52,9 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
-                if !offlineMapManager.isMapAreaSelectionActive && !shouldShowOfflineMapOnboarding {
+                if coordinator.bleManager.supportsDeviceSounds &&
+                    !offlineMapManager.isMapAreaSelectionActive &&
+                    !shouldShowOfflineMapOnboarding {
                     DeviceSoundMapButton(bleManager: coordinator.bleManager)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                         .padding(.trailing, 16)

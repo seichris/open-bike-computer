@@ -172,3 +172,15 @@ The authenticated BLE command is `SNDP` followed by a `UInt8` sound ID and a
 only the sound ID use the `70%` default. The app stores the selection under
 **Hardware Customization > Device Sounds** and the center-right button on the
 main map sends the selected sound and volume.
+
+## Hardware Regression Checklist
+
+1. Build and flash `WAVESHARE_AMOLED_206`, then leave the serial port closed.
+2. Power-cycle by removing and reconnecting USB; confirm the splash screen
+   advances to the normal UI and remains responsive for at least two minutes.
+3. Connect the iOS app and confirm the map sound button appears only after the
+   authenticated device-capability status is received.
+4. Select each sound and test volumes `0`, `70`, and `100`; confirm one tap
+   produces one requested sound and the amplifier is quiet after playback.
+5. Build `WAVESHARE_AMOLED_175`; confirm the Device Sounds settings are disabled
+   and the map sound button is absent for that target.

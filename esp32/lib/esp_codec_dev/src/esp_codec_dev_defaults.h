@@ -59,15 +59,6 @@ extern "C" {
 #endif  /* __cplusplus */
 
 /**
- * @brief Codec I2C configuration
- */
-typedef struct {
-    uint8_t port;       /*!< I2C port, this port need pre-installed by other modules */
-    uint8_t addr;       /*!< I2C address, default address can be gotten from codec head files */
-    void   *bus_handle; /*!< I2C Master bus handle (for IDFv5.3 or higher version) */
-} audio_codec_i2c_cfg_t;
-
-/**
  * @brief Codec I2S configuration
  */
 typedef struct {
@@ -78,34 +69,11 @@ typedef struct {
 } audio_codec_i2s_cfg_t;
 
 /**
- * @brief Codec SPI configuration
- */
-typedef struct {
-    uint8_t spi_port;    /*!< SPI port, this port need pre-installed by other modules */
-    int16_t cs_pin;      /*!< SPI CS GPIO pin setting */
-    int     clock_speed; /*!< SPI clock unit hz (use 10MHZif set to 0)*/
-} audio_codec_spi_cfg_t;
-
-/**
  * @brief         Get default codec GPIO interface
  * @return        NULL: Failed
  *                Others: Codec GPIO interface
  */
 const audio_codec_gpio_if_t *audio_codec_new_gpio(void);
-
-/**
- * @brief         Get default SPI control interface
- * @return        NULL: Failed
- *                Others: SPI control interface
- */
-const audio_codec_ctrl_if_t *audio_codec_new_spi_ctrl(audio_codec_spi_cfg_t *spi_cfg);
-
-/**
- * @brief         Get default I2C control interface
- * @return        NULL: Failed
- *                Others: I2C control interface
- */
-const audio_codec_ctrl_if_t *audio_codec_new_i2c_ctrl(audio_codec_i2c_cfg_t *i2c_cfg);
 
 /**
  * @brief         Get default I2S data interface

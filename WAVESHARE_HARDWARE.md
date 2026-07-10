@@ -192,7 +192,8 @@ ESP-IDF standard I2S driver and Espressif `esp_codec_dev` with:
 The implementation is in `esp32/lib/speaker/`, with codec sources in
 `esp32/lib/esp_codec_dev/`. It uses the shared mutex-protected I2C bus,
 initializes the codec on first playback, and processes requests through a
-four-entry FreeRTOS queue outside the BLE callback. PCM recordings are embedded
+four-entry FreeRTOS queue outside the BLE callback. It powers the codec and PA
+down when the queue drains. PCM recordings are embedded
 with PlatformIO `board_build.embed_files`.
 
 #### Sounds And BLE
