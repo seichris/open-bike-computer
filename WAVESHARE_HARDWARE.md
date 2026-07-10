@@ -288,6 +288,8 @@ card, and factory firmware.
   or color-cycle test before debugging app code. The verified baseline is
   CO5300 `410x502`, gap `(22,0,0,0)`, rotation `0`, QSPI pins
   `CS=12, SCLK=11, D0=4, D1=5, D2=6, D3=7`, reset `8`.
+- The verified 2.06 LVGL flush sequence sends CO5300 `CASET`, `PASET`,
+  `RAMWR`, then the RGB565 payload for every frame.
 - A full USB and battery power removal can matter after failed experiments; the
   verified standalone display test became visible after power removal and
   USB-only replug.
