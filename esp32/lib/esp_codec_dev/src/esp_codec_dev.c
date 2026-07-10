@@ -125,6 +125,21 @@ static void _update_codec_setting(codec_dev_t *dev)
     }
 }
 
+static int _abort_codec_open(codec_dev_t *dev, int ret)
+{
+    const audio_codec_if_t *codec = dev->codec_if;
+    if (codec && codec->enable) {
+        codec->enable(codec, false);
+    }
+    const audio_codec_data_if_t *data_if = dev->data_if;
+    if (data_if && data_if->enable) {
+        data_if->enable(data_if, dev->dev_caps, false);
+    }
+    dev->input_opened = false;
+    dev->output_opened = false;
+    return ret;
+}
+
 esp_codec_dev_handle_t esp_codec_dev_new(esp_codec_dev_cfg_t *cfg)
 {
     if (cfg == NULL || cfg->data_if == NULL || cfg->dev_type == ESP_CODEC_DEV_TYPE_NONE) {
@@ -154,12 +169,14 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         ESP_LOGI(TAG, "Input already open");
         return ESP_CODEC_DEV_OK;
     }
+    bool input_opened = false;
+    bool output_opened = false;
     if ((dev->dev_caps & ESP_CODEC_DEV_TYPE_IN)) {
         // check record
         if (_verify_drv_ready(dev, false) == false) {
             ESP_LOGE(TAG, "Codec not support input");
         } else {
-            dev->input_opened = true;
+            input_opened = true;
         }
     }
     if ((dev->dev_caps & ESP_CODEC_DEV_TYPE_OUT)) {
@@ -167,10 +184,10 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         if (_verify_drv_ready(dev, true) == false) {
             ESP_LOGE(TAG, "Codec not support output");
         } else {
-            dev->output_opened = true;
+            output_opened = true;
         }
     }
-    if (dev->input_opened == false && dev->output_opened == false) {
+    if (input_opened == false && output_opened == false) {
         return ESP_CODEC_DEV_NOT_SUPPORT;
     }
     const audio_codec_if_t *codec = dev->codec_if;
@@ -178,29 +195,33 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
     if (data_if->set_fmt) {
         int ret = data_if->set_fmt(data_if, dev->dev_caps, fs);
         if (ret != ESP_CODEC_DEV_OK) {
-            return ret;
+            return _abort_codec_open(dev, ret);
         }
     }
     if (data_if->enable) {
         int ret = data_if->enable(data_if, dev->dev_caps, true);
         if (ret != ESP_CODEC_DEV_OK) {
-            return ret;
+            return _abort_codec_open(dev, ret);
         }
     }
     if (codec) {
         // TODO not set codec fs
         if (codec->set_fs) {
-            if (codec->set_fs(codec, fs) != 0) {
-                return ESP_CODEC_DEV_NOT_SUPPORT;
+            int ret = codec->set_fs(codec, fs);
+            if (ret != ESP_CODEC_DEV_OK) {
+                return _abort_codec_open(dev, ret);
             }
         }
         if (codec->enable) {
-            if (codec->enable(codec, true) != ESP_CODEC_DEV_OK) {
+            int ret = codec->enable(codec, true);
+            if (ret != ESP_CODEC_DEV_OK) {
                 ESP_LOGE(TAG, "Fail to enable codec");
-                return ESP_CODEC_DEV_DRV_ERR;
+                return _abort_codec_open(dev, ret);
             }
         }
     }
+    dev->input_opened = input_opened;
+    dev->output_opened = output_opened;
     if (dev->output_opened) {
         if (codec == NULL || codec->set_vol == NULL) {
             if (dev->sw_vol == NULL) {

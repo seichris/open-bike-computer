@@ -186,7 +186,9 @@ class BikeComputerCoordinator: ObservableObject {
                     self.navEngine.processExternalLocation(location)
                 }
                 self.requestMapTransferStatusAfterDeviceRefresh()
-                self.refreshDeviceCapabilities(attempt: 0)
+                DispatchQueue.main.async { [weak self] in
+                    self?.refreshDeviceCapabilities(attempt: 0)
+                }
                 self.bleManager.requestDeviceTransferStatus()
                 self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
             }
