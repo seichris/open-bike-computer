@@ -23,6 +23,14 @@ on a GPS-equipped board like the
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, build and test flow, supported-hardware notes, and the current BLE protocol overview.
 
+## Hardware CAD
+
+Printable enclosure and mount files are available in [`hardware/cad`](hardware/cad/README.md).
+The Waveshare AMOLED 2.06 case is available directly as
+[`waveshare_206_case.stl`](hardware/cad/waveshare_206_case.stl).
+A Garmin-mount version is available as
+[`waveshare_206_case_garmin.stl`](hardware/cad/waveshare_206_case_garmin.stl).
+
 ## Offline maps
 
 See [OFFLINE_MAPS.md](OFFLINE_MAPS.md) to generate OpenStreetMap vector blocks
