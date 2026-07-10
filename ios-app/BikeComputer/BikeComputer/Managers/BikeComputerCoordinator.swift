@@ -186,7 +186,7 @@ class BikeComputerCoordinator: ObservableObject {
                     self.navEngine.processExternalLocation(location)
                 }
                 self.requestMapTransferStatusAfterDeviceRefresh()
-                DispatchQueue.main.async { [weak self] in
+                DeviceCapabilityRetry.scheduleInitial { [weak self] in
                     self?.refreshDeviceCapabilities(attempt: 0)
                 }
                 self.bleManager.requestDeviceTransferStatus()
@@ -311,9 +311,11 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private func refreshDeviceCapabilities(attempt: Int) {
-        guard bleManager.isNavigationReady,
-              !bleManager.hasReceivedDeviceCapabilities,
-              attempt < 5 else { return }
+        guard DeviceCapabilityRetry.shouldRequest(
+            isNavigationReady: bleManager.isNavigationReady,
+            hasReceivedCapabilities: bleManager.hasReceivedDeviceCapabilities,
+            attempt: attempt
+        ) else { return }
 
         bleManager.requestDeviceCapabilities()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in

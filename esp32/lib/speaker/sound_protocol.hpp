@@ -20,6 +20,13 @@ struct PlaybackRequest {
   uint8_t volumePercent;
 };
 
+enum class PlayCommandResult {
+  NotMatched,
+  RejectedUnauthenticated,
+  RejectedMalformed,
+  Accepted,
+};
+
 inline bool isKnownSound(Sound sound) {
   switch (sound) {
   case Sound::BellDing:
@@ -50,6 +57,28 @@ inline bool decodePlayPayload(const uint8_t *data, size_t length,
 
   request = {sound, volumePercent};
   return true;
+}
+
+inline PlayCommandResult classifyPlayCommand(const uint8_t *data, size_t length,
+                                             bool authenticated,
+                                             PlaybackRequest &request) {
+  constexpr uint8_t prefix[] = {'S', 'N', 'D', 'P'};
+  if (data == nullptr || length < sizeof(prefix)) {
+    return PlayCommandResult::NotMatched;
+  }
+  for (size_t i = 0; i < sizeof(prefix); i++) {
+    if (data[i] != prefix[i]) {
+      return PlayCommandResult::NotMatched;
+    }
+  }
+  if (!authenticated) {
+    return PlayCommandResult::RejectedUnauthenticated;
+  }
+  if (!decodePlayPayload(data + sizeof(prefix), length - sizeof(prefix),
+                         request)) {
+    return PlayCommandResult::RejectedMalformed;
+  }
+  return PlayCommandResult::Accepted;
 }
 
 } // namespace waveshare_board::speaker

@@ -464,15 +464,9 @@ static std::string trimAscii(const std::string &value) {
   return value.substr(begin, end - begin);
 }
 
-static void handleSoundPlayPayload(const uint8_t *data, size_t len,
-                                   const char *source) {
-  waveshare_board::speaker::PlaybackRequest request{};
-  if (!waveshare_board::speaker::decodePlayPayload(data, len, request)) {
-    Serial.printf("BLE Sound: rejected %s payload\n",
-                  source == nullptr ? "unknown" : source);
-    return;
-  }
-
+static void handleSoundPlaybackRequest(
+    const waveshare_board::speaker::PlaybackRequest &request,
+    const char *source) {
   if (!waveshare_board::speaker::isSupported(request.sound)) {
     Serial.printf("BLE Sound: sound ID %u is unavailable on this hardware\n",
                   static_cast<unsigned>(request.sound));
@@ -494,13 +488,23 @@ static void handleSoundPlayPayload(const uint8_t *data, size_t len,
 static bool handleSoundPlayCommand(const std::string &value,
                                    const char *authLabel,
                                    const char *source) {
-  if (!hasPrefix(value, "SNDP")) {
+  waveshare_board::speaker::PlaybackRequest request{};
+  const auto result = waveshare_board::speaker::classifyPlayCommand(
+      reinterpret_cast<const uint8_t *>(value.data()), value.length(),
+      bleSessionAuthenticated, request);
+  if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
     return false;
   }
-  if (requireAuthenticated(authLabel)) {
-    handleSoundPlayPayload((const uint8_t *)value.data() + 4,
-                           value.length() - 4, source);
+  if (result == waveshare_board::speaker::PlayCommandResult::RejectedUnauthenticated) {
+    requireAuthenticated(authLabel);
+    return true;
   }
+  if (result == waveshare_board::speaker::PlayCommandResult::RejectedMalformed) {
+    Serial.printf("BLE Sound: rejected %s payload\n",
+                  source == nullptr ? "unknown" : source);
+    return true;
+  }
+  handleSoundPlaybackRequest(request, source);
   return true;
 }
 

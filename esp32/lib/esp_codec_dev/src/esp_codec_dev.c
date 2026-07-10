@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_codec_dev.h"
 #include "audio_codec_if.h"

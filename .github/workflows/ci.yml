@@ -128,3 +128,20 @@ jobs:
             tools/tests/test_sound_protocol.cpp \
             -o /tmp/test_sound_protocol
           /tmp/test_sound_protocol
+      - name: Codec recovery host tests
+        run: |
+          cc -std=c11 -Wall -Wextra \
+            -Itools/tests/host_stubs \
+            -Ilib/esp_codec_dev/src \
+            tools/tests/test_codec_open.c \
+            lib/esp_codec_dev/src/esp_codec_dev.c \
+            -o /tmp/test_codec_open
+          /tmp/test_codec_open
+          cc -std=c11 -Wall -Wextra \
+            -Itools/tests/host_stubs \
+            -Ilib/esp_codec_dev/src \
+            tools/tests/test_es8311_recovery.c \
+            lib/esp_codec_dev/src/esp_codec_dev_vol.c \
+            -lm \
+            -o /tmp/test_es8311_recovery
+          /tmp/test_es8311_recovery

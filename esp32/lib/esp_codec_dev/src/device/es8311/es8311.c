@@ -309,6 +309,13 @@ static int es8311_suspend(audio_codec_es8311_t *codec)
     return ret;
 }
 
+static int es8311_abort_start(audio_codec_es8311_t *codec, int ret)
+{
+    es8311_suspend(codec);
+    codec->enabled = false;
+    return ret;
+}
+
 static int es8311_start(audio_codec_es8311_t *codec)
 {
     int ret = ESP_CODEC_DEV_OK;
@@ -336,7 +343,7 @@ static int es8311_start(audio_codec_es8311_t *codec)
     ret = es8311_read_reg(codec, ES8311_SDPIN_REG09, &dac_iface);
     ret |= es8311_read_reg(codec, ES8311_SDPOUT_REG0A, &adc_iface);
     if (ret != ESP_CODEC_DEV_OK) {
-        return ret;
+        return es8311_abort_start(codec, ret);
     }
     dac_iface &= 0xBF;
     adc_iface &= 0xBF;
@@ -344,7 +351,7 @@ static int es8311_start(audio_codec_es8311_t *codec)
     int codec_mode = codec->cfg.codec_mode;
     if (codec_mode == ESP_CODEC_DEV_WORK_MODE_LINE) {
         ESP_LOGE(TAG, "Codec not support LINE mode");
-        return ESP_CODEC_DEV_NOT_SUPPORT;
+        return es8311_abort_start(codec, ESP_CODEC_DEV_NOT_SUPPORT);
     }
     if (codec_mode == ESP_CODEC_DEV_WORK_MODE_ADC || codec_mode == ESP_CODEC_DEV_WORK_MODE_BOTH) {
         adc_iface &= ~(BITS(6));
@@ -376,8 +383,11 @@ static int es8311_start(audio_codec_es8311_t *codec)
     ret |= es8311_write_reg(codec, ES8311_ADC_REG15, 0x40);
     ret |= es8311_write_reg(codec, ES8311_DAC_REG37, 0x08);
     ret |= es8311_write_reg(codec, ES8311_GP_REG45, 0x00);
+    if (ret != ESP_CODEC_DEV_OK) {
+        return es8311_abort_start(codec, ret);
+    }
     es8311_add_pair(codec);
-    return ret;
+    return ESP_CODEC_DEV_OK;
 }
 
 static int es8311_set_mute(const audio_codec_if_t *h, bool mute)
@@ -674,7 +684,7 @@ static int es8311_enable(const audio_codec_if_t *h, bool enable)
             ret = es8311_set_mute(h, false);
             if (ret != ESP_CODEC_DEV_OK) {
                 es8311_pa_power(codec, ES_PA_DISABLE);
-                return ret;
+                return es8311_abort_start(codec, ret);
             }
         }
     } else {

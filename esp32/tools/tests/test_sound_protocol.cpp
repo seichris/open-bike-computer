@@ -4,9 +4,11 @@
 #include <cstdint>
 
 using waveshare_board::speaker::PlaybackRequest;
+using waveshare_board::speaker::PlayCommandResult;
 using waveshare_board::speaker::Sound;
 using waveshare_board::speaker::CAPABILITY_DEVICE_SOUNDS;
 using waveshare_board::speaker::capabilityFlags;
+using waveshare_board::speaker::classifyPlayCommand;
 using waveshare_board::speaker::decodePlayPayload;
 
 int main() {
@@ -37,4 +39,18 @@ int main() {
   assert(!decodePlayPayload(unsupported, sizeof(unsupported), request));
   assert(!decodePlayPayload(excessiveVolume, sizeof(excessiveVolume), request));
   assert(!decodePlayPayload(extraByte, sizeof(extraByte), request));
+
+  const uint8_t otherCommand[] = {'C', 'A', 'P', 'S'};
+  const uint8_t validCommand[] = {'S', 'N', 'D', 'P', 3, 64};
+  const uint8_t malformedCommand[] = {'S', 'N', 'D', 'P', 4, 70};
+  assert(classifyPlayCommand(otherCommand, sizeof(otherCommand), true, request) ==
+         PlayCommandResult::NotMatched);
+  assert(classifyPlayCommand(validCommand, sizeof(validCommand), false, request) ==
+         PlayCommandResult::RejectedUnauthenticated);
+  assert(classifyPlayCommand(malformedCommand, sizeof(malformedCommand), true,
+                             request) == PlayCommandResult::RejectedMalformed);
+  assert(classifyPlayCommand(validCommand, sizeof(validCommand), true, request) ==
+         PlayCommandResult::Accepted);
+  assert(request.sound == Sound::RotatingBicycleBell);
+  assert(request.volumePercent == 64);
 }

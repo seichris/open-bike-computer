@@ -244,6 +244,7 @@ struct NavigationProtocolTests {
         testDeviceBLEProtocolConstants()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
@@ -963,6 +964,39 @@ struct NavigationProtocolTests {
         let malformed = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8)
         assert(manager.handleDeviceCapabilitiesNotification(malformed), "malformed CAPS should be consumed")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+    }
+
+    static func testDeviceCapabilityRetryPolicy() {
+        assert(DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                   hasReceivedCapabilities: false,
+                                                   attempt: 0),
+               "ready devices retry missing capabilities")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: false,
+                                                    hasReceivedCapabilities: false,
+                                                    attempt: 0),
+               "disconnected devices do not retry capabilities")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                    hasReceivedCapabilities: true,
+                                                    attempt: 0),
+               "completed capability negotiation stops retries")
+        assert(!DeviceCapabilityRetry.shouldRequest(isNavigationReady: true,
+                                                    hasReceivedCapabilities: false,
+                                                    attempt: DeviceCapabilityRetry.maxAttempts),
+               "capability retries stop at the attempt limit")
+
+        let queue = DispatchQueue(label: "DeviceCapabilityRetryTests")
+        let scheduled = DispatchSemaphore(value: 0)
+        queue.suspend()
+        var didRun = false
+        DeviceCapabilityRetry.scheduleInitial(on: queue) {
+            didRun = true
+            scheduled.signal()
+        }
+        assert(!didRun, "initial capability retry is deferred past Published willSet")
+        queue.resume()
+        assertEqual(scheduled.wait(timeout: .now() + 1), .success,
+                    "deferred capability retry executes")
+        assert(didRun, "deferred capability retry runs its action")
     }
 
     static func testHardwareLabelPreference() {
