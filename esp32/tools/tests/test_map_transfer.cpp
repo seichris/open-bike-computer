@@ -10,7 +10,9 @@
 #include <unistd.h>
 
 using map_transfer::MapManifest;
+using map_transfer::MapActivationState;
 using map_transfer::MapTransferInstaller;
+using map_transfer::ActivationBeginResult;
 using map_transfer::sha256Hex;
 
 static bool exists(const std::string &path) {
@@ -47,6 +49,47 @@ static std::string sha(const std::string &text) {
 static void testSha256KnownVector() {
   assert(sha("abc") ==
          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+static void testActivationStateTracksAttemptsAndCompactStatus() {
+  MapActivationState state;
+  auto initial = state.snapshot();
+  assert(!initial.running);
+  assert(initial.sequence == 0);
+  assert(initial.status == "idle");
+
+  assert(state.begin("session-1") == ActivationBeginResult::Started);
+  auto first = state.snapshot();
+  assert(first.running);
+  assert(first.sequence == 1);
+  assert(first.status == "activating");
+  assert(first.sessionId == "session-1");
+  assert(state.begin("session-1") == ActivationBeginResult::AlreadyRunning);
+  assert(state.begin("session-2") == ActivationBeginResult::Busy);
+  assert(state.snapshot().sequence == 1);
+
+  state.finish("failed", "map-1", "file_sha256",
+               "staged map file sha256 mismatch: VECTMAP/map-1/123.fmb");
+  auto failed = state.snapshot();
+  assert(!failed.running);
+  assert(failed.status == "failed");
+  assert(failed.mapId == "map-1");
+  assert(failed.errorCode == "file_sha256");
+  std::string full = state.json(false);
+  assert(full.find("\"mapId\":\"map-1\"") != std::string::npos);
+  assert(full.find("staged map file sha256 mismatch") != std::string::npos);
+  std::string compact = state.json(true);
+  assert(compact.find("\"sequence\":1") != std::string::npos);
+  assert(compact.find("\"code\":\"file_sha256\"") != std::string::npos);
+  assert(compact.find("mapId") == std::string::npos);
+  assert(compact.find("mismatch") == std::string::npos);
+  assert(compact.size() <= 192);
+
+  assert(state.begin("session-1") == ActivationBeginResult::Started);
+  auto second = state.snapshot();
+  assert(second.sequence == 2);
+  assert(second.status == "activating");
+  assert(second.errorCode.empty());
 }
 
 static void testRejectsUnsafeManifestPath() {
@@ -154,6 +197,46 @@ static void testActivationReplacesOldPublishedBlocks() {
   assert(activeMapId == "map-new");
 }
 
+static void testActivationRestoresOldMapWhenMetadataWriteFails() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-rollback";
+  const std::string oldDir = root + "/VECTMAP/+9999+9999";
+  const std::string stagedDir =
+      root + "/VECTMAP/.staging/" + session + "/VECTMAP/map-new/+0032+0008";
+  assert(::system((std::string("mkdir -p ") + oldDir).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
+  writeFile(oldDir + "/old.fmb", "old-map-block");
+  const std::string activePath = root + "/VECTMAP/active-map.json";
+  writeFile(activePath, "{\"mapId\":\"map-old\",\"root\":\"/VECTMAP\"}\n");
+  assert(::chmod(activePath.c_str(), 0444) == 0);
+
+  const std::string blockData = "new-map-block";
+  writeFile(stagedDir + "/123_456.fmb", blockData);
+  const std::string manifestText =
+      "{\"schemaVersion\":1,\"mapId\":\"map-new\",\"files\":[{\"path\":"
+      "\"VECTMAP/map-new/+0032+0008/123_456.fmb\",\"bytes\":13,"
+      "\"sha256\":\"" +
+      sha(blockData) + "\"}]}";
+  writeFile(root + "/VECTMAP/.staging/" + session + "/manifest.json",
+            manifestText);
+
+  MapManifest manifest;
+  auto validated = installer.validateStagedMap(session, manifest);
+  assert(validated.ok);
+  auto activated = installer.activateStagedMap(session, manifest);
+  assert(!activated.ok);
+  assert(activated.code == "active_write");
+  assert(exists(oldDir + "/old.fmb"));
+  assert(readFile(oldDir + "/old.fmb") == "old-map-block");
+  assert(!exists(root + "/VECTMAP/+0032+0008/123_456.fmb"));
+  std::string activeMapId;
+  auto active = installer.readActiveMapId(activeMapId);
+  assert(active.ok);
+  assert(activeMapId == "map-old");
+  assert(exists(root + "/VECTMAP/.staging/" + session));
+}
+
 static void testRejectsChecksumMismatch() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -177,10 +260,12 @@ static void testRejectsChecksumMismatch() {
 
 int main() {
   testSha256KnownVector();
+  testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
   testRejectsPathOutsideMapNamespace();
   testValidatesStagedMapAndActivates();
   testActivationReplacesOldPublishedBlocks();
+  testActivationRestoresOldMapWhenMetadataWriteFails();
   testRejectsChecksumMismatch();
   std::cout << "map_transfer tests passed\n";
   return 0;

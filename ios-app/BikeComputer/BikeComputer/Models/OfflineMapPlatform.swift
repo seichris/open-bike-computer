@@ -232,6 +232,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     struct Activation: Decodable, Equatable {
         let status: String?
+        let sequence: UInt32?
         let sessionId: String?
         let mapId: String?
         let error: TransferError?

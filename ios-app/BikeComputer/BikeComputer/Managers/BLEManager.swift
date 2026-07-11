@@ -350,6 +350,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActivationStatus: String = "idle"
+    @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
     @Published var mapTransferActivationMapId: String = ""
     @Published var mapTransferActivationError: String?
@@ -1090,6 +1091,7 @@ class BLEManager: NSObject, ObservableObject {
 
     func resetMapTransferActivationObservation() {
         mapTransferActivationStatus = "idle"
+        mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
         mapTransferActivationMapId = ""
         mapTransferActivationError = nil
@@ -1299,6 +1301,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferAccessPointSSID = nil
         mapTransferActiveMapId = ""
         mapTransferActivationStatus = "idle"
+        mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
         mapTransferActivationMapId = ""
         mapTransferActivationError = nil
@@ -2328,6 +2331,8 @@ extension BLEManager: CBPeripheralDelegate {
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         if let activation = object["activation"] as? [String: Any] {
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
+            mapTransferActivationSequence =
+                (activation["sequence"] as? NSNumber)?.uint32Value
             mapTransferActivationSessionId = activation["sessionId"] as? String ?? ""
             mapTransferActivationMapId = activation["mapId"] as? String ?? ""
             if let activationError = activation["error"] as? [String: Any] {
@@ -2339,6 +2344,7 @@ extension BLEManager: CBPeripheralDelegate {
             }
         } else {
             mapTransferActivationStatus = "idle"
+            mapTransferActivationSequence = nil
             mapTransferActivationSessionId = ""
             mapTransferActivationMapId = ""
             mapTransferActivationError = nil

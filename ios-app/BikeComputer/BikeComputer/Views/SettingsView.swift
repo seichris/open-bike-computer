@@ -267,6 +267,18 @@ private struct SavedMapsSettingsSection: View {
             }
             .disabled(manager.isBusy)
         }
+        .onAppear {
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActiveMapId) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationStatus) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationSequence) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
     }
 }
 

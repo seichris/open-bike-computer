@@ -40,6 +40,24 @@ static std::string dirnameOf(const std::string &path) {
   return path.substr(0, slash);
 }
 
+static std::string jsonEscape(const std::string &value) {
+  std::string out;
+  out.reserve(value.size() + 8);
+  for (char c : value) {
+    if (c == '"' || c == '\\') {
+      out.push_back('\\');
+      out.push_back(c);
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
 static bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
          value.compare(0, prefix.size(), prefix) == 0;
@@ -301,6 +319,55 @@ std::string sha256Hex(const uint8_t *data, size_t len) {
   Sha256 sha;
   sha.update(data, len);
   return sha.finalHex();
+}
+
+ActivationBeginResult MapActivationState::begin(const std::string &sessionId) {
+  if (state_.running) {
+    return state_.sessionId == sessionId
+               ? ActivationBeginResult::AlreadyRunning
+               : ActivationBeginResult::Busy;
+  }
+  state_.running = true;
+  state_.sequence++;
+  if (state_.sequence == 0)
+    state_.sequence = 1;
+  state_.status = "activating";
+  state_.sessionId = sessionId;
+  state_.mapId.clear();
+  state_.errorCode.clear();
+  state_.errorMessage.clear();
+  return ActivationBeginResult::Started;
+}
+
+void MapActivationState::finish(const std::string &status,
+                                const std::string &mapId,
+                                const std::string &errorCode,
+                                const std::string &errorMessage) {
+  state_.running = false;
+  state_.status = status;
+  state_.mapId = mapId;
+  state_.errorCode = errorCode;
+  state_.errorMessage = errorMessage;
+}
+
+MapActivationSnapshot MapActivationState::snapshot() const { return state_; }
+
+std::string MapActivationState::json(bool compact) const {
+  std::string body = std::string("{\"status\":\"") +
+                     jsonEscape(state_.status) + "\",\"sequence\":" +
+                     std::to_string(state_.sequence);
+  if (!state_.sessionId.empty())
+    body += ",\"sessionId\":\"" + jsonEscape(state_.sessionId) + "\"";
+  if (!compact && !state_.mapId.empty())
+    body += ",\"mapId\":\"" + jsonEscape(state_.mapId) + "\"";
+  if (!state_.errorCode.empty()) {
+    body += ",\"error\":{\"code\":\"" + jsonEscape(state_.errorCode) + "\"";
+    if (!compact && !state_.errorMessage.empty())
+      body += ",\"message\":\"" + jsonEscape(state_.errorMessage) + "\"";
+    body += "}";
+  }
+  body += "}";
+  return body;
 }
 
 MapTransferInstaller::MapTransferInstaller(std::string storageRoot)

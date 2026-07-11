@@ -294,10 +294,13 @@ struct NavigationProtocolTests {
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
+        testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
+        testMapTransferSessionIdentityUsesManifestContent()
+        testMapActivationReconciliationMatrix()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
@@ -515,6 +518,35 @@ struct NavigationProtocolTests {
         assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
     }
 
+    @MainActor
+    static func testOfflineMapManagerReconcilesInterruptedActivation() {
+        let suite = "offline-map-reconcile-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("activating", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.previousMapId")
+        defaults.set(4, forKey: "offlineMap.lastTransfer.previousSequence")
+
+        let manager = OfflineMapManager(defaults: defaults)
+        assertEqual(manager.lastTransferOutcome, "unconfirmed", "interrupted activation restores as unconfirmed")
+
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActivationStatus = "installed"
+        bleManager.mapTransferActivationSequence = 5
+        bleManager.mapTransferActivationSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationMapId = "map-1"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+
+        assertEqual(manager.lastTransferOutcome, "installed", "newer matching BLE activation reconciles interrupted transfer")
+    }
+
     static func testOfflineMapPolygonClosesRing() {
         let request = OfflineMapJobRequest.customPolygon(ring: [
             CLLocationCoordinate2D(latitude: 1, longitude: 2),
@@ -598,6 +630,111 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testMapTransferSessionIdentityUsesManifestContent() {
+        let first = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-one".utf8)
+        )
+        let firstRetry = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-one".utf8)
+        )
+        let regenerated = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-two".utf8)
+        )
+
+        assertEqual(first, firstRetry, "the same pack resumes the same staged session")
+        assert(first != regenerated, "regenerated same-ID packs use distinct staged sessions")
+        assert(first.count <= 80, "content-derived session id fits the firmware contract")
+    }
+
+    static func testMapActivationReconciliationMatrix() {
+        func evaluate(previousMapId: String? = "map-1",
+                      previousSequence: UInt32? = 7,
+                      requestAcknowledged: Bool = false,
+                      observedCurrentAttempt: Bool = false,
+                      activeMapId: String? = "map-1",
+                      activationStatus: String? = "installed",
+                      activationSequence: UInt32? = 7,
+                      activationSessionId: String? = "session-1",
+                      activationMapId: String? = "map-1",
+                      activationError: String? = nil) -> MapActivationEvaluation {
+            MapActivationReconciler.evaluate(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: previousMapId,
+                previousSequence: previousSequence,
+                requestAcknowledged: requestAcknowledged,
+                observedCurrentAttempt: observedCurrentAttempt,
+                activeMapId: activeMapId,
+                activationStatus: activationStatus,
+                activationSequence: activationSequence,
+                activationSessionId: activationSessionId,
+                activationMapId: activationMapId,
+                activationError: activationError
+            )
+        }
+
+        assertEqual(
+            evaluate().decision,
+            .pending("installed"),
+            "same-ID reinstall rejects a retained installed activation"
+        )
+        assertEqual(
+            evaluate(activationSequence: 8).decision,
+            .installed,
+            "a newer activation sequence proves same-ID installation"
+        )
+        assertEqual(
+            evaluate(requestAcknowledged: true).decision,
+            .installed,
+            "an acknowledged activation request can complete before the first poll"
+        )
+        assertEqual(
+            evaluate(
+                previousMapId: "old-map",
+                activeMapId: "map-1",
+                activationStatus: "idle",
+                activationSessionId: nil,
+                activationMapId: nil
+            ).decision,
+            .installed,
+            "a changed active map proves installation on legacy firmware"
+        )
+        assertEqual(
+            evaluate(
+                activationStatus: "failed",
+                activationSequence: 8,
+                activationError: "file_sha256"
+            ).decision,
+            .failed("file_sha256"),
+            "matching failed activation surfaces the device error"
+        )
+        assertEqual(
+            evaluate(
+                activationSequence: 8,
+                activationMapId: "wrong-map"
+            ).decision,
+            .failed("device activated wrong-map instead of map-1"),
+            "matching session rejects a different activated map"
+        )
+        let inProgress = evaluate(
+            activeMapId: nil,
+            activationStatus: "activating",
+            activationSequence: nil
+        )
+        assert(inProgress.observedCurrentAttempt, "observing activating proves a response-lost request reached legacy firmware")
+        assertEqual(
+            evaluate(
+                observedCurrentAttempt: inProgress.observedCurrentAttempt,
+                activationSequence: nil
+            ).decision,
+            .installed,
+            "legacy firmware installs after an observed activating transition"
+        )
+    }
+
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
         let body = Data("""
         {
@@ -605,6 +742,7 @@ struct NavigationProtocolTests {
           "activeMapId": "old-map",
           "activation": {
             "status": "failed",
+            "sequence": 9,
             "sessionId": "new-map",
             "mapId": "new-map",
             "error": {
@@ -623,6 +761,7 @@ struct NavigationProtocolTests {
         assertEqual(status.enabled, true, "status exposes transfer mode")
         assertEqual(status.activeMapId, "old-map", "status exposes active map id")
         assertEqual(status.activation?.status, "failed", "status exposes activation state")
+        assertEqual(status.activation?.sequence, 9, "status exposes activation sequence")
         assertEqual(status.activation?.error?.code, "file_sha256", "status exposes activation error code")
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
     }
@@ -1708,7 +1847,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activation":{"status":"activating","sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1717,6 +1856,7 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
         assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
         assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
+        assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
         assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")

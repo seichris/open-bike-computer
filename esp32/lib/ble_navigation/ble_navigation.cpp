@@ -597,24 +597,19 @@ static std::string mapTransferStatusJson() {
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
-  if (!transferStatus.sessionToken.empty()) {
-    body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
-            "\"";
-  }
-
   if (activeStatus.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
-            "\",\"message\":\"" + jsonEscape(activeStatus.message) + "\"}";
+            "\"}";
   }
 
-  body += ",\"activation\":" + mapTransferHttp.activationStatusJson();
+  body += ",\"activation\":" + mapTransferHttp.activationStatusJson(true);
 
-  if (!transferStatus.lastErrorCode.empty()) {
+  if (!transferStatus.lastErrorCode.empty() &&
+      !mapTransferHttp.activationHasError()) {
     body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
-            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
+            jsonEscape(transferStatus.lastErrorCode) + "\"}";
   }
 
   body += "}";

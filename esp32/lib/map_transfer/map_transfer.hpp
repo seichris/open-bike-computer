@@ -26,6 +26,35 @@ struct InstallStatus {
   std::string message;
 };
 
+enum class ActivationBeginResult {
+  Started,
+  AlreadyRunning,
+  Busy,
+};
+
+struct MapActivationSnapshot {
+  bool running = false;
+  uint32_t sequence = 0;
+  std::string status = "idle";
+  std::string sessionId;
+  std::string mapId;
+  std::string errorCode;
+  std::string errorMessage;
+};
+
+class MapActivationState {
+public:
+  ActivationBeginResult begin(const std::string &sessionId);
+  void finish(const std::string &status, const std::string &mapId,
+              const std::string &errorCode,
+              const std::string &errorMessage);
+  MapActivationSnapshot snapshot() const;
+  std::string json(bool compact = false) const;
+
+private:
+  MapActivationSnapshot state_;
+};
+
 class MapTransferInstaller {
 public:
   explicit MapTransferInstaller(std::string storageRoot = "/sdcard");

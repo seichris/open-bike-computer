@@ -326,26 +326,19 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
     return false;
 
   lockState();
-  if (activationRunning_) {
-    const bool sameSession = activationSessionId_ == sessionId;
-    unlockState();
-    if (sameSession) {
-      sendJson(client, 202,
-               std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
-                   jsonEscape(sessionId) + "\"}");
-      return true;
-    }
+  ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  unlockState();
+  if (beginResult == ActivationBeginResult::AlreadyRunning) {
+    sendJson(client, 202,
+             std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
+                 jsonEscape(sessionId) + "\"}");
+    return true;
+  }
+  if (beginResult == ActivationBeginResult::Busy) {
     sendError(client, 409, "activation_busy",
               "another map activation is already running");
     return true;
   }
-  activationRunning_ = true;
-  activationSessionId_ = sessionId;
-  activationStatus_ = "activating";
-  activationMapId_.clear();
-  activationErrorCode_.clear();
-  activationErrorMessage_.clear();
-  unlockState();
 
   auto *context = new ActivationTaskContext{this, sessionId};
   BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
@@ -426,21 +419,18 @@ void MapTransferHttpServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-std::string MapTransferHttpServer::activationStatusJson() const {
+std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
   lockState();
-  std::string body = std::string("{\"status\":\"") +
-                     jsonEscape(activationStatus_) + "\"";
-  if (!activationSessionId_.empty())
-    body += ",\"sessionId\":\"" + jsonEscape(activationSessionId_) + "\"";
-  if (!activationMapId_.empty())
-    body += ",\"mapId\":\"" + jsonEscape(activationMapId_) + "\"";
-  if (!activationErrorCode_.empty()) {
-    body += ",\"error\":{\"code\":\"" + jsonEscape(activationErrorCode_) +
-            "\",\"message\":\"" + jsonEscape(activationErrorMessage_) + "\"}";
-  }
-  body += "}";
+  std::string body = activationState_.json(compact);
   unlockState();
   return body;
+}
+
+bool MapTransferHttpServer::activationHasError() const {
+  lockState();
+  const bool hasError = !activationState_.snapshot().errorCode.empty();
+  unlockState();
+  return hasError;
 }
 
 void MapTransferHttpServer::finishActivation(const std::string &status,
@@ -448,11 +438,7 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
                                              const std::string &errorCode,
                                              const std::string &errorMessage) {
   lockState();
-  activationRunning_ = false;
-  activationStatus_ = status;
-  activationMapId_ = mapId;
-  activationErrorCode_ = errorCode;
-  activationErrorMessage_ = errorMessage;
+  activationState_.finish(status, mapId, errorCode, errorMessage);
   unlockState();
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);

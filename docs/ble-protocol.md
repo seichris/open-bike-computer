@@ -240,11 +240,15 @@ Status responses should include:
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
-- `activation`: the latest activation `status`, `sessionId`, `mapId`, and
-  structured `error`, when present. Status is `idle`, `activating`, `failed`,
-  or `installed`.
-- `lastError`: last installer/upload error code and message, when present.
-- `activeError`: active-map metadata error, when no active map is installed.
+- `activation`: the latest activation `status`, monotonic boot-local
+  `sequence`, `sessionId`, optional `mapId`, and structured `error`, when
+  present. Status is `idle`, `activating`, `failed`, or `installed`. BLE uses a
+  compact form that omits error messages and duplicate `lastError`; HTTP retains
+  the full diagnostic text.
+- `lastError`: last installer/upload error code, when present. HTTP also includes
+  the diagnostic message.
+- `activeError`: active-map metadata error code, when no active map is installed.
+  HTTP also includes the diagnostic message.
 
 The ESP32 map installer validates staged packs before activation:
 
