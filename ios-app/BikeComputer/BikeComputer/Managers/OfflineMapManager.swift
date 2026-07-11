@@ -48,6 +48,7 @@ nonisolated enum MapActivationReconciler {
                          requestAcknowledged: Bool,
                          observedCurrentAttempt: Bool,
                          activeMapId: String?,
+                         activeSessionId: String?,
                          activationStatus: String?,
                          activationSequence: UInt32?,
                          activationSessionId: String?,
@@ -55,6 +56,7 @@ nonisolated enum MapActivationReconciler {
                          activationError: String?) -> MapActivationEvaluation {
         let previousMapId = previousMapId?.isEmpty == false ? previousMapId : nil
         let activeMapId = activeMapId?.isEmpty == false ? activeMapId : nil
+        let activeSessionId = activeSessionId?.isEmpty == false ? activeSessionId : nil
         let sessionMatches = activationSessionId == sessionId
         let sequenceAdvanced: Bool
         if let previousSequence, let activationSequence {
@@ -92,6 +94,13 @@ nonisolated enum MapActivationReconciler {
                     observedCurrentAttempt: true
                 )
             }
+        }
+
+        if activeMapId == expectedMapId, activeSessionId == sessionId {
+            return MapActivationEvaluation(
+                decision: .installed,
+                observedCurrentAttempt: observedCurrentAttempt
+            )
         }
 
         if let previousMapId,
@@ -350,6 +359,30 @@ final class OfflineMapManager: ObservableObject {
         return packURL.deletingPathExtension().lastPathComponent
     }
 
+    func isCachedPackInstalled(_ packURL: URL,
+                               activeMapId: String,
+                               activeSessionId: String) -> Bool {
+        guard !activeMapId.isEmpty,
+              activeMapId == packURL.deletingPathExtension().lastPathComponent else {
+            return false
+        }
+        // Older firmware exposes only mapId. New firmware includes the durable
+        // content-derived session so regenerated same-area packs are not shown
+        // as installed merely because their stable map IDs match.
+        guard !activeSessionId.isEmpty else { return true }
+        guard let archive = try? OfflineMapPackArchive(url: packURL),
+              let manifest = try? archive.manifest(),
+              let mapId = manifest.mapId,
+              let manifestEntry = archive.manifestEntry,
+              let manifestData = try? archive.data(for: manifestEntry) else {
+            return false
+        }
+        return MapTransferSessionIdentity.make(
+            mapId: mapId,
+            manifestData: manifestData
+        ) == activeSessionId
+    }
+
     var lastTransferDescription: String? {
         guard !lastTransferMapId.isEmpty else { return nil }
         let outcome = lastTransferOutcome.isEmpty ? "unknown" : lastTransferOutcome
@@ -389,6 +422,7 @@ final class OfflineMapManager: ObservableObject {
             requestAcknowledged: false,
             observedCurrentAttempt: false,
             activeMapId: bleManager.mapTransferActiveMapId,
+            activeSessionId: bleManager.mapTransferActiveSessionId,
             activationStatus: bleManager.mapTransferActivationStatus,
             activationSequence: bleManager.mapTransferActivationSequence,
             activationSessionId: bleManager.mapTransferActivationSessionId,
@@ -661,6 +695,7 @@ final class OfflineMapManager: ObservableObject {
                     requestAcknowledged: activationRequestAcknowledged,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: status.activeMapId,
+                    activeSessionId: status.activeSessionId,
                     activationStatus: activation?.status,
                     activationSequence: activation?.sequence,
                     activationSessionId: activation?.sessionId,
@@ -697,6 +732,7 @@ final class OfflineMapManager: ObservableObject {
                     requestAcknowledged: activationRequestAcknowledged,
                     observedCurrentAttempt: observedCurrentAttempt,
                     activeMapId: bleManager.mapTransferActiveMapId,
+                    activeSessionId: bleManager.mapTransferActiveSessionId,
                     activationStatus: bleManager.mapTransferActivationStatus,
                     activationSequence: bleManager.mapTransferActivationSequence,
                     activationSessionId: bleManager.mapTransferActivationSessionId,

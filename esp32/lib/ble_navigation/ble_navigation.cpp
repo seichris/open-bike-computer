@@ -573,10 +573,10 @@ static std::string jsonEscape(const std::string &value) {
 
 static std::string mapTransferStatusJson() {
   map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
-  std::string activeMapId;
+  map_transfer::ActiveMapSelection activeMap;
   map_transfer::MapTransferInstaller installer("/sdcard");
   map_transfer::InstallStatus activeStatus =
-      installer.readActiveMapId(activeMapId);
+      installer.readActiveMap(activeMap);
 
   std::string body = std::string("{\"configured\":") +
                      (transferStatus.configured ? "true" : "false") +
@@ -598,7 +598,11 @@ static std::string mapTransferStatusJson() {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
   if (activeStatus.ok) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
+    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    if (!activeMap.sessionId.empty()) {
+      body += ",\"activeSessionId\":\"" +
+              jsonEscape(activeMap.sessionId) + "\"";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
             "\"}";

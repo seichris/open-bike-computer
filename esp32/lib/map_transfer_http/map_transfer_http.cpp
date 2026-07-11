@@ -441,8 +441,8 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 }
 
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
-  std::string activeMapId;
-  InstallStatus active = installer_.readActiveMapId(activeMapId);
+  ActiveMapSelection activeMap;
+  InstallStatus active = installer_.readActiveMap(activeMap);
   HttpTransferStatus transferStatus = status();
 
   std::string body = std::string("{\"configured\":") +
@@ -457,7 +457,11 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
   if (active.ok) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
+    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    if (!activeMap.sessionId.empty()) {
+      body += ",\"activeSessionId\":\"" +
+              jsonEscape(activeMap.sessionId) + "\"";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";

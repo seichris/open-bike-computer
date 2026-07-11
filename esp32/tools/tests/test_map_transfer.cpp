@@ -244,6 +244,45 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   assert(selection.previousRoot == "/VECTMAP/.maps/session-old");
 }
 
+static void testSameSessionRetryRepairsDamagedInstalledVersion() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-repair";
+  const std::string stagedDir =
+      root + "/VECTMAP/.staging/" + session + "/VECTMAP/map-1/+0032+0008";
+  const std::string blockData = "map-block";
+  const std::string manifestText =
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{"
+      "\"path\":\"VECTMAP/map-1/+0032+0008/123_456.fmb\",\"bytes\":9,"
+      "\"sha256\":\"" +
+      sha(blockData) + "\"}]}";
+
+  assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
+  writeFile(stagedDir + "/123_456.fmb", blockData);
+  writeFile(root + "/VECTMAP/.staging/" + session + "/manifest.json",
+            manifestText);
+  MapManifest manifest;
+  assert(installer.validateStagedMap(session, manifest).ok);
+  assert(installer.activateStagedMap(session, manifest).ok);
+
+  const std::string originalRoot = root + "/VECTMAP/.maps/" + session;
+  assert(::unlink((originalRoot + "/+0032+0008/123_456.fmb").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
+  writeFile(stagedDir + "/123_456.fmb", blockData);
+  writeFile(root + "/VECTMAP/.staging/" + session + "/manifest.json",
+            manifestText);
+  assert(installer.validateStagedMap(session, manifest).ok);
+
+  auto repaired = installer.activateStagedMap(session, manifest);
+  assert(repaired.ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.sessionId == session);
+  assert(selected.root != "/VECTMAP/.maps/" + session);
+  assert(readFile(root + selected.root + "/+0032+0008/123_456.fmb") ==
+         blockData);
+}
+
 static void testActivationRestoresOldMapWhenMetadataWriteFails() {
   std::string root = tempRoot();
   MetadataWriteFailingInstaller installer(root);
@@ -421,6 +460,38 @@ static void testCompletesPointerSwitchInterruptedBeforeJournalCommit() {
   assert(activeMapId == "map-new");
 }
 
+static void testJournalRecoveryRollsBackMissingSelectedVersion() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  const std::string oldRoot = vectmap + "/.maps/session-old";
+  assert(::system((std::string("mkdir -p ") + oldRoot).c_str()) == 0);
+  writeFile(oldRoot + "/old.fmb", "old");
+  writeFile(vectmap + "/active-map.json",
+            "{\"mapId\":\"map-new\",\"sessionId\":\"session-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\"}\n");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-new\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
+            "\"phase\":\"ready\"}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.mapId == "map-old");
+  assert(selected.root == "/VECTMAP/.maps/session-old");
+  assert(readFile(oldRoot + "/old.fmb") == "old");
+  assert(!exists(vectmap + "/.activation-transaction.json"));
+}
+
 static void testMissingSelectedVersionRestoresPreviousPointer() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -464,6 +535,35 @@ static void testRejectsChecksumMismatch() {
   assert(validated.code == "file_sha256");
 }
 
+static void testVerificationReceiptControlsResumeEligibility() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-receipt";
+  const std::string stagedDir =
+      root + "/VECTMAP/.staging/" + session + "/VECTMAP/map-1/+0032+0008";
+  assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
+  const std::string path = "VECTMAP/map-1/+0032+0008/123_456.fmb";
+  const std::string blockData = "verified-map-block";
+  writeFile(stagedDir + "/123_456.fmb", blockData);
+  writeFile(root + "/VECTMAP/.staging/" + session + "/manifest.json",
+            "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{"
+            "\"path\":\"" + path + "\",\"bytes\":" +
+                std::to_string(blockData.size()) + ",\"sha256\":\"" +
+                sha(blockData) + "\"}]}\n");
+
+  map_transfer::ManifestFile expected;
+  assert(installer.expectedStagedFile(session, path, expected).ok);
+  assert(!installer.stagedFileVerified(session, expected));
+  assert(installer.markStagedFileVerified(session, expected));
+  assert(installer.stagedFileVerified(session, expected));
+  installer.clearStagedFileVerification(session, expected);
+  assert(!installer.stagedFileVerified(session, expected));
+
+  MapManifest manifest;
+  assert(installer.validateStagedMap(session, manifest).ok);
+  assert(installer.stagedFileVerified(session, manifest.files[0]));
+}
+
 int main() {
   testSha256KnownVector();
   testActivationStateTracksAttemptsAndCompactStatus();
@@ -471,14 +571,17 @@ int main() {
   testRejectsPathOutsideMapNamespace();
   testValidatesStagedMapAndActivates();
   testActivationSwitchesPointerAndRetainsPreviousVersion();
+  testSameSessionRetryRepairsDamagedInstalledVersion();
   testActivationRestoresOldMapWhenMetadataWriteFails();
   testPrunesAbandonedStagingSessions();
   testPrunesPreviousAndObsoleteVersionsBeforeNextUpload();
   testPrunesLegacyRollbackAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();
+  testJournalRecoveryRollsBackMissingSelectedVersion();
   testMissingSelectedVersionRestoresPreviousPointer();
   testRejectsChecksumMismatch();
+  testVerificationReceiptControlsResumeEligibility();
   std::cout << "map_transfer tests passed\n";
   return 0;
 }

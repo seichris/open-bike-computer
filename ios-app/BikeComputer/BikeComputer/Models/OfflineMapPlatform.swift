@@ -240,6 +240,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     let enabled: Bool?
     let activeMapId: String?
+    let activeSessionId: String?
     let activation: Activation?
 }
 

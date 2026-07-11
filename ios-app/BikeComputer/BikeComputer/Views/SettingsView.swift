@@ -273,6 +273,9 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActiveMapId) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
+        .onChange(of: bleManager.mapTransferActiveSessionId) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
         .onChange(of: bleManager.mapTransferActivationStatus) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
@@ -294,7 +297,11 @@ private struct DownloadedMapRow: View {
             Text(displayName)
                 .lineLimit(2)
 
-            if bleManager.mapTransferActiveMapId == packURL.deletingPathExtension().lastPathComponent {
+            if manager.isCachedPackInstalled(
+                packURL,
+                activeMapId: bleManager.mapTransferActiveMapId,
+                activeSessionId: bleManager.mapTransferActiveSessionId
+            ) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                     .accessibilityLabel("Installed on device")

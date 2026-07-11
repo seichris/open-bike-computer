@@ -350,6 +350,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
+    @Published var mapTransferActiveSessionId: String = ""
     @Published var mapTransferActivationStatus: String = "idle"
     @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
@@ -1304,6 +1305,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferBaseURL = nil
         mapTransferAccessPointSSID = nil
         mapTransferActiveMapId = ""
+        mapTransferActiveSessionId = ""
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
@@ -2374,6 +2376,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
         mapTransferAccessPointSSID = object["apSsid"] as? String
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
+        mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         if let activation = object["activation"] as? [String: Any] {
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
             mapTransferActivationSequence =

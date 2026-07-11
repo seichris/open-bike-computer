@@ -525,18 +525,26 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
-  const std::string root = std::string("/VECTMAP/.maps/") + sessionId;
-  const std::string destinationRoot = joinPath(storageRoot_, root);
+  const std::string baseRoot = std::string("/VECTMAP/.maps/") + sessionId;
+  std::string root = baseRoot;
 
   ActiveMapSelection previous;
   InstallStatus previousStatus = readActiveMap(previous);
   if (!previousStatus.ok && previousStatus.code != "active_missing")
     return previousStatus;
-  if (previousStatus.ok && previous.sessionId == sessionId &&
-      previous.root == root && activeRootExists(root)) {
-    removeTree(stagingRoot(sessionId));
-    return {true, "ok", ""};
+  if (previousStatus.ok && previous.sessionId == sessionId) {
+    if (installedMapMatches(previous.root, manifest)) {
+      removeTree(stagingRoot(sessionId));
+      return {true, "ok", ""};
+    }
+    const std::string repairDigest = sha256Hex(
+        reinterpret_cast<const uint8_t *>(sessionId.data()), sessionId.size());
+    const std::string repairName =
+        sessionId.substr(0, 63) + "-repair-" + repairDigest.substr(0, 8);
+    const std::string repairRoot = std::string("/VECTMAP/.maps/") + repairName;
+    root = previous.root == repairRoot ? baseRoot : repairRoot;
   }
+  const std::string destinationRoot = joinPath(storageRoot_, root);
 
   const auto transactionJson = [&](const char *phase) {
     return std::string("{\"sessionId\":\"") + sessionId +
@@ -655,7 +663,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
   const bool selectedNewRoot = activeStatus.ok && active.root == root;
-  if (selectedNewRoot) {
+  if (selectedNewRoot && activeRootExists(root)) {
     const bool cleanupComplete = removeTree(stagingRoot(sessionId)) &&
                                  removeTree(activePath + ".bak") &&
                                  removeTree(activePath + ".tmp") &&
@@ -666,7 +674,8 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     return {true, "recovered_commit", "completed interrupted map commit"};
   }
 
-  if (!activeStatus.ok && !previousRoot.empty() &&
+  bool restoredPrevious = false;
+  if ((!activeStatus.ok || selectedNewRoot) && !previousRoot.empty() &&
       activeRootExists(previousRoot)) {
     ActiveMapSelection rollback;
     rollback.mapId = previousMapId;
@@ -674,7 +683,12 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     rollback.root = previousRoot;
     if (!writeActiveMap(rollback))
       return fail("transaction_recovery", "could not restore previous map selection");
+    restoredPrevious = true;
   }
+
+  if (selectedNewRoot && !restoredPrevious)
+    return fail("active_root_missing",
+                "selected map directory is missing and no rollback is available");
 
   const bool cleanupComplete = removeTree(joinPath(storageRoot_, root)) &&
                                removeTree(stagingRoot(sessionId)) &&
@@ -963,6 +977,32 @@ bool MapTransferInstaller::publishStagedFiles(
     const std::string source = joinPath(stagingRoot(sessionId), file.path);
     const std::string destination = joinPath(destinationRoot, relative);
     if (!movePath(source, destination))
+      return false;
+  }
+  return true;
+}
+
+bool MapTransferInstaller::installedMapMatches(
+    const std::string &root, const MapManifest &manifest) const {
+  if (!activeRootExists(root))
+    return false;
+  const std::string publishPrefix = kVectMapPrefix;
+  for (const ManifestFile &file : manifest.files) {
+    if (!startsWith(file.publishPath, publishPrefix))
+      return false;
+    const std::string relative = file.publishPath.substr(publishPrefix.size());
+    const std::string path = joinPath(joinPath(storageRoot_, root), relative);
+    uint64_t size = 0;
+    if (!fileSize(path, size) || size != file.bytes)
+      return false;
+    std::string actual;
+    if (!fileSha256Hex(path, actual))
+      return false;
+    std::transform(actual.begin(), actual.end(), actual.begin(), ::tolower);
+    std::string expected = file.sha256;
+    std::transform(expected.begin(), expected.end(), expected.begin(),
+                   ::tolower);
+    if (actual != expected)
       return false;
   }
   return true;

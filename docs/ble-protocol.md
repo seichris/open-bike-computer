@@ -253,6 +253,9 @@ transfer id and accepts both forms.
 Status responses should include:
 
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
+- `activeSessionId`: durable content-derived session selected by
+  `active-map.json`, when installed by transfer-capable firmware. This
+  distinguishes regenerated packs that intentionally reuse a stable map ID.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
 - `activation`: the latest activation `status`, monotonic boot-local
