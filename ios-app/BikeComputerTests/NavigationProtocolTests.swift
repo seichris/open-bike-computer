@@ -262,7 +262,7 @@ struct NavigationProtocolTests {
         testDevicePacketRouting()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
-        testMapProfilesRemainIndependentWithoutCapabilityBit()
+        testMapProfileCapabilityNegotiation()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
@@ -980,6 +980,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.powerButtonHonkPrefix, "SNDH", "PWR honk configuration remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkStatusPrefix, "SNHA", "PWR honk acknowledgement remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
+        assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
         assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 3, "capability version requests extended map visibility")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
@@ -1131,6 +1132,13 @@ struct NavigationProtocolTests {
         assert(manager.supportsExtendedMapVisibility,
                "CAPS bit enables independent service-road and track visibility")
 
+        let independent = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(independent),
+               "independent map profile CAPS should be consumed")
+        assert(manager.supportsIndependentMapProfiles,
+               "CAPS bit enables independent map profile controls")
+
         let acknowledgedFlags = supportedFlags |
             DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask
         let acknowledged = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
@@ -1174,6 +1182,8 @@ struct NavigationProtocolTests {
                "malformed CAPS clears PWR honk acknowledgement support")
         assert(!manager.supportsExtendedMapVisibility,
                "malformed CAPS clears extended map visibility support")
+        assert(!manager.supportsIndependentMapProfiles,
+               "malformed CAPS clears independent map profile support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
@@ -1181,34 +1191,77 @@ struct NavigationProtocolTests {
         UserDefaults.standard.removeObject(forKey: "deviceSettings.powerButtonHonkEnabled")
     }
 
-    static func testMapProfilesRemainIndependentWithoutCapabilityBit() {
-        let manager = BLEManager()
-        manager.isConnected = true
-        manager.isNavigationReady = true
-        manager.detailLevel = 2
-        manager.zoomLevel = 5
-        manager.showBuildings = true
-        manager.mapPlusNavigationDetailLevel = 0
-        manager.mapPlusNavigationZoomLevel = 1
-        manager.mapPlusNavigationShowBuildings = false
-        var packets: [Data] = []
-        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 20,
-            canSend: { true },
-            write: { packets.append($0) }
-        ))
+    static func testMapProfileCapabilityNegotiation() {
+        func configuredManager() -> (BLEManager, () -> [Data]) {
+            let manager = BLEManager()
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.detailLevel = 2
+            manager.zoomLevel = 5
+            manager.showBuildings = true
+            manager.mapPlusNavigationDetailLevel = 0
+            manager.mapPlusNavigationZoomLevel = 1
+            manager.mapPlusNavigationShowBuildings = false
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return (manager, { packets })
+        }
 
+        let independentFlags = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask])
+        let (independentManager, independentPackets) = configuredManager()
+        assert(independentManager.handleDeviceCapabilitiesNotification(independentFlags),
+               "independent profile capability response should be consumed")
+        assertEqual(independentPackets().map { $0[4] },
+                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+                    "new firmware receives the independent profile before legacy Map IDs")
+        let independentDetail = independentPackets().first { $0[4] == 17 }
+        assertEqual(readInt32LE(independentDetail!, offset: 5), 0,
+                    "independent Map + Navigation detail remains distinct")
+
+        let (legacyManager, legacyPackets) = configuredManager()
         let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
-        assert(manager.handleDeviceCapabilitiesNotification(baselineCapabilities),
+        assert(legacyManager.handleDeviceCapabilitiesNotification(baselineCapabilities),
                "baseline capability response should be consumed")
-        assertEqual(packets.map { $0[4] },
-                    [8, 1, 2, 3, 9, 10, 7, 20, 16, 17, 18, 21, 22, 19],
-                    "every firmware receives both complete map profiles")
-        let mapNavigationDetailPacket = packets.first { $0[4] == 17 }
-        assertEqual(readInt32LE(mapNavigationDetailPacket!, offset: 5), 0,
-                    "Map + Navigation keeps its independent detail value")
-        assertEqual(manager.mapPlusNavigationZoomLevel, 1,
-                    "capability negotiation does not overwrite Map + Navigation settings")
+        assertEqual(legacyPackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+                    "legacy firmware receives only its shared Map profile IDs")
+        assertEqual(legacyManager.mapPlusNavigationZoomLevel, 1,
+                    "negotiation preserves the hidden independent local profile")
+        legacyManager.detailLevel = 1
+        legacyManager.sendSetting(id: 2, value: 1)
+        assertEqual(legacyManager.mapPlusNavigationDetailLevel, 1,
+                    "live legacy edits synchronize the local shared profile")
+        legacyManager.mapPlusNavigationZoomLevel = 1
+        legacyManager.showRouteOverlay = false
+        legacyManager.sendVisibilityMask()
+        assertEqual(legacyManager.mapPlusNavigationZoomLevel, 1,
+                    "global overlay edits preserve the hidden independent profile")
+        let packetCountBeforeUnsupportedWrite = legacyPackets().count
+        legacyManager.sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
+                                  value: 0)
+        assertEqual(legacyPackets().count, packetCountBeforeUnsupportedWrite,
+                    "unsupported independent setting IDs are not sent")
+
+        let (lateManager, latePackets) = configuredManager()
+        lateManager.useDeviceCapabilitiesFallback()
+        assertEqual(latePackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+                    "timeout fallback sends only the legacy shared profile")
+        let lateExtendedFlags = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
+                  DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
+        assert(lateManager.handleDeviceCapabilitiesNotification(lateExtendedFlags),
+               "late independent profile response should still be consumed")
+        assertEqual(Array(latePackets().map { $0[4] }.suffix(14)),
+                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+                    "late extended response resends both profiles with new semantics")
+        let resentMapVisibility = latePackets().last { $0[4] == 8 }
+        assert(readInt32LE(resentMapVisibility!, offset: 5) &
+               DeviceBLEProtocol.extendedVisibilityMarker != 0,
+               "late extended response repairs the folded Map visibility mask")
     }
 
     static func testDeviceCapabilitySynchronizesPowerButtonHonkOnce() {
@@ -1309,6 +1362,10 @@ struct NavigationProtocolTests {
                                                     hasReceivedCapabilities: false,
                                                     attempt: DeviceCapabilityRetry.maxAttempts),
                "capability retries stop at the attempt limit")
+        assert(DeviceCapabilityRetry.isCurrentSession(4, currentGeneration: 4),
+               "retry tokens remain valid within one BLE session")
+        assert(!DeviceCapabilityRetry.isCurrentSession(4, currentGeneration: 5),
+               "retry tokens from a previous BLE session are rejected")
         assert(PowerButtonHonkRetry.shouldRetry(isNavigationReady: true, attempt: 0),
                "PWR honk acknowledgement retries after the first attempt")
         assert(PowerButtonHonkRetry.shouldRetry(isNavigationReady: true, attempt: 1),
@@ -1418,7 +1475,8 @@ struct NavigationProtocolTests {
     static func testBLEManagerSendsSeparateMapProfileSettings() {
         let manager = BLEManager()
         let capabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
-            Data([DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
+                  DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
         assert(manager.handleDeviceCapabilitiesNotification(capabilities),
                "extended visibility capability should be accepted")
         manager.isConnected = true

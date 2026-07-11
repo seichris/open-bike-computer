@@ -33,6 +33,12 @@ int main() {
       VISIBILITY_EXTENDED_MARKER | VISIBILITY_TRACKS;
   assert(normalizedFeatureVisibilityMask(extendedTrackOnly) ==
          VISIBILITY_TRACKS);
+  assert(visibilityMaskForMapVersion(VISIBILITY_SERVICE_ROADS, 1) ==
+         (VISIBILITY_LOCAL_STREETS | VISIBILITY_SERVICE_ROADS));
+  assert(visibilityMaskForMapVersion(VISIBILITY_TRACKS, 1) ==
+         (VISIBILITY_PATHS | VISIBILITY_TRACKS));
+  assert(visibilityMaskForMapVersion(VISIBILITY_SERVICE_ROADS, 2) ==
+         VISIBILITY_SERVICE_ROADS);
   assert(isLocalStreetTypeId(6));
   assert(isLocalStreetTypeId(7));
   assert(!isLocalStreetTypeId(10));
@@ -50,6 +56,9 @@ int main() {
   assert(isIndependentSetting(16));
   assert(isIndependentSetting(22));
   assert(!isIndependentSetting(15));
+  assert(!shouldApplyMirroredZoomToMapNavigation(false, true));
+  assert(!shouldApplyMirroredZoomToMapNavigation(true, false));
+  assert(shouldApplyMirroredZoomToMapNavigation(true, true));
 
   assert(clampValue(1, -1) == 0);
   assert(clampValue(16, 51) == 50);

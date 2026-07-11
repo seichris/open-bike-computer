@@ -463,22 +463,36 @@ private struct DeviceScreensSettingsSection: View {
 private struct UICustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
 
+    private var screenStylesFooter: String {
+        if !bleManager.hasReceivedDeviceCapabilities {
+            return "Checking whether the connected firmware supports independent map styles."
+        }
+        if bleManager.supportsIndependentMapProfiles {
+            return "Configure map appearance independently for each device screen."
+        }
+        return "This firmware uses one shared style for both map screens. Update the firmware to configure them independently."
+    }
+
     var body: some View {
         Form {
-            Section(header: Text("Screen Styles"), footer: Text("Configure map appearance independently for each device screen.")) {
+            Section(header: Text("Screen Styles"), footer: Text(screenStylesFooter)) {
                 NavigationLink {
                     MapStyleSettingsView(screen: .map)
                 } label: {
-                    Label("Map", systemImage: "map")
+                    Label(bleManager.supportsIndependentMapProfiles ? "Map" : "Map Screens",
+                          systemImage: "map")
                 }
 
-                NavigationLink {
-                    MapStyleSettingsView(screen: .mapPlusNavigation)
-                } label: {
-                    Label("Map + Navigation", systemImage: "location.north.line")
+                if bleManager.supportsIndependentMapProfiles {
+                    NavigationLink {
+                        MapStyleSettingsView(screen: .mapPlusNavigation)
+                    } label: {
+                        Label("Map + Navigation", systemImage: "location.north.line")
+                    }
                 }
             }
-            .disabled(!bleManager.supportsDeviceSettings)
+            .disabled(!bleManager.supportsDeviceSettings ||
+                      !bleManager.hasReceivedDeviceCapabilities)
 
             Section(header: Text("Display Rotation"), footer: Text("Rotate display 90° CCW. Requires reboot.")) {
                 Toggle("Rotate 90°", isOn: Binding(
@@ -543,6 +557,12 @@ private struct MapStyleSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     let screen: MapStyleScreen
 
+    private var navigationTitle: String {
+        screen == .map && !bleManager.supportsIndependentMapProfiles
+            ? "Map Screens"
+            : screen.title
+    }
+
     private func binding<Value>(
         map: ReferenceWritableKeyPath<BLEManager, Value>,
         mapPlusNavigation: ReferenceWritableKeyPath<BLEManager, Value>
@@ -586,8 +606,34 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showLocalStreets, mapPlusNavigation: \.mapPlusNavigationShowLocalStreets)
     }
 
+    private var localRoadsControl: Binding<Bool> {
+        guard !bleManager.supportsExtendedMapVisibility else {
+            return showLocalStreets
+        }
+        return Binding(
+            get: { showLocalStreets.wrappedValue || showServiceRoads.wrappedValue },
+            set: {
+                showLocalStreets.wrappedValue = $0
+                showServiceRoads.wrappedValue = $0
+            }
+        )
+    }
+
     private var showPaths: Binding<Bool> {
         binding(map: \.showPaths, mapPlusNavigation: \.mapPlusNavigationShowPaths)
+    }
+
+    private var pathsControl: Binding<Bool> {
+        guard !bleManager.supportsExtendedMapVisibility else {
+            return showPaths
+        }
+        return Binding(
+            get: { showPaths.wrappedValue || showTracks.wrappedValue },
+            set: {
+                showPaths.wrappedValue = $0
+                showTracks.wrappedValue = $0
+            }
+        )
     }
 
     private var showTracks: Binding<Bool> {
@@ -620,17 +666,27 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Roads & Paths"), footer: Text("Service roads commonly include driveways and internal compound roads; exact results depend on the OpenStreetMap tags in the downloaded map.")) {
+            Section(header: Text("Roads & Paths"), footer: Text("Service roads commonly include driveways and internal compound roads. Separate Service Roads and Tracks require current v2 map downloads; legacy maps keep each pair combined.")) {
                 Toggle("Major Roads", isOn: showMajorRoads)
                     .onChange(of: showMajorRoads.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Residential & Local Roads", isOn: showLocalStreets)
-                    .onChange(of: showLocalStreets.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Service Roads", isOn: showServiceRoads)
-                    .onChange(of: showServiceRoads.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Paths & Footways", isOn: showPaths)
-                    .onChange(of: showPaths.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Tracks", isOn: showTracks)
-                    .onChange(of: showTracks.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle(bleManager.supportsExtendedMapVisibility
+                       ? "Residential & Local Roads"
+                       : "Residential, Local & Service Roads",
+                       isOn: localRoadsControl)
+                    .onChange(of: localRoadsControl.wrappedValue) { _ in sendVisibilityMask() }
+                if bleManager.supportsExtendedMapVisibility {
+                    Toggle("Service Roads", isOn: showServiceRoads)
+                        .onChange(of: showServiceRoads.wrappedValue) { _ in sendVisibilityMask() }
+                }
+                Toggle(bleManager.supportsExtendedMapVisibility
+                       ? "Paths & Footways"
+                       : "Paths, Footways & Tracks",
+                       isOn: pathsControl)
+                    .onChange(of: pathsControl.wrappedValue) { _ in sendVisibilityMask() }
+                if bleManager.supportsExtendedMapVisibility {
+                    Toggle("Tracks", isOn: showTracks)
+                        .onChange(of: showTracks.wrappedValue) { _ in sendVisibilityMask() }
+                }
                 Toggle("Railways", isOn: showRailways)
                     .onChange(of: showRailways.wrappedValue) { _ in sendVisibilityMask() }
             }
@@ -697,8 +753,11 @@ private struct MapStyleSettingsView: View {
                 }
             }
         }
-        .disabled(!bleManager.supportsDeviceSettings)
-        .navigationTitle(screen.title)
+        .disabled(!bleManager.supportsDeviceSettings ||
+                  !bleManager.hasReceivedDeviceCapabilities ||
+                  (screen == .mapPlusNavigation &&
+                   !bleManager.supportsIndependentMapProfiles))
+        .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
     }
 

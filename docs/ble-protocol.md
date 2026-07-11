@@ -128,6 +128,9 @@ overlay visibility remains shared by both profiles.
 Apps that support the extended visibility classes set marker bit `12`. Without
 that marker, firmware preserves the legacy behavior by applying bit `4` to both
 local and service roads and bit `2` to both paths and tracks.
+Legacy v1 map blocks do not contain feature type IDs, so the renderer also
+combines Local with Service and Paths with Tracks for those blocks. Downloading
+a current v2 map is required for independent road-class visibility.
 
 ## Device Sound Playback
 
@@ -202,8 +205,12 @@ configuration:
 "CAPS" | Flags: UInt8 | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
 ```
 
-Version `2` enables independent Map and Map + Navigation profiles. Version `3`
-requests the extended map visibility classes.
+Version `2` advertises that the client understands independent Map and Map +
+Navigation profiles. Version `3` also requests the extended map visibility
+classes. Receiving a `CAPS` request alone does not switch the firmware's
+setting semantics: a session switches to independent profiles only after the
+first setting ID in `16...22` is received. This keeps legacy IDs shared when a
+capability response is dropped.
 
 Legacy four-byte requests and five-byte responses remain supported. This lets
 new apps treat the device as the source of truth after reconnecting, while new
@@ -215,12 +222,13 @@ Flag bit `0` reports runtime device-sound availability after the speaker queue
 and task start successfully. Flag bit `1` reports PWR-button honk support. Flag
 bit `2` reports `SNHA` acknowledgement support; iOS only retries PWR
 configuration when this bit is set, preserving one-shot writes for older
-firmware. Flag bit `3` reports independent map profiles for older app builds;
-current app builds always send separate Map and Map + Navigation profiles. Flag
-bit `4` reports separate service-road and track visibility. The app retries
-discovery after each connection, uses the sound-related bits to enable sound
-controls, and restores the device-persisted PWR configuration from versioned
-responses.
+firmware. Flag bit `3` reports independent map profiles. Apps send IDs `16...22`
+only after this bit is received; otherwise they send the legacy Map profile and
+the firmware mirrors it to Map + Navigation. Flag bit `4` reports separate
+service-road and track visibility. The app retries discovery after each
+connection, ignores retry timers from older BLE sessions, uses the sound-related
+bits to enable sound controls, and restores the device-persisted PWR
+configuration from versioned responses.
 
 ## OSM Map Blocks
 

@@ -50,6 +50,25 @@ inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
   return normalized;
 }
 
+inline uint32_t visibilityMaskForMapVersion(uint32_t mask,
+                                            uint8_t mapVersion) {
+  if (mapVersion >= 2)
+    return mask;
+
+  const uint32_t localAndService =
+      VISIBILITY_LOCAL_STREETS | VISIBILITY_SERVICE_ROADS;
+  const uint32_t pathsAndTracks = VISIBILITY_PATHS | VISIBILITY_TRACKS;
+  if ((mask & localAndService) != 0)
+    mask |= localAndService;
+  else
+    mask &= ~localAndService;
+  if ((mask & pathsAndTracks) != 0)
+    mask |= pathsAndTracks;
+  else
+    mask &= ~pathsAndTracks;
+  return mask;
+}
+
 inline bool isServiceRoadTypeId(uint8_t typeId) { return typeId == 10; }
 
 inline bool isTrackTypeId(uint8_t typeId) { return typeId == 50; }
@@ -75,6 +94,11 @@ inline bool isLegacySetting(uint8_t settingId) {
 inline bool shouldMirrorLegacySetting(uint8_t settingId,
                                       bool independentProfilesEnabled) {
   return isLegacySetting(settingId) && !independentProfilesEnabled;
+}
+
+inline bool shouldApplyMirroredZoomToMapNavigation(
+    bool mirrorLegacySetting, bool mapNavigationActive) {
+  return mirrorLegacySetting && mapNavigationActive;
 }
 
 inline int32_t clampValue(uint8_t settingId, int32_t value) {

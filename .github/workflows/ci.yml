@@ -117,6 +117,12 @@ jobs:
             tools/tests/test_map_profile_protocol.cpp \
             -o /tmp/test_map_profile_protocol
           /tmp/test_map_profile_protocol
+      - name: Map profile persistence host tests
+        run: |
+          g++ -std=c++17 \
+            tools/tests/test_map_profile_persistence.cpp \
+            -o /tmp/test_map_profile_persistence
+          /tmp/test_map_profile_persistence
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \

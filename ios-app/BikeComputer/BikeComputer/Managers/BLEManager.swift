@@ -45,6 +45,7 @@ enum DeviceBLEProtocol {
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
+    static let independentMapProfilesCapabilityMask: UInt8 = 1 << 3
     static let extendedMapVisibilityCapabilityMask: UInt8 = 1 << 4
     static let deviceCapabilitiesVersion: UInt8 = 3
     static let fallbackWriteQueueCapacity = 32
@@ -349,6 +350,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
+    @Published private(set) var supportsIndependentMapProfiles: Bool = false
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
@@ -489,7 +491,9 @@ class BLEManager: NSObject, ObservableObject {
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
     private var powerButtonHonkAckTimeout: TimeInterval = 1.0
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
-    private var hasSentMapProfilesForConnection = false
+    private var hasSentMapProfileForConnection = false
+    private var hasSentMapNavigationProfileForConnection = false
+    private var isSendingNegotiatedMapProfiles = false
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -949,8 +953,21 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     /// Persist and send a runtime map setting to ESP32 when supported.
-    func sendSetting(id: UInt8, value: Int32) {
+    func sendSetting(id: UInt8, value: Int32,
+                     synchronizeLegacyProfile: Bool = true) {
+        if hasReceivedDeviceCapabilities,
+           !supportsIndependentMapProfiles,
+           !isSendingNegotiatedMapProfiles,
+           synchronizeLegacyProfile,
+           Self.isLegacyMapProfileSetting(id) {
+            synchronizeMapPlusNavigationProfileWithMap(for: id)
+        }
         saveSettings()
+        if Self.isIndependentMapProfileSetting(id),
+           (!hasReceivedDeviceCapabilities || !supportsIndependentMapProfiles) {
+            log("Independent map setting id=\(id) not sent: connected firmware does not advertise support")
+            return
+        }
         guard isConnected, isNavigationReady else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
             return
@@ -985,38 +1002,92 @@ class BLEManager: NSObject, ObservableObject {
         sendFallbackMapPacket(fallback, label: "setting id=\(id)")
     }
 
+    private static func isLegacyMapProfileSetting(_ id: UInt8) -> Bool {
+        id == 1 || id == 2 || id == 3 || id == 7 || id == 8 || id == 9 || id == 10
+    }
+
+    private static func isIndependentMapProfileSetting(_ id: UInt8) -> Bool {
+        id >= DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID &&
+            id <= DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID
+    }
+
+    private func synchronizeMapPlusNavigationProfileWithMap(for settingID: UInt8) {
+        switch settingID {
+        case 1:
+            mapPlusNavigationMinPolygonSize = minPolygonSize
+        case 2:
+            mapPlusNavigationDetailLevel = detailLevel
+        case 3:
+            mapPlusNavigationRouteLineWidth = routeLineWidth
+        case 7:
+            mapPlusNavigationZoomLevel = zoomLevel
+        case 8:
+            mapPlusNavigationShowBuildings = showBuildings
+            mapPlusNavigationShowGreenSpace = showGreenSpace
+            mapPlusNavigationShowPaths = showPaths
+            mapPlusNavigationShowTracks = showTracks
+            mapPlusNavigationShowMajorRoads = showMajorRoads
+            mapPlusNavigationShowLocalStreets = showLocalStreets
+            mapPlusNavigationShowServiceRoads = showServiceRoads
+            mapPlusNavigationShowWater = showWater
+            mapPlusNavigationShowRailways = showRailways
+            mapPlusNavigationShowOtherAreas = showOtherAreas
+        case 9:
+            mapPlusNavigationStreetLineWidthBoost = streetLineWidthBoost
+        case 10:
+            mapPlusNavigationPositionMarkerScale = positionMarkerScale
+        default:
+            break
+        }
+    }
+
     private func sendMapProfilesAfterCapabilityNegotiation() {
         guard isConnected,
               isNavigationReady,
-              hasReceivedDeviceCapabilities,
-              !hasSentMapProfilesForConnection else { return }
+              hasReceivedDeviceCapabilities else { return }
 
-        hasSentMapProfilesForConnection = true
-        sendVisibilityMask(for: .map)
-        sendSetting(id: 1, value: Int32(minPolygonSize))
-        sendSetting(id: 2, value: Int32(detailLevel))
-        sendSetting(id: 3, value: Int32(routeLineWidth))
-        sendSetting(id: 9, value: Int32(streetLineWidthBoost))
-        sendSetting(id: 10, value: Int32(positionMarkerScale))
-        sendSetting(id: 7, value: Int32(zoomLevel))
+        let shouldSendMap = !hasSentMapProfileForConnection
+        let shouldSendMapNavigation = supportsIndependentMapProfiles &&
+            !hasSentMapNavigationProfileForConnection
+        guard shouldSendMap || shouldSendMapNavigation else { return }
 
-        sendVisibilityMask(for: .mapPlusNavigation)
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID,
-                    value: Int32(mapPlusNavigationMinPolygonSize))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
-                    value: Int32(mapPlusNavigationDetailLevel))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
-                    value: Int32(mapPlusNavigationRouteLineWidth))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
-                    value: Int32(mapPlusNavigationStreetLineWidthBoost))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
-                    value: Int32(mapPlusNavigationPositionMarkerScale))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
-                    value: Int32(mapPlusNavigationZoomLevel))
+        isSendingNegotiatedMapProfiles = true
+        defer { isSendingNegotiatedMapProfiles = false }
+
+        // The first independent packet switches new firmware out of legacy
+        // mirroring mode before the Map profile's legacy IDs arrive.
+        if shouldSendMapNavigation {
+            hasSentMapNavigationProfileForConnection = true
+            sendVisibilityMask(for: .mapPlusNavigation)
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID,
+                        value: Int32(mapPlusNavigationMinPolygonSize))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
+                        value: Int32(mapPlusNavigationDetailLevel))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
+                        value: Int32(mapPlusNavigationRouteLineWidth))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
+                        value: Int32(mapPlusNavigationStreetLineWidthBoost))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
+                        value: Int32(mapPlusNavigationPositionMarkerScale))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
+                        value: Int32(mapPlusNavigationZoomLevel))
+        }
+
+        if shouldSendMap {
+            hasSentMapProfileForConnection = true
+            sendVisibilityMask(for: .map)
+            sendSetting(id: 1, value: Int32(minPolygonSize))
+            sendSetting(id: 2, value: Int32(detailLevel))
+            sendSetting(id: 3, value: Int32(routeLineWidth))
+            sendSetting(id: 9, value: Int32(streetLineWidthBoost))
+            sendSetting(id: 10, value: Int32(positionMarkerScale))
+            sendSetting(id: 7, value: Int32(zoomLevel))
+        }
     }
 
     func useDeviceCapabilitiesFallback() {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
+        supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         hasReceivedDeviceCapabilities = true
         log("Device capabilities unavailable; using baseline feature visibility")
@@ -1025,10 +1096,11 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Send feature visibility bitmask
     func sendVisibilityMask() {
-        sendVisibilityMask(for: .map)
+        sendVisibilityMask(for: .map, synchronizeLegacyProfile: false)
     }
 
-    func sendVisibilityMask(for screen: DeviceScreen) {
+    func sendVisibilityMask(for screen: DeviceScreen,
+                            synchronizeLegacyProfile: Bool = true) {
         var mask: Int32 = 0
         let settingID: UInt8
 
@@ -1069,7 +1141,8 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        sendSetting(id: settingID, value: mask)
+        sendSetting(id: settingID, value: mask,
+                    synchronizeLegacyProfile: synchronizeLegacyProfile)
     }
 
     func isDeviceScreenEnabled(_ screen: DeviceScreen) -> Bool {
@@ -1519,10 +1592,13 @@ class BLEManager: NSObject, ObservableObject {
         supportsDeviceSounds = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
+        supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         powerButtonHonkConfigurationError = nil
         hasReceivedDeviceCapabilities = false
-        hasSentMapProfilesForConnection = false
+        hasSentMapProfileForConnection = false
+        hasSentMapNavigationProfileForConnection = false
+        isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
 
@@ -2327,6 +2403,7 @@ extension BLEManager: CBPeripheralDelegate {
             supportsDeviceSounds = false
             supportsPowerButtonHonk = false
             supportsPowerButtonHonkAcknowledgement = false
+            supportsIndependentMapProfiles = false
             supportsExtendedMapVisibility = false
             hasReceivedDeviceCapabilities = false
             clearPendingPowerButtonHonkConfiguration()
@@ -2340,6 +2417,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
         let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
             flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+        let hasIndependentMapProfiles =
+            flags & DeviceBLEProtocol.independentMapProfilesCapabilityMask != 0
         let hasExtendedMapVisibility =
             flags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8
@@ -2351,6 +2430,7 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsDeviceSounds = false
                 supportsPowerButtonHonk = false
                 supportsPowerButtonHonkAcknowledgement = false
+                supportsIndependentMapProfiles = false
                 supportsExtendedMapVisibility = false
                 hasReceivedDeviceCapabilities = false
                 clearPendingPowerButtonHonkConfiguration()
@@ -2372,9 +2452,18 @@ extension BLEManager: CBPeripheralDelegate {
         let shouldSynchronizePowerButtonHonk = hasPowerButtonHonk &&
             !hasDevicePowerButtonConfig &&
             (!hasReceivedDeviceCapabilities || !supportsPowerButtonHonk)
+        let shouldResendMapProfilesForExtendedVisibility =
+            hasReceivedDeviceCapabilities &&
+            !supportsExtendedMapVisibility &&
+            hasExtendedMapVisibility
+        if shouldResendMapProfilesForExtendedVisibility {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
+        supportsIndependentMapProfiles = hasIndependentMapProfiles
         supportsExtendedMapVisibility = hasExtendedMapVisibility
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()

@@ -9,6 +9,11 @@ enum DeviceCapabilityRetry {
         isNavigationReady && !hasReceivedCapabilities && attempt < maxAttempts
     }
 
+    static func isCurrentSession(_ generation: UInt,
+                                 currentGeneration: UInt) -> Bool {
+        generation == currentGeneration
+    }
+
     static func scheduleInitial(on queue: DispatchQueue = .main,
                                 _ action: @escaping () -> Void) {
         queue.async {

@@ -76,6 +76,7 @@ class BikeComputerCoordinator: ObservableObject {
     private var ongoingDestinationSearch: MKLocalSearch?
     private var ongoingDirections: MKDirections?
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
+    private var deviceCapabilityRefreshGeneration: UInt = 0
 
     // MARK: - Initialization
 
@@ -179,15 +180,18 @@ class BikeComputerCoordinator: ObservableObject {
 
         bleManager.$isNavigationReady
             .removeDuplicates()
-            .filter { $0 }
-            .sink { [weak self] _ in
+            .sink { [weak self] isReady in
                 guard let self else { return }
+                self.deviceCapabilityRefreshGeneration &+= 1
+                guard isReady else { return }
+                let generation = self.deviceCapabilityRefreshGeneration
                 if let location = self.locationManager.currentLocation {
                     self.navEngine.processExternalLocation(location)
                 }
                 self.requestMapTransferStatusAfterDeviceRefresh()
                 DeviceCapabilityRetry.scheduleInitial { [weak self] in
-                    self?.refreshDeviceCapabilities(attempt: 0)
+                    self?.refreshDeviceCapabilities(attempt: 0,
+                                                    generation: generation)
                 }
                 self.bleManager.requestDeviceTransferStatus()
                 self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
@@ -310,7 +314,11 @@ class BikeComputerCoordinator: ObservableObject {
         }
     }
 
-    private func refreshDeviceCapabilities(attempt: Int) {
+    private func refreshDeviceCapabilities(attempt: Int, generation: UInt) {
+        guard DeviceCapabilityRetry.isCurrentSession(
+            generation,
+            currentGeneration: deviceCapabilityRefreshGeneration
+        ) else { return }
         let shouldRequest = DeviceCapabilityRetry.shouldRequest(
             isNavigationReady: bleManager.isNavigationReady,
             hasReceivedCapabilities: bleManager.hasReceivedDeviceCapabilities,
@@ -327,7 +335,8 @@ class BikeComputerCoordinator: ObservableObject {
 
         bleManager.requestDeviceCapabilities()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.refreshDeviceCapabilities(attempt: attempt + 1)
+            self?.refreshDeviceCapabilities(attempt: attempt + 1,
+                                            generation: generation)
         }
     }
 

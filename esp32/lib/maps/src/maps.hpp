@@ -79,6 +79,7 @@ private:
   {
     Point32 offset;
     bool inView = false;
+    uint8_t formatVersion = 1;
     std::vector<Polyline, PsramAllocator<Polyline>> polylines;
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
 

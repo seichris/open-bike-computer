@@ -1029,6 +1029,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   // Get version from 4th byte
   uint8_t version = (uint8_t)file[3];
   bool hasTypeId = (version >= 2);
+  mblock->formatVersion = version;
   ESP_LOGI(TAG, "Map file version: %d (typeId: %s)", version,
            hasTypeId ? "yes" : "no");
   offset += 4;
@@ -1534,6 +1535,11 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (!mblock->inView)
         continue;
 
+      ScreenMapRenderSettings blockStyle = style;
+      blockStyle.visibilityMask =
+          map_profile_protocol::visibilityMaskForMapVersion(
+              style.visibilityMask, mblock->formatVersion);
+
       // block to draw
       Point16 screen_center_mc =
           viewPort.center.toPoint16() -
@@ -1618,7 +1624,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             }
 
             // Skip if type is hidden by visibility mask
-            if (!isPolygonVisible(polygon.typeId, polygon.color, style)) {
+            if (!isPolygonVisible(polygon.typeId, polygon.color, blockStyle)) {
               continue;
             }
 
@@ -1649,7 +1655,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
             // Skip tiny polygons based on explicit min size plus detail density.
             const uint8_t minPolygonSize =
-                effectiveMinPolygonSize(style);
+                effectiveMinPolygonSize(blockStyle);
             int16_t polyWidth = maxX - minX;
             int16_t polyHeight = maxY - minY;
             if (minPolygonSize > 0 &&
@@ -1680,7 +1686,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           continue;
 
         // Skip if type is hidden by visibility mask
-        if (!isLineVisible(line.typeId, line.color, line.width, style))
+        if (!isLineVisible(line.typeId, line.color, line.width, blockStyle))
           continue;
 
         uint16_t color_swapped = line.color; // Use color directly (RGB565)
@@ -1710,7 +1716,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
         Point16 p1 = transformPoint(line.points[0]);
         int32_t streetBoost = shouldBoostLineWidth(line.typeId, line.width)
-                                  ? style.streetLineWidthBoost
+                                  ? blockStyle.streetLineWidthBoost
                                   : 0;
         uint8_t lineWidth = (uint8_t)std::min<int32_t>(
             std::max<int32_t>(line.width, 1) + streetBoost, 24);
