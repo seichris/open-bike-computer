@@ -100,6 +100,23 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v4
+      - name: GUI layout host tests
+        run: |
+          g++ -std=c++17 \
+            tools/tests/test_gui_layout.cpp \
+            -o /tmp/test_gui_layout_175
+          /tmp/test_gui_layout_175
+          g++ -std=c++17 \
+            -DWAVESHARE_AMOLED_206 \
+            tools/tests/test_gui_layout.cpp \
+            -o /tmp/test_gui_layout_206
+          /tmp/test_gui_layout_206
+      - name: Map profile protocol host tests
+        run: |
+          g++ -std=c++17 \
+            tools/tests/test_map_profile_protocol.cpp \
+            -o /tmp/test_map_profile_protocol
+          /tmp/test_map_profile_protocol
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \

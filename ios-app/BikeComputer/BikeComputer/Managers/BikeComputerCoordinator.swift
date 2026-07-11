@@ -311,11 +311,19 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private func refreshDeviceCapabilities(attempt: Int) {
-        guard DeviceCapabilityRetry.shouldRequest(
+        let shouldRequest = DeviceCapabilityRetry.shouldRequest(
             isNavigationReady: bleManager.isNavigationReady,
             hasReceivedCapabilities: bleManager.hasReceivedDeviceCapabilities,
             attempt: attempt
-        ) else { return }
+        )
+        guard shouldRequest else {
+            if bleManager.isNavigationReady,
+               !bleManager.hasReceivedDeviceCapabilities,
+               attempt >= DeviceCapabilityRetry.maxAttempts {
+                bleManager.useDeviceCapabilitiesFallback()
+            }
+            return
+        }
 
         bleManager.requestDeviceCapabilities()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in

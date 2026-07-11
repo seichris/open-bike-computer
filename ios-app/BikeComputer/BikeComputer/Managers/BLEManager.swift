@@ -45,8 +45,13 @@ enum DeviceBLEProtocol {
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
-    static let deviceCapabilitiesVersion: UInt8 = 1
+    static let extendedMapVisibilityCapabilityMask: UInt8 = 1 << 4
+    static let deviceCapabilitiesVersion: UInt8 = 3
     static let fallbackWriteQueueCapacity = 32
+
+    static let serviceRoadsVisibilityMask: Int32 = 1 << 10
+    static let tracksVisibilityMask: Int32 = 1 << 11
+    static let extendedVisibilityMarker: Int32 = 1 << 12
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -344,6 +349,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
+    @Published private(set) var supportsExtendedMapVisibility: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -402,16 +408,20 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showBuildings: Bool = true
     @Published var showGreenSpace: Bool = true
     @Published var showPaths: Bool = true
+    @Published var showTracks: Bool = true
     @Published var showMajorRoads: Bool = true
     @Published var showLocalStreets: Bool = true
+    @Published var showServiceRoads: Bool = true
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
     @Published var mapPlusNavigationShowBuildings: Bool = true
     @Published var mapPlusNavigationShowGreenSpace: Bool = true
     @Published var mapPlusNavigationShowPaths: Bool = true
+    @Published var mapPlusNavigationShowTracks: Bool = true
     @Published var mapPlusNavigationShowMajorRoads: Bool = true
     @Published var mapPlusNavigationShowLocalStreets: Bool = true
+    @Published var mapPlusNavigationShowServiceRoads: Bool = true
     @Published var mapPlusNavigationShowWater: Bool = true
     @Published var mapPlusNavigationShowRailways: Bool = true
     @Published var mapPlusNavigationShowOtherAreas: Bool = true
@@ -479,6 +489,7 @@ class BLEManager: NSObject, ObservableObject {
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
     private var powerButtonHonkAckTimeout: TimeInterval = 1.0
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
+    private var hasSentMapProfilesForConnection = false
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -505,8 +516,10 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
         static let mapPlusNavigationShowGreenSpace = "mapPlusNavigationSettings.showGreenSpace"
         static let mapPlusNavigationShowPaths = "mapPlusNavigationSettings.showPaths"
+        static let mapPlusNavigationShowTracks = "mapPlusNavigationSettings.showTracks"
         static let mapPlusNavigationShowMajorRoads = "mapPlusNavigationSettings.showMajorRoads"
         static let mapPlusNavigationShowLocalStreets = "mapPlusNavigationSettings.showLocalStreets"
+        static let mapPlusNavigationShowServiceRoads = "mapPlusNavigationSettings.showServiceRoads"
         static let mapPlusNavigationShowWater = "mapPlusNavigationSettings.showWater"
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
@@ -523,8 +536,10 @@ class BLEManager: NSObject, ObservableObject {
         static let showBuildings = "mapSettings.showBuildings"
         static let showGreenSpace = "mapSettings.showGreenSpace"
         static let showPaths = "mapSettings.showPaths"
+        static let showTracks = "mapSettings.showTracks"
         static let showMajorRoads = "mapSettings.showMajorRoads"
         static let showLocalStreets = "mapSettings.showLocalStreets"
+        static let showServiceRoads = "mapSettings.showServiceRoads"
         static let showWater = "mapSettings.showWater"
         static let showRailways = "mapSettings.showRailways"
         static let showOtherAreas = "mapSettings.showOtherAreas"
@@ -600,8 +615,10 @@ class BLEManager: NSObject, ObservableObject {
         let legacyMinorRoads = defaults.object(forKey: SettingsKeys.legacyShowMinorRoads) as? Bool ?? true
         showGreenSpace = defaults.object(forKey: SettingsKeys.showGreenSpace) as? Bool ?? legacyNature
         showPaths = defaults.object(forKey: SettingsKeys.showPaths) as? Bool ?? legacyMinorRoads
+        showTracks = defaults.object(forKey: SettingsKeys.showTracks) as? Bool ?? showPaths
         showMajorRoads = defaults.object(forKey: SettingsKeys.showMajorRoads) as? Bool ?? true
         showLocalStreets = defaults.object(forKey: SettingsKeys.showLocalStreets) as? Bool ?? true
+        showServiceRoads = defaults.object(forKey: SettingsKeys.showServiceRoads) as? Bool ?? showLocalStreets
         showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
@@ -618,8 +635,10 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowBuildings = showBuildings
             mapPlusNavigationShowGreenSpace = showGreenSpace
             mapPlusNavigationShowPaths = showPaths
+            mapPlusNavigationShowTracks = showTracks
             mapPlusNavigationShowMajorRoads = showMajorRoads
             mapPlusNavigationShowLocalStreets = showLocalStreets
+            mapPlusNavigationShowServiceRoads = showServiceRoads
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
@@ -651,12 +670,18 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowPaths = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowPaths
             ) as? Bool ?? true
+            mapPlusNavigationShowTracks = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowTracks
+            ) as? Bool ?? mapPlusNavigationShowPaths
             mapPlusNavigationShowMajorRoads = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowMajorRoads
             ) as? Bool ?? true
             mapPlusNavigationShowLocalStreets = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowLocalStreets
             ) as? Bool ?? true
+            mapPlusNavigationShowServiceRoads = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowServiceRoads
+            ) as? Bool ?? mapPlusNavigationShowLocalStreets
             mapPlusNavigationShowWater = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowWater
             ) as? Bool ?? true
@@ -714,16 +739,20 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showBuildings, forKey: SettingsKeys.showBuildings)
         defaults.set(showGreenSpace, forKey: SettingsKeys.showGreenSpace)
         defaults.set(showPaths, forKey: SettingsKeys.showPaths)
+        defaults.set(showTracks, forKey: SettingsKeys.showTracks)
         defaults.set(showMajorRoads, forKey: SettingsKeys.showMajorRoads)
         defaults.set(showLocalStreets, forKey: SettingsKeys.showLocalStreets)
+        defaults.set(showServiceRoads, forKey: SettingsKeys.showServiceRoads)
         defaults.set(showWater, forKey: SettingsKeys.showWater)
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
         defaults.set(mapPlusNavigationShowBuildings, forKey: SettingsKeys.mapPlusNavigationShowBuildings)
         defaults.set(mapPlusNavigationShowGreenSpace, forKey: SettingsKeys.mapPlusNavigationShowGreenSpace)
         defaults.set(mapPlusNavigationShowPaths, forKey: SettingsKeys.mapPlusNavigationShowPaths)
+        defaults.set(mapPlusNavigationShowTracks, forKey: SettingsKeys.mapPlusNavigationShowTracks)
         defaults.set(mapPlusNavigationShowMajorRoads, forKey: SettingsKeys.mapPlusNavigationShowMajorRoads)
         defaults.set(mapPlusNavigationShowLocalStreets, forKey: SettingsKeys.mapPlusNavigationShowLocalStreets)
+        defaults.set(mapPlusNavigationShowServiceRoads, forKey: SettingsKeys.mapPlusNavigationShowServiceRoads)
         defaults.set(mapPlusNavigationShowWater, forKey: SettingsKeys.mapPlusNavigationShowWater)
         defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
         defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
@@ -955,6 +984,44 @@ class BLEManager: NSObject, ObservableObject {
         }
         sendFallbackMapPacket(fallback, label: "setting id=\(id)")
     }
+
+    private func sendMapProfilesAfterCapabilityNegotiation() {
+        guard isConnected,
+              isNavigationReady,
+              hasReceivedDeviceCapabilities,
+              !hasSentMapProfilesForConnection else { return }
+
+        hasSentMapProfilesForConnection = true
+        sendVisibilityMask(for: .map)
+        sendSetting(id: 1, value: Int32(minPolygonSize))
+        sendSetting(id: 2, value: Int32(detailLevel))
+        sendSetting(id: 3, value: Int32(routeLineWidth))
+        sendSetting(id: 9, value: Int32(streetLineWidthBoost))
+        sendSetting(id: 10, value: Int32(positionMarkerScale))
+        sendSetting(id: 7, value: Int32(zoomLevel))
+
+        sendVisibilityMask(for: .mapPlusNavigation)
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID,
+                    value: Int32(mapPlusNavigationMinPolygonSize))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
+                    value: Int32(mapPlusNavigationDetailLevel))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
+                    value: Int32(mapPlusNavigationRouteLineWidth))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
+                    value: Int32(mapPlusNavigationStreetLineWidthBoost))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
+                    value: Int32(mapPlusNavigationPositionMarkerScale))
+        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
+                    value: Int32(mapPlusNavigationZoomLevel))
+    }
+
+    func useDeviceCapabilitiesFallback() {
+        guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
+        supportsExtendedMapVisibility = false
+        hasReceivedDeviceCapabilities = true
+        log("Device capabilities unavailable; using baseline feature visibility")
+        sendMapProfilesAfterCapabilityNegotiation()
+    }
     
     /// Send feature visibility bitmask
     func sendVisibilityMask() {
@@ -969,24 +1036,34 @@ class BLEManager: NSObject, ObservableObject {
         case .map:
             if showBuildings { mask |= (1 << 0) }
             if showGreenSpace { mask |= (1 << 1) }
-            if showPaths { mask |= (1 << 2) }
+            if showPaths || (!supportsExtendedMapVisibility && showTracks) { mask |= (1 << 2) }
             if showMajorRoads { mask |= (1 << 3) }
-            if showLocalStreets { mask |= (1 << 4) }
+            if showLocalStreets || (!supportsExtendedMapVisibility && showServiceRoads) { mask |= (1 << 4) }
             if showWater { mask |= (1 << 5) }
             if showRailways { mask |= (1 << 6) }
             if showOtherAreas { mask |= (1 << 7) }
             if showRouteOverlay { mask |= (1 << 8) }
             if showCurrentPosition { mask |= (1 << 9) }
+            if supportsExtendedMapVisibility {
+                if showServiceRoads { mask |= DeviceBLEProtocol.serviceRoadsVisibilityMask }
+                if showTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
+                mask |= DeviceBLEProtocol.extendedVisibilityMarker
+            }
             settingID = 8
         case .mapPlusNavigation:
             if mapPlusNavigationShowBuildings { mask |= (1 << 0) }
             if mapPlusNavigationShowGreenSpace { mask |= (1 << 1) }
-            if mapPlusNavigationShowPaths { mask |= (1 << 2) }
+            if mapPlusNavigationShowPaths || (!supportsExtendedMapVisibility && mapPlusNavigationShowTracks) { mask |= (1 << 2) }
             if mapPlusNavigationShowMajorRoads { mask |= (1 << 3) }
-            if mapPlusNavigationShowLocalStreets { mask |= (1 << 4) }
+            if mapPlusNavigationShowLocalStreets || (!supportsExtendedMapVisibility && mapPlusNavigationShowServiceRoads) { mask |= (1 << 4) }
             if mapPlusNavigationShowWater { mask |= (1 << 5) }
             if mapPlusNavigationShowRailways { mask |= (1 << 6) }
             if mapPlusNavigationShowOtherAreas { mask |= (1 << 7) }
+            if supportsExtendedMapVisibility {
+                if mapPlusNavigationShowServiceRoads { mask |= DeviceBLEProtocol.serviceRoadsVisibilityMask }
+                if mapPlusNavigationShowTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
+                mask |= DeviceBLEProtocol.extendedVisibilityMarker
+            }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
         case .navigation, .rideStats:
             return
@@ -1442,8 +1519,10 @@ class BLEManager: NSObject, ObservableObject {
         supportsDeviceSounds = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
+        supportsExtendedMapVisibility = false
         powerButtonHonkConfigurationError = nil
         hasReceivedDeviceCapabilities = false
+        hasSentMapProfilesForConnection = false
         clearPendingPowerButtonHonkConfiguration()
     }
 
@@ -1653,28 +1732,8 @@ class BLEManager: NSObject, ObservableObject {
         updateTrustedPeripheralDescription()
         log("BLE peripheral authenticated")
         requestDeviceCapabilities()
-        sendVisibilityMask()
-        sendSetting(id: 1, value: Int32(minPolygonSize))
-        sendSetting(id: 2, value: Int32(detailLevel))
-        sendSetting(id: 3, value: Int32(routeLineWidth))
-        sendSetting(id: 9, value: Int32(streetLineWidthBoost))
-        sendSetting(id: 10, value: Int32(positionMarkerScale))
         sendSetting(id: 4, value: Int32(displayRotation))
         sendSetting(id: 6, value: Int32(mapRotationMode))
-        sendSetting(id: 7, value: Int32(zoomLevel))
-        sendVisibilityMask(for: .mapPlusNavigation)
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID,
-                    value: Int32(mapPlusNavigationMinPolygonSize))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID,
-                    value: Int32(mapPlusNavigationDetailLevel))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
-                    value: Int32(mapPlusNavigationRouteLineWidth))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
-                    value: Int32(mapPlusNavigationStreetLineWidthBoost))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
-                    value: Int32(mapPlusNavigationPositionMarkerScale))
-        sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
-                    value: Int32(mapPlusNavigationZoomLevel))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
         sendEnabledDeviceScreensMask()
         sendDefaultDeviceScreen()
@@ -2268,6 +2327,7 @@ extension BLEManager: CBPeripheralDelegate {
             supportsDeviceSounds = false
             supportsPowerButtonHonk = false
             supportsPowerButtonHonkAcknowledgement = false
+            supportsExtendedMapVisibility = false
             hasReceivedDeviceCapabilities = false
             clearPendingPowerButtonHonkConfiguration()
             log("Received invalid device capabilities payload")
@@ -2280,6 +2340,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
         let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
             flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+        let hasExtendedMapVisibility =
+            flags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
@@ -2289,6 +2351,7 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsDeviceSounds = false
                 supportsPowerButtonHonk = false
                 supportsPowerButtonHonkAcknowledgement = false
+                supportsExtendedMapVisibility = false
                 hasReceivedDeviceCapabilities = false
                 clearPendingPowerButtonHonkConfiguration()
                 log("Received invalid device capabilities configuration")
@@ -2312,11 +2375,13 @@ extension BLEManager: CBPeripheralDelegate {
         supportsDeviceSounds = hasDeviceSounds
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
+        supportsExtendedMapVisibility = hasExtendedMapVisibility
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
         }
         hasReceivedDeviceCapabilities = true
         log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
+        sendMapProfilesAfterCapabilityNegotiation()
         if shouldSynchronizePowerButtonHonk {
             // @Published updates in willSet. Defer until the support flag is
             // observable so the guarded send uses the negotiated capability.

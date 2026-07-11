@@ -13,6 +13,7 @@
  */
 
 #include <Arduino.h>
+#include "map_profile_protocol.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -44,6 +45,41 @@ static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION);
 
+static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
+    map_profile_protocol::VISIBILITY_BUILDINGS;
+static constexpr uint32_t MAP_VISIBILITY_GREEN_SPACE =
+    map_profile_protocol::VISIBILITY_GREEN_SPACE;
+static constexpr uint32_t MAP_VISIBILITY_PATHS =
+    map_profile_protocol::VISIBILITY_PATHS;
+static constexpr uint32_t MAP_VISIBILITY_MAJOR_ROADS =
+    map_profile_protocol::VISIBILITY_MAJOR_ROADS;
+static constexpr uint32_t MAP_VISIBILITY_LOCAL_STREETS =
+    map_profile_protocol::VISIBILITY_LOCAL_STREETS;
+static constexpr uint32_t MAP_VISIBILITY_WATER =
+    map_profile_protocol::VISIBILITY_WATER;
+static constexpr uint32_t MAP_VISIBILITY_RAILWAYS =
+    map_profile_protocol::VISIBILITY_RAILWAYS;
+static constexpr uint32_t MAP_VISIBILITY_OTHER_AREAS =
+    map_profile_protocol::VISIBILITY_OTHER_AREAS;
+static constexpr uint32_t MAP_VISIBILITY_ROUTE_OVERLAY =
+    map_profile_protocol::VISIBILITY_ROUTE_OVERLAY;
+static constexpr uint32_t MAP_VISIBILITY_POSITION_MARKER =
+    map_profile_protocol::VISIBILITY_POSITION_MARKER;
+static constexpr uint32_t MAP_VISIBILITY_SERVICE_ROADS =
+    map_profile_protocol::VISIBILITY_SERVICE_ROADS;
+static constexpr uint32_t MAP_VISIBILITY_TRACKS =
+    map_profile_protocol::VISIBILITY_TRACKS;
+static constexpr uint32_t MAP_VISIBILITY_EXTENDED_MARKER =
+    map_profile_protocol::VISIBILITY_EXTENDED_MARKER;
+static constexpr uint32_t MAP_VISIBILITY_EXTENDED_FEATURE_MASK =
+    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK;
+static constexpr uint32_t MAP_VISIBILITY_OVERLAY_MASK =
+    map_profile_protocol::VISIBILITY_OVERLAY_MASK;
+
+static inline uint32_t normalizedMapFeatureVisibilityMask(uint32_t mask) {
+  return map_profile_protocol::normalizedFeatureVisibilityMask(mask);
+}
+
 struct ScreenMapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
   uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
@@ -51,9 +87,7 @@ struct ScreenMapRenderSettings {
   uint8_t streetLineWidthBoost = 0; // 0-24: Extra map street width in pixels
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t zoomLevel = 2;             // 0-5: Zoom level (0=super, 2=default)
-  uint32_t visibilityMask =
-      0xFF; // Bits 0-7: buildings, green, paths, major/local roads, water,
-            // rail, other areas
+  uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
 };
 
 struct MapRenderSettings {
@@ -70,7 +104,7 @@ struct MapRenderSettings {
   uint32_t disconnectedSleepTimeoutSeconds =
       120; // 0=never auto-sleep while disconnected
   uint32_t navigationOverlayVisibilityMask =
-      (1 << 8) | (1 << 9); // Bit 8 route, bit 9 current position
+      MAP_VISIBILITY_OVERLAY_MASK;
 };
 
 extern MapRenderSettings mapRenderSettings;

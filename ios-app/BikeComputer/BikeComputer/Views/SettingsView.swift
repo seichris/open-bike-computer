@@ -590,6 +590,14 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showPaths, mapPlusNavigation: \.mapPlusNavigationShowPaths)
     }
 
+    private var showTracks: Binding<Bool> {
+        binding(map: \.showTracks, mapPlusNavigation: \.mapPlusNavigationShowTracks)
+    }
+
+    private var showServiceRoads: Binding<Bool> {
+        binding(map: \.showServiceRoads, mapPlusNavigation: \.mapPlusNavigationShowServiceRoads)
+    }
+
     private var showRailways: Binding<Bool> {
         binding(map: \.showRailways, mapPlusNavigation: \.mapPlusNavigationShowRailways)
     }
@@ -612,13 +620,17 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Roads & Paths"), footer: Text("Control which street and trail classes appear on this screen.")) {
+            Section(header: Text("Roads & Paths"), footer: Text("Service roads commonly include driveways and internal compound roads; exact results depend on the OpenStreetMap tags in the downloaded map.")) {
                 Toggle("Major Roads", isOn: showMajorRoads)
                     .onChange(of: showMajorRoads.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Local Streets", isOn: showLocalStreets)
+                Toggle("Residential & Local Roads", isOn: showLocalStreets)
                     .onChange(of: showLocalStreets.wrappedValue) { _ in sendVisibilityMask() }
-                Toggle("Paths & Tracks", isOn: showPaths)
+                Toggle("Service Roads", isOn: showServiceRoads)
+                    .onChange(of: showServiceRoads.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Paths & Footways", isOn: showPaths)
                     .onChange(of: showPaths.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Tracks", isOn: showTracks)
+                    .onChange(of: showTracks.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Railways", isOn: showRailways)
                     .onChange(of: showRailways.wrappedValue) { _ in sendVisibilityMask() }
             }

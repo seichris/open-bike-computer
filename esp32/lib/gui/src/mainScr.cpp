@@ -64,8 +64,9 @@ bool isMapScreenActive() { return activeTile == MAP; }
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
 const ScreenMapRenderSettings &currentMapStyleSettings() {
-  return isMapGuidanceScreenActive() ? mapRenderSettings.mapNavigationStyle
-                                     : mapRenderSettings.mapStyle;
+  return map_profile_protocol::select(mapRenderSettings.mapStyle,
+                                      mapRenderSettings.mapNavigationStyle,
+                                      isMapGuidanceScreenActive());
 }
 
 static void tapCycleScreenEvent(lv_event_t *event);

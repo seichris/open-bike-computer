@@ -98,7 +98,7 @@ Current setting IDs:
 | `4` | Display rotation | `0...3` |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/tracks, bit 3 major roads, bit 4 local streets, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
 | `9` | Map street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
@@ -110,7 +110,7 @@ Current setting IDs:
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
 | `18` | Map + Navigation route line width | `2...48` |
 | `19` | Map + Navigation zoom level | `0...5` |
-| `20` | Map + Navigation feature visibility mask | bits `0...7` use the same feature classes as ID `8`; navigation overlay bits remain global via ID `8` |
+| `20` | Map + Navigation feature visibility mask | feature bits and the extended-mask marker use the same meanings as ID `8`; navigation overlay bits remain global via ID `8` |
 | `21` | Map + Navigation street line width boost | `0...24` px |
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 
@@ -124,6 +124,10 @@ Navigation profile. On firmware upgrade, missing Map + Navigation values inherit
 the persisted Map values. Map rotation mode remains Map-only; Map + Navigation
 automatically uses course-up while navigating. Route and current-position
 overlay visibility remains shared by both profiles.
+
+Apps that support the extended visibility classes set marker bit `12`. Without
+that marker, firmware preserves the legacy behavior by applying bit `4` to both
+local and service roads and bit `2` to both paths and tracks.
 
 ## Device Sound Playback
 
@@ -198,6 +202,9 @@ configuration:
 "CAPS" | Flags: UInt8 | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8
 ```
 
+Version `2` enables independent Map and Map + Navigation profiles. Version `3`
+requests the extended map visibility classes.
+
 Legacy four-byte requests and five-byte responses remain supported. This lets
 new apps treat the device as the source of truth after reconnecting, while new
 apps still interoperate with older firmware and older apps still receive the
@@ -208,10 +215,12 @@ Flag bit `0` reports runtime device-sound availability after the speaker queue
 and task start successfully. Flag bit `1` reports PWR-button honk support. Flag
 bit `2` reports `SNHA` acknowledgement support; iOS only retries PWR
 configuration when this bit is set, preserving one-shot writes for older
-firmware. The app retries discovery after each connection, enables controls
-only when their bits are set, and restores the device-persisted PWR
-configuration from versioned responses. With legacy responses, it synchronizes
-the app-persisted configuration after discovery.
+firmware. Flag bit `3` reports independent map profiles for older app builds;
+current app builds always send separate Map and Map + Navigation profiles. Flag
+bit `4` reports separate service-road and track visibility. The app retries
+discovery after each connection, uses the sound-related bits to enable sound
+controls, and restores the device-persisted PWR configuration from versioned
+responses.
 
 ## OSM Map Blocks
 

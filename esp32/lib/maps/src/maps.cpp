@@ -34,10 +34,12 @@ enum class VisibilityClass : uint8_t {
   Always,
   MajorRoad,
   LocalStreet,
+  ServiceRoad,
   Building,
   GreenSpace,
   Water,
   Path,
+  Track,
   Rail,
   OtherArea,
 };
@@ -50,21 +52,25 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
   uint32_t visMask = settings.visibilityMask;
   switch (visibilityClass) {
   case VisibilityClass::MajorRoad:
-    return (visMask & (1 << 3)) != 0;
+    return (visMask & MAP_VISIBILITY_MAJOR_ROADS) != 0;
   case VisibilityClass::LocalStreet:
-    return (visMask & (1 << 4)) != 0;
+    return (visMask & MAP_VISIBILITY_LOCAL_STREETS) != 0;
+  case VisibilityClass::ServiceRoad:
+    return (visMask & MAP_VISIBILITY_SERVICE_ROADS) != 0;
   case VisibilityClass::Building:
-    return (visMask & (1 << 0)) != 0;
+    return (visMask & MAP_VISIBILITY_BUILDINGS) != 0;
   case VisibilityClass::GreenSpace:
-    return (visMask & (1 << 1)) != 0;
+    return (visMask & MAP_VISIBILITY_GREEN_SPACE) != 0;
   case VisibilityClass::Water:
-    return (visMask & (1 << 5)) != 0;
+    return (visMask & MAP_VISIBILITY_WATER) != 0;
   case VisibilityClass::Path:
-    return (visMask & (1 << 2)) != 0;
+    return (visMask & MAP_VISIBILITY_PATHS) != 0;
+  case VisibilityClass::Track:
+    return (visMask & MAP_VISIBILITY_TRACKS) != 0;
   case VisibilityClass::Rail:
-    return (visMask & (1 << 6)) != 0;
+    return (visMask & MAP_VISIBILITY_RAILWAYS) != 0;
   case VisibilityClass::OtherArea:
-    return (visMask & (1 << 7)) != 0;
+    return (visMask & MAP_VISIBILITY_OTHER_AREAS) != 0;
   case VisibilityClass::Always:
   default:
     return true;
@@ -74,9 +80,13 @@ static inline bool isClassVisible(VisibilityClass visibilityClass,
 static inline VisibilityClass visibilityClassForTypeId(uint8_t typeId) {
   if (typeId >= 1 && typeId <= 5)
     return VisibilityClass::MajorRoad;
-  if (typeId >= 6 && typeId < 50)
+  if (map_profile_protocol::isServiceRoadTypeId(typeId))
+    return VisibilityClass::ServiceRoad;
+  if (map_profile_protocol::isLocalStreetTypeId(typeId))
     return VisibilityClass::LocalStreet;
-  if (typeId >= 50 && typeId < 100)
+  if (map_profile_protocol::isTrackTypeId(typeId))
+    return VisibilityClass::Track;
+  if (map_profile_protocol::isPathTypeId(typeId))
     return VisibilityClass::Path;
   if (typeId >= 100 && typeId < 150)
     return VisibilityClass::Building;
@@ -138,7 +148,7 @@ static inline VisibilityClass legacyLineVisibilityClass(uint16_t color,
 
 // Helper: Check if a typeId is visible based on detail level and visibilityMask.
 // Bits: 0 buildings, 1 green space, 2 paths, 3 major roads, 4 local streets,
-// 5 water, 6 rail, 7 other areas.
+// 5 water, 6 rail, 7 other areas, 10 service roads, 11 tracks.
 static inline bool isTypeVisible(uint8_t typeId,
                                  const ScreenMapRenderSettings &settings) {
   if (typeId == 0)

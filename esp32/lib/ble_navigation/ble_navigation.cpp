@@ -59,6 +59,9 @@ static Preferences settingsPrefs;
 static NavigationData currentNavData = {0, 0, ""};
 static volatile bool navDataUpdated = false;
 static bool bleSessionAuthenticated = false;
+static bool bleSessionUsesIndependentMapProfiles = false;
+static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
+    map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
@@ -397,6 +400,7 @@ static void handleAuthPayload(const std::string &value) {
     char mac[65];
     char response[112];
     bleSessionAuthenticated = false;
+    bleSessionUsesIndependentMapProfiles = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
     if (!hmacSha256Hex(message, mac, sizeof(mac))) {
       Serial.println("BLE: Failed to compute auth response");
@@ -712,9 +716,12 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       waveshare_board::speaker::isPowerButtonHonkAvailable();
   uint8_t response[8] = {
       'C', 'A', 'P', 'S',
-      waveshare_board::speaker::capabilityFlags(
-          speakerAvailable, powerButtonHonkAvailable,
-          powerButtonHonkAvailable),
+      static_cast<uint8_t>(
+          waveshare_board::speaker::capabilityFlags(
+              speakerAvailable, powerButtonHonkAvailable,
+              powerButtonHonkAvailable) |
+          map_profile_protocol::CAPABILITY_MASK |
+          CAPABILITY_EXTENDED_MAP_VISIBILITY),
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
@@ -765,8 +772,12 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     return false;
   }
   if (requireAuthenticated(authLabel)) {
+    const uint8_t clientVersion =
+        value.length() == 5 ? static_cast<uint8_t>(value[4]) : 0;
+    bleSessionUsesIndependentMapProfiles =
+        map_profile_protocol::clientSupportsIndependentProfiles(clientVersion);
     const bool includePowerButtonConfig =
-        value.length() == 5 && static_cast<uint8_t>(value[4]) >= 1;
+        clientVersion >= 1;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig);
   }
   return true;
@@ -1036,54 +1047,99 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
   bleDebugStats.settingsPacketCount++;
   bleDebugStats.lastSettingsPacketMs = millis();
+  const bool mirrorLegacyMapProfile =
+      map_profile_protocol::shouldMirrorLegacySetting(
+          settingId, bleSessionUsesIndependentMapProfiles);
 
   switch (settingId) {
   case 1:
     mapRenderSettings.mapStyle.minPolygonSize =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.minPolygonSize =
+          mapRenderSettings.mapStyle.minPolygonSize;
+    }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("minPolySize",
                            mapRenderSettings.mapStyle.minPolygonSize);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar(
+          "navMinPoly", mapRenderSettings.mapNavigationStyle.minPolygonSize);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: minPolygonSize = %d (saved)\n",
                   mapRenderSettings.mapStyle.minPolygonSize);
     break;
   case 2:
     mapRenderSettings.mapStyle.detailLevel =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.detailLevel =
+          mapRenderSettings.mapStyle.detailLevel;
+    }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("detailLevel",
                            mapRenderSettings.mapStyle.detailLevel);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar("navDetail",
+                             mapRenderSettings.mapNavigationStyle.detailLevel);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: detailLevel = %d (saved)\n",
                   mapRenderSettings.mapStyle.detailLevel);
     break;
   case 3:
     mapRenderSettings.mapStyle.routeLineWidth =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.routeLineWidth =
+          mapRenderSettings.mapStyle.routeLineWidth;
+    }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("routeWidth",
                            mapRenderSettings.mapStyle.routeLineWidth);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar(
+          "navRouteW", mapRenderSettings.mapNavigationStyle.routeLineWidth);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: routeLineWidth = %d (saved)\n",
                   mapRenderSettings.mapStyle.routeLineWidth);
     break;
   case 9:
     mapRenderSettings.mapStyle.streetLineWidthBoost =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)24);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.streetLineWidthBoost =
+          mapRenderSettings.mapStyle.streetLineWidthBoost;
+    }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("streetBoost",
                            mapRenderSettings.mapStyle.streetLineWidthBoost);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar(
+          "navStreetB",
+          mapRenderSettings.mapNavigationStyle.streetLineWidthBoost);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: streetLineWidthBoost = %d (saved)\n",
                   mapRenderSettings.mapStyle.streetLineWidthBoost);
     break;
   case 10:
     mapRenderSettings.mapStyle.positionMarkerScale =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.positionMarkerScale =
+          mapRenderSettings.mapStyle.positionMarkerScale;
+    }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("markerScale",
                            mapRenderSettings.mapStyle.positionMarkerScale);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar(
+          "navMarkerS",
+          mapRenderSettings.mapNavigationStyle.positionMarkerScale);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: positionMarkerScale = %d (saved)\n",
                   mapRenderSettings.mapStyle.positionMarkerScale);
@@ -1159,12 +1215,20 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   case 7: {
     extern uint8_t zoom;
     mapRenderSettings.mapStyle.zoomLevel =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)5);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.zoomLevel =
+          mapRenderSettings.mapStyle.zoomLevel;
+    }
     if (isMapScreenActive()) {
       zoom = mapRenderSettings.mapStyle.zoomLevel;
     }
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("zoomLevel", mapRenderSettings.mapStyle.zoomLevel);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUChar("navZoom",
+                             mapRenderSettings.mapNavigationStyle.zoomLevel);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: zoomLevel = %d (saved)\n",
                   mapRenderSettings.mapStyle.zoomLevel);
@@ -1172,44 +1236,60 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   }
   case 8: {
     const uint32_t mask = (uint32_t)settingValue;
-    mapRenderSettings.mapStyle.visibilityMask = mask & 0xFF;
-    mapRenderSettings.navigationOverlayVisibilityMask = mask & 0x300;
+    mapRenderSettings.mapStyle.visibilityMask =
+        normalizedMapFeatureVisibilityMask(mask);
+    if (mirrorLegacyMapProfile) {
+      mapRenderSettings.mapNavigationStyle.visibilityMask =
+          mapRenderSettings.mapStyle.visibilityMask;
+    }
+    mapRenderSettings.navigationOverlayVisibilityMask =
+        mask & MAP_VISIBILITY_OVERLAY_MASK;
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUInt(
         "visMask", mapRenderSettings.mapStyle.visibilityMask |
-                       mapRenderSettings.navigationOverlayVisibilityMask);
+                       mapRenderSettings.navigationOverlayVisibilityMask |
+                       MAP_VISIBILITY_EXTENDED_MARKER);
+    if (mirrorLegacyMapProfile) {
+      settingsPrefs.putUInt(
+          "navVis", mapRenderSettings.mapNavigationStyle.visibilityMask |
+                        MAP_VISIBILITY_EXTENDED_MARKER);
+    }
     settingsPrefs.end();
     Serial.printf("BLE Settings: visibilityMask = 0x%08X (saved)\n",
                   mask);
     break;
   }
   case 16:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.minPolygonSize =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)50);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar(
         "navMinPoly", mapRenderSettings.mapNavigationStyle.minPolygonSize);
     settingsPrefs.end();
     break;
   case 17:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.detailLevel =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)2);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar("navDetail",
                            mapRenderSettings.mapNavigationStyle.detailLevel);
     settingsPrefs.end();
     break;
   case 18:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.routeLineWidth =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)2), (int32_t)48);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar(
         "navRouteW", mapRenderSettings.mapNavigationStyle.routeLineWidth);
     settingsPrefs.end();
     break;
   case 19:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.zoomLevel =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)5);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     if (isMapGuidanceScreenActive()) {
       extern uint8_t zoom;
       zoom = mapRenderSettings.mapNavigationStyle.zoomLevel;
@@ -1220,16 +1300,19 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     settingsPrefs.end();
     break;
   case 20:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.visibilityMask =
-        (uint32_t)settingValue & 0xFF;
+        normalizedMapFeatureVisibilityMask((uint32_t)settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUInt(
-        "navVis", mapRenderSettings.mapNavigationStyle.visibilityMask);
+        "navVis", mapRenderSettings.mapNavigationStyle.visibilityMask |
+                      MAP_VISIBILITY_EXTENDED_MARKER);
     settingsPrefs.end();
     break;
   case 21:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.streetLineWidthBoost =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)24);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar(
         "navStreetB",
@@ -1237,8 +1320,9 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     settingsPrefs.end();
     break;
   case 22:
+    bleSessionUsesIndependentMapProfiles = true;
     mapRenderSettings.mapNavigationStyle.positionMarkerScale =
-        (uint8_t)std::min(std::max(settingValue, (int32_t)1), (int32_t)5);
+        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     settingsPrefs.begin("mapSettings", false);
     settingsPrefs.putUChar(
         "navMarkerS",
@@ -1282,6 +1366,7 @@ public:
     activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     server->connected = true;
     bleSessionAuthenticated = false;
+    bleSessionUsesIndependentMapProfiles = false;
     unauthTimeoutDisconnectRequested = false;
     bleDebugStats.connected = true;
     bleDebugStats.authenticated = false;
@@ -1306,6 +1391,7 @@ public:
     }
     server->connected = false;
     bleSessionAuthenticated = false;
+    bleSessionUsesIndependentMapProfiles = false;
     unauthTimeoutDisconnectRequested = false;
     activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     bleDebugStats.connected = false;
@@ -1566,13 +1652,15 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.disconnectedSleepTimeoutSeconds =
       normalizedDisconnectedSleepTimeoutSeconds(
           prefs.getUInt("discSleepSec", 120));
-  const uint32_t legacyVisibilityMask = prefs.getUInt("visMask", 0x3FF);
-  mapRenderSettings.mapStyle.visibilityMask = legacyVisibilityMask & 0xFF;
+  const uint32_t storedVisibilityMask = prefs.getUInt("visMask", 0x3FF);
+  mapRenderSettings.mapStyle.visibilityMask =
+      normalizedMapFeatureVisibilityMask(storedVisibilityMask);
   mapRenderSettings.navigationOverlayVisibilityMask =
-      legacyVisibilityMask & 0x300;
+      storedVisibilityMask & MAP_VISIBILITY_OVERLAY_MASK;
   mapRenderSettings.mapNavigationStyle.visibilityMask =
-      prefs.getUInt("navVis", mapRenderSettings.mapStyle.visibilityMask) &
-      0xFF;
+      normalizedMapFeatureVisibilityMask(prefs.getUInt(
+          "navVis", mapRenderSettings.mapStyle.visibilityMask |
+                        MAP_VISIBILITY_EXTENDED_MARKER));
 
   prefs.end();
 
