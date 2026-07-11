@@ -907,6 +907,18 @@ struct NavigationProtocolTests {
         assertEqual(labels, ["second", "third"], "queue flushes write metadata in order")
         assertEqual(queue.count, 0, "queue is empty after flush")
 
+        var pacedQueue = NavigationWriteQueue(maxCount: 3)
+        pacedQueue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
+        pacedQueue.enqueue(NavigationWrite(data: Data([2]), label: "second"))
+        var pacedWrites: [Data] = []
+        pacedQueue.flush(canSend: { true }, maxWrites: 1) {
+            pacedWrites.append($0.data)
+        }
+        assertEqual(pacedWrites, [Data([1])],
+                    "paced flush sends only the configured batch size")
+        assertEqual(pacedQueue.count, 1,
+                    "paced flush retains later writes for the next transport tick")
+
         var reconnectQueue = NavigationWriteQueue(
             maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
         )
@@ -933,6 +945,19 @@ struct NavigationProtocolTests {
         assert(trackedQueue.enqueue(NavigationWrite(data: Data([2]), label: "replacement")),
                "overflow reports that the oldest write was dropped")
         assert(didNotifyDrop, "tracked writes are notified when queue overflow evicts them")
+
+        var targetedWrites: [Data] = []
+        var fallbackWrites: [Data] = []
+        let targetedWrite = NavigationWrite(
+            data: Data([3]),
+            label: "targeted",
+            transportWrite: { targetedWrites.append($0) }
+        )
+        targetedWrite.perform { fallbackWrites.append($0) }
+        assertEqual(targetedWrites, [Data([3])],
+                    "targeted writes use their native characteristic transport")
+        assertEqual(fallbackWrites.count, 0,
+                    "targeted writes do not leak onto the fallback characteristic")
     }
 
     static func testDeviceBLEProtocolConstants() {

@@ -3,19 +3,31 @@ import Foundation
 struct NavigationWrite {
     let data: Data
     let label: String
+    let transportWrite: ((Data) -> Void)?
     let onWrite: (() -> Void)?
     let onDrop: (() -> Void)?
 
     init(
         data: Data,
         label: String,
+        transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil
     ) {
         self.data = data
         self.label = label
+        self.transportWrite = transportWrite
         self.onWrite = onWrite
         self.onDrop = onDrop
+    }
+
+    func perform(using fallbackWrite: (Data) -> Void) {
+        if let transportWrite {
+            transportWrite(data)
+        } else {
+            fallbackWrite(data)
+        }
+        onWrite?()
     }
 }
 
@@ -47,9 +59,15 @@ struct NavigationWriteQueue {
         pendingWrites.removeAll()
     }
 
-    mutating func flush(canSend: () -> Bool, write: (NavigationWrite) -> Void) {
-        while !pendingWrites.isEmpty && canSend() {
+    mutating func flush(
+        canSend: () -> Bool,
+        maxWrites: Int = .max,
+        write: (NavigationWrite) -> Void
+    ) {
+        var writesRemaining = max(0, maxWrites)
+        while writesRemaining > 0 && !pendingWrites.isEmpty && canSend() {
             write(pendingWrites.removeFirst())
+            writesRemaining -= 1
         }
     }
 }

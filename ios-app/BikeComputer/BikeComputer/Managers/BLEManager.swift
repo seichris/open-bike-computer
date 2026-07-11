@@ -423,6 +423,7 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteQueue = NavigationWriteQueue(
         maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity
     )
+    private var lastNavigationQueuePendingLogAt = Date.distantPast
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -447,6 +448,7 @@ class BLEManager: NSObject, ObservableObject {
     private var reconnectTimer: Timer?
     private var rssiTimer: Timer?
     private var navigationFlushRetryTimer: Timer?
+    private var writeWithResponseInFlight = false
     private var connectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
     private var authTimeoutTimer: Timer?
@@ -711,14 +713,23 @@ class BLEManager: NSObject, ObservableObject {
         }
 
         let maxLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        if let characteristic = routeGeometryCharacteristic {
+        if let characteristic = routeGeometryCharacteristic,
+           let endpoint = navigationWriteEndpoint {
             guard data.count <= maxLength else {
                 log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
                 return
             }
 
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log("Sent route geometry: \(data.count) bytes")
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native route geometry",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log("Queued native route geometry: \(data.count) bytes")
             return
         }
 
@@ -767,9 +778,18 @@ class BLEManager: NSObject, ObservableObject {
             routeRemainingMeters: routeRemainingMeters
         )
 
-        if let characteristic = gpsPositionCharacteristic {
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log(String(format: "Sent GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
+        if let characteristic = gpsPositionCharacteristic,
+           let endpoint = navigationWriteEndpoint {
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native GPS position",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log(String(format: "Queued native GPS position: %.6f, %.6f heading=%.0f", lat, lon, heading))
             return
         }
 
@@ -794,9 +814,19 @@ class BLEManager: NSObject, ObservableObject {
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
 
-        if let peripheral = connectedPeripheral, let characteristic = settingsCharacteristic {
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            log("Sent setting: id=\(id), value=\(value)")
+        if let peripheral = connectedPeripheral,
+           let characteristic = settingsCharacteristic,
+           let endpoint = navigationWriteEndpoint {
+            enqueueNavigationWrite(
+                data,
+                endpoint: endpoint,
+                label: "native setting id=\(id)",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(payload, to: characteristic, on: peripheral)
+                }
+            )
+            log("Queued native setting: id=\(id), value=\(value)")
             return
         }
 
@@ -1235,11 +1265,13 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        writeWithResponseInFlight = false
         pendingAuthNonce = nil
         authWriteState = .idle
         navigationWriteQueue.removeAll()
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
+        lastNavigationQueuePendingLogAt = .distantPast
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         authRetryTimer?.invalidate()
@@ -1362,7 +1394,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        guard let writeType = authWriteType(for: authCharacteristic) else {
+        guard let writeType = preferredWriteType(for: authCharacteristic) else {
             log("Auth characteristic does not support writes; props=\(authCharacteristic.properties.debugDescription)")
             return
         }
@@ -1380,12 +1412,14 @@ class BLEManager: NSObject, ObservableObject {
         log("Sent BLE auth challenge via \(authWriteLabel(writeType)); props=\(authCharacteristic.properties.debugDescription)")
     }
 
-    private func authWriteType(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {
-        if characteristic.properties.contains(.writeWithoutResponse) {
-            return .withoutResponse
-        }
+    private func preferredWriteType(
+        for characteristic: CBCharacteristic
+    ) -> CBCharacteristicWriteType? {
         if characteristic.properties.contains(.write) {
             return .withResponse
+        }
+        if characteristic.properties.contains(.writeWithoutResponse) {
+            return .withoutResponse
         }
         return nil
     }
@@ -1440,15 +1474,28 @@ class BLEManager: NSObject, ObservableObject {
 
     private func completeAuthentication(for peripheral: CBPeripheral) {
         guard let characteristic = navigationCharacteristic else { return }
+        guard let navigationWriteType = preferredWriteType(for: characteristic) else {
+            log("Navigation characteristic is not writable after authentication")
+            return
+        }
 
         installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse),
-            canSend: { [weak peripheral] in
-                peripheral?.canSendWriteWithoutResponse == true
+            maximumWriteLength: peripheral.maximumWriteValueLength(for: navigationWriteType),
+            canSend: { [weak self, weak peripheral] in
+                guard let self, let peripheral else { return false }
+                if navigationWriteType == .withResponse {
+                    return !self.writeWithResponseInFlight
+                }
+                return peripheral.canSendWriteWithoutResponse
             },
-            write: { [weak peripheral, weak characteristic] data in
-                guard let peripheral, let characteristic else { return }
-                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            write: { [weak self, weak peripheral, weak characteristic] data in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    data,
+                    to: characteristic,
+                    on: peripheral,
+                    type: navigationWriteType
+                )
             }
         ))
 
@@ -1466,6 +1513,7 @@ class BLEManager: NSObject, ObservableObject {
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
         updateTrustedPeripheralDescription()
         log("BLE peripheral authenticated")
+        requestDeviceCapabilities()
         sendVisibilityMask()
         sendSetting(id: 1, value: Int32(minPolygonSize))
         sendSetting(id: 2, value: Int32(detailLevel))
@@ -1481,7 +1529,6 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
-        requestDeviceCapabilities()
         requestDeviceTransferStatus()
     }
 
@@ -1498,7 +1545,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func writeClientAuthProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let writeType = authWriteType(for: characteristic) else {
+        guard let writeType = preferredWriteType(for: characteristic) else {
             log("Cannot send BLE client auth proof: auth characteristic is not writable")
             isPairingMode = false
             clearConnectionState()
@@ -1528,12 +1575,14 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         endpoint: NavigationWriteEndpoint,
         label: String,
+        transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil
     ) {
         if navigationWriteQueue.enqueue(NavigationWrite(
             data: data,
             label: label,
+            transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop
         )) {
@@ -1575,13 +1624,21 @@ class BLEManager: NSObject, ObservableObject {
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
-              peripheral.canSendWriteWithoutResponse,
-              data.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
+              let endpoint = navigationWriteEndpoint,
+              data.count <= endpoint.maximumWriteLength else {
             return false
         }
 
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        log("Sent native \(label): \(data.count) bytes")
+        enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "native \(label)",
+            transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(payload, to: characteristic, on: peripheral)
+            }
+        )
+        log("Queued native \(label): \(data.count) bytes")
         return true
     }
 
@@ -1604,24 +1661,41 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-        navigationWriteQueue.flush(canSend: endpoint.canSend) { write in
-            endpoint.write(write.data)
-            write.onWrite?()
+        navigationWriteQueue.flush(canSend: endpoint.canSend, maxWrites: 1) { write in
+            write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {
             navigationFlushRetryTimer?.invalidate()
             navigationFlushRetryTimer = nil
-        } else {
+            lastNavigationQueuePendingLogAt = .distantPast
+        } else if Date().timeIntervalSince(lastNavigationQueuePendingLogAt) >= 1 {
             log("Navigation write queue pending: \(navigationWriteQueue.count)")
+            lastNavigationQueuePendingLogAt = Date()
         }
+    }
+
+    private func writeDeviceData(
+        _ data: Data,
+        to characteristic: CBCharacteristic,
+        on peripheral: CBPeripheral,
+        type explicitType: CBCharacteristicWriteType? = nil
+    ) {
+        guard let writeType = explicitType ?? preferredWriteType(for: characteristic) else {
+            log("Cannot write characteristic \(characteristic.uuid): unsupported properties")
+            return
+        }
+        if writeType == .withResponse {
+            writeWithResponseInFlight = true
+        }
+        peripheral.writeValue(data, for: characteristic, type: writeType)
     }
 
     private func scheduleNavigationFlushRetryIfNeeded() {
         guard navigationWriteQueue.count > 0,
               navigationFlushRetryTimer == nil else { return }
 
-        navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.1,
+        navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
                                                          repeats: false) { [weak self] _ in
             guard let self else { return }
             self.navigationFlushRetryTimer = nil
@@ -1886,8 +1960,8 @@ extension BLEManager: CBPeripheralDelegate {
             }
             
             if characteristic.uuid == characteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Navigation characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Navigation characteristic is not writable")
                     continue
                 }
 
@@ -1911,24 +1985,24 @@ extension BLEManager: CBPeripheralDelegate {
             }
 
             if characteristic.uuid == routeGeometryCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Route geometry characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Route geometry characteristic is not writable")
                     continue
                 }
                 routeGeometryCharacteristic = characteristic
             }
 
             if characteristic.uuid == gpsPositionCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("GPS characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("GPS characteristic is not writable")
                     continue
                 }
                 gpsPositionCharacteristic = characteristic
             }
 
             if characteristic.uuid == settingsCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Settings characteristic does not support write without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Settings characteristic is not writable")
                     continue
                 }
                 settingsCharacteristic = characteristic
@@ -1952,12 +2026,17 @@ extension BLEManager: CBPeripheralDelegate {
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
         guard isNavigationReady, let endpoint = navigationWriteEndpoint else { return }
+        log("BLE transport ready; pending writes=\(navigationWriteQueue.count)")
         flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
     }
     
     func peripheral(_ peripheral: CBPeripheral, 
                    didWriteValueFor characteristic: CBCharacteristic, 
                    error: Error?) {
+        if characteristic.uuid != authCharacteristicUUID {
+            writeWithResponseInFlight = false
+        }
         if let error = error {
             log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if characteristic.uuid == authCharacteristicUUID {
@@ -1966,11 +2045,19 @@ extension BLEManager: CBPeripheralDelegate {
                 clearConnectionState()
                 centralManager.cancelPeripheralConnection(peripheral)
             }
+            if characteristic.uuid != authCharacteristicUUID,
+               let endpoint = navigationWriteEndpoint {
+                flushPendingNavigationWrites(endpoint: endpoint)
+                scheduleNavigationFlushRetryIfNeeded()
+            }
             return
         }
 
         if characteristic.uuid == authCharacteristicUUID {
             authWriteCompleted(for: peripheral, characteristic: characteristic)
+        } else if let endpoint = navigationWriteEndpoint {
+            flushPendingNavigationWrites(endpoint: endpoint)
+            scheduleNavigationFlushRetryIfNeeded()
         }
     }
     

@@ -1522,7 +1522,7 @@ void BLENavigationServer::init(const char *deviceName) {
   // Create Navigation Instruction Characteristic (UUID 2A6E)
   pNavCharacteristic = pService->createCharacteristic(
       NAV_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE_NR |
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
           NIMBLE_PROPERTY::NOTIFY // Added NOTIFY support just in case
   );
   mapTransferStatusCharacteristic = pNavCharacteristic;
@@ -1532,24 +1532,29 @@ void BLENavigationServer::init(const char *deviceName) {
   // marks the device as navigation-ready.
   pAuthCharacteristic = pService->createCharacteristic(
       AUTH_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
   pAuthCharacteristic->setCallbacks(new MyAuthCharacteristicCallbacks());
   pAuthCharacteristic->setValue("LOCKED");
   authCharacteristic = pAuthCharacteristic;
 
   pRouteCharacteristic = pService->createCharacteristic(
-      ROUTE_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+      ROUTE_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
   pRouteCharacteristic->setCallbacks(new MyRouteCharacteristicCallbacks());
 
   // Create GPS Position Characteristic (UUID 2A72)
   NimBLECharacteristic *pGPSCharacteristic =
-      pService->createCharacteristic(GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+      pService->createCharacteristic(
+          GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
 
   // Create Settings Characteristic (UUID 2A73) for runtime configuration
   NimBLECharacteristic *pSettingsCharacteristic =
-      pService->createCharacteristic(SETTINGS_CHAR_UUID,
-                                     NIMBLE_PROPERTY::WRITE_NR);
+      pService->createCharacteristic(
+          SETTINGS_CHAR_UUID,
+          NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pSettingsCharacteristic->setCallbacks(
       new MySettingsCharacteristicCallbacks());
 

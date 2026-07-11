@@ -8,6 +8,7 @@
  */
 
 #include "maps.hpp"
+#include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
@@ -28,21 +29,6 @@ const char *TAG PROGMEM = "Maps";
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include <esp_heap_caps.h>
-
-// BLE Settings - extern declaration for runtime map configuration
-struct MapRenderSettings {
-  uint8_t minPolygonSize;
-  uint8_t detailLevel;
-  uint8_t routeLineWidth;
-  uint8_t streetLineWidthBoost;
-  uint8_t positionMarkerScale;
-  uint8_t displayRotation;
-  uint8_t mapRotationMode;
-  uint8_t zoomLevel;
-  uint8_t tapToSwitchScreens;
-  uint32_t visibilityMask;
-};
-extern MapRenderSettings mapRenderSettings;
 
 enum class VisibilityClass : uint8_t {
   Always,
