@@ -233,6 +233,13 @@ private struct DownloadingMapsSettingsSection: View {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
+            if let preparationTimeEstimate {
+                SettingsValueRow(title: "Estimated Preparation", value: preparationTimeEstimate)
+                Text("Feature density and water coverage can affect preparation time.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             if let error = manager.errorMessage {
                 Text(error)
                     .font(.caption)
@@ -247,6 +254,15 @@ private struct DownloadingMapsSettingsSection: View {
             return "\(regionName) \(Int(area.rounded())) km²"
         }
         return regionName
+    }
+
+    private var preparationTimeEstimate: String? {
+        guard let job = manager.currentJob,
+              !job.isTerminal,
+              let areaKm2 = job.geometry?.areaKm2 else {
+            return nil
+        }
+        return OfflineMapPreparationTimeEstimate.description(for: areaKm2)
     }
 }
 

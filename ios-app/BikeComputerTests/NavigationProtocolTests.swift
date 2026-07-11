@@ -295,6 +295,7 @@ struct NavigationProtocolTests {
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
+        testOfflineMapPreparationTimeEstimate()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -457,6 +458,29 @@ struct NavigationProtocolTests {
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
         assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+    }
+
+    static func testOfflineMapPreparationTimeEstimate() {
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 1),
+            "Usually under a minute",
+            "small map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 785),
+            "Usually a few minutes",
+            "city map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 14_252),
+            "May take 15–90 minutes",
+            "large map preparation estimate"
+        )
+        assertEqual(
+            OfflineMapPreparationTimeEstimate.description(for: 37_019),
+            "May take several hours",
+            "very large map preparation estimate"
+        )
     }
 
     static func testOfflineMapCreateJobURLRequest() {

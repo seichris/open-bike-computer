@@ -147,6 +147,21 @@ struct OfflineMapJobGeometry: Decodable, Equatable {
     let routePointCount: Int
 }
 
+enum OfflineMapPreparationTimeEstimate {
+    static func description(for areaKm2: Double) -> String {
+        switch max(areaKm2, 0) {
+        case ..<10:
+            return "Usually under a minute"
+        case ..<1_000:
+            return "Usually a few minutes"
+        case ..<15_000:
+            return "May take 15–90 minutes"
+        default:
+            return "May take several hours"
+        }
+    }
+}
+
 struct OfflineMapSourceRegion: Decodable, Equatable {
     let id: String
     let name: String
