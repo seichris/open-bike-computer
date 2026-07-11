@@ -580,10 +580,10 @@ static std::string jsonEscape(const std::string &value) {
 
 static std::string mapTransferStatusJson() {
   map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
-  std::string activeMapId;
+  map_transfer::ActiveMapSelection activeMap;
   map_transfer::MapTransferInstaller installer("/sdcard");
   map_transfer::InstallStatus activeStatus =
-      installer.readActiveMapId(activeMapId);
+      installer.readActiveMap(activeMap);
 
   std::string body = std::string("{\"configured\":") +
                      (transferStatus.configured ? "true" : "false") +
@@ -604,22 +604,23 @@ static std::string mapTransferStatusJson() {
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
-  if (!transferStatus.sessionToken.empty()) {
-    body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
-            "\"";
-  }
-
   if (activeStatus.ok) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
+    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    if (!activeMap.sessionId.empty()) {
+      body += ",\"activeSessionId\":\"" +
+              jsonEscape(activeMap.sessionId) + "\"";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
-            "\",\"message\":\"" + jsonEscape(activeStatus.message) + "\"}";
+            "\"}";
   }
 
-  if (!transferStatus.lastErrorCode.empty()) {
+  body += ",\"activation\":" + mapTransferHttp.activationStatusJson(true);
+
+  if (!transferStatus.lastErrorCode.empty() &&
+      !mapTransferHttp.activationHasError()) {
     body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
-            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
+            jsonEscape(transferStatus.lastErrorCode) + "\"}";
   }
 
   body += "}";
@@ -681,11 +682,51 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  std::string response = "MSTS" + mapTransferStatusJson();
-  pChar->setValue((uint8_t *)response.data(), response.size());
-  pChar->notify();
-  Serial.printf("BLE Map Transfer: status notified (%u bytes)\n",
-                (unsigned)response.size());
+  // Notifications must fit even when the central keeps the minimum ATT MTU
+  // (23 bytes, 20-byte value). Frame the JSON into independently valid chunks
+  // instead of relying on the requested 512-byte MTU being negotiated.
+  constexpr size_t kChunkBytes = 13;
+  static uint8_t transferId = 0;
+  const std::string body = mapTransferStatusJson();
+  const std::string legacy = "MSTS" + body;
+  uint16_t peerMtu = 23;
+  NimBLEService *service = pChar->getService();
+  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
+  if (server != nullptr) {
+    const std::vector<uint16_t> peers = server->getPeerDevices();
+    if (!peers.empty())
+      peerMtu = server->getPeerMTU(peers.front());
+  }
+  if (peerMtu >= 3 && legacy.size() <= peerMtu - 3) {
+    pChar->setValue(reinterpret_cast<const uint8_t *>(legacy.data()),
+                    legacy.size());
+    pChar->notify();
+    Serial.printf("BLE Map Transfer: status notified (%u bytes, MTU %u)\n",
+                  (unsigned)legacy.size(), (unsigned)peerMtu);
+    return;
+  }
+  const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
+  if (chunkCount == 0 || chunkCount > 255) {
+    Serial.printf("BLE Map Transfer: status too large (%u bytes)\n",
+                  (unsigned)body.size());
+    return;
+  }
+  transferId++;
+  for (size_t index = 0; index < chunkCount; index++) {
+    const size_t offset = index * kChunkBytes;
+    const size_t length = std::min(kChunkBytes, body.size() - offset);
+    std::string frame = "MSTC";
+    frame.push_back(static_cast<char>(transferId));
+    frame.push_back(static_cast<char>(index));
+    frame.push_back(static_cast<char>(chunkCount));
+    frame.append(body.data() + offset, length);
+    pChar->setValue(reinterpret_cast<const uint8_t *>(frame.data()),
+                    frame.size());
+    pChar->notify();
+    delay(2);
+  }
+  Serial.printf("BLE Map Transfer: status notified (%u bytes, %u chunks)\n",
+                (unsigned)body.size(), (unsigned)chunkCount);
 }
 
 static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {

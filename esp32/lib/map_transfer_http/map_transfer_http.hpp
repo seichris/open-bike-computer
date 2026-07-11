@@ -19,6 +19,9 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
+  std::string activationStatusJson(bool compact = false) const;
+  bool activationHasError() const;
+  bool takeActivatedMapRoot(std::string &root);
 
 private:
   std::string storageRoot_ = "/sdcard";
@@ -27,12 +30,9 @@ private:
       &ownedTransferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
-  bool activationRunning_ = false;
-  std::string activationSessionId_;
-  std::string activationStatus_ = "idle";
-  std::string activationMapId_;
-  std::string activationErrorCode_;
-  std::string activationErrorMessage_;
+  MapActivationState activationState_;
+  std::string pendingMapRoot_;
+  bool recoveryBlocked_ = false;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      WiFiClient &client) override;
@@ -47,7 +47,6 @@ private:
                  const std::string &message);
   void lockState() const;
   void unlockState() const;
-  std::string activationStatusJson() const;
   void finishActivation(const std::string &status, const std::string &mapId,
                         const std::string &errorCode,
                         const std::string &errorMessage);

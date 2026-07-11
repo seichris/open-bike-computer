@@ -246,6 +246,7 @@ final class TestRoute: MKRoute {
 
 @main
 struct NavigationProtocolTests {
+    @MainActor
     static func main() {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -279,6 +280,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
+        testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
@@ -295,10 +297,19 @@ struct NavigationProtocolTests {
         testOfflineMapCustomBBoxRequest()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
+        testOfflineMapManagerRestoresLastTransferIdentity()
+        testOfflineMapManagerReconcilesInterruptedActivation()
+        testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
+        testMapTransferUploadResumeContract()
+        testMapTransferActivationAcknowledgementSequence()
+        testMapTransferSessionIdentityUsesManifestContent()
+        testMapActivationReconciliationMatrix()
+        testMapActivationConfirmationOrchestration()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
@@ -494,6 +505,83 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
+    static func testOfflineMapManagerRestoresLastTransferIdentity() {
+        let suite = "offline-map-transfer-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("custom-map-shanghai", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set(
+            ["custom-map-shanghai.zip": "Shanghai"],
+            forKey: "offlineMap.packDisplayNames"
+        )
+
+        let manager = OfflineMapManager(defaults: defaults)
+        assertEqual(manager.lastTransferMapId, "custom-map-shanghai", "last transfer map id survives app restart")
+        assertEqual(manager.lastTransferOutcome, "unconfirmed", "last transfer outcome survives app restart")
+        assertEqual(manager.lastTransferDescription, "Shanghai — unconfirmed", "last transfer identifies the selected saved map")
+    }
+
+    @MainActor
+    static func testOfflineMapManagerReconcilesInterruptedActivation() {
+        let suite = "offline-map-reconcile-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("activating", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.previousMapId")
+        defaults.set(4, forKey: "offlineMap.lastTransfer.previousSequence")
+
+        let manager = OfflineMapManager(defaults: defaults)
+        assertEqual(manager.lastTransferOutcome, "unconfirmed", "interrupted activation restores as unconfirmed")
+
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActiveSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationStatus = "idle"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+
+        assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
+    }
+
+    @MainActor
+    static func testOfflineMapManagerReconcilesAcknowledgedFirstInstall() {
+        let suite = "offline-map-first-install-reconcile-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set(9, forKey: "offlineMap.lastTransfer.acceptedSequence")
+
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActiveSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationStatus = "installed"
+        bleManager.mapTransferActivationSequence = 9
+        bleManager.mapTransferActivationSessionId = "map-1-manifest"
+        bleManager.mapTransferActivationMapId = "map-1"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+
+        assertEqual(manager.lastTransferOutcome, "installed",
+                    "persisted activation acknowledgement reconciles after app restart")
+    }
+
     static func testOfflineMapPolygonClosesRing() {
         let request = OfflineMapJobRequest.customPolygon(ring: [
             CLLocationCoordinate2D(latitude: 1, longitude: 2),
@@ -529,6 +617,58 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+    }
+
+    @MainActor
+    static func testCachedMapInstalledIdentityUsesManifestSession() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("map-1.zip")
+        let newManifest = Data("{\"schemaVersion\":1,\"mapId\":\"map-1\",\"revision\":2}".utf8)
+        let oldManifest = Data("{\"schemaVersion\":1,\"mapId\":\"map-1\",\"revision\":1}".utf8)
+        let zip = makeStoredZip(entries: [
+            ("manifest.json", newManifest),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8))
+        ])
+        try? zip.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let suite = "cached-map-identity-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = OfflineMapManager(defaults: defaults)
+        let oldSession = MapTransferSessionIdentity.make(
+            mapId: "map-1",
+            manifestData: oldManifest
+        )
+        let newSession = MapTransferSessionIdentity.make(
+            mapId: "map-1",
+            manifestData: newManifest
+        )
+
+        assert(
+            !manager.isCachedPackInstalled(
+                url,
+                activeMapId: "map-1",
+                activeSessionId: oldSession
+            ),
+            "a regenerated same-ID cached pack is not marked installed for the old session"
+        )
+        assert(
+            manager.isCachedPackInstalled(
+                url,
+                activeMapId: "map-1",
+                activeSessionId: newSession
+            ),
+            "the exact cached manifest session is marked installed"
+        )
+        assert(
+            manager.isCachedPackInstalled(
+                url,
+                activeMapId: "map-1",
+                activeSessionId: ""
+            ),
+            "legacy firmware without active-session status falls back to map ID"
+        )
     }
 
     static func testOfflineMapManifestDecoding() {
@@ -577,13 +717,445 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
+    static func testMapTransferUploadResumeContract() {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("map-upload-resume-\(UUID().uuidString).zip")
+        let manifest = Data("{\"schemaVersion\":1,\"mapId\":\"map-1\"}".utf8)
+        let firstBlock = Data("first-block".utf8)
+        let secondBlock = Data("second-block".utf8)
+        let zip = makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            ("VECTMAP/map-1/+0032+0008/001_001.fmb", firstBlock),
+            ("VECTMAP/map-1/+0032+0008/002_002.fmb", secondBlock)
+        ])
+        try? zip.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let archive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "resume test archive should parse")
+            return
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        var headPaths: [String] = []
+        var manifestHeadAttempts = 0
+        var putBodies: [String: Data] = [:]
+        FirmwareRequestCaptureProtocol.handler = { request, body in
+            let path = request.url!.path
+            let method = request.httpMethod ?? ""
+            let status: Int
+            var headers: [String: String] = [:]
+            if method == "HEAD" {
+                headPaths.append(path)
+                if path.hasSuffix("manifest.json") {
+                    manifestHeadAttempts += 1
+                    if manifestHeadAttempts == 1 {
+                        throw URLError(.timedOut)
+                    } else if manifestHeadAttempts == 2 {
+                        status = 503
+                    } else {
+                        status = 200
+                        headers["Content-Length"] = String(manifest.count)
+                    }
+                } else if path.hasSuffix("001_001.fmb") {
+                    status = 200
+                    headers["Content-Length"] = String(firstBlock.count)
+                } else {
+                    status = 404
+                }
+            } else if method == "PUT" {
+                status = 200
+                putBodies[path] = body
+            } else {
+                status = 405
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: status,
+                    httpVersion: nil,
+                    headerFields: headers
+                )!,
+                Data()
+            )
+        }
+
+        var progress: [(String, Bool)] = []
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session,
+            recoveryRetryNanoseconds: 1_000_000
+        )
+        runMainActorAsyncTest {
+            try await client.upload(
+                archive: archive,
+                sessionId: "session-1"
+            ) { _, _, path, didUpload in
+                progress.append((path, didUpload))
+            }
+        }
+
+        assertEqual(manifestHeadAttempts, 3,
+                    "resume waits through timeout and busy recovery responses")
+        assertEqual(headPaths.count, 5, "resume checks every declared upload entry")
+        assertEqual(progress.map { $0.1 }, [false, false, true],
+                    "verified entries are skipped while a missing receipt is reuploaded")
+        assertEqual(putBodies.count, 1, "resume uploads only the unverified file")
+        let uploaded = putBodies.first
+        assert(uploaded?.key.hasSuffix("002_002.fmb") == true,
+               "resume retries the file whose HEAD check returned missing")
+        assertEqual(uploaded?.value, secondBlock,
+                    "resume PUT sends the exact archive entry bytes")
+
+        var blindTimeoutAttempts = 0
+        FirmwareRequestCaptureProtocol.handler = { _, _ in
+            blindTimeoutAttempts += 1
+            throw URLError(.timedOut)
+        }
+        runMainActorAsyncTest {
+            do {
+                try await client.upload(
+                    archive: archive,
+                    sessionId: "session-1"
+                ) { _, _, _, _ in }
+                assert(false, "an ordinary Wi-Fi outage should not enter the long recovery wait")
+            } catch let error as URLError {
+                assertEqual(error.code, .timedOut,
+                            "blind manifest timeout surfaces the transport error")
+            }
+        }
+        assertEqual(blindTimeoutAttempts, 3,
+                    "blind recovery retries are bounded without an explicit device signal")
+    }
+
+    @MainActor
+    static func testMapTransferActivationAcknowledgementSequence() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 202, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (
+                response,
+                Data("{\"ok\":true,\"sessionId\":\"session-1\",\"sequence\":9}".utf8)
+            )
+        }
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+        var acceptedSequence: UInt32?
+        runMainActorAsyncTest {
+            acceptedSequence = try await client.activate(sessionId: "session-1")
+        }
+        assertEqual(acceptedSequence, 9,
+                    "activation acknowledgement exposes the queued attempt sequence")
+    }
+
+    static func testMapTransferSessionIdentityUsesManifestContent() {
+        let first = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-one".utf8)
+        )
+        let firstRetry = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-one".utf8)
+        )
+        let regenerated = MapTransferSessionIdentity.make(
+            mapId: "custom-map-shanghai",
+            manifestData: Data("manifest-two".utf8)
+        )
+
+        assertEqual(first, firstRetry, "the same pack resumes the same staged session")
+        assert(first != regenerated, "regenerated same-ID packs use distinct staged sessions")
+        assert(first.count <= 80, "content-derived session id fits the firmware contract")
+    }
+
+    static func testMapActivationReconciliationMatrix() {
+        func evaluate(previousMapId: String? = "map-1",
+                      previousSessionId: String? = "session-1",
+                      previousSequence: UInt32? = 7,
+                      acceptedSequence: UInt32? = nil,
+                      observedCurrentAttempt: Bool = false,
+                      activeMapId: String? = "map-1",
+                      activeSessionId: String? = nil,
+                      activationStatus: String? = "installed",
+                      activationSequence: UInt32? = 7,
+                      activationSessionId: String? = "session-1",
+                      activationMapId: String? = "map-1",
+                      activationError: String? = nil) -> MapActivationEvaluation {
+            MapActivationReconciler.evaluate(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: previousMapId,
+                previousSessionId: previousSessionId,
+                previousSequence: previousSequence,
+                acceptedSequence: acceptedSequence,
+                observedCurrentAttempt: observedCurrentAttempt,
+                activeMapId: activeMapId,
+                activeSessionId: activeSessionId,
+                activationStatus: activationStatus,
+                activationSequence: activationSequence,
+                activationSessionId: activationSessionId,
+                activationMapId: activationMapId,
+                activationError: activationError
+            )
+        }
+
+        assertEqual(
+            evaluate().decision,
+            .pending("installed"),
+            "same-ID reinstall rejects a retained installed activation"
+        )
+        assertEqual(
+            evaluate(activationSequence: 8).decision,
+            .installed,
+            "a newer activation sequence proves same-ID installation"
+        )
+        assertEqual(
+            evaluate(
+                previousSequence: nil,
+                acceptedSequence: 8,
+                activationSequence: 8
+            ).decision,
+            .installed,
+            "the acknowledged activation sequence proves a fast same-session completion"
+        )
+        assertEqual(
+            evaluate(
+                previousSessionId: "old-session",
+                previousSequence: nil,
+                activeSessionId: "session-1"
+            ).decision,
+            .installed,
+            "an exact active-session transition proves a fast same-ID installation"
+        )
+        assertEqual(
+            evaluate(
+                activeSessionId: "session-1",
+                activationStatus: "idle",
+                activationSessionId: nil,
+                activationMapId: nil
+            ).decision,
+            .installed,
+            "the durable active session proves an exact same-ID pack after restart"
+        )
+        assertEqual(
+            evaluate(
+                activeSessionId: "session-1",
+                activationStatus: "activating"
+            ).decision,
+            .pending("activating"),
+            "an old exact-session root does not complete an in-progress same-session repair"
+        )
+        assertEqual(
+            evaluate(
+                activeSessionId: "session-1",
+                activationStatus: "failed"
+            ).decision,
+            .pending("failed"),
+            "an unobserved matching failure is not hidden by an old exact-session root"
+        )
+        assertEqual(
+            evaluate(activeSessionId: "session-1").decision,
+            .pending("installed"),
+            "a cached terminal state cannot complete a same-session retry"
+        )
+        assertEqual(
+            evaluate(
+                previousMapId: "old-map",
+                activeMapId: "map-1",
+                activationStatus: "idle",
+                activationSessionId: nil,
+                activationMapId: nil
+            ).decision,
+            .installed,
+            "a changed active map proves installation on legacy firmware"
+        )
+        assertEqual(
+            evaluate(
+                activationStatus: "failed",
+                activationSequence: 8,
+                activationError: "file_sha256"
+            ).decision,
+            .failed("file_sha256"),
+            "matching failed activation surfaces the device error"
+        )
+        assertEqual(
+            evaluate(
+                activationSequence: 8,
+                activationMapId: "wrong-map"
+            ).decision,
+            .failed("device activated wrong-map instead of map-1"),
+            "matching session rejects a different activated map"
+        )
+        let inProgress = evaluate(
+            activeMapId: nil,
+            activationStatus: "activating",
+            activationSequence: nil
+        )
+        assert(inProgress.observedCurrentAttempt, "observing activating proves a response-lost request reached legacy firmware")
+        assertEqual(
+            evaluate(
+                observedCurrentAttempt: inProgress.observedCurrentAttempt,
+                activationSequence: nil
+            ).decision,
+            .installed,
+            "legacy firmware installs after an observed activating transition"
+        )
+        assertEqual(
+            evaluate(
+                previousMapId: nil,
+                activeMapId: "map-1",
+                activationStatus: "idle",
+                activationSessionId: nil,
+                activationMapId: nil
+            ).decision,
+            .pending("active map is map-1; waiting for current activation"),
+            "an unknown baseline is not proof that a same-ID activation ran"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.timedOut)),
+            "activation request timeout enters reconciliation"
+        )
+        assert(
+            MapActivationTransport.isAmbiguousResponseError(URLError(.networkConnectionLost)),
+            "lost activation response enters reconciliation"
+        )
+        assert(
+            !MapActivationTransport.isAmbiguousResponseError(URLError(.cannotConnectToHost)),
+            "a connection failure before delivery remains a hard error"
+        )
+    }
+
+    @MainActor
+    static func testMapActivationConfirmationOrchestration() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        let defaults = UserDefaults(suiteName: "map-confirmation-\(UUID().uuidString)")!
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+
+        var statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { _, _ in
+            statusRequests += 1
+            throw URLError(.timedOut)
+        }
+        bleManager.mapTransferActiveMapId = "map-1"
+        bleManager.mapTransferActivationStatus = "installed"
+        bleManager.mapTransferActivationSequence = 8
+        bleManager.mapTransferActivationSessionId = "session-1"
+        runMainActorAsyncTest {
+            try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSessionId: "old-session",
+                previousSequence: 7,
+                acceptedSequence: nil,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.2,
+                pollIntervalNanoseconds: 1_000_000
+            )
+        }
+        assertEqual(statusRequests, 1, "HTTP status failure falls back to BLE")
+
+        statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            statusRequests += 1
+            let state = statusRequests == 1 ? "activating" : "installed"
+            let body = Data("""
+            {"activeMapId":"map-1","activation":{"status":"\(state)","sequence":8,"sessionId":"session-1","mapId":"map-1"}}
+            """.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, body)
+        }
+        runMainActorAsyncTest {
+            try await manager.confirmActivatedMap(
+                expectedMapId: "map-1",
+                sessionId: "session-1",
+                previousMapId: "map-1",
+                previousSessionId: "old-session",
+                previousSequence: 7,
+                acceptedSequence: nil,
+                client: client,
+                bleManager: bleManager,
+                timeout: 0.2,
+                pollIntervalNanoseconds: 1_000_000
+            )
+        }
+        assertEqual(statusRequests, 2,
+                    "confirmation polls from activating through installed")
+
+        statusRequests = 0
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            statusRequests += 1
+            let body = Data("""
+            {"activeMapId":"map-1","activation":{"status":"installed","sequence":7,"sessionId":"session-1","mapId":"map-1"}}
+            """.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, body)
+        }
+        runMainActorAsyncTest {
+            do {
+                try await manager.confirmActivatedMap(
+                    expectedMapId: "map-1",
+                    sessionId: "session-1",
+                    previousMapId: "map-1",
+                    previousSessionId: "session-1",
+                    previousSequence: 7,
+                    acceptedSequence: nil,
+                    client: client,
+                    bleManager: bleManager,
+                    timeout: 0.02,
+                    pollIntervalNanoseconds: 1_000_000
+                )
+                assert(false, "retained activation should time out")
+            } catch OfflineMapPlatformError.mapActivationTimedOut {
+                // Expected.
+            }
+        }
+        assert(statusRequests > 1, "timeout covers repeated pending polls")
+    }
+
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
         let body = Data("""
         {
           "enabled": true,
           "activeMapId": "old-map",
+          "activeSessionId": "old-map-session",
           "activation": {
             "status": "failed",
+            "sequence": 9,
             "sessionId": "new-map",
             "mapId": "new-map",
             "error": {
@@ -602,8 +1174,10 @@ struct NavigationProtocolTests {
         assertEqual(status.enabled, true, "status exposes transfer mode")
         assertEqual(status.activeMapId, "old-map", "status exposes active map id")
         assertEqual(status.activation?.status, "failed", "status exposes activation state")
+        assertEqual(status.activation?.sequence, 9, "status exposes activation sequence")
         assertEqual(status.activation?.error?.code, "file_sha256", "status exposes activation error code")
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
+        assertEqual(status.activeSessionId, "old-map-session", "status exposes durable active session identity")
     }
 
     static func testFirmwareManifestDecodingAndHash() {
@@ -852,6 +1426,27 @@ struct NavigationProtocolTests {
         }
     }
 
+    @MainActor
+    static func runMainActorAsyncTest(
+        _ operation: @MainActor @escaping () async throws -> Void
+    ) {
+        var finished = false
+        var failure: Error?
+        Task { @MainActor in
+            do {
+                try await operation()
+            } catch {
+                failure = error
+            }
+            finished = true
+        }
+        assert(waitForMainLoop(timeout: 3) { finished },
+               "main-actor async test should finish")
+        if let failure {
+            assert(false, "main-actor async test failed: \(failure)")
+        }
+    }
+
     static func testNavigationPacketBuilder() {
         let shortPacket = "2|150|Turn left"
         guard let shortData = NavigationPacketBuilder.data(from: shortPacket, maxLength: NavigationPacketBuilder.protocolMaxBytes) else {
@@ -974,6 +1569,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.settingsFallbackPrefix, "MSET", "settings fallback remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferControlPrefix, "MTRN", "map transfer control remains framed over navigation writes")
         assertEqual(DeviceBLEProtocol.mapTransferStatusPrefix, "MSTS", "map transfer status remains framed over navigation notifications")
+        assertEqual(DeviceBLEProtocol.mapTransferStatusChunkPrefix, "MSTC", "chunked map transfer status remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferControlPrefix, "DTRN", "generic transfer control remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.deviceTransferStatusPrefix, "DSTS", "generic transfer status remains firmware-compatible")
         assertEqual(DeviceBLEProtocol.soundPlayPrefix, "SNDP", "sound playback remains firmware-compatible")
@@ -1779,7 +2375,7 @@ struct NavigationProtocolTests {
                "ACK timeout does not start while the PWR configuration is queued")
 
         transportReady = true
-        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 1 },
+        assert(waitForMainLoop(timeout: 2) { sentPackets.count == 1 },
                "queued PWR configuration is eventually handed to the transport")
         let recoveredAfterBackpressure = powerButtonHonkStatus(
             for: sentPackets[0],
@@ -1885,7 +2481,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2"},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -1893,10 +2489,43 @@ struct NavigationProtocolTests {
         assert(manager.mapTransferModeEnabled, "status parser exposes enabled transfer mode")
         assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
         assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
+        assertEqual(manager.mapTransferActiveSessionId, "kyoto-v1-session", "status parser exposes active session id")
+        assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
+        assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
+        assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
+        assertEqual(manager.mapTransferActivationMapId, "tokyo-v2", "status parser exposes activating map id")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+    }
+
+    static func testBLEManagerReassemblesChunkedMapTransferStatus() {
+        let manager = BLEManager()
+        let body = Data("""
+        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activeSessionId":"custom-map-session","activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
+        """.utf8)
+        let chunkSize = 13
+        let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
+        for index in UInt8(0)..<chunkCount {
+            let start = Int(index) * chunkSize
+            let end = min(start + chunkSize, body.count)
+            var frame = Data(DeviceBLEProtocol.mapTransferStatusChunkPrefix.utf8)
+            frame.append(contentsOf: [7, index, chunkCount])
+            frame.append(body.subdata(in: start..<end))
+            assert(frame.count <= 20, "chunked map status fits the minimum ATT payload")
+            assert(manager.handleMapTransferStatusNotification(frame),
+                   "MSTC chunk should be consumed")
+        }
+
+        assertEqual(manager.mapTransferActiveMapId, "custom-map",
+                    "chunk reassembly exposes active map")
+        assertEqual(manager.mapTransferActiveSessionId, "custom-map-session",
+                    "chunk reassembly exposes durable active session")
+        assertEqual(manager.mapTransferActivationStatus, "installed",
+                    "chunk reassembly exposes activation state")
+        assertEqual(manager.mapTransferActivationSequence, 9,
+                    "chunk reassembly exposes activation sequence")
     }
 
     static func testBLEManagerParsesDeviceTransferStatus() {

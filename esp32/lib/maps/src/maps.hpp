@@ -107,6 +107,7 @@ private:
     std::vector<MapBlock *> blocks;
   };
   MemCache memCache;               // Memory Cache
+  String vectorMapFolder = "/sdcard/VECTMAP/";
   Point32 point = viewPort.center; // Vector map GPS position point
   double lat2y(double lat);
   double lon2x(double lon);
@@ -197,6 +198,7 @@ public:
   MapTile getMapTile(double lon, double lat, uint8_t zoomLevel, int8_t offsetX,
                      int8_t offsetY);
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
+  void setVectorMapFolder(const std::string &folder);
   void deleteMapScrSprites();
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);

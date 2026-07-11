@@ -1434,7 +1434,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     char folderName[12];
     snprintf(folderName, 12, "%+04d%+04d", (int)folderNameX, (int)folderNameY);
     String fileName =
-        mapVectorFolder + folderName + "/" + blockX + "_" + blockY;
+        vectorMapFolder + folderName + "/" + blockX + "_" + blockY;
 
     log_i("Attempting to load map file: %s", fileName.c_str());
 
@@ -2106,6 +2106,25 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   Maps::navArrowPosition = {0, 0}; // Map Arrow position
 
   Maps::totalBounds = {90.0, -90.0, 180.0, -180.0};
+}
+
+void Maps::setVectorMapFolder(const std::string &folder) {
+  String normalized(folder.c_str());
+  if (!normalized.endsWith("/"))
+    normalized += "/";
+  if (normalized == vectorMapFolder)
+    return;
+
+  for (MapBlock *block : memCache.blocks)
+    delete block;
+  memCache.blocks.clear();
+  vectorMapFolder = normalized;
+  isMapFound = false;
+  isPosMoved = true;
+  redrawMap = true;
+  oldMapTile = {};
+  currentMapTile = {};
+  ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
 }
 
 /**

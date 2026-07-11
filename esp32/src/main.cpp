@@ -477,11 +477,21 @@ void setup() {
 
   {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
-    std::string activeMapId;
+    map_transfer::InstallStatus recoveryStatus =
+        mapInstaller.recoverInterruptedActivation();
+    if (!recoveryStatus.ok) {
+      Serial.printf("MAP_TRANSFER: recovery failed code=%s message=%s\n",
+                    recoveryStatus.code.c_str(), recoveryStatus.message.c_str());
+    } else if (recoveryStatus.code != "ok") {
+      Serial.printf("MAP_TRANSFER: %s\n", recoveryStatus.message.c_str());
+    }
+    map_transfer::ActiveMapSelection activeMap;
     map_transfer::InstallStatus activeStatus =
-        mapInstaller.readActiveMapId(activeMapId);
+        mapInstaller.readActiveMap(activeMap);
     if (activeStatus.ok) {
-      Serial.printf("MAP_TRANSFER: activeMapId=%s\n", activeMapId.c_str());
+      mapView.setVectorMapFolder(std::string("/sdcard") + activeMap.root);
+      Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
+                    activeMap.mapId.c_str(), activeMap.root.c_str());
     } else {
       Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
                     activeStatus.code.c_str(), activeStatus.message.c_str());
@@ -577,6 +587,11 @@ void loop() {
   }
   lastLoopMs = now;
   loopCount++;
+
+  std::string activatedMapRoot;
+  if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
+    mapView.setVectorMapFolder(std::string("/sdcard") + activatedMapRoot);
+  }
 
   // Process app-provided GPS transitions before any periodic work that can
   // briefly block on display, sensor, BLE, or debug output.

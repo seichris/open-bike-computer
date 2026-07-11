@@ -256,6 +256,16 @@ private struct SavedMapsSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
+            if !bleManager.mapTransferActiveMapId.isEmpty {
+                SettingsValueRow(
+                    title: "Installed on Device",
+                    value: manager.displayName(forMapId: bleManager.mapTransferActiveMapId)
+                )
+            }
+            if let lastTransferDescription = manager.lastTransferDescription {
+                SettingsValueRow(title: "Last Transfer", value: lastTransferDescription)
+            }
+
             if manager.cachedPackURLs.isEmpty {
                 Text("0 maps downloaded yet")
                     .foregroundColor(.secondary)
@@ -271,6 +281,21 @@ private struct SavedMapsSettingsSection: View {
             }
             .disabled(manager.isBusy)
         }
+        .onAppear {
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActiveMapId) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActiveSessionId) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationStatus) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.mapTransferActivationSequence) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
     }
 }
 
@@ -285,6 +310,16 @@ private struct DownloadedMapRow: View {
         HStack(spacing: 12) {
             Text(displayName)
                 .lineLimit(2)
+
+            if manager.isCachedPackInstalled(
+                packURL,
+                activeMapId: bleManager.mapTransferActiveMapId,
+                activeSessionId: bleManager.mapTransferActiveSessionId
+            ) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                    .accessibilityLabel("Installed on device")
+            }
 
             Spacer()
 

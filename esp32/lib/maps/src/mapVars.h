@@ -96,8 +96,6 @@ struct Polygon {
   uint8_t maxZoom;
 };
 
-static const String mapVectorFolder PROGMEM =
-    "/sdcard/VECTMAP/"; // Vector Map Files Folder
 static const char *mapRenderFolder PROGMEM =
     "/sdcard/MAP/%u/%u/%u.png"; // Render Maps file folder
 static const char *noMapFile PROGMEM = "/spiffs/NOMAP.png"; // No map image file

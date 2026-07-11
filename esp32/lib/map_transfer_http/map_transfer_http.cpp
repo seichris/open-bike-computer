@@ -232,6 +232,41 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
     sendHead(client, 400);
     return true;
   }
+  lockState();
+  const bool acceptsUploads = activationState_.acceptsUploads();
+  unlockState();
+  if (!acceptsUploads) {
+    sendHead(client, 409);
+    return true;
+  }
+  if (installer_.hasInterruptedActivation()) {
+    lockState();
+    const bool recoveryBlocked = recoveryBlocked_;
+    unlockState();
+    if (recoveryBlocked) {
+      sendHead(client, 500);
+      return true;
+    }
+    // Complete the zero-length response before the exceptional recovery hash.
+    // The client uses this explicit 503 to distinguish SD recovery from an
+    // ordinary Wi-Fi timeout while this single-threaded server is occupied.
+    sendHead(client, 503);
+    InstallStatus recovery = installer_.recoverInterruptedActivation();
+    lockState();
+    recoveryBlocked_ = !recovery.ok;
+    unlockState();
+    if (!recovery.ok)
+      setLastError(recovery.code, recovery.message);
+    return true;
+  }
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    sendHead(client, 500);
+    return true;
+  }
+  lockState();
+  recoveryBlocked_ = false;
+  unlockState();
 
   const std::string stagedPath =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
@@ -239,6 +274,21 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
   if (!fileSize(stagedPath, size)) {
     sendHead(client, 404);
     return true;
+  }
+  if (relativePath == "manifest.json") {
+    MapManifest manifest;
+    if (!installer_.readStagedManifest(sessionId, manifest).ok) {
+      sendHead(client, 404);
+      return true;
+    }
+  } else {
+    ManifestFile expected;
+    InstallStatus declared =
+        installer_.expectedStagedFile(sessionId, relativePath, expected);
+    if (!declared.ok || !installer_.stagedFileVerified(sessionId, expected)) {
+      sendHead(client, 404);
+      return true;
+    }
   }
   sendHead(client, 200, size);
   return true;
@@ -259,7 +309,36 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 413, "content_length", "upload size is invalid");
     return true;
   }
+  lockState();
+  const bool acceptsUploads = activationState_.acceptsUploads();
+  unlockState();
+  if (!acceptsUploads) {
+    sendError(client, 409, "activation_busy",
+              "map files cannot change while activation is running");
+    return true;
+  }
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    sendError(client, 503, recovery.code, recovery.message);
+    return true;
+  }
 
+  ManifestFile expectedFile;
+  const bool isManifest = relativePath == "manifest.json";
+  if (!isManifest) {
+    InstallStatus declared =
+        installer_.expectedStagedFile(sessionId, relativePath, expectedFile);
+    if (!declared.ok) {
+      sendError(client, 400, declared.code, declared.message);
+      return true;
+    }
+    if (contentLength != expectedFile.bytes) {
+      sendError(client, 400, "file_size",
+                "upload size does not match the staged manifest");
+      return true;
+    }
+    installer_.clearStagedFileVerification(sessionId, expectedFile);
+  }
   const std::string destination =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   if (!mkdirs(dirnameOf(destination))) {
@@ -274,6 +353,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
   }
 
   uint8_t buffer[1024];
+  Sha256Hasher hasher;
   uint64_t remaining = contentLength;
   uint32_t lastRead = millis();
   while (remaining > 0) {
@@ -292,6 +372,8 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     int read = client.read(buffer, toRead);
     if (read <= 0)
       continue;
+    if (!isManifest)
+      hasher.update(buffer, static_cast<size_t>(read));
     output.write(reinterpret_cast<const char *>(buffer), read);
     if (!output) {
       sendError(client, 500, "write", "could not write staged file");
@@ -304,6 +386,39 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
   if (!output.good()) {
     sendError(client, 500, "write", "could not finish staged file");
     return true;
+  }
+  if (isManifest) {
+    MapManifest manifest;
+    InstallStatus parsed = installer_.readStagedManifest(sessionId, manifest);
+    if (!parsed.ok) {
+      ::unlink(destination.c_str());
+      sendError(client, 400, parsed.code, parsed.message);
+      return true;
+    }
+    if (!installer_.pruneStagingSessions(sessionId) ||
+        !installer_.pruneObsoleteInstalledMaps()) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "staging_cleanup",
+                "could not prune obsolete map transfers");
+      return true;
+    }
+  } else {
+    std::string actualSha = hasher.finalHex();
+    std::string expectedSha = expectedFile.sha256;
+    std::transform(expectedSha.begin(), expectedSha.end(), expectedSha.begin(),
+                   ::tolower);
+    if (actualSha != expectedSha) {
+      ::unlink(destination.c_str());
+      sendError(client, 400, "file_sha256",
+                "uploaded map file sha256 mismatch");
+      return true;
+    }
+    if (!installer_.markStagedFileVerified(sessionId, expectedFile)) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "file_receipt",
+                "could not record uploaded map verification");
+      return true;
+    }
   }
 
   Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
@@ -326,26 +441,23 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
     return false;
 
   lockState();
-  if (activationRunning_) {
-    const bool sameSession = activationSessionId_ == sessionId;
-    unlockState();
-    if (sameSession) {
-      sendJson(client, 202,
-               std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
-                   jsonEscape(sessionId) + "\"}");
-      return true;
-    }
+  ActivationBeginResult beginResult = activationState_.begin(sessionId);
+  const uint32_t activationSequence = activationState_.snapshot().sequence;
+  unlockState();
+  const auto activatingResponse = [&]() {
+    return std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
+           jsonEscape(sessionId) + "\",\"sequence\":" +
+           std::to_string(activationSequence) + "}";
+  };
+  if (beginResult == ActivationBeginResult::AlreadyRunning) {
+    sendJson(client, 202, activatingResponse());
+    return true;
+  }
+  if (beginResult == ActivationBeginResult::Busy) {
     sendError(client, 409, "activation_busy",
               "another map activation is already running");
     return true;
   }
-  activationRunning_ = true;
-  activationSessionId_ = sessionId;
-  activationStatus_ = "activating";
-  activationMapId_.clear();
-  activationErrorCode_.clear();
-  activationErrorMessage_.clear();
-  unlockState();
 
   auto *context = new ActivationTaskContext{this, sessionId};
   BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
@@ -361,15 +473,13 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
 
   Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s\n",
                 sessionId.c_str());
-  sendJson(client, 202,
-           std::string("{\"ok\":true,\"status\":\"activating\",\"sessionId\":\"") +
-               jsonEscape(sessionId) + "\"}");
+  sendJson(client, 202, activatingResponse());
   return true;
 }
 
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
-  std::string activeMapId;
-  InstallStatus active = installer_.readActiveMapId(activeMapId);
+  ActiveMapSelection activeMap;
+  InstallStatus active = installer_.readActiveMap(activeMap);
   HttpTransferStatus transferStatus = status();
 
   std::string body = std::string("{\"configured\":") +
@@ -384,7 +494,11 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
   if (active.ok) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMapId) + "\"";
+    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    if (!activeMap.sessionId.empty()) {
+      body += ",\"activeSessionId\":\"" +
+              jsonEscape(activeMap.sessionId) + "\"";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";
@@ -426,21 +540,30 @@ void MapTransferHttpServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-std::string MapTransferHttpServer::activationStatusJson() const {
+std::string MapTransferHttpServer::activationStatusJson(bool compact) const {
   lockState();
-  std::string body = std::string("{\"status\":\"") +
-                     jsonEscape(activationStatus_) + "\"";
-  if (!activationSessionId_.empty())
-    body += ",\"sessionId\":\"" + jsonEscape(activationSessionId_) + "\"";
-  if (!activationMapId_.empty())
-    body += ",\"mapId\":\"" + jsonEscape(activationMapId_) + "\"";
-  if (!activationErrorCode_.empty()) {
-    body += ",\"error\":{\"code\":\"" + jsonEscape(activationErrorCode_) +
-            "\",\"message\":\"" + jsonEscape(activationErrorMessage_) + "\"}";
-  }
-  body += "}";
+  std::string body = activationState_.json(compact);
   unlockState();
   return body;
+}
+
+bool MapTransferHttpServer::activationHasError() const {
+  lockState();
+  const bool hasError = !activationState_.snapshot().errorCode.empty();
+  unlockState();
+  return hasError;
+}
+
+bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
+  lockState();
+  if (pendingMapRoot_.empty()) {
+    unlockState();
+    return false;
+  }
+  root = pendingMapRoot_;
+  pendingMapRoot_.clear();
+  unlockState();
+  return true;
 }
 
 void MapTransferHttpServer::finishActivation(const std::string &status,
@@ -448,11 +571,7 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
                                              const std::string &errorCode,
                                              const std::string &errorMessage) {
   lockState();
-  activationRunning_ = false;
-  activationStatus_ = status;
-  activationMapId_ = mapId;
-  activationErrorCode_ = errorCode;
-  activationErrorMessage_ = errorMessage;
+  activationState_.finish(status, mapId, errorCode, errorMessage);
   unlockState();
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);
@@ -462,6 +581,13 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
 void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
   Serial.printf("MAP_TRANSFER_HTTP: activate start session=%s\n",
                 sessionId.c_str());
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: recovery failed code=%s message=%s\n",
+                  recovery.code.c_str(), recovery.message.c_str());
+    finishActivation("failed", "", recovery.code, recovery.message);
+    return;
+  }
   MapManifest manifest;
   InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
   if (!validated.ok) {
@@ -482,6 +608,15 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
 
   Serial.printf("MAP_TRANSFER_HTTP: activated mapId=%s session=%s\n",
                 manifest.mapId.c_str(), sessionId.c_str());
+  ActiveMapSelection selected;
+  InstallStatus active = installer_.readActiveMap(selected);
+  if (!active.ok) {
+    finishActivation("failed", manifest.mapId, active.code, active.message);
+    return;
+  }
+  lockState();
+  pendingMapRoot_ = selected.root;
+  unlockState();
   finishActivation("installed", manifest.mapId, "", "");
 }
 

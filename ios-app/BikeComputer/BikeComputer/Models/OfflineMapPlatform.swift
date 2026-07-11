@@ -167,7 +167,7 @@ enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
-    case mapActivationTimedOut
+    case mapActivationTimedOut(String)
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
     case invalidPack(String)
@@ -189,8 +189,8 @@ enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
-        case .mapActivationTimedOut:
-            return "Timed out while activating map on device"
+        case .mapActivationTimedOut(let message):
+            return "Map activation could not be confirmed: \(message)"
         case .mapActivationFailed(let message):
             return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):
@@ -232,6 +232,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     struct Activation: Decodable, Equatable {
         let status: String?
+        let sequence: UInt32?
         let sessionId: String?
         let mapId: String?
         let error: TransferError?
@@ -239,7 +240,13 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     let enabled: Bool?
     let activeMapId: String?
+    let activeSessionId: String?
     let activation: Activation?
+}
+
+nonisolated struct MapTransferActivationAcknowledgement: Decodable, Equatable {
+    let sessionId: String?
+    let sequence: UInt32?
 }
 
 struct OfflineMapPackArchive {
@@ -383,6 +390,7 @@ struct OfflineMapPackArchive {
 struct MapTransferDeviceClient {
     let baseURL: URL
     var session: URLSession = .shared
+    var recoveryRetryNanoseconds: UInt64 = 2_000_000_000
 
     nonisolated func upload(
         archive: OfflineMapPackArchive,
@@ -405,7 +413,7 @@ struct MapTransferDeviceClient {
         }
     }
 
-    nonisolated func activate(sessionId: String) async throws {
+    nonisolated func activate(sessionId: String) async throws -> UInt32? {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
             sessionId: sessionId,
@@ -413,7 +421,16 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "POST"
         request.timeoutInterval = 15
-        _ = try await send(request: request, data: nil)
+        let data = try await send(request: request, data: nil)
+        let acknowledgement = try JSONDecoder().decode(
+            MapTransferActivationAcknowledgement.self,
+            from: data
+        )
+        guard acknowledgement.sessionId == nil ||
+                acknowledgement.sessionId == sessionId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        return acknowledgement.sequence
     }
 
     nonisolated func status() async throws -> MapTransferDeviceStatus {
@@ -438,30 +455,59 @@ struct MapTransferDeviceClient {
     }
 
     private nonisolated func stagedByteCount(sessionId: String, path: String) async throws -> Int? {
-        var request = URLRequest(url: Self.uploadURL(
-            baseURL: baseURL,
-            sessionId: sessionId,
-            relativePath: path
-        ))
-        request.httpMethod = "HEAD"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
+        let toleratesRecovery = path == "manifest.json"
+        let recoveryDeadline = Date().addingTimeInterval(10 * 60)
+        var observedRecoveryResponse = false
+        var blindTransportRetries = 0
+        while true {
+            var request = URLRequest(url: Self.uploadURL(
+                baseURL: baseURL,
+                sessionId: sessionId,
+                relativePath: path
+            ))
+            request.httpMethod = "HEAD"
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 3
 
-        let response = try await session.data(for: request)
-        guard let http = response.1 as? HTTPURLResponse else {
-            throw OfflineMapPlatformError.invalidResponse
+            do {
+                let response = try await session.data(for: request)
+                guard let http = response.1 as? HTTPURLResponse else {
+                    throw OfflineMapPlatformError.invalidResponse
+                }
+                if http.statusCode == 404 {
+                    return nil
+                }
+                if toleratesRecovery,
+                   (http.statusCode == 409 || http.statusCode == 503),
+                   Date() < recoveryDeadline {
+                    observedRecoveryResponse = true
+                    try await Task.sleep(nanoseconds: recoveryRetryNanoseconds)
+                    continue
+                }
+                guard 200..<300 ~= http.statusCode else {
+                    return nil
+                }
+                guard let value = http.value(forHTTPHeaderField: "Content-Length"),
+                      let count = Int(value) else {
+                    return nil
+                }
+                return count
+            } catch {
+                let urlError = error as? URLError
+                let isAmbiguousRecoveryWait = urlError?.code == .timedOut ||
+                    urlError?.code == .networkConnectionLost
+                if isAmbiguousRecoveryWait && !observedRecoveryResponse {
+                    blindTransportRetries += 1
+                }
+                guard toleratesRecovery,
+                      isAmbiguousRecoveryWait,
+                      (observedRecoveryResponse || blindTransportRetries <= 2),
+                      Date() < recoveryDeadline else {
+                    throw error
+                }
+                try await Task.sleep(nanoseconds: recoveryRetryNanoseconds)
+            }
         }
-        if http.statusCode == 404 {
-            return nil
-        }
-        guard 200..<300 ~= http.statusCode else {
-            return nil
-        }
-        guard let value = http.value(forHTTPHeaderField: "Content-Length"),
-              let count = Int(value) else {
-            return nil
-        }
-        return count
     }
 
     private nonisolated func send(request: URLRequest, data: Data?) async throws -> Data {
