@@ -501,8 +501,8 @@ InstallStatus MapTransferInstaller::activateStagedMap(
                                  removeTree(transactionPath + ".tmp");
     return cleanupComplete && removeTree(transactionPath);
   };
-  const auto finalizeRollback = [&]() {
-    if (!restorePublishedMap(rollbackRoot))
+  const auto finalizeRollback = [&](bool preserveExisting) {
+    if (!restorePublishedMap(rollbackRoot, preserveExisting))
       return false;
     if (!writeTextFileAtomic(transactionPath, transactionJson("rolled_back")))
       return false;
@@ -514,7 +514,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
         ::unlink(activePath.c_str()) == 0 || errno == ENOENT;
     if (!cleared || !metadataRemoved)
       return false;
-    return finalizeRollback();
+    return finalizeRollback(false);
   };
 
   if (!writeTextFileAtomic(transactionPath, transactionJson("backing_up"))) {
@@ -522,11 +522,11 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("transaction", "could not start map activation transaction");
   }
   if (!backupPublishedMap(rollbackRoot)) {
-    finalizeRollback();
+    finalizeRollback(true);
     return fail("rollback", "could not backup current map before activation");
   }
   if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
-    finalizeRollback();
+    finalizeRollback(true);
     return fail("transaction", "could not advance map activation transaction");
   }
   if (!clearPublishedMap()) {
@@ -636,7 +636,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     if (::unlink(activePath.c_str()) != 0 && errno != ENOENT)
       return fail("transaction_recovery", "could not clear interrupted metadata");
   }
-  if (!restorePublishedMap(rollbackRoot))
+  if (!restorePublishedMap(rollbackRoot, phase == "backing_up"))
     return fail("transaction_recovery", "could not restore interrupted map");
   const std::string rolledBack = std::string("{\"sessionId\":\"") + sessionId +
                                  "\",\"mapId\":\"" + mapId +
@@ -751,8 +751,20 @@ bool MapTransferInstaller::copyFile(const std::string &from,
   std::ofstream output(to, std::ios::binary | std::ios::trunc);
   if (!output)
     return false;
-  output << input.rdbuf();
-  return output.good();
+  std::array<char, 4096> buffer = {};
+  while (input.good()) {
+    input.read(buffer.data(), buffer.size());
+    const std::streamsize count = input.gcount();
+    if (count > 0)
+      output.write(buffer.data(), count);
+    if (!output.good())
+      return false;
+  }
+  output.flush();
+  if (!input.eof() || !output.good())
+    return false;
+  output.close();
+  return !output.fail();
 }
 
 bool MapTransferInstaller::copyTree(const std::string &from,
@@ -851,7 +863,7 @@ bool MapTransferInstaller::backupPublishedMap(
 }
 
 bool MapTransferInstaller::restorePublishedMap(
-    const std::string &backupRoot) const {
+    const std::string &backupRoot, bool preserveExisting) const {
   if (!dirExists(backupRoot))
     return true;
   const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
@@ -865,7 +877,12 @@ bool MapTransferInstaller::restorePublishedMap(
     std::string name = entry->d_name;
     if (name == "." || name == "..")
       continue;
-    if (!copyTree(joinPath(backupRoot, name), joinPath(vectmapRoot, name))) {
+    const std::string destination = joinPath(vectmapRoot, name);
+    if (preserveExisting &&
+        (fileExists(destination) || dirExists(destination))) {
+      continue;
+    }
+    if (!copyTree(joinPath(backupRoot, name), destination)) {
       ::closedir(dir);
       return false;
     }

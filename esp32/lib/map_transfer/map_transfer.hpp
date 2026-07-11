@@ -89,7 +89,8 @@ private:
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
   bool backupPublishedMap(const std::string &backupRoot) const;
-  bool restorePublishedMap(const std::string &backupRoot) const;
+  bool restorePublishedMap(const std::string &backupRoot,
+                           bool preserveExisting = false) const;
   bool clearPublishedMap() const;
   bool publishActivation(const std::string &activationRoot) const;
   bool fileExists(const std::string &path) const;

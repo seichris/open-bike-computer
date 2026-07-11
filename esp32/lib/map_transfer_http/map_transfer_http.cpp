@@ -267,6 +267,11 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
               "map files cannot change while activation is running");
     return true;
   }
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    sendError(client, 503, recovery.code, recovery.message);
+    return true;
+  }
   const std::string destination =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   if (!mkdirs(dirnameOf(destination))) {
@@ -462,6 +467,13 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
 void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
   Serial.printf("MAP_TRANSFER_HTTP: activate start session=%s\n",
                 sessionId.c_str());
+  InstallStatus recovery = installer_.recoverInterruptedActivation();
+  if (!recovery.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: recovery failed code=%s message=%s\n",
+                  recovery.code.c_str(), recovery.message.c_str());
+    finishActivation("failed", "", recovery.code, recovery.message);
+    return;
+  }
   MapManifest manifest;
   InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
   if (!validated.ok) {
