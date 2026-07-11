@@ -9,6 +9,12 @@ namespace map_profile_persistence {
 template <typename Store, typename Profile>
 inline void load(Store &store, Profile &mapStyle,
                  Profile &mapNavigationStyle) {
+  const bool hasStoredMapStyle =
+      store.isKey("minPolySize") || store.isKey("detailLevel") ||
+      store.isKey("routeWidth") || store.isKey("streetBoost") ||
+      store.isKey("markerScale") || store.isKey("zoomLevel") ||
+      store.isKey("visMask");
+
   mapStyle.minPolygonSize = store.getUChar("minPolySize", 0);
   mapStyle.detailLevel = store.getUChar("detailLevel", 2);
   mapStyle.routeLineWidth = store.getUChar("routeWidth", 4);
@@ -22,7 +28,11 @@ inline void load(Store &store, Profile &mapStyle,
   mapNavigationStyle.minPolygonSize =
       store.getUChar("navMinPoly", mapStyle.minPolygonSize);
   mapNavigationStyle.detailLevel =
-      store.getUChar("navDetail", mapStyle.detailLevel);
+      store.getUChar(
+          "navDetail",
+          hasStoredMapStyle
+              ? mapStyle.detailLevel
+              : map_profile_protocol::MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
   mapNavigationStyle.routeLineWidth =
       store.getUChar("navRouteW", mapStyle.routeLineWidth);
   mapNavigationStyle.streetLineWidthBoost =
@@ -32,8 +42,11 @@ inline void load(Store &store, Profile &mapStyle,
   mapNavigationStyle.zoomLevel = store.getUChar("navZoom", mapStyle.zoomLevel);
   mapNavigationStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(store.getUInt(
-          "navVis", mapStyle.visibilityMask |
-                        map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
+          "navVis",
+          (hasStoredMapStyle
+               ? mapStyle.visibilityMask
+               : map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK) |
+              map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
 }
 
 template <typename Store, typename Profile>

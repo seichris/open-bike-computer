@@ -125,6 +125,12 @@ the persisted Map values. Map rotation mode remains Map-only; Map + Navigation
 automatically uses course-up while navigating. Route and current-position
 overlay visibility remains shared by both profiles.
 
+Fresh Map + Navigation profiles default to low detail with Major Roads and
+Residential & Local Roads visible. Buildings, Service Roads, Paths & Footways,
+Tracks, Railways, and Other Areas default to hidden; green space and water
+remain visible. Existing persisted or migrated profiles keep their saved
+values.
+
 Apps that support the extended visibility classes set marker bit `12`. Without
 that marker, firmware preserves the legacy behavior by applying bit `4` to both
 local and service roads and bit `2` to both paths and tracks.

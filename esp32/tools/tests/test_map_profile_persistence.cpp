@@ -18,6 +18,7 @@ struct TestProfile {
 
 class FakeStore {
 public:
+  bool isKey(const char *key) const { return values.find(key) != values.end(); }
   uint8_t getUChar(const char *key, uint8_t fallback) const {
     const auto value = values.find(key);
     return value == values.end() ? fallback
@@ -54,6 +55,15 @@ static void persistProfile(FakeStore &store, const TestProfile &map,
 int main() {
   using namespace map_profile_protocol;
 
+  FakeStore freshStore;
+  TestProfile loadedMap;
+  TestProfile loadedNavigation;
+  map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
+  assert(loadedNavigation.detailLevel ==
+         MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
+  assert(loadedNavigation.visibilityMask ==
+         MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK);
+
   FakeStore legacyStore;
   const TestProfile legacyMap = profile(1, VISIBILITY_LEGACY_FEATURE_MASK);
   legacyStore.putUChar("minPolySize", legacyMap.minPolygonSize);
@@ -63,8 +73,6 @@ int main() {
   legacyStore.putUChar("markerScale", legacyMap.positionMarkerScale);
   legacyStore.putUChar("zoomLevel", legacyMap.zoomLevel);
   legacyStore.putUInt("visMask", legacyMap.visibilityMask);
-  TestProfile loadedMap;
-  TestProfile loadedNavigation;
   map_profile_persistence::load(legacyStore, loadedMap, loadedNavigation);
   assert(loadedMap.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
   assert(loadedNavigation.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);

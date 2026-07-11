@@ -342,6 +342,25 @@ private extension CBCharacteristicProperties {
     }
 }
 
+private enum MapPlusNavigationDefaults {
+    static let minPolygonSize: Double = 0
+    static let detailLevel = 0
+    static let routeLineWidth: Double = 4
+    static let streetLineWidthBoost: Double = 0
+    static let positionMarkerScale: Double = 2
+    static let zoomLevel = 2
+    static let showBuildings = false
+    static let showGreenSpace = true
+    static let showPaths = false
+    static let showTracks = false
+    static let showMajorRoads = true
+    static let showLocalStreets = true
+    static let showServiceRoads = false
+    static let showWater = true
+    static let showRailways = false
+    static let showOtherAreas = false
+}
+
 class BLEManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
@@ -398,12 +417,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var displayRotation: Int = 0 
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up  // 0-3: 0°, 90°, 180°, 270°
     @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
-    @Published var mapPlusNavigationMinPolygonSize: Double = 0
-    @Published var mapPlusNavigationDetailLevel: Int = 2
-    @Published var mapPlusNavigationRouteLineWidth: Double = 4
-    @Published var mapPlusNavigationStreetLineWidthBoost: Double = 0
-    @Published var mapPlusNavigationPositionMarkerScale: Double = 2
-    @Published var mapPlusNavigationZoomLevel: Int = 2
+    @Published var mapPlusNavigationMinPolygonSize = MapPlusNavigationDefaults.minPolygonSize
+    @Published var mapPlusNavigationDetailLevel = MapPlusNavigationDefaults.detailLevel
+    @Published var mapPlusNavigationRouteLineWidth = MapPlusNavigationDefaults.routeLineWidth
+    @Published var mapPlusNavigationStreetLineWidthBoost = MapPlusNavigationDefaults.streetLineWidthBoost
+    @Published var mapPlusNavigationPositionMarkerScale = MapPlusNavigationDefaults.positionMarkerScale
+    @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
@@ -424,16 +443,16 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
-    @Published var mapPlusNavigationShowBuildings: Bool = true
-    @Published var mapPlusNavigationShowGreenSpace: Bool = true
-    @Published var mapPlusNavigationShowPaths: Bool = true
-    @Published var mapPlusNavigationShowTracks: Bool = true
-    @Published var mapPlusNavigationShowMajorRoads: Bool = true
-    @Published var mapPlusNavigationShowLocalStreets: Bool = true
-    @Published var mapPlusNavigationShowServiceRoads: Bool = true
-    @Published var mapPlusNavigationShowWater: Bool = true
-    @Published var mapPlusNavigationShowRailways: Bool = true
-    @Published var mapPlusNavigationShowOtherAreas: Bool = true
+    @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings
+    @Published var mapPlusNavigationShowGreenSpace = MapPlusNavigationDefaults.showGreenSpace
+    @Published var mapPlusNavigationShowPaths = MapPlusNavigationDefaults.showPaths
+    @Published var mapPlusNavigationShowTracks = MapPlusNavigationDefaults.showTracks
+    @Published var mapPlusNavigationShowMajorRoads = MapPlusNavigationDefaults.showMajorRoads
+    @Published var mapPlusNavigationShowLocalStreets = MapPlusNavigationDefaults.showLocalStreets
+    @Published var mapPlusNavigationShowServiceRoads = MapPlusNavigationDefaults.showServiceRoads
+    @Published var mapPlusNavigationShowWater = MapPlusNavigationDefaults.showWater
+    @Published var mapPlusNavigationShowRailways = MapPlusNavigationDefaults.showRailways
+    @Published var mapPlusNavigationShowOtherAreas = MapPlusNavigationDefaults.showOtherAreas
     @Published var showRouteOverlay: Bool = true
     @Published var showCurrentPosition: Bool = true
     
@@ -636,10 +655,31 @@ class BLEManager: NSObject, ObservableObject {
         showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
+        let persistedMapProfileKeys = [
+            SettingsKeys.minPolygonSize,
+            SettingsKeys.detailLevel,
+            SettingsKeys.routeLineWidth,
+            SettingsKeys.streetLineWidthBoost,
+            SettingsKeys.positionMarkerScale,
+            SettingsKeys.zoomLevel,
+            SettingsKeys.showBuildings,
+            SettingsKeys.showGreenSpace,
+            SettingsKeys.showPaths,
+            SettingsKeys.showTracks,
+            SettingsKeys.showMajorRoads,
+            SettingsKeys.showLocalStreets,
+            SettingsKeys.showServiceRoads,
+            SettingsKeys.showWater,
+            SettingsKeys.showRailways,
+            SettingsKeys.showOtherAreas
+        ]
+        let hasPersistedMapProfile = persistedMapProfileKeys.contains {
+            defaults.object(forKey: $0) != nil
+        }
         let shouldMigrateMapPlusNavigationProfile = !defaults.bool(
             forKey: SettingsKeys.mapPlusNavigationProfileMigrated
         )
-        if shouldMigrateMapPlusNavigationProfile {
+        if shouldMigrateMapPlusNavigationProfile && hasPersistedMapProfile {
             mapPlusNavigationMinPolygonSize = minPolygonSize
             mapPlusNavigationDetailLevel = detailLevel
             mapPlusNavigationRouteLineWidth = routeLineWidth
@@ -656,55 +696,55 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
-        } else {
+        } else if !shouldMigrateMapPlusNavigationProfile {
             mapPlusNavigationMinPolygonSize = defaults.double(
                 forKey: SettingsKeys.mapPlusNavigationMinPolygonSize
             )
             mapPlusNavigationDetailLevel = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationDetailLevel
-            ) as? Int ?? 2
+            ) as? Int ?? MapPlusNavigationDefaults.detailLevel
             mapPlusNavigationRouteLineWidth = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationRouteLineWidth
-            ) as? Double ?? 4
+            ) as? Double ?? MapPlusNavigationDefaults.routeLineWidth
             mapPlusNavigationStreetLineWidthBoost = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationStreetLineWidthBoost
-            ) as? Double ?? 0
+            ) as? Double ?? MapPlusNavigationDefaults.streetLineWidthBoost
             mapPlusNavigationPositionMarkerScale = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale
-            ) as? Double ?? 2
+            ) as? Double ?? MapPlusNavigationDefaults.positionMarkerScale
             mapPlusNavigationZoomLevel = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationZoomLevel
-            ) as? Int ?? 2
+            ) as? Int ?? MapPlusNavigationDefaults.zoomLevel
             mapPlusNavigationShowBuildings = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowBuildings
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showBuildings
             mapPlusNavigationShowGreenSpace = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowGreenSpace
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showGreenSpace
             mapPlusNavigationShowPaths = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowPaths
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showPaths
             mapPlusNavigationShowTracks = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowTracks
-            ) as? Bool ?? mapPlusNavigationShowPaths
+            ) as? Bool ?? MapPlusNavigationDefaults.showTracks
             mapPlusNavigationShowMajorRoads = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowMajorRoads
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showMajorRoads
             mapPlusNavigationShowLocalStreets = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowLocalStreets
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showLocalStreets
             mapPlusNavigationShowServiceRoads = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowServiceRoads
-            ) as? Bool ?? mapPlusNavigationShowLocalStreets
+            ) as? Bool ?? MapPlusNavigationDefaults.showServiceRoads
             mapPlusNavigationShowWater = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowWater
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showWater
             mapPlusNavigationShowRailways = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowRailways
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showRailways
             mapPlusNavigationShowOtherAreas = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
-            ) as? Bool ?? true
+            ) as? Bool ?? MapPlusNavigationDefaults.showOtherAreas
         }
         showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
         showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true

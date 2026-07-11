@@ -17,6 +17,19 @@ int main() {
   assert(clientSupportsIndependentProfiles(3));
   assert(!clientSupportsExtendedVisibility(2));
   assert(clientSupportsExtendedVisibility(3));
+  assert(MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_MAJOR_ROADS) !=
+         0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_LOCAL_STREETS) !=
+         0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_BUILDINGS) == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_SERVICE_ROADS) ==
+         0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_PATHS) == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_TRACKS) == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_RAILWAYS) == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_OTHER_AREAS) ==
+         0);
 
   const uint32_t allLegacyFeatures = VISIBILITY_LEGACY_FEATURE_MASK;
   assert(normalizedFeatureVisibilityMask(allLegacyFeatures) ==

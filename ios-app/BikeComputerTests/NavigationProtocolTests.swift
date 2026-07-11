@@ -2618,14 +2618,25 @@ struct NavigationProtocolTests {
     static func testBLEManagerPersistsNewMapSettings() {
         let defaults = UserDefaults.standard
         let keys = [
+            "mapSettings.minPolygonSize",
             "mapSettings.detailLevel",
+            "mapSettings.routeLineWidth",
+            "mapSettings.streetLineWidthBoost",
+            "mapSettings.positionMarkerScale",
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
             "mapSettings.showBuildings",
+            "mapSettings.showGreenSpace",
             "mapSettings.showPaths",
             "mapSettings.showTracks",
+            "mapSettings.showMajorRoads",
             "mapSettings.showLocalStreets",
             "mapSettings.showServiceRoads",
+            "mapSettings.showWater",
+            "mapSettings.showRailways",
+            "mapSettings.showOtherAreas",
+            "mapSettings.showNature",
+            "mapSettings.showMinorRoads",
             "mapPlusNavigationSettings.minPolygonSize",
             "mapPlusNavigationSettings.detailLevel",
             "mapPlusNavigationSettings.routeLineWidth",
@@ -2652,6 +2663,28 @@ struct NavigationProtocolTests {
 
         let freshManager = BLEManager()
         assertEqual(freshManager.defaultDeviceScreen, .mapPlusNavigation, "fresh installs default to Map + Navigation")
+        assertEqual(freshManager.mapPlusNavigationDetailLevel, 0,
+                    "fresh Map + Navigation profiles default to low detail")
+        assert(!freshManager.mapPlusNavigationShowBuildings,
+               "fresh Map + Navigation profiles hide buildings")
+        assert(freshManager.mapPlusNavigationShowGreenSpace,
+               "fresh Map + Navigation profiles keep green space visible")
+        assert(!freshManager.mapPlusNavigationShowPaths,
+               "fresh Map + Navigation profiles hide paths and footways")
+        assert(!freshManager.mapPlusNavigationShowTracks,
+               "fresh Map + Navigation profiles hide tracks")
+        assert(freshManager.mapPlusNavigationShowMajorRoads,
+               "fresh Map + Navigation profiles show major roads")
+        assert(freshManager.mapPlusNavigationShowLocalStreets,
+               "fresh Map + Navigation profiles show residential and local roads")
+        assert(!freshManager.mapPlusNavigationShowServiceRoads,
+               "fresh Map + Navigation profiles hide service roads")
+        assert(freshManager.mapPlusNavigationShowWater,
+               "fresh Map + Navigation profiles keep water visible")
+        assert(!freshManager.mapPlusNavigationShowRailways,
+               "fresh Map + Navigation profiles hide railways")
+        assert(!freshManager.mapPlusNavigationShowOtherAreas,
+               "fresh Map + Navigation profiles hide other areas")
 
         defaults.set(DeviceScreen.map.rawValue, forKey: "deviceSettings.defaultScreen")
         defaults.removeObject(forKey: "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1")
