@@ -260,20 +260,13 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     return true;
   }
   lockState();
-  const bool activationRunning = activationState_.snapshot().running;
+  const bool acceptsUploads = activationState_.acceptsUploads();
   unlockState();
-  if (activationRunning) {
+  if (!acceptsUploads) {
     sendError(client, 409, "activation_busy",
               "map files cannot change while activation is running");
     return true;
   }
-  if (relativePath == "manifest.json" &&
-      !installer_.pruneStagingSessions(sessionId)) {
-    sendError(client, 500, "staging_cleanup",
-              "could not remove abandoned map staging sessions");
-    return true;
-  }
-
   const std::string destination =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   if (!mkdirs(dirnameOf(destination))) {
@@ -317,6 +310,13 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
   output.close();
   if (!output.good()) {
     sendError(client, 500, "write", "could not finish staged file");
+    return true;
+  }
+  if (relativePath == "manifest.json" &&
+      !installer_.pruneStagingSessions(sessionId)) {
+    ::unlink(destination.c_str());
+    sendError(client, 500, "staging_cleanup",
+              "could not remove abandoned map staging sessions");
     return true;
   }
 

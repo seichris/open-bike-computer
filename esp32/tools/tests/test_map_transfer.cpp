@@ -74,8 +74,10 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(!initial.running);
   assert(initial.sequence == 0);
   assert(initial.status == "idle");
+  assert(state.acceptsUploads());
 
   assert(state.begin("session-1") == ActivationBeginResult::Started);
+  assert(!state.acceptsUploads());
   auto first = state.snapshot();
   assert(first.running);
   assert(first.sequence == 1);
@@ -89,6 +91,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
                "staged map file sha256 mismatch: VECTMAP/map-1/123.fmb");
   auto failed = state.snapshot();
   assert(!failed.running);
+  assert(state.acceptsUploads());
   assert(failed.status == "failed");
   assert(failed.mapId == "map-1");
   assert(failed.errorCode == "file_sha256");
@@ -267,20 +270,39 @@ static void testPrunesAbandonedStagingSessions() {
   assert(!exists(staging + "/abandoned"));
 }
 
-static void testRecoversInterruptedActiveMetadataRename() {
+static void testPrunesPreJournalActivationCopies() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string abandoned =
+      root + "/VECTMAP/.activation/session-abandoned/VECTMAP/map-new";
+  assert(::system((std::string("mkdir -p ") + abandoned).c_str()) == 0);
+  writeFile(abandoned + "/partial.fmb", "partial");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(!exists(root + "/VECTMAP/.activation"));
+}
+
+static void testRecoversInterruptedBackupPhase() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
-  assert(::system((std::string("mkdir -p ") + vectmap).c_str()) == 0);
-  writeFile(vectmap + "/active-map.json.bak",
+  const std::string rollback = vectmap + "/.rollback/session-backup";
+  assert(::system((std::string("mkdir -p ") + vectmap + "/old-two").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + rollback + "/old-one").c_str()) == 0);
+  writeFile(vectmap + "/old-two/two.fmb", "two");
+  writeFile(vectmap + "/active-map.json",
             "{\"mapId\":\"map-old\",\"root\":\"/VECTMAP\"}\n");
+  writeFile(rollback + "/old-one/one.fmb", "one");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-backup\",\"mapId\":\"map-new\","
+            "\"phase\":\"backing_up\"}\n");
 
-  std::string activeMapId;
-  auto active = installer.readActiveMapId(activeMapId);
-  assert(active.ok);
-  assert(activeMapId == "map-old");
-  assert(exists(vectmap + "/active-map.json"));
-  assert(!exists(vectmap + "/active-map.json.bak"));
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(readFile(vectmap + "/old-one/one.fmb") == "one");
+  assert(readFile(vectmap + "/old-two/two.fmb") == "two");
+  assert(!exists(rollback));
 }
 
 static void testRollsBackInterruptedPublishedMapTransaction() {
@@ -289,11 +311,15 @@ static void testRollsBackInterruptedPublishedMapTransaction() {
   const std::string vectmap = root + "/VECTMAP";
   const std::string rollback = vectmap + "/.rollback/session-crash";
   assert(::system((std::string("mkdir -p ") + vectmap + "/new-block").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + vectmap + "/old-block").c_str()) == 0);
   assert(::system((std::string("mkdir -p ") + rollback + "/old-block").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + rollback + "/old-two").c_str()) == 0);
   writeFile(vectmap + "/new-block/new.fmb", "new");
+  writeFile(vectmap + "/old-block/old.fmb", "partial");
   writeFile(vectmap + "/active-map.json",
             "{\"mapId\":\"map-new\",\"root\":\"/VECTMAP\"}\n");
   writeFile(rollback + "/old-block/old.fmb", "old");
+  writeFile(rollback + "/old-two/two.fmb", "two");
   writeFile(rollback + "/active-map.json",
             "{\"mapId\":\"map-old\",\"root\":\"/VECTMAP\"}\n");
   writeFile(vectmap + "/.activation-transaction.json",
@@ -305,6 +331,7 @@ static void testRollsBackInterruptedPublishedMapTransaction() {
   assert(recovered.code == "recovered_rollback");
   assert(!exists(vectmap + "/new-block"));
   assert(readFile(vectmap + "/old-block/old.fmb") == "old");
+  assert(readFile(vectmap + "/old-two/two.fmb") == "two");
   std::string activeMapId;
   assert(installer.readActiveMapId(activeMapId).ok);
   assert(activeMapId == "map-old");
@@ -369,7 +396,8 @@ int main() {
   testActivationReplacesOldPublishedBlocks();
   testActivationRestoresOldMapWhenMetadataWriteFails();
   testPrunesAbandonedStagingSessions();
-  testRecoversInterruptedActiveMetadataRename();
+  testPrunesPreJournalActivationCopies();
+  testRecoversInterruptedBackupPhase();
   testRollsBackInterruptedPublishedMapTransaction();
   testCompletesCommittedMapTransactionRecovery();
   testRejectsChecksumMismatch();

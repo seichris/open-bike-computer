@@ -48,6 +48,7 @@ public:
   void finish(const std::string &status, const std::string &mapId,
               const std::string &errorCode,
               const std::string &errorMessage);
+  bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
 

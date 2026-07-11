@@ -352,6 +352,8 @@ void MapActivationState::finish(const std::string &status,
   state_.errorMessage = errorMessage;
 }
 
+bool MapActivationState::acceptsUploads() const { return !state_.running; }
+
 MapActivationSnapshot MapActivationState::snapshot() const { return state_; }
 
 std::string MapActivationState::json(bool compact) const {
@@ -490,18 +492,29 @@ InstallStatus MapTransferInstaller::activateStagedMap(
            "\",\"mapId\":\"" + manifest.mapId + "\",\"phase\":\"" +
            phase + "\"}\n";
   };
+  const auto cleanupRolledBack = [&]() {
+    const bool cleanupComplete = removeTree(rollbackRoot) &&
+                                 removeTree(activationRoot) &&
+                                 removeTree(activePath + ".bak") &&
+                                 removeTree(activePath + ".tmp") &&
+                                 removeTree(transactionPath + ".bak") &&
+                                 removeTree(transactionPath + ".tmp");
+    return cleanupComplete && removeTree(transactionPath);
+  };
+  const auto finalizeRollback = [&]() {
+    if (!restorePublishedMap(rollbackRoot))
+      return false;
+    if (!writeTextFileAtomic(transactionPath, transactionJson("rolled_back")))
+      return false;
+    return cleanupRolledBack();
+  };
   const auto rollbackPublished = [&]() {
     const bool cleared = clearPublishedMap();
     const bool metadataRemoved =
         ::unlink(activePath.c_str()) == 0 || errno == ENOENT;
-    const bool restored = restorePublishedMap(rollbackRoot);
-    if (cleared && metadataRemoved && restored) {
-      removeTree(activePath + ".bak");
-      removeTree(activePath + ".tmp");
-      removeTree(transactionPath);
-      return true;
-    }
-    return false;
+    if (!cleared || !metadataRemoved)
+      return false;
+    return finalizeRollback();
   };
 
   if (!writeTextFileAtomic(transactionPath, transactionJson("backing_up"))) {
@@ -509,15 +522,11 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("transaction", "could not start map activation transaction");
   }
   if (!backupPublishedMap(rollbackRoot)) {
-    if (restorePublishedMap(rollbackRoot))
-      removeTree(transactionPath);
-    removeTree(activationRoot);
+    finalizeRollback();
     return fail("rollback", "could not backup current map before activation");
   }
   if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
-    if (restorePublishedMap(rollbackRoot))
-      removeTree(transactionPath);
-    removeTree(activationRoot);
+    finalizeRollback();
     return fail("transaction", "could not advance map activation transaction");
   }
   if (!clearPublishedMap()) {
@@ -544,13 +553,17 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("transaction", "could not commit map activation transaction");
   }
 
-  removeTree(rollbackRoot);
-  removeTree(activationRoot);
-  removeTree(stagingRoot(sessionId));
-  removeTree(activePath + ".bak");
-  removeTree(activePath + ".tmp");
-  removeTree(transactionPath);
-  return {true, "ok", ""};
+  const bool cleanupComplete = removeTree(rollbackRoot) &&
+                               removeTree(activationRoot) &&
+                               removeTree(stagingRoot(sessionId)) &&
+                               removeTree(activePath + ".bak") &&
+                               removeTree(activePath + ".tmp") &&
+                               removeTree(transactionPath + ".bak") &&
+                               removeTree(transactionPath + ".tmp");
+  if (cleanupComplete && removeTree(transactionPath))
+    return {true, "ok", ""};
+  return {true, "cleanup_pending",
+          "map installed; cleanup will retry after restart"};
 }
 
 InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
@@ -561,6 +574,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     const std::string backupPath = transactionPath + ".bak";
     if (!fileExists(backupPath)) {
       removeTree(transactionPath + ".tmp");
+      removeTree(joinPath(storageRoot_, "VECTMAP/.activation"));
       return {true, "ok", ""};
     }
     if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
@@ -575,7 +589,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string phase = jsonStringValue(transaction, "phase");
   if (!safeId(sessionId) || !safeId(mapId) ||
       (phase != "backing_up" && phase != "publishing" &&
-       phase != "committed")) {
+       phase != "rolled_back" && phase != "committed")) {
     return fail("transaction_invalid", "map activation transaction is invalid");
   }
 
@@ -586,13 +600,34 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
 
   if (phase == "committed") {
-    removeTree(rollbackRoot);
-    removeTree(activationRoot);
-    removeTree(stagingRoot(sessionId));
-    removeTree(activePath + ".bak");
-    removeTree(activePath + ".tmp");
-    removeTree(transactionPath);
+    const bool cleanupComplete = removeTree(rollbackRoot) &&
+                                 removeTree(activationRoot) &&
+                                 removeTree(stagingRoot(sessionId)) &&
+                                 removeTree(activePath + ".bak") &&
+                                 removeTree(activePath + ".tmp") &&
+                                 removeTree(transactionPath + ".bak") &&
+                                 removeTree(transactionPath + ".tmp");
+    if (!cleanupComplete || !removeTree(transactionPath))
+      return fail("transaction_cleanup",
+                  "could not finish committed map cleanup");
     return {true, "recovered_commit", "completed interrupted map commit"};
+  }
+
+  const auto cleanupRolledBack = [&]() {
+    const bool cleanupComplete = removeTree(rollbackRoot) &&
+                                 removeTree(activationRoot) &&
+                                 removeTree(activePath + ".bak") &&
+                                 removeTree(activePath + ".tmp") &&
+                                 removeTree(transactionPath + ".bak") &&
+                                 removeTree(transactionPath + ".tmp");
+    return cleanupComplete && removeTree(transactionPath);
+  };
+  if (phase == "rolled_back") {
+    if (!cleanupRolledBack())
+      return fail("transaction_cleanup",
+                  "could not finish rolled-back map cleanup");
+    return {true, "recovered_rollback",
+            "completed interrupted map rollback"};
   }
 
   if (phase == "publishing") {
@@ -603,25 +638,24 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   }
   if (!restorePublishedMap(rollbackRoot))
     return fail("transaction_recovery", "could not restore interrupted map");
-
-  removeTree(activationRoot);
-  removeTree(activePath + ".tmp");
-  removeTree(activePath + ".bak");
-  removeTree(transactionPath);
+  const std::string rolledBack = std::string("{\"sessionId\":\"") + sessionId +
+                                 "\",\"mapId\":\"" + mapId +
+                                 "\",\"phase\":\"rolled_back\"}\n";
+  if (!writeTextFileAtomic(transactionPath, rolledBack))
+    return fail("transaction_recovery",
+                "could not record completed map rollback");
+  if (!cleanupRolledBack())
+    return fail("transaction_cleanup",
+                "could not finish rolled-back map cleanup");
   return {true, "recovered_rollback", "rolled back interrupted map activation"};
 }
 
 InstallStatus
 MapTransferInstaller::readActiveMapId(std::string &mapId) const {
   const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
-  const std::string backupPath = activePath + ".bak";
   std::string text;
-  if (!readTextFile(activePath, text, 1024)) {
-    if (!fileExists(backupPath) || ::rename(backupPath.c_str(), activePath.c_str()) != 0 ||
-        !readTextFile(activePath, text, 1024)) {
-      return fail("active_missing", "active map metadata is missing");
-    }
-  }
+  if (!readTextFile(activePath, text, 1024))
+    return fail("active_missing", "active map metadata is missing");
   mapId = jsonStringValue(text, "mapId");
   if (!safeId(mapId))
     return fail("active_invalid", "active map metadata is invalid");
@@ -831,13 +865,12 @@ bool MapTransferInstaller::restorePublishedMap(
     std::string name = entry->d_name;
     if (name == "." || name == "..")
       continue;
-    if (!movePath(joinPath(backupRoot, name), joinPath(vectmapRoot, name))) {
+    if (!copyTree(joinPath(backupRoot, name), joinPath(vectmapRoot, name))) {
       ::closedir(dir);
       return false;
     }
   }
   ::closedir(dir);
-  removeTree(backupRoot);
   return true;
 }
 
