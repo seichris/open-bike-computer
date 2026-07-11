@@ -120,6 +120,7 @@ jobs:
             -Ilib/esp_codec_dev/src \
             tools/tests/test_codec_open.c \
             lib/esp_codec_dev/src/esp_codec_dev.c \
+            -lm \
             -o /tmp/test_codec_open
           /tmp/test_codec_open
           cc -std=c11 -Wall -Wextra \

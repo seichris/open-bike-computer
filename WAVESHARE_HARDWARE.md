@@ -213,7 +213,9 @@ Authenticated playback uses:
 
 `VolumePercent` is `0...100`. A legacy frame without it uses `70%`. The command
 uses settings characteristic `2A73`, with navigation characteristic `2A6E` as
-a compatibility fallback.
+a compatibility fallback. The production curve preserves the existing level
+through `70%`, then ramps to `+20 dB` ES8311 DAC gain at `100%`. Playback above
+the DAC's unity-gain point uses a soft limiter to prevent hard clipping.
 
 The iOS app stores the selected sound and volume locally. The selector and
 volume slider are under **Hardware Customization > Device Sounds**. Pressing

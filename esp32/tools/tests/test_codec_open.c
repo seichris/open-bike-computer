@@ -1,7 +1,9 @@
 #include "audio_codec_sw_vol.h"
 #include "esp_codec_dev.h"
+#include "../../lib/speaker/speaker_gain.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -17,6 +19,7 @@ typedef enum {
 static failure_point_t failure_point;
 static int codec_disable_count;
 static int data_disable_count;
+static float last_volume_db;
 
 static bool codec_is_open(const audio_codec_if_t *codec)
 {
@@ -44,7 +47,7 @@ static int codec_set_format(const audio_codec_if_t *codec, esp_codec_dev_sample_
 static int codec_set_volume(const audio_codec_if_t *codec, float db)
 {
     (void) codec;
-    (void) db;
+    last_volume_db = db;
     return ESP_CODEC_DEV_OK;
 }
 
@@ -149,6 +152,60 @@ static void verify_failed_open_can_retry(failure_point_t point)
     esp_codec_dev_delete(device);
 }
 
+static void verify_custom_volume_curve(void)
+{
+    esp_codec_dev_cfg_t config = {
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+        .codec_if = &codec_if,
+        .data_if = &data_if,
+    };
+    esp_codec_dev_handle_t device = esp_codec_dev_new(&config);
+    assert(device != NULL);
+
+    const float hardware_gain_db = 20.0f * log10f(3.3f / 5.0f);
+    const float max_route_db = speaker_max_route_gain_db(hardware_gain_db);
+    esp_codec_dev_vol_map_t volume_map[SPEAKER_VOLUME_CURVE_POINT_COUNT];
+    speaker_build_volume_map(volume_map, hardware_gain_db);
+    esp_codec_dev_vol_curve_t curve = {
+        .vol_map = volume_map,
+        .count = 3,
+    };
+    assert(esp_codec_dev_set_vol_curve(device, &curve) == ESP_CODEC_DEV_OK);
+
+    assert(esp_codec_dev_set_out_vol(device, 30) == ESP_CODEC_DEV_OK);
+    assert(fabsf(last_volume_db - (-35.0f)) < 0.001f);
+    assert(esp_codec_dev_set_out_vol(device, 70) == ESP_CODEC_DEV_OK);
+    assert(fabsf(last_volume_db - (-15.0f)) < 0.001f);
+    assert(esp_codec_dev_set_out_vol(device, 85) == ESP_CODEC_DEV_OK);
+    assert(fabsf(last_volume_db - ((-15.0f + max_route_db) / 2.0f)) <
+           0.001f);
+    assert(esp_codec_dev_set_out_vol(device, 100) == ESP_CODEC_DEV_OK);
+    assert(fabsf(last_volume_db - max_route_db) < 0.001f);
+
+    esp_codec_dev_delete(device);
+}
+
+static void verify_high_gain_limiter(void)
+{
+    speaker_limiter_t limiter = {0};
+    speaker_configure_limiter(&limiter, 20.0f);
+    assert(limiter.enabled);
+    assert(limiter.limit == 3276);
+    assert(speaker_limit_sample(1000, &limiter) == 1000);
+    assert(speaker_limit_sample(-1000, &limiter) == -1000);
+
+    const int16_t limited_positive = speaker_limit_sample(INT16_MAX, &limiter);
+    const int16_t limited_negative = speaker_limit_sample(INT16_MIN, &limiter);
+    assert(limited_positive > 0 && limited_positive <= 3276);
+    assert(limited_negative < 0 && limited_negative >= -3276);
+    assert((float) limited_positive * 10.0f <= INT16_MAX);
+    assert((float) -limited_negative * 10.0f <= INT16_MAX);
+
+    speaker_configure_limiter(&limiter, 0.0f);
+    assert(!limiter.enabled);
+    assert(speaker_limit_sample(INT16_MAX, &limiter) == INT16_MAX);
+}
+
 int main(void)
 {
     const failure_point_t points[] = {
@@ -160,5 +217,7 @@ int main(void)
     for (size_t i = 0; i < sizeof(points) / sizeof(points[0]); i++) {
         verify_failed_open_can_retry(points[i]);
     }
+    verify_custom_volume_curve();
+    verify_high_gain_limiter();
     return 0;
 }

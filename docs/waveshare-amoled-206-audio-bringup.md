@@ -96,7 +96,10 @@ Confirmed tested volumes:
 - `60%`: audition sampler confirmed.
 - `70%`: current production default; each app request can select `0...100%`.
 
-Going above `100%` is not supported through the normal API and should not be used without a deliberate gain-stage review.
+The production curve keeps `0...70%` at the previously tested levels and ramps
+the upper range so `100%` targets `+20 dB` in the ES8311 DAC volume register.
+A soft limiter protects positive-gain playback from hard clipping. Values above
+`100%` remain unsupported.
 
 ## Current Temporary Test Shape
 

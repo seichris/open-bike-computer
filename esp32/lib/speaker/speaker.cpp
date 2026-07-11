@@ -2,6 +2,7 @@
 
 #if defined(WAVESHARE_AMOLED_206)
 
+#include "speaker_gain.h"
 #include "../waveshare_board/axp2101.hpp"
 #include "../waveshare_board/i2c_bus.hpp"
 
@@ -21,6 +22,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <math.h>
+#include <string.h>
 
 namespace waveshare_board::speaker {
 
@@ -66,6 +68,9 @@ SemaphoreHandle_t powerButtonConfigMutex = nullptr;
 bool initialized = false;
 bool powerButtonHonkAvailable = false;
 bool powerButtonMonitoringConfigured = false;
+float codecHardwareGainDb = 0.0f;
+float currentDacGainDb = 0.0f;
+speaker_limiter_t playbackLimiter{};
 PowerButtonHonkConfig powerButtonHonkConfig{
     false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
 uint32_t lastPowerButtonPollMs = 0;
@@ -225,6 +230,9 @@ void configureWireControl() {
 
 void releaseCodecResources() {
   initialized = false;
+  codecHardwareGainDb = 0.0f;
+  currentDacGainDb = 0.0f;
+  playbackLimiter = {};
 
   if (speakerDevice != nullptr) {
     esp_codec_dev_delete(speakerDevice);
@@ -318,6 +326,7 @@ bool initializeCodec() {
   esp_codec_dev_hw_gain_t hardwareGain{};
   hardwareGain.pa_voltage = 5.0f;
   hardwareGain.codec_dac_voltage = 3.3f;
+  codecHardwareGainDb = esp_codec_dev_col_calc_hw_gain(&hardwareGain);
 
   es8311_codec_cfg_t codecConfig{};
   codecConfig.ctrl_if = &wireControl.base;
@@ -346,6 +355,16 @@ bool initializeCodec() {
     return failInitialization("Speaker: failed to create codec device");
   }
 
+  esp_codec_dev_vol_map_t volumeMap[SPEAKER_VOLUME_CURVE_POINT_COUNT]{};
+  speaker_build_volume_map(volumeMap, codecHardwareGainDb);
+  esp_codec_dev_vol_curve_t volumeCurve{};
+  volumeCurve.vol_map = volumeMap;
+  volumeCurve.count = sizeof(volumeMap) / sizeof(volumeMap[0]);
+  if (esp_codec_dev_set_vol_curve(speakerDevice, &volumeCurve) !=
+      ESP_CODEC_DEV_OK) {
+    return failInitialization("Speaker: failed to configure volume curve");
+  }
+
   esp_codec_dev_sample_info_t sampleInfo{};
   sampleInfo.bits_per_sample = 16;
   sampleInfo.channel = CHANNELS;
@@ -359,15 +378,47 @@ bool initializeCodec() {
   }
 
   initialized = true;
-  Serial.printf("Speaker: ES8311 ready at %u%% default volume\n",
-                DEFAULT_VOLUME_PERCENT);
+  currentDacGainDb =
+      speaker_dac_gain_db(DEFAULT_VOLUME_PERCENT, codecHardwareGainDb);
+  speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
+  Serial.printf(
+      "Speaker: ES8311 ready at %u%% default volume (100%% = %.0f dB DAC)\n",
+      DEFAULT_VOLUME_PERCENT, SPEAKER_MAX_DAC_GAIN_DB);
   return true;
 }
 
 bool writeAudio(const void *data, size_t length) {
-  return speakerDevice != nullptr && data != nullptr && length > 0 &&
-         esp_codec_dev_write(speakerDevice, const_cast<void *>(data), length) ==
-             ESP_CODEC_DEV_OK;
+  if (speakerDevice == nullptr || data == nullptr || length == 0) {
+    return false;
+  }
+  if (!playbackLimiter.enabled) {
+    return esp_codec_dev_write(speakerDevice, const_cast<void *>(data),
+                               length) == ESP_CODEC_DEV_OK;
+  }
+  if (length % sizeof(int16_t) != 0) {
+    return false;
+  }
+
+  const uint8_t *input = static_cast<const uint8_t *>(data);
+  size_t remainingSamples = length / sizeof(int16_t);
+  int16_t limitedSamples[256];
+  while (remainingSamples > 0) {
+    const size_t sampleCount =
+        remainingSamples > 256 ? 256 : remainingSamples;
+    for (size_t index = 0; index < sampleCount; index++) {
+      int16_t sample = 0;
+      memcpy(&sample, input + index * sizeof(sample), sizeof(sample));
+      limitedSamples[index] = speaker_limit_sample(sample, &playbackLimiter);
+    }
+    if (esp_codec_dev_write(speakerDevice, limitedSamples,
+                            sampleCount * sizeof(int16_t)) !=
+        ESP_CODEC_DEV_OK) {
+      return false;
+    }
+    input += sampleCount * sizeof(int16_t);
+    remainingSamples -= sampleCount;
+  }
+  return true;
 }
 
 bool writeSilence(uint32_t milliseconds) {
@@ -468,6 +519,9 @@ void speakerTask(void *) {
       Serial.printf("Speaker: failed to set volume to %u%%\n",
                     request.volumePercent);
     } else {
+      currentDacGainDb =
+          speaker_dac_gain_db(request.volumePercent, codecHardwareGainDb);
+      speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
       Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
                     request.volumePercent);
       if (!playNow(sound)) {

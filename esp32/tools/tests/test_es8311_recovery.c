@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../../lib/esp_codec_dev/src/device/es8311/es8311.c"
+#include "../../lib/speaker/speaker_gain.h"
 
 static uint8_t registers[256];
 static int failed_read_register = -1;
@@ -116,6 +117,16 @@ int main(void)
     failed_write_register = -1;
     assert(codec->enable(codec, true) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == (audio_codec_es8311_t *) codec);
+
+    esp_codec_dev_hw_gain_t hardware_gain = {
+        .pa_voltage = 5.0f,
+        .codec_dac_voltage = 3.3f,
+    };
+    const float target_route_db = speaker_max_route_gain_db(
+        esp_codec_dev_col_calc_hw_gain(&hardware_gain));
+    assert(codec->set_vol(codec, target_route_db) == ESP_CODEC_DEV_OK);
+    assert(registers[ES8311_DAC_REG32] == 0xE7);
+
     assert(codec->enable(codec, false) == ESP_CODEC_DEV_OK);
     assert(paired_8311.dac == NULL);
 
