@@ -2686,6 +2686,34 @@ struct NavigationProtocolTests {
         assert(!freshManager.mapPlusNavigationShowOtherAreas,
                "fresh Map + Navigation profiles hide other areas")
 
+        freshManager.isConnected = true
+        freshManager.isNavigationReady = true
+        var freshProfilePackets: [Data] = []
+        freshManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { freshProfilePackets.append($0) }
+        ))
+        let independentCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
+                  DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
+        assert(freshManager.handleDeviceCapabilitiesNotification(independentCapabilities),
+               "fresh profiles negotiate independent map settings")
+        let freshVisibilityPacket = freshProfilePackets.first {
+            $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
+        }
+        let freshDetailPacket = freshProfilePackets.first {
+            $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID
+        }
+        assert(freshVisibilityPacket != nil,
+               "fresh Map + Navigation visibility is sent after capability negotiation")
+        assert(freshDetailPacket != nil,
+               "fresh Map + Navigation detail is sent after capability negotiation")
+        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x103A,
+                    "fresh Map + Navigation sends only green space, major roads, local roads, and water")
+        assertEqual(readInt32LE(freshDetailPacket!, offset: 5), 0,
+                    "fresh Map + Navigation sends low detail")
+
         defaults.set(DeviceScreen.map.rawValue, forKey: "deviceSettings.defaultScreen")
         defaults.removeObject(forKey: "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1")
         let migratedManager = BLEManager()

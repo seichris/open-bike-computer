@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
+from map_format import write_fmb
 from shapely import box
-import json, yaml, struct
+import json, yaml
 import os, sys
 
 if len( sys.argv ) < 2: 
@@ -118,55 +119,14 @@ for init_x in range(area_min_x, area_max_x, 4096):
                 file.write('\n')
 
         # BINARY VERSION (.fmb)
-        with open( f"{file_name}.fmb", "wb") as file:
-            # Header: Magic 'FMB' + Version 2 (includes Type ID)
-            file.write(b'FMB\x02')
-            
-            # Polygons
-            file.write(struct.pack('<H', len(clipped_polygons)))
-            for feat in clipped_polygons:
-                color_int = int(feat['color'], 16) if isinstance(feat['color'], str) else int(feat['color'])
-                maxzoom_int = int(feat['maxzoom']) if feat['maxzoom'] != '' and feat['maxzoom'] is not None else 15
-                
-                file.write(struct.pack('<H', color_int))
-                file.write(struct.pack('<B', maxzoom_int))
-                file.write(struct.pack('<B', get_type_id(feat['type']))) # Type ID (u8)
-                # BBox
-                file.write(struct.pack('<hhhh', 
-                    int(round(feat['bbox'][0] - min_x)), 
-                    int(round(feat['bbox'][1] - min_y)),
-                    int(round(feat['bbox'][2] - min_x)),
-                    int(round(feat['bbox'][3] - min_y))))
-                
-                coords = list(feat['geom'].exterior.coords)
-                file.write(struct.pack('<H', len(coords)))
-                for coord in coords:
-                    file.write(struct.pack('<hh', int(round(coord[0] - min_x)), int(round(coord[1] - min_y))))
-            
-            # Polylines
-            file.write(struct.pack('<H', len(clipped_lines)))
-            for feat in clipped_lines:
-                color_int = int(feat['color'], 16) if isinstance(feat['color'], str) else int(feat['color'])
-                width_int = int(feat['width']) if feat['width'] is not None else 1
-                maxzoom_int = int(feat['maxzoom']) if feat['maxzoom'] != '' and feat['maxzoom'] is not None else 15
-
-                file.write(struct.pack('<H', color_int))
-                file.write(struct.pack('<B', width_int))
-                file.write(struct.pack('<B', maxzoom_int))
-                file.write(struct.pack('<B', get_type_id(feat['type']))) # Type ID (u8)
-                # BBox
-                file.write(struct.pack('<hhhh', 
-                    int(round(feat['bbox'][0] - min_x)), 
-                    int(round(feat['bbox'][1] - min_y)),
-                    int(round(feat['bbox'][2] - min_x)),
-                    int(round(feat['bbox'][3] - min_y))))
-                
-                coords = list(feat['geom'].coords)
-                file.write(struct.pack('<H', len(coords)))
-                for coord in coords:
-                    file.write(struct.pack('<hh', int(round(coord[0] - min_x)), int(round(coord[1] - min_y))))
+        write_fmb(
+            f"{file_name}.fmb",
+            clipped_polygons,
+            clipped_lines,
+            min_x,
+            min_y,
+        )
 
         done += 1
         print("  Step 5/5 Building map. {:.0%}  ".format(done/total), end='\r')
-
 
