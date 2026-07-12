@@ -392,6 +392,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobPersistence()
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
+        testOfflineMapDownloadResponseValidation()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
@@ -703,6 +704,16 @@ struct NavigationProtocolTests {
             ["job-resume", "job-other"],
             "handled server jobs remain excluded from automatic redownload"
         )
+        let ignoredBefore = Date(timeIntervalSince1970: 1_750_000_000)
+        OfflineMapRecoveryHistory.ignoreExistingServerJobs(
+            defaults: defaults,
+            now: ignoredBefore
+        )
+        assertEqual(
+            OfflineMapRecoveryHistory.ignoredBefore(defaults: defaults),
+            ignoredBefore,
+            "forgetting discovery persists a durable server-job cutoff"
+        )
     }
 
     static func testOfflineMapInstallationIdentity() {
@@ -803,6 +814,74 @@ struct NavigationProtocolTests {
             excludedJobIds: ["job-regenerated", "job-running", "job-cached-old"]
         )
         assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
+
+        let ignoredExisting = OfflineMapJobRecoverySelector.select(
+            jobs: jobs,
+            clientInstallationId: "installation-mine",
+            ignoredBefore: ISO8601DateFormatter().date(from: "2026-07-12T04:30:00Z")
+        )
+        assertEqual(
+            ignoredExisting,
+            nil,
+            "durable forget excludes every recoverable job that already existed"
+        )
+        let futureFractionalJob = offlineMapJob(
+            jobId: "job-created-after-forget",
+            status: "ready",
+            mapId: "map-created-after-forget",
+            createdAt: "2026-07-12T04:30:00.123456Z",
+            clientInstallationId: "installation-mine"
+        )
+        let selectedAfterForget = OfflineMapJobRecoverySelector.select(
+            jobs: [futureFractionalJob].compactMap { $0 },
+            clientInstallationId: "installation-mine",
+            ignoredBefore: ISO8601DateFormatter().date(from: "2026-07-12T04:00:00Z")
+        )
+        assertEqual(
+            selectedAfterForget?.jobId,
+            "job-created-after-forget",
+            "durable forget still permits later server jobs with production timestamps"
+        )
+    }
+
+    static func testOfflineMapDownloadResponseValidation() {
+        let success = HTTPURLResponse(
+            url: URL(string: "https://maps.example/download")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        do {
+            try OfflineMapDownloadResponseValidator.validate(
+                response: success,
+                errorBody: "unused"
+            )
+        } catch {
+            assert(false, "successful map download response should validate")
+        }
+
+        let forbidden = HTTPURLResponse(
+            url: URL(string: "https://maps.example/download")!,
+            statusCode: 403,
+            httpVersion: nil,
+            headerFields: nil
+        )
+        do {
+            try OfflineMapDownloadResponseValidator.validate(
+                response: forbidden,
+                errorBody: "download URL expired"
+            )
+            assert(false, "HTTP error body must not be cached as a map pack")
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(let status, let body) = error else {
+                assert(false, "HTTP error should retain its server status")
+                return
+            }
+            assertEqual(status, 403, "download validation preserves HTTP status")
+            assertEqual(body, "download URL expired", "download validation preserves error body")
+        } catch {
+            assert(false, "HTTP error should use OfflineMapPlatformError")
+        }
     }
 
     static func testOfflineMapProgressPresentation() {
@@ -994,13 +1073,14 @@ struct NavigationProtocolTests {
             jobId: String,
             mapId: String,
             installationId: String? = nil,
-            installOnDevice: Bool? = nil
+            installOnDevice: Bool? = nil,
+            createdAt: String = "2026-07-12T04:00:00Z"
         ) -> Data {
             var payload: [String: Any] = [
                 "jobId": jobId,
                 "status": "ready",
                 "mapId": mapId,
-                "createdAt": "2026-07-12T04:00:00Z",
+                "createdAt": createdAt,
             ]
             if let installationId { payload["clientInstallationId"] = installationId }
             if let installOnDevice { payload["installOnDevice"] = installOnDevice }
@@ -1097,6 +1177,62 @@ struct NavigationProtocolTests {
         }
         persistedManager.forgetPendingMapJob()
 
+        let managedSuite = "offline-map-managed-token-route-\(UUID().uuidString)"
+        let managedDefaults = UserDefaults(suiteName: managedSuite)!
+        defer { managedDefaults.removePersistentDomain(forName: managedSuite) }
+        let managedCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-managed-token-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: managedCache) }
+        OfflineMapJobPersistence.save(
+            jobId: "job-managed-token",
+            serverURLString: OfflineMapServiceConfig.productionServerURLString,
+            apiTokenString: "stale-bundled-token",
+            defaults: managedDefaults
+        )
+        let managedManager = OfflineMapManager(
+            defaults: managedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: managedCache,
+            packDownload: { _, onProgress, _ in
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-managed-token").write(to: url)
+                return url
+            }
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-managed-token" {
+                return (200, jobData(jobId: "job-managed-token", mapId: "map-managed-token"))
+            }
+            if request.url?.path == "/v1/map-packs/map-managed-token/download-url" {
+                return (200, downloadURLData(mapId: "map-managed-token"))
+            }
+            return (404, Data())
+        }
+        managedManager.resumePendingMapJobIfNeeded()
+        let managedCompleted = await waitForMapTaskCompletion(managedManager)
+        assert(managedCompleted, "managed-server recovery should complete after token rotation")
+        let expectedManagedAuthorization = managedManager.apiToken.isEmpty ?
+            nil : "Bearer \(managedManager.apiToken)"
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.url?.host == URL(string: OfflineMapServiceConfig.productionServerURLString)?.host &&
+                    $0.value(forHTTPHeaderField: "Authorization") == expectedManagedAuthorization
+            },
+            "managed-server recovery uses the updated bundled endpoint and credential"
+        )
+        assert(
+            OfflineMapTestURLProtocol.requests().allSatisfy {
+                $0.value(forHTTPHeaderField: "Authorization") != "Bearer stale-bundled-token"
+            },
+            "managed-server recovery never reuses a stale bundled credential"
+        )
+        if let url = managedManager.downloadedPackURL {
+            managedManager.deleteCachedPack(at: url)
+        }
+
         let discoverySuite = "offline-map-discovery-route-\(UUID().uuidString)"
         let discoveryDefaults = UserDefaults(suiteName: discoverySuite)!
         defer { discoveryDefaults.removePersistentDomain(forName: discoverySuite) }
@@ -1157,6 +1293,83 @@ struct NavigationProtocolTests {
             discoveryManager.deleteCachedPack(at: url)
         }
 
+        let downloadRetrySuite = "offline-map-download-retry-\(UUID().uuidString)"
+        let downloadRetryDefaults = UserDefaults(suiteName: downloadRetrySuite)!
+        defer { downloadRetryDefaults.removePersistentDomain(forName: downloadRetrySuite) }
+        downloadRetryDefaults.set("https://download-retry.example", forKey: "offlineMap.serverURL")
+        downloadRetryDefaults.set(
+            ["map-download-retry.zip": "Shanghai Riverside"],
+            forKey: "offlineMap.packDisplayNames"
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-download-retry",
+            serverURLString: "https://download-retry.example",
+            defaults: downloadRetryDefaults
+        )
+        let downloadRetryCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-download-retry-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: downloadRetryCache) }
+        var downloadURLIssueCount = 0
+        var packDownloadAttemptCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-download-retry" {
+                return (200, jobData(jobId: "job-download-retry", mapId: "map-download-retry"))
+            }
+            if request.url?.path == "/v1/map-packs/map-download-retry/download-url" {
+                downloadURLIssueCount += 1
+                return (
+                    200,
+                    try! JSONSerialization.data(withJSONObject: [
+                        "mapId": "map-download-retry",
+                        "url": "/downloads/map-download-retry-\(downloadURLIssueCount).zip",
+                        "expiresAt": 2_000_000_000,
+                        "expiresInSeconds": 900,
+                    ])
+                )
+            }
+            return (404, Data())
+        }
+        let downloadRetryManager = OfflineMapManager(
+            defaults: downloadRetryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: downloadRetryCache,
+            packDownload: { _, onProgress, _ in
+                packDownloadAttemptCount += 1
+                if packDownloadAttemptCount == 1 {
+                    throw URLError(.networkConnectionLost)
+                }
+                onProgress(1)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-download-retry").write(to: url)
+                return url
+            }
+        )
+        downloadRetryManager.resumePendingMapJobIfNeeded()
+        let firstDownloadAttemptCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(firstDownloadAttemptCompleted, "failed download attempt should stop cleanly")
+        assert(downloadRetryManager.hasPendingMapJob, "failed download remains recoverable")
+        assertEqual(downloadRetryManager.downloadURL, nil, "failed signed URL is discarded")
+
+        downloadRetryManager.resumePendingMapJobIfNeeded()
+        let retryDeadline = Date().addingTimeInterval(3)
+        while downloadURLIssueCount < 2 && Date() < retryDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let retriedDownloadCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(retriedDownloadCompleted, "download retry should complete")
+        assertEqual(downloadURLIssueCount, 2, "download retry obtains a fresh exact-job URL")
+        assertEqual(packDownloadAttemptCount, 2, "download retry performs a second transfer")
+        assert(!downloadRetryManager.hasPendingMapJob, "successful download retry clears recovery state")
+        let downloadRetryPack = downloadRetryCache.appendingPathComponent("map-download-retry.zip")
+        assertEqual(
+            downloadRetryManager.displayName(forCachedPack: downloadRetryPack),
+            "Shanghai Riverside",
+            "same-map replacement preserves the user rename"
+        )
+        downloadRetryManager.deleteCachedPack(at: downloadRetryPack)
+
         let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
         let retryDefaults = UserDefaults(suiteName: retrySuite)!
         defer { retryDefaults.removePersistentDomain(forName: retrySuite) }
@@ -1182,6 +1395,40 @@ struct NavigationProtocolTests {
         assert(retryManager.hasPendingMapJob, "paused discovery remains resumable")
         retryManager.forgetPendingMapJob()
         assert(!retryManager.hasPendingMapJob, "paused discovery can be explicitly forgotten")
+        let relaunchedRetryManager = OfflineMapManager(
+            defaults: retryDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: retryCache
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs" {
+                let oldJob = try! JSONSerialization.jsonObject(
+                    with: jobData(
+                        jobId: "job-forgotten-before-discovery",
+                        mapId: "map-forgotten-before-discovery",
+                        installationId: relaunchedRetryManager.clientInstallationId,
+                        createdAt: "1970-01-01T00:00:00Z"
+                    )
+                )
+                return (200, try! JSONSerialization.data(withJSONObject: ["jobs": [oldJob]]))
+            }
+            return (404, Data())
+        }
+        relaunchedRetryManager.resumePendingMapJobIfNeeded()
+        let forgottenDeadline = Date().addingTimeInterval(3)
+        while relaunchedRetryManager.hasPendingMapJob && Date() < forgottenDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            !relaunchedRetryManager.hasPendingMapJob,
+            "forgotten discovery cutoff survives relaunch"
+        )
+        assertEqual(
+            relaunchedRetryManager.currentJob,
+            nil,
+            "durable forget does not rediscover server jobs that already existed"
+        )
+        assert(!relaunchedRetryManager.isBusy, "durable forget leaves the app ready for a new map")
 
         let launch401Suite = "offline-map-launch-401-\(UUID().uuidString)"
         let launch401Defaults = UserDefaults(suiteName: launch401Suite)!
@@ -1512,6 +1759,20 @@ struct NavigationProtocolTests {
         let packURL = cacheDirectory.appendingPathComponent("custom-map-shanghai.zip")
 
         let manager = OfflineMapManager(defaults: defaults, cacheDirectory: cacheDirectory)
+        assert(
+            !SavedMapRenameFocusPolicy.shouldCommit(
+                editingFilename: packURL.lastPathComponent,
+                focusedFilename: packURL.lastPathComponent
+            ),
+            "tapping within the active name field keeps editing"
+        )
+        assert(
+            SavedMapRenameFocusPolicy.shouldCommit(
+                editingFilename: packURL.lastPathComponent,
+                focusedFilename: nil
+            ),
+            "tapping outside the active name field commits editing"
+        )
         assertEqual(
             manager.renameCachedPack(at: packURL, to: "  Shanghai Riverside  "),
             "Shanghai Riverside",

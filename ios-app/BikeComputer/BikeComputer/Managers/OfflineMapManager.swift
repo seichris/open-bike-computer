@@ -368,6 +368,7 @@ nonisolated enum OfflineMapInstallationIdentity {
 
 nonisolated enum OfflineMapRecoveryHistory {
     private static let key = "offlineMap.handledServerJobIds"
+    private static let ignoredBeforeKey = "offlineMap.ignoredServerJobsBefore"
     private static let maximumCount = 200
 
     static func handledJobIds(defaults: UserDefaults) -> Set<String> {
@@ -379,6 +380,29 @@ nonisolated enum OfflineMapRecoveryHistory {
         values.removeAll { $0 == jobId }
         values.append(jobId)
         defaults.set(Array(values.suffix(maximumCount)), forKey: key)
+    }
+
+    static func ignoredBefore(defaults: UserDefaults) -> Date? {
+        guard defaults.object(forKey: ignoredBeforeKey) != nil else { return nil }
+        return Date(timeIntervalSince1970: defaults.double(forKey: ignoredBeforeKey))
+    }
+
+    static func ignoreExistingServerJobs(
+        defaults: UserDefaults,
+        now: Date = Date()
+    ) {
+        defaults.set(now.timeIntervalSince1970, forKey: ignoredBeforeKey)
+    }
+}
+
+nonisolated enum OfflineMapDownloadResponseValidator {
+    static func validate(response: URLResponse?, errorBody: @autoclosure () -> String) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            throw OfflineMapPlatformError.serverStatus(http.statusCode, errorBody())
+        }
     }
 }
 
@@ -574,10 +598,13 @@ final class OfflineMapManager: ObservableObject {
         }
 
         startMapJobTask { manager in
-            let recoveryServerURL = persistedServerURL ?? manager.serverURLString
+            let usesManagedServer = manager.isManagedServerURL(persistedServerURL)
+            let recoveryServerURL = usesManagedServer ?
+                manager.serverURLString : (persistedServerURL ?? manager.serverURLString)
+            let recoveryAPIToken = usesManagedServer ? manager.apiToken : persistedAPIToken
             let client = try manager.makeClient(
                 serverURLString: recoveryServerURL,
-                apiTokenString: persistedAPIToken
+                apiTokenString: recoveryAPIToken
             )
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
@@ -590,7 +617,7 @@ final class OfflineMapManager: ObservableObject {
                     manager.statusMessage = ""
                     return
                 }
-                manager.currentJob = recovered
+                manager.adoptRecoveredJob(recovered)
                 jobId = recovered.jobId
                 shouldInstallOnDevice = recovered.installOnDevice == true
                 manager.persistCurrentJob(installOnDevice: shouldInstallOnDevice)
@@ -615,6 +642,10 @@ final class OfflineMapManager: ObservableObject {
 
     func forgetPendingMapJob() {
         guard hasPendingMapJob else { return }
+        if OfflineMapJobPersistence.activeJobId(defaults: defaults) == nil,
+           isServerRecoveryCheckPending {
+            OfflineMapRecoveryHistory.ignoreExistingServerJobs(defaults: defaults)
+        }
         mapJobTask?.cancel()
         mapJobTask = nil
         mapJobTaskID = nil
@@ -925,7 +956,8 @@ final class OfflineMapManager: ObservableObject {
         OfflineMapJobRecoverySelector.select(
             jobs: jobs,
             clientInstallationId: clientInstallationId,
-            excludedJobIds: OfflineMapRecoveryHistory.handledJobIds(defaults: defaults)
+            excludedJobIds: OfflineMapRecoveryHistory.handledJobIds(defaults: defaults),
+            ignoredBefore: OfflineMapRecoveryHistory.ignoredBefore(defaults: defaults)
         )
     }
 
@@ -935,7 +967,7 @@ final class OfflineMapManager: ObservableObject {
     ) async throws -> Bool {
         let jobs = try await client.jobs()
         guard let recovered = selectOwnedRecoverableJob(from: jobs) else { return false }
-        currentJob = recovered
+        adoptRecoveredJob(recovered)
         let installOnDevice = recovered.installOnDevice == true
         persistCurrentJob(installOnDevice: installOnDevice)
         statusMessage = "resuming previous map"
@@ -962,6 +994,26 @@ final class OfflineMapManager: ObservableObject {
             clientInstallationId: clientInstallationId,
             session: mapPlatformSession
         )
+    }
+
+    private func isManagedServerURL(_ value: String?) -> Bool {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return true
+        }
+        return value == OfflineMapServiceConfig.productionServerURLString ||
+            OfflineMapDefaults.legacyServerURLs.contains(value)
+    }
+
+    private func adoptRecoveredJob(_ job: OfflineMapJob) {
+        if currentJob?.jobId != job.jobId {
+            downloadedPackURL = nil
+            downloadProgress = 0
+            downloadByteProgress = nil
+            transferProgress = 0
+        }
+        currentJob = job
+        downloadURL = nil
     }
 
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
@@ -1031,22 +1083,23 @@ final class OfflineMapManager: ObservableObject {
         guard let jobId = currentJob?.jobId else {
             throw OfflineMapPlatformError.invalidResponse
         }
-        let url: URL
-        if let downloadURL {
-            url = downloadURL
-        } else {
-            url = try await client.downloadURL(mapId: mapId, jobId: jobId)
-            downloadURL = url
-        }
+        let url = try await client.downloadURL(mapId: mapId, jobId: jobId)
+        downloadURL = url
 
         statusMessage = "downloading pack"
         downloadProgress = 0
         downloadByteProgress = nil
-        let temporaryURL = try await packDownload(url, { [weak self] progress in
-            self?.downloadProgress = progress
-        }, { [weak self] byteProgress in
-            self?.downloadByteProgress = byteProgress
-        })
+        let temporaryURL: URL
+        do {
+            temporaryURL = try await packDownload(url, { [weak self] progress in
+                self?.downloadProgress = progress
+            }, { [weak self] byteProgress in
+                self?.downloadByteProgress = byteProgress
+            })
+        } catch {
+            downloadURL = nil
+            throw error
+        }
         let destination = try cachedPackURL(mapId: mapId)
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
@@ -1056,7 +1109,8 @@ final class OfflineMapManager: ObservableObject {
         if let jobId = currentJob?.jobId {
             OfflineMapJobPersistence.markPackDownloaded(jobId: jobId, defaults: defaults)
         }
-        if let displayName = displayNameForCurrentJob() {
+        if packDisplayNames[destination.lastPathComponent]?.isEmpty != false,
+           let displayName = displayNameForCurrentJob() {
             packDisplayNames[destination.lastPathComponent] = displayName
             persistPackDisplayNames()
         }
@@ -1572,6 +1626,10 @@ private final class OfflineMapPackDownloader: NSObject, URLSessionDownloadDelega
         didFinishDownloadingTo location: URL
     ) {
         do {
+            try OfflineMapDownloadResponseValidator.validate(
+                response: downloadTask.response,
+                errorBody: (try? String(contentsOf: location, encoding: .utf8)) ?? ""
+            )
             let temporaryURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("zip")

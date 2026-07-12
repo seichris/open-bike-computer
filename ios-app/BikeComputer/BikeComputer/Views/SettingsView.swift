@@ -388,16 +388,26 @@ private struct DownloadedMapRow: View {
                         focusedPackFilename = nil
                     }
                     .onChange(of: focusedPackFilename) { newValue in
-                        if newValue != packURL.lastPathComponent {
-                            finishRenaming()
+                        if SavedMapRenameFocusPolicy.shouldCommit(
+                            editingFilename: packURL.lastPathComponent,
+                            focusedFilename: newValue
+                        ) {
+                            scheduleFinishRenamingIfNeeded()
                         }
                     }
+                    .simultaneousGesture(TapGesture().onEnded {
+                        DispatchQueue.main.async {
+                            focusedPackFilename = packURL.lastPathComponent
+                        }
+                    })
                     .accessibilityLabel("Map name")
             } else {
                 Button {
                     draftName = displayName
                     isEditingName = true
-                    focusedPackFilename = packURL.lastPathComponent
+                    DispatchQueue.main.async {
+                        focusedPackFilename = packURL.lastPathComponent
+                    }
                 } label: {
                     Text(displayName)
                         .lineLimit(2)
@@ -453,6 +463,19 @@ private struct DownloadedMapRow: View {
         guard isEditingName else { return }
         draftName = manager.renameCachedPack(at: packURL, to: draftName)
         isEditingName = false
+    }
+
+    private func scheduleFinishRenamingIfNeeded() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard SavedMapRenameFocusPolicy.shouldCommit(
+                editingFilename: packURL.lastPathComponent,
+                focusedFilename: focusedPackFilename
+            ) else {
+                return
+            }
+            finishRenaming()
+        }
     }
 }
 
