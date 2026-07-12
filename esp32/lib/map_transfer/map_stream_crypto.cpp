@@ -4,6 +4,36 @@
 #include <mbedtls/ecp.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/version.h>
+
+namespace {
+
+int checkedSha256Starts(mbedtls_sha256_context *context) {
+#if MBEDTLS_VERSION_NUMBER < 0x03000000
+  return mbedtls_sha256_starts_ret(context, 0);
+#else
+  return mbedtls_sha256_starts(context, 0);
+#endif
+}
+
+int checkedSha256Update(mbedtls_sha256_context *context, const uint8_t *data,
+                        size_t size) {
+#if MBEDTLS_VERSION_NUMBER < 0x03000000
+  return mbedtls_sha256_update_ret(context, data, size);
+#else
+  return mbedtls_sha256_update(context, data, size);
+#endif
+}
+
+int checkedSha256Finish(mbedtls_sha256_context *context, uint8_t digest[32]) {
+#if MBEDTLS_VERSION_NUMBER < 0x03000000
+  return mbedtls_sha256_finish_ret(context, digest);
+#else
+  return mbedtls_sha256_finish(context, digest);
+#endif
+}
+
+} // namespace
 
 namespace map_transfer {
 
@@ -21,16 +51,16 @@ bool verifyMapStreamP256Signature(
   uint8_t digest[32] = {};
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
-  int result = mbedtls_sha256_starts(&sha, 0);
+  int result = checkedSha256Starts(&sha);
   if (result == 0) {
-    result = mbedtls_sha256_update(
+    result = checkedSha256Update(
         &sha, reinterpret_cast<const uint8_t *>(MAP_STREAM_SIGNATURE_DOMAIN),
         MAP_STREAM_SIGNATURE_DOMAIN_BYTES);
   }
   if (result == 0)
-    result = mbedtls_sha256_update(&sha, manifest, manifestSize);
+    result = checkedSha256Update(&sha, manifest, manifestSize);
   if (result == 0)
-    result = mbedtls_sha256_finish(&sha, digest);
+    result = checkedSha256Finish(&sha, digest);
   mbedtls_sha256_free(&sha);
   if (result != 0)
     return false;
