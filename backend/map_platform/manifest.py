@@ -10,7 +10,10 @@ from typing import Any
 
 from .models import MapJob, utc_now_iso
 
-ALLOWED_PACK_FILE_RE = re.compile(r"^VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]$")
+ALLOWED_PACK_FILE_RE = re.compile(r"VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]")
+MAX_PACK_MAP_ID_BYTES = 64
+MAX_PACK_PATH_COMPONENT_BYTES = 64
+MAX_PACK_RELATIVE_PATH_BYTES = 202
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ def stable_map_id(job: MapJob) -> str:
         separators=(",", ":"),
     )
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:10]
+    maximum_slug_bytes = MAX_PACK_MAP_ID_BYTES - len(digest) - 1
+    slug = slug[:maximum_slug_bytes].rstrip("-") or "custom-map"
     return f"{slug}-{digest}"
 
 
@@ -65,7 +70,7 @@ def collect_map_files(map_root: Path, map_id: str) -> list[dict[str, Any]]:
 
 
 def is_pack_map_file(relative_path: str) -> bool:
-    return bool(ALLOWED_PACK_FILE_RE.match(relative_path))
+    return bool(ALLOWED_PACK_FILE_RE.fullmatch(relative_path))
 
 
 def validate_pack_path(relative_path: str) -> None:
@@ -73,6 +78,15 @@ def validate_pack_path(relative_path: str) -> None:
         raise ValueError(f"unsafe map pack path: {relative_path}")
     if not is_pack_map_file(relative_path):
         raise ValueError(f"unexpected map pack file path: {relative_path}")
+    components = relative_path.split("/")
+    if (
+        len(relative_path.encode("ascii")) > MAX_PACK_RELATIVE_PATH_BYTES
+        or any(
+            not 0 < len(component.encode("ascii")) <= MAX_PACK_PATH_COMPONENT_BYTES
+            for component in components[1:]
+        )
+    ):
+        raise ValueError(f"map pack path is too long: {relative_path}")
 
 
 def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> dict[str, Any]:

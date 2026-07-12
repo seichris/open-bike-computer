@@ -137,6 +137,10 @@ Map install protocol v2 initially carries Bike Map Stream format v1. Protocol
 and artifact versions are separate so transport/recovery can evolve without
 silently changing artifact parsing.
 
+The normative byte-level source of truth is
+[`map-stream-format-v1.md`](map-stream-format-v1.md). This section records the
+architectural rationale and must remain consistent with that specification.
+
 All integers are unsigned little-endian. The fixed header contains:
 
 | Field | Width | Requirement |

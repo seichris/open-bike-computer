@@ -5,6 +5,7 @@ from pathlib import Path
 
 from map_platform.geometry import normalize_geometry
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
+from map_platform.map_stream import canonical_manifest_bytes
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
 
 
@@ -110,6 +111,31 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(first.geometry.bounds, second.geometry.bounds)
         self.assertNotEqual(stable_map_id(first), stable_map_id(second))
+
+    def test_stable_map_id_truncates_long_name_but_preserves_digest(self):
+        short = fake_job()
+        short.request["displayName"] = "a" * 53
+        long = fake_job()
+        long.request["displayName"] = "a" * 500
+
+        short_id = stable_map_id(short)
+        long_id = stable_map_id(long)
+        self.assertEqual(len(short_id.encode("ascii")), 64)
+        self.assertEqual(len(long_id.encode("ascii")), 64)
+        self.assertEqual(long_id, short_id)
+        canonical_manifest_bytes(
+            {
+                "schemaVersion": 1,
+                "mapId": long_id,
+                "files": [
+                    {
+                        "path": f"VECTMAP/{long_id}/+0000+0000/1.fmb",
+                        "bytes": 1,
+                        "sha256": "0" * 64,
+                    }
+                ],
+            }
+        )
 
 
 if __name__ == "__main__":

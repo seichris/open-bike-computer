@@ -62,6 +62,20 @@ func appendUInt32LE(_ value: UInt32, to data: inout Data) {
     data.append(UInt8((value >> 24) & 0xFF))
 }
 
+private extension Data {
+    init?(hex: String) {
+        guard hex.count.isMultiple(of: 2) else { return nil }
+        self.init(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            append(byte)
+            index = next
+        }
+    }
+}
+
 func makeStoredZip(entries: [(String, Data)]) -> Data {
     var zip = Data()
     for (path, body) in entries {
@@ -384,6 +398,7 @@ struct NavigationProtocolTests {
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testOfflineMapCustomBBoxRequest()
+        testBikeMapStreamGoldenVector()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
@@ -430,6 +445,167 @@ struct NavigationProtocolTests {
         testFirmwareDeviceClientSendsSignedBeginRequest()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
+    }
+
+    static func testBikeMapStreamGoldenVector() {
+        let fixtureURL = URL(fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt")
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+            assert(false, "map stream golden fixture is readable")
+            return
+        }
+        let fixture = Dictionary(uniqueKeysWithValues: text.split(separator: "\n").map { line in
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            return (String(parts[0]), String(parts[1]))
+        })
+        guard let header = Data(hex: fixture["header_hex"] ?? ""),
+              let expectedManifest = Data(hex: fixture["manifest_hex"] ?? ""),
+              let expectedEnvelope = Data(hex: fixture["signature_envelope_hex"] ?? ""),
+              let expectedPayload = Data(hex: fixture["payload_hex"] ?? ""),
+              let publicKey = Data(hex: fixture["public_key_x963_hex"] ?? ""),
+              let stream = Data(hex: fixture["stream_hex"] ?? "") else {
+            assert(false, "map stream golden fixture contains valid hex")
+            return
+        }
+        guard let parsedHeader = try? BikeMapStreamFormat.parseHeader(stream.prefix(32)),
+              let layout = try? BikeMapStreamFormat.layout(
+                  header: parsedHeader,
+                  contentBytes: UInt64(stream.count)
+              ) else {
+            assert(false, "map stream golden stream layout parses")
+            return
+        }
+        let manifest = stream.subdata(in: layout.manifestOffset..<layout.signatureEnvelopeOffset)
+        let envelopeData = stream.subdata(in: layout.signatureEnvelopeOffset..<layout.payloadOffset)
+        let payload = stream.subdata(in: layout.payloadOffset..<layout.endOffset)
+        guard let envelope = try? BikeMapStreamFormat.parseSignatureEnvelope(envelopeData) else {
+            assert(false, "map stream golden header and envelope parse")
+            return
+        }
+        assertEqual(stream.prefix(32), header, "map stream stream embeds the golden header")
+        assertEqual(manifest, expectedManifest, "map stream stream embeds the golden manifest")
+        assertEqual(envelopeData, expectedEnvelope, "map stream stream embeds the golden envelope")
+        assertEqual(payload, expectedPayload, "map stream stream embeds payload in manifest order")
+        assertEqual(parsedHeader.fileCount, 1, "map stream golden fixture file count")
+        assertEqual(parsedHeader.payloadBytes, 9, "map stream golden fixture payload bytes")
+        assertEqual(parsedHeader.totalBytes, UInt64(stream.count), "map stream golden fixture total bytes")
+        assertEqual(envelope.keyID, "map-test-2026-01", "map stream golden fixture key id")
+        assert(
+            BikeMapStreamFormat.verifyP256Signature(
+                manifest: manifest,
+                envelope: envelope,
+                publicKeyX963: publicKey
+            ),
+            "map stream golden signature verifies with CryptoKit"
+        )
+        assertEqual(
+            BikeMapStreamFormat.manifestReceipt(manifest),
+            fixture["manifest_receipt"],
+            "map stream manifest receipt agrees with Python and C++"
+        )
+        assertEqual(
+            BikeMapStreamFormat.signedManifestReceipt(manifest: manifest, envelope: envelopeData),
+            fixture["signed_manifest_receipt"],
+            "map stream signed manifest receipt agrees with Python and C++"
+        )
+
+        var tamperedManifest = manifest
+        tamperedManifest[tamperedManifest.startIndex] ^= 1
+        assert(
+            !BikeMapStreamFormat.verifyP256Signature(
+                manifest: tamperedManifest,
+                envelope: envelope,
+                publicKeyX963: publicKey
+            ),
+            "map stream manifest tampering fails CryptoKit verification"
+        )
+        var tamperedSignatureData = envelopeData
+        tamperedSignatureData[tamperedSignatureData.index(before: tamperedSignatureData.endIndex)] ^= 1
+        guard let tamperedEnvelope = try? BikeMapStreamFormat.parseSignatureEnvelope(tamperedSignatureData) else {
+            assert(false, "tampered signature remains structurally parseable")
+            return
+        }
+        assert(
+            !BikeMapStreamFormat.verifyP256Signature(
+                manifest: manifest,
+                envelope: tamperedEnvelope,
+                publicKeyX963: publicKey
+            ),
+            "map stream signature tampering fails CryptoKit verification"
+        )
+
+        var highSEnvelopeData = envelopeData
+        let highS = Data(hex: "84bbcdefdaa6426471c25ac037769c84cebf6fdf76c1ebd87fe26f14e3b42870")!
+        highSEnvelopeData.replaceSubrange(
+            (highSEnvelopeData.count - 32)..<highSEnvelopeData.count,
+            with: highS
+        )
+        do {
+            _ = try BikeMapStreamFormat.parseSignatureEnvelope(highSEnvelopeData)
+            assert(false, "malleable high-S signature is rejected")
+        } catch {
+            assertEqual(
+                error as? BikeMapStreamFormatError,
+                .nonCanonicalSignature,
+                "high-S signature failure is typed"
+            )
+        }
+        var highSRawSignature = envelope.rawSignature
+        highSRawSignature.replaceSubrange(32..<64, with: highS)
+        let manuallyConstructedHighSEnvelope = BikeMapStreamFormat.SignatureEnvelope(
+            algorithmID: envelope.algorithmID,
+            keyID: envelope.keyID,
+            rawSignature: highSRawSignature
+        )
+        assert(
+            !BikeMapStreamFormat.verifyP256Signature(
+                manifest: manifest,
+                envelope: manuallyConstructedHighSEnvelope,
+                publicKeyX963: publicKey
+            ),
+            "signature verification independently rejects a constructed high-S envelope"
+        )
+
+        var paddedHeader = Data([0xFF])
+        paddedHeader.append(header)
+        var paddedEnvelope = Data([0xFF])
+        paddedEnvelope.append(envelopeData)
+        assertEqual(
+            try? BikeMapStreamFormat.parseHeader(paddedHeader.dropFirst()),
+            parsedHeader,
+            "map stream header parsing is relative to a Data slice start index"
+        )
+        assertEqual(
+            try? BikeMapStreamFormat.parseSignatureEnvelope(paddedEnvelope.dropFirst()),
+            envelope,
+            "map stream envelope parsing is relative to a Data slice start index"
+        )
+        do {
+            _ = try BikeMapStreamFormat.layout(
+                header: parsedHeader,
+                contentBytes: UInt64(stream.count - 1)
+            )
+            assert(false, "truncated map stream is rejected")
+        } catch {
+            assertEqual(error as? BikeMapStreamFormatError, .invalidContentLength, "truncation failure is typed")
+        }
+        do {
+            _ = try BikeMapStreamFormat.layout(
+                header: parsedHeader,
+                contentBytes: UInt64(stream.count + 1)
+            )
+            assert(false, "map stream trailing data is rejected")
+        } catch {
+            assertEqual(error as? BikeMapStreamFormatError, .invalidContentLength, "trailing-data failure is typed")
+        }
+
+        var invalidHeader = header
+        invalidHeader[8] = 2
+        do {
+            _ = try BikeMapStreamFormat.parseHeader(invalidHeader)
+            assert(false, "unsupported map stream version is rejected")
+        } catch {
+            assertEqual(error as? BikeMapStreamFormatError, .unsupportedVersion, "version failure is typed")
+        }
     }
 
     static func testIconMapping() {

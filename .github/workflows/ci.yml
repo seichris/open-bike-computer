@@ -111,6 +111,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v4
+      - name: Install host crypto dependency
+        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
       - name: GUI layout host tests
         run: |
           g++ -std=c++17 \
@@ -141,6 +143,16 @@ jobs:
             tools/tests/test_map_transfer.cpp \
             -o /tmp/test_map_transfer
           /tmp/test_map_transfer
+      - name: Map stream format host tests
+        run: |
+          g++ -std=c++17 \
+            lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_stream_format.cpp \
+            lib/map_transfer/map_stream_crypto.cpp \
+            tools/tests/test_map_stream_format.cpp \
+            $(pkg-config --cflags --libs mbedcrypto) \
+            -o /tmp/test_map_stream_format
+          /tmp/test_map_stream_format
       - name: Transfer control dispatch host tests
         run: |
           g++ -std=c++17 \
