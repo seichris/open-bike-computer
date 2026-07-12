@@ -1372,7 +1372,12 @@ final class OfflineMapManager: ObservableObject {
         statusMessage = "preparing transfer"
         transferProgress = 0
         let archive = try await Task.detached(priority: .userInitiated) {
-            try OfflineMapPackArchive(url: packURL)
+            let archive = try OfflineMapPackArchive(url: packURL)
+            guard let mapId = try archive.manifest().mapId, !mapId.isEmpty else {
+                throw OfflineMapPlatformError.invalidPack("manifest.json has no mapId")
+            }
+            try archive.validate(expectedMapId: mapId)
+            return archive
         }.value
         guard let expectedMapId = try archive.manifest().mapId,
               !expectedMapId.isEmpty else {

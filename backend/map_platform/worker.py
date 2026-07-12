@@ -111,6 +111,8 @@ class MapWorker:
 
 
 def expire_ready_jobs(store: JobStore, *, older_than_days: int) -> int:
+    if isinstance(older_than_days, bool) or not 1 <= older_than_days <= 3_650:
+        raise ValueError("older_than_days must be between 1 and 3650")
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     count = 0
     for job in store.list():

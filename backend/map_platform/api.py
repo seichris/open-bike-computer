@@ -96,7 +96,7 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
-    @app.post("/v1/map-jobs/{job_id}/run", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/map-jobs/{job_id}/run", dependencies=[Depends(require_admin_token)])
     def run_map_job(job_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
         try:
             service.get_job_for_installation(job_id, clientInstallationId)
@@ -147,10 +147,9 @@ def create_app():
 
     @app.post("/v1/maintenance/expire", dependencies=[Depends(require_admin_token)])
     def expire_map_packs(payload: dict[str, Any] | None = None) -> dict[str, int]:
-        try:
-            older_than_days = int((payload or {}).get("olderThanDays", 30))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="olderThanDays must be an integer") from exc
+        older_than_days = (payload or {}).get("olderThanDays", 30)
+        if isinstance(older_than_days, bool) or not isinstance(older_than_days, int):
+            raise HTTPException(status_code=400, detail="olderThanDays must be an integer")
         if not 1 <= older_than_days <= 3_650:
             raise HTTPException(status_code=400, detail="olderThanDays must be between 1 and 3650")
         return {"expired": expire_ready_jobs(service.store, older_than_days=older_than_days)}

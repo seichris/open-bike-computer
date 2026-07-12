@@ -54,8 +54,17 @@ class MapJobRunAPITests(unittest.TestCase):
         result = Mock()
         result.to_dict.return_value = {"jobId": job_id, "status": "ready"}
 
+        client_response = self.client.post(
+            f"/v1/map-jobs/{job_id}/run",
+            headers={"Authorization": "Bearer app-bundled-token"},
+        )
+        self.assertEqual(client_response.status_code, 401)
+
         with patch("map_platform.api.run_job", return_value=result):
-            response = self.client.post(f"/v1/map-jobs/{job_id}/run")
+            response = self.client.post(
+                f"/v1/map-jobs/{job_id}/run",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ready")
@@ -219,6 +228,13 @@ class MapJobRunAPITests(unittest.TestCase):
             headers={"Authorization": "Bearer admin-secret"},
         )
         self.assertEqual(invalid_retention.status_code, 400)
+        for invalid_value in (True, 1.5, "30"):
+            invalid_type = self.client.post(
+                "/v1/maintenance/expire",
+                json={"olderThanDays": invalid_value},
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+            self.assertEqual(invalid_type.status_code, 400)
 
     def test_run_route_rejects_active_job(self):
         job_id = self.create_job()
@@ -228,7 +244,10 @@ class MapJobRunAPITests(unittest.TestCase):
         job["workerId"] = "worker-active"
         job_path.write_text(json.dumps(job))
 
-        response = self.client.post(f"/v1/map-jobs/{job_id}/run")
+        response = self.client.post(
+            f"/v1/map-jobs/{job_id}/run",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("not queued", response.json()["detail"])
@@ -237,13 +256,19 @@ class MapJobRunAPITests(unittest.TestCase):
         job_id = self.create_job()
         self.assertEqual(self.client.post(f"/v1/map-jobs/{job_id}/cancel").status_code, 200)
 
-        response = self.client.post(f"/v1/map-jobs/{job_id}/run")
+        response = self.client.post(
+            f"/v1/map-jobs/{job_id}/run",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("cancelled", response.json()["detail"])
 
     def test_run_route_returns_not_found_for_missing_job(self):
-        response = self.client.post("/v1/map-jobs/missing-job/run")
+        response = self.client.post(
+            "/v1/map-jobs/missing-job/run",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
 
         self.assertEqual(response.status_code, 404)
 
@@ -491,7 +516,13 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         job_id = response.json()["jobId"]
 
-        self.assertEqual(self.client.post(f"/v1/map-jobs/{job_id}/run").status_code, 404)
+        self.assertEqual(
+            self.client.post(
+                f"/v1/map-jobs/{job_id}/run",
+                headers={"Authorization": "Bearer admin-secret"},
+            ).status_code,
+            404,
+        )
         self.assertEqual(
             self.client.post(
                 f"/v1/map-jobs/{job_id}/cancel",

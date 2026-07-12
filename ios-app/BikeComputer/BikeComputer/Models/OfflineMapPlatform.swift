@@ -456,7 +456,9 @@ struct OfflineMapPackArchive {
         }
         let declaredPaths = Set(files.map(\.path))
         let archivePaths = Set(mapFileEntries.map(\.path))
-        guard declaredPaths.count == files.count, declaredPaths == archivePaths else {
+        guard declaredPaths.count == files.count,
+              archivePaths.count == mapFileEntries.count,
+              declaredPaths == archivePaths else {
             throw OfflineMapPlatformError.invalidPack("manifest file list does not match the archive")
         }
         let entriesByPath = Dictionary(uniqueKeysWithValues: mapFileEntries.map { ($0.path, $0) })

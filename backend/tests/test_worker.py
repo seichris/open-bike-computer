@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -324,7 +325,11 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(ready)
             ready_pack_path = Path(ready.pack_path)
             self.assertTrue(ready_pack_path.exists())
-            expired = expire_ready_jobs(store, older_than_days=0)
+            job_path = root / "jobs" / f"{job.job_id}.json"
+            persisted = json.loads(job_path.read_text())
+            persisted["updatedAt"] = "2020-01-01T00:00:00Z"
+            job_path.write_text(json.dumps(persisted))
+            expired = expire_ready_jobs(store, older_than_days=1)
 
             stale_dir = root / "work" / job.job_id
             stale_dir.mkdir(parents=True)
@@ -333,6 +338,8 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(expired, 1)
             self.assertFalse(ready_pack_path.exists())
             self.assertEqual(removed, 1)
+            with self.assertRaisesRegex(ValueError, "between 1 and 3650"):
+                expire_ready_jobs(store, older_than_days=0)
 
     def test_expiry_removes_only_unreferenced_pack_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1183,6 +1183,34 @@ struct NavigationProtocolTests {
             ])
         }
 
+        let corruptCacheSuite = "offline-map-corrupt-cache-route-\(UUID().uuidString)"
+        let corruptCacheDefaults = UserDefaults(suiteName: corruptCacheSuite)!
+        defer { corruptCacheDefaults.removePersistentDomain(forName: corruptCacheSuite) }
+        let corruptCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-corrupt-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: corruptCache) }
+        try! FileManager.default.createDirectory(at: corruptCache, withIntermediateDirectories: true)
+        let corruptCachedPack = corruptCache.appendingPathComponent("map-corrupt-cache.zip")
+        try! packData(
+            mapId: "map-corrupt-cache",
+            storedMapData: Data([0x02]),
+            hashedMapData: Data([0x01])
+        ).write(to: corruptCachedPack)
+        let corruptCacheManager = OfflineMapManager(
+            defaults: corruptCacheDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: corruptCache
+        )
+        corruptCacheManager.transferCachedPack(at: corruptCachedPack, bleManager: BLEManager())
+        let corruptCacheDeadline = Date().addingTimeInterval(3)
+        while corruptCacheManager.errorMessage == nil && Date() < corruptCacheDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            corruptCacheManager.errorMessage?.contains("hash mismatch") == true,
+            "cached packs are hash-validated before device transfer"
+        )
+
         let persistedSuite = "offline-map-persisted-route-\(UUID().uuidString)"
         let persistedDefaults = UserDefaults(suiteName: persistedSuite)!
         defer { persistedDefaults.removePersistentDomain(forName: persistedSuite) }
@@ -1545,6 +1573,10 @@ struct NavigationProtocolTests {
         )
 
         downloadRetryManager.resumePendingMapJobIfNeeded()
+        let corruptAttemptDeadline = Date().addingTimeInterval(3)
+        while downloadURLIssueCount < 2 && Date() < corruptAttemptDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         let corruptDownloadAttemptCompleted = await waitForMapTaskCompletion(downloadRetryManager)
         assert(corruptDownloadAttemptCompleted, "corrupt download attempt should stop cleanly")
         assert(downloadRetryManager.hasPendingMapJob, "corrupt download remains recoverable")
@@ -2201,6 +2233,34 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+
+        let duplicateURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-duplicate-test-\(UUID().uuidString).zip")
+        defer { try? FileManager.default.removeItem(at: duplicateURL) }
+        let duplicatePath = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        let duplicateManifest = try! JSONSerialization.data(withJSONObject: [
+            "mapId": "map-1",
+            "files": [[
+                "path": duplicatePath,
+                "bytes": block.count,
+                "sha256": FirmwareUpdateManager.sha256Hex(block),
+            ]],
+        ])
+        let duplicateZip = makeStoredZip(entries: [
+            ("manifest.json", duplicateManifest),
+            (duplicatePath, block),
+            (duplicatePath, block),
+        ])
+        try? duplicateZip.write(to: duplicateURL)
+        do {
+            let duplicateArchive = try OfflineMapPackArchive(url: duplicateURL)
+            try duplicateArchive.validate(expectedMapId: "map-1")
+            assert(false, "duplicate map entries should be rejected")
+        } catch OfflineMapPlatformError.invalidPack {
+            // Expected.
+        } catch {
+            assert(false, "duplicate map entries should produce invalidPack")
+        }
     }
 
     @MainActor
