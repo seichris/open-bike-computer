@@ -645,6 +645,28 @@ MapStreamFileTable::~MapStreamFileTable() {
   freeStreamMemory(data_);
 }
 
+MapStreamFileTable::MapStreamFileTable(MapStreamFileTable &&other) noexcept
+    : data_(other.data_), size_(other.size_), capacity_(other.capacity_) {
+  other.data_ = nullptr;
+  other.size_ = 0;
+  other.capacity_ = 0;
+}
+
+MapStreamFileTable &
+MapStreamFileTable::operator=(MapStreamFileTable &&other) noexcept {
+  if (this == &other)
+    return *this;
+  clear();
+  freeStreamMemory(data_);
+  data_ = other.data_;
+  size_ = other.size_;
+  capacity_ = other.capacity_;
+  other.data_ = nullptr;
+  other.size_ = 0;
+  other.capacity_ = 0;
+  return *this;
+}
+
 bool MapStreamFileTable::allocate(size_t capacity) {
   clear();
   freeStreamMemory(data_);
@@ -820,6 +842,31 @@ bool mapStreamFirmwareCompatible(const std::string &currentVersion,
   std::array<uint32_t, 3> minimum = {};
   return parseFirmwareVersion(currentVersion, current) &&
          parseFirmwareVersion(minimumVersion, minimum) && current >= minimum;
+}
+
+bool mapStreamFileView(const ParsedMapStreamManifest &parsed,
+                       std::string_view canonicalManifest, size_t index,
+                       MapStreamFileView &view) {
+  view = MapStreamFileView();
+  if (index >= parsed.files.size())
+    return false;
+  const MapStreamFileDescriptor &file = parsed.files[index];
+  if (file.pathOffset > canonicalManifest.size() ||
+      file.pathBytes > canonicalManifest.size() - file.pathOffset ||
+      file.tileOffset > canonicalManifest.size() ||
+      file.tileBytes > canonicalManifest.size() - file.tileOffset ||
+      file.filenameOffset > canonicalManifest.size() ||
+      file.filenameBytes > canonicalManifest.size() - file.filenameOffset) {
+    return false;
+  }
+  view.path = canonicalManifest.substr(file.pathOffset, file.pathBytes);
+  view.tileDirectory =
+      canonicalManifest.substr(file.tileOffset, file.tileBytes);
+  view.filename =
+      canonicalManifest.substr(file.filenameOffset, file.filenameBytes);
+  view.bytes = file.bytes;
+  view.sha256 = &file.sha256;
+  return true;
 }
 
 MapStreamIncrementalParser::MapStreamIncrementalParser(
@@ -1018,12 +1065,14 @@ bool MapStreamIncrementalParser::beginCurrentFile() {
   if (fileIndex_ >= verified_.manifest.files.size())
     return fail(MapStreamParserError::ManifestInvalid);
   fileBytes_ = 0;
-  if (!fileHasher_.reset())
+  const MapStreamFileView file = currentFileView();
+  const MapStreamFileAction action = consumer_.onFileBegin(file, fileIndex_);
+  if (action == MapStreamFileAction::Reject)
+    return fail(MapStreamParserError::ConsumerRejected);
+  verifyCurrentFile_ = action == MapStreamFileAction::VerifyAndConsume;
+  if (verifyCurrentFile_ && !fileHasher_.reset())
     return fail(MapStreamParserError::HashUnavailable);
   fileStarted_ = true;
-  const MapStreamFileView file = currentFileView();
-  if (!consumer_.onFileBegin(file, fileIndex_))
-    return fail(MapStreamParserError::ConsumerRejected);
   return true;
 }
 
@@ -1039,7 +1088,7 @@ bool MapStreamIncrementalParser::acceptPayloadBytes(const uint8_t *&data,
       std::min<uint64_t>(remaining, static_cast<uint64_t>(size)));
   if (take == 0)
     return fail(MapStreamParserError::ManifestInvalid);
-  if (!fileHasher_.update(data, take))
+  if (verifyCurrentFile_ && !fileHasher_.update(data, take))
     return fail(MapStreamParserError::HashUnavailable);
   if (!consumer_.onFileData(file, data, take))
     return fail(MapStreamParserError::ConsumerRejected);
@@ -1057,10 +1106,12 @@ bool MapStreamIncrementalParser::finishCurrentFile() {
   const MapStreamFileDescriptor &descriptor =
       verified_.manifest.files[fileIndex_];
   const MapStreamFileView file = currentFileView();
-  if (!fileHasher_.finish(digest))
-    return fail(MapStreamParserError::HashUnavailable);
-  if (digest != descriptor.sha256)
-    return fail(MapStreamParserError::FileHashMismatch);
+  if (verifyCurrentFile_) {
+    if (!fileHasher_.finish(digest))
+      return fail(MapStreamParserError::HashUnavailable);
+    if (digest != descriptor.sha256)
+      return fail(MapStreamParserError::FileHashMismatch);
+  }
   if (!consumer_.onFileEnd(file, fileIndex_))
     return fail(MapStreamParserError::ConsumerRejected);
   fileStarted_ = false;
@@ -1077,24 +1128,9 @@ bool MapStreamIncrementalParser::finishCurrentFile() {
 
 MapStreamFileView MapStreamIncrementalParser::currentFileView() const {
   MapStreamFileView view;
-  if (fileIndex_ >= verified_.manifest.files.size())
-    return view;
-  const MapStreamFileDescriptor &file = verified_.manifest.files[fileIndex_];
   const std::string_view manifest(
       reinterpret_cast<const char *>(manifestBuffer_), manifestBuffered_);
-  if (file.pathOffset > manifest.size() ||
-      file.pathBytes > manifest.size() - file.pathOffset ||
-      file.tileOffset > manifest.size() ||
-      file.tileBytes > manifest.size() - file.tileOffset ||
-      file.filenameOffset > manifest.size() ||
-      file.filenameBytes > manifest.size() - file.filenameOffset) {
-    return view;
-  }
-  view.path = manifest.substr(file.pathOffset, file.pathBytes);
-  view.tileDirectory = manifest.substr(file.tileOffset, file.tileBytes);
-  view.filename = manifest.substr(file.filenameOffset, file.filenameBytes);
-  view.bytes = file.bytes;
-  view.sha256 = &file.sha256;
+  mapStreamFileView(verified_.manifest, manifest, fileIndex_, view);
   return view;
 }
 

@@ -20,6 +20,7 @@ using map_transfer::MapStreamLayout;
 using map_transfer::MapStreamSignatureEnvelope;
 using map_transfer::MapStreamConsumer;
 using map_transfer::MapStreamFileDescriptor;
+using map_transfer::MapStreamFileAction;
 using map_transfer::MapStreamFileView;
 using map_transfer::MapStreamIncrementalParser;
 using map_transfer::MapStreamParserError;
@@ -42,6 +43,7 @@ public:
   bool rejectData = false;
   bool rejectFileEnd = false;
   bool rejectComplete = false;
+  bool consumeCheckpointed = false;
   size_t manifestCalls = 0;
   size_t beginCalls = 0;
   size_t endCalls = 0;
@@ -62,12 +64,14 @@ public:
     return !rejectManifest;
   }
 
-  bool onFileBegin(const MapStreamFileView &file, size_t) override {
+  MapStreamFileAction onFileBegin(const MapStreamFileView &file,
+                                  size_t) override {
     beginCalls++;
     lastPath = std::string(file.path);
     lastTileDirectory = std::string(file.tileDirectory);
     lastFilename = std::string(file.filename);
-    return true;
+    return consumeCheckpointed ? MapStreamFileAction::ConsumeCheckpointed
+                               : MapStreamFileAction::VerifyAndConsume;
   }
 
   bool onFileData(const MapStreamFileView &, const uint8_t *data,
@@ -625,7 +629,21 @@ int main() {
     assert(!parser.feed(stream.data(), stream.size()));
     assert(parser.error() == MapStreamParserError::HashUnavailable);
     assert(consumer.manifestCalls == 1);
-    assert(consumer.beginCalls == 0);
+    assert(consumer.beginCalls == 1);
+  }
+
+  {
+    auto trust = trustStore(publicKey);
+    ResetFailingHasher hasher;
+    RecordingConsumer consumer;
+    consumer.consumeCheckpointed = true;
+    MapStreamIncrementalParser parser(
+        trust, hasher, consumer, {stream.size(), "0.2.4"});
+    assert(parser.feed(stream.data(), stream.size()));
+    assert(parser.finish());
+    assert(consumer.payload == expectedPayload);
+    assert(consumer.endCalls == 1);
+    assert(consumer.completeCalls == 1);
   }
 
   {

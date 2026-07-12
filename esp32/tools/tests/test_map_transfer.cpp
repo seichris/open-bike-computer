@@ -11,11 +11,11 @@
 #include <utility>
 #include <vector>
 
-using map_transfer::MapManifest;
-using map_transfer::MapActivationState;
-using map_transfer::MapTransferInstaller;
 using map_transfer::ActivationBeginResult;
 using map_transfer::ActiveMapSelection;
+using map_transfer::MapActivationState;
+using map_transfer::MapManifest;
+using map_transfer::MapTransferInstaller;
 using map_transfer::Sha256Hasher;
 using map_transfer::sha256Hex;
 
@@ -74,18 +74,17 @@ static void writeLe16(std::ofstream &out, uint16_t value) {
 }
 
 static void writeLe32(std::ofstream &out, uint32_t value) {
-  const uint8_t bytes[] = {
-      static_cast<uint8_t>(value & 0xff),
-      static_cast<uint8_t>((value >> 8) & 0xff),
-      static_cast<uint8_t>((value >> 16) & 0xff),
-      static_cast<uint8_t>((value >> 24) & 0xff)};
+  const uint8_t bytes[] = {static_cast<uint8_t>(value & 0xff),
+                           static_cast<uint8_t>((value >> 8) & 0xff),
+                           static_cast<uint8_t>((value >> 16) & 0xff),
+                           static_cast<uint8_t>((value >> 24) & 0xff)};
   out.write(reinterpret_cast<const char *>(bytes), sizeof(bytes));
 }
 
-static void writeStoredZip(
-    const std::string &path,
-    const std::vector<std::pair<std::string, std::string>> &entries,
-    bool includeCentralDirectory = true) {
+static void
+writeStoredZip(const std::string &path,
+               const std::vector<std::pair<std::string, std::string>> &entries,
+               bool includeCentralDirectory = true) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   assert(out.good());
   for (const auto &entry : entries) {
@@ -100,8 +99,10 @@ static void writeStoredZip(
     writeLe32(out, static_cast<uint32_t>(entry.second.size()));
     writeLe16(out, static_cast<uint16_t>(entry.first.size()));
     writeLe16(out, 0);
-    out.write(entry.first.data(), static_cast<std::streamsize>(entry.first.size()));
-    out.write(entry.second.data(), static_cast<std::streamsize>(entry.second.size()));
+    out.write(entry.first.data(),
+              static_cast<std::streamsize>(entry.first.size()));
+    out.write(entry.second.data(),
+              static_cast<std::streamsize>(entry.second.size()));
   }
   if (includeCentralDirectory)
     writeLe32(out, 0x02014b50);
@@ -205,6 +206,14 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(state.snapshot().sequence == 2);
   assert(state.begin("session-2") == ActivationBeginResult::Started);
   assert(state.snapshot().sequence == 3);
+
+  MapActivationState streamState;
+  assert(streamState.begin("stream-session", 3) ==
+         ActivationBeginResult::Started);
+  streamState.updateProgress({3, 3, 2, 3});
+  assert(streamState.snapshot().step == 3);
+  assert(streamState.snapshot().totalSteps == 3);
+  assert(streamState.snapshot().progress == 66);
 }
 
 static void testRejectsUnsafeManifestPath() {
@@ -266,8 +275,8 @@ static void testValidatesStagedMapAndActivates() {
 
   auto activated = installer.activateStagedMap(session, manifest);
   assert(activated.ok);
-  const std::string installed = root + "/VECTMAP/.maps/" + session +
-                                "/+0032+0008/123_456.fmb";
+  const std::string installed =
+      root + "/VECTMAP/.maps/" + session + "/+0032+0008/123_456.fmb";
   assert(exists(installed));
   assert(readFile(installed) == blockData);
   struct stat installedStat;
@@ -293,8 +302,7 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string session = "session-replace";
-  const std::string oldDir =
-      root + "/VECTMAP/.maps/session-old/+9999+9999";
+  const std::string oldDir = root + "/VECTMAP/.maps/session-old/+9999+9999";
   const std::string stagedDir =
       root + "/VECTMAP/.staging/" + session + "/VECTMAP/map-new/+0032+0008";
   assert(::system((std::string("mkdir -p ") + oldDir).c_str()) == 0);
@@ -320,8 +328,8 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   auto activated = installer.activateStagedMap(session, manifest);
   assert(activated.ok);
   assert(readFile(oldDir + "/old.fmb") == "old-map-block");
-  const std::string installed = root + "/VECTMAP/.maps/" + session +
-                                "/+0032+0008/123_456.fmb";
+  const std::string installed =
+      root + "/VECTMAP/.maps/" + session + "/+0032+0008/123_456.fmb";
   assert(readFile(installed) == blockData);
   ActiveMapSelection selection;
   auto active = installer.readActiveMap(selection);
@@ -375,17 +383,15 @@ static void testActivationRestoresOldMapWhenMetadataWriteFails() {
   std::string root = tempRoot();
   MetadataWriteFailingInstaller installer(root);
   const std::string session = "session-rollback";
-  const std::string oldDir =
-      root + "/VECTMAP/.maps/session-old/+9999+9999";
+  const std::string oldDir = root + "/VECTMAP/.maps/session-old/+9999+9999";
   const std::string stagedDir =
       root + "/VECTMAP/.staging/" + session + "/VECTMAP/map-new/+0032+0008";
   assert(::system((std::string("mkdir -p ") + oldDir).c_str()) == 0);
   assert(::system((std::string("mkdir -p ") + stagedDir).c_str()) == 0);
   writeFile(oldDir + "/old.fmb", "old-map-block");
   const std::string activePath = root + "/VECTMAP/active-map.json";
-  writeFile(activePath,
-            "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
-            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+  writeFile(activePath, "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
+                        "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
 
   const std::string blockData = "new-map-block";
   writeFile(stagedDir + "/123_456.fmb", blockData);
@@ -419,7 +425,8 @@ static void testPrunesAbandonedStagingSessions() {
   MapTransferInstaller installer(root);
   const std::string staging = root + "/VECTMAP/.staging";
   assert(::system((std::string("mkdir -p ") + staging + "/keep").c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + staging + "/abandoned").c_str()) == 0);
+  assert(::system(
+             (std::string("mkdir -p ") + staging + "/abandoned").c_str()) == 0);
   writeFile(staging + "/keep/manifest.json", "keep");
   writeFile(staging + "/abandoned/block.fmb", "old");
 
@@ -428,13 +435,15 @@ static void testPrunesAbandonedStagingSessions() {
   assert(!exists(staging + "/abandoned"));
 }
 
-static void testPrunesPreviousAndObsoleteVersionsBeforeNextUpload() {
+static void testPreservesPreviousAndPrunesObsoleteVersions() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string maps = root + "/VECTMAP/.maps";
   assert(::system((std::string("mkdir -p ") + maps + "/current").c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + maps + "/previous").c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + maps + "/obsolete").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + maps + "/previous").c_str()) ==
+         0);
+  assert(::system((std::string("mkdir -p ") + maps + "/obsolete").c_str()) ==
+         0);
   writeFile(maps + "/current/map.fmb", "current");
   writeFile(maps + "/previous/map.fmb", "previous");
   writeFile(maps + "/obsolete/map.fmb", "obsolete");
@@ -447,7 +456,40 @@ static void testPrunesPreviousAndObsoleteVersionsBeforeNextUpload() {
 
   assert(installer.pruneObsoleteInstalledMaps());
   assert(exists(maps + "/current/map.fmb"));
-  assert(!exists(maps + "/previous"));
+  assert(exists(maps + "/previous/map.fmb"));
+  assert(!exists(maps + "/obsolete"));
+}
+
+static void testPruningPreservesLiveDurableStreamReferences() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string maps = root + "/VECTMAP/.maps";
+  for (const std::string &name :
+       {"active", "previous", "installing", "ready", "pending", "transaction",
+        "transaction-previous", "obsolete"}) {
+    assert(::system((std::string("mkdir -p ") + maps + "/" + name).c_str()) ==
+           0);
+    writeFile(maps + "/" + name + "/map.fmb", name);
+  }
+  writeFile(root + "/VECTMAP/active-map.json",
+            "{\"mapId\":\"map-active\",\"sessionId\":\"active\","
+            "\"root\":\"/VECTMAP/.maps/active\","
+            "\"previousMapId\":\"map-previous\","
+            "\"previousSessionId\":\"previous\","
+            "\"previousRoot\":\"/VECTMAP/.maps/previous\"}\n");
+  writeFile(maps + "/installing/.installing", "installing");
+  writeFile(maps + "/ready/.ready", "ready");
+  writeFile(root + "/VECTMAP/.pending-stream-activation.json",
+            "{\"root\":\"/VECTMAP/.maps/pending\"}\n");
+  writeFile(root + "/VECTMAP/.activation-transaction.json",
+            "{\"root\":\"/VECTMAP/.maps/transaction\","
+            "\"previousRoot\":\"/VECTMAP/.maps/transaction-previous\"}\n");
+  assert(installer.pruneObsoleteInstalledMaps());
+  for (const std::string &name : {"active", "previous", "installing", "pending",
+                                  "transaction", "transaction-previous"}) {
+    assert(exists(maps + "/" + name + "/map.fmb"));
+  }
+  assert(!exists(maps + "/ready"));
   assert(!exists(maps + "/obsolete"));
 }
 
@@ -455,11 +497,12 @@ static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
-  assert(::system((std::string("mkdir -p ") +
-                   vectmap + "/.maps/current/+0032+0008")
-                      .c_str()) == 0);
-  assert(::system((std::string("mkdir -p ") + vectmap + "/+9999+9999")
-                      .c_str()) == 0);
+  assert(::system(
+             (std::string("mkdir -p ") + vectmap + "/.maps/current/+0032+0008")
+                 .c_str()) == 0);
+  assert(
+      ::system((std::string("mkdir -p ") + vectmap + "/+9999+9999").c_str()) ==
+      0);
   writeFile(vectmap + "/.maps/current/+0032+0008/new.fmb", "new");
   writeFile(vectmap + "/+9999+9999/old.fmb", "old");
   writeFile(vectmap + "/active-map.json",
@@ -586,8 +629,7 @@ static void testJournalRecoveryRollsBackSameSizeCorruptSelectedVersion() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   prepareInterruptedSelectedVersion(root, "good");
-  writeFile(root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb",
-            "evil");
+  writeFile(root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb", "evil");
 
   auto recovered = installer.recoverInterruptedActivation();
   assert(recovered.ok);
@@ -699,8 +741,8 @@ static void testJournalRecoveryClearsCorruptFirstInstallMetadata() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
-  assert(::system((std::string("mkdir -p ") +
-                   vectmap + "/.maps/session-new").c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + vectmap + "/.maps/session-new")
+                      .c_str()) == 0);
   writeFile(vectmap + "/.maps/session-new/partial.fmb", "partial");
   writeFile(vectmap + "/active-map.json", "{not-json}\n");
   writeFile(vectmap + "/.activation-transaction.json",
@@ -755,8 +797,7 @@ static void testCorruptJournalRollsBackUnverifiableSelectedMap() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   prepareInterruptedSelectedVersion(root, "good");
-  writeFile(root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb",
-            "evil");
+  writeFile(root + "/VECTMAP/.maps/session-commit/+0032+0008/new.fmb", "evil");
   writeFile(root + "/VECTMAP/.activation-transaction.json", "{not-json}\n");
 
   auto recovered = installer.recoverInterruptedActivation();
@@ -801,9 +842,9 @@ static void testVerificationReceiptControlsResumeEligibility() {
   writeFile(stagedDir + "/123_456.fmb", blockData);
   writeFile(root + "/VECTMAP/.staging/" + session + "/manifest.json",
             "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{"
-            "\"path\":\"" + path + "\",\"bytes\":" +
-                std::to_string(blockData.size()) + ",\"sha256\":\"" +
-                sha(blockData) + "\"}]}\n");
+            "\"path\":\"" +
+                path + "\",\"bytes\":" + std::to_string(blockData.size()) +
+                ",\"sha256\":\"" + sha(blockData) + "\"}]}\n");
 
   map_transfer::ManifestFile expected;
   assert(installer.expectedStagedFile(session, path, expected).ok);
@@ -822,14 +863,13 @@ static void testStoredArchivePreparesAndActivatesInBackgroundTransferPath() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string session = "session-archive";
-  const std::string blockPath =
-      "VECTMAP/map-archive/+0032+0008/123_456.fmb";
+  const std::string blockPath = "VECTMAP/map-archive/+0032+0008/123_456.fmb";
   const std::string blockData = "background-map-block";
   const std::string manifest =
       "{\"schemaVersion\":1,\"mapId\":\"map-archive\",\"files\":[{"
-      "\"path\":\"" + blockPath + "\",\"bytes\":" +
-      std::to_string(blockData.size()) + ",\"sha256\":\"" +
-      sha(blockData) + "\"}]}\n";
+      "\"path\":\"" +
+      blockPath + "\",\"bytes\":" + std::to_string(blockData.size()) +
+      ",\"sha256\":\"" + sha(blockData) + "\"}]}\n";
   assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
                       .c_str()) == 0);
   writeStoredZip(installer.stagedArchivePath(session),
@@ -856,19 +896,17 @@ static void testStoredArchiveResumesVerifiedFileCheckpoints() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string session = "session-archive-resume";
-  const std::string firstPath =
-      "VECTMAP/map-resume/+0032+0008/100_100.fmb";
-  const std::string secondPath =
-      "VECTMAP/map-resume/+0032+0008/200_200.fmb";
+  const std::string firstPath = "VECTMAP/map-resume/+0032+0008/100_100.fmb";
+  const std::string secondPath = "VECTMAP/map-resume/+0032+0008/200_200.fmb";
   const std::string firstData = "already-verified";
   const std::string secondData = "finish-after-reboot";
   const std::string manifest =
       "{\"schemaVersion\":1,\"mapId\":\"map-resume\",\"files\":[{"
-      "\"path\":\"" + firstPath + "\",\"bytes\":" +
-      std::to_string(firstData.size()) + ",\"sha256\":\"" +
-      sha(firstData) + "\"},{\"path\":\"" + secondPath +
-      "\",\"bytes\":" + std::to_string(secondData.size()) +
-      ",\"sha256\":\"" + sha(secondData) + "\"}]}\n";
+      "\"path\":\"" +
+      firstPath + "\",\"bytes\":" + std::to_string(firstData.size()) +
+      ",\"sha256\":\"" + sha(firstData) + "\"},{\"path\":\"" + secondPath +
+      "\",\"bytes\":" + std::to_string(secondData.size()) + ",\"sha256\":\"" +
+      sha(secondData) + "\"}]}\n";
   const std::string firstStaged =
       installer.stagingRoot(session) + "/" + firstPath;
   assert(::system((std::string("mkdir -p ") +
@@ -928,8 +966,9 @@ static void testPendingArchiveActivationSurvivesRestart() {
   const std::string root = tempRoot();
   MapTransferInstaller first(root);
   const std::string session = "session-pending-archive";
-  assert(::system((std::string("mkdir -p ") + first.stagingRoot(session))
-                      .c_str()) == 0);
+  assert(::system(
+             (std::string("mkdir -p ") + first.stagingRoot(session)).c_str()) ==
+         0);
   writeFile(first.stagedArchivePath(session), "archive");
   assert(first.markPendingArchiveActivation(session));
 
@@ -953,7 +992,8 @@ int main() {
   testSameSessionRetryRepairsDamagedInstalledVersion();
   testActivationRestoresOldMapWhenMetadataWriteFails();
   testPrunesAbandonedStagingSessions();
-  testPrunesPreviousAndObsoleteVersionsBeforeNextUpload();
+  testPreservesPreviousAndPrunesObsoleteVersions();
+  testPruningPreservesLiveDurableStreamReferences();
   testPrunesLegacyRollbackAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testRollbackPreservesPendingArchiveForBootResume();

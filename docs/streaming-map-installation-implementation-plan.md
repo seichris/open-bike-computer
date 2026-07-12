@@ -37,8 +37,15 @@ Status as of 2026-07-12:
 - Phase 3 adds the host-tested transport-independent firmware parser, exact-byte
   P-256 trust verification with rotation support, hardware-backed SHA-256,
   canonical UTF-8 manifest validation, checked PSRAM ownership, and compact
-  Shanghai-scale file descriptors. Protocol v2 remains unadvertised until the
-  Phase 4/5 installation and HTTP state machines are complete.
+  Shanghai-scale file descriptors.
+- Phase 4 adds the direct inactive-root writer, one compact receipt-bound
+  checkpoint, exact-size retry skipping, atomic ready/pending/active journals,
+  consumed-intent replay protection, current/previous-root rollback identity,
+  metadata-only activation, bounded-memory filesystem enumeration, three-step
+  progress, stable recovery states, and fault-injected crash-boundary coverage.
+  The host suite, ASan/UBSan, and both Waveshare firmware builds pass. Protocol
+  v2 remains unadvertised until the Phase 5 HTTP and Phase 6 iOS paths are
+  complete.
 - No production capability should advertise v2 until the signed stream parser,
   one-pass writer, checkpoint recovery, and pointer transaction all exist and
   pass the acceptance gate below.

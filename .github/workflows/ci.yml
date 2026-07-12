@@ -183,6 +183,18 @@ jobs:
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_format
           /tmp/test_map_stream_format
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_stream_format.cpp \
+            lib/map_transfer/map_stream_crypto.cpp \
+            lib/map_transfer/map_stream_sha.cpp \
+            lib/map_transfer/map_stream_trust.cpp \
+            lib/map_transfer/map_stream_parser.cpp \
+            lib/map_transfer/map_stream_install.cpp \
+            tools/tests/test_map_stream_install.cpp \
+            $(pkg-config --cflags --libs mbedcrypto) \
+            -o /tmp/test_map_stream_install
+          /tmp/test_map_stream_install
       - name: Transfer control dispatch host tests
         run: |
           g++ -std=c++17 \

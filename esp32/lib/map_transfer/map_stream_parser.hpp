@@ -59,6 +59,8 @@ public:
   ~MapStreamFileTable();
   MapStreamFileTable(const MapStreamFileTable &) = delete;
   MapStreamFileTable &operator=(const MapStreamFileTable &) = delete;
+  MapStreamFileTable(MapStreamFileTable &&other) noexcept;
+  MapStreamFileTable &operator=(MapStreamFileTable &&other) noexcept;
 
   bool allocate(size_t capacity);
   bool pushBack(const MapStreamFileDescriptor &file);
@@ -96,12 +98,19 @@ struct MapStreamFileView {
   const std::array<uint8_t, 32> *sha256 = nullptr;
 };
 
+enum class MapStreamFileAction {
+  VerifyAndConsume,
+  ConsumeCheckpointed,
+  Reject,
+};
+
 class MapStreamConsumer {
 public:
   virtual ~MapStreamConsumer() = default;
   virtual bool onManifest(const VerifiedMapStreamManifest &manifest,
                           std::string_view canonicalManifest) = 0;
-  virtual bool onFileBegin(const MapStreamFileView &file, size_t index) = 0;
+  virtual MapStreamFileAction onFileBegin(const MapStreamFileView &file,
+                                          size_t index) = 0;
   virtual bool onFileData(const MapStreamFileView &file, const uint8_t *data,
                           size_t size) = 0;
   virtual bool onFileEnd(const MapStreamFileView &file, size_t index) = 0;
@@ -112,6 +121,9 @@ public:
 bool parseMapStreamManifest(std::string_view manifestText,
                             const MapStreamHeader &header,
                             ParsedMapStreamManifest &manifest);
+bool mapStreamFileView(const ParsedMapStreamManifest &manifest,
+                       std::string_view canonicalManifest, size_t index,
+                       MapStreamFileView &file);
 bool mapStreamFirmwareCompatible(const std::string &currentVersion,
                                  const std::string &minimumVersion);
 
@@ -177,6 +189,7 @@ private:
   size_t fileIndex_ = 0;
   uint64_t fileBytes_ = 0;
   bool fileStarted_ = false;
+  bool verifyCurrentFile_ = true;
   bool verifiedReady_ = false;
 
   bool fail(MapStreamParserError error);
