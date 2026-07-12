@@ -23,7 +23,25 @@ constexpr const char *kActivationTransactionFile =
     "/VECTMAP/.activation-transaction.json";
 constexpr const char *kInstalledManifestFile = ".manifest.json";
 constexpr const char *kInstalledReceiptFile = ".verified.sha256";
-constexpr size_t kMaxManifestBytes = 64 * 1024;
+// Large city packs can contain several thousand map files; their hash manifest
+// is currently about 1 MB for 5,500 entries. Keep a firm upper bound while
+// allowing those production packs to validate in PSRAM-backed builds.
+constexpr size_t kMaxManifestBytes = 2 * 1024 * 1024;
+constexpr uint32_t kZipLocalHeaderSignature = 0x04034b50;
+constexpr uint32_t kZipCentralHeaderSignature = 0x02014b50;
+constexpr uint32_t kZipEndSignature = 0x06054b50;
+
+static uint16_t readLe16(const uint8_t *data) {
+  return static_cast<uint16_t>(data[0]) |
+         (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static uint32_t readLe32(const uint8_t *data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
+}
 
 static std::string joinPath(const std::string &a, const std::string &b) {
   if (a.empty())
@@ -464,6 +482,153 @@ MapTransferInstaller::validateStagedMap(const std::string &sessionId,
     }
   }
   return {true, "ok", ""};
+}
+
+InstallStatus
+MapTransferInstaller::prepareStagedArchive(const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("session_id", "session id contains unsafe characters");
+  const std::string archivePath = stagedArchivePath(sessionId);
+  if (!fileExists(archivePath))
+    return {true, "legacy_files", ""};
+
+  const std::string root = stagingRoot(sessionId);
+  const auto clearExtracted = [&]() {
+    const bool manifestRemoved = removeTree(joinPath(root, "manifest.json"));
+    const bool mapRemoved = removeTree(joinPath(root, "VECTMAP"));
+    const bool verificationRemoved = removeTree(joinPath(root, ".verified"));
+    return manifestRemoved && mapRemoved && verificationRemoved;
+  };
+  if (!clearExtracted() || !mkdirs(root))
+    return fail("archive_cleanup", "could not prepare archive staging directory");
+
+  uint64_t archiveBytes = 0;
+  if (!fileSize(archivePath, archiveBytes))
+    return fail("archive_missing", "staged archive is missing");
+  std::ifstream input(archivePath, std::ios::binary);
+  if (!input)
+    return fail("archive_open", "could not open staged archive");
+
+  bool sawCentralDirectory = false;
+  bool extractedManifest = false;
+  uint64_t offset = 0;
+  while (offset + 4 <= archiveBytes) {
+    uint8_t signatureBytes[4] = {};
+    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    input.read(reinterpret_cast<char *>(signatureBytes), sizeof(signatureBytes));
+    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
+      break;
+    const uint32_t signature = readLe32(signatureBytes);
+    if (signature == kZipCentralHeaderSignature || signature == kZipEndSignature) {
+      sawCentralDirectory = true;
+      break;
+    }
+    if (signature != kZipLocalHeaderSignature) {
+      clearExtracted();
+      return fail("archive_header", "stored archive has an invalid local header");
+    }
+
+    uint8_t header[26] = {};
+    input.read(reinterpret_cast<char *>(header), sizeof(header));
+    if (input.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+      clearExtracted();
+      return fail("archive_truncated", "stored archive header is truncated");
+    }
+    const uint16_t flags = readLe16(header + 2);
+    const uint16_t compression = readLe16(header + 4);
+    const uint64_t compressedSize = readLe32(header + 14);
+    const uint64_t uncompressedSize = readLe32(header + 18);
+    const uint16_t nameLength = readLe16(header + 22);
+    const uint16_t extraLength = readLe16(header + 24);
+    if ((flags & 0x0009) != 0 || compression != 0 ||
+        compressedSize != uncompressedSize || nameLength == 0 ||
+        nameLength > 240) {
+      clearExtracted();
+      return fail("archive_format", "map archive must use stored entries without descriptors");
+    }
+
+    std::string path(nameLength, '\0');
+    input.read(path.data(), static_cast<std::streamsize>(nameLength));
+    if (input.gcount() != static_cast<std::streamsize>(nameLength) ||
+        path.find('\0') != std::string::npos) {
+      clearExtracted();
+      return fail("archive_path", "map archive contains an invalid path");
+    }
+    const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
+    if (dataOffset > archiveBytes || compressedSize > archiveBytes - dataOffset) {
+      clearExtracted();
+      return fail("archive_truncated", "map archive entry extends past end of file");
+    }
+
+    const bool isManifest = path == "manifest.json";
+    const bool isMapFile = startsWith(path, kVectMapPrefix) &&
+                           safeRelativePath(path) &&
+                           (path.size() >= 4 &&
+                            (path.rfind(".fmb") == path.size() - 4 ||
+                             path.rfind(".fmp") == path.size() - 4));
+    const bool isMetadata = path == "ATTRIBUTION.txt" ||
+                            startsWith(path, "LICENSES/");
+    if (!isManifest && !isMapFile && !isMetadata && path.back() != '/') {
+      clearExtracted();
+      return fail("archive_path", "map archive contains an unexpected path");
+    }
+
+    if (isManifest || isMapFile) {
+      if (isManifest && extractedManifest) {
+        clearExtracted();
+        return fail("archive_path", "map archive contains multiple manifests");
+      }
+      if (isManifest && compressedSize > kMaxManifestBytes) {
+        clearExtracted();
+        return fail("manifest_size", "manifest size is invalid");
+      }
+      const std::string destination = joinPath(root, path);
+      if (!mkdirs(dirnameOf(destination))) {
+        clearExtracted();
+        return fail("archive_mkdir", "could not create extracted map directory");
+      }
+      std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+      if (!output) {
+        clearExtracted();
+        return fail("archive_write", "could not create extracted map file");
+      }
+      input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
+      uint8_t buffer[4096];
+      uint64_t remaining = compressedSize;
+      while (remaining > 0) {
+        const size_t count = static_cast<size_t>(
+            std::min<uint64_t>(remaining, sizeof(buffer)));
+        input.read(reinterpret_cast<char *>(buffer),
+                   static_cast<std::streamsize>(count));
+        if (input.gcount() != static_cast<std::streamsize>(count)) {
+          output.close();
+          clearExtracted();
+          return fail("archive_truncated", "map archive data is truncated");
+        }
+        output.write(reinterpret_cast<const char *>(buffer),
+                     static_cast<std::streamsize>(count));
+        if (!output) {
+          output.close();
+          clearExtracted();
+          return fail("archive_write", "could not write extracted map file");
+        }
+        remaining -= count;
+      }
+      output.close();
+      if (!output.good()) {
+        clearExtracted();
+        return fail("archive_write", "could not finish extracted map file");
+      }
+      extractedManifest = extractedManifest || isManifest;
+    }
+    offset = dataOffset + compressedSize;
+  }
+
+  if (!sawCentralDirectory || !extractedManifest) {
+    clearExtracted();
+    return fail("archive_truncated", "map archive is incomplete");
+  }
+  return {true, "archive_extracted", ""};
 }
 
 InstallStatus MapTransferInstaller::expectedStagedFile(
@@ -912,6 +1077,11 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps() const {
 
 std::string MapTransferInstaller::stagingRoot(const std::string &sessionId) const {
   return joinPath(joinPath(storageRoot_, "VECTMAP/.staging"), sessionId);
+}
+
+std::string
+MapTransferInstaller::stagedArchivePath(const std::string &sessionId) const {
+  return joinPath(stagingRoot(sessionId), "pack.zip");
 }
 
 InstallStatus MapTransferInstaller::fail(const std::string &code,

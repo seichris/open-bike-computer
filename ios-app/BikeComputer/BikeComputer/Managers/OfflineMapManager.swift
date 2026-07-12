@@ -1410,14 +1410,35 @@ final class OfflineMapManager: ObservableObject {
                 deviceTransferManager.exitMapTransfer(bleManager: bleManager)
             }
             downloadedPackURL = packURL
-            let client = MapTransferDeviceClient(baseURL: transferSession.baseURL)
+            let client = MapTransferDeviceClient(
+                baseURL: transferSession.baseURL,
+                sessionToken: transferSession.sessionToken
+            )
             transferProgress = 0
             statusMessage = "uploading \(displayName(forMapId: expectedMapId)) to device"
             updateLastTransferOutcome("uploading")
-            try await client.upload(archive: archive, sessionId: sessionId) { completed, total, path, didUpload in
-                self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
-                let prefix = didUpload ? "uploaded" : "already on device"
-                self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+            do {
+                try await client.uploadArchiveInBackground(
+                    archiveURL: packURL,
+                    sessionId: sessionId
+                ) { completedBytes, totalBytes in
+                    self.transferProgress = totalBytes == 0 ? 0 :
+                        Double(completedBytes) / Double(totalBytes)
+                    let percent = Int((self.transferProgress * 100).rounded())
+                    self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+                }
+                transferProgress = 1
+                statusMessage = "map uploaded; activating on device"
+            } catch OfflineMapPlatformError.serverStatus(let status, _) where status == 400 {
+                statusMessage = "device uses foreground map transfer"
+                try await client.upload(
+                    archive: archive,
+                    sessionId: sessionId
+                ) { completed, total, path, didUpload in
+                    self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
+                    let prefix = didUpload ? "uploaded" : "already on device"
+                    self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+                }
             }
 
             let statusBeforeActivation = try? await client.status()

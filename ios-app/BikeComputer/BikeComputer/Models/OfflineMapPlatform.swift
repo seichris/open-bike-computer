@@ -591,6 +591,7 @@ struct OfflineMapPackArchive {
 
 struct MapTransferDeviceClient {
     let baseURL: URL
+    var sessionToken: String? = nil
     var session: URLSession = .shared
     var recoveryRetryNanoseconds: UInt64 = 2_000_000_000
 
@@ -615,6 +616,40 @@ struct MapTransferDeviceClient {
         }
     }
 
+    nonisolated func uploadArchiveInBackground(
+        archiveURL: URL,
+        sessionId: String,
+        progress: @escaping @MainActor (_ completedBytes: Int64, _ totalBytes: Int64) -> Void
+    ) async throws {
+        let values = try archiveURL.resourceValues(forKeys: [.fileSizeKey])
+        guard let fileSize = values.fileSize, fileSize > 0 else {
+            throw OfflineMapPlatformError.invalidPack("archive size is unavailable")
+        }
+        if try await stagedByteCount(sessionId: sessionId, path: "pack.zip") == fileSize {
+            await progress(Int64(fileSize), Int64(fileSize))
+            return
+        }
+
+        let request = Self.archiveUploadRequest(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            sessionToken: sessionToken
+        )
+
+#if os(iOS)
+        try await BackgroundMapUploadCoordinator.shared.upload(
+            request: request,
+            fileURL: archiveURL,
+            expectedBytes: Int64(fileSize),
+            progress: progress
+        )
+#else
+        let response = try await session.upload(for: request, fromFile: archiveURL)
+        try Self.validate(response: response.1, body: response.0)
+        await progress(Int64(fileSize), Int64(fileSize))
+#endif
+    }
+
     nonisolated func activate(sessionId: String) async throws -> UInt32? {
         var request = URLRequest(url: Self.uploadURL(
             baseURL: baseURL,
@@ -623,6 +658,7 @@ struct MapTransferDeviceClient {
         ))
         request.httpMethod = "POST"
         request.timeoutInterval = 15
+        authorize(&request)
         let data = try await send(request: request, data: nil)
         let acknowledgement = try JSONDecoder().decode(
             MapTransferActivationAcknowledgement.self,
@@ -640,6 +676,7 @@ struct MapTransferDeviceClient {
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 2
+        authorize(&request)
         let data = try await send(request: request, data: nil)
         return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
     }
@@ -653,6 +690,7 @@ struct MapTransferDeviceClient {
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
+        authorize(&request)
         _ = try await send(request: request, data: data)
     }
 
@@ -670,6 +708,7 @@ struct MapTransferDeviceClient {
             request.httpMethod = "HEAD"
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 3
+            authorize(&request)
 
             do {
                 let response = try await session.data(for: request)
@@ -719,14 +758,24 @@ struct MapTransferDeviceClient {
         } else {
             response = try await session.data(for: request)
         }
-        guard let http = response.1 as? HTTPURLResponse else {
+        try Self.validate(response: response.1, body: response.0)
+        return response.0
+    }
+
+    private nonisolated func authorize(_ request: inout URLRequest) {
+        if let sessionToken, !sessionToken.isEmpty {
+            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        }
+    }
+
+    fileprivate nonisolated static func validate(response: URLResponse, body: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: response.0, encoding: .utf8) ?? ""
+            let bodyText = String(data: body, encoding: .utf8) ?? ""
             throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
         }
-        return response.0
     }
 
     nonisolated static func uploadURL(baseURL: URL, sessionId: String, relativePath: String) -> URL {
@@ -735,6 +784,25 @@ struct MapTransferDeviceClient {
             .map(percentEncodedPathComponent)
             .joined(separator: "/")
         return URL(string: "\(base)/\(encodedSegments)")!
+    }
+
+    nonisolated static func archiveUploadRequest(
+        baseURL: URL,
+        sessionId: String,
+        sessionToken: String?
+    ) -> URLRequest {
+        var request = URLRequest(url: uploadURL(
+            baseURL: baseURL,
+            sessionId: sessionId,
+            relativePath: "pack.zip"
+        ))
+        request.httpMethod = "PUT"
+        request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
+        if let sessionToken, !sessionToken.isEmpty {
+            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        }
+        return request
     }
 
     nonisolated static func statusURL(baseURL: URL) -> URL {
@@ -748,6 +816,143 @@ struct MapTransferDeviceClient {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }
+
+#if os(iOS)
+final class BackgroundMapUploadCoordinator: NSObject,
+                                            URLSessionDataDelegate,
+                                            URLSessionTaskDelegate {
+    static let shared = BackgroundMapUploadCoordinator()
+    static let sessionIdentifier = "LetItRide.BikeComputer.map-transfer.background"
+
+    private struct PendingUpload {
+        let continuation: CheckedContinuation<Void, Error>
+        let progress: @MainActor (Int64, Int64) -> Void
+        let expectedBytes: Int64
+        var responseData = Data()
+    }
+
+    private let lock = NSLock()
+    private var pendingUploads: [Int: PendingUpload] = [:]
+    private var backgroundCompletionHandler: (() -> Void)?
+
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(
+            withIdentifier: Self.sessionIdentifier
+        )
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        configuration.allowsCellularAccess = false
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.httpMaximumConnectionsPerHost = 1
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 6 * 60 * 60
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    func upload(
+        request: URLRequest,
+        fileURL: URL,
+        expectedBytes: Int64,
+        progress: @escaping @MainActor (Int64, Int64) -> Void
+    ) async throws {
+        let task = session.uploadTask(with: request, fromFile: fileURL)
+        task.countOfBytesClientExpectsToSend = expectedBytes
+        task.countOfBytesClientExpectsToReceive = 512
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                pendingUploads[task.taskIdentifier] = PendingUpload(
+                    continuation: continuation,
+                    progress: progress,
+                    expectedBytes: expectedBytes
+                )
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func handleEvents(completionHandler: @escaping () -> Void) {
+        lock.lock()
+        backgroundCompletionHandler = completionHandler
+        lock.unlock()
+        _ = session
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        lock.lock()
+        let pending = pendingUploads[task.taskIdentifier]
+        lock.unlock()
+        guard let pending else { return }
+        let expectedBytes = totalBytesExpectedToSend > 0
+            ? totalBytesExpectedToSend
+            : pending.expectedBytes
+        Task { @MainActor in
+            pending.progress(totalBytesSent, expectedBytes)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        lock.lock()
+        if var pending = pendingUploads[dataTask.taskIdentifier] {
+            pending.responseData.append(data)
+            pendingUploads[dataTask.taskIdentifier] = pending
+        }
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        lock.lock()
+        let pending = pendingUploads.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+        guard let pending else { return }
+        if let error {
+            pending.continuation.resume(throwing: error)
+            return
+        }
+        do {
+            guard let response = task.response else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            try MapTransferDeviceClient.validate(
+                response: response,
+                body: pending.responseData
+            )
+            pending.continuation.resume()
+        } catch {
+            pending.continuation.resume(throwing: error)
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        lock.lock()
+        let completionHandler = backgroundCompletionHandler
+        backgroundCompletionHandler = nil
+        lock.unlock()
+        DispatchQueue.main.async {
+            completionHandler?()
+        }
+    }
+}
+#endif
 
 struct OfflineMapPlatformClient {
     let baseURL: URL

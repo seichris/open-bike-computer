@@ -24,6 +24,8 @@ struct DeviceTransferSession: Equatable {
 
 @MainActor
 final class DeviceTransferManager {
+    private var joinedAccessPointSSID: String?
+
     func enterMapTransfer(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
@@ -70,6 +72,7 @@ final class DeviceTransferManager {
 
     func exitMapTransfer(bleManager: BLEManager) {
         bleManager.requestMapTransferMode(enabled: false)
+        removeJoinedAccessPointIfNeeded()
     }
 
     func enterFirmwareTransfer(
@@ -118,6 +121,7 @@ final class DeviceTransferManager {
 
     func exitFirmwareTransfer(bleManager: BLEManager) {
         bleManager.requestDeviceTransferExit()
+        removeJoinedAccessPointIfNeeded()
     }
 
     private func joinDeviceNetworkIfNeeded(
@@ -135,7 +139,12 @@ final class DeviceTransferManager {
 #if os(iOS)
         status("joining device Wi-Fi")
         let configuration = NEHotspotConfiguration(ssid: ssid)
-        configuration.joinOnce = true
+        // A join-once network is disconnected by iOS when the screen sleeps or
+        // the app remains backgrounded for 15 seconds. Keep this accessory AP
+        // configured for the duration of the background URLSession upload and
+        // remove it explicitly when transfer mode exits.
+        configuration.joinOnce = false
+        configuration.lifeTimeInDays = 1
 
         do {
             try await withCheckedThrowingContinuation { continuation in
@@ -149,6 +158,7 @@ final class DeviceTransferManager {
                         }
                         return
                     }
+                    self.joinedAccessPointSSID = ssid
                     continuation.resume()
                 }
             }
@@ -156,6 +166,7 @@ final class DeviceTransferManager {
             if await isTransferServerReachable(baseURL: session.baseURL,
                                                statusPath: statusPath,
                                                sessionToken: sessionToken) {
+                joinedAccessPointSSID = ssid
                 return
             }
             status("using device Wi-Fi")
@@ -166,9 +177,18 @@ final class DeviceTransferManager {
         if await isTransferServerReachable(baseURL: session.baseURL,
                                            statusPath: statusPath,
                                            sessionToken: sessionToken) {
+            joinedAccessPointSSID = ssid
             return
         }
         status("using device Wi-Fi")
+#endif
+    }
+
+    private func removeJoinedAccessPointIfNeeded() {
+#if os(iOS)
+        guard let ssid = joinedAccessPointSSID else { return }
+        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
+        joinedAccessPointSSID = nil
 #endif
     }
 

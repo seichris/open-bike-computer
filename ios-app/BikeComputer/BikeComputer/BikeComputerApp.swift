@@ -40,4 +40,18 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillEnterForeground(_ application: UIApplication) {
         print("App entering foreground")
     }
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == BackgroundMapUploadCoordinator.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        BackgroundMapUploadCoordinator.shared.handleEvents(
+            completionHandler: completionHandler
+        )
+    }
 }

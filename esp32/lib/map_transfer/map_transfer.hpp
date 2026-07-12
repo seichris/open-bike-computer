@@ -92,6 +92,7 @@ public:
                                    MapManifest &manifest) const;
   InstallStatus validateStagedMap(const std::string &sessionId,
                                   MapManifest &manifest) const;
+  InstallStatus prepareStagedArchive(const std::string &sessionId) const;
   InstallStatus expectedStagedFile(const std::string &sessionId,
                                    const std::string &path,
                                    ManifestFile &file) const;
@@ -111,6 +112,7 @@ public:
   bool pruneObsoleteInstalledMaps() const;
 
   std::string stagingRoot(const std::string &sessionId) const;
+  std::string stagedArchivePath(const std::string &sessionId) const;
 
 protected:
   virtual bool writeTextFileAtomic(const std::string &path,

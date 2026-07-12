@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <freertos/task.h>
 
 namespace map_transfer {
@@ -16,6 +17,7 @@ namespace {
 constexpr const char *kStatusPath = "/map-transfer/status";
 constexpr const char *kSessionPrefix = "/map-transfer/sessions/";
 constexpr uint64_t kMaxUploadBytes = 128ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxArchiveUploadBytes = 512ULL * 1024ULL * 1024ULL;
 
 struct ActivationTaskContext {
   MapTransferHttpServer *server = nullptr;
@@ -75,7 +77,7 @@ static bool safeRelativePath(const std::string &path) {
 }
 
 static bool safeUploadPath(const std::string &path) {
-  if (path == "manifest.json")
+  if (path == "manifest.json" || path == "pack.zip")
     return true;
   return startsWith(path, "VECTMAP/") && safeRelativePath(path);
 }
@@ -268,6 +270,16 @@ bool MapTransferHttpServer::handleHead(const std::string &path,
   recoveryBlocked_ = false;
   unlockState();
 
+  if (relativePath == "pack.zip") {
+    uint64_t archiveSize = 0;
+    if (!fileSize(installer_.stagedArchivePath(sessionId), archiveSize)) {
+      sendHead(client, 404);
+      return true;
+    }
+    sendHead(client, 200, archiveSize);
+    return true;
+  }
+
   const std::string stagedPath =
       joinPath(installer_.stagingRoot(sessionId), relativePath);
   uint64_t size = 0;
@@ -305,7 +317,10 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 400, "path", "upload path is invalid");
     return true;
   }
-  if (contentLength == 0 || contentLength > kMaxUploadBytes) {
+  const bool isArchive = relativePath == "pack.zip";
+  const uint64_t maxUploadBytes =
+      isArchive ? kMaxArchiveUploadBytes : kMaxUploadBytes;
+  if (contentLength == 0 || contentLength > maxUploadBytes) {
     sendError(client, 413, "content_length", "upload size is invalid");
     return true;
   }
@@ -325,7 +340,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
 
   ManifestFile expectedFile;
   const bool isManifest = relativePath == "manifest.json";
-  if (!isManifest) {
+  if (!isManifest && !isArchive) {
     InstallStatus declared =
         installer_.expectedStagedFile(sessionId, relativePath, expectedFile);
     if (!declared.ok) {
@@ -339,8 +354,10 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     }
     installer_.clearStagedFileVerification(sessionId, expectedFile);
   }
-  const std::string destination =
-      joinPath(installer_.stagingRoot(sessionId), relativePath);
+  const std::string destination = isArchive
+                                      ? installer_.stagedArchivePath(sessionId)
+                                      : joinPath(installer_.stagingRoot(sessionId),
+                                                 relativePath);
   if (!mkdirs(dirnameOf(destination))) {
     sendError(client, 500, "mkdir", "could not create staging directory");
     return true;
@@ -372,7 +389,7 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     int read = client.read(buffer, toRead);
     if (read <= 0)
       continue;
-    if (!isManifest)
+    if (!isManifest && !isArchive)
       hasher.update(buffer, static_cast<size_t>(read));
     output.write(reinterpret_cast<const char *>(buffer), read);
     if (!output) {
@@ -387,7 +404,15 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
     sendError(client, 500, "write", "could not finish staged file");
     return true;
   }
-  if (isManifest) {
+  if (isArchive) {
+    if (!installer_.pruneStagingSessions(sessionId) ||
+        !installer_.pruneObsoleteInstalledMaps()) {
+      ::unlink(destination.c_str());
+      sendError(client, 500, "staging_cleanup",
+                "could not prune obsolete map transfers");
+      return true;
+    }
+  } else if (isManifest) {
     MapManifest manifest;
     InstallStatus parsed = installer_.readStagedManifest(sessionId, manifest);
     if (!parsed.ok) {
@@ -588,12 +613,22 @@ void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
     finishActivation("failed", "", recovery.code, recovery.message);
     return;
   }
+  InstallStatus prepared = installer_.prepareStagedArchive(sessionId);
+  if (!prepared.ok) {
+    Serial.printf("MAP_TRANSFER_HTTP: archive preparation failed code=%s message=%s\n",
+                  prepared.code.c_str(), prepared.message.c_str());
+    finishActivation("failed", "", prepared.code, prepared.message);
+    ::unlink(installer_.stagedArchivePath(sessionId).c_str());
+    return;
+  }
+
   MapManifest manifest;
   InstallStatus validated = installer_.validateStagedMap(sessionId, manifest);
   if (!validated.ok) {
     Serial.printf("MAP_TRANSFER_HTTP: activate validation failed code=%s message=%s\n",
                   validated.code.c_str(), validated.message.c_str());
     finishActivation("failed", "", validated.code, validated.message);
+    ::unlink(installer_.stagedArchivePath(sessionId).c_str());
     return;
   }
 

@@ -2359,6 +2359,22 @@ struct NavigationProtocolTests {
             "http://192.168.4.20:8080/map-transfer/sessions/session-1/VECTMAP/map-1/%2B0032%2B0008/123_456.fmb",
             "upload URL percent-encodes plus signs so firmware does not decode them as spaces"
         )
+        let archiveRequest = MapTransferDeviceClient.archiveUploadRequest(
+            baseURL: baseURL,
+            sessionId: "session-1",
+            sessionToken: "transfer-secret"
+        )
+        assertEqual(
+            archiveRequest.url?.absoluteString,
+            "http://192.168.4.20:8080/map-transfer/sessions/session-1/pack.zip",
+            "background map transfer uploads one archive to the session endpoint"
+        )
+        assertEqual(archiveRequest.httpMethod, "PUT", "archive transfer uses PUT")
+        assertEqual(
+            archiveRequest.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"),
+            "transfer-secret",
+            "archive transfer carries the BLE-issued session token"
+        )
     }
 
     @MainActor
