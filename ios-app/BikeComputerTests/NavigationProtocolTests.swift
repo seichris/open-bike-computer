@@ -389,6 +389,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
+        testOfflineMapActivityCounterOverlappingOperations()
         testOfflineMapJobPersistence()
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
@@ -1010,6 +1011,19 @@ struct NavigationProtocolTests {
             ),
             "pending device install waits for navigation readiness"
         )
+    }
+
+    static func testOfflineMapActivityCounterOverlappingOperations() {
+        var counter = OfflineMapActivityCounter()
+        counter.begin()
+        counter.begin()
+        counter.end()
+        assert(
+            counter.isBusy,
+            "finishing a cancelled older operation keeps a newer map operation busy"
+        )
+        counter.end()
+        assert(!counter.isBusy, "busy state clears after the final operation finishes")
     }
 
     @MainActor
@@ -2321,12 +2335,12 @@ struct NavigationProtocolTests {
             "the exact cached manifest session is marked installed"
         )
         assert(
-            manager.isCachedPackInstalled(
+            !manager.isCachedPackInstalled(
                 url,
                 activeMapId: "map-1",
                 activeSessionId: ""
             ),
-            "legacy firmware without active-session status falls back to map ID"
+            "legacy firmware cannot hide upload for a regenerated same-area pack"
         )
     }
 
@@ -2389,6 +2403,24 @@ struct NavigationProtocolTests {
             archiveRequest.value(forHTTPHeaderField: "X-BikeComputer-Transfer-Token"),
             "transfer-secret",
             "archive transfer carries the BLE-issued session token"
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(400, "unknown path")
+            ),
+            "older firmware falls back to foreground per-file transfer"
+        )
+        assert(
+            MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(413, "archive too large")
+            ),
+            "oversized archives fall back to the supported per-file protocol"
+        )
+        assert(
+            !MapArchiveUploadFallback.shouldUseForeground(
+                for: OfflineMapPlatformError.serverStatus(500, "write failed")
+            ),
+            "device failures are not disguised as compatibility fallback"
         )
     }
 

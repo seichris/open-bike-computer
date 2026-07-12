@@ -181,6 +181,19 @@ nonisolated enum MapActivationTransport {
     }
 }
 
+nonisolated enum MapArchiveUploadFallback {
+    static func shouldUseForeground(for error: Error) -> Bool {
+        guard let platformError = error as? OfflineMapPlatformError,
+              case .serverStatus(let status, _) = platformError else {
+            return false
+        }
+        // Older firmware rejects pack.zip as an unknown path (400). Current
+        // firmware caps a single archive at 512 MiB (413), while its per-file
+        // protocol can still accept the same valid map.
+        return status == 400 || status == 413
+    }
+}
+
 nonisolated enum MapTransferSessionIdentity {
     static func make(mapId: String, manifestData: Data) -> String {
         let allowed = CharacterSet(
@@ -481,6 +494,21 @@ nonisolated enum OfflineMapDownloadResponseValidator {
     }
 }
 
+nonisolated struct OfflineMapActivityCounter {
+    private(set) var count = 0
+
+    var isBusy: Bool { count > 0 }
+
+    mutating func begin() {
+        count += 1
+    }
+
+    mutating func end() {
+        precondition(count > 0, "offline map activity counter is unbalanced")
+        count -= 1
+    }
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     typealias PackDownloadOperation = (
@@ -552,6 +580,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
+    private var activityCounter = OfflineMapActivityCounter()
 
     init(
         defaults: UserDefaults = .standard,
@@ -856,10 +885,10 @@ final class OfflineMapManager: ObservableObject {
               activeMapId == packURL.deletingPathExtension().lastPathComponent else {
             return false
         }
-        // Older firmware exposes only mapId. New firmware includes the durable
-        // content-derived session so regenerated same-area packs are not shown
-        // as installed merely because their stable map IDs match.
-        guard !activeSessionId.isEmpty else { return true }
+        // A stable map ID identifies an area, not a particular generated pack.
+        // Older firmware does not expose the content-derived session, so it
+        // cannot prove that a regenerated same-area pack is already installed.
+        guard !activeSessionId.isEmpty else { return false }
         guard let archive = try? OfflineMapPackArchive(url: packURL),
               let manifest = try? archive.manifest(),
               let mapId = manifest.mapId,
@@ -1217,10 +1246,16 @@ final class OfflineMapManager: ObservableObject {
                 self?.downloadByteProgress = byteProgress
             })
             temporaryURL = downloadedURL
-            try await Task.detached(priority: .userInitiated) {
+            let validationTask = Task.detached(priority: .userInitiated) {
                 let archive = try OfflineMapPackArchive(url: downloadedURL)
                 try archive.validate(expectedMapId: mapId)
-            }.value
+            }
+            try await withTaskCancellationHandler {
+                try await validationTask.value
+            } onCancel: {
+                validationTask.cancel()
+            }
+            try Task.checkCancellation()
         } catch {
             if let temporaryURL {
                 try? FileManager.default.removeItem(at: temporaryURL)
@@ -1429,7 +1464,10 @@ final class OfflineMapManager: ObservableObject {
                 }
                 transferProgress = 1
                 statusMessage = "map uploaded; activating on device"
-            } catch OfflineMapPlatformError.serverStatus(let status, _) where status == 400 {
+            } catch {
+                guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
+                    throw error
+                }
                 statusMessage = "device uses foreground map transfer"
                 try await client.upload(
                     archive: archive,
@@ -1726,9 +1764,13 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {
-        isBusy = true
+        activityCounter.begin()
+        isBusy = activityCounter.isBusy
         errorMessage = nil
-        defer { isBusy = false }
+        defer {
+            activityCounter.end()
+            isBusy = activityCounter.isBusy
+        }
         do {
             try await operation()
         } catch is CancellationError {

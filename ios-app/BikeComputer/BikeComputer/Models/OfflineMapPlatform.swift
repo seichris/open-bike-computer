@@ -437,7 +437,7 @@ struct OfflineMapPackArchive {
         return data
     }
 
-    func manifest() throws -> OfflineMapPackManifest {
+    nonisolated func manifest() throws -> OfflineMapPackManifest {
         guard let manifestEntry else {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
         }
@@ -445,6 +445,7 @@ struct OfflineMapPackArchive {
     }
 
     nonisolated func validate(expectedMapId: String) throws {
+        try Task.checkCancellation()
         let manifest = try manifest()
         guard manifest.mapId == expectedMapId else {
             throw OfflineMapPlatformError.invalidPack(
@@ -463,6 +464,7 @@ struct OfflineMapPackArchive {
         }
         let entriesByPath = Dictionary(uniqueKeysWithValues: mapFileEntries.map { ($0.path, $0) })
         for file in files {
+            try Task.checkCancellation()
             guard let entry = entriesByPath[file.path], file.bytes == entry.byteCount else {
                 throw OfflineMapPlatformError.invalidPack("file size mismatch for \(file.path)")
             }
@@ -482,6 +484,7 @@ struct OfflineMapPackArchive {
         var remaining = entry.byteCount
         var hasher = SHA256()
         while remaining > 0 {
+            try Task.checkCancellation()
             let chunk = try handle.read(upToCount: min(remaining, 1_048_576)) ?? Data()
             guard !chunk.isEmpty else {
                 throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
