@@ -29,6 +29,7 @@ def create_app():
     )
     data_root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", repo_root / "backend" / "data"))
     api_token = os.environ.get("MAP_PLATFORM_API_TOKEN")
+    admin_token = os.environ.get("MAP_PLATFORM_ADMIN_TOKEN")
     download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or api_token or secrets.token_urlsafe(32)
     download_signer = DownloadSigner(download_secret)
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
@@ -49,8 +50,14 @@ def create_app():
     def require_api_token(authorization: str | None = Header(default=None)) -> None:
         if not api_token:
             return
-        if authorization != f"Bearer {api_token}":
+        if authorization is None or not secrets.compare_digest(authorization, f"Bearer {api_token}"):
             raise HTTPException(status_code=401, detail="invalid API token")
+
+    def require_admin_token(authorization: str | None = Header(default=None)) -> None:
+        if not admin_token:
+            raise HTTPException(status_code=503, detail="admin API is disabled")
+        if authorization is None or not secrets.compare_digest(authorization, f"Bearer {admin_token}"):
+            raise HTTPException(status_code=401, detail="invalid admin token")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -112,7 +119,7 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
-    @app.post("/v1/workers/run-next", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/workers/run-next", dependencies=[Depends(require_admin_token)])
     def run_next_job() -> dict[str, Any]:
         result = MapWorker(service.store, pipeline).run_next()
         return {
@@ -121,7 +128,7 @@ def create_app():
             "job": result.job.to_dict() if result.job else None,
         }
 
-    @app.post("/v1/source-regions/{region_id}/cache", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/source-regions/{region_id}/cache", dependencies=[Depends(require_admin_token)])
     def cache_source_region(region_id: str) -> dict[str, Any]:
         matches = [region for region in service.source_index.all_regions(include_dynamic=True) if region.id == region_id]
         if not matches:
@@ -138,12 +145,17 @@ def create_app():
             "cachedAt": cached.cached_at,
         }
 
-    @app.post("/v1/maintenance/expire", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/maintenance/expire", dependencies=[Depends(require_admin_token)])
     def expire_map_packs(payload: dict[str, Any] | None = None) -> dict[str, int]:
-        older_than_days = int((payload or {}).get("olderThanDays", 30))
+        try:
+            older_than_days = int((payload or {}).get("olderThanDays", 30))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="olderThanDays must be an integer") from exc
+        if not 1 <= older_than_days <= 3_650:
+            raise HTTPException(status_code=400, detail="olderThanDays must be between 1 and 3650")
         return {"expired": expire_ready_jobs(service.store, older_than_days=older_than_days)}
 
-    @app.post("/v1/maintenance/cleanup-work", dependencies=[Depends(require_api_token)])
+    @app.post("/v1/maintenance/cleanup-work", dependencies=[Depends(require_admin_token)])
     def cleanup_work() -> dict[str, int]:
         return {"removed": cleanup_work_dirs(data_root / "work", service.store)}
 

@@ -721,7 +721,7 @@ struct NavigationProtocolTests {
             "handled server jobs remain excluded from automatic redownload"
         )
         OfflineMapRecoveryHistory.forgetNextDiscovery(
-            serverURLString: "https://maps-a.example/",
+            serverURLString: "https://maps-a.example:443/",
             defaults: defaults
         )
         assert(
@@ -729,7 +729,7 @@ struct NavigationProtocolTests {
                 serverURLString: "https://maps-a.example",
                 defaults: defaults
             ),
-            "forgetting discovery survives relaunch for the normalized server"
+            "forgetting discovery survives relaunch and default-port normalization"
         )
         assert(
             !OfflineMapRecoveryHistory.shouldForgetNextDiscovery(
@@ -1161,11 +1161,25 @@ struct NavigationProtocolTests {
             ])
         }
 
-        func packData(mapId: String) -> Data {
-            let manifest = Data("{\"mapId\":\"\(mapId)\",\"displayName\":\"Recovery Test\"}".utf8)
+        func packData(
+            mapId: String,
+            storedMapData: Data = Data([0x01]),
+            hashedMapData: Data? = nil
+        ) -> Data {
+            let mapPath = "VECTMAP/0/0/0.pbf"
+            let declaredData = hashedMapData ?? storedMapData
+            let manifest = try! JSONSerialization.data(withJSONObject: [
+                "mapId": mapId,
+                "displayName": "Recovery Test",
+                "files": [[
+                    "path": mapPath,
+                    "bytes": declaredData.count,
+                    "sha256": FirmwareUpdateManager.sha256Hex(declaredData),
+                ]],
+            ])
             return makeStoredZip(entries: [
                 ("manifest.json", manifest),
-                ("VECTMAP/0/0/0.pbf", Data([0x01])),
+                (mapPath, storedMapData),
             ])
         }
 
@@ -1274,7 +1288,7 @@ struct NavigationProtocolTests {
         defer { try? FileManager.default.removeItem(at: managedCache) }
         OfflineMapJobPersistence.save(
             jobId: "job-managed-token",
-            serverURLString: OfflineMapServiceConfig.productionServerURLString,
+            serverURLString: "https://maps.8o.vc:443/",
             apiTokenString: "stale-bundled-token",
             defaults: managedDefaults
         )
@@ -1339,7 +1353,7 @@ struct NavigationProtocolTests {
         defer { try? FileManager.default.removeItem(at: rotatedCustomCache) }
         OfflineMapJobPersistence.save(
             jobId: "job-rotated-custom-token",
-            serverURLString: "https://custom-rotation.example/",
+            serverURLString: "https://custom-rotation.example:443/",
             apiTokenString: "old-custom-token",
             defaults: rotatedCustomDefaults
         )
@@ -1466,7 +1480,7 @@ struct NavigationProtocolTests {
         try! originalDownloadRetryPackData.write(to: downloadRetryPack)
         var downloadURLIssueCount = 0
         var packDownloadAttemptCount = 0
-        var rejectedTemporaryURL: URL?
+        var rejectedTemporaryURLs: [URL] = []
         OfflineMapTestURLProtocol.configure { request in
             if request.url?.path == "/v1/map-jobs/job-download-retry" {
                 return (200, jobData(jobId: "job-download-retry", mapId: "map-download-retry"))
@@ -1491,12 +1505,20 @@ struct NavigationProtocolTests {
             cacheDirectory: downloadRetryCache,
             packDownload: { _, onProgress, _ in
                 packDownloadAttemptCount += 1
-                if packDownloadAttemptCount == 1 {
+                if packDownloadAttemptCount <= 2 {
                     let url = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString)
                         .appendingPathExtension("zip")
-                    try packData(mapId: "map-from-wrong-job").write(to: url)
-                    rejectedTemporaryURL = url
+                    if packDownloadAttemptCount == 1 {
+                        try packData(mapId: "map-from-wrong-job").write(to: url)
+                    } else {
+                        try packData(
+                            mapId: "map-download-retry",
+                            storedMapData: Data([0x02]),
+                            hashedMapData: Data([0x01])
+                        ).write(to: url)
+                    }
+                    rejectedTemporaryURLs.append(url)
                     return url
                 }
                 onProgress(1)
@@ -1513,7 +1535,7 @@ struct NavigationProtocolTests {
         assert(downloadRetryManager.hasPendingMapJob, "failed download remains recoverable")
         assertEqual(downloadRetryManager.downloadURL, nil, "failed signed URL is discarded")
         assert(
-            rejectedTemporaryURL.map { !FileManager.default.fileExists(atPath: $0.path) } == true,
+            rejectedTemporaryURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
             "mismatched downloaded archive is removed"
         )
         assertEqual(
@@ -1523,14 +1545,29 @@ struct NavigationProtocolTests {
         )
 
         downloadRetryManager.resumePendingMapJobIfNeeded()
+        let corruptDownloadAttemptCompleted = await waitForMapTaskCompletion(downloadRetryManager)
+        assert(corruptDownloadAttemptCompleted, "corrupt download attempt should stop cleanly")
+        assert(downloadRetryManager.hasPendingMapJob, "corrupt download remains recoverable")
+        assertEqual(downloadRetryManager.downloadURL, nil, "corrupt download URL is discarded")
+        assert(
+            rejectedTemporaryURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+            "hash-mismatched archive is removed"
+        )
+        assertEqual(
+            try? Data(contentsOf: downloadRetryPack),
+            originalDownloadRetryPackData,
+            "corrupt replacement preserves the existing cached map"
+        )
+
+        downloadRetryManager.resumePendingMapJobIfNeeded()
         let retryDeadline = Date().addingTimeInterval(3)
-        while downloadURLIssueCount < 2 && Date() < retryDeadline {
+        while downloadURLIssueCount < 3 && Date() < retryDeadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         let retriedDownloadCompleted = await waitForMapTaskCompletion(downloadRetryManager)
         assert(retriedDownloadCompleted, "download retry should complete")
-        assertEqual(downloadURLIssueCount, 2, "download retry obtains a fresh exact-job URL")
-        assertEqual(packDownloadAttemptCount, 2, "download retry performs a second transfer")
+        assertEqual(downloadURLIssueCount, 3, "each download retry obtains a fresh exact-job URL")
+        assertEqual(packDownloadAttemptCount, 3, "download retry performs a clean third transfer")
         assert(!downloadRetryManager.hasPendingMapJob, "successful download retry clears recovery state")
         assertEqual(
             downloadRetryManager.displayName(forCachedPack: downloadRetryPack),

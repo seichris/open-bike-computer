@@ -41,6 +41,10 @@ nonisolated enum OfflineMapServerIdentity {
         }
         components.scheme = components.scheme?.lowercased()
         components.host = components.host?.lowercased()
+        if (components.scheme == "https" && components.port == 443) ||
+            (components.scheme == "http" && components.port == 80) {
+            components.port = nil
+        }
         while !components.path.isEmpty && components.path.hasSuffix("/") {
             components.path.removeLast()
         }
@@ -1213,15 +1217,9 @@ final class OfflineMapManager: ObservableObject {
                 self?.downloadByteProgress = byteProgress
             })
             temporaryURL = downloadedURL
-            _ = try await Task.detached(priority: .userInitiated) {
+            try await Task.detached(priority: .userInitiated) {
                 let archive = try OfflineMapPackArchive(url: downloadedURL)
-                let downloadedMapId = try archive.manifest().mapId
-                guard downloadedMapId == mapId else {
-                    throw OfflineMapPlatformError.invalidPack(
-                        "manifest mapId \(downloadedMapId ?? "missing") does not match \(mapId)"
-                    )
-                }
-                return archive
+                try archive.validate(expectedMapId: mapId)
             }.value
         } catch {
             if let temporaryURL {

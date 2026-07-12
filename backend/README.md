@@ -73,13 +73,17 @@ enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
 Required Coolify secrets:
 
 - `MAP_PLATFORM_API_TOKEN`: bearer token used by the iOS app for job creation,
-  job polling, maintenance, and signed download URL creation.
+  job polling, and signed download URL creation. Treat it as a client token,
+  because it is embedded in distributed app builds.
 - `MAP_PLATFORM_DOWNLOAD_SECRET`: HMAC secret for signed map-pack downloads.
   Use a separate long random value so signed URLs survive API restarts without
   reusing the API token as the signing key.
 
 Useful production environment variables:
 
+- `MAP_PLATFORM_ADMIN_TOKEN`: separate server-only bearer token for worker,
+  source-cache, and maintenance API routes. If unset, those routes are disabled;
+  the normal worker loop and CLI maintenance remain available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts,

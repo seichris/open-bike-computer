@@ -6,6 +6,7 @@
 //
 
 import CoreLocation
+import CryptoKit
 import Foundation
 
 struct OfflineMapBounds: Codable, Equatable {
@@ -360,6 +361,12 @@ struct OfflineMapPackEntry: Equatable {
 }
 
 struct OfflineMapPackManifest: Decodable, Equatable {
+    struct File: Decodable, Equatable {
+        let path: String
+        let bytes: Int
+        let sha256: String
+    }
+
     struct Source: Decodable, Equatable {
         let region: String?
         let url: String?
@@ -368,6 +375,7 @@ struct OfflineMapPackManifest: Decodable, Equatable {
     let mapId: String?
     let displayName: String?
     let source: Source?
+    let files: [File]?
 }
 
 nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
@@ -434,6 +442,52 @@ struct OfflineMapPackArchive {
             throw OfflineMapPlatformError.invalidPack("manifest.json is missing")
         }
         return try JSONDecoder().decode(OfflineMapPackManifest.self, from: data(for: manifestEntry))
+    }
+
+    nonisolated func validate(expectedMapId: String) throws {
+        let manifest = try manifest()
+        guard manifest.mapId == expectedMapId else {
+            throw OfflineMapPlatformError.invalidPack(
+                "manifest mapId \(manifest.mapId ?? "missing") does not match \(expectedMapId)"
+            )
+        }
+        guard let files = manifest.files, !files.isEmpty else {
+            throw OfflineMapPlatformError.invalidPack("manifest contains no file hashes")
+        }
+        let declaredPaths = Set(files.map(\.path))
+        let archivePaths = Set(mapFileEntries.map(\.path))
+        guard declaredPaths.count == files.count, declaredPaths == archivePaths else {
+            throw OfflineMapPlatformError.invalidPack("manifest file list does not match the archive")
+        }
+        let entriesByPath = Dictionary(uniqueKeysWithValues: mapFileEntries.map { ($0.path, $0) })
+        for file in files {
+            guard let entry = entriesByPath[file.path], file.bytes == entry.byteCount else {
+                throw OfflineMapPlatformError.invalidPack("file size mismatch for \(file.path)")
+            }
+            let actualHash = try sha256Hex(for: entry)
+            guard file.sha256.count == 64,
+                  file.sha256.allSatisfy({ $0.isHexDigit }),
+                  actualHash == file.sha256.lowercased() else {
+                throw OfflineMapPlatformError.invalidPack("file hash mismatch for \(file.path)")
+            }
+        }
+    }
+
+    private nonisolated func sha256Hex(for entry: OfflineMapPackEntry) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: entry.offset)
+        var remaining = entry.byteCount
+        var hasher = SHA256()
+        while remaining > 0 {
+            let chunk = try handle.read(upToCount: min(remaining, 1_048_576)) ?? Data()
+            guard !chunk.isEmpty else {
+                throw OfflineMapPlatformError.invalidPack("truncated entry \(entry.path)")
+            }
+            hasher.update(data: chunk)
+            remaining -= chunk.count
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private nonisolated static func readEntries(url: URL) throws -> [OfflineMapPackEntry] {

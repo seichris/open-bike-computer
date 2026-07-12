@@ -22,6 +22,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_DATA_ROOT": self.tmp.name,
                 "MAP_PLATFORM_SOURCE_INDEX": str(self.repo_root / "backend" / "config" / "source-regions.json"),
                 "MAP_PLATFORM_API_TOKEN": "",
+                "MAP_PLATFORM_ADMIN_TOKEN": "admin-secret",
                 "MAP_PLATFORM_DOWNLOAD_SECRET": "test-secret",
             },
             clear=False,
@@ -88,8 +89,9 @@ class MapJobRunAPITests(unittest.TestCase):
                 ("map-shared", second_built_archive),
             ],
         ):
-            first_worker_run = self.client.post("/v1/workers/run-next")
-            second_worker_run = self.client.post("/v1/workers/run-next")
+            admin_headers = {"Authorization": "Bearer admin-secret"}
+            first_worker_run = self.client.post("/v1/workers/run-next", headers=admin_headers)
+            second_worker_run = self.client.post("/v1/workers/run-next", headers=admin_headers)
 
         self.assertEqual(first_worker_run.status_code, 200)
         self.assertEqual(second_worker_run.status_code, 200)
@@ -173,6 +175,7 @@ class MapJobRunAPITests(unittest.TestCase):
             status="ready",
             mapId="map-expired",
             packPath=str(pack_path),
+            updatedAt="2020-01-01T00:00:00Z",
         )
         # Keep the artifact present after expiry so the signed-download
         # assertion below proves READY-state gating, not a missing file.
@@ -184,9 +187,15 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         self.assertEqual(issued.status_code, 200)
 
+        client_authorized_expiry = self.client.post(
+            "/v1/maintenance/expire",
+            json={"olderThanDays": 1},
+            headers={"Authorization": "Bearer app-bundled-token"},
+        )
         expired = self.client.post(
             "/v1/maintenance/expire",
-            json={"olderThanDays": 0},
+            json={"olderThanDays": 1},
+            headers={"Authorization": "Bearer admin-secret"},
         )
         download = self.client.post(
             "/v1/map-packs/map-expired/download-url",
@@ -197,11 +206,19 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         previously_issued_download = self.client.get(issued.json()["url"])
 
+        self.assertEqual(client_authorized_expiry.status_code, 401)
         self.assertEqual(expired.status_code, 200)
         self.assertEqual(expired.json()["expired"], 1)
         self.assertEqual(download.status_code, 404)
         self.assertEqual(previously_issued_download.status_code, 404)
         self.assertTrue(pack_path.exists())
+
+        invalid_retention = self.client.post(
+            "/v1/maintenance/expire",
+            json={"olderThanDays": 0},
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(invalid_retention.status_code, 400)
 
     def test_run_route_rejects_active_job(self):
         job_id = self.create_job()
