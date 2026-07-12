@@ -334,7 +334,7 @@ private struct SavedMapsSettingsSection: View {
             Button(action: manager.beginMapAreaSelection) {
                 Label("Download a new Map", systemImage: "rectangle.dashed")
             }
-            .disabled(manager.isBusy)
+            .disabled(manager.isBusy || manager.hasPendingMapJob)
         }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)

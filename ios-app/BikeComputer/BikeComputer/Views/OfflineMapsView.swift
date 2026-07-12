@@ -29,7 +29,7 @@ struct OfflineMapsView: View {
                 Button(action: manager.beginMapAreaSelection) {
                     Label("Choose Area", systemImage: "rectangle.dashed")
                 }
-                .disabled(manager.isBusy)
+                .disabled(manager.isBusy || manager.hasPendingMapJob)
 
                 if let bounds = manager.selectedMapBounds {
                     OfflineMapValueRow(

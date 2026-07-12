@@ -344,6 +344,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func beginMapAreaSelection() {
+        guard canStartNewMapJob() else { return }
         errorMessage = nil
         selectedMapBounds = nil
         isMapAreaSelectionActive = true
@@ -358,6 +359,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func createJobFromSelectedMapArea() {
+        guard canStartNewMapJob() else { return }
         guard let selectedMapBounds else {
             errorMessage = OfflineMapPlatformError.invalidResponse.localizedDescription
             return
@@ -367,6 +369,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func installCurrentLocationMap(location: CLLocation, bleManager: BLEManager) {
+        guard canStartNewMapJob() else { return }
         centerLatitude = String(format: "%.6f", location.coordinate.latitude)
         centerLongitude = String(format: "%.6f", location.coordinate.longitude)
 
@@ -618,6 +621,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {
+        guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
             let client = try manager.makeClient()
             manager.currentJob = nil
@@ -757,6 +761,14 @@ final class OfflineMapManager: ObservableObject {
 
     private func clearPersistedJob() {
         OfflineMapJobPersistence.clear(defaults: defaults)
+    }
+
+    private func canStartNewMapJob() -> Bool {
+        guard !hasPendingMapJob else {
+            errorMessage = "Resume the pending map before starting another download."
+            return false
+        }
+        return true
     }
 
     private func shouldForgetPersistedJob(after error: Error) -> Bool {

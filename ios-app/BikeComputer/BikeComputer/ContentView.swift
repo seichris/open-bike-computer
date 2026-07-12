@@ -123,6 +123,7 @@ struct ContentView: View {
         guard !dismissedOfflineMapOnboarding else { return false }
         guard !offlineMapManager.isMapAreaSelectionActive else { return false }
         guard !offlineMapManager.isBusy,
+              !offlineMapManager.hasPendingMapJob,
               offlineMapManager.currentJob == nil,
               offlineMapManager.downloadedPackURL == nil,
               offlineMapManager.errorMessage == nil else { return false }
