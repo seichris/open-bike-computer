@@ -411,9 +411,11 @@ struct NavigationProtocolTests {
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
+        await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
+        testMapTransferOutcomePolicy()
         await testMapTransferUploadResumeContract()
         await testMapTransferActivationAcknowledgementSequence()
         testMapTransferSessionIdentityUsesManifestContent()
@@ -2319,6 +2321,46 @@ struct NavigationProtocolTests {
         }
     }
 
+    static func testOfflineMapArchiveValidationCancellation() async {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("offline-map-cancel-test-\(UUID().uuidString).zip")
+        let path = "VECTMAP/map-1/+0032+0008/123_456.fmb"
+        let block = Data(repeating: 0x5a, count: 2 * 1_048_576)
+        let manifest = try! JSONSerialization.data(withJSONObject: [
+            "mapId": "map-1",
+            "files": [[
+                "path": path,
+                "bytes": block.count,
+                "sha256": FirmwareUpdateManager.sha256Hex(block),
+            ]],
+        ])
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifest),
+            (path, block),
+        ]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let archive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "cancellation test archive should parse")
+            return
+        }
+        let validation = Task.detached {
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            try archive.validate(expectedMapId: "map-1")
+        }
+        validation.cancel()
+        do {
+            try await validation.value
+            assert(false, "cancelled archive validation should not publish a result")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            assert(false, "cancelled archive validation should throw CancellationError")
+        }
+    }
+
     @MainActor
     static func testCachedMapInstalledIdentityUsesManifestSession() {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -2448,6 +2490,33 @@ struct NavigationProtocolTests {
                 for: OfflineMapPlatformError.serverStatus(500, "write failed")
             ),
             "device failures are not disguised as compatibility fallback"
+        )
+    }
+
+    static func testMapTransferOutcomePolicy() {
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: CancellationError(),
+                activationMayBeInFlight: true
+            ),
+            "unconfirmed",
+            "cancelling after activation starts remains reconcilable"
+        )
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: CancellationError(),
+                activationMayBeInFlight: false
+            ),
+            "failed",
+            "cancelling before activation does not claim a device-side attempt"
+        )
+        assertEqual(
+            MapTransferOutcomePolicy.outcome(
+                after: OfflineMapPlatformError.mapActivationTimedOut("pending"),
+                activationMayBeInFlight: true
+            ),
+            "unconfirmed",
+            "activation timeout remains reconcilable over BLE"
         )
     }
 
@@ -4574,9 +4643,10 @@ struct NavigationProtocolTests {
         assertEqual(manager.sentPackets.count, 0, "navigation should not mark unsent packet while BLE is not ready")
 
         manager.isNavigationReady = true
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-
-        assertEqual(manager.sentPackets.count, 1, "navigation readiness should resend the current snapshot")
+        assert(
+            waitForMainLoop(timeout: 1) { manager.sentPackets.count == 1 },
+            "navigation readiness should resend the current snapshot"
+        )
         let fields = manager.sentPackets[0].split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         assertEqual(fields.count, 3, "resent packet uses firmware fields")
         assertEqual(String(fields[0]), "\(NavigationIconID.left)", "resent packet keeps current icon")

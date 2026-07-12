@@ -194,6 +194,19 @@ nonisolated enum MapArchiveUploadFallback {
     }
 }
 
+nonisolated enum MapTransferOutcomePolicy {
+    static func outcome(after error: Error, activationMayBeInFlight: Bool) -> String {
+        if error is CancellationError && activationMayBeInFlight {
+            return "unconfirmed"
+        }
+        if let platformError = error as? OfflineMapPlatformError,
+           case .mapActivationTimedOut = platformError {
+            return "unconfirmed"
+        }
+        return "failed"
+    }
+}
+
 nonisolated enum MapTransferSessionIdentity {
     static func make(mapId: String, manifestData: Data) -> String {
         let allowed = CharacterSet(
@@ -1440,6 +1453,7 @@ final class OfflineMapManager: ObservableObject {
             previousSequence: bleManager.mapTransferActivationSequence,
             outcome: "preparing"
         )
+        var activationMayBeInFlight = false
 
         do {
             let transferSession = try await deviceTransferManager.enterMapTransfer(
@@ -1447,106 +1461,128 @@ final class OfflineMapManager: ObservableObject {
             ) { message in
                 self.statusMessage = message
             }
-#if os(iOS)
-            BackgroundMapUploadCoordinator.shared.beginTransferWorkflow()
-            defer {
-                BackgroundMapUploadCoordinator.shared.finishTransferWorkflow()
-            }
-#endif
-            defer {
-                deviceTransferManager.exitMapTransfer(bleManager: bleManager)
-            }
-            downloadedPackURL = packURL
-            let client = MapTransferDeviceClient(
-                baseURL: transferSession.baseURL,
-                sessionToken: transferSession.sessionToken
-            )
-            transferProgress = 0
-            statusMessage = "uploading \(displayName(forMapId: expectedMapId)) to device"
-            updateLastTransferOutcome("uploading")
-            do {
-                try await client.uploadArchiveInBackground(
-                    archiveURL: packURL,
-                    sessionId: sessionId
-                ) { completedBytes, totalBytes in
-                    self.transferProgress = totalBytes == 0 ? 0 :
-                        Double(completedBytes) / Double(totalBytes)
-                    let percent = Int((self.transferProgress * 100).rounded())
-                    self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+            try await withBackgroundTransferLifecycle(bleManager: bleManager) {
+                downloadedPackURL = packURL
+                let client = MapTransferDeviceClient(
+                    baseURL: transferSession.baseURL,
+                    sessionToken: transferSession.sessionToken
+                )
+                transferProgress = 0
+                statusMessage = "uploading \(displayName(forMapId: expectedMapId)) to device"
+                updateLastTransferOutcome("uploading")
+                do {
+                    try await client.uploadArchiveInBackground(
+                        archiveURL: packURL,
+                        sessionId: sessionId
+                    ) { completedBytes, totalBytes in
+                        self.transferProgress = totalBytes == 0 ? 0 :
+                            Double(completedBytes) / Double(totalBytes)
+                        let percent = Int((self.transferProgress * 100).rounded())
+                        self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+                    }
+                    transferProgress = 1
+                    statusMessage = "map uploaded; activating on device"
+                } catch {
+                    guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
+                        throw error
+                    }
+                    statusMessage = "device uses foreground map transfer"
+                    try await client.upload(
+                        archive: archive,
+                        sessionId: sessionId
+                    ) { completed, total, path, didUpload in
+                        self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
+                        let prefix = didUpload ? "uploaded" : "already on device"
+                        self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+                    }
                 }
+
+                let statusBeforeActivation = try? await client.status()
+                let activationAlreadyStarted =
+                    statusBeforeActivation?.activation?.sessionId == sessionId
+                let previousMapId = statusBeforeActivation?.activeMapId ??
+                    bleManager.mapTransferActiveMapId
+                let previousSessionId = statusBeforeActivation?.activeSessionId ??
+                    bleManager.mapTransferActiveSessionId
+                let previousSequence = activationAlreadyStarted
+                    ? bleManager.mapTransferActivationSequence
+                    : statusBeforeActivation?.activation?.sequence ??
+                        bleManager.mapTransferActivationSequence
+                recordTransfer(
+                    mapId: expectedMapId,
+                    sessionId: sessionId,
+                    previousMapId: previousMapId,
+                    previousSessionId: previousSessionId,
+                    previousSequence: previousSequence,
+                    outcome: "activating"
+                )
+                statusMessage = "activating \(displayName(forMapId: expectedMapId))"
+                bleManager.resetMapTransferActivationObservation()
+                var acceptedSequence = activationAlreadyStarted
+                    ? statusBeforeActivation?.activation?.sequence
+                    : nil
+                activationMayBeInFlight = true
+                do {
+                    if let sequence = try await client.activate(sessionId: sessionId) {
+                        acceptedSequence = sequence
+                    }
+                    if let acceptedSequence {
+                        defaults.set(
+                            Int(acceptedSequence),
+                            forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey
+                        )
+                    }
+                } catch {
+                    guard MapActivationTransport.isAmbiguousResponseError(error) else {
+                        throw error
+                    }
+                }
+
+                try await confirmActivatedMap(
+                    expectedMapId: expectedMapId,
+                    sessionId: sessionId,
+                    previousMapId: previousMapId,
+                    previousSessionId: previousSessionId,
+                    previousSequence: previousSequence,
+                    acceptedSequence: acceptedSequence,
+                    client: client,
+                    bleManager: bleManager
+                )
                 transferProgress = 1
-                statusMessage = "map uploaded; activating on device"
-            } catch {
-                guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
-                    throw error
-                }
-                statusMessage = "device uses foreground map transfer"
-                try await client.upload(
-                    archive: archive,
-                    sessionId: sessionId
-                ) { completed, total, path, didUpload in
-                    self.transferProgress = total == 0 ? 0 : Double(completed) / Double(total)
-                    let prefix = didUpload ? "uploaded" : "already on device"
-                    self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
-                }
+                statusMessage = "map installed: \(displayName(forMapId: expectedMapId))"
+                updateLastTransferOutcome("installed")
+                bleManager.requestMapTransferStatus()
             }
-
-            let statusBeforeActivation = try? await client.status()
-            let previousMapId = statusBeforeActivation?.activeMapId ?? bleManager.mapTransferActiveMapId
-            let previousSessionId = statusBeforeActivation?.activeSessionId ??
-                bleManager.mapTransferActiveSessionId
-            let previousSequence = statusBeforeActivation?.activation?.sequence ??
-                bleManager.mapTransferActivationSequence
-            recordTransfer(
-                mapId: expectedMapId,
-                sessionId: sessionId,
-                previousMapId: previousMapId,
-                previousSessionId: previousSessionId,
-                previousSequence: previousSequence,
-                outcome: "activating"
-            )
-            statusMessage = "activating \(displayName(forMapId: expectedMapId))"
-            bleManager.resetMapTransferActivationObservation()
-            var acceptedSequence: UInt32? = nil
-            do {
-                acceptedSequence = try await client.activate(sessionId: sessionId)
-                if let acceptedSequence {
-                    defaults.set(
-                        Int(acceptedSequence),
-                        forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey
-                    )
-                }
-            } catch {
-                guard MapActivationTransport.isAmbiguousResponseError(error) else {
-                    throw error
-                }
-            }
-
-            try await confirmActivatedMap(
-                expectedMapId: expectedMapId,
-                sessionId: sessionId,
-                previousMapId: previousMapId,
-                previousSessionId: previousSessionId,
-                previousSequence: previousSequence,
-                acceptedSequence: acceptedSequence,
-                client: client,
-                bleManager: bleManager
-            )
-            transferProgress = 1
-            statusMessage = "map installed: \(displayName(forMapId: expectedMapId))"
-            updateLastTransferOutcome("installed")
-            bleManager.requestMapTransferStatus()
         } catch {
-            if let platformError = error as? OfflineMapPlatformError {
-                switch platformError {
-                case .mapActivationTimedOut:
-                    updateLastTransferOutcome("unconfirmed")
-                default:
-                    updateLastTransferOutcome("failed")
-                }
-            } else {
-                updateLastTransferOutcome("failed")
-            }
+            updateLastTransferOutcome(
+                MapTransferOutcomePolicy.outcome(
+                    after: error,
+                    activationMayBeInFlight: activationMayBeInFlight
+                )
+            )
+            throw error
+        }
+    }
+
+    private func withBackgroundTransferLifecycle<T>(
+        bleManager: BLEManager,
+        operation: () async throws -> T
+    ) async throws -> T {
+#if os(iOS)
+        BackgroundMapUploadCoordinator.shared.beginTransferWorkflow()
+#endif
+        do {
+            let value = try await operation()
+            await deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+#if os(iOS)
+            BackgroundMapUploadCoordinator.shared.finishTransferWorkflow()
+#endif
+            return value
+        } catch {
+            await deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+#if os(iOS)
+            BackgroundMapUploadCoordinator.shared.finishTransferWorkflow()
+#endif
             throw error
         }
     }

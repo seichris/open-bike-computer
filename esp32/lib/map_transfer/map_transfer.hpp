@@ -54,6 +54,7 @@ private:
 enum class ActivationBeginResult {
   Started,
   AlreadyRunning,
+  AlreadyInstalled,
   Busy,
 };
 

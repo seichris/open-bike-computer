@@ -592,6 +592,11 @@ void loop() {
   if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
     mapView.setVectorMapFolder(std::string("/sdcard") + activatedMapRoot);
   }
+  if (mapTransferHttp.takeAutomaticExitRequest()) {
+    const bool disabled = mapTransferHttp.setEnabled(false);
+    Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
+                  disabled);
+  }
 
   // Process app-provided GPS transitions before any periodic work that can
   // briefly block on display, sensor, BLE, or debug output.

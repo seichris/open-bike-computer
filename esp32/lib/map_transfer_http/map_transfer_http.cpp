@@ -22,6 +22,7 @@ constexpr uint64_t kMaxArchiveUploadBytes = 512ULL * 1024ULL * 1024ULL;
 struct ActivationTaskContext {
   MapTransferHttpServer *server = nullptr;
   std::string sessionId;
+  bool automaticExit = false;
 };
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -453,6 +454,19 @@ bool MapTransferHttpServer::handlePut(const std::string &path,
            std::string("{\"ok\":true,\"sessionId\":\"") +
                jsonEscape(sessionId) + "\",\"path\":\"" +
                jsonEscape(relativePath) + "\"}");
+  if (isArchive) {
+    // A background URLSession upload can outlive the iOS process that started
+    // it. Once the complete archive is durably closed on SD, activation must
+    // therefore be device-owned instead of depending on a follow-up request.
+    lockState();
+    const ActivationBeginResult beginResult = activationState_.begin(sessionId);
+    unlockState();
+    if (beginResult == ActivationBeginResult::Started) {
+      startActivationTask(sessionId, true);
+    } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+      requestAutomaticExit();
+    }
+  }
   return true;
 }
 
@@ -478,26 +492,24 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
     sendJson(client, 202, activatingResponse());
     return true;
   }
+  if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+    sendJson(client, 200,
+             std::string("{\"ok\":true,\"status\":\"installed\",\"sessionId\":\"") +
+                 jsonEscape(sessionId) + "\",\"sequence\":" +
+                 std::to_string(activationSequence) + "}");
+    return true;
+  }
   if (beginResult == ActivationBeginResult::Busy) {
     sendError(client, 409, "activation_busy",
               "another map activation is already running");
     return true;
   }
 
-  auto *context = new ActivationTaskContext{this, sessionId};
-  BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
-                                   context, 1, nullptr);
-  if (created != pdPASS) {
-    delete context;
-    finishActivation("failed", "", "activation_task",
-                     "could not start activation task");
+  if (!startActivationTask(sessionId, false)) {
     sendError(client, 500, "activation_task",
               "could not start activation task");
     return true;
   }
-
-  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s\n",
-                sessionId.c_str());
   sendJson(client, 202, activatingResponse());
   return true;
 }
@@ -591,6 +603,20 @@ bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
   return true;
 }
 
+bool MapTransferHttpServer::takeAutomaticExitRequest() {
+  lockState();
+  const bool requested = pendingAutomaticExit_;
+  pendingAutomaticExit_ = false;
+  unlockState();
+  return requested;
+}
+
+void MapTransferHttpServer::requestAutomaticExit() {
+  lockState();
+  pendingAutomaticExit_ = true;
+  unlockState();
+}
+
 void MapTransferHttpServer::finishActivation(const std::string &status,
                                              const std::string &mapId,
                                              const std::string &errorCode,
@@ -601,6 +627,25 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);
   }
+}
+
+bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
+                                                bool automaticExit) {
+  auto *context =
+      new ActivationTaskContext{this, sessionId, automaticExit};
+  BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
+                                   context, 1, nullptr);
+  if (created != pdPASS) {
+    delete context;
+    finishActivation("failed", "", "activation_task",
+                     "could not start activation task");
+    if (automaticExit)
+      requestAutomaticExit();
+    return false;
+  }
+  Serial.printf("MAP_TRANSFER_HTTP: activation queued session=%s automatic=%d\n",
+                sessionId.c_str(), automaticExit);
+  return true;
 }
 
 void MapTransferHttpServer::runActivationTask(const std::string &sessionId) {
@@ -660,8 +705,11 @@ void MapTransferHttpServer::activationTaskThunk(void *arg) {
   if (context != nullptr && context->server != nullptr) {
     MapTransferHttpServer *server = context->server;
     std::string sessionId = context->sessionId;
+    const bool automaticExit = context->automaticExit;
     delete context;
     server->runActivationTask(sessionId);
+    if (automaticExit)
+      server->requestAutomaticExit();
   } else {
     delete context;
   }

@@ -192,6 +192,12 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(second.sequence == 2);
   assert(second.status == "activating");
   assert(second.errorCode.empty());
+
+  state.finish("installed", "map-1", "", "");
+  assert(state.begin("session-1") == ActivationBeginResult::AlreadyInstalled);
+  assert(state.snapshot().sequence == 2);
+  assert(state.begin("session-2") == ActivationBeginResult::Started);
+  assert(state.snapshot().sequence == 3);
 }
 
 static void testRejectsUnsafeManifestPath() {

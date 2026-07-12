@@ -70,8 +70,10 @@ final class DeviceTransferManager {
         throw OfflineMapPlatformError.missingTransferBaseURL
     }
 
-    func exitMapTransfer(bleManager: BLEManager) {
-        bleManager.requestMapTransferMode(enabled: false)
+    func exitMapTransfer(bleManager: BLEManager) async {
+        if bleManager.requestMapTransferMode(enabled: false) {
+            _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
+        }
         removeJoinedAccessPointIfNeeded()
     }
 

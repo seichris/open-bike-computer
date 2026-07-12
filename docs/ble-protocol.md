@@ -337,9 +337,16 @@ bulk upload:
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/pack.zip` | Store one complete archive, then start durable device-owned activation. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
 | `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
+
+The archive route starts activation after its response is durably staged so a
+background iOS upload remains installable even if iOS terminates the originating
+app process. Firmware disables transfer mode after that activation finishes.
+The explicit activation route remains idempotent for the foreground per-file
+fallback and for clients that are still alive after the archive upload.
 
 An accepted activation returns HTTP 202 with the boot-local activation
 `sequence`. The app matches that acknowledgement to later HTTP/BLE terminal

@@ -339,6 +339,9 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId) {
                ? ActivationBeginResult::AlreadyRunning
                : ActivationBeginResult::Busy;
   }
+  if (state_.status == "installed" && state_.sessionId == sessionId) {
+    return ActivationBeginResult::AlreadyInstalled;
+  }
   state_.running = true;
   state_.sequence++;
   if (state_.sequence == 0)
