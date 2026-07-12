@@ -301,6 +301,7 @@ struct NavigationProtocolTests {
         testOfflineMapProgressPresentation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapJobPersistence()
+        testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
@@ -602,6 +603,40 @@ struct NavigationProtocolTests {
                 errorMessage: nil
             ),
             "idle map settings omit an empty downloading section"
+        )
+    }
+
+    @MainActor
+    static func testPendingOfflineMapJobBlocksEveryCreationIngress() {
+        let suite = "offline-map-pending-ingress-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "pending job ingress test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        OfflineMapJobPersistence.save(jobId: "job-existing", defaults: defaults)
+        let manager = OfflineMapManager(defaults: defaults)
+
+        manager.beginMapAreaSelection()
+        manager.createCustomCutoutJob()
+        manager.createJobFromSelectedMapArea()
+        manager.installCurrentLocationMap(
+            location: CLLocation(latitude: 31.2304, longitude: 121.4737),
+            bleManager: BLEManager()
+        )
+
+        assert(
+            !manager.isMapAreaSelectionActive,
+            "pending job blocks the area-selection creation ingress"
+        )
+        assert(
+            !manager.isBusy,
+            "pending job blocks all creation tasks before network work starts"
+        )
+        assertEqual(
+            OfflineMapJobPersistence.activeJobId(defaults: defaults),
+            "job-existing",
+            "all creation ingresses preserve the paused job recovery ID"
         )
     }
 
