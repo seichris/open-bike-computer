@@ -676,7 +676,7 @@ void testRollbackRejectsMismatchedPreviousIdentity() {
 void testConsumedReadyRootsAreNotReactivatedAndArePruned() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
-  for (const std::string &session : {"history-a", "history-b", "history-c"}) {
+  for (const char *session : {"history-a", "history-b", "history-c"}) {
     prepareReadyRoot(root, session);
     assert(installer.activateReadyStreamMap(session).ok);
     assert(
