@@ -400,6 +400,7 @@ struct NavigationProtocolTests {
         testOfflineMapCreateJobURLRequest()
         testOfflineMapListJobsURLRequest()
         testOfflineMapManagerMigratesProductionConfig()
+        testOfflineMapManagerRenamesCachedPack()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
@@ -1536,6 +1537,48 @@ struct NavigationProtocolTests {
             ),
             "custom-server-token",
             "custom server keeps its deliberate custom credential"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRenamesCachedPack() {
+        let suite = "offline-map-rename-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "rename test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-rename-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let packURL = cacheDirectory.appendingPathComponent("custom-map-shanghai.zip")
+
+        let manager = OfflineMapManager(defaults: defaults, cacheDirectory: cacheDirectory)
+        assertEqual(
+            manager.renameCachedPack(at: packURL, to: "  Shanghai Riverside  "),
+            "Shanghai Riverside",
+            "renaming trims surrounding whitespace"
+        )
+        assertEqual(
+            manager.displayName(forCachedPack: packURL),
+            "Shanghai Riverside",
+            "renamed map is shown immediately"
+        )
+
+        let restoredManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+        assertEqual(
+            restoredManager.displayName(forCachedPack: packURL),
+            "Shanghai Riverside",
+            "renamed map survives app restart"
+        )
+        assertEqual(
+            restoredManager.renameCachedPack(at: packURL, to: "   \n "),
+            "Shanghai Riverside",
+            "blank rename preserves the existing name"
         )
     }
 

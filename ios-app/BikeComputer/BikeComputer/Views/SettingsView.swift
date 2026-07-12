@@ -314,6 +314,7 @@ private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     @State private var recoveryJobId = ""
+    @FocusState private var focusedPackFilename: String?
 
     var body: some View {
         Section(header: Text("Saved Maps")) {
@@ -332,7 +333,11 @@ private struct SavedMapsSettingsSection: View {
                     .foregroundColor(.secondary)
             } else {
                 ForEach(manager.cachedPackURLs, id: \.self) { packURL in
-                    DownloadedMapRow(manager: manager, packURL: packURL)
+                    DownloadedMapRow(
+                        manager: manager,
+                        packURL: packURL,
+                        focusedPackFilename: $focusedPackFilename
+                    )
                         .environmentObject(bleManager)
                 }
             }
@@ -361,6 +366,9 @@ private struct SavedMapsSettingsSection: View {
                     .foregroundColor(.secondary)
             }
         }
+        .onTapGesture {
+            focusedPackFilename = nil
+        }
         .onAppear {
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
@@ -383,13 +391,42 @@ private struct DownloadedMapRow: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     let packURL: URL
+    @FocusState.Binding var focusedPackFilename: String?
+    @State private var draftName = ""
+    @State private var isEditingName = false
 
     var body: some View {
         let displayName = manager.displayName(forCachedPack: packURL)
 
         HStack(spacing: 12) {
-            Text(displayName)
-                .lineLimit(2)
+            if isEditingName {
+                TextField("Map name", text: $draftName)
+                    .focused($focusedPackFilename, equals: packURL.lastPathComponent)
+                    .submitLabel(.done)
+                    .onSubmit {
+                        focusedPackFilename = nil
+                    }
+                    .onChange(of: focusedPackFilename) { newValue in
+                        if newValue != packURL.lastPathComponent {
+                            finishRenaming()
+                        }
+                    }
+                    .accessibilityLabel("Map name")
+            } else {
+                Button {
+                    draftName = displayName
+                    isEditingName = true
+                    focusedPackFilename = packURL.lastPathComponent
+                } label: {
+                    Text(displayName)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename \(displayName)")
+                .accessibilityHint("Edits this saved map name")
+            }
 
             if manager.isCachedPackInstalled(
                 packURL,
@@ -402,8 +439,13 @@ private struct DownloadedMapRow: View {
             }
 
             Spacer()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedPackFilename = nil
+                }
 
             Button {
+                focusedPackFilename = nil
                 manager.transferCachedPack(at: packURL, bleManager: bleManager)
             } label: {
                 Image(systemName: "arrow.up.circle")
@@ -414,6 +456,7 @@ private struct DownloadedMapRow: View {
             .accessibilityLabel("Transfer \(displayName) to device")
 
             Button(role: .destructive) {
+                focusedPackFilename = nil
                 manager.deleteCachedPack(at: packURL)
             } label: {
                 Image(systemName: "trash")
@@ -423,6 +466,12 @@ private struct DownloadedMapRow: View {
             .disabled(manager.isBusy)
             .accessibilityLabel("Delete \(displayName)")
         }
+    }
+
+    private func finishRenaming() {
+        guard isEditingName else { return }
+        draftName = manager.renameCachedPack(at: packURL, to: draftName)
+        isEditingName = false
     }
 }
 

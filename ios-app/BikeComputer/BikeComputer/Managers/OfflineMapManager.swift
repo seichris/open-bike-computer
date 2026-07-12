@@ -447,7 +447,7 @@ final class OfflineMapManager: ObservableObject {
     private let cacheDirectoryOverride: URL?
     let clientInstallationId: String
     private let deviceTransferManager = DeviceTransferManager()
-    private var packDisplayNames: [String: String]
+    @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
 
@@ -735,6 +735,17 @@ final class OfflineMapManager: ObservableObject {
             return displayName
         }
         return packURL.deletingPathExtension().lastPathComponent
+    }
+
+    @discardableResult
+    func renameCachedPack(at packURL: URL, to proposedName: String) -> String {
+        let displayName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayName.isEmpty else {
+            return self.displayName(forCachedPack: packURL)
+        }
+        packDisplayNames[packURL.lastPathComponent] = displayName
+        persistPackDisplayNames()
+        return displayName
     }
 
     func isCachedPackInstalled(_ packURL: URL,
