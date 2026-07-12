@@ -216,6 +216,28 @@ nonisolated enum MapTransferOutcomePolicy {
     }
 }
 
+nonisolated enum CachedPackRecoveryDecision: Equatable {
+    case installed
+    case pending
+    case absent
+
+    static func evaluate(
+        expectedSessionId: String,
+        activeSessionId: String,
+        activationStatus: String,
+        activationSessionId: String
+    ) -> CachedPackRecoveryDecision {
+        if activeSessionId == expectedSessionId {
+            return .installed
+        }
+        if activationSessionId == expectedSessionId,
+           activationStatus == "activating" || activationStatus == "installed" {
+            return .pending
+        }
+        return .absent
+    }
+}
+
 nonisolated enum MapTransferSessionIdentity {
     static func make(mapId: String, manifestData: Data) -> String {
         let allowed = CharacterSet(
@@ -1334,15 +1356,21 @@ final class OfflineMapManager: ObservableObject {
                 statusMessage = "map downloaded; reconnect device to install"
                 return
             }
-            if let downloadedPackURL,
-               await waitForInstalledCachedPack(
+            if let downloadedPackURL {
+                let deviceState = await cachedPackDeviceState(
                     downloadedPackURL,
                     bleManager: bleManager
-               ) {
-                statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
-                updateLastTransferOutcome("installed")
-                clearPersistedJob(markHandled: true)
-                return
+                )
+                if deviceState == .pending {
+                    statusMessage = "map activation is still running on device"
+                    return
+                }
+                if deviceState == .installed {
+                    statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
+                    updateLastTransferOutcome("installed")
+                    clearPersistedJob(markHandled: true)
+                    return
+                }
             }
             try await transferReadyPack(bleManager: bleManager)
             clearPersistedJob(markHandled: true)
@@ -1373,46 +1401,84 @@ final class OfflineMapManager: ObservableObject {
                 statusMessage = "map downloaded; reconnect device to install"
                 return
             }
-            if let downloadedPackURL,
-               await waitForInstalledCachedPack(
+            if let downloadedPackURL {
+                let deviceState = await cachedPackDeviceState(
                     downloadedPackURL,
                     bleManager: bleManager
-               ) {
-                statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
-                updateLastTransferOutcome("installed")
-                clearPersistedJob(markHandled: true)
-                return
+                )
+                if deviceState == .pending {
+                    statusMessage = "map activation is still running on device"
+                    return
+                }
+                if deviceState == .installed {
+                    statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
+                    updateLastTransferOutcome("installed")
+                    clearPersistedJob(markHandled: true)
+                    return
+                }
             }
             try await transferReadyPack(bleManager: bleManager)
         }
         clearPersistedJob(markHandled: true)
     }
 
-    private func waitForInstalledCachedPack(
+    private func cachedPackDeviceState(
         _ packURL: URL,
         bleManager: BLEManager
-    ) async -> Bool {
-        if isCachedPackInstalled(
-            packURL,
-            activeMapId: bleManager.mapTransferActiveMapId,
-            activeSessionId: bleManager.mapTransferActiveSessionId
-        ) {
-            return true
+    ) async -> CachedPackRecoveryDecision {
+        guard let archive = try? OfflineMapPackArchive(url: packURL),
+              let manifestEntry = archive.manifestEntry,
+              let manifest = try? archive.manifest(),
+              let mapId = manifest.mapId,
+              !mapId.isEmpty,
+              let manifestData = try? archive.data(for: manifestEntry) else {
+            return .absent
         }
-        guard bleManager.requestMapTransferStatus() else { return false }
+        let expectedSessionId = MapTransferSessionIdentity.make(
+            mapId: mapId,
+            manifestData: manifestData
+        )
+        guard bleManager.requestMapTransferStatus() else { return .absent }
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
-        for _ in 0..<20 {
-            if Task.isCancelled { return false }
-            if isCachedPackInstalled(
-                packURL,
-                activeMapId: bleManager.mapTransferActiveMapId,
-                activeSessionId: bleManager.mapTransferActiveSessionId
-            ) {
-                return true
+        let initialDeadline = Date().addingTimeInterval(2)
+        var activationDeadline: Date?
+        var pollCount = 0
+        while true {
+            if Task.isCancelled { return .pending }
+            let decision = CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: expectedSessionId,
+                activeSessionId: bleManager.mapTransferActiveSessionId,
+                activationStatus: bleManager.mapTransferActivationStatus,
+                activationSessionId: bleManager.mapTransferActivationSessionId
+            )
+            switch decision {
+            case .installed:
+                return .installed
+            case .pending:
+                if activationDeadline == nil {
+                    activationDeadline = Date().addingTimeInterval(
+                        OfflineMapDefaults.activationConfirmationTimeout
+                    )
+                }
+            case .absent:
+                if bleManager.mapTransferActivationSessionId == expectedSessionId,
+                   bleManager.mapTransferActivationStatus == "failed" {
+                    return .absent
+                }
+                break
+            }
+            let now = Date()
+            if let activationDeadline {
+                if now >= activationDeadline { return .pending }
+            } else if now >= initialDeadline {
+                return .absent
+            }
+            pollCount += 1
+            if pollCount % 10 == 0 {
+                bleManager.requestMapTransferStatus()
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        return false
     }
 
     private func restoreDownloadedPackIfAvailable(jobId: String) -> Bool {

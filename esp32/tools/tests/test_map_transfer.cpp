@@ -503,6 +503,43 @@ static void testRollsBackInterruptedVersionPublish() {
   assert(!exists(vectmap + "/.activation-transaction.json"));
 }
 
+static void testRollbackPreservesPendingArchiveForBootResume() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string vectmap = root + "/VECTMAP";
+  const std::string session = "session-new";
+  const std::string oldRoot = vectmap + "/.maps/session-old";
+  const std::string newRoot = vectmap + "/.maps/" + session;
+  const std::string staging = installer.stagingRoot(session);
+  assert(::system((std::string("mkdir -p ") + oldRoot).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + newRoot).c_str()) == 0);
+  assert(::system((std::string("mkdir -p ") + staging).c_str()) == 0);
+  writeFile(oldRoot + "/old.fmb", "old");
+  writeFile(newRoot + "/partial.fmb", "partial");
+  writeFile(staging + "/manifest.json", "partial");
+  writeFile(installer.stagedArchivePath(session), "complete-archive");
+  assert(installer.markPendingArchiveActivation(session));
+  writeFile(vectmap + "/active-map.json",
+            "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
+            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+  writeFile(vectmap + "/.activation-transaction.json",
+            "{\"sessionId\":\"session-new\",\"mapId\":\"map-new\","
+            "\"root\":\"/VECTMAP/.maps/session-new\","
+            "\"previousMapId\":\"map-old\","
+            "\"previousSessionId\":\"session-old\","
+            "\"previousRoot\":\"/VECTMAP/.maps/session-old\","
+            "\"phase\":\"publishing\"}\n");
+
+  auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  assert(!exists(newRoot));
+  assert(exists(installer.stagedArchivePath(session)));
+  std::string pendingSession;
+  assert(installer.readPendingArchiveActivation(pendingSession));
+  assert(pendingSession == session);
+}
+
 static void testCompletesPointerSwitchInterruptedBeforeJournalCommit() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -856,6 +893,7 @@ int main() {
   testPrunesPreviousAndObsoleteVersionsBeforeNextUpload();
   testPrunesLegacyRollbackAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
+  testRollbackPreservesPendingArchiveForBootResume();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();
   testJournalRecoveryRollsBackPartialSelectedVersion();
   testJournalRecoveryRollsBackSameSizeCorruptSelectedVersion();

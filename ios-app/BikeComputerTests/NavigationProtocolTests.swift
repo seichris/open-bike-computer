@@ -416,6 +416,7 @@ struct NavigationProtocolTests {
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferOutcomePolicy()
+        testCachedPackRecoveryDecision()
         await testMapTransferUploadResumeContract()
         await testMapTransferActivationAcknowledgementSequence()
         testMapTransferSessionIdentityUsesManifestContent()
@@ -2517,6 +2518,39 @@ struct NavigationProtocolTests {
             ),
             "unconfirmed",
             "activation timeout remains reconcilable over BLE"
+        )
+    }
+
+    static func testCachedPackRecoveryDecision() {
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-new",
+                activationStatus: "idle",
+                activationSessionId: ""
+            ),
+            .installed,
+            "exact active session completes recovered installation"
+        )
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-old",
+                activationStatus: "activating",
+                activationSessionId: "session-new"
+            ),
+            .pending,
+            "matching device activation blocks a redundant archive upload"
+        )
+        assertEqual(
+            CachedPackRecoveryDecision.evaluate(
+                expectedSessionId: "session-new",
+                activeSessionId: "session-old",
+                activationStatus: "failed",
+                activationSessionId: "session-new"
+            ),
+            .absent,
+            "failed activation remains eligible for an explicit retry"
         )
     }
 

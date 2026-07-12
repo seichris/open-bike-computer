@@ -919,6 +919,12 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
             "cleared invalid map activation transaction"};
   }
 
+  std::string pendingArchiveSessionId;
+  const bool preserveStagedArchive =
+      readPendingArchiveActivation(pendingArchiveSessionId) &&
+      pendingArchiveSessionId == sessionId &&
+      fileExists(stagedArchivePath(sessionId));
+
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
   const bool activePointsToNewRoot = activeStatus.ok && active.root == root;
@@ -931,11 +937,12 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       installedManifest.mapId == mapId &&
       installedMapContentsMatch(root, installedManifest);
   if (selectedRootVerified) {
-    const bool cleanupComplete = removeTree(stagingRoot(sessionId)) &&
-                                 removeTree(activePath + ".bak") &&
-                                 removeTree(activePath + ".tmp") &&
-                                 removeTree(transactionPath + ".bak") &&
-                                 removeTree(transactionPath + ".tmp");
+    const bool cleanupComplete =
+        (preserveStagedArchive || removeTree(stagingRoot(sessionId))) &&
+        removeTree(activePath + ".bak") &&
+        removeTree(activePath + ".tmp") &&
+        removeTree(transactionPath + ".bak") &&
+        removeTree(transactionPath + ".tmp");
     if (!cleanupComplete || !removeTree(transactionPath))
       return fail("transaction_cleanup", "could not finish map commit cleanup");
     return {true, "recovered_commit", "completed interrupted map commit"};
@@ -962,7 +969,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       (!(discardInvalidActive || discardIncompleteSelection) ||
        removeTree(activePath)) &&
       removeTree(joinPath(storageRoot_, root)) &&
-      removeTree(stagingRoot(sessionId)) &&
+      (preserveStagedArchive || removeTree(stagingRoot(sessionId))) &&
       removeTree(activePath + ".bak") &&
       removeTree(activePath + ".tmp") &&
       removeTree(transactionPath + ".bak") &&
