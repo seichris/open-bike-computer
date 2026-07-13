@@ -34,12 +34,20 @@ final class DeviceTransferManager {
         guard bleManager.isNavigationReady else {
             throw OfflineMapPlatformError.missingTransferBaseURL
         }
+        let initialDeviceTransferStatusRevision =
+            bleManager.deviceTransferStatusRevision
 
         guard bleManager.requestMapTransferMode(enabled: true) else {
             throw OfflineMapPlatformError.missingTransferBaseURL
         }
         guard bleManager.requestMapTransferStatus() else {
             throw OfflineMapPlatformError.missingTransferBaseURL
+        }
+        // MSTS carries map/install state, while the shared DSTS response owns
+        // the short-lived HTTP credential. Both notifications can arrive in
+        // either order, so do not construct a usable session until they agree.
+        guard bleManager.requestDeviceTransferStatus() else {
+            throw OfflineMapPlatformError.transferCommandNotSent
         }
         guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
             throw OfflineMapPlatformError.transferCommandNotSent
@@ -49,12 +57,20 @@ final class DeviceTransferManager {
             if bleManager.deviceHasSDCard == false {
                 throw OfflineMapPlatformError.deviceSDCardUnavailable
             }
-            if bleManager.mapTransferModeEnabled, let baseURL = bleManager.mapTransferBaseURL {
+            if bleManager.mapTransferModeEnabled,
+               bleManager.deviceTransferStatusRevision !=
+                   initialDeviceTransferStatusRevision,
+               bleManager.deviceTransferMode == DeviceTransferSession.Mode.map.rawValue,
+               let baseURL = bleManager.mapTransferBaseURL,
+               bleManager.deviceTransferBaseURL == baseURL,
+               let token = bleManager.deviceTransferSessionToken,
+               !token.isEmpty {
                 let session = DeviceTransferSession(
                     mode: .map,
                     baseURL: baseURL,
-                    accessPointSSID: bleManager.mapTransferAccessPointSSID,
-                    sessionToken: bleManager.deviceTransferSessionToken
+                    accessPointSSID: bleManager.deviceTransferAccessPointSSID ??
+                        bleManager.mapTransferAccessPointSSID,
+                    sessionToken: token
                 )
                 await joinDeviceNetworkIfNeeded(session: session,
                                                 statusPath: "map-transfer/status",
@@ -64,6 +80,7 @@ final class DeviceTransferManager {
             }
             if attempt % 4 == 3 {
                 bleManager.requestMapTransferStatus()
+                bleManager.requestDeviceTransferStatus()
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
@@ -85,6 +102,8 @@ final class DeviceTransferManager {
         guard bleManager.isNavigationReady else {
             throw FirmwareUpdateError.deviceNotReady
         }
+        let initialDeviceTransferStatusRevision =
+            bleManager.deviceTransferStatusRevision
 
         guard bleManager.requestDeviceTransferMode(.firmware) else {
             throw FirmwareUpdateError.transferCommandNotSent
@@ -97,7 +116,9 @@ final class DeviceTransferManager {
         }
 
         for attempt in 0..<32 {
-            if bleManager.deviceTransferMode == DeviceTransferSession.Mode.firmware.rawValue,
+            if bleManager.deviceTransferStatusRevision !=
+                   initialDeviceTransferStatusRevision,
+               bleManager.deviceTransferMode == DeviceTransferSession.Mode.firmware.rawValue,
                let baseURL = bleManager.deviceTransferBaseURL,
                let token = bleManager.deviceTransferSessionToken,
                !token.isEmpty {

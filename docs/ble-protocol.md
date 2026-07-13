@@ -285,6 +285,13 @@ payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
 
+The HTTP credential is not part of the map-status payload. After sending
+`MTRNenter`, iOS also sends the shared `DSTS` status request and waits for a new
+authenticated response whose `mode` is `map`, whose `baseUrl` matches the map
+status, and whose `sessionToken` is non-empty. A status cached before the enter
+request is not sufficient. The app sends that token as
+`X-BikeComputer-Transfer-Token` on every local HTTP request.
+
 Status responses should include:
 
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.

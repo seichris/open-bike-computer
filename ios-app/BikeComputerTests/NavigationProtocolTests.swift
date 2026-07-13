@@ -407,6 +407,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadArbitration()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
+        await testDeviceTransferManagerWaitsForMapToken()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -5841,6 +5842,80 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[0], encoding: .utf8), "DTRNenter|firmware", "firmware enter command uses DTRN frame")
         assertEqual(String(data: sentPackets[1], encoding: .utf8), "DSTS", "status command uses DSTS frame")
         assertEqual(String(data: sentPackets[2], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
+    }
+
+    static func testDeviceTransferManagerWaitsForMapToken() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let staleDeviceStatus = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"stale-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(staleDeviceStatus.utf8)
+        )
+        let staleRevision = bleManager.deviceTransferStatusRevision
+
+        let transferTask = Task {
+            try await DeviceTransferManager().enterMapTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+
+        for _ in 0..<100 where sentPackets.count < 3 {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(sentPackets.count, 3,
+                    "map transfer handshake requests map and credential status")
+        if sentPackets.count == 3 {
+            assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter",
+                        "map transfer handshake enables map mode")
+            assertEqual(String(data: sentPackets[1], encoding: .utf8), "MSTS",
+                        "map transfer handshake requests map status")
+            assertEqual(String(data: sentPackets[2], encoding: .utf8), "DSTS",
+                        "map transfer handshake requests its HTTP credential")
+        }
+
+        let mapStatus = """
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sdPresent":true,"mapFound":true,"mapBlocks":1,"activation":{"status":"idle"}}
+        """
+        _ = bleManager.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(mapStatus.utf8)
+        )
+
+        // Reproduce the real notification order: MSTS can arrive before the
+        // token-bearing DSTS. The manager must not return a tokenless session.
+        try? await Task.sleep(nanoseconds: 25_000_000)
+        let deviceStatus = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
+        )
+        assert(bleManager.deviceTransferStatusRevision != staleRevision,
+               "fresh device status advances the transfer credential revision")
+
+        do {
+            let session = try await transferTask.value
+            assertEqual(session.mode, .map,
+                        "map transfer handshake returns map mode")
+            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+                        "map transfer handshake binds matching status origins")
+            assertEqual(session.sessionToken, "fresh-map-token",
+                        "map transfer handshake waits for the fresh token")
+        } catch {
+            assert(false, "map transfer handshake should succeed: \(error)")
+        }
     }
 
     static func testBLEManagerSendsDisconnectedSleepTimeoutSetting() {
