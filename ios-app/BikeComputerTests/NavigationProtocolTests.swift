@@ -486,7 +486,11 @@ struct NavigationProtocolTests {
         assertEqual(envelopeData, expectedEnvelope, "map stream stream embeds the golden envelope")
         assertEqual(payload, expectedPayload, "map stream stream embeds payload in manifest order")
         assertEqual(parsedHeader.fileCount, 1, "map stream golden fixture file count")
-        assertEqual(parsedHeader.payloadBytes, 9, "map stream golden fixture payload bytes")
+        assertEqual(
+            parsedHeader.payloadBytes,
+            UInt64(expectedPayload.count),
+            "map stream golden fixture payload bytes"
+        )
         assertEqual(parsedHeader.totalBytes, UInt64(stream.count), "map stream golden fixture total bytes")
         assertEqual(envelope.keyID, "map-test-2026-01", "map stream golden fixture key id")
         assert(
