@@ -113,7 +113,7 @@ If you add/remove/rename BLE characteristics, update both:
 
 ## Hardware gotchas (Waveshare ESP32-S3-Touch-AMOLED-1.75)
 
-Definitive pinout + quirks: `WAVESHARE_HARDWARE.md`
+Definitive pinout + quirks: [hardware/README.md](hardware/README.md)
 
 Highlights:
 - Display power must be enabled via **AXP2101** (I2C `0x34`) or the screen stays black.

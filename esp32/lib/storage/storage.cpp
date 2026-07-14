@@ -104,7 +104,7 @@ esp_err_t Storage::initSD() {
   // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
   // QSPI display. The default SPI (FSPI) shares resources with the display.
   // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See WAVESHARE_HARDWARE.md for variant-specific CS pins.
+  // See hardware/README.md for variant-specific CS pins.
 
   Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
                 "sck=%d]\n",

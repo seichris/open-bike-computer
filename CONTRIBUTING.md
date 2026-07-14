@@ -18,9 +18,9 @@ map settings, and ride telemetry to a small handlebar display over BLE.
   [aresta/OSM_Extract](https://github.com/aresta/OSM_Extract).
 - `docs/` - protocol and implementation notes. The current BLE source of truth
   is [docs/ble-protocol.md](docs/ble-protocol.md).
-- `hardware/` and [WAVESHARE_HARDWARE.md](WAVESHARE_HARDWARE.md) - board
-  bring-up notes, pinouts, power/enclosure records, and hardware validation
-  evidence.
+- `hardware/` and [hardware/README.md](hardware/README.md) - board bring-up
+  notes, pinouts, local vendor manuals, power/enclosure records, and hardware
+  validation evidence.
 
 ## Development flow
 
@@ -120,7 +120,7 @@ Supported display targets:
   tracked in [PR #31](https://github.com/seichris/open-bike-computer/pull/31).
 
 Definitive Waveshare pinouts and known quirks live in
-[WAVESHARE_HARDWARE.md](WAVESHARE_HARDWARE.md). Important reminders:
+[hardware/README.md](hardware/README.md). Important reminders:
 
 - The 1.75 and 2.06 Waveshare boards both use CO5300 AMOLED displays, but they
   do not share the same display, touch, or SD pinout. Keep

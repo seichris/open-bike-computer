@@ -1,8 +1,6 @@
 <img width="2375" height="871" alt="bike_header" src="https://github.com/user-attachments/assets/06dda2a2-b5b1-4a5c-86de-9ac191c8e657" />
 
-# Open Source Bike Computer
-
-Navigate your bike rides with a sleek, compact bike computer.
+Navigate your bike rides with a sleek, Garmin-mounted bike computer.
 
 ## Get started
 
