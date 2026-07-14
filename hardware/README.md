@@ -10,20 +10,21 @@ connected-device bring-up tests on Chris's Mac.
 
 ## Documentation Library
 
-The vendor PDFs are stored locally under [`reference/`](reference/). Shared
-component manuals are stored once. The ESP32-S3 manuals are stored separately
-because the 1.75 documentation and 2.06 wiki currently link different
-revisions.
+The vendor PDFs are stored locally under [`reference/`](reference/). Every PDF
+filename starts with `1.75 - ` or `2.06 - ` to identify its board. Manuals for
+components shared by both boards are available under both prefixes. The
+ESP32-S3 manuals use separate revisions because the 1.75 documentation and
+2.06 wiki currently link different copies.
 
 ### ESP32-S3-Touch-AMOLED-1.75
 
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262)
 - [Official documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.75)
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75)
-- [Schematic](reference/esp32-s3-touch-amoled-1.75-schematic.pdf)
-- [Dimension drawing](reference/esp32-s3-touch-amoled-1.75-dimensions.pdf),
+- [Schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>)
+- [Dimension drawing](<reference/1.75 - esp32-s3-touch-amoled-1.75-dimensions.pdf>),
   extracted from the official [design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-3D.zip)
-- [1.75-B dimension drawing](reference/esp32-s3-touch-amoled-1.75-b-dimensions.pdf),
+- [1.75-B dimension drawing](<reference/1.75 - esp32-s3-touch-amoled-1.75-b-dimensions.pdf>),
   extracted from the official [1.75-B design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-B-3D.zip)
 
 ### ESP32-S3-Touch-AMOLED-2.06
@@ -31,26 +32,26 @@ revisions.
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm)
 - [Official wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06)
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06)
-- [Schematic](reference/esp32-s3-touch-amoled-2.06-schematic.pdf)
-- [Dimension drawing](reference/esp32-s3-touch-amoled-2.06-dimensions.pdf)
+- [Schematic](<reference/2.06 - esp32-s3-touch-amoled-2.06-schematic.pdf>)
+- [Dimension drawing](<reference/2.06 - esp32-s3-touch-amoled-2.06-dimensions.pdf>)
 
 ### ESP32-S3 Manuals
 
-- [ESP32-S3 datasheet - current Espressif copy linked by the 1.75 documentation](reference/esp32-s3-datasheet-espressif.pdf)
-- [ESP32-S3 technical reference manual - current Espressif copy linked by the 1.75 documentation](reference/esp32-s3-trm-espressif.pdf)
-- [ESP32-S3 datasheet - Waveshare mirror linked by the 2.06 wiki](reference/esp32-s3-datasheet-waveshare.pdf)
-- [ESP32-S3 technical reference manual - Waveshare mirror linked by the 2.06 wiki](reference/esp32-s3-trm-waveshare.pdf)
+- [ESP32-S3 datasheet - current Espressif copy linked by the 1.75 documentation](<reference/1.75 - esp32-s3-datasheet-espressif.pdf>)
+- [ESP32-S3 technical reference manual - current Espressif copy linked by the 1.75 documentation](<reference/1.75 - esp32-s3-trm-espressif.pdf>)
+- [ESP32-S3 datasheet - Waveshare mirror linked by the 2.06 wiki](<reference/2.06 - esp32-s3-datasheet-waveshare.pdf>)
+- [ESP32-S3 technical reference manual - Waveshare mirror linked by the 2.06 wiki](<reference/2.06 - esp32-s3-trm-waveshare.pdf>)
 
 ### Component Manuals
 
 | Component | Boards | Local PDF |
 | --- | --- | --- |
-| QMI8658C IMU | 1.75 and 2.06 | [Datasheet](reference/qmi8658c-datasheet.pdf) |
-| PCF85063A RTC | 1.75 and 2.06 | [Datasheet](reference/pcf85063a-datasheet.pdf) |
-| AXP2101 PMU | 1.75 and 2.06 | [Datasheet](reference/axp2101-datasheet.pdf) |
-| ES8311 audio codec | 1.75 and 2.06 | [Datasheet](reference/es8311-datasheet.pdf) and [user guide](reference/es8311-user-guide.pdf) |
-| FT3168 touch controller | 2.06 | [Datasheet](reference/ft3168-datasheet.pdf) |
-| ES7210 audio ADC | 2.06 | [Datasheet](reference/es7210-datasheet.pdf) |
+| QMI8658C IMU | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - qmi8658c-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - qmi8658c-datasheet.pdf>) |
+| PCF85063A RTC | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - pcf85063a-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - pcf85063a-datasheet.pdf>) |
+| AXP2101 PMU | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - axp2101-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - axp2101-datasheet.pdf>) |
+| ES8311 audio codec | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - es8311-datasheet.pdf>), [1.75 user guide](<reference/1.75 - es8311-user-guide.pdf>), [2.06 datasheet](<reference/2.06 - es8311-datasheet.pdf>), and [2.06 user guide](<reference/2.06 - es8311-user-guide.pdf>) |
+| FT3168 touch controller | 2.06 | [Datasheet](<reference/2.06 - ft3168-datasheet.pdf>) |
+| ES7210 audio ADC | 2.06 | [Datasheet](<reference/2.06 - es7210-datasheet.pdf>) |
 
 ### Software
 
