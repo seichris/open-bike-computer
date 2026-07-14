@@ -123,7 +123,8 @@ int main(void)
         .codec_dac_voltage = 3.3f,
     };
     const float target_route_db = speaker_max_route_gain_db(
-        esp_codec_dev_col_calc_hw_gain(&hardware_gain));
+        esp_codec_dev_col_calc_hw_gain(&hardware_gain),
+        SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_206);
     assert(codec->set_vol(codec, target_route_db) == ESP_CODEC_DEV_OK);
     assert(registers[ES8311_DAC_REG32] == 0xE7);
 

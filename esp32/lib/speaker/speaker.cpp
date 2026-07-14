@@ -34,6 +34,9 @@ constexpr uint8_t ES8311_I2C_ADDRESS = 0x18;
 
 #if defined(WAVESHARE_AMOLED_175)
 constexpr float PA_SUPPLY_VOLTAGE = 3.3f;
+constexpr float VOLUME_DB_AT_70_PERCENT =
+    SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_175;
+constexpr float MAX_DAC_GAIN_DB = SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_175;
 constexpr gpio_num_t I2S_MCLK = GPIO_NUM_42;
 constexpr gpio_num_t I2S_BCLK = GPIO_NUM_9;
 constexpr gpio_num_t I2S_WS = GPIO_NUM_45;
@@ -41,6 +44,9 @@ constexpr gpio_num_t I2S_DOUT = GPIO_NUM_8;
 constexpr gpio_num_t I2S_DIN = GPIO_NUM_10;
 #else
 constexpr float PA_SUPPLY_VOLTAGE = 5.0f;
+constexpr float VOLUME_DB_AT_70_PERCENT =
+    SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_206;
+constexpr float MAX_DAC_GAIN_DB = SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_206;
 constexpr gpio_num_t I2S_MCLK = GPIO_NUM_16;
 constexpr gpio_num_t I2S_BCLK = GPIO_NUM_41;
 constexpr gpio_num_t I2S_WS = GPIO_NUM_45;
@@ -369,7 +375,8 @@ bool initializeCodec() {
   }
 
   esp_codec_dev_vol_map_t volumeMap[SPEAKER_VOLUME_CURVE_POINT_COUNT]{};
-  speaker_build_volume_map(volumeMap, codecHardwareGainDb);
+  speaker_build_volume_map(volumeMap, codecHardwareGainDb,
+                           VOLUME_DB_AT_70_PERCENT, MAX_DAC_GAIN_DB);
   esp_codec_dev_vol_curve_t volumeCurve{};
   volumeCurve.vol_map = volumeMap;
   volumeCurve.count = sizeof(volumeMap) / sizeof(volumeMap[0]);
@@ -391,12 +398,13 @@ bool initializeCodec() {
   }
 
   initialized = true;
-  currentDacGainDb =
-      speaker_dac_gain_db(DEFAULT_VOLUME_PERCENT, codecHardwareGainDb);
+  currentDacGainDb = speaker_dac_gain_db(
+      DEFAULT_VOLUME_PERCENT, codecHardwareGainDb,
+      VOLUME_DB_AT_70_PERCENT, MAX_DAC_GAIN_DB);
   speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
   Serial.printf(
       "Speaker: ES8311 ready at %u%% default volume (100%% = %.0f dB DAC)\n",
-      DEFAULT_VOLUME_PERCENT, SPEAKER_MAX_DAC_GAIN_DB);
+      DEFAULT_VOLUME_PERCENT, MAX_DAC_GAIN_DB);
   return true;
 }
 
@@ -532,8 +540,9 @@ void speakerTask(void *) {
       Serial.printf("Speaker: failed to set volume to %u%%\n",
                     request.volumePercent);
     } else {
-      currentDacGainDb =
-          speaker_dac_gain_db(request.volumePercent, codecHardwareGainDb);
+      currentDacGainDb = speaker_dac_gain_db(
+          request.volumePercent, codecHardwareGainDb,
+          VOLUME_DB_AT_70_PERCENT, MAX_DAC_GAIN_DB);
       speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
       Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
                     request.volumePercent);

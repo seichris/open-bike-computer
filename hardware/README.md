@@ -441,6 +441,9 @@ both the production `WAVESHARE_AMOLED_175` image and the standalone
 The 1.75 schematic powers the NS4150B from `VCC3V3`, so the firmware models the
 PA and codec DAC rails as 3.3 V for volume calculations. This differs from the
 2.06 path, whose established audio configuration models a 5 V PA rail.
+The 1.75-specific volume curve maps the default `70%` setting to 0 dB DAC
+gain, `90%` to +4 dB, and caps `100%` at +6 dB. This avoids the +20 dB ceiling
+used by the separately calibrated 2.06 path.
 
 The tested external speaker is marked only `F3`. That marking is not a usable
 impedance or wattage rating, and neither the board schematic nor the speaker

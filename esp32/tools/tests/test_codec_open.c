@@ -189,9 +189,14 @@ static void verify_custom_volume_curve(void)
     assert(device != NULL);
 
     const float hardware_gain_db = 20.0f * log10f(3.3f / 5.0f);
-    const float max_route_db = speaker_max_route_gain_db(hardware_gain_db);
+    const float volume_db_at_70_percent =
+        SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_206;
+    const float max_dac_gain_db = SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_206;
+    const float max_route_db =
+        speaker_max_route_gain_db(hardware_gain_db, max_dac_gain_db);
     esp_codec_dev_vol_map_t volume_map[SPEAKER_VOLUME_CURVE_POINT_COUNT];
-    speaker_build_volume_map(volume_map, hardware_gain_db);
+    speaker_build_volume_map(volume_map, hardware_gain_db,
+                             volume_db_at_70_percent, max_dac_gain_db);
     esp_codec_dev_vol_curve_t curve = {
         .vol_map = volume_map,
         .count = 3,
@@ -209,6 +214,29 @@ static void verify_custom_volume_curve(void)
     assert(fabsf(last_volume_db - max_route_db) < 0.001f);
 
     esp_codec_dev_delete(device);
+}
+
+static void verify_waveshare_175_volume_profile(void)
+{
+    const float hardware_gain_db = 0.0f;
+    const float volume_db_at_70_percent =
+        SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_175;
+    const float max_dac_gain_db = SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_175;
+    esp_codec_dev_vol_map_t volume_map[SPEAKER_VOLUME_CURVE_POINT_COUNT];
+    speaker_build_volume_map(volume_map, hardware_gain_db,
+                             volume_db_at_70_percent, max_dac_gain_db);
+
+    assert(fabsf(volume_map[1].db_value - 0.0f) < 0.001f);
+    assert(fabsf(volume_map[2].db_value - 6.0f) < 0.001f);
+    assert(fabsf(speaker_dac_gain_db(70, hardware_gain_db,
+                                     volume_db_at_70_percent,
+                                     max_dac_gain_db) - 0.0f) < 0.001f);
+    assert(fabsf(speaker_dac_gain_db(90, hardware_gain_db,
+                                     volume_db_at_70_percent,
+                                     max_dac_gain_db) - 4.0f) < 0.001f);
+    assert(fabsf(speaker_dac_gain_db(100, hardware_gain_db,
+                                     volume_db_at_70_percent,
+                                     max_dac_gain_db) - 6.0f) < 0.001f);
 }
 
 static void verify_failed_close_can_retry(failure_point_t point)
@@ -285,6 +313,7 @@ int main(void)
     verify_failed_close_can_retry(FAIL_CODEC_DISABLE);
     verify_failed_close_can_retry(FAIL_DATA_DISABLE);
     verify_custom_volume_curve();
+    verify_waveshare_175_volume_profile();
     verify_high_gain_limiter();
     return 0;
 }

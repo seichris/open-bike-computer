@@ -159,7 +159,8 @@ Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 
 `VolumePercent` must be in the inclusive range `0...100`. For compatibility,
 the firmware also accepts the older frame containing only `SoundID` and uses
-the default volume of `70`.
+the default volume of `70`. The 1.75 hardware profile maps `70%` to 0 dB DAC
+gain and caps `100%` at +6 dB; the established 2.06 curve is unchanged.
 
 Playback requests are queued by the firmware and run outside the BLE callback.
 Unsupported IDs, invalid volumes, and sound commands received before

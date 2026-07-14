@@ -5,9 +5,11 @@
 
 #include <esp_codec_dev_vol.h>
 
-#define SPEAKER_MAX_DAC_GAIN_DB 20.0f
+#define SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_175 6.0f
+#define SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_175 0.0f
+#define SPEAKER_MAX_DAC_GAIN_DB_WAVESHARE_206 20.0f
+#define SPEAKER_VOLUME_DB_AT_70_PERCENT_WAVESHARE_206 -15.0f
 #define SPEAKER_VOLUME_CURVE_MIN_DB -50.0f
-#define SPEAKER_VOLUME_DB_AT_70_PERCENT -15.0f
 #define SPEAKER_VOLUME_CURVE_POINT_COUNT 3
 
 typedef struct {
@@ -17,38 +19,50 @@ typedef struct {
   float headroom;
 } speaker_limiter_t;
 
-static inline float speaker_max_route_gain_db(float hardware_gain_db) {
-  return SPEAKER_MAX_DAC_GAIN_DB + hardware_gain_db;
+static inline float speaker_max_route_gain_db(float hardware_gain_db,
+                                              float max_dac_gain_db) {
+  return max_dac_gain_db + hardware_gain_db;
 }
 
 static inline void speaker_build_volume_map(esp_codec_dev_vol_map_t *volume_map,
-                                            float hardware_gain_db) {
+                                            float hardware_gain_db,
+                                            float volume_db_at_70_percent,
+                                            float max_dac_gain_db) {
   volume_map[0].vol = 0;
   volume_map[0].db_value = SPEAKER_VOLUME_CURVE_MIN_DB;
   volume_map[1].vol = 70;
-  volume_map[1].db_value = SPEAKER_VOLUME_DB_AT_70_PERCENT;
+  volume_map[1].db_value = volume_db_at_70_percent;
   volume_map[2].vol = 100;
-  volume_map[2].db_value = speaker_max_route_gain_db(hardware_gain_db);
+  volume_map[2].db_value =
+      speaker_max_route_gain_db(hardware_gain_db, max_dac_gain_db);
 }
 
 static inline float speaker_route_gain_db(uint8_t volume_percent,
-                                          float hardware_gain_db) {
+                                          float hardware_gain_db,
+                                          float volume_db_at_70_percent,
+                                          float max_dac_gain_db) {
   if (volume_percent == 0) {
     return -96.0f;
   }
   if (volume_percent <= 70) {
-    return SPEAKER_VOLUME_CURVE_MIN_DB + 0.5f * volume_percent;
+    const float lower_range =
+        volume_db_at_70_percent - SPEAKER_VOLUME_CURVE_MIN_DB;
+    return SPEAKER_VOLUME_CURVE_MIN_DB +
+           lower_range * volume_percent / 70.0f;
   }
   const float upper_range =
-      speaker_max_route_gain_db(hardware_gain_db) -
-      SPEAKER_VOLUME_DB_AT_70_PERCENT;
-  return SPEAKER_VOLUME_DB_AT_70_PERCENT +
+      speaker_max_route_gain_db(hardware_gain_db, max_dac_gain_db) -
+      volume_db_at_70_percent;
+  return volume_db_at_70_percent +
          upper_range * (volume_percent - 70) / 30.0f;
 }
 
 static inline float speaker_dac_gain_db(uint8_t volume_percent,
-                                        float hardware_gain_db) {
-  return speaker_route_gain_db(volume_percent, hardware_gain_db) -
+                                        float hardware_gain_db,
+                                        float volume_db_at_70_percent,
+                                        float max_dac_gain_db) {
+  return speaker_route_gain_db(volume_percent, hardware_gain_db,
+                               volume_db_at_70_percent, max_dac_gain_db) -
          hardware_gain_db;
 }
 
