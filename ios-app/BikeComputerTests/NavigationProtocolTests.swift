@@ -2435,6 +2435,24 @@ struct NavigationProtocolTests {
         assert(writes.allSatisfy {
             String(data: $0.prefix(4), encoding: .utf8) == "DLST"
         }, "fallback catalog frames stay explicitly framed")
+
+        let reconnectManager = BLEManager()
+        reconnectManager.isConnected = true
+        reconnectManager.isNavigationReady = true
+        var reconnectWrites: [Data] = []
+        reconnectManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { reconnectWrites.append($0) }
+        ))
+        assert(reconnectManager.sendDestinationStatus(
+            generation: 17,
+            token: 3,
+            status: .calculating,
+            message: "Starting navigation..."
+        ), "a retained-catalog request can be answered before CAPS completes")
+        assertEqual(String(data: reconnectWrites.first?.prefix(4) ?? Data(), encoding: .utf8),
+                    "DNST", "the pre-capability reconnect reply uses DNST")
     }
 
     static func testRouteInitialLocationUsesResolvedSource() {

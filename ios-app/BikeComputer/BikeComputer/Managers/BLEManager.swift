@@ -1686,8 +1686,11 @@ class BLEManager: NSObject, ObservableObject {
         status: DeviceDestinationStatusCode,
         message: String
     ) -> Bool {
-        guard supportsDestinationPicker,
-              let endpoint = navigationWriteEndpoint,
+        // A DREQ notification itself proves that the connected firmware knows
+        // DNST. Allow the reply during the brief post-authentication window
+        // before the CAPS response arrives, when the device may still show its
+        // retained catalog from the previous connection.
+        guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady,
               endpoint.maximumWriteLength >= 11 else { return false }
