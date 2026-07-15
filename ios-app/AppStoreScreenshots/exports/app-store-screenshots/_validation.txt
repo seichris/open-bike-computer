@@ -1,0 +1,3 @@
+PASS 1242x2688 png opaque /Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/01-01-plan-rides-en-us-iphone-6.5-1242x2688.png
+PASS 1242x2688 png opaque /Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/02-02-follow-route-en-us-iphone-6.5-1242x2688.png
+PASS 1242x2688 png opaque /Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/03-03-bike-display-en-us-iphone-6.5-1242x2688.png

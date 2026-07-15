@@ -1,0 +1,385 @@
+:root {
+  color-scheme: light;
+  --font-stack: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #eef0ee;
+  color: #141414;
+  font-family: var(--font-stack);
+}
+
+button {
+  font: inherit;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 0;
+}
+
+.toolbar {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #d8ddda;
+  border-radius: 8px;
+  display: none;
+  gap: 14px;
+  justify-content: space-between;
+  margin: 0 auto 28px;
+  max-width: 1180px;
+  padding: 14px 16px;
+}
+
+.toolbar strong {
+  font-size: 16px;
+}
+
+.toolbar span {
+  color: #5d6560;
+  font-size: 14px;
+}
+
+.previewGrid {
+  display: none;
+  gap: 28px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 auto;
+  max-width: 1180px;
+}
+
+.previewCard {
+  background: #ffffff;
+  border: 1px solid #d8ddda;
+  border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(24, 30, 26, 0.12);
+  overflow: hidden;
+}
+
+.previewCard img {
+  display: block;
+  width: 100%;
+}
+
+.exportStage {
+  display: grid;
+  gap: 0;
+  justify-content: center;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.slide {
+  height: 2688px;
+  overflow: hidden;
+  position: relative;
+  width: 1242px;
+}
+
+.slideInner {
+  height: 2868px;
+  left: 0;
+  position: absolute;
+  top: 0;
+  transform: scale(0.940909, 0.937238);
+  transform-origin: top left;
+  width: 1320px;
+}
+
+.slideOne {
+  background:
+    radial-gradient(circle at 84% 16%, rgba(255, 23, 23, 0.24), transparent 26%),
+    linear-gradient(160deg, #f8fff4 0%, #ffffff 42%, #e8f0f4 100%);
+}
+
+.slideTwo {
+  background:
+    radial-gradient(circle at 10% 10%, rgba(255, 23, 23, 0.26), transparent 28%),
+    linear-gradient(180deg, #101314 0%, #202625 52%, #f1f4ef 52%, #ffffff 100%);
+}
+
+.slideThree {
+  background: #ffffff;
+}
+
+.headline {
+  letter-spacing: 0;
+  line-height: 0.94;
+  margin: 0;
+}
+
+.subhead {
+  letter-spacing: 0;
+  line-height: 1.22;
+  margin: 0;
+}
+
+.label {
+  align-items: center;
+  display: inline-flex;
+  font-size: 34px;
+  font-weight: 800;
+  gap: 16px;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.label::before {
+  background: #ff1717;
+  border-radius: 999px;
+  content: "";
+  display: block;
+  height: 22px;
+  width: 22px;
+}
+
+.captionOne {
+  left: 74px;
+  position: absolute;
+  top: 142px;
+  width: 930px;
+  z-index: 4;
+}
+
+.captionOne .headline {
+  color: #101214;
+  font-size: 124px;
+  font-weight: 900;
+  margin-top: 34px;
+}
+
+.captionOne .subhead {
+  color: #4d5752;
+  font-size: 46px;
+  font-weight: 650;
+  margin-top: 34px;
+  width: 760px;
+}
+
+.captionTwo {
+  left: 76px;
+  position: absolute;
+  top: 130px;
+  width: 940px;
+  z-index: 5;
+}
+
+.captionTwo .label,
+.captionTwo .headline,
+.captionTwo .subhead {
+  color: #ffffff;
+}
+
+.captionTwo .headline {
+  font-size: 114px;
+  font-weight: 900;
+  margin-top: 34px;
+}
+
+.captionTwo .subhead {
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 45px;
+  font-weight: 650;
+  margin-top: 34px;
+  width: 760px;
+}
+
+.captionThree {
+  left: 84px;
+  position: absolute;
+  top: 138px;
+  width: 980px;
+  z-index: 5;
+}
+
+.captionThree .headline {
+  color: #101214;
+  font-size: 112px;
+  font-weight: 900;
+  margin-top: 34px;
+}
+
+.captionThree .subhead {
+  color: #4f5954;
+  font-size: 45px;
+  font-weight: 650;
+  margin-top: 32px;
+  width: 780px;
+}
+
+.phoneFrame {
+  aspect-ratio: 430 / 932;
+  background: linear-gradient(180deg, #2c2c2e 0%, #111113 100%);
+  border-radius: 14% / 6.5%;
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.12),
+    0 34px 92px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  position: absolute;
+}
+
+.phoneScreen {
+  background: #000000;
+  border-radius: 10% / 4.8%;
+  height: 94.6%;
+  left: 5.7%;
+  overflow: hidden;
+  position: absolute;
+  top: 2.7%;
+  width: 88.6%;
+}
+
+.phoneScreen img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  width: 100%;
+}
+
+.phoneIsland {
+  background: #050506;
+  border-radius: 999px;
+  height: 3.2%;
+  left: 50%;
+  position: absolute;
+  top: 3.9%;
+  transform: translateX(-50%);
+  width: 30%;
+  z-index: 3;
+}
+
+.phoneOutline {
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14% / 6.5%;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+}
+
+.phoneOne {
+  bottom: -300px;
+  right: -4px;
+  transform: rotate(3deg);
+  width: 860px;
+  z-index: 2;
+}
+
+.phoneTwo {
+  bottom: -240px;
+  left: 50%;
+  transform: translateX(-50%) rotate(-2deg);
+  width: 900px;
+  z-index: 4;
+}
+
+.deviceArtwork {
+  display: block;
+  height: auto;
+  left: 50%;
+  position: absolute;
+  top: 500px;
+  transform: translateX(-50%);
+  width: 1320px;
+  z-index: 3;
+}
+
+.mapTile {
+  background:
+    linear-gradient(90deg, transparent 0 47%, rgba(148, 156, 152, 0.28) 47% 49%, transparent 49%),
+    linear-gradient(0deg, transparent 0 47%, rgba(148, 156, 152, 0.28) 47% 49%, transparent 49%),
+    #ecf1ec;
+  border: 2px solid rgba(23, 28, 24, 0.08);
+  border-radius: 42px;
+  height: 760px;
+  left: -90px;
+  opacity: 0.9;
+  position: absolute;
+  top: 796px;
+  transform: rotate(-10deg);
+  width: 760px;
+}
+
+.routeLine {
+  background: #ff1717;
+  border-radius: 999px;
+  box-shadow: 0 0 36px rgba(255, 23, 23, 0.45);
+  height: 22px;
+  left: 38px;
+  position: absolute;
+  top: 1190px;
+  transform: rotate(-31deg);
+  width: 560px;
+}
+
+.statsBand {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 2px solid rgba(19, 24, 22, 0.08);
+  border-radius: 44px;
+  bottom: 96px;
+  box-shadow: 0 28px 70px rgba(21, 31, 26, 0.14);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  left: 60px;
+  padding: 34px 26px;
+  position: absolute;
+  width: 612px;
+  z-index: 5;
+}
+
+.stat strong {
+  color: #111315;
+  display: block;
+  font-size: 54px;
+  line-height: 1;
+}
+
+.stat span {
+  color: #737b77;
+  display: block;
+  font-size: 24px;
+  font-weight: 700;
+  margin-top: 14px;
+}
+
+.softGrid {
+  inset: 0;
+  opacity: 0.18;
+  position: absolute;
+}
+
+.softGrid::before,
+.softGrid::after {
+  background: #89928d;
+  content: "";
+  position: absolute;
+}
+
+.softGrid::before {
+  height: 100%;
+  left: 46%;
+  width: 3px;
+}
+
+.softGrid::after {
+  height: 3px;
+  left: 0;
+  top: 46%;
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .previewGrid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,68 @@
+[
+  {
+    "filename": "01-01-plan-rides-en-us-iphone-6.5-1242x2688.png",
+    "path": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/01-01-plan-rides-en-us-iphone-6.5-1242x2688.png",
+    "locale": "en-US",
+    "device": "iphone-6.5",
+    "theme": "shibuya-red",
+    "slide": 1,
+    "slideId": "01-plan-rides",
+    "width": 1242,
+    "height": 2688,
+    "renderer": "playwright",
+    "createdAt": "2026-07-09T05:30:02.954Z",
+    "validation": {
+      "file": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/01-01-plan-rides-en-us-iphone-6.5-1242x2688.png",
+      "status": "pass",
+      "width": 1242,
+      "height": 2688,
+      "format": "png",
+      "hasAlphaChannel": false,
+      "errors": []
+    }
+  },
+  {
+    "filename": "02-02-follow-route-en-us-iphone-6.5-1242x2688.png",
+    "path": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/02-02-follow-route-en-us-iphone-6.5-1242x2688.png",
+    "locale": "en-US",
+    "device": "iphone-6.5",
+    "theme": "shibuya-red",
+    "slide": 2,
+    "slideId": "02-follow-route",
+    "width": 1242,
+    "height": 2688,
+    "renderer": "playwright",
+    "createdAt": "2026-07-09T05:30:02.954Z",
+    "validation": {
+      "file": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/02-02-follow-route-en-us-iphone-6.5-1242x2688.png",
+      "status": "pass",
+      "width": 1242,
+      "height": 2688,
+      "format": "png",
+      "hasAlphaChannel": false,
+      "errors": []
+    }
+  },
+  {
+    "filename": "03-03-bike-display-en-us-iphone-6.5-1242x2688.png",
+    "path": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/03-03-bike-display-en-us-iphone-6.5-1242x2688.png",
+    "locale": "en-US",
+    "device": "iphone-6.5",
+    "theme": "shibuya-red",
+    "slide": 3,
+    "slideId": "03-bike-display",
+    "width": 1242,
+    "height": 2688,
+    "renderer": "playwright",
+    "createdAt": "2026-07-09T05:30:02.954Z",
+    "validation": {
+      "file": "/Users/chris/Documents/Workspace/open-bike-computer/ios-app/AppStoreScreenshots/exports/app-store-screenshots/screenshots/en-us/iphone-6.5/03-03-bike-display-en-us-iphone-6.5-1242x2688.png",
+      "status": "pass",
+      "width": 1242,
+      "height": 2688,
+      "format": "png",
+      "hasAlphaChannel": false,
+      "errors": []
+    }
+  }
+]
