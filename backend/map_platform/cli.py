@@ -20,6 +20,28 @@ from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 
+def _pipeline_producer_identity(
+    repo_root: Path,
+    worker_image_reference: str,
+    *,
+    required: bool,
+) -> tuple[str | None, str | None]:
+    """Load the fail-closed worker identity used by streams and pack reuse."""
+    try:
+        producer_image_digest = image_digest_from_reference(
+            worker_image_reference
+        )
+        build_identity = verify_map_stream_build_identity(
+            repo_root / "config" / "map-stream-build-identity.json",
+            repo_root,
+        )
+    except (OSError, ValueError):
+        if required:
+            raise
+        return None, None
+    return build_identity.producer_build_sha256, producer_image_digest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline map platform operations")
     parser.add_argument("--repo-root", default=os.environ.get("MAP_PLATFORM_REPO_ROOT", Path(__file__).resolve().parents[2]))
@@ -104,18 +126,12 @@ def main() -> int:
             "MAP_PLATFORM_WORKER_IMAGE_REFERENCE",
             "",
         ).strip()
-        producer_image_digest = (
-            image_digest_from_reference(worker_image_reference)
-            if map_signer is not None
-            else None
-        )
-        build_identity = (
-            verify_map_stream_build_identity(
-                repo_root / "config" / "map-stream-build-identity.json",
+        producer_build_sha256, producer_image_digest = (
+            _pipeline_producer_identity(
                 repo_root,
+                worker_image_reference,
+                required=map_signer is not None,
             )
-            if map_signer is not None
-            else None
         )
         return MapBuildPipeline(
             PipelinePaths(
@@ -126,9 +142,7 @@ def main() -> int:
             source_cache=source_cache,
             artifact_store=create_artifact_store_from_environment(data_root),
             map_signer=map_signer,
-            producer_build_sha256=(
-                build_identity.producer_build_sha256 if build_identity else None
-            ),
+            producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
             source_preview_geometry_resolver=(
                 source_provider.preview_geometry_for_source
