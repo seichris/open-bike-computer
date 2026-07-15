@@ -70,6 +70,21 @@ class GeofabrikSourceProvider:
             return sorted(containing, key=lambda region: bbox_area_km2(region.source_region.bounds))[0].source_region
         raise SourceResolutionError("no Geofabrik source region covers the requested area")
 
+    def preview_geometry_for_source(self, source: SourceRegion) -> dict[str, Any] | None:
+        if source.preview_geometry is not None:
+            return source.preview_geometry
+        if source.provider != "geofabrik":
+            return None
+        matching = next(
+            (
+                region
+                for region in self._catalog_regions()
+                if region.source_region.url == source.url
+            ),
+            None,
+        )
+        return matching.geometry if matching is not None else None
+
     def _catalog_regions(self) -> list[GeofabrikCatalogRegion]:
         if self._regions is None:
             try:

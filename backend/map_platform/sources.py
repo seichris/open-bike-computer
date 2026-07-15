@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -46,8 +45,7 @@ class SourceIndex:
     def resolve_for_bounds(self, bounds: Bounds) -> SourceRegion:
         containing = [region for region in self.regions if contains_bounds(region.bounds, bounds)]
         if containing:
-            selected = sorted(containing, key=lambda region: bbox_area_km2(region.bounds))[0]
-            return self._with_fallback_preview_geometry(selected)
+            return sorted(containing, key=lambda region: bbox_area_km2(region.bounds))[0]
         intersecting = [region for region in self.regions if intersects_bounds(region.bounds, bounds)]
         if self.fallback_provider is not None:
             try:
@@ -59,27 +57,6 @@ class SourceIndex:
                 "requested area crosses configured source regions; add a parent source or merge support"
             )
         raise SourceResolutionError("no configured source region covers the requested area")
-
-    def _with_fallback_preview_geometry(self, selected: SourceRegion) -> SourceRegion:
-        if selected.preview_geometry is not None or self.fallback_provider is None:
-            return selected
-        try:
-            matching = next(
-                (
-                    region
-                    for region in self.fallback_provider.source_regions()
-                    if region.provider == selected.provider
-                    and region.url == selected.url
-                    and region.preview_geometry is not None
-                ),
-                None,
-            )
-        except SourceResolutionError:
-            return selected
-        if matching is None:
-            return selected
-        return replace(selected, preview_geometry=matching.preview_geometry)
-
 
 def contains_bounds(container: Bounds, child: Bounds) -> bool:
     return (

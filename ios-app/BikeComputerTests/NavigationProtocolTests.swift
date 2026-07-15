@@ -3817,6 +3817,12 @@ struct NavigationProtocolTests {
                 !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
             "saved-map previews load lazily without scanning cached archives on the main actor"
         )
+        assert(
+            managerSource.contains(
+                "refreshCachedPacks()\n#if canImport(UIKit)\n        loadPreviewIfNeeded(forCachedPack: destination)"
+            ),
+            "replacing a pack at the same URL explicitly reloads its invalidated preview"
+        )
     }
 
     @MainActor

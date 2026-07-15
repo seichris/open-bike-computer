@@ -1959,6 +1959,9 @@ final class OfflineMapManager: ObservableObject {
         }
         persistPackDisplayNames()
         refreshCachedPacks()
+#if canImport(UIKit)
+        loadPreviewIfNeeded(forCachedPack: destination)
+#endif
         downloadProgress = 1
         downloadByteProgress = nil
         transferProgress = 0

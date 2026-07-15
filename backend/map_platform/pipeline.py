@@ -9,9 +9,9 @@ import time
 import uuid
 from copy import deepcopy
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .artifacts import (
     BIKE_MAP_STREAM_FORMAT,
@@ -25,8 +25,9 @@ from .artifacts import (
 )
 from .manifest import PipelineMetadata, build_manifest, stable_map_id, write_pack_archive
 from .map_stream import write_map_stream_artifact
-from .models import JobStatus, MapJob
+from .models import JobStatus, MapJob, SourceRegion
 from .source_cache import SourceCache
+from .sources import SourceResolutionError
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ class MapBuildPipeline:
         map_signer=None,
         producer_build_sha256: str | None = None,
         producer_image_digest: str | None = None,
+        source_preview_geometry_resolver: Callable[[SourceRegion], dict[str, Any] | None] | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -147,6 +149,7 @@ class MapBuildPipeline:
         self.map_signer = map_signer
         self.producer_build_sha256 = producer_build_sha256
         self.producer_image_digest = producer_image_digest
+        self.source_preview_geometry_resolver = source_preview_geometry_resolver
         if self.map_signer is not None and self.artifact_store is None:
             raise ValueError("map stream generation requires durable artifact storage")
         if self.map_signer is not None and not re.fullmatch(
@@ -197,6 +200,7 @@ class MapBuildPipeline:
             on_status(JobStatus.PACKAGING)
         self._stage_vectmap(raw_output_dir, vectmap_output)
 
+        self._resolve_source_preview_geometry(job)
         manifest = build_manifest(job, pack_root, self._pipeline_metadata())
         write_pack_archive(pack_root, manifest, archive_path)
         artifacts: list[ArtifactRecord] = []
@@ -307,6 +311,20 @@ class MapBuildPipeline:
 
     def published_archive_path(self, map_id: str, job_id: str) -> Path:
         return self.paths.pack_root / map_id / f"{job_id}.zip"
+
+    def _resolve_source_preview_geometry(self, job: MapJob) -> None:
+        resolver = self.source_preview_geometry_resolver
+        if job.source_region.preview_geometry is not None or resolver is None:
+            return
+        try:
+            geometry = resolver(job.source_region)
+        except SourceResolutionError:
+            return
+        if isinstance(geometry, dict) and geometry:
+            job.source_region = replace(
+                job.source_region,
+                preview_geometry=geometry,
+            )
 
     def _source_pbf_path(self, job: MapJob) -> Path:
         return self.source_cache.ensure(job.source_region).path

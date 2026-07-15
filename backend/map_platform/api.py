@@ -119,6 +119,11 @@ def create_app():
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
         source_cache=source_cache,
+        source_preview_geometry_resolver=(
+            source_provider.preview_geometry_for_source
+            if source_provider is not None
+            else None
+        ),
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")

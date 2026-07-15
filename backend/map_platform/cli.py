@@ -90,9 +90,10 @@ def main() -> int:
     data_root = Path(args.data_root).resolve() if args.data_root else repo_root / "backend" / "data"
     source_index_path = Path(args.source_index).resolve() if args.source_index else repo_root / "backend" / "config" / "source-regions.json"
     store = JobStore(data_root / "jobs")
+    source_provider = GeofabrikSourceProvider.from_environment(data_root)
     source_index = SourceIndex.from_json(
         source_index_path,
-        fallback_provider=GeofabrikSourceProvider.from_environment(data_root),
+        fallback_provider=source_provider,
     )
     service = MapJobService(source_index, store)
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
@@ -129,6 +130,11 @@ def main() -> int:
                 build_identity.producer_build_sha256 if build_identity else None
             ),
             producer_image_digest=producer_image_digest,
+            source_preview_geometry_resolver=(
+                source_provider.preview_geometry_for_source
+                if source_provider is not None
+                else None
+            ),
         )
 
     if args.command == "create-job":

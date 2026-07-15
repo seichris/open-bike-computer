@@ -59,6 +59,16 @@ class PipelineArtifactTests(unittest.TestCase):
             )
             job.worker_id = "worker-test"
             artifact_store = FileSystemArtifactStore(root / "artifacts")
+            preview_geometry = {
+                "type": "Polygon",
+                "coordinates": [[[103, 1], [104.5, 1], [103.75, 1.8], [103, 1]]],
+            }
+            preview_resolution_calls = []
+
+            def resolve_preview_geometry(source_region):
+                preview_resolution_calls.append(source_region.id)
+                return preview_geometry
+
             signer = P256MapArtifactSigner(
                 "map-pipeline-test",
                 ec.derive_private_key(5, ec.SECP256R1()),
@@ -73,11 +83,14 @@ class PipelineArtifactTests(unittest.TestCase):
                 map_signer=signer,
                 producer_build_sha256="1" * 64,
                 producer_image_digest="sha256:" + "2" * 64,
+                source_preview_geometry_resolver=resolve_preview_geometry,
             )
 
             pending_keys = []
             first = pipeline.build(job, on_artifact_pending=pending_keys.append)
             second = pipeline.build(job)
+            self.assertEqual(job.source_region.preview_geometry, preview_geometry)
+            self.assertEqual(preview_resolution_calls, ["sg"])
             first_stream = next(
                 artifact for artifact in first.artifacts if artifact.format == BIKE_MAP_STREAM_FORMAT
             )
