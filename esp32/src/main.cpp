@@ -174,13 +174,14 @@ static void processWaveshareBootButton() {
   stablePressed = pressed;
   if (stablePressed) {
     pressStartMs = now;
+    log_i("Waveshare BOOT pressed; cycling main screen");
+    toggleNavigationScreen();
     return;
   }
 
   const uint32_t pressDurationMs = now - pressStartMs;
-  log_i("Waveshare BOOT released after %lu ms; cycling main screen",
+  log_i("Waveshare BOOT released after %lu ms",
         static_cast<unsigned long>(pressDurationMs));
-  toggleNavigationScreen();
 }
 #endif
 extern Gps gps;
@@ -697,6 +698,12 @@ void loop() {
   checkPendingMapTransition();
   updateMapActivationProgressOverlay();
 
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  // Sample the screen-cycle button before LVGL can start a synchronous vector
+  // redraw. updateMainScreen() also defers while the raw input is active.
+  processWaveshareBootButton();
+#endif
+
   if (!waitScreenRefresh) {
     uint32_t startUs = micros();
     lv_timer_handler();
@@ -715,7 +722,6 @@ void loop() {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::imu::process();
-  processWaveshareBootButton();
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::speaker::processPowerButtonHonk();

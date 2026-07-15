@@ -85,6 +85,7 @@ void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
+bool shouldInterruptMapRenderForScreenCycle();
 
 void createMainScr();
 void toggleNavigationScreen();

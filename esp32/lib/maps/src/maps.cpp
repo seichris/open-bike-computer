@@ -1286,7 +1286,7 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
  * @param points
  * @param color
  */
-void Maps::fillPolygon(const Polygon &p,
+bool Maps::fillPolygon(const Polygon &p,
                        lv_obj_t *canvas) // scanline fill algorithm
 {
   int16_t maxY = p.bbox.max.y;
@@ -1295,7 +1295,7 @@ void Maps::fillPolygon(const Polygon &p,
   // Retrieve canvas buffer and dimensions
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
   if (draw_buf == NULL)
-    return;
+    return true;
   uint16_t *buf =
       (uint16_t *)draw_buf->data; // Assuming RGB565 and direct access
   int32_t buf_w = draw_buf->header.w;
@@ -1310,7 +1310,7 @@ void Maps::fillPolygon(const Polygon &p,
   if (minY < 0)
     minY = 0;
   if (minY >= maxY)
-    return;
+    return true;
 
   int16_t nodeX[p.points.size()], pixelY;
 
@@ -1318,9 +1318,13 @@ void Maps::fillPolygon(const Polygon &p,
   int16_t nodes, i, swap;
 
   if (p.points.size() < 2)
-    return;
+    return true;
 
   for (pixelY = minY; pixelY <= maxY; pixelY++) { //  Build a list of nodes.
+    if ((pixelY & 0x0F) == 0 &&
+        shouldInterruptMapRenderForScreenCycle()) {
+      return false;
+    }
     nodes = 0;
     for (int i = 0; i < (int)p.points.size() - 1; i++) {
       if ((p.points[i].y < pixelY && p.points[i + 1].y >= pixelY) ||
@@ -1386,6 +1390,7 @@ void Maps::fillPolygon(const Polygon &p,
       }
     }
   }
+  return true;
 }
 
 /**
@@ -1598,7 +1603,7 @@ void Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
  * @param map -> Map Sprite
  * @param zoom -> Zoom Level
  */
-void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
+bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation) {
   Polygon newPolygon;
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
@@ -1631,12 +1636,15 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
-    return;
+    return true;
   }
 
   int16_t p1x, p1y, p2x, p2y;
   if (Maps::isMapFound) {
     for (MapBlock *mblock : memCache.blocks) {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        return false;
+      }
       uint32_t blockTime = millis();
       if (!mblock->inView)
         continue;
@@ -1716,6 +1724,10 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             continue;
 
           for (uint16_t polyIdx : mblock->polygonGrid[cellIdx]) {
+            if ((poly_checked & 0x0F) == 0 &&
+                shouldInterruptMapRenderForScreenCycle()) {
+              return false;
+            }
             // Skip if already processed (polygon spans multiple cells)
             if (visited[polyIdx])
               continue;
@@ -1770,7 +1782,9 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               continue;
             }
 
-            Maps::fillPolygon(newPolygon, canvas);
+            if (!Maps::fillPolygon(newPolygon, canvas)) {
+              return false;
+            }
           }
         }
       }
@@ -1783,6 +1797,9 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       ////// Lines
       // Removed lv_draw_line usage to fix crash
       for (const auto &line : mblock->polylines) {
+        if (shouldInterruptMapRenderForScreenCycle()) {
+          return false;
+        }
         if (zoom > line.maxZoom)
           continue;
         if (!line.bbox.intersects(screen_bbox_mc))
@@ -1828,6 +1845,10 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             std::max<int32_t>(line.width, 1) + streetBoost, 24);
 
         for (int i = 0; i < (int)line.points.size() - 1; i++) {
+          if ((i & 0x0F) == 0 &&
+              shouldInterruptMapRenderForScreenCycle()) {
+            return false;
+          }
           Point16 p2 = transformPoint(line.points[i + 1]);
           Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped,
                          lineWidth);
@@ -1905,6 +1926,7 @@ void Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     //    Maps::showNoMap(map);
     //    ESP_LOGE(TAG, "Map doesn't exist");
   }
+  return true;
 }
 
 void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
@@ -2617,7 +2639,7 @@ void Maps::displayMap() {
  *
  * @param zoom -> Zoom Level
  */
-void Maps::generateVectorMap(uint8_t zoom) {
+bool Maps::generateVectorMap(uint8_t zoom) {
   const uint32_t generateStartMs = MAPIO_TIME_MS();
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
@@ -2661,9 +2683,17 @@ void Maps::generateVectorMap(uint8_t zoom) {
 
   // Read Vector Map to Canvas (Pass calculated rotation)
   const uint32_t drawStartMs = MAPIO_TIME_MS();
-  Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap, zoom,
-                      rotationRad);
+  if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMap,
+                           zoom, rotationRad)) {
+    log_i("Map render interrupted to service a screen-cycle input");
+    return false;
+  }
   const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    log_i("Map render interrupted before route overlay");
+    return false;
+  }
 
   // Draw route overlay from iOS navigation (if available)
   const uint32_t routeStartMs = MAPIO_TIME_MS();
@@ -2701,6 +2731,7 @@ void Maps::generateVectorMap(uint8_t zoom) {
             (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
+  return true;
 }
 
 /**

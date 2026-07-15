@@ -27,6 +27,9 @@ extern Compass compass;
 #endif
 extern Gps gps;
 extern wayPoint loadWpt;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+extern bool touchPressed;
+#endif
 
 uint8_t toolBarOffset = gui_layout::MAP_TOOLBAR_OFFSET;
 uint8_t toolBarSpace = gui_layout::MAP_TOOLBAR_SPACE;
@@ -63,6 +66,25 @@ Maps mapView;
 bool isMapScreenActive() { return activeTile == MAP; }
 
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
+
+bool shouldInterruptMapRenderForScreenCycle() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (!isMainScreen || activeTile != MAP_GUIDANCE) {
+    return false;
+  }
+
+  // The BOOT button always cycles screens. On Map + Navigation, also use the
+  // touch controller's interrupt hint so a new tap can pre-empt the synchronous
+  // vector renderer before LVGL has had a chance to consume the touch event.
+  if (digitalRead(BOARD_BOOT_PIN) == LOW) {
+    return true;
+  }
+  return mapRenderSettings.tapToSwitchScreens &&
+         (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
+#else
+  return false;
+#endif
+}
 
 const ScreenMapRenderSettings &currentMapStyleSettings() {
   return map_profile_protocol::select(mapRenderSettings.mapStyle,
@@ -366,6 +388,13 @@ void scrollTile(lv_event_t *event) {
  *
  */
 void updateMainScreen(lv_timer_t *t) {
+  // The Map + Navigation renderer can take long enough to mask a complete
+  // button press or touch. Let the input timer run before starting more map
+  // work whenever either physical input is already active.
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    return;
+  }
+
   // Handle BLE-triggered map updates OUTSIDE of isScrolled check
   // This ensures continuous updates even when user hasn't dragged
   if (isMainScreen && isMapBackedTile(activeTile) &&
@@ -384,6 +413,9 @@ void updateMainScreen(lv_timer_t *t) {
 
     // Trigger map regeneration and display
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      return;
+    }
   }
 
   if (isScrolled && isMainScreen) {
@@ -411,6 +443,10 @@ void updateMainScreen(lv_timer_t *t) {
 
     case MAP:
     case MAP_GUIDANCE: {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        return;
+      }
+
       // SIMULATE GPS MOVEMENT - TEST MODE
       // Removed legacy simulation code - controlled via BLE now
 
@@ -538,10 +574,18 @@ void gestureEvent(lv_event_t *event) {
 void updateMap(lv_event_t *event) {
   // Only regenerate map if position changed to avoid blocking the main loop
   if (mapView.isPosMoved) {
-    if (mapSet.vectorMap)
-      mapView.generateVectorMap(zoom);
-    else
+    bool renderCompleted = true;
+    if (mapSet.vectorMap) {
+      renderCompleted = mapView.generateVectorMap(zoom);
+    } else {
       mapView.generateRenderMap(zoom);
+    }
+    if (!renderCompleted) {
+      // Keep both flags set so the map is regenerated cleanly if the user
+      // remains on this screen. Do not display the partially rendered canvas.
+      mapView.redrawMap = true;
+      return;
+    }
     // Clear flag AFTER generation complete (not inside generateVectorMap)
     // This ensures BLE updates during generation will queue another cycle
     mapView.isPosMoved = false;
@@ -612,9 +656,9 @@ void mapToolBarEvent(lv_event_t *event) {
 void scrollMapEvent(lv_event_t *event) {
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
-        lv_event_get_code(event) == LV_EVENT_CLICKED &&
+        lv_event_get_code(event) == LV_EVENT_PRESSED &&
         mapRenderSettings.tapToSwitchScreens) {
-      log_i("MAP GUIDANCE SHORT TAP: cycling main screen");
+      log_i("MAP GUIDANCE PRESS: cycling main screen");
       showNextMainScreen();
     }
     return;
@@ -948,7 +992,7 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_bg_color(mapGuidanceOverlay, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mapGuidanceOverlay, 230, 0);
   lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
-  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_CLICKED,
+  lv_obj_add_event_cb(mapGuidanceOverlay, tapCycleScreenEvent, LV_EVENT_PRESSED,
                       NULL);
 
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
@@ -1047,7 +1091,10 @@ static void tapCycleScreenEvent(lv_event_t *event) {
     return;
   }
 
-  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+  const lv_event_code_t code = lv_event_get_code(event);
+  const bool mapGuidancePress =
+      activeTile == MAP_GUIDANCE && code == LV_EVENT_PRESSED;
+  if (!mapGuidancePress && code != LV_EVENT_CLICKED) {
     return;
   }
 
