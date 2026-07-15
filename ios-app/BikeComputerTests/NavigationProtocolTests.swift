@@ -353,10 +353,15 @@ final class FirmwareRequestCaptureProtocol: URLProtocol {
 final class TestRouteStep: MKRoute.Step {
     private let storedInstructions: String
     private let storedPolyline: MKPolyline
+    private let storedDistance: CLLocationDistance
 
     init(instructions: String, coordinates: [CLLocationCoordinate2D]) {
         self.storedInstructions = instructions
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
+        self.storedDistance = zip(coordinates, coordinates.dropFirst()).reduce(0) { distance, pair in
+            distance + CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
+                .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
+        }
         super.init()
     }
 
@@ -366,6 +371,10 @@ final class TestRouteStep: MKRoute.Step {
 
     override var polyline: MKPolyline {
         storedPolyline
+    }
+
+    override var distance: CLLocationDistance {
+        storedDistance
     }
 }
 
@@ -404,6 +413,7 @@ struct NavigationProtocolTests {
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
+        testStepRemainingDistanceFollowsPolyline()
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
@@ -443,6 +453,7 @@ struct NavigationProtocolTests {
         testBLEManagerPersistsNewMapSettings()
         testBLEManagerPersistsDeviceSoundSettings()
         testNavigationSendTrackerReadinessRetry()
+        testNavigationEngineUsesStepPolylineDistance()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
@@ -2039,6 +2050,48 @@ struct NavigationProtocolTests {
 
         let offRouteNearHalfway = CLLocation(latitude: 37.0010, longitude: -122.0005)
         assert(abs((RouteProgress.remainingDistance(from: offRouteNearHalfway, in: route) ?? -1) - totalDistance / 2) < 2, "route remaining projects nearby locations onto closest segment")
+    }
+
+    static func testStepRemainingDistanceFollowsPolyline() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9990)
+        ]
+        let step = TestRouteStep(instructions: "Turn right", coordinates: coordinates)
+        let start = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
+        let endpoint = CLLocation(latitude: coordinates[3].latitude, longitude: coordinates[3].longitude)
+
+        guard let remainingDistance = RouteProgress.remainingDistance(from: start, in: step) else {
+            assert(false, "step remaining distance should be available for valid geometry")
+            return
+        }
+
+        assert(
+            abs(remainingDistance - step.distance) < 2,
+            "step remaining starts at the full polyline distance"
+        )
+        assert(
+            remainingDistance > start.distance(from: endpoint) * 2.5,
+            "curved step distance should not collapse to straight-line endpoint distance"
+        )
+
+        let firstCorner = CLLocation(latitude: coordinates[1].latitude, longitude: coordinates[1].longitude)
+        let expectedAfterCorner = CLLocation(latitude: coordinates[1].latitude, longitude: coordinates[1].longitude)
+            .distance(from: CLLocation(latitude: coordinates[2].latitude, longitude: coordinates[2].longitude))
+            + CLLocation(latitude: coordinates[2].latitude, longitude: coordinates[2].longitude)
+                .distance(from: endpoint)
+        assert(
+            abs((RouteProgress.remainingDistance(from: firstCorner, in: step) ?? -1) - expectedAfterCorner) < 2,
+            "step remaining sums the route geometry after the nearest projection"
+        )
+
+        let offRouteNearCorner = CLLocation(latitude: 37.0010, longitude: -122.0005)
+        assert(
+            abs((RouteProgress.remainingDistance(from: offRouteNearCorner, in: step) ?? -1) - expectedAfterCorner) < 2,
+            "step remaining projects nearby off-route locations onto the step geometry"
+        )
     }
 
     static func testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge() {
@@ -7696,6 +7749,35 @@ struct NavigationProtocolTests {
 
         tracker.resetForReadinessRetry()
         assert(tracker.shouldSend(snapshot), "readiness retry should resend current snapshot without reprocessing route location")
+    }
+
+    static func testNavigationEngineUsesStepPolylineDistance() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9990)
+        ]
+        let route = TestRoute(instructions: "Turn right", coordinates: coordinates)
+        let start = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
+        let endpoint = CLLocation(latitude: coordinates[3].latitude, longitude: coordinates[3].longitude)
+        guard let expectedDistance = RouteProgress.remainingDistance(from: start, in: route.steps[0]) else {
+            assert(false, "navigation test step should have measurable geometry")
+            return
+        }
+
+        let engine = NavigationEngine()
+        engine.startNavigation(with: route, initialLocation: start)
+
+        assertEqual(
+            engine.distanceToManeuver,
+            Int(expectedDistance),
+            "navigation engine publishes remaining step polyline distance"
+        )
+        assert(
+            Double(engine.distanceToManeuver) > start.distance(from: endpoint) * 2.5,
+            "navigation engine should not publish straight-line endpoint distance"
+        )
     }
 
     static func testNavigationEngineResendsWhenBLEBecomesReady() {

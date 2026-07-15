@@ -296,11 +296,12 @@ class NavigationEngine: NSObject, ObservableObject {
         let currentStep = route.steps[currentStepIndex]
         guard let stepEndLocation = endpointLocation(for: currentStep) else { return }
         
-        // Calculate distance to end of current step
-        let distanceRemaining = Int(location.distance(from: stepEndLocation))
+        // Keep step advancement tied to physical proximity to the endpoint so
+        // an off-route projection beyond the maneuver cannot skip the step.
+        let endpointDistance = Int(location.distance(from: stepEndLocation))
         
         // Check if we should advance to next step (within 20m of step end)
-        if distanceRemaining < 20 && currentStepIndex < route.steps.count - 1 {
+        if endpointDistance < 20 && currentStepIndex < route.steps.count - 1 {
             currentStepIndex += 1
             _ = advanceToNextNavigableStep(in: route)
             print("Advanced to step \(currentStepIndex)")
@@ -311,9 +312,9 @@ class NavigationEngine: NSObject, ObservableObject {
         let newInstruction = extractInstruction(from: newStep)
         let newIconID = mapInstructionToIconID(newInstruction)
 
-        // Recalculate distance to the new step's endpoint after advancement
-        guard let newStepEndLocation = endpointLocation(for: newStep) else { return }
-        let newDistance = Int(location.distance(from: newStepEndLocation))
+        // Recalculate remaining distance along the new step after advancement.
+        guard let remainingDistance = distanceToManeuver(from: location, in: newStep) else { return }
+        let newDistance = Int(remainingDistance)
         let snapshot = NavigationManeuverSnapshot(iconID: newIconID, distance: newDistance, instruction: newInstruction)
         currentSnapshot = snapshot
         
@@ -332,6 +333,17 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func endpointLocation(for step: MKRoute.Step) -> CLLocation? {
         RoutePolylineEndpoint.location(for: step.polyline)
+    }
+
+    private func distanceToManeuver(
+        from location: CLLocation,
+        in step: MKRoute.Step
+    ) -> CLLocationDistance? {
+        if let remainingDistance = RouteProgress.remainingDistance(from: location, in: step) {
+            return remainingDistance
+        }
+
+        return endpointLocation(for: step).map { location.distance(from: $0) }
     }
 
     private func advanceToNextNavigableStep(in route: MKRoute) -> Bool {

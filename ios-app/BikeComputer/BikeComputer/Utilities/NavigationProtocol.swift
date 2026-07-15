@@ -37,19 +37,38 @@ enum RoutePolylineEndpoint {
 
 enum RouteProgress {
     static func remainingDistance(from location: CLLocation, in route: MKRoute) -> CLLocationDistance? {
-        let polyline = route.polyline
+        remainingDistance(
+            from: location,
+            along: route.polyline,
+            referenceDistance: route.distance
+        )
+    }
+
+    static func remainingDistance(from location: CLLocation, in step: MKRoute.Step) -> CLLocationDistance? {
+        remainingDistance(
+            from: location,
+            along: step.polyline,
+            referenceDistance: step.distance
+        )
+    }
+
+    private static func remainingDistance(
+        from location: CLLocation,
+        along polyline: MKPolyline,
+        referenceDistance: CLLocationDistance
+    ) -> CLLocationDistance? {
         let pointCount = polyline.pointCount
         guard pointCount > 1 else { return nil }
 
-        let routePoints = polyline.points()
+        let polylinePoints = polyline.points()
         let target = MKMapPoint(location.coordinate)
         var totalDistance: CLLocationDistance = 0
         var closestDistance = Double.greatestFiniteMagnitude
-        var closestDistanceAlongRoute: CLLocationDistance = 0
+        var closestDistanceAlongPolyline: CLLocationDistance = 0
 
         for index in 0..<(pointCount - 1) {
-            let start = routePoints[index]
-            let end = routePoints[index + 1]
+            let start = polylinePoints[index]
+            let end = polylinePoints[index + 1]
             let dx = end.x - start.x
             let dy = end.y - start.y
             let segmentLengthSquared = dx * dx + dy * dy
@@ -62,7 +81,7 @@ enum RouteProgress {
                 let distanceToSegment = target.distance(to: projected)
                 if distanceToSegment < closestDistance {
                     closestDistance = distanceToSegment
-                    closestDistanceAlongRoute = totalDistance + start.distance(to: projected)
+                    closestDistanceAlongPolyline = totalDistance + start.distance(to: projected)
                 }
             }
 
@@ -71,9 +90,12 @@ enum RouteProgress {
 
         guard totalDistance > 0 else { return nil }
 
-        let routeDistance = route.distance > 0 ? route.distance : totalDistance
-        let scaledDistanceAlongRoute = (closestDistanceAlongRoute / totalDistance) * routeDistance
-        return max(routeDistance - scaledDistanceAlongRoute, 0)
+        let measuredDistance = referenceDistance.isFinite && referenceDistance > 0
+            ? referenceDistance
+            : totalDistance
+        let scaledDistanceAlongPolyline =
+            (closestDistanceAlongPolyline / totalDistance) * measuredDistance
+        return max(measuredDistance - scaledDistanceAlongPolyline, 0)
     }
 }
 
