@@ -32,18 +32,21 @@ struct NavigationData {
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * IDs 1,2,3,7,8,9,10 configure the Map screen. IDs 16-22 configure
- * Map + Navigation. IDs 4,6,11-15 configure shared/device behavior.
+ * Map + Navigation. IDs 4,6,11-15 configure shared/device behavior, and ID 23
+ * carries the connected phone's transient battery percentage.
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
   DEVICE_SCREEN_NAVIGATION = 1,
   DEVICE_SCREEN_RIDE_STATS = 2,
   DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
+  DEVICE_SCREEN_BATTERY_STATUS = 4,
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
-    (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION);
+    (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
+    (1 << DEVICE_SCREEN_BATTERY_STATUS);
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;
@@ -112,6 +115,7 @@ const ScreenMapRenderSettings &currentMapStyleSettings();
 
 NavigationData getCurrentNavigationData();
 bool hasCurrentNavigationData();
+int16_t getPhoneBatteryLevelPercent();
 
 struct BLEDebugStats {
   bool initialized = false;

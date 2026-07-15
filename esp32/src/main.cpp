@@ -240,6 +240,8 @@ static const char *debugTileName(uint8_t tile) {
     return "SATTRACK";
   case RIDESTATS:
     return "RIDESTATS";
+  case BATTERY_STATUS:
+    return "BATTERY_STATUS";
   default:
     return "UNKNOWN";
   }

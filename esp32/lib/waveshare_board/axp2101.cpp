@@ -18,6 +18,7 @@ bool pmuAvailable = false;
 
 constexpr uint8_t AXP2101_STATUS1_REG = 0x00;
 constexpr uint8_t AXP2101_STATUS2_REG = 0x01;
+constexpr uint8_t AXP2101_BATTERY_PERCENTAGE_REG = 0xA4;
 constexpr uint8_t AXP2101_VBUS_GOOD_MASK = 0x20;
 constexpr uint8_t AXP2101_BATTERY_PRESENT_MASK = 0x08;
 constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_SHIFT = 5;
@@ -101,6 +102,26 @@ bool readPowerStatus(PowerStatus &status) {
   status.systemOn = (status.status2 & AXP2101_SYSTEM_ON_MASK) != 0;
   status.vindpmActive = (status.status2 & AXP2101_VINDPM_ACTIVE_MASK) != 0;
   status.chargingStatus = status.status2 & AXP2101_CHARGING_STATUS_MASK;
+  return true;
+}
+
+bool readBatteryPercentage(uint8_t &percentage) {
+  if (!pmuAvailable && !begin()) {
+    return false;
+  }
+
+  PowerStatus status;
+  if (!readPowerStatus(status) || !status.batteryPresent) {
+    return false;
+  }
+
+  uint8_t rawPercentage = 0;
+  if (!readRegister(AXP2101_BATTERY_PERCENTAGE_REG, rawPercentage) ||
+      rawPercentage > 100) {
+    return false;
+  }
+
+  percentage = rawPercentage;
   return true;
 }
 

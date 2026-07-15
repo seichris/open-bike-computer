@@ -61,10 +61,13 @@ static Preferences settingsPrefs;
 // Global navigation data
 static NavigationData currentNavData = {0, 0, ""};
 static volatile bool navDataUpdated = false;
+static volatile int16_t phoneBatteryLevelPercent = -1;
 static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
+static bool bleSessionSupportsBatteryStatusScreen = false;
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
+static constexpr uint8_t BATTERY_STATUS_SCREEN_CLIENT_VERSION = 4;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
@@ -79,8 +82,10 @@ bool hasCurrentNavigationData() {
   return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
 }
 
+int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
+
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
@@ -91,7 +96,7 @@ static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_BATTERY_STATUS
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -108,6 +113,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS)) {
+    return DEVICE_SCREEN_BATTERY_STATUS;
   }
   return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
@@ -405,6 +413,8 @@ static void handleAuthPayload(const std::string &value) {
     char response[112];
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsBatteryStatusScreen = false;
+    phoneBatteryLevelPercent = -1;
     snprintf(message, sizeof(message), "server|%s", nonce);
     if (!hmacSha256Hex(message, mac, sizeof(mac))) {
       Serial.println("BLE: Failed to compute auth response");
@@ -925,6 +935,8 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
   if (requireAuthenticated(authLabel)) {
     const uint8_t clientVersion =
         value.length() == 5 ? static_cast<uint8_t>(value[4]) : 0;
+    bleSessionSupportsBatteryStatusScreen =
+        clientVersion >= BATTERY_STATUS_SCREEN_CLIENT_VERSION;
     const bool includePowerButtonConfig =
         clientVersion >= 1;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig);
@@ -1247,6 +1259,9 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                   mapRenderSettings.tapToSwitchScreens);
     break;
   case 13:
+    if (!bleSessionSupportsBatteryStatusScreen) {
+      settingValue |= deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS);
+    }
     mapRenderSettings.enabledScreensMask =
         normalizedEnabledScreensMask(settingValue);
     mapRenderSettings.defaultScreen = normalizedDefaultScreen(
@@ -1379,6 +1394,17 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
     persistMapProfileSetting();
     break;
+  case 23:
+    if (settingValue < 0 || settingValue > 100) {
+      Serial.printf("BLE Settings: rejected phone battery level %ld from %s\n",
+                    (long)settingValue,
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+    phoneBatteryLevelPercent = static_cast<int16_t>(settingValue);
+    Serial.printf("BLE Settings: phoneBatteryLevel = %d%%\n",
+                  phoneBatteryLevelPercent);
+    return;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -1417,6 +1443,8 @@ public:
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsBatteryStatusScreen = false;
+    phoneBatteryLevelPercent = -1;
     unauthTimeoutDisconnectRequested = false;
     bleDebugStats.connected = true;
     bleDebugStats.authenticated = false;
@@ -1441,6 +1469,8 @@ public:
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsBatteryStatusScreen = false;
+    phoneBatteryLevelPercent = -1;
     unauthTimeoutDisconnectRequested = false;
     activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     bleDebugStats.connected = false;
@@ -1669,7 +1699,7 @@ public:
  */
 static void loadSettingsFromNVS() {
   Preferences prefs;
-  prefs.begin("mapSettings", true); // read-only
+  prefs.begin("mapSettings", false);
 
   map_profile_persistence::load(prefs, mapRenderSettings.mapStyle,
                                 mapRenderSettings.mapNavigationStyle);
@@ -1677,9 +1707,15 @@ static void loadSettingsFromNVS() {
       sanitizeMapDisplayRotation(prefs.getUChar("rotation", 0), "NVS");
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
+  uint8_t storedScreenMask =
+      prefs.getUChar("screenMask", DEVICE_SCREEN_SUPPORTED_MASK);
+  if (!prefs.getBool("batteryScrV1", false)) {
+    storedScreenMask |= deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS);
+    prefs.putUChar("screenMask", storedScreenMask);
+    prefs.putBool("batteryScrV1", true);
+  }
   mapRenderSettings.enabledScreensMask =
-      normalizedEnabledScreensMask(prefs.getUChar("screenMask",
-                                                 DEVICE_SCREEN_SUPPORTED_MASK));
+      normalizedEnabledScreensMask(storedScreenMask);
   mapRenderSettings.defaultScreen = normalizedDefaultScreen(
       prefs.getUChar("defaultScreen", DEVICE_SCREEN_MAP_PLUS_NAVIGATION),
       mapRenderSettings.enabledScreensMask);

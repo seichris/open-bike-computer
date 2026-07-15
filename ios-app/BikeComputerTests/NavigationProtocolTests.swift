@@ -5130,7 +5130,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 3, "capability version requests extended map visibility")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 4, "capability version advertises Battery Status screen support")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
@@ -5145,14 +5145,22 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID, 20, "Map + Navigation visibility uses setting ID 20")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, 21, "Map + Navigation street width uses setting ID 21")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
+        assertEqual(DeviceBLEProtocol.phoneBatteryLevelSettingID, 23, "phone battery level uses firmware setting ID 23")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: -1), nil, "unavailable iPhone battery levels stay unknown")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0), 0, "empty iPhone battery maps to zero percent")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0.735), 74, "iPhone battery levels round to whole percentages")
+        assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 1), 100, "full iPhone battery maps to 100 percent")
         assertEqual(DeviceScreen.map.rawValue, 0, "Map screen protocol value stays stable")
         assertEqual(DeviceScreen.navigation.rawValue, 1, "Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
+        assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
-        assertEqual(DeviceScreen.displayOrder[0], .mapPlusNavigation, "Map + Navigation is the first device screen in settings")
-        assertEqual(DeviceScreen.displayOrder[1], .rideStats, "Ride Stats is the second device screen in settings")
-        assertEqual(DeviceScreen.allScreensMask, 0x0F, "all supported device screens use the low four mask bits")
+        assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
+        assertEqual(DeviceScreen.displayOrder,
+                    [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
+                    "Battery Status is the last device screen in settings and cycling order")
+        assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.fiveMinutes.settingValue, 300, "five-minute sleep timeout sends seconds")
@@ -5174,6 +5182,11 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.navigation.rawValue, mask: mapAndStats),
                     .rideStats,
                     "disabled default follows the device screen display order")
+
+        let batteryAndStats = DeviceScreen.batteryStatus.bit | DeviceScreen.rideStats.bit
+        assertEqual(DeviceScreen.fallbackDefault(for: DeviceScreen.map.rawValue, mask: batteryAndStats),
+                    .rideStats,
+                    "Battery Status remains last in fallback order")
     }
 
     static func testDeviceSoundProtocol() {
@@ -6286,6 +6299,7 @@ struct NavigationProtocolTests {
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
+            "deviceSettings.enabledScreensMask.batteryStatus.v1",
             "deviceSettings.disconnectedSleepTimeoutSeconds"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
@@ -6314,6 +6328,12 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation profiles hide railways")
         assert(!freshManager.mapPlusNavigationShowOtherAreas,
                "fresh Map + Navigation profiles hide other areas")
+
+        defaults.set(0x0F, forKey: "deviceSettings.enabledScreensMask")
+        defaults.removeObject(forKey: "deviceSettings.enabledScreensMask.batteryStatus.v1")
+        let batteryScreenMigratedManager = BLEManager()
+        assert(batteryScreenMigratedManager.isDeviceScreenEnabled(.batteryStatus),
+               "existing four-screen installs enable Battery Status once")
 
         freshManager.isConnected = true
         freshManager.isNavigationReady = true

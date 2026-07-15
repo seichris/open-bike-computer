@@ -11,6 +11,7 @@
 #include "maps.hpp"
 
 #include "buttonBar.hpp"
+#include "batteryStatusScr.hpp"
 #ifdef ENABLE_COMPASS
 #include "compass.hpp"
 #endif
@@ -40,6 +41,7 @@ enum tileName {
   SATTRACK = 3,
   RIDESTATS = 4,
   MAP_GUIDANCE = 5,
+  BATTERY_STATUS = 6,
 };
 
 /**
@@ -49,6 +51,7 @@ enum tileName {
 extern lv_obj_t *compassTile;
 extern lv_obj_t *navTile;
 extern lv_obj_t *rideStatsTile;
+extern lv_obj_t *batteryStatusTile;
 extern lv_obj_t *mapTile;
 extern lv_obj_t *satTrackTile;
 extern lv_obj_t *tilesScreen;

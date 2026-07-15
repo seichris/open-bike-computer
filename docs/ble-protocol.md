@@ -15,7 +15,7 @@ navigation-ready.
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002` | bidirectional | UTF-8 auth messages | Local pairing/auth handshake. |
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
-| `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer settings. |
+| `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
 or `2A73`, the app falls back to framed binary writes over authenticated `2A6E`.
@@ -103,8 +103,8 @@ Current setting IDs:
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
 | `12` | Device brightness | `5...100` percent on supported hardware |
-| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation. Invalid or empty masks fall back to all supported screens. |
-| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation. Invalid or disabled defaults fall back to Map if enabled, otherwise the first enabled screen. |
+| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
+| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
 | `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. |
 | `16` | Map + Navigation minimum polygon size | `0...50` |
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
@@ -113,6 +113,10 @@ Current setting IDs:
 | `20` | Map + Navigation feature visibility mask | feature bits and the extended-mask marker use the same meanings as ID `8`; navigation overlay bits remain global via ID `8` |
 | `21` | Map + Navigation street line width boost | `0...24` px |
 | `22` | Map + Navigation current-position marker scale | `1...5` |
+| `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
+
+The settings list and the device's tap/PWR-button cycle use this screen order:
+Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
 
 Feature visibility toggles are authoritative for their classes. Detail level
 controls small-area density without overriding the visibility mask: high uses
@@ -214,7 +218,10 @@ configuration:
 
 Version `2` advertises that the client understands independent Map and Map +
 Navigation profiles. Version `3` also requests the extended map visibility
-classes. Receiving a `CAPS` request alone does not switch the firmware's
+classes. Version `4` advertises Battery Status screen support so the device can
+distinguish a current screen mask from one sent by an older four-screen app;
+older app masks keep Battery Status enabled. Receiving a `CAPS` request alone
+does not switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
 capability response is dropped.

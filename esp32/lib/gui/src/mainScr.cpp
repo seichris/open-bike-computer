@@ -47,6 +47,7 @@ lv_obj_t *tilesScreen;
 lv_obj_t *compassTile;
 lv_obj_t *navTile;
 lv_obj_t *rideStatsTile;
+lv_obj_t *batteryStatusTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -101,8 +102,15 @@ static uint8_t normalizedEnabledScreensMask() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_MAP_PLUS_NAVIGATION) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
 }
+
+static constexpr uint8_t DEVICE_SCREEN_CYCLE_ORDER[] = {
+    DEVICE_SCREEN_MAP_PLUS_NAVIGATION, DEVICE_SCREEN_RIDE_STATS,
+    DEVICE_SCREEN_MAP, DEVICE_SCREEN_NAVIGATION,
+    DEVICE_SCREEN_BATTERY_STATUS};
+static constexpr uint8_t DEVICE_SCREEN_COUNT =
+    sizeof(DEVICE_SCREEN_CYCLE_ORDER) / sizeof(DEVICE_SCREEN_CYCLE_ORDER[0]);
 
 static tileName tileForDeviceScreen(uint8_t screen) {
   switch (screen) {
@@ -112,6 +120,8 @@ static tileName tileForDeviceScreen(uint8_t screen) {
     return RIDESTATS;
   case DEVICE_SCREEN_MAP_PLUS_NAVIGATION:
     return MAP_GUIDANCE;
+  case DEVICE_SCREEN_BATTERY_STATUS:
+    return BATTERY_STATUS;
   case DEVICE_SCREEN_MAP:
   default:
     return MAP;
@@ -126,6 +136,8 @@ static uint8_t deviceScreenForTile(tileName tile) {
     return DEVICE_SCREEN_RIDE_STATS;
   case MAP_GUIDANCE:
     return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  case BATTERY_STATUS:
+    return DEVICE_SCREEN_BATTERY_STATUS;
   case MAP:
   default:
     return DEVICE_SCREEN_MAP;
@@ -140,23 +152,16 @@ static bool isScreenEnabled(tileName tile) {
 static uint8_t normalizedDefaultDeviceScreen() {
   const uint8_t mask = normalizedEnabledScreensMask();
   uint8_t defaultScreen = mapRenderSettings.defaultScreen;
-  if (defaultScreen > DEVICE_SCREEN_MAP_PLUS_NAVIGATION) {
+  if (defaultScreen > DEVICE_SCREEN_BATTERY_STATUS) {
     defaultScreen = DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   }
   if (mask & deviceScreenBit(defaultScreen)) {
     return defaultScreen;
   }
-  if (mask & deviceScreenBit(DEVICE_SCREEN_MAP_PLUS_NAVIGATION)) {
-    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
-  }
-  if (mask & deviceScreenBit(DEVICE_SCREEN_RIDE_STATS)) {
-    return DEVICE_SCREEN_RIDE_STATS;
-  }
-  if (mask & deviceScreenBit(DEVICE_SCREEN_MAP)) {
-    return DEVICE_SCREEN_MAP;
-  }
-  if (mask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
-    return DEVICE_SCREEN_NAVIGATION;
+  for (uint8_t screen : DEVICE_SCREEN_CYCLE_ORDER) {
+    if (mask & deviceScreenBit(screen)) {
+      return screen;
+    }
   }
   return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
 }
@@ -167,8 +172,16 @@ static tileName configuredDefaultTile() {
 
 static tileName nextEnabledTile(tileName current) {
   const uint8_t currentScreen = deviceScreenForTile(current);
-  for (uint8_t offset = 1; offset <= 4; offset++) {
-    const uint8_t screen = (currentScreen + offset) % 4;
+  uint8_t currentIndex = 0;
+  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
+    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
+      currentIndex = index;
+      break;
+    }
+  }
+  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
+    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
+        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
     tileName candidate = tileForDeviceScreen(screen);
     if (isScreenEnabled(candidate)) {
       return candidate;
@@ -467,6 +480,10 @@ void updateMainScreen(lv_timer_t *t) {
 
     case RIDESTATS:
       lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+      break;
+
+    case BATTERY_STATUS:
+      lv_obj_send_event(batteryStatusTile, LV_EVENT_VALUE_CHANGED, NULL);
       break;
 
     case SATTRACK:
@@ -953,13 +970,15 @@ static void createMapGuidanceOverlay() {
 }
 
 static void showMainTile(tileName tile) {
-  if (!mapTile || !navTile || !rideStatsTile || !mapGuidanceOverlay) {
+  if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
+      !mapGuidanceOverlay) {
     return;
   }
 
   lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
   activeTile = tile;
@@ -991,6 +1010,11 @@ static void showMainTile(tileName tile) {
     lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to ride telemetry screen");
     break;
+  case BATTERY_STATUS:
+    lv_obj_clear_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_send_event(batteryStatusTile, LV_EVENT_VALUE_CHANGED, NULL);
+    log_i("UI: switched to battery status screen");
+    break;
   case MAP:
   default:
     lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
@@ -1009,7 +1033,7 @@ void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); 
 
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !mapGuidanceOverlay) {
+      !batteryStatusTile || !mapGuidanceOverlay) {
     return;
   }
 
@@ -1033,7 +1057,7 @@ static void tapCycleScreenEvent(lv_event_t *event) {
 
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !mapGuidanceOverlay) {
+      !batteryStatusTile || !mapGuidanceOverlay) {
     return;
   }
 
@@ -1080,6 +1104,19 @@ void createMainScr() {
   lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+
+  batteryStatusTile = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(batteryStatusTile);
+  lv_obj_set_size(batteryStatusTile, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_pos(batteryStatusTile, 0, 0);
+  lv_obj_clear_flag(batteryStatusTile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_CLICKABLE);
+  batteryStatusScr(batteryStatusTile);
+  lv_obj_add_event_cb(batteryStatusTile, updateBatteryStatusEvent,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(batteryStatusTile, tapCycleScreenEvent,
+                      LV_EVENT_CLICKED, NULL);
+  lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
 
   createMapGuidanceOverlay();
 
