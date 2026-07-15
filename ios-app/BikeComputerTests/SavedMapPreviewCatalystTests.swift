@@ -1,4 +1,5 @@
 import Foundation
+import MapKit
 import UIKit
 
 private func fail(_ message: String) -> Never {
@@ -73,6 +74,40 @@ private func hasVisiblePixel(_ image: UIImage) -> Bool {
         context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
         return stride(from: 3, to: bytes.count, by: 4).contains { bytes[$0] > 0 }
     }
+}
+
+private func rgbaPixels(_ image: UIImage) -> [UInt8]? {
+    guard let source = image.cgImage else { return nil }
+    let width = source.width
+    let height = source.height
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+        guard let context = CGContext(
+            data: bytes.baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return false
+        }
+        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return true
+    }
+    return rendered ? pixels : nil
+}
+
+private func imageMatchesPNG(_ image: UIImage?, data: Data) -> Bool {
+    guard let image,
+          let expected = UIImage(data: data),
+          image.size == expected.size,
+          let actualPixels = rgbaPixels(image),
+          let expectedPixels = rgbaPixels(expected) else {
+        return false
+    }
+    return actualPixels == expectedPixels
 }
 
 private func solidPNG(color: UIColor) -> Data {
@@ -205,7 +240,10 @@ struct SavedMapPreviewCatalystTests {
             Date() < outlineDeadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        guard outlineFallbackManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+        guard imageMatchesPNG(
+            outlineFallbackManager.previewImage(forCachedPack: snapshotPackURL),
+            data: outlinePNG
+        ) else {
             fail("embedded boundary image should remain the MapKit failure fallback")
         }
         guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
@@ -213,24 +251,55 @@ struct SavedMapPreviewCatalystTests {
         }
 
         var generatedBounds: OfflineMapPreviewBounds?
+        var snapshotContinuation: CheckedContinuation<Data?, Never>?
+        var gatedSnapshotStarted = false
         let snapshotManager = OfflineMapManager(
             defaults: defaults,
             cacheDirectory: cacheDirectory,
             mapSnapshot: { bounds in
                 generatedBounds = bounds
-                return snapshotPNG
+                gatedSnapshotStarted = true
+                return await withCheckedContinuation { continuation in
+                    snapshotContinuation = continuation
+                }
             }
         )
         snapshotManager.loadPreviewIfNeeded(forCachedPack: snapshotPackURL)
+        let fallbackDeadline = Date().addingTimeInterval(3)
+        while (!gatedSnapshotStarted ||
+            snapshotManager.previewImage(forCachedPack: snapshotPackURL) == nil) &&
+            Date() < fallbackDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard gatedSnapshotStarted else {
+            fail("snapshot generation should start after publishing the offline fallback")
+        }
+        guard imageMatchesPNG(
+            snapshotManager.previewImage(forCachedPack: snapshotPackURL),
+            data: outlinePNG
+        ) else {
+            fail("embedded preview should publish while MapKit is still pending")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
+            fail("a pending MapKit request should not persist the offline fallback")
+        }
+        snapshotContinuation?.resume(returning: snapshotPNG)
+        snapshotContinuation = nil
         let snapshotDeadline = Date().addingTimeInterval(3)
-        while snapshotManager.previewImage(forCachedPack: snapshotPackURL) == nil &&
+        while (!imageMatchesPNG(
+            snapshotManager.previewImage(forCachedPack: snapshotPackURL),
+            data: snapshotPNG
+        ) || SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) != snapshotPNG) &&
             Date() < snapshotDeadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         guard generatedBounds == expectedBounds else {
             fail("snapshot generation should use the downloaded map's exact bounds")
         }
-        guard snapshotManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+        guard imageMatchesPNG(
+            snapshotManager.previewImage(forCachedPack: snapshotPackURL),
+            data: snapshotPNG
+        ) else {
             fail("generated map snapshot should replace the embedded boundary fallback")
         }
         guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == snapshotPNG else {
@@ -252,7 +321,10 @@ struct SavedMapPreviewCatalystTests {
             Date() < restoredDeadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        guard restoredManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+        guard imageMatchesPNG(
+            restoredManager.previewImage(forCachedPack: snapshotPackURL),
+            data: snapshotPNG
+        ) else {
             fail("persisted map snapshot should load after relaunch")
         }
         guard restoredGenerationCount == 0 else {
@@ -316,6 +388,111 @@ struct SavedMapPreviewCatalystTests {
         }
         guard SavedMapSnapshotPreviewStore.imageData(for: cancellationPackURL) == nil else {
             fail("a cancelled snapshot must not recreate a deleted map's thumbnail")
+        }
+
+        let lateMapID = "custom-map-late-snapshot"
+        let latePackURL = cacheDirectory.appendingPathComponent("\(lateMapID).zip")
+        do {
+            let lateManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": lateMapID,
+                "bounds": [120.92, 30.72, 121.93, 31.53],
+            ])
+            try storedZip(entries: [
+                ("manifest.json", lateManifest),
+                (
+                    "VECTMAP/\(lateMapID)/+0000+0000/1.fmb",
+                    Data("map-block".utf8)
+                ),
+            ]).write(to: latePackURL)
+        } catch {
+            fail("late snapshot test pack should write: \(error)")
+        }
+        var lateSnapshotStarted = false
+        var lateSnapshotReturned = false
+        var lateSnapshotContinuation: CheckedContinuation<Data?, Never>?
+        let lateSnapshotManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                lateSnapshotStarted = true
+                let data = await withCheckedContinuation { continuation in
+                    lateSnapshotContinuation = continuation
+                }
+                lateSnapshotReturned = true
+                return data
+            }
+        )
+        lateSnapshotManager.loadPreviewIfNeeded(forCachedPack: latePackURL)
+        let lateStartedDeadline = Date().addingTimeInterval(3)
+        while !lateSnapshotStarted && Date() < lateStartedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard lateSnapshotStarted else {
+            fail("non-cooperative snapshot generation should start")
+        }
+        lateSnapshotManager.deleteCachedPack(at: latePackURL)
+        lateSnapshotContinuation?.resume(returning: snapshotPNG)
+        lateSnapshotContinuation = nil
+        let lateReturnedDeadline = Date().addingTimeInterval(3)
+        while !lateSnapshotReturned && Date() < lateReturnedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard lateSnapshotReturned else {
+            fail("non-cooperative snapshot should finish after deletion")
+        }
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        guard lateSnapshotManager.previewImage(forCachedPack: latePackURL) == nil else {
+            fail("a late snapshot must not republish a deleted map's thumbnail")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: latePackURL) == nil else {
+            fail("a late snapshot must not persist after its map was deleted")
+        }
+
+        let liveSnapshotTask = Task { @MainActor in
+            try await OfflineMapSnapshotPreviewRenderer.pngData(for: expectedBounds)
+        }
+        let liveSnapshotTimeout = Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            liveSnapshotTask.cancel()
+        }
+        let liveSnapshotData: Data
+        do {
+            guard let data = try await liveSnapshotTask.value else {
+                fail("production MapKit renderer should return a cropped PNG")
+            }
+            liveSnapshotData = data
+        } catch {
+            fail("production MapKit renderer should complete: \(error)")
+        }
+        liveSnapshotTimeout.cancel()
+        guard let liveSnapshotImage = UIImage(data: liveSnapshotData) else {
+            fail("production MapKit renderer output should decode")
+        }
+        let northWest = MKMapPoint(CLLocationCoordinate2D(
+            latitude: expectedBounds.maxLatitude,
+            longitude: expectedBounds.minLongitude
+        ))
+        let southEast = MKMapPoint(CLLocationCoordinate2D(
+            latitude: expectedBounds.minLatitude,
+            longitude: expectedBounds.maxLongitude
+        ))
+        let expectedAspectRatio = abs(southEast.x - northWest.x) /
+            abs(southEast.y - northWest.y)
+        let actualAspectRatio = liveSnapshotImage.size.width / liveSnapshotImage.size.height
+        guard abs(actualAspectRatio - expectedAspectRatio) / expectedAspectRatio < 0.05 else {
+            fail("production MapKit renderer should crop to the selected bounds aspect ratio")
+        }
+        guard liveSnapshotImage.size.width <= 160,
+              liveSnapshotImage.size.height <= 96,
+              !imageMatchesPNG(liveSnapshotImage, data: outlinePNG) else {
+            fail(
+                "production MapKit renderer should return map content within thumbnail limits " +
+                    "(size: \(liveSnapshotImage.size), outline: " +
+                    "\(imageMatchesPNG(liveSnapshotImage, data: outlinePNG)))"
+            )
         }
 
         print("SavedMapPreviewCatalystTests passed")

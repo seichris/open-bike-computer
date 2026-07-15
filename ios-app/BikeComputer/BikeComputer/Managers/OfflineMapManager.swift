@@ -45,18 +45,20 @@ private enum OfflineMapDefaults {
 }
 
 @MainActor
-private enum OfflineMapSnapshotPreviewRenderer {
+enum OfflineMapSnapshotPreviewRenderer {
     static func pngData(for bounds: OfflineMapPreviewBounds) async throws -> Data? {
 #if canImport(UIKit) && canImport(MapKit)
         let options = MKMapSnapshotter.Options()
-        let northWest = MKMapPoint(CLLocationCoordinate2D(
+        let northWestCoordinate = CLLocationCoordinate2D(
             latitude: bounds.maxLatitude,
             longitude: bounds.minLongitude
-        ))
-        let southEast = MKMapPoint(CLLocationCoordinate2D(
+        )
+        let southEastCoordinate = CLLocationCoordinate2D(
             latitude: bounds.minLatitude,
             longitude: bounds.maxLongitude
-        ))
+        )
+        let northWest = MKMapPoint(northWestCoordinate)
+        let southEast = MKMapPoint(southEastCoordinate)
         options.mapRect = MKMapRect(
             x: min(northWest.x, southEast.x),
             y: min(northWest.y, southEast.y),
@@ -79,11 +81,71 @@ private enum OfflineMapSnapshotPreviewRenderer {
             snapshotter.cancel()
         }
         try Task.checkCancellation()
-        return snapshot.image.pngData()
+        guard let croppedImage = croppedImage(
+            from: snapshot,
+            northWest: northWestCoordinate,
+            southEast: southEastCoordinate
+        ) else {
+            return nil
+        }
+        return croppedImage.pngData()
 #else
         return nil
 #endif
     }
+
+#if canImport(UIKit) && canImport(MapKit)
+    private static func croppedImage(
+        from snapshot: MKMapSnapshotter.Snapshot,
+        northWest: CLLocationCoordinate2D,
+        southEast: CLLocationCoordinate2D
+    ) -> UIImage? {
+        guard let source = snapshot.image.cgImage else { return nil }
+        let scale = snapshot.image.scale
+        let northWestPoint = snapshot.point(for: northWest)
+        let southEastPoint = snapshot.point(for: southEast)
+        let minimumX = max(
+            0,
+            ceil(min(northWestPoint.x, southEastPoint.x) * scale)
+        )
+        let minimumY = max(
+            0,
+            ceil(min(northWestPoint.y, southEastPoint.y) * scale)
+        )
+        let maximumX = min(
+            CGFloat(source.width),
+            floor(max(northWestPoint.x, southEastPoint.x) * scale)
+        )
+        let maximumY = min(
+            CGFloat(source.height),
+            floor(max(northWestPoint.y, southEastPoint.y) * scale)
+        )
+        guard maximumX > minimumX, maximumY > minimumY,
+              let cropped = source.cropping(to: CGRect(
+                  x: minimumX,
+                  y: minimumY,
+                  width: maximumX - minimumX,
+                  height: maximumY - minimumY
+              )) else {
+            return nil
+        }
+        let croppedImage = UIImage(
+            cgImage: cropped,
+            scale: scale,
+            orientation: snapshot.image.imageOrientation
+        )
+        let normalizedSize = CGSize(
+            width: min(160, max(1, floor(croppedImage.size.width))),
+            height: min(96, max(1, floor(croppedImage.size.height)))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: normalizedSize, format: format).image { _ in
+            croppedImage.draw(in: CGRect(origin: .zero, size: normalizedSize))
+        }
+    }
+#endif
 }
 
 typealias OfflineMapSnapshotOperation = @MainActor (
@@ -417,6 +479,10 @@ final class OfflineMapPreviewLoadRegistry {
         guard tokens[key] == token else { return false }
         tokens.removeValue(forKey: key)
         return true
+    }
+
+    func isCurrent(_ token: UUID, for key: String) -> Bool {
+        tokens[key] == token
     }
 
     func invalidate(_ key: String) {
@@ -1550,18 +1616,45 @@ final class OfflineMapManager: ObservableObject {
                 try? SavedMapSnapshotPreviewStore.delete(for: packURL)
             }
 
-            var generatedSnapshotData: Data?
-            if let bounds = loaded.packContent?.bounds {
-                do {
-                    generatedSnapshotData = try await self.mapSnapshot(bounds)
-                } catch is CancellationError {
-                    if self.previewLoadRegistry.finishIfCurrent(token, for: key) {
-                        self.previewLoadTasks.removeValue(forKey: key)
-                    }
+            guard self.previewLoadRegistry.isCurrent(token, for: key),
+                  !Task.isCancelled,
+                  self.cachedPackURLs.contains(where: {
+                      self.previewCacheKey(for: $0) == key
+                  }) else {
+                return
+            }
+            var publishedFallback = false
+            if let image = self.usablePreviewImage(from: loaded.packContent?.imageData) {
+                self.packPreviewImages[key] = image
+                publishedFallback = true
+            } else if let bounds = loaded.packContent?.bounds {
+                self.packPreviewImages[key] = OfflineMapFallbackPreviewRenderer.image(
+                    for: bounds
+                )
+                publishedFallback = true
+            }
+
+            guard let bounds = loaded.packContent?.bounds else {
+                guard self.previewLoadRegistry.finishIfCurrent(token, for: key) else {
                     return
-                } catch {
-                    generatedSnapshotData = nil
                 }
+                self.previewLoadTasks.removeValue(forKey: key)
+                if !publishedFallback {
+                    self.unavailablePackPreviews.insert(key)
+                }
+                return
+            }
+
+            let generatedSnapshotData: Data?
+            do {
+                generatedSnapshotData = try await self.mapSnapshot(bounds)
+            } catch is CancellationError {
+                if self.previewLoadRegistry.finishIfCurrent(token, for: key) {
+                    self.previewLoadTasks.removeValue(forKey: key)
+                }
+                return
+            } catch {
+                generatedSnapshotData = nil
             }
 
             guard self.previewLoadRegistry.finishIfCurrent(
@@ -1584,17 +1677,9 @@ final class OfflineMapManager: ObservableObject {
                 self.packPreviewImages[key] = image
                 return
             }
-            if let image = self.usablePreviewImage(from: loaded.packContent?.imageData) {
-                self.packPreviewImages[key] = image
-                return
+            if !publishedFallback {
+                self.unavailablePackPreviews.insert(key)
             }
-            if let bounds = loaded.packContent?.bounds {
-                self.packPreviewImages[key] = OfflineMapFallbackPreviewRenderer.image(
-                    for: bounds
-                )
-                return
-            }
-            self.unavailablePackPreviews.insert(key)
         }
     }
 
