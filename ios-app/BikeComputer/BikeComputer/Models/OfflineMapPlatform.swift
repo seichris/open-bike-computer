@@ -215,6 +215,11 @@ struct OfflineMapJob: Decodable, Equatable {
     let clientRequestId: String?
     let installOnDevice: Bool?
     let artifacts: [OfflineMapArtifact]?
+    let userLabel: String?
+    let reuseStrategy: String?
+    let downloadCount: Int?
+    let firstDownloadedAt: String?
+    let lastDownloadedAt: String?
 
     var isTerminal: Bool {
         ["ready", "failed", "expired", "cancelled"].contains(status)
@@ -315,6 +320,25 @@ nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
 nonisolated struct OfflineMapInstallationCredential: Codable, Equatable {
     let clientInstallationId: String
     let clientInstallationToken: String
+}
+
+nonisolated struct OfflineMapDisplayNameRequest: Encodable, Equatable {
+    let displayName: String
+}
+
+nonisolated struct OfflineMapDownloadReceiptRequest: Encodable, Equatable {
+    let receiptId: String
+    let artifactFormat: String
+    let sha256: String?
+    let bytes: Int64
+}
+
+nonisolated struct OfflineMapInventoryMutationResponse: Decodable, Equatable {
+    let jobId: String
+    let userLabel: String?
+    let downloadCount: Int
+    let firstDownloadedAt: String?
+    let lastDownloadedAt: String?
 }
 
 struct OfflineMapJobsResponse: Decodable, Equatable {
@@ -2214,6 +2238,39 @@ struct OfflineMapPlatformClient {
         return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
     }
 
+    func updateDisplayName(jobId: String, displayName: String) async throws {
+        var request = try Self.makeUpdateDisplayNameURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            clientInstallationId: clientInstallationId,
+            jobId: jobId,
+            displayName: displayName
+        )
+        authorizeInstallation(&request)
+        let response: OfflineMapInventoryMutationResponse = try await send(request: request)
+        guard response.jobId == jobId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+    }
+
+    func recordDownload(
+        jobId: String,
+        receipt: OfflineMapDownloadReceiptRequest
+    ) async throws {
+        var request = try Self.makeRecordDownloadURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            clientInstallationId: clientInstallationId,
+            jobId: jobId,
+            receipt: receipt
+        )
+        authorizeInstallation(&request)
+        let response: OfflineMapInventoryMutationResponse = try await send(request: request)
+        guard response.jobId == jobId, response.downloadCount > 0 else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+    }
+
     func downloadURL(mapId: String, jobId: String) async throws -> URL {
         let request = try Self.makeInstallationScopedURLRequest(
             baseURL: baseURL,
@@ -2337,6 +2394,46 @@ struct OfflineMapPlatformClient {
         if let apiToken, !apiToken.isEmpty {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         }
+        return request
+    }
+
+    static func makeUpdateDisplayNameURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        clientInstallationId: String,
+        jobId: String,
+        displayName: String
+    ) throws -> URLRequest {
+        var request = try makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            path: "/v1/map-jobs/\(jobId)/display-name",
+            method: "PATCH",
+            clientInstallationId: clientInstallationId
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.offlineMap.encode(
+            OfflineMapDisplayNameRequest(displayName: displayName)
+        )
+        return request
+    }
+
+    static func makeRecordDownloadURLRequest(
+        baseURL: URL,
+        apiToken: String?,
+        clientInstallationId: String,
+        jobId: String,
+        receipt: OfflineMapDownloadReceiptRequest
+    ) throws -> URLRequest {
+        var request = try makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            apiToken: apiToken,
+            path: "/v1/map-jobs/\(jobId)/downloads",
+            method: "POST",
+            clientInstallationId: clientInstallationId
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.offlineMap.encode(receipt)
         return request
     }
 

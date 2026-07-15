@@ -15,6 +15,7 @@ struct ContentView: View {
     @StateObject private var coordinator = BikeComputerCoordinator()
     @StateObject private var offlineMapManager = OfflineMapManager()
     @StateObject private var destinationStore = SavedDestinationStore()
+    @Environment(\.scenePhase) private var scenePhase
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
@@ -106,6 +107,10 @@ struct ContentView: View {
             coordinator.updateSelectedView(newValue)
         }
         .onAppear {
+            offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+        }
+        .onChange(of: scenePhase) { newValue in
+            guard newValue == .active else { return }
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in

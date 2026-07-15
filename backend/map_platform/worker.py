@@ -9,6 +9,7 @@ from pathlib import Path
 from .jobs import JobStore
 from .models import JobStatus, MapJob
 from .pipeline import MapBuildPipeline
+from .reuse import SubsetReuseUnavailable
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,58 @@ class MapWorker:
                             worker_id=self.worker_id,
                         )
                     )
-                build_result = self.pipeline.build(job, **build_kwargs)
+                reuse_keys = (
+                    self.pipeline.reuse_keys(job)
+                    if isinstance(self.pipeline, MapBuildPipeline)
+                    else None
+                )
+                reuse_strategy = None
+                reuse_source_job_id = None
+                if reuse_keys is not None:
+                    self.store.set_build_keys_unless_cancelled(
+                        job.job_id,
+                        worker_id=self.worker_id,
+                        build_cache_key=reuse_keys.exact,
+                        build_compatibility_key=reuse_keys.compatibility,
+                    )
+                    exact = self.store.find_exact_reuse_candidate(
+                        job_id=job.job_id,
+                        build_cache_key=reuse_keys.exact,
+                    )
+                    if exact is not None:
+                        finished = self.store.complete_exact_reuse(
+                            job.job_id,
+                            worker_id=self.worker_id,
+                            source_job_id=exact.job_id,
+                            build_cache_key=reuse_keys.exact,
+                            build_compatibility_key=reuse_keys.compatibility,
+                        )
+                        if finished is not None:
+                            return WorkerResult(
+                                worker_id=self.worker_id,
+                                job=finished,
+                                processed=True,
+                            )
+                    build_result = None
+                    for parent in self.store.find_subset_reuse_candidates(
+                        job,
+                        build_compatibility_key=reuse_keys.compatibility,
+                    ):
+                        try:
+                            build_result = self.pipeline.build_subset(
+                                job,
+                                parent,
+                                **build_kwargs,
+                            )
+                        except SubsetReuseUnavailable:
+                            continue
+                        reuse_strategy = "subset"
+                        reuse_source_job_id = parent.job_id
+                        break
+                    if build_result is None:
+                        build_result = self.pipeline.build(job, **build_kwargs)
+                else:
+                    build_result = self.pipeline.build(job, **build_kwargs)
                 map_id, archive_path = build_result
             published_archive = (
                 self.pipeline.published_archive_path(map_id, job.job_id)
@@ -90,6 +142,10 @@ class MapWorker:
                 published_archive=published_archive,
                 artifacts=getattr(build_result, "artifacts", None),
                 artifact_metrics=getattr(build_result, "artifact_metrics", None),
+                build_cache_key=(reuse_keys.exact if reuse_keys else None),
+                build_compatibility_key=(reuse_keys.compatibility if reuse_keys else None),
+                reuse_strategy=reuse_strategy,
+                reuse_source_job_id=reuse_source_job_id,
             )
             return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
         except Exception as exc:

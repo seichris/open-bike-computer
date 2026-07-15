@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import shutil
 import subprocess
 import time
 import uuid
+import zipfile
 from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -23,9 +25,24 @@ from .artifacts import (
     sha256_file,
     zip_object_key,
 )
-from .manifest import PipelineMetadata, build_manifest, stable_map_id, write_pack_archive
+from .manifest import (
+    PipelineMetadata,
+    build_manifest,
+    stable_map_id,
+    validate_pack_path,
+    write_pack_archive,
+)
 from .map_stream import write_map_stream_artifact
 from .models import JobStatus, MapJob, SourceRegion
+from .reuse import (
+    MapReuseKeys,
+    SubsetReuseUnavailable,
+    aligned_processing_bounds,
+    block_from_pack_path,
+    child_pack_path,
+    required_blocks,
+    reuse_keys,
+)
 from .source_cache import SourceCache
 from .sources import SourceResolutionError
 
@@ -181,6 +198,7 @@ class MapBuildPipeline:
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
+        processing_bounds = aligned_processing_bounds(job)
 
         if job_dir.exists():
             shutil.rmtree(job_dir)
@@ -191,15 +209,97 @@ class MapBuildPipeline:
         source_pbf = self._source_pbf_path(job)
         if on_status:
             on_status(JobStatus.EXTRACTING_PBF)
-        self._extract_pbf(job, source_pbf, clipped_pbf)
+        self._extract_pbf(job, source_pbf, clipped_pbf, bounds=processing_bounds)
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
-        self._convert_to_geojson(job, clipped_pbf, geojson_prefix)
-        self._extract_features(job, geojson_prefix, raw_output_dir, on_progress=on_progress)
+        self._convert_to_geojson(job, clipped_pbf, geojson_prefix, bounds=processing_bounds)
+        self._extract_features(
+            job,
+            geojson_prefix,
+            raw_output_dir,
+            bounds=processing_bounds,
+            on_progress=on_progress,
+        )
         if on_status:
             on_status(JobStatus.PACKAGING)
         self._stage_vectmap(raw_output_dir, vectmap_output)
 
+        return self._package_map(
+            job,
+            pack_root,
+            archive_path,
+            artifact_publication_lease=artifact_publication_lease,
+            on_artifact_pending=on_artifact_pending,
+        )
+
+    def reuse_keys(self, job: MapJob) -> MapReuseKeys | None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.producer_build_sha256 or ""):
+            return None
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            self.producer_image_digest or "",
+        ):
+            return None
+        source_snapshot_sha256 = job.source_region.checksum
+        if not re.fullmatch(r"[0-9a-f]{64}", source_snapshot_sha256 or ""):
+            source_snapshot_sha256 = self.source_cache.ensure(
+                job.source_region
+            ).sha256
+        return reuse_keys(
+            job,
+            producer_build_sha256=self.producer_build_sha256,
+            producer_image_digest=self.producer_image_digest,
+            source_snapshot_sha256=source_snapshot_sha256,
+        )
+
+    def build_subset(
+        self,
+        job: MapJob,
+        parent: MapJob,
+        *,
+        on_status=None,
+        on_progress=None,
+        on_artifact_pending=None,
+        artifact_publication_lease=None,
+    ) -> MapBuildResult:
+        map_id = stable_map_id(job)
+        job.map_id = map_id
+        attempt_id = re.sub(
+            r"[^a-zA-Z0-9_-]",
+            "-",
+            job.worker_id or f"attempt-{job.attempts}",
+        )
+        job_dir = self.paths.work_root / job.job_id / attempt_id
+        pack_root = job_dir / "pack"
+        archive_path = job_dir / f"{map_id}.zip"
+        if job_dir.exists():
+            shutil.rmtree(job_dir)
+        job_dir.mkdir(parents=True)
+        if on_status:
+            on_status(JobStatus.PACKAGING)
+        self._stage_subset_pack(job, parent, pack_root)
+        if on_progress:
+            on_progress(1, 1)
+        return self._package_map(
+            job,
+            pack_root,
+            archive_path,
+            artifact_publication_lease=artifact_publication_lease,
+            on_artifact_pending=on_artifact_pending,
+        )
+
+    def _package_map(
+        self,
+        job: MapJob,
+        pack_root: Path,
+        archive_path: Path,
+        *,
+        artifact_publication_lease=None,
+        on_artifact_pending=None,
+    ) -> MapBuildResult:
+        map_id = job.map_id or stable_map_id(job)
+        job.map_id = map_id
+        job_dir = archive_path.parent
         self._resolve_source_preview_geometry(job)
         manifest = build_manifest(job, pack_root, self._pipeline_metadata())
         write_pack_archive(pack_root, manifest, archive_path)
@@ -329,8 +429,15 @@ class MapBuildPipeline:
     def _source_pbf_path(self, job: MapJob) -> Path:
         return self.source_cache.ensure(job.source_region).path
 
-    def _extract_pbf(self, job: MapJob, source_pbf: Path, clipped_pbf: Path) -> None:
-        bounds = job.geometry.bounds
+    def _extract_pbf(
+        self,
+        job: MapJob,
+        source_pbf: Path,
+        clipped_pbf: Path,
+        *,
+        bounds=None,
+    ) -> None:
+        bounds = bounds or job.geometry.bounds
         args = [
             "osmium",
             "extract",
@@ -358,8 +465,15 @@ class MapBuildPipeline:
             ]
         self.runner.run(args)
 
-    def _convert_to_geojson(self, job: MapJob, clipped_pbf: Path, geojson_prefix: Path) -> None:
-        bounds = job.geometry.bounds
+    def _convert_to_geojson(
+        self,
+        job: MapJob,
+        clipped_pbf: Path,
+        geojson_prefix: Path,
+        *,
+        bounds=None,
+    ) -> None:
+        bounds = bounds or job.geometry.bounds
         script = self.paths.osm_extract_root / "scripts" / "pbf_to_geojson.sh"
         self.runner.run(
             [
@@ -375,8 +489,16 @@ class MapBuildPipeline:
             cwd=self.paths.osm_extract_root / "scripts",
         )
 
-    def _extract_features(self, job: MapJob, geojson_prefix: Path, raw_output_dir: Path, on_progress=None) -> None:
-        bounds = job.geometry.bounds
+    def _extract_features(
+        self,
+        job: MapJob,
+        geojson_prefix: Path,
+        raw_output_dir: Path,
+        *,
+        bounds=None,
+        on_progress=None,
+    ) -> None:
+        bounds = bounds or job.geometry.bounds
         script = self.paths.osm_extract_root / "scripts" / "extract_features.py"
         args = [
             "python",
@@ -407,6 +529,129 @@ class MapBuildPipeline:
         if on_progress:
             for line in output.splitlines():
                 handle_output(line)
+
+    def _stage_subset_pack(
+        self,
+        child: MapJob,
+        parent: MapJob,
+        pack_root: Path,
+    ) -> None:
+        if not parent.pack_path or not parent.map_id:
+            raise SubsetReuseUnavailable("parent map pack is unavailable")
+        parent_archive = Path(parent.pack_path)
+        if not parent_archive.is_file():
+            raise SubsetReuseUnavailable("parent map pack is missing")
+        parent_zip_artifact = next(
+            (
+                artifact
+                for artifact in parent.artifacts
+                if artifact.format == ZIP_STORED_FORMAT
+            ),
+            None,
+        )
+        if parent_zip_artifact is None:
+            raise SubsetReuseUnavailable("parent map pack has no immutable ZIP identity")
+        try:
+            parent_identity_matches = (
+                parent_archive.stat().st_size == parent_zip_artifact.bytes
+                and sha256_file(parent_archive) == parent_zip_artifact.sha256
+            )
+        except OSError as exc:
+            raise SubsetReuseUnavailable("parent map pack cannot be read") from exc
+        if not parent_identity_matches:
+            raise SubsetReuseUnavailable("parent map pack identity is invalid")
+        required = required_blocks(child.geometry.bounds)
+        child_map_id = child.map_id or stable_map_id(child)
+        copied_fmb = 0
+        copied_paths: set[str] = set()
+
+        try:
+            with zipfile.ZipFile(parent_archive, "r") as archive:
+                infos = archive.infolist()
+                names = [info.filename for info in infos]
+                if len(names) != len(set(names)):
+                    raise SubsetReuseUnavailable("parent map pack has duplicate entries")
+                try:
+                    manifest_info = archive.getinfo("manifest.json")
+                except KeyError as exc:
+                    raise SubsetReuseUnavailable("parent map manifest is missing") from exc
+                if manifest_info.file_size > 16 * 1024 * 1024:
+                    raise SubsetReuseUnavailable("parent map manifest is too large")
+                manifest = json.loads(archive.read(manifest_info))
+                if not isinstance(manifest, dict) or manifest.get("mapId") != parent.map_id:
+                    raise SubsetReuseUnavailable("parent map manifest identity is invalid")
+                if manifest.get("bounds") != parent.geometry.bounds.to_list():
+                    raise SubsetReuseUnavailable("parent map manifest bounds are invalid")
+                files = manifest.get("files")
+                if not isinstance(files, list) or not files:
+                    raise SubsetReuseUnavailable("parent map manifest has no files")
+
+                manifest_paths: set[str] = set()
+                for entry in files:
+                    if not isinstance(entry, dict):
+                        raise SubsetReuseUnavailable("parent map manifest file is invalid")
+                    path = entry.get("path")
+                    byte_count = entry.get("bytes")
+                    expected_sha256 = entry.get("sha256")
+                    if (
+                        not isinstance(path, str)
+                        or isinstance(byte_count, bool)
+                        or not isinstance(byte_count, int)
+                        or byte_count < 0
+                        or not isinstance(expected_sha256, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                    ):
+                        raise SubsetReuseUnavailable("parent map manifest file is invalid")
+                    try:
+                        validate_pack_path(path)
+                    except ValueError as exc:
+                        raise SubsetReuseUnavailable(str(exc)) from exc
+                    if path in manifest_paths:
+                        raise SubsetReuseUnavailable("parent map manifest has duplicate files")
+                    manifest_paths.add(path)
+                    parts = path.split("/")
+                    if len(parts) != 4 or parts[1] != parent.map_id:
+                        raise SubsetReuseUnavailable("parent map file identity is invalid")
+                    block = block_from_pack_path(path)
+                    if block not in required:
+                        continue
+                    try:
+                        info = archive.getinfo(path)
+                    except KeyError as exc:
+                        raise SubsetReuseUnavailable("parent map file is missing") from exc
+                    if (
+                        info.is_dir()
+                        or info.flag_bits & 0x1
+                        or info.compress_type != zipfile.ZIP_STORED
+                        or info.file_size != byte_count
+                    ):
+                        raise SubsetReuseUnavailable("parent map file metadata is invalid")
+                    extension = Path(path).suffix.removeprefix(".")
+                    destination_relative = child_pack_path(child_map_id, block, extension)
+                    if destination_relative in copied_paths:
+                        raise SubsetReuseUnavailable("parent block selection is ambiguous")
+                    copied_paths.add(destination_relative)
+                    destination = pack_root / destination_relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    copied = 0
+                    with archive.open(info, "r") as source, destination.open("xb") as output:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            output.write(chunk)
+                            digest.update(chunk)
+                            copied += len(chunk)
+                    if copied != byte_count or digest.hexdigest() != expected_sha256:
+                        destination.unlink(missing_ok=True)
+                        raise SubsetReuseUnavailable("parent map block hash is invalid")
+                    if extension == "fmb":
+                        copied_fmb += 1
+        except SubsetReuseUnavailable:
+            raise
+        except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+            raise SubsetReuseUnavailable(f"parent map pack is invalid: {exc}") from exc
+
+        if copied_fmb == 0:
+            raise SubsetReuseUnavailable("parent map contains no required binary blocks")
 
     def _stage_vectmap(self, raw_output_dir: Path, vectmap_output: Path) -> None:
         if not raw_output_dir.exists():
@@ -456,7 +701,54 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
                         worker_id=worker_id,
                     )
                 )
-            build_result = pipeline.build(job, **build_kwargs)
+            reuse_identity = (
+                pipeline.reuse_keys(job)
+                if isinstance(pipeline, MapBuildPipeline)
+                else None
+            )
+            reuse_strategy = None
+            reuse_source_job_id = None
+            if reuse_identity is not None:
+                store.set_build_keys_unless_cancelled(
+                    job_id,
+                    worker_id=worker_id,
+                    build_cache_key=reuse_identity.exact,
+                    build_compatibility_key=reuse_identity.compatibility,
+                )
+                exact = store.find_exact_reuse_candidate(
+                    job_id=job_id,
+                    build_cache_key=reuse_identity.exact,
+                )
+                if exact is not None:
+                    reused = store.complete_exact_reuse(
+                        job_id,
+                        worker_id=worker_id,
+                        source_job_id=exact.job_id,
+                        build_cache_key=reuse_identity.exact,
+                        build_compatibility_key=reuse_identity.compatibility,
+                    )
+                    if reused is not None:
+                        return reused
+                build_result = None
+                for parent in store.find_subset_reuse_candidates(
+                    job,
+                    build_compatibility_key=reuse_identity.compatibility,
+                ):
+                    try:
+                        build_result = pipeline.build_subset(
+                            job,
+                            parent,
+                            **build_kwargs,
+                        )
+                    except SubsetReuseUnavailable:
+                        continue
+                    reuse_strategy = "subset"
+                    reuse_source_job_id = parent.job_id
+                    break
+                if build_result is None:
+                    build_result = pipeline.build(job, **build_kwargs)
+            else:
+                build_result = pipeline.build(job, **build_kwargs)
             map_id, archive_path = build_result
         published_archive = (
             pipeline.published_archive_path(map_id, job.job_id)
@@ -471,6 +763,12 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             published_archive=published_archive,
             artifacts=getattr(build_result, "artifacts", None),
             artifact_metrics=getattr(build_result, "artifact_metrics", None),
+            build_cache_key=(reuse_identity.exact if reuse_identity else None),
+            build_compatibility_key=(
+                reuse_identity.compatibility if reuse_identity else None
+            ),
+            reuse_strategy=reuse_strategy,
+            reuse_source_job_id=reuse_source_job_id,
         )
     except Exception as exc:
         current = store.get(job_id)

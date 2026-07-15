@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .downloads import DownloadSigner, DownloadTokenError
 from .geofabrik_sources import GeofabrikSourceProvider
@@ -251,6 +252,14 @@ def create_app():
             "mapStreamRollout": map_stream_rollout.public_summary(),
         }
 
+    @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])
+    def admin_maps(includeUndownloaded: bool = False) -> dict[str, Any]:
+        return map_inventory(
+            service.store.list(),
+            pseudonym_secret=installation_secret or download_secret,
+            include_undownloaded=includeUndownloaded,
+        )
+
     @app.post("/v1/installations", dependencies=[Depends(require_api_token)])
     def create_installation() -> dict[str, str]:
         installation_id, token = installation_store.issue()
@@ -408,6 +417,90 @@ def create_app():
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
+
+    @app.patch(
+        "/v1/map-jobs/{job_id}/display-name",
+        dependencies=[Depends(require_api_token)],
+    )
+    def update_map_display_name(
+        job_id: str,
+        payload: dict[str, Any],
+        clientInstallationId: str | None = None,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        if clientInstallationId is None:
+            raise HTTPException(status_code=400, detail="clientInstallationId is required")
+        if set(payload) != {"displayName"}:
+            raise HTTPException(status_code=400, detail="display-name request has invalid fields")
+        try:
+            verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+                required=True,
+            )
+            job = service.update_user_label_for_installation(
+                job_id,
+                clientInstallationId,
+                payload.get("displayName"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        return {
+            "jobId": job.job_id,
+            "userLabel": job.user_label,
+            "downloadCount": len(job.download_receipts),
+        }
+
+    @app.post(
+        "/v1/map-jobs/{job_id}/downloads",
+        dependencies=[Depends(require_api_token)],
+    )
+    def record_map_download(
+        job_id: str,
+        payload: dict[str, Any],
+        clientInstallationId: str | None = None,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        if clientInstallationId is None:
+            raise HTTPException(status_code=400, detail="clientInstallationId is required")
+        try:
+            verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+                required=True,
+            )
+            job = service.record_download_for_installation(
+                job_id,
+                clientInstallationId,
+                payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        return {
+            "jobId": job.job_id,
+            "userLabel": job.user_label,
+            "downloadCount": len(job.download_receipts),
+            "firstDownloadedAt": (
+                job.download_receipts[0].downloaded_at
+                if job.download_receipts
+                else None
+            ),
+            "lastDownloadedAt": (
+                job.download_receipts[-1].downloaded_at
+                if job.download_receipts
+                else None
+            ),
+        }
 
     @app.post("/v1/map-jobs/{job_id}/run", dependencies=[Depends(require_admin_token)])
     def run_map_job(job_id: str, clientInstallationId: str | None = None) -> dict[str, Any]:
