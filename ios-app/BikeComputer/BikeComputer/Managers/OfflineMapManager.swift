@@ -11,6 +11,9 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(UIKit) && canImport(MapKit)
+import MapKit
+#endif
 #if os(iOS)
 import Security
 #endif
@@ -41,7 +44,108 @@ private enum OfflineMapDefaults {
     ]
 }
 
+@MainActor
+private enum OfflineMapSnapshotPreviewRenderer {
+    static func pngData(for bounds: OfflineMapPreviewBounds) async throws -> Data? {
+#if canImport(UIKit) && canImport(MapKit)
+        let options = MKMapSnapshotter.Options()
+        let northWest = MKMapPoint(CLLocationCoordinate2D(
+            latitude: bounds.maxLatitude,
+            longitude: bounds.minLongitude
+        ))
+        let southEast = MKMapPoint(CLLocationCoordinate2D(
+            latitude: bounds.minLatitude,
+            longitude: bounds.maxLongitude
+        ))
+        options.mapRect = MKMapRect(
+            x: min(northWest.x, southEast.x),
+            y: min(northWest.y, southEast.y),
+            width: abs(southEast.x - northWest.x),
+            height: abs(southEast.y - northWest.y)
+        )
+        options.size = CGSize(width: 160, height: 96)
+        options.scale = 1
+        options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
+        if #available(iOS 17.0, macCatalyst 17.0, *) {
+            options.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat)
+        } else {
+            options.mapType = .standard
+        }
+
+        let snapshotter = MKMapSnapshotter(options: options)
+        let snapshot = try await withTaskCancellationHandler {
+            try await snapshotter.start()
+        } onCancel: {
+            snapshotter.cancel()
+        }
+        try Task.checkCancellation()
+        return snapshot.image.pngData()
+#else
+        return nil
+#endif
+    }
+}
+
+typealias OfflineMapSnapshotOperation = @MainActor (
+    OfflineMapPreviewBounds
+) async throws -> Data?
+
 #if canImport(UIKit)
+nonisolated enum SavedMapSnapshotPreviewStore {
+    static let maximumImageBytes = 1_048_576
+    private static let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
+    static func imageURL(for artifactURL: URL) -> URL {
+        artifactURL.appendingPathExtension("thumbnail.png")
+    }
+
+    static func imageData(for artifactURL: URL) -> Data? {
+        let url = imageURL(for: artifactURL)
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              (33...maximumImageBytes).contains(fileSize),
+              let data = try? Data(contentsOf: url),
+              isValidPNG(data) else {
+            return nil
+        }
+        return data
+    }
+
+    static func save(_ data: Data, for artifactURL: URL) throws {
+        guard isValidPNG(data) else {
+            throw OfflineMapPlatformError.invalidPack("map snapshot preview is not a valid PNG")
+        }
+        try data.write(to: imageURL(for: artifactURL), options: .atomic)
+    }
+
+    static func delete(for artifactURL: URL) throws {
+        let url = imageURL(for: artifactURL)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private static func isValidPNG(_ data: Data) -> Bool {
+        guard (33...maximumImageBytes).contains(data.count),
+              data.starts(with: pngSignature),
+              uint32BE(data, at: 8) == 13,
+              data.subdata(in: 12..<16) == Data("IHDR".utf8) else {
+            return false
+        }
+        let width = uint32BE(data, at: 16)
+        let height = uint32BE(data, at: 20)
+        return (1...1_024).contains(width) && (1...1_024).contains(height)
+    }
+
+    private static func uint32BE(_ data: Data, at offset: Int) -> UInt32 {
+        UInt32(data[offset]) << 24 |
+            UInt32(data[offset + 1]) << 16 |
+            UInt32(data[offset + 2]) << 8 |
+            UInt32(data[offset + 3])
+    }
+}
+
 @MainActor
 private enum OfflineMapFallbackPreviewRenderer {
     private static let size = CGSize(width: 160, height: 96)
@@ -786,6 +890,9 @@ nonisolated enum SavedMapArtifactMetadataStore {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+#if canImport(UIKit)
+        try SavedMapSnapshotPreviewStore.delete(for: artifactURL)
+#endif
     }
 }
 
@@ -998,6 +1105,7 @@ final class OfflineMapManager: ObservableObject {
     private let defaults: UserDefaults
     private let mapPlatformSession: URLSession
     private let packDownload: PackDownloadOperation
+    private let mapSnapshot: OfflineMapSnapshotOperation
     private let cacheDirectoryOverride: URL?
     private let installationCredentialStore: OfflineMapInstallationCredentialStore
     private let mapStreamTrustStore: BikeMapStreamTrustStore
@@ -1031,12 +1139,16 @@ final class OfflineMapManager: ObservableObject {
                 onProgress: onProgress,
                 onByteProgress: onByteProgress
             )
+        },
+        mapSnapshot: @escaping OfflineMapSnapshotOperation = { bounds in
+            try await OfflineMapSnapshotPreviewRenderer.pngData(for: bounds)
         }
     ) {
         OfflineMapPackCompatibilityArchive.removeOrphans()
         self.defaults = defaults
         self.mapPlatformSession = mapPlatformSession
         self.packDownload = packDownload
+        self.mapSnapshot = mapSnapshot
         self.cacheDirectoryOverride = cacheDirectory
         self.installationCredentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
         self.mapStreamTrustStore = mapStreamTrustStore
@@ -1413,10 +1525,45 @@ final class OfflineMapManager: ObservableObject {
         }
         let token = previewLoadRegistry.begin(for: key)
         previewLoadTasks[key] = Task { [weak self] in
-            let preview = await Task.detached(priority: .utility) {
-                OfflineMapPackPreviewReader.content(for: packURL)
+            let loaded = await Task.detached(priority: .utility) {
+                (
+                    snapshotData: SavedMapSnapshotPreviewStore.imageData(for: packURL),
+                    packContent: OfflineMapPackPreviewReader.content(for: packURL)
+                )
             }.value
             guard let self else { return }
+            if let image = self.usablePreviewImage(from: loaded.snapshotData) {
+                guard self.previewLoadRegistry.finishIfCurrent(token, for: key) else {
+                    return
+                }
+                self.previewLoadTasks.removeValue(forKey: key)
+                guard !Task.isCancelled,
+                      self.cachedPackURLs.contains(where: {
+                          self.previewCacheKey(for: $0) == key
+                      }) else {
+                    return
+                }
+                self.packPreviewImages[key] = image
+                return
+            }
+            if loaded.snapshotData != nil {
+                try? SavedMapSnapshotPreviewStore.delete(for: packURL)
+            }
+
+            var generatedSnapshotData: Data?
+            if let bounds = loaded.packContent?.bounds {
+                do {
+                    generatedSnapshotData = try await self.mapSnapshot(bounds)
+                } catch is CancellationError {
+                    if self.previewLoadRegistry.finishIfCurrent(token, for: key) {
+                        self.previewLoadTasks.removeValue(forKey: key)
+                    }
+                    return
+                } catch {
+                    generatedSnapshotData = nil
+                }
+            }
+
             guard self.previewLoadRegistry.finishIfCurrent(
                 token,
                 for: key
@@ -1428,16 +1575,20 @@ final class OfflineMapManager: ObservableObject {
                   }) else {
                 return
             }
-            if let data = preview?.imageData,
-               let image = UIImage(data: data),
-               image.size.width > 0,
-               image.size.height > 0,
-               image.size.width <= 512,
-               image.size.height <= 512 {
+            if let image = self.usablePreviewImage(from: generatedSnapshotData),
+               let generatedSnapshotData {
+                try? SavedMapSnapshotPreviewStore.save(
+                    generatedSnapshotData,
+                    for: packURL
+                )
                 self.packPreviewImages[key] = image
                 return
             }
-            if let bounds = preview?.bounds {
+            if let image = self.usablePreviewImage(from: loaded.packContent?.imageData) {
+                self.packPreviewImages[key] = image
+                return
+            }
+            if let bounds = loaded.packContent?.bounds {
                 self.packPreviewImages[key] = OfflineMapFallbackPreviewRenderer.image(
                     for: bounds
                 )
@@ -1445,6 +1596,18 @@ final class OfflineMapManager: ObservableObject {
             }
             self.unavailablePackPreviews.insert(key)
         }
+    }
+
+    private func usablePreviewImage(from data: Data?) -> UIImage? {
+        guard let data,
+              let image = UIImage(data: data),
+              image.size.width > 0,
+              image.size.height > 0,
+              image.size.width <= 512,
+              image.size.height <= 512 else {
+            return nil
+        }
+        return image
     }
 #endif
 
@@ -3719,6 +3882,7 @@ final class OfflineMapManager: ObservableObject {
         previewLoadTasks.removeValue(forKey: key)?.cancel()
         packPreviewImages.removeValue(forKey: key)
         unavailablePackPreviews.remove(key)
+        try? SavedMapSnapshotPreviewStore.delete(for: packURL)
     }
 #else
     private func invalidateCachedPreview(for packURL: URL) {}

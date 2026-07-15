@@ -75,6 +75,23 @@ private func hasVisiblePixel(_ image: UIImage) -> Bool {
     }
 }
 
+private func solidPNG(color: UIColor) -> Data {
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    let image = UIGraphicsImageRenderer(
+        size: CGSize(width: 160, height: 96),
+        format: format
+    ).image { context in
+        color.setFill()
+        context.cgContext.fill(CGRect(x: 0, y: 0, width: 160, height: 96))
+    }
+    guard let data = image.pngData() else {
+        fail("test snapshot should encode as PNG")
+    }
+    return data
+}
+
 @main
 struct SavedMapPreviewCatalystTests {
     @MainActor
@@ -120,7 +137,11 @@ struct SavedMapPreviewCatalystTests {
             forKey: "offlineMap.packDisplayNames"
         )
 
-        let manager = OfflineMapManager(defaults: defaults, cacheDirectory: cacheDirectory)
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil }
+        )
         guard manager.displayName(forCachedPack: packURL) == "Shanghai and Suzhou" else {
             fail("source.name should repair the generated saved-map title")
         }
@@ -138,6 +159,163 @@ struct SavedMapPreviewCatalystTests {
         }
         guard hasVisiblePixel(image) else {
             fail("bounds fallback should contain visible rendered pixels")
+        }
+
+        let outlinePNG = solidPNG(color: .systemBlue)
+        let snapshotPNG = solidPNG(color: .systemOrange)
+        let snapshotMapID = "custom-map-snapshot"
+        let snapshotPackURL = cacheDirectory
+            .appendingPathComponent("\(snapshotMapID).zip")
+        let expectedBounds = OfflineMapPreviewBounds(
+            coordinates: [120.90, 30.70, 121.95, 31.55]
+        )!
+        do {
+            let snapshotManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": snapshotMapID,
+                "bounds": [120.90, 30.70, 121.95, 31.55],
+                "preview": [
+                    "type": "boundary-png",
+                    "path": "preview.png",
+                    "width": 160,
+                    "height": 96,
+                    "dataBase64": outlinePNG.base64EncodedString(),
+                ],
+            ])
+            try storedZip(entries: [
+                ("manifest.json", snapshotManifest),
+                ("preview.png", outlinePNG),
+                (
+                    "VECTMAP/\(snapshotMapID)/+0000+0000/1.fmb",
+                    Data("map-block".utf8)
+                ),
+            ]).write(to: snapshotPackURL)
+        } catch {
+            fail("snapshot test pack should write: \(error)")
+        }
+
+        let outlineFallbackManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil }
+        )
+        outlineFallbackManager.loadPreviewIfNeeded(forCachedPack: snapshotPackURL)
+        let outlineDeadline = Date().addingTimeInterval(3)
+        while outlineFallbackManager.previewImage(forCachedPack: snapshotPackURL) == nil &&
+            Date() < outlineDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard outlineFallbackManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+            fail("embedded boundary image should remain the MapKit failure fallback")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
+            fail("an embedded boundary fallback should not be persisted as a map snapshot")
+        }
+
+        var generatedBounds: OfflineMapPreviewBounds?
+        let snapshotManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { bounds in
+                generatedBounds = bounds
+                return snapshotPNG
+            }
+        )
+        snapshotManager.loadPreviewIfNeeded(forCachedPack: snapshotPackURL)
+        let snapshotDeadline = Date().addingTimeInterval(3)
+        while snapshotManager.previewImage(forCachedPack: snapshotPackURL) == nil &&
+            Date() < snapshotDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard generatedBounds == expectedBounds else {
+            fail("snapshot generation should use the downloaded map's exact bounds")
+        }
+        guard snapshotManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+            fail("generated map snapshot should replace the embedded boundary fallback")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == snapshotPNG else {
+            fail("generated map snapshot should persist beside the saved artifact")
+        }
+
+        var restoredGenerationCount = 0
+        let restoredManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                restoredGenerationCount += 1
+                return nil
+            }
+        )
+        restoredManager.loadPreviewIfNeeded(forCachedPack: snapshotPackURL)
+        let restoredDeadline = Date().addingTimeInterval(3)
+        while restoredManager.previewImage(forCachedPack: snapshotPackURL) == nil &&
+            Date() < restoredDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard restoredManager.previewImage(forCachedPack: snapshotPackURL) != nil else {
+            fail("persisted map snapshot should load after relaunch")
+        }
+        guard restoredGenerationCount == 0 else {
+            fail("persisted map snapshot should avoid an unnecessary MapKit request")
+        }
+        restoredManager.deleteCachedPack(at: snapshotPackURL)
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
+            fail("deleting a saved map should delete its persisted snapshot")
+        }
+
+        let cancellationMapID = "custom-map-cancel"
+        let cancellationPackURL = cacheDirectory
+            .appendingPathComponent("\(cancellationMapID).zip")
+        do {
+            let cancellationManifest = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1,
+                "mapId": cancellationMapID,
+                "bounds": [120.91, 30.71, 121.94, 31.54],
+            ])
+            try storedZip(entries: [
+                ("manifest.json", cancellationManifest),
+                (
+                    "VECTMAP/\(cancellationMapID)/+0000+0000/1.fmb",
+                    Data("map-block".utf8)
+                ),
+            ]).write(to: cancellationPackURL)
+        } catch {
+            fail("cancellation test pack should write: \(error)")
+        }
+        var snapshotStarted = false
+        var snapshotCancelled = false
+        let cancellationManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                snapshotStarted = true
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                    return snapshotPNG
+                } catch is CancellationError {
+                    snapshotCancelled = true
+                    throw CancellationError()
+                }
+            }
+        )
+        cancellationManager.loadPreviewIfNeeded(forCachedPack: cancellationPackURL)
+        let startedDeadline = Date().addingTimeInterval(3)
+        while !snapshotStarted && Date() < startedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard snapshotStarted else {
+            fail("snapshot generation should start for a previewable map")
+        }
+        cancellationManager.deleteCachedPack(at: cancellationPackURL)
+        let cancelledDeadline = Date().addingTimeInterval(3)
+        while !snapshotCancelled && Date() < cancelledDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard snapshotCancelled else {
+            fail("deleting a map should cancel its in-flight snapshot")
+        }
+        guard SavedMapSnapshotPreviewStore.imageData(for: cancellationPackURL) == nil else {
+            fail("a cancelled snapshot must not recreate a deleted map's thumbnail")
         }
 
         print("SavedMapPreviewCatalystTests passed")
