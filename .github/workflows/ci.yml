@@ -5,6 +5,35 @@ on:
   pull_request:
 
 jobs:
+  app-store-screenshots:
+    name: App Store Screenshots
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ios-app/AppStoreScreenshots
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.11"
+      - name: Install dependencies without lifecycle scripts
+        run: bun install --ignore-scripts --frozen-lockfile
+      - name: Audit dependencies
+        run: bun audit
+      - name: Unit tests
+        run: bun test
+      - name: Build generator
+        run: bun run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+      - name: Validate committed exports
+        run: >-
+          bun x tsx scripts/validate-exports.ts
+          --dir exports/app-store-screenshots/screenshots
+          --allow 1242x2688
+          --output /tmp/app-store-screenshots-validation.txt
+          --json /tmp/app-store-screenshots-validation.json
+
   esp32:
     name: ESP32 (${{ matrix.target }})
     runs-on: ubuntu-latest

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="466" height="466" viewBox="0 0 466 466" role="img" aria-labelledby="title desc">
+  <title id="title">BikeComputer device navigation screen mockup</title>
+  <desc id="desc">A square AMOLED-style navigation screen showing a Shibuya route instruction, distance, and turn arrow.</desc>
+  <defs>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="screenShade" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#050505"/>
+      <stop offset="0.55" stop-color="#000000"/>
+      <stop offset="1" stop-color="#080808"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="466" height="466" rx="58" fill="url(#screenShade)"/>
+
+  <g opacity="0.9">
+    <text x="24" y="34" fill="#f7f7f7" font-family="Inter, Helvetica, Arial, sans-serif" font-size="22" font-weight="500">12:31</text>
+    <circle cx="349" cy="24" r="4" fill="#ffffff"/>
+    <circle cx="363" cy="24" r="4" fill="#ffffff" opacity="0.75"/>
+    <circle cx="377" cy="24" r="4" fill="#ffffff" opacity="0.45"/>
+    <rect x="408" y="17" width="34" height="14" rx="4" fill="none" stroke="#ffffff" stroke-width="2"/>
+    <rect x="443" y="21" width="3" height="6" rx="1.5" fill="#ffffff"/>
+    <rect x="412" y="20" width="24" height="8" rx="2" fill="#ffffff"/>
+  </g>
+
+  <text x="233" y="93" fill="#ffffff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="42" font-weight="700" text-anchor="middle">Turn right</text>
+  <text x="233" y="140" fill="#ffffff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="34" font-weight="500" text-anchor="middle">toward</text>
+  <text x="233" y="183" fill="#ffffff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="36" font-weight="700" text-anchor="middle">Shibuya Crossing</text>
+
+  <text x="233" y="276" fill="#ffffff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="74" font-weight="700" text-anchor="middle">180 m</text>
+
+  <g transform="translate(232 372) rotate(42)" filter="url(#softGlow)">
+    <path d="M-92 -18 H34 V-55 L98 0 34 55 V18 H-92 Z" fill="#ff1717"/>
+    <path d="M-92 -18 H34 V-55 L98 0 34 55 V18 H-92 Z" fill="none" stroke="#ff4a4a" stroke-width="3" opacity="0.55"/>
+  </g>
+
+  <rect x="165" y="438" width="136" height="5" rx="2.5" fill="#4a4a4a"/>
+</svg>
