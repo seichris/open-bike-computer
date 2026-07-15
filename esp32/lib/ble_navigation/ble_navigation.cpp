@@ -62,6 +62,7 @@ static Preferences settingsPrefs;
 static NavigationData currentNavData = {0, 0, ""};
 static volatile bool navDataUpdated = false;
 static volatile int16_t phoneBatteryLevelPercent = -1;
+static volatile bool phoneBatteryCharging = false;
 static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsBatteryStatusScreen = false;
@@ -83,6 +84,7 @@ bool hasCurrentNavigationData() {
 }
 
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
+bool isPhoneBatteryCharging() { return phoneBatteryCharging; }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
   return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
@@ -415,6 +417,7 @@ static void handleAuthPayload(const std::string &value) {
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
+    phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
     if (!hmacSha256Hex(message, mac, sizeof(mac))) {
       Serial.println("BLE: Failed to compute auth response");
@@ -1405,6 +1408,17 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: phoneBatteryLevel = %d%%\n",
                   phoneBatteryLevelPercent);
     return;
+  case 24:
+    if (settingValue < 0 || settingValue > 1) {
+      Serial.printf("BLE Settings: rejected phone charging state %ld from %s\n",
+                    (long)settingValue,
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+    phoneBatteryCharging = settingValue == 1;
+    Serial.printf("BLE Settings: phoneBatteryCharging = %s\n",
+                  phoneBatteryCharging ? "yes" : "no");
+    return;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -1445,6 +1459,7 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
+    phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
     bleDebugStats.connected = true;
     bleDebugStats.authenticated = false;
@@ -1471,6 +1486,7 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsBatteryStatusScreen = false;
     phoneBatteryLevelPercent = -1;
+    phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
     activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     bleDebugStats.connected = false;

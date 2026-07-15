@@ -27,6 +27,7 @@ bool isAvailable();
 bool readRegister(uint8_t reg, uint8_t &value);
 bool writeRegister(uint8_t reg, uint8_t value);
 bool readPowerStatus(PowerStatus &status);
+bool readBatteryStatus(uint8_t &percentage, bool &charging);
 bool readBatteryPercentage(uint8_t &percentage);
 bool setPowerButtonShortPressMonitoring(bool enabled);
 bool readAndClearPowerButtonShortPress(bool &pressed);

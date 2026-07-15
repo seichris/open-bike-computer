@@ -19,7 +19,8 @@
  */
 Battery::Battery()
     : batteryMax(4.2f), batteryMin(3.6f), lastBatteryReadMs(0),
-      cachedBatteryPercentage(0), cachedBatteryPercentageValid(false) {}
+      cachedBatteryPercentage(0), cachedBatteryCharging(false),
+      cachedBatteryPercentageValid(false) {}
 
 /**
  * @brief Configure ADC Channel for battery reading
@@ -88,23 +89,25 @@ float Battery::readLegacyBattery()
   return (output <= 160) ? output : 0.0f;
 }
 
-bool Battery::readBatteryPercent(uint8_t &percentage) {
+bool Battery::readBatteryStatus(uint8_t &percentage, bool &charging) {
   const uint32_t now = millis();
   if (lastBatteryReadMs != 0 &&
       now - lastBatteryReadMs < BATTERY_READ_INTERVAL_MS) {
     if (cachedBatteryPercentageValid) {
       percentage = cachedBatteryPercentage;
+      charging = cachedBatteryCharging;
     }
     return cachedBatteryPercentageValid;
   }
 
   lastBatteryReadMs = now;
   uint8_t latestPercentage = 0;
+  bool latestCharging = false;
   bool readSucceeded = false;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  readSucceeded =
-      waveshare_board::axp2101::readBatteryPercentage(latestPercentage);
+  readSucceeded = waveshare_board::axp2101::readBatteryStatus(
+      latestPercentage, latestCharging);
 #elif defined(ADC1) || defined(ADC2)
   const float rawLevel = readLegacyBattery();
   if (isfinite(rawLevel)) {
@@ -120,8 +123,15 @@ bool Battery::readBatteryPercent(uint8_t &percentage) {
   }
 
   cachedBatteryPercentage = latestPercentage;
+  cachedBatteryCharging = latestCharging;
   percentage = cachedBatteryPercentage;
+  charging = cachedBatteryCharging;
   return true;
+}
+
+bool Battery::readBatteryPercent(uint8_t &percentage) {
+  bool charging = false;
+  return readBatteryStatus(percentage, charging);
 }
 
 float Battery::readBattery() {

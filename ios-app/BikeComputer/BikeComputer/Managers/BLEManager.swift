@@ -70,6 +70,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationStreetLineWidthBoostSettingID: UInt8 = 21
     static let mapPlusNavigationPositionMarkerScaleSettingID: UInt8 = 22
     static let phoneBatteryLevelSettingID: UInt8 = 23
+    static let phoneBatteryChargingSettingID: UInt8 = 24
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -86,6 +87,10 @@ enum DeviceBLEProtocol {
     static func phoneBatteryPercentage(from batteryLevel: Float) -> Int32? {
         guard batteryLevel >= 0, batteryLevel <= 1 else { return nil }
         return Int32((batteryLevel * 100).rounded())
+    }
+
+    static func phoneBatteryChargingValue(isCharging: Bool) -> Int32 {
+        isCharging ? 1 : 0
     }
 
     static func hardwareLabel(model: String?, hardware: String?) -> String {
@@ -540,6 +545,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentMapNavigationProfileForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
+    private var lastSentPhoneBatteryCharging: Bool?
     private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
@@ -608,8 +614,14 @@ class BLEManager: NSObject, ObservableObject {
         UIDevice.current.isBatteryMonitoringEnabled = true
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(phoneBatteryLevelDidChange(_:)),
+            selector: #selector(phoneBatteryStatusDidChange(_:)),
             name: UIDevice.batteryLevelDidChangeNotification,
+            object: UIDevice.current
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(phoneBatteryStatusDidChange(_:)),
+            name: UIDevice.batteryStateDidChangeNotification,
             object: UIDevice.current
         )
         centralManager = CBCentralManager(delegate: self, queue: nil)
@@ -627,12 +639,17 @@ class BLEManager: NSObject, ObservableObject {
             name: UIDevice.batteryLevelDidChangeNotification,
             object: UIDevice.current
         )
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UIDevice.batteryStateDidChangeNotification,
+            object: UIDevice.current
+        )
 #endif
     }
 
 #if canImport(UIKit) && !HOST_TESTING
-    @objc private func phoneBatteryLevelDidChange(_ notification: Notification) {
-        sendPhoneBatteryLevel()
+    @objc private func phoneBatteryStatusDidChange(_ notification: Notification) {
+        sendPhoneBatteryStatus()
     }
 #endif
     
@@ -1096,26 +1113,38 @@ class BLEManager: NSObject, ObservableObject {
     }
 
 #if canImport(UIKit) && !HOST_TESTING
-    private func sendPhoneBatteryLevel(force: Bool = false) {
+    private func sendPhoneBatteryStatus(force: Bool = false) {
         guard isConnected,
               isNavigationReady,
               let percentage = DeviceBLEProtocol.phoneBatteryPercentage(
                 from: UIDevice.current.batteryLevel
-              ),
-              force || percentage != lastSentPhoneBatteryPercent else {
+              ) else {
             return
         }
 
-        if sendSettingPacket(
+        if (force || percentage != lastSentPhoneBatteryPercent),
+           sendSettingPacket(
             id: DeviceBLEProtocol.phoneBatteryLevelSettingID,
             value: percentage,
             label: "phone battery level"
-        ) {
+           ) {
             lastSentPhoneBatteryPercent = percentage
+        }
+
+        let isCharging = UIDevice.current.batteryState == .charging
+        if (force || isCharging != lastSentPhoneBatteryCharging),
+           sendSettingPacket(
+            id: DeviceBLEProtocol.phoneBatteryChargingSettingID,
+            value: DeviceBLEProtocol.phoneBatteryChargingValue(
+                isCharging: isCharging
+            ),
+            label: "phone charging state"
+           ) {
+            lastSentPhoneBatteryCharging = isCharging
         }
     }
 #else
-    private func sendPhoneBatteryLevel(force: Bool = false) {}
+    private func sendPhoneBatteryStatus(force: Bool = false) {}
 #endif
 
     private static func isLegacyMapProfileSetting(_ id: UInt8) -> Bool {
@@ -1620,6 +1649,7 @@ class BLEManager: NSObject, ObservableObject {
         authWriteState = .idle
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         authRetryTimer?.invalidate()
         authRetryTimer = nil
         authTimeoutTimer?.invalidate()
@@ -1687,6 +1717,7 @@ class BLEManager: NSObject, ObservableObject {
         authWriteState = .idle
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
         lastNavigationQueuePendingLogAt = .distantPast
@@ -1959,7 +1990,7 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
         sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
                     value: disconnectedSleepTimeout.settingValue)
-        sendPhoneBatteryLevel(force: true)
+        sendPhoneBatteryStatus(force: true)
         requestDeviceTransferStatus()
         requestMapTransferStatus()
     }
@@ -2229,6 +2260,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         isNavigationReady = false
         lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         peripheralName = peripheral.name ?? "BikeComputer"
         startMonitoringRSSI()
         startAuthenticationTimeout(for: peripheral)
@@ -2270,6 +2302,7 @@ extension BLEManager: CBCentralManagerDelegate {
         authWriteState = .idle
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
+        lastSentPhoneBatteryCharging = nil
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         stopMonitoringRSSI()

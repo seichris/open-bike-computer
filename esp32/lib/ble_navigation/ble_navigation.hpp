@@ -32,8 +32,9 @@ struct NavigationData {
 /**
  * @brief Map rendering settings (configurable via BLE from iOS app)
  * IDs 1,2,3,7,8,9,10 configure the Map screen. IDs 16-22 configure
- * Map + Navigation. IDs 4,6,11-15 configure shared/device behavior, and ID 23
- * carries the connected phone's transient battery percentage.
+ * Map + Navigation. IDs 4,6,11-15 configure shared/device behavior, and IDs
+ * 23-24 carry the connected phone's transient battery percentage and charging
+ * state.
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
@@ -116,6 +117,7 @@ const ScreenMapRenderSettings &currentMapStyleSettings();
 NavigationData getCurrentNavigationData();
 bool hasCurrentNavigationData();
 int16_t getPhoneBatteryLevelPercent();
+bool isPhoneBatteryCharging();
 
 struct BLEDebugStats {
   bool initialized = false;

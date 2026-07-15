@@ -21,6 +21,7 @@ private:
   static constexpr uint32_t BATTERY_READ_INTERVAL_MS = 5000;
   uint32_t lastBatteryReadMs;
   uint8_t cachedBatteryPercentage;
+  bool cachedBatteryCharging;
   bool cachedBatteryPercentageValid;
 
   float readLegacyBattery();
@@ -31,5 +32,6 @@ public:
   void initADC();
   void setBatteryLevels(float maxVoltage, float minVoltage);
   float readBattery();
+  bool readBatteryStatus(uint8_t &percentage, bool &charging);
   bool readBatteryPercent(uint8_t &percentage);
 };

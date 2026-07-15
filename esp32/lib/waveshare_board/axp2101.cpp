@@ -105,7 +105,8 @@ bool readPowerStatus(PowerStatus &status) {
   return true;
 }
 
-bool readBatteryPercentage(uint8_t &percentage) {
+bool readBatteryStatus(uint8_t &percentage, bool &charging) {
+  charging = false;
   if (!pmuAvailable && !begin()) {
     return false;
   }
@@ -122,7 +123,16 @@ bool readBatteryPercentage(uint8_t &percentage) {
   }
 
   percentage = rawPercentage;
+  // REG 01H[2:0] values 0-3 are trickle, pre-charge, constant-current,
+  // and constant-voltage charging. Require valid VBUS as well so a stale
+  // charge phase cannot leave the UI showing external power.
+  charging = status.vbusGood && status.chargingStatus <= 3;
   return true;
+}
+
+bool readBatteryPercentage(uint8_t &percentage) {
+  bool charging = false;
+  return readBatteryStatus(percentage, charging);
 }
 
 bool setPowerButtonShortPressMonitoring(bool enabled) {
