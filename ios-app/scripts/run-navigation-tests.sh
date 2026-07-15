@@ -28,3 +28,22 @@ xcrun swiftc \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"
+
+CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
+MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+IOS_SUPPORT="${MACOS_SDK}/System/iOSSupport"
+
+xcrun swiftc \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios15.0-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CATALYST_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
+  ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
+
+"${CATALYST_OUT}"

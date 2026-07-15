@@ -77,13 +77,12 @@ struct SavedDestination: Codable, Identifiable, Equatable {
     }
 
     fileprivate func matches(_ other: SavedDestination) -> Bool {
-        if name.caseInsensitiveCompare(other.name) == .orderedSame {
-            return true
+        if let coordinate, let otherCoordinate = other.coordinate {
+            return abs(coordinate.latitude - otherCoordinate.latitude) < 0.00001 &&
+                abs(coordinate.longitude - otherCoordinate.longitude) < 0.00001
         }
 
-        guard let coordinate, let otherCoordinate = other.coordinate else { return false }
-        return abs(coordinate.latitude - otherCoordinate.latitude) < 0.00001 &&
-            abs(coordinate.longitude - otherCoordinate.longitude) < 0.00001
+        return name.caseInsensitiveCompare(other.name) == .orderedSame
     }
 }
 
@@ -107,15 +106,15 @@ final class SavedDestinationStore: ObservableObject {
 
         favoriteDestinations = Self.loadDestinations(forKey: Self.favoritesKey, from: defaults)
 
+        let legacyRecents = Self.loadLegacyRecents(from: defaults)
         if let storedRecents = Self.loadDestinationData(forKey: Self.recentsKey, from: defaults) {
-            recentDestinations = Array(storedRecents.prefix(self.recentLimit))
-        } else {
-            recentDestinations = Array(
-                (defaults.stringArray(forKey: Self.legacyRecentsKey) ?? [])
-                    .map { SavedDestination(name: $0) }
-                    .filter { !$0.name.isEmpty }
-                    .prefix(self.recentLimit)
+            recentDestinations = Self.reconciledRecents(
+                stored: storedRecents,
+                legacy: legacyRecents,
+                limit: self.recentLimit
             )
+        } else {
+            recentDestinations = Array(legacyRecents.prefix(self.recentLimit))
         }
 
         persist()
@@ -170,7 +169,7 @@ final class SavedDestinationStore: ObservableObject {
         }
 
         // Keep the previous string-only key current so app downgrades retain useful history.
-        defaults.set(recentDestinations.map(\.name), forKey: Self.legacyRecentsKey)
+        defaults.set(Self.legacyNames(for: recentDestinations), forKey: Self.legacyRecentsKey)
     }
 
     private static func loadDestinations(forKey key: String, from defaults: UserDefaults) -> [SavedDestination] {
@@ -183,5 +182,51 @@ final class SavedDestinationStore: ObservableObject {
             return nil
         }
         return destinations.filter { !$0.name.isEmpty }
+    }
+
+    private static func loadLegacyRecents(from defaults: UserDefaults) -> [SavedDestination] {
+        (defaults.stringArray(forKey: legacyRecentsKey) ?? [])
+            .map { SavedDestination(name: $0) }
+            .filter { !$0.name.isEmpty }
+    }
+
+    /// Merges changes made by older app versions into the coordinate-rich history.
+    /// The legacy key is kept current for downgrade compatibility, so a different
+    /// ordering means an older build has written newer history since our last run.
+    private static func reconciledRecents(
+        stored: [SavedDestination],
+        legacy: [SavedDestination],
+        limit: Int
+    ) -> [SavedDestination] {
+        guard !legacy.isEmpty else { return Array(stored.prefix(limit)) }
+
+        let storedNames = legacyNames(for: stored).map { $0.lowercased() }
+        let legacyNames = legacy.map { $0.name.lowercased() }
+        guard storedNames != legacyNames else { return Array(stored.prefix(limit)) }
+
+        var unmatchedStored = stored
+        var reconciled: [SavedDestination] = []
+
+        for legacyDestination in legacy {
+            if let index = unmatchedStored.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(legacyDestination.name) == .orderedSame
+            }) {
+                reconciled.append(unmatchedStored.remove(at: index))
+            } else {
+                reconciled.append(legacyDestination)
+            }
+        }
+
+        reconciled.append(contentsOf: unmatchedStored)
+        return Array(reconciled.prefix(limit))
+    }
+
+    private static func legacyNames(for destinations: [SavedDestination]) -> [String] {
+        destinations.reduce(into: []) { names, destination in
+            guard !names.contains(where: {
+                $0.caseInsensitiveCompare(destination.name) == .orderedSame
+            }) else { return }
+            names.append(destination.name)
+        }
     }
 }

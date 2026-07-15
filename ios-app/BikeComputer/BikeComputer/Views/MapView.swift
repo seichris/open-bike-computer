@@ -16,6 +16,28 @@ final class DestinationAnnotation: MKPointAnnotation {
     var calloutAddress = ""
 }
 
+@MainActor
+enum DestinationCalloutLabel {
+    static let preferredWidth: CGFloat = 240
+
+    static func make(address: String) -> UILabel {
+        let label = UILabel()
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.adjustsFontForContentSizeCategory = true
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.preferredMaxLayoutWidth = preferredWidth
+        label.setContentCompressionResistancePriority(.required, for: .vertical)
+        update(label, address: address)
+        return label
+    }
+
+    static func update(_ label: UILabel, address: String) {
+        label.text = address
+        label.invalidateIntrinsicContentSize()
+    }
+}
+
 // MARK: - Simulated Position Annotation
 
 class SimulatedPositionAnnotation: MKPointAnnotation {}
@@ -444,8 +466,7 @@ struct MapViewContainer: UIViewRepresentable {
                   let addressLabel = annotationView.detailCalloutAccessoryView as? UILabel else { return }
 
             let calloutWasVisible = annotationView.isSelected
-            addressLabel.text = address
-            addressLabel.invalidateIntrinsicContentSize()
+            DestinationCalloutLabel.update(addressLabel, address: address)
 
             // MapKit measures the standard callout when it first appears. The
             // placeholder is one line tall, so rebuild a visible callout after
@@ -525,14 +546,7 @@ struct MapViewContainer: UIViewRepresentable {
                     annotationView?.annotation = annotation
                 }
 
-                let addressLabel = UILabel()
-                addressLabel.font = .preferredFont(forTextStyle: .subheadline)
-                addressLabel.adjustsFontForContentSizeCategory = true
-                addressLabel.numberOfLines = 0
-                addressLabel.lineBreakMode = .byWordWrapping
-                addressLabel.text = destinationAnnotation.calloutAddress
-                addressLabel.preferredMaxLayoutWidth = 240
-                addressLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+                let addressLabel = DestinationCalloutLabel.make(address: destinationAnnotation.calloutAddress)
                 annotationView?.detailCalloutAccessoryView = addressLabel
                 
                 return annotationView
