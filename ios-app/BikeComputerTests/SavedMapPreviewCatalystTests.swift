@@ -127,6 +127,79 @@ private func solidPNG(color: UIColor) -> Data {
     return data
 }
 
+private func cropFixtureImage() -> UIImage {
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 2
+    format.opaque = true
+    return UIGraphicsImageRenderer(
+        size: CGSize(width: 160, height: 96),
+        format: format
+    ).image { context in
+        UIColor(red: 0.75, green: 0.05, blue: 0.05, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 0, y: 0, width: 160, height: 96))
+        UIColor(red: 0.05, green: 0.25, blue: 0.75, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 30, y: 0, width: 100, height: 96))
+        UIColor(red: 0.95, green: 0.75, blue: 0.05, alpha: 1).setFill()
+        context.cgContext.fill(CGRect(x: 75, y: 0, width: 10, height: 96))
+        UIColor.white.setFill()
+        context.cgContext.fill(CGRect(x: 30, y: 44, width: 100, height: 8))
+    }
+}
+
+private func pixel(
+    in image: UIImage,
+    x: Int,
+    y: Int
+) -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)? {
+    guard let source = image.cgImage,
+          x >= 0, x < source.width,
+          y >= 0, y < source.height,
+          let pixels = rgbaPixels(image) else {
+        return nil
+    }
+    let offset = (y * source.width + x) * 4
+    return (
+        pixels[offset],
+        pixels[offset + 1],
+        pixels[offset + 2],
+        pixels[offset + 3]
+    )
+}
+
+private func hasMeaningfulVisualVariation(_ image: UIImage) -> Bool {
+    guard let source = image.cgImage,
+          let pixels = rgbaPixels(image) else {
+        return false
+    }
+    let pixelCount = source.width * source.height
+    let sampleStride = max(1, pixelCount / 4_096)
+    var quantizedColors = Set<UInt32>()
+    var minimum = [UInt8](repeating: .max, count: 3)
+    var maximum = [UInt8](repeating: .min, count: 3)
+    for index in stride(from: 0, to: pixelCount, by: sampleStride) {
+        let offset = index * 4
+        guard pixels[offset + 3] >= 128 else { continue }
+        let red = pixels[offset]
+        let green = pixels[offset + 1]
+        let blue = pixels[offset + 2]
+        minimum[0] = min(minimum[0], red)
+        minimum[1] = min(minimum[1], green)
+        minimum[2] = min(minimum[2], blue)
+        maximum[0] = max(maximum[0], red)
+        maximum[1] = max(maximum[1], green)
+        maximum[2] = max(maximum[2], blue)
+        quantizedColors.insert(
+            UInt32(red >> 4) << 8 |
+                UInt32(green >> 4) << 4 |
+                UInt32(blue >> 4)
+        )
+    }
+    let widestChannelRange = zip(minimum, maximum)
+        .map { Int($0.1) - Int($0.0) }
+        .max() ?? 0
+    return quantizedColors.count >= 3 && widestChannelRange >= 24
+}
+
 @main
 struct SavedMapPreviewCatalystTests {
     @MainActor
@@ -451,26 +524,6 @@ struct SavedMapPreviewCatalystTests {
             fail("a late snapshot must not persist after its map was deleted")
         }
 
-        let liveSnapshotTask = Task { @MainActor in
-            try await OfflineMapSnapshotPreviewRenderer.pngData(for: expectedBounds)
-        }
-        let liveSnapshotTimeout = Task {
-            try? await Task.sleep(nanoseconds: 15_000_000_000)
-            liveSnapshotTask.cancel()
-        }
-        let liveSnapshotData: Data
-        do {
-            guard let data = try await liveSnapshotTask.value else {
-                fail("production MapKit renderer should return a cropped PNG")
-            }
-            liveSnapshotData = data
-        } catch {
-            fail("production MapKit renderer should complete: \(error)")
-        }
-        liveSnapshotTimeout.cancel()
-        guard let liveSnapshotImage = UIImage(data: liveSnapshotData) else {
-            fail("production MapKit renderer output should decode")
-        }
         let northWest = MKMapPoint(CLLocationCoordinate2D(
             latitude: expectedBounds.maxLatitude,
             longitude: expectedBounds.minLongitude
@@ -481,18 +534,75 @@ struct SavedMapPreviewCatalystTests {
         ))
         let expectedAspectRatio = abs(southEast.x - northWest.x) /
             abs(southEast.y - northWest.y)
-        let actualAspectRatio = liveSnapshotImage.size.width / liveSnapshotImage.size.height
-        guard abs(actualAspectRatio - expectedAspectRatio) / expectedAspectRatio < 0.05 else {
-            fail("production MapKit renderer should crop to the selected bounds aspect ratio")
+        guard let croppedFixture = OfflineMapSnapshotPreviewRenderer.croppedImage(
+            from: cropFixtureImage(),
+            northWestPoint: CGPoint(x: 30, y: 0),
+            southEastPoint: CGPoint(x: 130, y: 96)
+        ) else {
+            fail("production crop helper should crop a deterministic snapshot fixture")
         }
-        guard liveSnapshotImage.size.width <= 160,
-              liveSnapshotImage.size.height <= 96,
-              !imageMatchesPNG(liveSnapshotImage, data: outlinePNG) else {
-            fail(
-                "production MapKit renderer should return map content within thumbnail limits " +
-                    "(size: \(liveSnapshotImage.size), outline: " +
-                    "\(imageMatchesPNG(liveSnapshotImage, data: outlinePNG)))"
-            )
+        guard croppedFixture.size == CGSize(width: 100, height: 96),
+              let bluePixel = pixel(in: croppedFixture, x: 5, y: 20),
+              Int(bluePixel.blue) > Int(bluePixel.red) + 80,
+              let yellowPixel = pixel(in: croppedFixture, x: 50, y: 20),
+              yellowPixel.red > 180,
+              yellowPixel.green > 140,
+              yellowPixel.blue < 100,
+              let whitePixel = pixel(in: croppedFixture, x: 5, y: 48),
+              whitePixel.red > 220,
+              whitePixel.green > 220,
+              whitePixel.blue > 220 else {
+            fail("production crop helper should return only the selected fixture area")
+        }
+        guard OfflineMapSnapshotPreviewRenderer.croppedImage(
+            from: cropFixtureImage(),
+            northWestPoint: CGPoint(x: 40, y: 40),
+            southEastPoint: CGPoint(x: 40, y: 40)
+        ) == nil else {
+            fail("production crop helper should reject an empty selected area")
+        }
+        guard hasMeaningfulVisualVariation(croppedFixture),
+              let blankImage = UIImage(data: solidPNG(color: .systemGray)),
+              !hasMeaningfulVisualVariation(blankImage) else {
+            fail("map content validation should reject uniform placeholder images")
+        }
+
+        if ProcessInfo.processInfo.environment["RUN_LIVE_MAPKIT_SNAPSHOT_TESTS"] == "1" {
+            let liveSnapshotTask = Task { @MainActor in
+                try await OfflineMapSnapshotPreviewRenderer.pngData(for: expectedBounds)
+            }
+            let liveSnapshotTimeout = Task {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                liveSnapshotTask.cancel()
+            }
+            let liveSnapshotData: Data
+            do {
+                guard let data = try await liveSnapshotTask.value else {
+                    fail("production MapKit renderer should return a cropped PNG")
+                }
+                liveSnapshotData = data
+            } catch {
+                fail("production MapKit renderer should complete: \(error)")
+            }
+            liveSnapshotTimeout.cancel()
+            guard let liveSnapshotImage = UIImage(data: liveSnapshotData) else {
+                fail("production MapKit renderer output should decode")
+            }
+            let actualAspectRatio = liveSnapshotImage.size.width /
+                liveSnapshotImage.size.height
+            guard abs(actualAspectRatio - expectedAspectRatio) / expectedAspectRatio < 0.05 else {
+                fail("production MapKit renderer should crop to the selected bounds aspect ratio")
+            }
+            guard liveSnapshotImage.size.width <= 160,
+                  liveSnapshotImage.size.height <= 96,
+                  hasMeaningfulVisualVariation(liveSnapshotImage) else {
+                fail(
+                    "production MapKit renderer should return varied map content within " +
+                        "thumbnail limits (size: \(liveSnapshotImage.size))"
+                )
+            }
+        } else {
+            print("Skipping opt-in live MapKit snapshot smoke test")
         }
 
         print("SavedMapPreviewCatalystTests passed")

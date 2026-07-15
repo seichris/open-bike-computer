@@ -82,9 +82,9 @@ enum OfflineMapSnapshotPreviewRenderer {
         }
         try Task.checkCancellation()
         guard let croppedImage = croppedImage(
-            from: snapshot,
-            northWest: northWestCoordinate,
-            southEast: southEastCoordinate
+            from: snapshot.image,
+            northWestPoint: snapshot.point(for: northWestCoordinate),
+            southEastPoint: snapshot.point(for: southEastCoordinate)
         ) else {
             return nil
         }
@@ -95,15 +95,13 @@ enum OfflineMapSnapshotPreviewRenderer {
     }
 
 #if canImport(UIKit) && canImport(MapKit)
-    private static func croppedImage(
-        from snapshot: MKMapSnapshotter.Snapshot,
-        northWest: CLLocationCoordinate2D,
-        southEast: CLLocationCoordinate2D
+    static func croppedImage(
+        from image: UIImage,
+        northWestPoint: CGPoint,
+        southEastPoint: CGPoint
     ) -> UIImage? {
-        guard let source = snapshot.image.cgImage else { return nil }
-        let scale = snapshot.image.scale
-        let northWestPoint = snapshot.point(for: northWest)
-        let southEastPoint = snapshot.point(for: southEast)
+        guard let source = image.cgImage else { return nil }
+        let scale = image.scale
         let minimumX = max(
             0,
             ceil(min(northWestPoint.x, southEastPoint.x) * scale)
@@ -132,7 +130,7 @@ enum OfflineMapSnapshotPreviewRenderer {
         let croppedImage = UIImage(
             cgImage: cropped,
             scale: scale,
-            orientation: snapshot.image.imageOrientation
+            orientation: image.imageOrientation
         )
         let normalizedSize = CGSize(
             width: min(160, max(1, floor(croppedImage.size.width))),
