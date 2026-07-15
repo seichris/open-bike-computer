@@ -46,6 +46,10 @@ class BoundaryPreviewTests(unittest.TestCase):
         )
 
         self.assert_valid_preview(data)
+        with Image.open(io.BytesIO(data)) as image:
+            self.assertGreater(image.getpixel((56, 72))[3], 0)
+            self.assertEqual(image.getpixel((80, 48))[3], 0)
+            self.assertGreater(image.getpixel((104, 24))[3], 0)
 
     def test_invalid_and_antimeridian_geometry_fall_back_to_bounds(self):
         invalid = render_boundary_preview(
@@ -64,6 +68,8 @@ class BoundaryPreviewTests(unittest.TestCase):
 
         self.assert_valid_preview(invalid)
         self.assert_valid_preview(antimeridian)
+        self.assertEqual(invalid, render_boundary_preview(None, Bounds(100, 0, 110, 10)))
+        self.assertEqual(antimeridian, render_boundary_preview(None, Bounds(170, 0, 180, 2)))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,10 @@ from map_platform.map_stream import (
 TEST_KEY_ID = "map-test-2026-01"
 TEST_PAYLOAD = b"FMB\x01\x00\x00\x00\x00"
 TEST_PRIVATE_VALUE = 1
+TEST_PREVIEW_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def build_vector() -> dict[str, str]:
@@ -46,6 +50,14 @@ def build_vector() -> dict[str, str]:
         "producer": {
             "buildSha256": "1" * 64,
             "imageDigest": "sha256:" + "2" * 64,
+        },
+        "preview": {
+            "background": "transparent",
+            "dataBase64": TEST_PREVIEW_BASE64,
+            "height": 1,
+            "path": "preview.png",
+            "type": "boundary-png",
+            "width": 1,
         },
         "schemaVersion": 1,
         "target": {

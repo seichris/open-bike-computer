@@ -108,6 +108,62 @@ class SourceAndJobTests(unittest.TestCase):
         self.assertEqual(source.local_path, "backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
         self.assertEqual(source.preview_geometry["type"], "Polygon")
 
+    def test_static_geofabrik_source_is_enriched_with_catalog_preview_geometry(self):
+        from map_platform.geofabrik_sources import GeofabrikSourceProvider
+
+        geometry = {
+            "type": "Polygon",
+            "coordinates": [[[98, -1.8], [120.2, -1.8], [120.2, 7.6], [98, 7.6], [98, -1.8]]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = Path(tmp) / "geofabrik-index-v1.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "id": "asia/malaysia-singapore-brunei",
+                                    "name": "Malaysia, Singapore, and Brunei",
+                                    "urls": {
+                                        "pbf": (
+                                            "https://download.geofabrik.de/asia/"
+                                            "malaysia-singapore-brunei-latest.osm.pbf"
+                                        )
+                                    },
+                                },
+                                "geometry": geometry,
+                            }
+                        ],
+                    }
+                )
+            )
+            provider = GeofabrikSourceProvider(catalog_path.as_uri(), cache_path=Path(tmp) / "cache.json")
+            source_index_path = Path(__file__).resolve().parents[1] / "config" / "source-regions.json"
+            index = SourceIndex.from_json(source_index_path, fallback_provider=provider)
+
+            source = index.resolve_for_bounds(Bounds(103.75, 1.24, 103.93, 1.37))
+
+        self.assertEqual(source.id, "geofabrik-asia-malaysia-singapore-brunei")
+        self.assertEqual(source.local_path, "backend/data/source-pbf/malaysia-singapore-brunei-latest.osm.pbf")
+        self.assertEqual(source.preview_geometry, geometry)
+
+    def test_static_source_still_resolves_when_preview_catalog_is_unavailable(self):
+        class UnavailableProvider:
+            def source_regions(self):
+                raise SourceResolutionError("catalog unavailable")
+
+            def resolve_for_bounds(self, bounds):
+                raise SourceResolutionError("catalog unavailable")
+
+        index = SourceIndex([self.singapore], fallback_provider=UnavailableProvider())
+
+        source = index.resolve_for_bounds(Bounds(103.75, 1.24, 103.93, 1.37))
+
+        self.assertEqual(source, self.singapore)
+
     def test_geofabrik_preview_geometry_is_persisted_but_not_public(self):
         source = SourceRegion(
             id="geofabrik-sg",

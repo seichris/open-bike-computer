@@ -213,6 +213,12 @@ nonisolated enum MapArchiveUploadFallback {
     }
 }
 
+nonisolated enum MapArchiveUploadStrategy {
+    static func requiresForegroundUpload(for archive: OfflineMapPackArchive) -> Bool {
+        archive.entries.contains { $0.path == "preview.png" }
+    }
+}
+
 private enum PreparedMapTransfer {
     case stream(VerifiedBikeMapArtifact, SavedMapArtifactMetadata)
     case archive(OfflineMapPackArchive, mapID: String, sessionID: String)
@@ -899,8 +905,9 @@ final class OfflineMapManager: ObservableObject {
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
 #if canImport(UIKit)
-    private var packPreviewImages: [String: UIImage] = [:]
+    @Published private var packPreviewImages: [String: UIImage] = [:]
     private var unavailablePackPreviews: Set<String> = []
+    private var previewLoadTasks: [String: Task<Void, Never>] = [:]
 #endif
 
     init(
@@ -1270,6 +1277,38 @@ final class OfflineMapManager: ObservableObject {
 #if canImport(UIKit)
     func previewImage(forCachedPack packURL: URL) -> UIImage? {
         packPreviewImages[previewCacheKey(for: packURL)]
+    }
+
+    func loadPreviewIfNeeded(forCachedPack packURL: URL) {
+        let key = previewCacheKey(for: packURL)
+        guard packPreviewImages[key] == nil,
+              !unavailablePackPreviews.contains(key),
+              previewLoadTasks[key] == nil else {
+            return
+        }
+        previewLoadTasks[key] = Task { [weak self] in
+            let data = await Task.detached(priority: .utility) {
+                OfflineMapPackPreviewReader.imageData(for: packURL)
+            }.value
+            guard let self else { return }
+            self.previewLoadTasks.removeValue(forKey: key)
+            guard !Task.isCancelled,
+                  self.cachedPackURLs.contains(where: {
+                      self.previewCacheKey(for: $0) == key
+                  }) else {
+                return
+            }
+            guard let data,
+                  let image = UIImage(data: data),
+                  image.size.width > 0,
+                  image.size.height > 0,
+                  image.size.width <= 512,
+                  image.size.height <= 512 else {
+                self.unavailablePackPreviews.insert(key)
+                return
+            }
+            self.packPreviewImages[key] = image
+        }
     }
 #endif
 
@@ -2397,35 +2436,8 @@ final class OfflineMapManager: ObservableObject {
 
                 switch prepared {
                 case .archive(let archive, _, _):
-                    do {
-                        try await client.uploadArchiveInBackground(
-                            archiveURL: packURL,
-                            sessionId: sessionId,
-                            descriptor: BackgroundMapUploadDescriptor(
-                                mapID: expectedMapId,
-                                sessionID: sessionId,
-                                protocolVersion: 1,
-                                streamFormatVersion: nil,
-                                artifactFilename: packURL.lastPathComponent,
-                                accessPointSSID: transferSession.accessPointSSID
-                            ),
-                            onTaskStarted: { taskID in
-                                self.recordBackgroundUploadTask(
-                                    taskID,
-                                    mapID: expectedMapId
-                                )
-                            }
-                        ) { completedBytes, totalBytes in
-                            self.transferProgress = totalBytes == 0 ? 0 :
-                                Double(completedBytes) / Double(totalBytes)
-                            let percent = Int((self.transferProgress * 100).rounded())
-                            self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
-                        }
-                    } catch {
-                        guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
-                            throw error
-                        }
-                        statusMessage = "device uses foreground map transfer"
+                    if MapArchiveUploadStrategy.requiresForegroundUpload(for: archive) {
+                        statusMessage = "device uses compatible map transfer"
                         try await client.upload(
                             archive: archive,
                             sessionId: sessionId
@@ -2434,6 +2446,46 @@ final class OfflineMapManager: ObservableObject {
                                 Double(completed) / Double(total)
                             let prefix = didUpload ? "uploaded" : "already on device"
                             self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+                        }
+                    } else {
+                        do {
+                            try await client.uploadArchiveInBackground(
+                                archiveURL: packURL,
+                                sessionId: sessionId,
+                                descriptor: BackgroundMapUploadDescriptor(
+                                    mapID: expectedMapId,
+                                    sessionID: sessionId,
+                                    protocolVersion: 1,
+                                    streamFormatVersion: nil,
+                                    artifactFilename: packURL.lastPathComponent,
+                                    accessPointSSID: transferSession.accessPointSSID
+                                ),
+                                onTaskStarted: { taskID in
+                                    self.recordBackgroundUploadTask(
+                                        taskID,
+                                        mapID: expectedMapId
+                                    )
+                                }
+                            ) { completedBytes, totalBytes in
+                                self.transferProgress = totalBytes == 0 ? 0 :
+                                    Double(completedBytes) / Double(totalBytes)
+                                let percent = Int((self.transferProgress * 100).rounded())
+                                self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
+                            }
+                        } catch {
+                            guard MapArchiveUploadFallback.shouldUseForeground(for: error) else {
+                                throw error
+                            }
+                            statusMessage = "device uses foreground map transfer"
+                            try await client.upload(
+                                archive: archive,
+                                sessionId: sessionId
+                            ) { completed, total, path, didUpload in
+                                self.transferProgress = total == 0 ? 0 :
+                                    Double(completed) / Double(total)
+                                let prefix = didUpload ? "uploaded" : "already on device"
+                                self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
+                            }
                         }
                     }
                     transferProgress = 1
@@ -3312,13 +3364,19 @@ final class OfflineMapManager: ObservableObject {
             for key in Array(packPreviewImages.keys) where !activePreviewKeys.contains(key) {
                 packPreviewImages.removeValue(forKey: key)
             }
+            for key in Array(previewLoadTasks.keys) where !activePreviewKeys.contains(key) {
+                previewLoadTasks.removeValue(forKey: key)?.cancel()
+            }
             unavailablePackPreviews.formIntersection(activePreviewKeys)
-            packURLs.forEach(cachePreviewIfAvailable)
 #endif
             cacheMissingDisplayNames(for: packURLs)
             cachedPackURLs = packURLs
         } catch {
 #if canImport(UIKit)
+            for task in previewLoadTasks.values {
+                task.cancel()
+            }
+            previewLoadTasks.removeAll()
             packPreviewImages.removeAll()
             unavailablePackPreviews.removeAll()
 #endif
@@ -3331,26 +3389,9 @@ final class OfflineMapManager: ObservableObject {
         packURL.standardizedFileURL.path
     }
 
-    private func cachePreviewIfAvailable(for packURL: URL) {
-        let key = previewCacheKey(for: packURL)
-        guard packPreviewImages[key] == nil,
-              !unavailablePackPreviews.contains(key) else {
-            return
-        }
-        guard let data = OfflineMapPackPreviewReader.imageData(for: packURL),
-              let image = UIImage(data: data),
-              image.size.width > 0,
-              image.size.height > 0,
-              image.size.width <= 512,
-              image.size.height <= 512 else {
-            unavailablePackPreviews.insert(key)
-            return
-        }
-        packPreviewImages[key] = image
-    }
-
     private func invalidateCachedPreview(for packURL: URL) {
         let key = previewCacheKey(for: packURL)
+        previewLoadTasks.removeValue(forKey: key)?.cancel()
         packPreviewImages.removeValue(forKey: key)
         unavailablePackPreviews.remove(key)
     }

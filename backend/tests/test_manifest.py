@@ -130,10 +130,14 @@ class ManifestTests(unittest.TestCase):
                 geometry=requested_geometry,
             )
 
-            fallback_manifest = build_manifest(job, root, PipelineMetadata())
-            fallback_data = base64.b64decode(fallback_manifest["preview"]["dataBase64"])
+            requested_manifest = build_manifest(job, root, PipelineMetadata())
+            requested_data = base64.b64decode(requested_manifest["preview"]["dataBase64"])
             self.assertEqual(
-                fallback_data,
+                requested_data,
+                render_boundary_preview(requested_geometry, job.geometry.bounds),
+            )
+            self.assertNotEqual(
+                requested_data,
                 render_boundary_preview(None, job.geometry.bounds),
             )
 

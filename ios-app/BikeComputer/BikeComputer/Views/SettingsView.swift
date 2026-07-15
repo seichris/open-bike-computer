@@ -457,6 +457,9 @@ private struct DownloadedMapRow: View {
             SavedMapThumbnail(
                 image: manager.previewImage(forCachedPack: packURL)
             )
+            .task(id: packURL) {
+                manager.loadPreviewIfNeeded(forCachedPack: packURL)
+            }
 
             if renameInteraction.editingFilename == packURL.lastPathComponent {
                 TextField(

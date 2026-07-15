@@ -208,6 +208,8 @@ int main() {
                     envelopeBytes.begin()));
   assert(std::equal(stream.begin() + layout.payloadOffset, stream.end(),
                     expectedPayload.begin()));
+  assert(std::string(manifest.begin(), manifest.end()).find("\"preview\"") !=
+         std::string::npos);
   assert(mapStreamLayout(header, stream.size() - 1, layout) ==
          MapStreamFormatError::InvalidContentLength);
   assert(mapStreamLayout(header, stream.size() + 1, layout) ==

@@ -497,6 +497,14 @@ struct NavigationProtocolTests {
         assertEqual(manifest, expectedManifest, "map stream stream embeds the golden manifest")
         assertEqual(envelopeData, expectedEnvelope, "map stream stream embeds the golden envelope")
         assertEqual(payload, expectedPayload, "map stream stream embeds payload in manifest order")
+        let expectedPreview = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )!
+        assertEqual(
+            OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
+            expectedPreview,
+            "the shared signed stream exposes its inline boundary preview"
+        )
         assertEqual(parsedHeader.fileCount, 1, "map stream golden fixture file count")
         assertEqual(
             parsedHeader.payloadBytes,
@@ -3793,8 +3801,21 @@ struct NavigationProtocolTests {
         assert(
             source.contains("SavedMapThumbnail(") &&
                 source.contains("manager.previewImage(forCachedPack: packURL)") &&
+                source.contains("manager.loadPreviewIfNeeded(forCachedPack: packURL)") &&
                 source.contains(".frame(width: 52, height: 36)"),
             "each saved map shows a fixed-size preview before its editable name"
+        )
+        let managerSourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift"
+        )
+        guard let managerSource = try? String(contentsOf: managerSourceURL, encoding: .utf8) else {
+            assert(false, "offline map manager source should be available to the integration test")
+            return
+        }
+        assert(
+            managerSource.contains("Task.detached(priority: .utility)") &&
+                !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
+            "saved-map previews load lazily without scanning cached archives on the main actor"
         )
     }
 
@@ -3926,6 +3947,10 @@ struct NavigationProtocolTests {
         assertEqual(archive.mapFileEntries.count, 1, "zip reader exposes VECTMAP file entries")
         assertEqual(archive.manifestEntry?.path, "manifest.json", "zip reader exposes manifest entry")
         assertEqual(try? archive.data(for: archive.mapFileEntries[0]), block, "zip reader reads entry data")
+        assert(
+            !MapArchiveUploadStrategy.requiresForegroundUpload(for: archive),
+            "legacy ZIPs without preview entries retain background archive transfer"
+        )
 
         let duplicateURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("offline-map-duplicate-test-\(UUID().uuidString).zip")
@@ -3986,6 +4011,14 @@ struct NavigationProtocolTests {
             OfflineMapPackPreviewReader.imageData(for: url),
             preview,
             "stored map packs expose their boundary preview"
+        )
+        guard let previewArchive = try? OfflineMapPackArchive(url: url) else {
+            assert(false, "preview ZIP should parse for transfer strategy")
+            return
+        }
+        assert(
+            MapArchiveUploadStrategy.requiresForegroundUpload(for: previewArchive),
+            "preview ZIPs use per-file transfer so older firmware never receives preview.png"
         )
         assertEqual(
             OfflineMapPackPreviewReader.imageData(fromManifestData: manifest),
@@ -4375,6 +4408,7 @@ struct NavigationProtocolTests {
         let secondBlock = Data("second-block".utf8)
         let zip = makeStoredZip(entries: [
             ("manifest.json", manifest),
+            ("preview.png", Data("preview-only-local".utf8)),
             ("VECTMAP/map-1/+0032+0008/001_001.fmb", firstBlock),
             ("VECTMAP/map-1/+0032+0008/002_002.fmb", secondBlock)
         ])
@@ -4453,6 +4487,10 @@ struct NavigationProtocolTests {
         assertEqual(manifestHeadAttempts, 3,
                     "resume waits through timeout and busy recovery responses")
         assertEqual(headPaths.count, 5, "resume checks every declared upload entry")
+        assert(
+            !headPaths.contains(where: { $0.hasSuffix("preview.png") }),
+            "foreground compatibility transfer never stages preview.png on older firmware"
+        )
         assertEqual(progress.map { $0.1 }, [false, false, true],
                     "verified entries are skipped while a missing receipt is reuploaded")
         assertEqual(putBodies.count, 1, "resume uploads only the unverified file")

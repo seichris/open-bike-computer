@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 import hashlib
@@ -90,6 +91,7 @@ class MapStreamFormatTests(unittest.TestCase):
         self.assertEqual(envelope.key_id, "map-test-2026-01")
         self.assertEqual(payload, bytes.fromhex(fixture["payload_hex"]))
         self.assertEqual(manifest.hex(), fixture["manifest_hex"])
+        self.assertEqual(json.loads(manifest)["preview"]["path"], "preview.png")
         self.assertEqual(manifest_receipt(manifest), fixture["manifest_receipt"])
         self.assertEqual(
             signed_manifest_receipt(manifest, envelope_bytes),
