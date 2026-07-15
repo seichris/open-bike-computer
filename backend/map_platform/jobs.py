@@ -16,7 +16,8 @@ from typing import Any
 from .artifacts import ArtifactRecord
 from .geometry import GeometryError, normalize_geometry
 from .limits import JobLimits, LimitError
-from .models import JobStatus, MapJob, utc_now_iso
+from .models import JobStatus, MapDownloadReceipt, MapJob, utc_now_iso
+from .reuse import parent_contains_child_blocks
 from .sources import SourceIndex, SourceResolutionError
 
 
@@ -85,6 +86,10 @@ class JobStore:
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
+        build_cache_key: str | None = None,
+        build_compatibility_key: str | None = None,
+        reuse_strategy: str | None = None,
+        reuse_source_job_id: str | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -100,6 +105,10 @@ class JobStore:
                 pack_bytes=pack_bytes,
                 artifacts=artifacts,
                 artifact_metrics=artifact_metrics,
+                build_cache_key=build_cache_key,
+                build_compatibility_key=build_compatibility_key,
+                reuse_strategy=reuse_strategy,
+                reuse_source_job_id=reuse_source_job_id,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -117,6 +126,10 @@ class JobStore:
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
+        build_cache_key: str | None = None,
+        build_compatibility_key: str | None = None,
+        reuse_strategy: str | None = None,
+        reuse_source_job_id: str | None = None,
         worker_id: str | None = None,
         event: str | None = None,
         finished: bool = False,
@@ -137,6 +150,10 @@ class JobStore:
                 pack_bytes=pack_bytes,
                 artifacts=artifacts,
                 artifact_metrics=artifact_metrics,
+                build_cache_key=build_cache_key,
+                build_compatibility_key=build_compatibility_key,
+                reuse_strategy=reuse_strategy,
+                reuse_source_job_id=reuse_source_job_id,
                 worker_id=worker_id,
                 event=event,
                 finished=finished,
@@ -154,6 +171,10 @@ class JobStore:
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
+        build_cache_key: str | None = None,
+        build_compatibility_key: str | None = None,
+        reuse_strategy: str | None = None,
+        reuse_source_job_id: str | None = None,
         pending_artifact_keys: list[str] | None = None,
         artifact_gc_keys: list[str] | None = None,
         worker_id: str | None = None,
@@ -185,6 +206,14 @@ class JobStore:
             job.artifacts = list(artifacts)
         if artifact_metrics is not None:
             job.artifact_metrics = dict(artifact_metrics)
+        if build_cache_key is not None:
+            job.build_cache_key = build_cache_key
+        if build_compatibility_key is not None:
+            job.build_compatibility_key = build_compatibility_key
+        if reuse_strategy is not None:
+            job.reuse_strategy = reuse_strategy
+        if reuse_source_job_id is not None:
+            job.reuse_source_job_id = reuse_source_job_id
         if pending_artifact_keys is not None:
             job.pending_artifact_keys = list(pending_artifact_keys)
         if artifact_gc_keys is not None:
@@ -409,6 +438,112 @@ class JobStore:
             ]
             self.save(job)
 
+    def set_build_keys_unless_cancelled(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        build_cache_key: str,
+        build_compatibility_key: str,
+    ) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            job.build_cache_key = build_cache_key
+            job.build_compatibility_key = build_compatibility_key
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def find_exact_reuse_candidate(
+        self,
+        *,
+        job_id: str,
+        build_cache_key: str,
+    ) -> MapJob | None:
+        with self._queue_lock():
+            candidates = [
+                job
+                for job in self.list()
+                if job.job_id != job_id
+                and job.status == JobStatus.READY
+                and job.build_cache_key == build_cache_key
+                and job.map_id
+                and job.pack_path
+                and Path(job.pack_path).is_file()
+            ]
+            return max(candidates, key=lambda value: value.created_at) if candidates else None
+
+    def find_subset_reuse_candidates(
+        self,
+        child: MapJob,
+        *,
+        build_compatibility_key: str,
+    ) -> list[MapJob]:
+        with self._queue_lock():
+            candidates = [
+                job
+                for job in self.list()
+                if job.job_id != child.job_id
+                and job.status == JobStatus.READY
+                and job.build_compatibility_key == build_compatibility_key
+                and job.map_id
+                and job.pack_path
+                and Path(job.pack_path).is_file()
+                and parent_contains_child_blocks(job, child)
+            ]
+        return sorted(
+            candidates,
+            key=lambda value: (value.geometry.area_km2, value.created_at),
+        )
+
+    def complete_exact_reuse(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        source_job_id: str,
+        build_cache_key: str,
+        build_compatibility_key: str,
+    ) -> MapJob | None:
+        """Atomically reference a compatible ready job, or return None if it vanished."""
+        with self._queue_lock():
+            job = self.get(job_id)
+            source = self.get(source_job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            if (
+                source.status != JobStatus.READY
+                or source.build_cache_key != build_cache_key
+                or source.build_compatibility_key != build_compatibility_key
+                or not source.map_id
+                or not source.pack_path
+                or not Path(source.pack_path).is_file()
+            ):
+                return None
+            return self._update_status_unlocked(
+                job_id,
+                JobStatus.READY,
+                map_id=source.map_id,
+                pack_path=source.pack_path,
+                pack_bytes=source.pack_bytes,
+                artifacts=source.artifacts,
+                artifact_metrics={"reuseStrategy": "exact"},
+                build_cache_key=build_cache_key,
+                build_compatibility_key=build_compatibility_key,
+                reuse_strategy="exact",
+                reuse_source_job_id=source.job_id,
+                pending_artifact_keys=[],
+                worker_id=worker_id,
+                event="reused an identical ready map pack",
+                finished=True,
+            )
+
     def complete_job(
         self,
         job_id: str,
@@ -419,6 +554,10 @@ class JobStore:
         published_archive: Path,
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
+        build_cache_key: str | None = None,
+        build_compatibility_key: str | None = None,
+        reuse_strategy: str | None = None,
+        reuse_source_job_id: str | None = None,
     ) -> MapJob:
         with self._legacy_pack_lock(published_archive):
             with self._queue_lock():
@@ -445,10 +584,18 @@ class JobStore:
                     pack_bytes=published_archive.stat().st_size,
                     artifacts=artifacts,
                     artifact_metrics=artifact_metrics,
+                    build_cache_key=build_cache_key,
+                    build_compatibility_key=build_compatibility_key,
+                    reuse_strategy=reuse_strategy,
+                    reuse_source_job_id=reuse_source_job_id,
                     pending_artifact_keys=[],
                     artifact_gc_keys=artifact_gc_keys,
                     worker_id=worker_id,
-                    event="map pack ready",
+                    event=(
+                        "map pack ready from compatible parent blocks"
+                        if reuse_strategy == "subset"
+                        else "map pack ready"
+                    ),
                     finished=True,
                 )
 
@@ -490,6 +637,32 @@ class JobStore:
                 event="cancelled by request",
                 finished=True,
             )
+
+    def update_user_label(self, job_id: str, user_label: str) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            job.user_label = user_label
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def record_download(
+        self,
+        job_id: str,
+        receipt: MapDownloadReceipt,
+    ) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if any(
+                existing.receipt_id == receipt.receipt_id
+                for existing in job.download_receipts
+            ):
+                return job
+            job.download_receipts.append(receipt)
+            job.download_receipts.sort(key=lambda value: value.downloaded_at)
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
 
     def heartbeat_unless_cancelled(self, job_id: str, *, worker_id: str) -> MapJob:
         with self._queue_lock():
@@ -778,6 +951,72 @@ class MapJobService:
     def cancel_job(self, job_id: str) -> MapJob:
         return self.store.cancel_if_active(job_id)
 
+    def update_user_label_for_installation(
+        self,
+        job_id: str,
+        client_installation_id: str,
+        display_name: Any,
+    ) -> MapJob:
+        job = self.get_job_for_installation(job_id, client_installation_id)
+        if job.client_installation_id is None:
+            raise ValueError("legacy unowned jobs cannot store user labels")
+        return self.store.update_user_label(job_id, _normalize_user_label(display_name))
+
+    def record_download_for_installation(
+        self,
+        job_id: str,
+        client_installation_id: str,
+        payload: dict[str, Any],
+    ) -> MapJob:
+        job = self.get_job_for_installation(job_id, client_installation_id)
+        if job.client_installation_id is None:
+            raise ValueError("legacy unowned jobs cannot store download receipts")
+        if job.status != JobStatus.READY:
+            raise ValueError("map job is not ready")
+        required_fields = {"receiptId", "artifactFormat", "bytes"}
+        if not required_fields.issubset(payload) or not set(payload).issubset(
+            required_fields | {"sha256"}
+        ):
+            raise ValueError("download receipt has invalid fields")
+        receipt_id = payload.get("receiptId")
+        artifact_format = payload.get("artifactFormat")
+        sha256 = payload.get("sha256")
+        byte_count = payload.get("bytes")
+        if not isinstance(receipt_id, str) or not _DOWNLOAD_RECEIPT_ID_RE.fullmatch(receipt_id):
+            raise ValueError("receiptId is invalid")
+        if not isinstance(artifact_format, str) or not _ARTIFACT_FORMAT_RE.fullmatch(artifact_format):
+            raise ValueError("artifactFormat is invalid")
+        if sha256 is not None and (
+            not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256)
+        ):
+            raise ValueError("sha256 is invalid")
+        if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count <= 0:
+            raise ValueError("bytes must be a positive integer")
+
+        artifact = next(
+            (value for value in job.artifacts if value.format == artifact_format),
+            None,
+        )
+        if artifact is not None:
+            if sha256 != artifact.sha256 or byte_count != artifact.bytes:
+                raise ValueError("download receipt does not match the ready artifact")
+        elif artifact_format == "zip-stored-v1" and job.pack_path:
+            if job.pack_bytes is not None and byte_count != job.pack_bytes:
+                raise ValueError("download receipt does not match the ready pack")
+        else:
+            raise ValueError("download receipt references an unknown artifact")
+
+        return self.store.record_download(
+            job_id,
+            MapDownloadReceipt(
+                receipt_id=receipt_id,
+                artifact_format=artifact_format,
+                bytes=byte_count,
+                sha256=sha256,
+                downloaded_at=utc_now_iso(),
+            ),
+        )
+
     def _new_job_id(self) -> str:
         return uuid.uuid4().hex[:20]
 
@@ -787,6 +1026,9 @@ class JobClaimError(RuntimeError):
 
 
 _CLIENT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+_DOWNLOAD_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
+_ARTIFACT_FORMAT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _client_identifier(request: dict[str, Any], key: str) -> str | None:
@@ -802,6 +1044,19 @@ def _validate_identifier(value: str, key: str) -> str:
     if not _CLIENT_IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"{key} must contain 8-128 letters, numbers, hyphens, or underscores")
     return value
+
+
+def _normalize_user_label(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("displayName must be a string")
+    label = value.strip()
+    if not label:
+        raise ValueError("displayName must not be empty")
+    if len(label) > 80:
+        raise ValueError("displayName must be at most 80 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in label):
+        raise ValueError("displayName must not contain control characters")
+    return label
 
 
 def _age_seconds(value: str) -> float:

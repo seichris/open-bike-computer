@@ -463,6 +463,7 @@ struct NavigationProtocolTests {
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapListJobsURLRequest()
+        testOfflineMapInventoryMutationURLRequests()
         testOfflineMapManagerMigratesProductionConfig()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
@@ -3679,6 +3680,81 @@ struct NavigationProtocolTests {
             downloadRequest.url?.query?.contains("jobId=job-12345678") == true,
             "download URL lookup stays bound to the recovered job"
         )
+    }
+
+    static func testOfflineMapInventoryMutationURLRequests() {
+        guard let baseURL = URL(string: "https://maps.example.com/api"),
+              let displayNameRequest = try? OfflineMapPlatformClient.makeUpdateDisplayNameURLRequest(
+                baseURL: baseURL,
+                apiToken: "secret",
+                clientInstallationId: "installation-test",
+                jobId: "job-12345678",
+                displayName: "Shanghai and Suzhou"
+              ),
+              let downloadReceiptRequest = try? OfflineMapPlatformClient.makeRecordDownloadURLRequest(
+                baseURL: baseURL,
+                apiToken: "secret",
+                clientInstallationId: "installation-test",
+                jobId: "job-12345678",
+                receipt: OfflineMapDownloadReceiptRequest(
+                    receiptId: "receipt-12345678",
+                    artifactFormat: "bike-map-stream-v1",
+                    sha256: "0123456789abcdef",
+                    bytes: 1_234_567
+                )
+              ) else {
+            assert(false, "inventory mutation URL requests should build")
+            return
+        }
+
+        assertEqual(displayNameRequest.httpMethod, "PATCH", "display name update uses PATCH")
+        assertEqual(
+            displayNameRequest.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs/job-12345678/display-name?clientInstallationId=installation-test",
+            "display name update is scoped to the installation"
+        )
+        assertEqual(
+            displayNameRequest.value(forHTTPHeaderField: "Authorization"),
+            "Bearer secret",
+            "display name update includes bearer token"
+        )
+        assertEqual(
+            displayNameRequest.value(forHTTPHeaderField: "Content-Type"),
+            "application/json",
+            "display name update sends JSON"
+        )
+        let displayNameBody = (try? JSONSerialization.jsonObject(
+            with: displayNameRequest.httpBody ?? Data()
+        )) as? [String: Any]
+        assertEqual(
+            displayNameBody?["displayName"] as? String,
+            "Shanghai and Suzhou",
+            "display name update encodes the user label"
+        )
+
+        assertEqual(downloadReceiptRequest.httpMethod, "POST", "download receipt uses POST")
+        assertEqual(
+            downloadReceiptRequest.url?.absoluteString,
+            "https://maps.example.com/api/v1/map-jobs/job-12345678/downloads?clientInstallationId=installation-test",
+            "download receipt is scoped to the installation"
+        )
+        assertEqual(
+            downloadReceiptRequest.value(forHTTPHeaderField: "Authorization"),
+            "Bearer secret",
+            "download receipt includes bearer token"
+        )
+        assertEqual(
+            downloadReceiptRequest.value(forHTTPHeaderField: "Content-Type"),
+            "application/json",
+            "download receipt sends JSON"
+        )
+        let receiptBody = (try? JSONSerialization.jsonObject(
+            with: downloadReceiptRequest.httpBody ?? Data()
+        )) as? [String: Any]
+        assertEqual(receiptBody?["receiptId"] as? String, "receipt-12345678", "receipt ID is encoded")
+        assertEqual(receiptBody?["artifactFormat"] as? String, "bike-map-stream-v1", "artifact format is encoded")
+        assertEqual(receiptBody?["sha256"] as? String, "0123456789abcdef", "artifact digest is encoded")
+        assertEqual(receiptBody?["bytes"] as? Int, 1_234_567, "artifact size is encoded")
     }
 
     static func testOfflineMapManagerMigratesProductionConfig() {

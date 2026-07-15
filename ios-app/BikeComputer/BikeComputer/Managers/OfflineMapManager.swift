@@ -705,6 +705,8 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var expectedActiveMapID: String?
     var expectedActiveSessionID: String?
     var lastTransferOutcome: String?
+    var userDefinedDisplayName: Bool? = nil
+    var downloadReceiptID: String? = nil
 }
 
 nonisolated enum SavedMapArtifactMetadataStore {
@@ -958,6 +960,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
+    private var inventorySyncTask: Task<Void, Never>?
     private var activationReconciliationTask: Task<Void, Never>?
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
@@ -1108,6 +1111,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func resumePendingMapJobIfNeeded(bleManager: BLEManager? = nil) {
+        syncDownloadedMapInventoryIfNeeded()
         guard mapJobTask == nil, !isBusy else {
             return
         }
@@ -1385,9 +1389,11 @@ final class OfflineMapManager: ObservableObject {
         packDisplayNames[packURL.lastPathComponent] = displayName
         if var metadata = SavedMapArtifactMetadataStore.load(for: packURL) {
             metadata.displayName = displayName
+            metadata.userDefinedDisplayName = true
             try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
         }
         persistPackDisplayNames()
+        syncSavedMapInventory(packURL)
         return displayName
     }
 
@@ -1697,6 +1703,120 @@ final class OfflineMapManager: ObservableObject {
         return true
     }
 
+    private func syncDownloadedMapInventoryIfNeeded() {
+        guard inventorySyncTask == nil else { return }
+        let packURLs = cachedPackURLs
+        inventorySyncTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.inventorySyncTask = nil }
+            do {
+                let client = try self.makeClient()
+                guard client.clientInstallationToken?.isEmpty == false else { return }
+                let jobs = try await client.jobs()
+                for packURL in packURLs {
+                    await self.syncSavedMapInventory(
+                        packURL,
+                        client: client,
+                        jobs: jobs
+                    )
+                }
+            } catch {
+                // Inventory sync is best-effort. A later app activation retries
+                // the stable receipt and any explicit user label.
+            }
+        }
+    }
+
+    private func syncSavedMapInventory(_ packURL: URL) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let client = try self.makeClient()
+                guard client.clientInstallationToken?.isEmpty == false else { return }
+                let jobs = try await client.jobs()
+                await self.syncSavedMapInventory(
+                    packURL,
+                    client: client,
+                    jobs: jobs
+                )
+            } catch {
+                // The app remains the local source of truth until the next
+                // idempotent background sync succeeds.
+            }
+        }
+    }
+
+    private func syncSavedMapInventory(
+        _ packURL: URL,
+        client: OfflineMapPlatformClient,
+        jobs: [OfflineMapJob]
+    ) async {
+        guard var metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+              let jobID = metadata.jobID,
+              let savedServerURL = metadata.serverURLString,
+              let savedInstallationID = metadata.clientInstallationID,
+              savedInstallationID == client.clientInstallationId,
+              OfflineMapServerIdentity.normalized(savedServerURL) ==
+                OfflineMapServerIdentity.normalized(client.baseURL.absoluteString),
+              let job = jobs.first(where: { $0.jobId == jobID }) else {
+            return
+        }
+
+        if metadata.downloadReceiptID == nil {
+            metadata.downloadReceiptID = UUID().uuidString.lowercased()
+        }
+        if metadata.userDefinedDisplayName == nil {
+            let localName = metadata.displayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let sourceName = job.sourceRegion?.name
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            metadata.userDefinedDisplayName = {
+                guard let localName, !localName.isEmpty,
+                      let sourceName, !sourceName.isEmpty else {
+                    return false
+                }
+                return Self.cleanDisplayName(localName).localizedCaseInsensitiveCompare(
+                    Self.cleanDisplayName(sourceName)
+                ) != .orderedSame
+            }()
+        }
+        try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
+
+        let artifact = metadata.primaryArtifact ?? job.artifacts?.first(where: { value in
+            if packURL.pathExtension.lowercased() == "bmap" {
+                return value.isBikeMapStream
+            }
+            return value.isStoredZip
+        })
+        let fileBytes = (try? packURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+            .map(Int64.init)
+        guard let receiptID = metadata.downloadReceiptID,
+              let byteCount = artifact?.bytes ?? fileBytes,
+              byteCount > 0 else {
+            return
+        }
+        let receipt = OfflineMapDownloadReceiptRequest(
+            receiptId: receiptID,
+            artifactFormat: artifact?.format ?? OfflineMapArtifact.storedZipFormat,
+            sha256: artifact?.sha256,
+            bytes: byteCount
+        )
+        do {
+            try await client.recordDownload(jobId: jobID, receipt: receipt)
+            if metadata.userDefinedDisplayName == true,
+               let displayName = metadata.displayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !displayName.isEmpty {
+                try await client.updateDisplayName(
+                    jobId: jobID,
+                    displayName: displayName
+                )
+            }
+        } catch {
+            // Preserve the stable local receipt for a later retry.
+        }
+    }
+
     private func makeClient(
         serverURLString: String? = nil,
         apiTokenString: String? = nil
@@ -1940,11 +2060,22 @@ final class OfflineMapManager: ObservableObject {
             throw OfflineMapPlatformError.missingDownloadURL
         }
         let destination = try cachedPackURL(mapId: mapId, fileExtension: fileExtension)
+        let existingMetadata = ["bmap", "zip"]
+            .compactMap { try? cachedPackURL(mapId: mapId, fileExtension: $0) }
+            .compactMap { SavedMapArtifactMetadataStore.load(for: $0) }
+            .first
         let existingDisplayName = ["\(mapId).bmap", "\(mapId).zip"]
             .compactMap { packDisplayNames[$0] }
             .first { !$0.isEmpty }
-        let displayName = existingDisplayName ?? verifiedStream?.displayName ??
-            displayNameForCurrentJob()
+        let defaultDisplayName = verifiedStream?.displayName ?? displayNameForCurrentJob()
+        let displayName = existingDisplayName ?? defaultDisplayName
+        let userDefinedDisplayName = existingMetadata?.userDefinedDisplayName ?? {
+            guard let existingDisplayName, let defaultDisplayName else { return false }
+            return Self.cleanDisplayName(existingDisplayName).localizedCaseInsensitiveCompare(
+                Self.cleanDisplayName(defaultDisplayName)
+            ) != .orderedSame
+        }()
+        let downloadReceiptID = UUID().uuidString.lowercased()
         let metadata = SavedMapArtifactMetadata(
             schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
             mapID: mapId,
@@ -1967,7 +2098,9 @@ final class OfflineMapManager: ObservableObject {
             lastDeviceProgress: nil,
             expectedActiveMapID: mapId,
             expectedActiveSessionID: nil,
-            lastTransferOutcome: nil
+            lastTransferOutcome: nil,
+            userDefinedDisplayName: userDefinedDisplayName,
+            downloadReceiptID: downloadReceiptID
         )
         let backup = destination
             .deletingLastPathComponent()
@@ -2022,6 +2155,23 @@ final class OfflineMapManager: ObservableObject {
             packDisplayNames[destination.lastPathComponent] = displayName
         }
         persistPackDisplayNames()
+        let receiptBytes = primaryArtifact?.bytes ?? Int64(
+            (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        )
+        if receiptBytes > 0 {
+            try? await client.recordDownload(
+                jobId: job.jobId,
+                receipt: OfflineMapDownloadReceiptRequest(
+                    receiptId: downloadReceiptID,
+                    artifactFormat: primaryArtifact?.format ?? OfflineMapArtifact.storedZipFormat,
+                    sha256: primaryArtifact?.sha256,
+                    bytes: receiptBytes
+                )
+            )
+        }
+        if userDefinedDisplayName, let displayName, !displayName.isEmpty {
+            try? await client.updateDisplayName(jobId: job.jobId, displayName: displayName)
+        }
         refreshCachedPacks()
 #if canImport(UIKit)
         loadPreviewIfNeeded(forCachedPack: destination)

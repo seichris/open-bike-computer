@@ -22,14 +22,25 @@ class FixtureMapBuildPipeline(MapBuildPipeline):
     def _source_pbf_path(self, job):
         return self.paths.work_root / "source.osm.pbf"
 
-    def _extract_pbf(self, job, source_pbf, clipped_pbf):
+    def _extract_pbf(self, job, source_pbf, clipped_pbf, *, bounds=None):
+        del job, source_pbf, bounds
         clipped_pbf.parent.mkdir(parents=True, exist_ok=True)
         clipped_pbf.write_bytes(b"pbf")
 
-    def _convert_to_geojson(self, job, clipped_pbf, geojson_prefix):
+    def _convert_to_geojson(self, job, clipped_pbf, geojson_prefix, *, bounds=None):
+        del job, clipped_pbf, geojson_prefix, bounds
         pass
 
-    def _extract_features(self, job, geojson_prefix, raw_output_dir, on_progress=None):
+    def _extract_features(
+        self,
+        job,
+        geojson_prefix,
+        raw_output_dir,
+        *,
+        bounds=None,
+        on_progress=None,
+    ):
+        del job, geojson_prefix, bounds
         directory = raw_output_dir / "+0000+0000"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "1.fmb").write_bytes(b"first-map-block")

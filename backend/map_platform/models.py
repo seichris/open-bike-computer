@@ -119,6 +119,34 @@ class SourceRegion:
         return result
 
 
+@dataclass(frozen=True)
+class MapDownloadReceipt:
+    receipt_id: str
+    artifact_format: str
+    bytes: int
+    downloaded_at: str
+    sha256: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "receiptId": self.receipt_id,
+            "artifactFormat": self.artifact_format,
+            "bytes": self.bytes,
+            "sha256": self.sha256,
+            "downloadedAt": self.downloaded_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MapDownloadReceipt":
+        return cls(
+            receipt_id=str(data["receiptId"]),
+            artifact_format=str(data["artifactFormat"]),
+            bytes=int(data["bytes"]),
+            sha256=data.get("sha256"),
+            downloaded_at=str(data["downloadedAt"]),
+        )
+
+
 @dataclass
 class MapJob:
     job_id: str
@@ -138,6 +166,12 @@ class MapJob:
     pack_bytes: int | None = None
     artifacts: list[ArtifactRecord] = field(default_factory=list)
     artifact_metrics: dict[str, Any] | None = None
+    user_label: str | None = None
+    build_cache_key: str | None = None
+    build_compatibility_key: str | None = None
+    reuse_strategy: str | None = None
+    reuse_source_job_id: str | None = None
+    download_receipts: list[MapDownloadReceipt] = field(default_factory=list)
     pending_artifact_keys: list[str] = field(default_factory=list)
     artifact_gc_keys: list[str] = field(default_factory=list)
     attempts: int = 0
@@ -168,6 +202,19 @@ class MapJob:
             "packBytes": self.pack_bytes,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "artifactMetrics": self.artifact_metrics,
+            "userLabel": self.user_label,
+            "reuseStrategy": self.reuse_strategy,
+            "downloadCount": len(self.download_receipts),
+            "firstDownloadedAt": (
+                self.download_receipts[0].downloaded_at
+                if self.download_receipts
+                else None
+            ),
+            "lastDownloadedAt": (
+                self.download_receipts[-1].downloaded_at
+                if self.download_receipts
+                else None
+            ),
             "attempts": self.attempts,
             "maxAttempts": self.max_attempts,
             "workerId": self.worker_id,
@@ -178,6 +225,12 @@ class MapJob:
             "phaseTimings": self.phase_timings(),
         }
         if include_internal:
+            result["buildCacheKey"] = self.build_cache_key
+            result["buildCompatibilityKey"] = self.build_compatibility_key
+            result["reuseSourceJobId"] = self.reuse_source_job_id
+            result["downloadReceipts"] = [
+                receipt.to_dict() for receipt in self.download_receipts
+            ]
             result["pendingArtifactKeys"] = self.pending_artifact_keys
             result["artifactGcKeys"] = self.artifact_gc_keys
         return result
@@ -212,6 +265,15 @@ class MapJob:
             pack_bytes=data.get("packBytes"),
             artifacts=[ArtifactRecord.from_dict(value) for value in data.get("artifacts", [])],
             artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
+            user_label=data.get("userLabel"),
+            build_cache_key=data.get("buildCacheKey"),
+            build_compatibility_key=data.get("buildCompatibilityKey"),
+            reuse_strategy=data.get("reuseStrategy"),
+            reuse_source_job_id=data.get("reuseSourceJobId"),
+            download_receipts=[
+                MapDownloadReceipt.from_dict(value)
+                for value in data.get("downloadReceipts", [])
+            ],
             pending_artifact_keys=[str(value) for value in data.get("pendingArtifactKeys", [])],
             artifact_gc_keys=[str(value) for value in data.get("artifactGcKeys", [])],
             attempts=int(data.get("attempts", 0)),
