@@ -871,10 +871,19 @@ private struct SavedDestinationRow: View {
             Image(systemName: icon)
                 .foregroundColor(icon == "star.fill" ? .yellow : .secondary)
 
-            Text(destination.name)
-                .font(.body)
-                .foregroundColor(.primary)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(destination.name)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+
+                if let coordinateSubtitle = destination.coordinateSubtitle {
+                    Text(coordinateSubtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
+                }
+            }
 
             Spacer()
         }

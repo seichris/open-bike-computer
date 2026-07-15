@@ -213,6 +213,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        typealias AddressResolver = @MainActor (CLLocation) async -> String?
+
         var lastRoute: MKRoute?
         var mapView: MKMapView?
         var onMapTapped: (() -> Void)?
@@ -225,6 +227,16 @@ struct MapViewContainer: UIViewRepresentable {
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
         private var reverseGeocodingTask: Task<Void, Never>?
+        private let addressResolver: AddressResolver?
+
+        override convenience init() {
+            self.init(addressResolver: nil)
+        }
+
+        init(addressResolver: AddressResolver?) {
+            self.addressResolver = addressResolver
+            super.init()
+        }
 
         func installMapControls(on mapView: MKMapView) {
             guard compassButton == nil else { return }
@@ -355,6 +367,10 @@ struct MapViewContainer: UIViewRepresentable {
             let touchPoint = gestureRecognizer.location(in: mapView)
             let coordinate = mapView.convert(touchPoint, toCoordinateFrom: mapView)
 
+            selectDestination(at: coordinate, on: mapView)
+        }
+
+        func selectDestination(at coordinate: CLLocationCoordinate2D, on mapView: MKMapView) {
             reverseGeocodingTask?.cancel()
             reverseGeocodingTask = nil
             
@@ -388,7 +404,9 @@ struct MapViewContainer: UIViewRepresentable {
                     longitude: annotation.coordinate.longitude
                 )
                 let resolvedAddress: String?
-                if #available(iOS 26.0, *) {
+                if let addressResolver = self.addressResolver {
+                    resolvedAddress = await addressResolver(location)
+                } else if #available(iOS 26.0, *) {
                     resolvedAddress = await self.modernAddress(for: location)
                 } else {
                     resolvedAddress = await self.legacyAddress(for: location)
@@ -405,6 +423,13 @@ struct MapViewContainer: UIViewRepresentable {
                 self.reverseGeocodingTask = nil
             }
         }
+
+        #if HOST_TESTING
+        func waitForReverseGeocodingForTesting() async {
+            let task = reverseGeocodingTask
+            await task?.value
+        }
+        #endif
 
         @available(iOS 26.0, *)
         private func modernAddress(for location: CLLocation) async -> String? {
@@ -453,7 +478,12 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         private func coordinateFallbackName(_ coordinate: CLLocationCoordinate2D) -> String {
-            String(format: "Dropped Pin · %.5f, %.5f", coordinate.latitude, coordinate.longitude)
+            String(
+                format: "Dropped Pin · %.5f, %.5f",
+                locale: Locale(identifier: "en_US_POSIX"),
+                coordinate.latitude,
+                coordinate.longitude
+            )
         }
 
         private func updateDestinationCallout(

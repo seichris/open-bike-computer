@@ -34,6 +34,7 @@ MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
 IOS_SUPPORT="${MACOS_SDK}/System/iOSSupport"
 
 xcrun swiftc \
+  -D HOST_TESTING \
   -parse-as-library \
   -target "$(uname -m)-apple-ios15.0-macabi" \
   -sdk "${MACOS_SDK}" \

@@ -76,13 +76,27 @@ struct SavedDestination: Codable, Identifiable, Equatable {
         return .mapItem(item)
     }
 
+    var coordinateSubtitle: String? {
+        guard let coordinate else { return nil }
+        return String(
+            format: "%.5f, %.5f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            coordinate.latitude,
+            coordinate.longitude
+        )
+    }
+
     fileprivate func matches(_ other: SavedDestination) -> Bool {
         if let coordinate, let otherCoordinate = other.coordinate {
             return abs(coordinate.latitude - otherCoordinate.latitude) < 0.00001 &&
                 abs(coordinate.longitude - otherCoordinate.longitude) < 0.00001
         }
 
-        return name.caseInsensitiveCompare(other.name) == .orderedSame
+        if coordinate == nil, other.coordinate == nil {
+            return name.caseInsensitiveCompare(other.name) == .orderedSame
+        }
+
+        return false
     }
 }
 

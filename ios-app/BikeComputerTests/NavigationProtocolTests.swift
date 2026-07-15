@@ -2222,6 +2222,32 @@ struct NavigationProtocolTests {
             assert(false, "same-name saved pin should produce a map item endpoint")
         }
 
+        let queryDestination = SavedDestination(name: firstEntrance.name)
+        restoredIdentityStore.addRecent(queryDestination)
+        assertEqual(
+            restoredIdentityStore.recentDestinations.count,
+            3,
+            "query-only and exact same-name destinations remain independent"
+        )
+        assert(restoredIdentityStore.isFavorite(firstEntrance), "query insertion keeps the exact favorite")
+        assert(!restoredIdentityStore.isFavorite(queryDestination), "query-only destination is not conflated with exact favorite")
+        assertEqual(
+            restoredIdentityStore.nonFavoriteRecentDestinations.count,
+            2,
+            "query-only and unfavorited exact pins both remain visible"
+        )
+        assertEqual(
+            firstEntrance.coordinateSubtitle,
+            "31.23040, 121.47370",
+            "exact pins expose a stable visible coordinate disambiguator"
+        )
+        assert(queryDestination.coordinateSubtitle == nil, "query-only destinations omit the coordinate subtitle")
+
+        assert(restoredIdentityStore.toggleFavorite(queryDestination), "query-only favorite can coexist with exact favorite")
+        assertEqual(restoredIdentityStore.favoriteDestinations.count, 2, "mixed-representation favorites coexist")
+        assert(!restoredIdentityStore.toggleFavorite(queryDestination), "query-only favorite removes independently")
+        assert(restoredIdentityStore.isFavorite(firstEntrance), "removing query-only favorite preserves exact favorite")
+
         switch droppedPin.routeEndpoint {
         case .mapItem(let item):
             assertCoordinate(item.location.coordinate,
