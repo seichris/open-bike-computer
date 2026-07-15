@@ -153,6 +153,126 @@ class MapJobRunAPITests(unittest.TestCase):
         job.update(values)
         job_path.write_text(json.dumps(job))
 
+    def test_download_inventory_records_real_receipts_names_and_redacts_installations(self):
+        credential = self.client.post("/v1/installations").json()
+        installation_id = credential["clientInstallationId"]
+        installation_headers = {
+            "X-Installation-Token": credential["clientInstallationToken"]
+        }
+        created = self.client.post(
+            "/v1/map-jobs",
+            headers=installation_headers,
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": installation_id,
+                "clientRequestId": "inventory-request-1",
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["jobId"]
+        source_name = created.json()["sourceRegion"]["name"]
+        pack_path = Path(self.tmp.name) / "inventory-map.zip"
+        pack_path.write_bytes(b"inventory-map")
+        artifact_sha256 = hashlib.sha256(pack_path.read_bytes()).hexdigest()
+        self.update_job(
+            job_id,
+            status="ready",
+            mapId="inventory-map",
+            packPath=str(pack_path),
+            packBytes=pack_path.stat().st_size,
+            finishedAt="2026-07-15T10:00:00.000000Z",
+            artifacts=[
+                {
+                    "format": "zip-stored-v1",
+                    "mediaType": "application/zip",
+                    "filename": "inventory-map.zip",
+                    "objectKey": "maps/inventory-map.zip",
+                    "bytes": pack_path.stat().st_size,
+                    "sha256": artifact_sha256,
+                }
+            ],
+        )
+
+        renamed = self.client.patch(
+            f"/v1/map-jobs/{job_id}/display-name",
+            params={"clientInstallationId": installation_id},
+            headers=installation_headers,
+            json={"displayName": "  Marina Bay rides  "},
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["userLabel"], "Marina Bay rides")
+
+        receipt = {
+            "receiptId": "download-receipt-0001",
+            "artifactFormat": "zip-stored-v1",
+            "sha256": artifact_sha256,
+            "bytes": pack_path.stat().st_size,
+        }
+        first = self.client.post(
+            f"/v1/map-jobs/{job_id}/downloads",
+            params={"clientInstallationId": installation_id},
+            headers=installation_headers,
+            json=receipt,
+        )
+        repeated = self.client.post(
+            f"/v1/map-jobs/{job_id}/downloads",
+            params={"clientInstallationId": installation_id},
+            headers=installation_headers,
+            json=receipt,
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(first.json()["downloadCount"], 1)
+        self.assertEqual(repeated.json()["downloadCount"], 1)
+
+        unauthorized = self.client.get("/v1/admin/maps")
+        inventory = self.client.get(
+            "/v1/admin/maps",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(inventory.status_code, 200)
+        document = inventory.json()
+        self.assertEqual(document["summary"]["mapJobs"], 1)
+        self.assertEqual(document["summary"]["downloads"], 1)
+        self.assertEqual(document["maps"][0]["userLabel"], "Marina Bay rides")
+        self.assertEqual(document["maps"][0]["geofabrik"]["name"], source_name)
+        self.assertTrue(document["maps"][0]["installationRef"].startswith("install_"))
+        self.assertNotIn(installation_id, inventory.text)
+        self.assertNotIn("download-receipt-0001", inventory.text)
+
+    def test_inventory_mutations_require_the_owning_registered_installation(self):
+        owner = self.client.post("/v1/installations").json()
+        stranger = self.client.post("/v1/installations").json()
+        created = self.client.post(
+            "/v1/map-jobs",
+            headers={"X-Installation-Token": owner["clientInstallationToken"]},
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": owner["clientInstallationId"],
+                "clientRequestId": "inventory-owner-1",
+            },
+        )
+        job_id = created.json()["jobId"]
+
+        response = self.client.patch(
+            f"/v1/map-jobs/{job_id}/display-name",
+            params={"clientInstallationId": stranger["clientInstallationId"]},
+            headers={"X-Installation-Token": stranger["clientInstallationToken"]},
+            json={"displayName": "Not mine"},
+        )
+        invalid_name = self.client.patch(
+            f"/v1/map-jobs/{job_id}/display-name",
+            params={"clientInstallationId": owner["clientInstallationId"]},
+            headers={"X-Installation-Token": owner["clientInstallationToken"]},
+            json={"displayName": "bad\u0007name"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(invalid_name.status_code, 400)
+
     def test_run_route_returns_queued_job_result(self):
         job_id = self.create_job()
         result = Mock()

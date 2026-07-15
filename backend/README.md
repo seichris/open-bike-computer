@@ -22,6 +22,10 @@ sources. It implements the production contract described in
 - Immutable content-addressed artifact storage on the persistent volume or an
   S3-compatible object store.
 - Artifact metadata and identity-bound download-URL refresh APIs.
+- Fail-closed exact-pack and contained bounding-box block reuse, keyed by the
+  actual cached PBF snapshot and immutable worker identity.
+- Installation-authenticated saved-map names and successful-download receipts,
+  plus a redacted admin inventory at `GET /v1/admin/maps`.
 - Coolify-oriented compose file and Dockerfile.
 
 ## Local API
@@ -141,8 +145,9 @@ promotion, rollback, retention, and rotation.
 Useful production environment variables:
 
 - `MAP_PLATFORM_ADMIN_TOKEN`: separate server-only bearer token for worker,
-  source-cache, and maintenance API routes. If unset, those routes are disabled;
-  the normal worker loop and CLI maintenance remain available.
+  source-cache, maintenance, and downloaded-map inventory API routes. If unset,
+  those routes are disabled; the normal worker loop and CLI maintenance remain
+  available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts,
