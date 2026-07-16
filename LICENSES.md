@@ -21,8 +21,7 @@ users interact with remotely over a network as well as to distributed copies.
 Unless a more specific notice applies, all other project-authored software
 source code, tests, scripts, and software configuration are licensed under the
 [GNU General Public License version 3 only](LICENSE). This includes the iOS
-application, top-level tooling, GitHub workflows, and software such as the
-Python CAD generators.
+application, top-level tooling, and GitHub workflows.
 
 The following imported or derived components retain their existing GNU GPL
 version 3 terms as stated by their own notices. This licensing change does not
@@ -63,10 +62,10 @@ The Battery Status screen's bicycle geometry in
 `esp32/lib/gui/src/batteryStatusScr.cpp` is adapted from the Lucide Bike icon
 and remains available under the [Lucide ISC license](LICENSES/Lucide-ISC.txt).
 
-Documentation, artwork, trademarks, hardware reference documents, CAD models
-and exports, and other non-software material are not licensed by the software
-licenses above. All rights in that material remain with their respective
-copyright or other rights holders unless a specific notice says otherwise.
+Documentation, artwork, trademarks, hardware reference documents, and other
+non-software material are not licensed by the software licenses above. All
+rights in that material remain with their respective copyright or other rights
+holders unless a specific notice says otherwise.
 
 The project name, logos, and other marks are not licensed for use as trademarks
 by any software license in this repository.
