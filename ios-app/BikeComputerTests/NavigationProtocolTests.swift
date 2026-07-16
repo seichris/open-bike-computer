@@ -246,6 +246,22 @@ func assertCoordinate(
     assert(abs(actual.longitude - expectedLongitude) < 0.000001, "\(message): longitude")
 }
 
+func testLocation(
+    latitude: CLLocationDegrees,
+    longitude: CLLocationDegrees,
+    horizontalAccuracy: CLLocationAccuracy = 5
+) -> CLLocation {
+    CLLocation(
+        coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+        altitude: 0,
+        horizontalAccuracy: horizontalAccuracy,
+        verticalAccuracy: 5,
+        course: -1,
+        speed: -1,
+        timestamp: Date()
+    )
+}
+
 final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
     var sentRouteGeometry: [Data] = []
@@ -393,6 +409,13 @@ final class TestRoute: MKRoute {
         super.init()
     }
 
+    init(steps: [TestRouteStep], coordinates: [CLLocationCoordinate2D]) {
+        self.storedSteps = steps
+        self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
+        self.storedDistance = steps.reduce(0) { $0 + $1.distance }
+        super.init()
+    }
+
     override var steps: [MKRoute.Step] {
         storedSteps
     }
@@ -414,6 +437,7 @@ struct NavigationProtocolTests {
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
         testStepRemainingDistanceFollowsPolyline()
+        testStepRemainingDistanceResolvesAmbiguousGeometry()
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
         testNonChinaCoordinatesPassThroughUnchanged()
         testSourceEndpointSelection()
@@ -452,8 +476,14 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
         testBLEManagerPersistsDeviceSoundSettings()
+        testNavigationSnapshotTransportDistanceBounds()
         testNavigationSendTrackerReadinessRetry()
         testNavigationEngineUsesStepPolylineDistance()
+        testNavigationEngineDoesNotSkipNearbyCurvedEndpoint()
+        testNavigationEngineSeedsCurvedProgressAfterStepTransition()
+        testNavigationEngineReportsDistanceAfterPassingManeuver()
+        testNavigationEngineUsesDegenerateStepFallback()
+        testNavigationEngineKeepsProgressAtRouteCrossing()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
@@ -2091,6 +2121,64 @@ struct NavigationProtocolTests {
         assert(
             abs((RouteProgress.remainingDistance(from: offRouteNearCorner, in: step) ?? -1) - expectedAfterCorner) < 2,
             "step remaining projects nearby off-route locations onto the step geometry"
+        )
+    }
+
+    static func testStepRemainingDistanceResolvesAmbiguousGeometry() {
+        let crossingCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let crossingStep = TestRouteStep(instructions: "Continue", coordinates: crossingCoordinates)
+        let crossing = CLLocation(latitude: 37.0005, longitude: -121.9995)
+        let finalSegmentStart = CLLocation(
+            latitude: crossingCoordinates[2].latitude,
+            longitude: crossingCoordinates[2].longitude
+        )
+        let finalEndpoint = CLLocation(
+            latitude: crossingCoordinates[3].latitude,
+            longitude: crossingCoordinates[3].longitude
+        )
+        let preferredBeforeCrossing = finalSegmentStart.distance(from: finalEndpoint)
+        let expectedAfterCrossing = crossing.distance(from: finalEndpoint)
+
+        let ambiguousRemaining = RouteProgress.remainingDistance(from: crossing, in: crossingStep)
+        let progressAwareRemaining = RouteProgress.remainingDistance(
+            from: crossing,
+            in: crossingStep,
+            preferredRemainingDistance: preferredBeforeCrossing
+        )
+        assert(
+            (ambiguousRemaining ?? 0) > expectedAfterCrossing * 3,
+            "an unqualified crossing projection selects the earlier route occurrence"
+        )
+        assert(
+            abs((progressAwareRemaining ?? -1) - expectedAfterCrossing) < 3,
+            "prior progress keeps a crossing projection on the later route occurrence"
+        )
+
+        let parallelCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9999),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9999)
+        ]
+        let parallelStep = TestRouteStep(instructions: "Continue", coordinates: parallelCoordinates)
+        let noisyFirstLegLocation = CLLocation(latitude: 37.0005, longitude: -121.99994)
+        let nearestOnlyRemaining = RouteProgress.remainingDistance(
+            from: noisyFirstLegLocation,
+            in: parallelStep
+        )
+        let continuousRemaining = RouteProgress.remainingDistance(
+            from: noisyFirstLegLocation,
+            in: parallelStep,
+            preferredRemainingDistance: parallelStep.distance
+        )
+        assert(
+            (continuousRemaining ?? 0) > (nearestOnlyRemaining ?? 0) + 80,
+            "prior progress prevents GPS noise from jumping to a close parallel return leg"
         )
     }
 
@@ -7751,22 +7839,65 @@ struct NavigationProtocolTests {
         assert(tracker.shouldSend(snapshot), "readiness retry should resend current snapshot without reprocessing route location")
     }
 
+    static func testNavigationSnapshotTransportDistanceBounds() {
+        let oversized = NavigationManeuverSnapshot(
+            iconID: NavigationIconID.straight,
+            distance: 70_000,
+            instruction: "Continue"
+        )
+        let negative = NavigationManeuverSnapshot(
+            iconID: NavigationIconID.straight,
+            distance: -10,
+            instruction: "Continue"
+        )
+
+        assertEqual(
+            oversized.packet,
+            "1|65535|Continue",
+            "navigation packet saturates distance to the firmware UInt16 field"
+        )
+        assertEqual(
+            negative.packet,
+            "1|0|Continue",
+            "navigation packet does not transmit a negative distance"
+        )
+    }
+
     static func testNavigationEngineUsesStepPolylineDistance() {
-        let coordinates = [
+        let firstStepCoordinates = [
             CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
             CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
             CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990),
             CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9990)
         ]
-        let route = TestRoute(instructions: "Turn right", coordinates: coordinates)
-        let start = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
-        let endpoint = CLLocation(latitude: coordinates[3].latitude, longitude: coordinates[3].longitude)
+        let secondStepCoordinates = [
+            firstStepCoordinates[3],
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9970)
+        ]
+        let firstStep = TestRouteStep(instructions: "Turn right", coordinates: firstStepCoordinates)
+        let secondStep = TestRouteStep(instructions: "Continue", coordinates: secondStepCoordinates)
+        let route = TestRoute(
+            steps: [firstStep, secondStep],
+            coordinates: firstStepCoordinates + Array(secondStepCoordinates.dropFirst())
+        )
+        let start = CLLocation(
+            latitude: firstStepCoordinates[0].latitude,
+            longitude: firstStepCoordinates[0].longitude
+        )
+        let endpoint = CLLocation(
+            latitude: firstStepCoordinates[3].latitude,
+            longitude: firstStepCoordinates[3].longitude
+        )
         guard let expectedDistance = RouteProgress.remainingDistance(from: start, in: route.steps[0]) else {
             assert(false, "navigation test step should have measurable geometry")
             return
         }
 
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
         let engine = NavigationEngine()
+        engine.setBLEManager(manager)
         engine.startNavigation(with: route, initialLocation: start)
 
         assertEqual(
@@ -7777,6 +7908,216 @@ struct NavigationProtocolTests {
         assert(
             Double(engine.distanceToManeuver) > start.distance(from: endpoint) * 2.5,
             "navigation engine should not publish straight-line endpoint distance"
+        )
+        assert(
+            Double(engine.distanceToManeuver) < route.distance - secondStep.distance / 2,
+            "navigation engine uses only the active step rather than whole-route distance"
+        )
+        assertEqual(manager.sentPackets.count, 1, "initial maneuver is sent to the BLE device")
+        let fields = manager.sentPackets[0].split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        assertEqual(fields.count, 3, "polyline-distance packet uses firmware fields")
+        assertEqual(
+            String(fields[1]),
+            "\(Int(expectedDistance))",
+            "BLE packet carries the active-step polyline distance"
+        )
+    }
+
+    static func testNavigationEngineDoesNotSkipNearbyCurvedEndpoint() {
+        let firstStepCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0006, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0006, longitude: -121.9998),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9998)
+        ]
+        let secondStepCoordinates = [
+            firstStepCoordinates[3],
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9988)
+        ]
+        let firstStep = TestRouteStep(instructions: "Turn right", coordinates: firstStepCoordinates)
+        let secondStep = TestRouteStep(instructions: "Continue", coordinates: secondStepCoordinates)
+        let route = TestRoute(
+            steps: [firstStep, secondStep],
+            coordinates: firstStepCoordinates + Array(secondStepCoordinates.dropFirst())
+        )
+        let noisyStart = testLocation(latitude: 37.0000, longitude: -121.99979)
+        let routeStart = CLLocation(
+            latitude: firstStepCoordinates[0].latitude,
+            longitude: firstStepCoordinates[0].longitude
+        )
+        let nearbyEndpoint = CLLocation(
+            latitude: firstStepCoordinates[3].latitude,
+            longitude: firstStepCoordinates[3].longitude
+        )
+        let startToEndpointDistance = routeStart.distance(from: nearbyEndpoint)
+        assert(
+            startToEndpointDistance > 10 && startToEndpointDistance < 20,
+            "test curved endpoint is in the 10-to-20-meter arrival band"
+        )
+        assert(
+            noisyStart.distance(from: nearbyEndpoint) < noisyStart.distance(from: routeStart),
+            "test sample is closer to the return-leg endpoint than the route start"
+        )
+        assert(noisyStart.distance(from: nearbyEndpoint) < 20, "test endpoint is inside the arrival radius")
+
+        let engine = NavigationEngine()
+        engine.startNavigation(with: route, initialLocation: noisyStart)
+
+        assertEqual(engine.currentInstruction, "Turn right", "nearby curved endpoint does not skip the active step")
+        assert(
+            Double(engine.distanceToManeuver) > 100,
+            "nearby curved endpoint keeps its substantial along-step distance"
+        )
+    }
+
+    static func testNavigationEngineSeedsCurvedProgressAfterStepTransition() {
+        let curvedStepCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0006, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0006, longitude: -121.9998),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9998)
+        ]
+        let entryStepCoordinates = [
+            CLLocationCoordinate2D(latitude: 36.9995, longitude: -122.0000),
+            curvedStepCoordinates[0]
+        ]
+        let exitStepCoordinates = [
+            curvedStepCoordinates[3],
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9988)
+        ]
+        let entryStep = TestRouteStep(instructions: "Continue", coordinates: entryStepCoordinates)
+        let curvedStep = TestRouteStep(instructions: "Turn right", coordinates: curvedStepCoordinates)
+        let exitStep = TestRouteStep(instructions: "Continue", coordinates: exitStepCoordinates)
+        let route = TestRoute(
+            steps: [entryStep, curvedStep, exitStep],
+            coordinates: entryStepCoordinates
+                + Array(curvedStepCoordinates.dropFirst())
+                + Array(exitStepCoordinates.dropFirst())
+        )
+        let routeStart = CLLocation(
+            latitude: entryStepCoordinates[0].latitude,
+            longitude: entryStepCoordinates[0].longitude
+        )
+        let noisyTransition = testLocation(latitude: 37.0000, longitude: -121.99979)
+        let curvedStart = CLLocation(
+            latitude: curvedStepCoordinates[0].latitude,
+            longitude: curvedStepCoordinates[0].longitude
+        )
+        let curvedEndpoint = CLLocation(
+            latitude: curvedStepCoordinates[3].latitude,
+            longitude: curvedStepCoordinates[3].longitude
+        )
+        let curvedEndpointSeparation = curvedStart.distance(from: curvedEndpoint)
+        assert(
+            curvedEndpointSeparation > 10 && curvedEndpointSeparation < 20,
+            "transition test endpoint is in the 10-to-20-meter arrival band"
+        )
+
+        let engine = NavigationEngine()
+        engine.startNavigation(with: route, initialLocation: routeStart)
+        engine.processExternalLocation(noisyTransition)
+        engine.processExternalLocation(noisyTransition)
+
+        assertEqual(
+            engine.currentInstruction,
+            "Turn right",
+            "noisy transition initializes the curved step at its start rather than its nearby endpoint"
+        )
+        assert(
+            Double(engine.distanceToManeuver) > 100,
+            "noisy transition preserves the curved step's substantial remaining distance"
+        )
+    }
+
+    static func testNavigationEngineReportsDistanceAfterPassingManeuver() {
+        let firstStepCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let secondStepCoordinates = [
+            firstStepCoordinates[1],
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990)
+        ]
+        let firstStep = TestRouteStep(instructions: "Turn left", coordinates: firstStepCoordinates)
+        let secondStep = TestRouteStep(instructions: "Continue", coordinates: secondStepCoordinates)
+        let route = TestRoute(
+            steps: [firstStep, secondStep],
+            coordinates: firstStepCoordinates + Array(secondStepCoordinates.dropFirst())
+        )
+        let start = CLLocation(
+            latitude: firstStepCoordinates[0].latitude,
+            longitude: firstStepCoordinates[0].longitude
+        )
+        let endpoint = CLLocation(
+            latitude: firstStepCoordinates[1].latitude,
+            longitude: firstStepCoordinates[1].longitude
+        )
+        let pastEndpoint = CLLocation(latitude: 37.0030, longitude: -121.9997)
+        let expectedDistance = Int(pastEndpoint.distance(from: endpoint))
+
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, initialLocation: start)
+        engine.processExternalLocation(start)
+        engine.processExternalLocation(pastEndpoint)
+
+        assertEqual(engine.currentInstruction, "Turn left", "passing far from the endpoint does not skip the maneuver")
+        assert(
+            abs(engine.distanceToManeuver - expectedDistance) <= 1,
+            "a beyond-endpoint projection reports physical distance back to the maneuver"
+        )
+        let fields = manager.sentPackets.last?.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        assertEqual(String(fields?[1] ?? ""), "\(expectedDistance)", "BLE packet does not remain at zero after passing the maneuver")
+    }
+
+    static func testNavigationEngineUsesDegenerateStepFallback() {
+        let endpointCoordinate = CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        let route = TestRoute(instructions: "Arrive", coordinates: [endpointCoordinate])
+        let start = CLLocation(latitude: 37.0005, longitude: -122.0000)
+        let endpoint = CLLocation(latitude: endpointCoordinate.latitude, longitude: endpointCoordinate.longitude)
+        let expectedDistance = Int(start.distance(from: endpoint))
+
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, initialLocation: start)
+
+        assert(
+            abs(engine.distanceToManeuver - expectedDistance) <= 1,
+            "one-point step falls back to endpoint distance"
+        )
+        let fields = manager.sentPackets.last?.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        assertEqual(String(fields?[1] ?? ""), "\(expectedDistance)", "fallback distance is sent to the BLE device")
+    }
+
+    static func testNavigationEngineKeepsProgressAtRouteCrossing() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9990),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        let start = CLLocation(latitude: coordinates[0].latitude, longitude: coordinates[0].longitude)
+        let finalSegmentStart = CLLocation(latitude: coordinates[2].latitude, longitude: coordinates[2].longitude)
+        let crossing = CLLocation(latitude: 37.0005, longitude: -121.9995)
+        let endpoint = CLLocation(latitude: coordinates[3].latitude, longitude: coordinates[3].longitude)
+        let expectedDistance = Int(crossing.distance(from: endpoint))
+
+        let engine = NavigationEngine()
+        engine.startNavigation(with: route, initialLocation: start)
+        engine.processExternalLocation(start)
+        engine.processExternalLocation(finalSegmentStart)
+        engine.processExternalLocation(crossing)
+
+        assert(
+            abs(engine.distanceToManeuver - expectedDistance) <= 2,
+            "sequential progress keeps the rider on the later segment at a route crossing"
         )
     }
 

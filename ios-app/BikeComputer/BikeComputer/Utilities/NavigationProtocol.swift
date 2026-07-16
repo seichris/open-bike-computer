@@ -36,26 +36,44 @@ enum RoutePolylineEndpoint {
 }
 
 enum RouteProgress {
+    private struct ProjectionCandidate {
+        let crossTrackDistance: CLLocationDistance
+        let distanceAlongPolyline: CLLocationDistance
+    }
+
+    private static let minimumAmbiguityTolerance: CLLocationDistance = 10
+
     static func remainingDistance(from location: CLLocation, in route: MKRoute) -> CLLocationDistance? {
         remainingDistance(
             from: location,
             along: route.polyline,
-            referenceDistance: route.distance
+            referenceDistance: route.distance,
+            preferredRemainingDistance: nil,
+            ambiguityTolerance: minimumAmbiguityTolerance
         )
     }
 
-    static func remainingDistance(from location: CLLocation, in step: MKRoute.Step) -> CLLocationDistance? {
+    static func remainingDistance(
+        from location: CLLocation,
+        in step: MKRoute.Step,
+        preferredRemainingDistance: CLLocationDistance? = nil,
+        ambiguityTolerance: CLLocationDistance = minimumAmbiguityTolerance
+    ) -> CLLocationDistance? {
         remainingDistance(
             from: location,
             along: step.polyline,
-            referenceDistance: step.distance
+            referenceDistance: step.distance,
+            preferredRemainingDistance: preferredRemainingDistance,
+            ambiguityTolerance: ambiguityTolerance
         )
     }
 
     private static func remainingDistance(
         from location: CLLocation,
         along polyline: MKPolyline,
-        referenceDistance: CLLocationDistance
+        referenceDistance: CLLocationDistance,
+        preferredRemainingDistance: CLLocationDistance?,
+        ambiguityTolerance requestedAmbiguityTolerance: CLLocationDistance
     ) -> CLLocationDistance? {
         let pointCount = polyline.pointCount
         guard pointCount > 1 else { return nil }
@@ -63,8 +81,7 @@ enum RouteProgress {
         let polylinePoints = polyline.points()
         let target = MKMapPoint(location.coordinate)
         var totalDistance: CLLocationDistance = 0
-        var closestDistance = Double.greatestFiniteMagnitude
-        var closestDistanceAlongPolyline: CLLocationDistance = 0
+        var candidates: [ProjectionCandidate] = []
 
         for index in 0..<(pointCount - 1) {
             let start = polylinePoints[index]
@@ -79,23 +96,65 @@ enum RouteProgress {
                 let projection = min(max(rawProjection, 0), 1)
                 let projected = MKMapPoint(x: start.x + projection * dx, y: start.y + projection * dy)
                 let distanceToSegment = target.distance(to: projected)
-                if distanceToSegment < closestDistance {
-                    closestDistance = distanceToSegment
-                    closestDistanceAlongPolyline = totalDistance + start.distance(to: projected)
-                }
+                candidates.append(ProjectionCandidate(
+                    crossTrackDistance: distanceToSegment,
+                    distanceAlongPolyline: totalDistance + start.distance(to: projected)
+                ))
             }
 
             totalDistance += segmentLength
         }
 
-        guard totalDistance > 0 else { return nil }
+        guard totalDistance > 0, !candidates.isEmpty else { return nil }
 
         let measuredDistance = referenceDistance.isFinite && referenceDistance > 0
             ? referenceDistance
             : totalDistance
-        let scaledDistanceAlongPolyline =
-            (closestDistanceAlongPolyline / totalDistance) * measuredDistance
-        return max(measuredDistance - scaledDistanceAlongPolyline, 0)
+
+        func remainingDistance(for candidate: ProjectionCandidate) -> CLLocationDistance {
+            let scaledDistanceAlongPolyline =
+                (candidate.distanceAlongPolyline / totalDistance) * measuredDistance
+            return max(measuredDistance - scaledDistanceAlongPolyline, 0)
+        }
+
+        let closestCrossTrackDistance = candidates
+            .map(\.crossTrackDistance)
+            .min() ?? Double.greatestFiniteMagnitude
+        let reportedAccuracy = location.horizontalAccuracy.isFinite && location.horizontalAccuracy >= 0
+            ? location.horizontalAccuracy
+            : 0
+        let sanitizedAmbiguityTolerance = requestedAmbiguityTolerance.isFinite
+            && requestedAmbiguityTolerance >= 0
+            ? requestedAmbiguityTolerance
+            : 0
+        let ambiguityTolerance = max(
+            max(reportedAccuracy, sanitizedAmbiguityTolerance),
+            minimumAmbiguityTolerance
+        )
+        let plausibleCandidates = candidates.filter {
+            $0.crossTrackDistance <= closestCrossTrackDistance + ambiguityTolerance
+        }
+
+        let selectedCandidate: ProjectionCandidate?
+        if let preferredRemainingDistance,
+           preferredRemainingDistance.isFinite,
+           preferredRemainingDistance >= 0 {
+            selectedCandidate = plausibleCandidates.min { lhs, rhs in
+                let lhsProgressDelta = abs(remainingDistance(for: lhs) - preferredRemainingDistance)
+                let rhsProgressDelta = abs(remainingDistance(for: rhs) - preferredRemainingDistance)
+                if lhsProgressDelta == rhsProgressDelta {
+                    return lhs.crossTrackDistance < rhs.crossTrackDistance
+                }
+                return lhsProgressDelta < rhsProgressDelta
+            }
+        } else {
+            selectedCandidate = candidates.min {
+                $0.crossTrackDistance < $1.crossTrackDistance
+            }
+        }
+
+        guard let selectedCandidate else { return nil }
+        return remainingDistance(for: selectedCandidate)
     }
 }
 
@@ -198,12 +257,15 @@ enum NavigationPacketBuilder {
 }
 
 struct NavigationManeuverSnapshot: Equatable {
+    static let maximumTransportDistance = Int(UInt16.max)
+
     let iconID: Int
     let distance: Int
     let instruction: String
 
     var packet: String {
-        "\(iconID)|\(distance)|\(instruction)"
+        let transportDistance = min(max(distance, 0), Self.maximumTransportDistance)
+        return "\(iconID)|\(transportDistance)|\(instruction)"
     }
 }
 

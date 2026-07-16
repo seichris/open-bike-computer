@@ -17,6 +17,10 @@ navigation-ready.
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
 
+`DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
+sender saturates larger maneuver distances at `65535` instead of allowing the
+firmware field to wrap.
+
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
 or `2A73`, the app falls back to framed binary writes over authenticated `2A6E`.
 Fallback frame prefixes:
