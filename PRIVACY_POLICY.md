@@ -10,7 +10,7 @@ Bike Computer 2.0 does not require an account. We do not sell personal data, use
 
 ## Location
 
-The app uses your device location to show your position, calculate cycling routes, provide turn-by-turn navigation, and track ride distance while navigation or workout tracking is active.
+The app uses your device location to show your position, calculate cycling routes, provide turn-by-turn navigation, and track route progress while navigation is active.
 
 Most location processing happens on your device or through Apple system services such as MapKit. We are not responsible for data collected by Apple through Apple frameworks and services.
 
@@ -19,10 +19,6 @@ If you request an offline map pack, the selected map area or route corridor may 
 ## Bluetooth and Local Network
 
 The app uses Bluetooth and local network access to connect to compatible bike computer hardware and transfer navigation or map data. This data is used to operate the connected device.
-
-## HealthKit
-
-If you enable workout tracking, the app may request permission to read heart rate and write cycling workout and distance data to Apple Health. HealthKit data is handled through Apple's HealthKit framework. We do not sell HealthKit data or use it for advertising or tracking.
 
 ## Data Sharing
 

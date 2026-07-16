@@ -20,8 +20,6 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private let locationManager = CLLocationManager()
     private var lastGeocodedLocation: CLLocation?
     private var lastGeocodeTime: Date?
-    private var lastLocation: CLLocation?
-    private var totalDistance: Double = 0
     
     // MARK: - Optimization #3: Intelligent Location Update Management
     private var isNavigating = false
@@ -30,8 +28,6 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isDeviceDestinationRequestsEnabled = false
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
-    
-    weak var healthKitManager: HealthKitManager?
     
     override init() {
         authorizationStatus = locationManager.authorizationStatus
@@ -45,11 +41,6 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.showsBackgroundLocationIndicator = false
         locationManager.requestWhenInUseAuthorization()
         // Don't start by default - wait for explicit need
-    }
-    
-    func resetDistance() {
-        totalDistance = 0
-        lastLocation = nil
     }
     
     func requestLocation() {
@@ -113,10 +104,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     public func updateLocationTracking(restart: Bool = false) {
         let shouldTrack = isNavigating || 
                          isViewingMap || 
-                         (healthKitManager?.isWorkoutActive == true) ||
                          isRefreshingDeviceDestinationLocation
         let shouldTrackInBackground = isNavigating ||
-                                      (healthKitManager?.isWorkoutActive == true) ||
                                       isRefreshingDeviceDestinationLocation
 
         if shouldTrackInBackground &&
@@ -133,7 +122,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
-            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(healthKitManager?.isWorkoutActive == true), device destination request: \(isRefreshingDeviceDestinationLocation))")
+            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
         } else if !shouldTrack && isLocationUpdating {
@@ -161,25 +150,6 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         guard let location = locations.last else { return }
         
         currentLocation = location
-        
-        // Pass to HealthKit to calculate speed/distance
-        if let healthKit = healthKitManager, healthKit.isWorkoutActive {
-            if let last = lastLocation {
-                // Calculate distance increment
-                let distanceIncrement = location.distance(from: last)
-                // Filter out unrealistic jumps (> 100m between updates at 5m filter)
-                if distanceIncrement < 100 {
-                    totalDistance += distanceIncrement
-                }
-            }
-            lastLocation = location
-            
-            // Get current speed (m/s) from location, or calculate it
-            let speed = location.speed >= 0 ? location.speed : 0
-            
-            // Update HealthKit manager with current speed and total distance
-            healthKit.updateLocation(speed: speed, distance: totalDistance)
-        }
         
         // Only reverse geocode if:
         // 1. We haven't geocoded yet, OR

@@ -1,8 +1,8 @@
 # Contributing
 
 Open Source Bike Computer is an iOS-driven bike computer: the phone plans the
-route, records workout metrics, and streams navigation, GPS, route geometry,
-map settings, and ride telemetry to a small handlebar display over BLE.
+route and streams navigation, GPS, route geometry, map settings, and ride
+telemetry to a small handlebar display over BLE.
 
 ## Repo layout
 
@@ -11,8 +11,8 @@ map settings, and ride telemetry to a small handlebar display over BLE.
 - `xiao-nrf52840/` - lower-power Seeed XIAO nRF52840 + Round Display firmware
   target using PlatformIO, Seeed_GFX, Bluefruit BLE, serial simulation, native
   protocol tests, and hardware-evidence checkers.
-- `ios-app/` - iOS companion app using SwiftUI, MapKit, CoreBluetooth,
-  CoreLocation, and HealthKit.
+- `ios-app/` - iOS companion app using SwiftUI, MapKit, CoreBluetooth, and
+  CoreLocation.
 - `tools/OSM_Extract/` - Dockerized OpenStreetMap extraction tools that generate
   vector map blocks (`.fmb` / `.fmp`) from PBF files. This is modified from
   [aresta/OSM_Extract](https://github.com/aresta/OSM_Extract).

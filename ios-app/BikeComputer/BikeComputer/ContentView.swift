@@ -102,9 +102,6 @@ struct ContentView: View {
                     .environmentObject(coordinator.bleManager)
             }
         }
-        .onChange(of: coordinator.selectedView) { newValue in
-            coordinator.updateSelectedView(newValue)
-        }
         .onAppear {
             coordinator.applicationDidBecomeActive()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)

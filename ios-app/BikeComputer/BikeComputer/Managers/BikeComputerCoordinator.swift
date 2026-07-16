@@ -18,7 +18,7 @@ enum NavigationStartOutcome: Equatable {
 }
 
 /// Main coordinator for the Bike Computer app
-/// Manages BLE, Navigation, Location, and HealthKit subsystems
+/// Manages BLE, navigation, and location subsystems.
 @MainActor
 class BikeComputerCoordinator: ObservableObject {
 
@@ -29,7 +29,6 @@ class BikeComputerCoordinator: ObservableObject {
     let destinationStore: SavedDestinationStore
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
-    private let healthKitManager = HealthKitManager()
 
     // MARK: - Published State (UI Observable)
 
@@ -51,16 +50,6 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var routeRemainingTime: TimeInterval?
     @Published var expectedArrivalDate: Date?
 
-    // Workout
-    @Published var isWorkoutActive: Bool = false
-    @Published var isHealthKitAuthorized: Bool = false
-    @Published var isHealthKitAvailable: Bool = false
-    @Published var workoutElapsedTime: TimeInterval = 0
-    @Published var currentSpeedKmh: Double = 0
-    @Published var distanceKm: Double = 0
-    @Published var heartRate: Int?
-    @Published var formattedElapsedTime: String = "00:00"
-
     // Location
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
@@ -71,9 +60,6 @@ class BikeComputerCoordinator: ObservableObject {
 
     // Alerts
     @Published var alert = AlertState()
-
-    // UI State
-    @Published var selectedView: Int = 0  // 0 = map, 1 = navigation+workout
 
     // MARK: - Private State
 
@@ -166,39 +152,6 @@ class BikeComputerCoordinator: ObservableObject {
 
         navEngine.$expectedArrivalDate
             .assign(to: &$expectedArrivalDate)
-
-        // Bind health kit manager state
-        healthKitManager.$isAuthorized
-            .assign(to: &$isHealthKitAuthorized)
-
-        healthKitManager.$isHealthKitAvailable
-            .assign(to: &$isHealthKitAvailable)
-
-        healthKitManager.$isWorkoutActive
-            .sink { [weak self] active in
-                self?.isWorkoutActive = active
-                self?.locationManager.updateLocationTracking()
-            }
-            .store(in: &cancellables)
-
-        healthKitManager.$workoutElapsedTime
-            .assign(to: &$workoutElapsedTime)
-
-        healthKitManager.$currentSpeed
-            .map { $0 * 3.6 }
-            .assign(to: &$currentSpeedKmh)
-
-        healthKitManager.$distanceTraveled
-            .map { $0 / 1000.0 }
-            .assign(to: &$distanceKm)
-
-        healthKitManager.$heartRate
-            .map { $0 > 0 ? Int($0) : nil }
-            .assign(to: &$heartRate)
-
-        healthKitManager.$workoutElapsedTime
-            .map { TimeFormatter.format($0) }
-            .assign(to: &$formattedElapsedTime)
 
         // Bind location manager state
         locationManager.$currentLocation
@@ -313,9 +266,6 @@ class BikeComputerCoordinator: ObservableObject {
                 self?.scheduleDestinationCatalogRetry()
             }
         }
-        locationManager.healthKitManager = healthKitManager
-        healthKitManager.locationManager = locationManager
-
         // Start BLE operations
         bleManager.startScanning()
 
@@ -359,7 +309,6 @@ class BikeComputerCoordinator: ObservableObject {
         navEngine.stopNavigation()
         currentRoute = nil
         locationManager.setNavigating(false)
-        selectedView = 0
     }
 
     func handleDestinationSelection(destination: SavedDestination, mapLocation: CLLocation?) {
@@ -383,16 +332,6 @@ class BikeComputerCoordinator: ObservableObject {
         destinationItem.name = destination.name
         transportType = RouteTransportTypes.cycling
         calculateRoute(from: .mapItem(source), to: .mapItem(destinationItem))
-    }
-
-    // MARK: - Public API: Workout
-
-    func startWorkout() {
-        healthKitManager.startBikeWorkout()
-    }
-
-    func endWorkout() {
-        healthKitManager.endBikeWorkout()
     }
 
     // MARK: - Public API: Location
@@ -473,13 +412,6 @@ class BikeComputerCoordinator: ObservableObject {
         !bleManager.firmwareVersion.isEmpty &&
         bleManager.firmwareBuild > 0 &&
         !bleManager.firmwareGitSha.isEmpty
-    }
-
-    // MARK: - Public API: UI State
-
-    func updateSelectedView(_ view: Int) {
-        selectedView = view
-        locationManager.setViewingMap(view == 0)
     }
 
     private func synchronizeDestinationCatalog(force: Bool = false) {
@@ -1009,8 +941,6 @@ extension BikeComputerCoordinator {
                 // Enable location tracking for navigation
                 self.locationManager.setNavigating(!isTestMode)
 
-                // Show navigation+workout view
-                self.selectedView = 1
                 self.completeNavigationStart(.started, generation: generation)
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {

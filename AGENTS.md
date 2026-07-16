@@ -2,7 +2,7 @@
 
 This repo contains:
 - `esp32/`: ESP32-S3 firmware (PlatformIO + Arduino + LVGL + NimBLE), currently based on the local IceNav-v3 map-renderer snapshot.
-- `ios-app/`: iOS companion app (SwiftUI + MapKit + CoreBluetooth + HealthKit).
+- `ios-app/`: iOS companion app (SwiftUI + MapKit + CoreBluetooth + CoreLocation).
 - `tools/OSM_Extract/`: offline vector-map build pipeline (Docker-based).
 - `waveshare_test/`: hardware bring-up sketches for the Waveshare board.
 

@@ -33,13 +33,6 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>BikeComputer connects to your bike computer over local Wi-Fi to transfer offline maps.</string>
 
-	<!-- HealthKit Permission -->
-	<key>NSHealthShareUsageDescription</key>
-	<string>BikeComputer uses HealthKit to track your cycling workouts and activity data.</string>
-
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>BikeComputer saves your cycling workout data to HealthKit.</string>
-	
 	<!-- Location Accuracy -->
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
 	<dict>
