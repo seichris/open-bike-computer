@@ -2099,17 +2099,17 @@ struct NavigationProtocolTests {
                "off-route location reports distance to the nearest segment")
 
         var detector = RouteDeviationDetector(
-            distanceThreshold: 50,
+            distanceThreshold: 30,
             requiredConsecutiveSamples: 3,
             maxHorizontalAccuracy: 50
         )
-        assert(!detector.shouldReroute(distanceToRoute: 90, horizontalAccuracy: 10),
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "first off-route sample does not reroute")
-        assert(!detector.shouldReroute(distanceToRoute: 90, horizontalAccuracy: 10),
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "second off-route sample does not reroute")
-        assert(detector.shouldReroute(distanceToRoute: 90, horizontalAccuracy: 10),
+        assert(detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
                "third accurate off-route sample reroutes")
-        assert(!detector.shouldReroute(distanceToRoute: 90, horizontalAccuracy: 80),
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 80),
                "poor GPS accuracy does not trigger rerouting")
         assert(!detector.shouldReroute(distanceToRoute: 55, horizontalAccuracy: 30),
                "accuracy-adjusted threshold avoids marginal deviations")

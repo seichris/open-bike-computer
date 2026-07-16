@@ -463,7 +463,7 @@ struct RouteDeviationDetector {
     private(set) var consecutiveOffRouteSamples = 0
 
     init(
-        distanceThreshold: CLLocationDistance = 50,
+        distanceThreshold: CLLocationDistance = 30,
         requiredConsecutiveSamples: Int = 3,
         maxHorizontalAccuracy: CLLocationAccuracy = 50
     ) {
