@@ -67,6 +67,11 @@ class BikeComputerCoordinator: ObservableObject {
     private var ongoingSourceSearch: MKLocalSearch?
     private var ongoingDestinationSearch: MKLocalSearch?
     private var ongoingDirections: MKDirections?
+    private var ongoingRerouteDirections: MKDirections?
+    private var navigationDestination: MKMapItem?
+    private var routeDeviationDetector = RouteDeviationDetector()
+    private var lastRerouteRequestDate = Date.distantPast
+    private let rerouteCooldown: TimeInterval = 15
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     private var deviceCapabilityRefreshGeneration: UInt = 0
     private var routeCalculationGeneration: UInt = 0
@@ -160,7 +165,11 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.$currentLocation
             .compactMap { $0 }
             .sink { [weak self] location in
-                self?.navEngine.processExternalLocation(location)
+                guard let self else { return }
+                let acceptedForNavigation = self.navEngine.processExternalLocation(location)
+                if acceptedForNavigation {
+                    self.evaluateRerouting(for: location)
+                }
             }
             .store(in: &cancellables)
 
@@ -306,6 +315,11 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     func stopNavigation() {
+        ongoingRerouteDirections?.cancel()
+        ongoingRerouteDirections = nil
+        navigationDestination = nil
+        routeDeviationDetector.reset()
+        lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
         currentRoute = nil
         locationManager.setNavigating(false)
@@ -741,6 +755,11 @@ extension BikeComputerCoordinator {
         ongoingSourceSearch?.cancel()
         ongoingDestinationSearch?.cancel()
         ongoingDirections?.cancel()
+        ongoingRerouteDirections?.cancel()
+        ongoingRerouteDirections = nil
+        navigationDestination = nil
+        routeDeviationDetector.reset()
+        lastRerouteRequestDate = .distantPast
         routeCalculationGeneration &+= 1
         let generation = routeCalculationGeneration
         if let completion {
@@ -930,6 +949,8 @@ extension BikeComputerCoordinator {
 
                 // Store the route for map display
                 self.currentRoute = route
+                self.navigationDestination = destinationItem
+                self.routeDeviationDetector.reset()
 
                 // Start navigation from the same source MapKit used to calculate the route.
                 self.navEngine.startNavigation(
@@ -948,6 +969,83 @@ extension BikeComputerCoordinator {
                     self.routeCalculation.isCalculating = false
                     self.routeCalculation.status = ""
                 }
+            }
+        }
+    }
+
+    private func evaluateRerouting(for gpsLocation: CLLocation) {
+        guard navEngine.isNavigating,
+              !navEngine.isSimulationMode,
+              ongoingRerouteDirections == nil,
+              let route = currentRoute,
+              let destination = navigationDestination else {
+            routeDeviationDetector.reset()
+            return
+        }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastRerouteRequestDate) >= rerouteCooldown else {
+            routeDeviationDetector.reset()
+            return
+        }
+
+        let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: gpsLocation)
+        guard let distanceToRoute = RouteDeviation.distance(from: routeLocation, to: route.polyline),
+              routeDeviationDetector.shouldReroute(
+                distanceToRoute: distanceToRoute,
+                horizontalAccuracy: gpsLocation.horizontalAccuracy
+              ) else {
+            return
+        }
+
+        requestReroute(from: routeLocation, to: destination, distanceToRoute: distanceToRoute)
+    }
+
+    private func requestReroute(
+        from routeLocation: CLLocation,
+        to destination: MKMapItem,
+        distanceToRoute: CLLocationDistance
+    ) {
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: routeLocation.coordinate))
+        source.name = "Current Location"
+
+        let request = MKDirections.Request()
+        request.source = source
+        request.destination = destination
+        request.transportType = transportType
+        request.requestsAlternateRoutes = false
+
+        lastRerouteRequestDate = Date()
+        print("Off route by \(Int(distanceToRoute.rounded()))m; requesting reroute")
+
+        let directions = MKDirections(request: request)
+        ongoingRerouteDirections = directions
+        directions.calculate { [weak self] response, error in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let activeDirections = self.ongoingRerouteDirections,
+                      activeDirections === directions else {
+                    return
+                }
+                self.ongoingRerouteDirections = nil
+
+                if let error {
+                    print("Reroute failed: \(error.localizedDescription)")
+                    return
+                }
+
+                guard self.navEngine.isNavigating,
+                      let route = response?.routes.first else {
+                    print("Reroute returned no route")
+                    return
+                }
+
+                self.currentRoute = route
+                self.routeDeviationDetector.reset()
+                let latestRouteLocation = self.currentLocation
+                    .map(CoordinateConverter.mapKitRouteLocation(fromGPSLocation:)) ?? routeLocation
+                self.navEngine.replaceRoute(with: route, currentLocation: latestRouteLocation)
+                print("Reroute applied: \(Int(route.distance.rounded()))m, \(route.steps.count) steps")
             }
         }
     }

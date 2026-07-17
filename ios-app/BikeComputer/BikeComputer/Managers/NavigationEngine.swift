@@ -80,8 +80,9 @@ class NavigationEngine: NSObject, ObservableObject {
             .store(in: &cancellables)
     }
 
-    func processExternalLocation(_ location: CLLocation) {
-        guard !isSimulationMode else { return }
+    @discardableResult
+    func processExternalLocation(_ location: CLLocation) -> Bool {
+        guard !isSimulationMode else { return false }
         let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
         let acceptedRouteLocation: CLLocation?
         if shouldAcceptLiveLocation(routeLocation) {
@@ -97,6 +98,7 @@ class NavigationEngine: NSObject, ObservableObject {
             lastDeviceGpsLocation = (location, false)
             sendIdleDeviceTimeSyncIfNeeded(location)
         }
+        return acceptedRouteLocation != nil
     }
     
     /// Start navigation with a given route
@@ -127,6 +129,30 @@ class NavigationEngine: NSObject, ObservableObject {
             updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
             sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
         }
+    }
+
+    /// Replace an active route after rerouting without resetting ride telemetry.
+    func replaceRoute(with route: MKRoute, currentLocation: CLLocation) {
+        guard isNavigating, !isSimulationMode else { return }
+
+        currentRoute = route
+        currentStepIndex = 0
+        currentSnapshot = nil
+        lastManeuverStepIndex = nil
+        lastManeuverRemainingDistance = nil
+        sendTracker.reset()
+        initialNavigationLocation = nil
+        hasAcceptedLiveLocation = true
+        lastSentGeometryHash = 0
+        lastGeometrySendTime = .distantPast
+
+        let remainingDistance = RouteProgress.remainingDistance(from: currentLocation, in: route) ?? route.distance
+        lastRouteRemainingMeters = remainingDistance
+        updateNavigationSummary(route: route, remainingDistance: remainingDistance)
+        processLocation(currentLocation)
+        resendCurrentDeviceGpsPosition()
+
+        print("Navigation route replaced with \(route.steps.count) steps")
     }
     
     /// Stop navigation

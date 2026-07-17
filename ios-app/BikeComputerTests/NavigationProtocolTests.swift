@@ -436,6 +436,7 @@ struct NavigationProtocolTests {
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
+        testRouteDeviationDetection()
         testStepRemainingDistanceFollowsPolyline()
         testStepRemainingDistanceResolvesAmbiguousGeometry()
         testChinaRouteCoordinatesRoundTripWithoutCalibrationNudge()
@@ -2081,6 +2082,39 @@ struct NavigationProtocolTests {
 
         let offRouteNearHalfway = CLLocation(latitude: 37.0010, longitude: -122.0005)
         assert(abs((RouteProgress.remainingDistance(from: offRouteNearHalfway, in: route) ?? -1) - totalDistance / 2) < 2, "route remaining projects nearby locations onto closest segment")
+    }
+
+    static func testRouteDeviationDetection() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0020, longitude: -122.0000)
+        ]
+        let polyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
+        let onRoute = CLLocation(latitude: 37.0010, longitude: -122.0000)
+        let offRoute = CLLocation(latitude: 37.0010, longitude: -122.0010)
+
+        assert((RouteDeviation.distance(from: onRoute, to: polyline) ?? -1) < 1,
+               "on-route location has near-zero deviation")
+        assert((RouteDeviation.distance(from: offRoute, to: polyline) ?? 0) > 80,
+               "off-route location reports distance to the nearest segment")
+
+        var detector = RouteDeviationDetector(
+            distanceThreshold: 30,
+            requiredConsecutiveSamples: 3,
+            maxHorizontalAccuracy: 50
+        )
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
+               "first off-route sample does not reroute")
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
+               "second off-route sample does not reroute")
+        assert(detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 10),
+               "third accurate off-route sample reroutes")
+        assert(!detector.shouldReroute(distanceToRoute: 40, horizontalAccuracy: 80),
+               "poor GPS accuracy does not trigger rerouting")
+        assert(!detector.shouldReroute(distanceToRoute: 55, horizontalAccuracy: 30),
+               "accuracy-adjusted threshold avoids marginal deviations")
+        assertEqual(detector.consecutiveOffRouteSamples, 0,
+                    "an on-route or uncertain sample resets the deviation streak")
     }
 
     static func testStepRemainingDistanceFollowsPolyline() {
@@ -8697,8 +8731,9 @@ struct NavigationProtocolTests {
         assertEqual(manager.sentPackets.count, 1, "ready BLE should send initial source-based packet")
 
         let unrelatedDeviceLocation = CLLocation(latitude: 32.2304, longitude: 121.4737)
-        engine.processExternalLocation(unrelatedDeviceLocation)
+        let accepted = engine.processExternalLocation(unrelatedDeviceLocation)
 
+        assert(!accepted, "far live GPS should not be accepted for rerouting")
         assertEqual(manager.sentPackets.count, 1, "far live GPS should not overwrite a route started from another source")
     }
 

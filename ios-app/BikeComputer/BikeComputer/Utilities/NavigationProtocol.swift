@@ -422,6 +422,85 @@ enum RouteProgress {
     }
 }
 
+enum RouteDeviation {
+    static func distance(from location: CLLocation, to polyline: MKPolyline) -> CLLocationDistance? {
+        let pointCount = polyline.pointCount
+        guard pointCount > 0 else { return nil }
+
+        let routePoints = polyline.points()
+        let target = MKMapPoint(location.coordinate)
+        if pointCount == 1 {
+            return target.distance(to: routePoints[0])
+        }
+
+        var closestDistance = Double.greatestFiniteMagnitude
+        for index in 0..<(pointCount - 1) {
+            let start = routePoints[index]
+            let end = routePoints[index + 1]
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let segmentLengthSquared = dx * dx + dy * dy
+
+            guard segmentLengthSquared > 0 else {
+                closestDistance = min(closestDistance, target.distance(to: start))
+                continue
+            }
+
+            let rawProjection = ((target.x - start.x) * dx + (target.y - start.y) * dy) / segmentLengthSquared
+            let projection = min(max(rawProjection, 0), 1)
+            let projected = MKMapPoint(x: start.x + projection * dx, y: start.y + projection * dy)
+            closestDistance = min(closestDistance, target.distance(to: projected))
+        }
+
+        return closestDistance.isFinite ? closestDistance : nil
+    }
+}
+
+struct RouteDeviationDetector {
+    let distanceThreshold: CLLocationDistance
+    let requiredConsecutiveSamples: Int
+    let maxHorizontalAccuracy: CLLocationAccuracy
+    private(set) var consecutiveOffRouteSamples = 0
+
+    init(
+        distanceThreshold: CLLocationDistance = 30,
+        requiredConsecutiveSamples: Int = 3,
+        maxHorizontalAccuracy: CLLocationAccuracy = 50
+    ) {
+        self.distanceThreshold = distanceThreshold
+        self.requiredConsecutiveSamples = max(requiredConsecutiveSamples, 1)
+        self.maxHorizontalAccuracy = maxHorizontalAccuracy
+    }
+
+    mutating func reset() {
+        consecutiveOffRouteSamples = 0
+    }
+
+    mutating func shouldReroute(
+        distanceToRoute: CLLocationDistance,
+        horizontalAccuracy: CLLocationAccuracy
+    ) -> Bool {
+        guard distanceToRoute.isFinite,
+              horizontalAccuracy >= 0,
+              horizontalAccuracy <= maxHorizontalAccuracy else {
+            reset()
+            return false
+        }
+
+        let accuracyAdjustedThreshold = max(distanceThreshold, horizontalAccuracy * 2)
+        guard distanceToRoute > accuracyAdjustedThreshold else {
+            reset()
+            return false
+        }
+
+        consecutiveOffRouteSamples += 1
+        guard consecutiveOffRouteSamples >= requiredConsecutiveSamples else { return false }
+
+        reset()
+        return true
+    }
+}
+
 enum RouteEndpointSelection {
     static func sourceEndpoint(hasSelectedSource: Bool, sourceAddress: String) -> RouteEndpoint {
         hasSelectedSource ? .query(sourceAddress) : .currentLocation
