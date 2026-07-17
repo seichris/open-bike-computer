@@ -1,4 +1,6 @@
+import math
 import unittest
+from unittest.mock import patch
 
 from map_platform.geometry import GeometryError, normalize_geometry
 
@@ -45,6 +47,40 @@ class GeometryTests(unittest.TestCase):
                 }
             )
 
+    def test_maximum_public_polygon_vertex_budget(self):
+        ring = [
+            [
+                math.cos(index * 2 * math.pi / 499),
+                math.sin(index * 2 * math.pi / 499),
+            ]
+            for index in range(499)
+        ]
+        ring.append(ring[0])
+
+        geometry = normalize_geometry(
+            {
+                "mode": "custom_polygon",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [ring],
+                },
+            }
+        )
+
+        self.assertEqual(geometry.vertex_count, 500)
+
+        too_large = ring[:-1] + [[1.1, 0], ring[0]]
+        with self.assertRaisesRegex(GeometryError, "too many vertices"):
+            normalize_geometry(
+                {
+                    "mode": "custom_polygon",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [too_large],
+                    },
+                }
+            )
+
     def test_route_corridor_expands_thin_route(self):
         geometry = normalize_geometry(
             {
@@ -60,6 +96,31 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(geometry.route_point_count, 2)
         self.assertLess(geometry.bounds.min_lon, 103.8)
         self.assertGreater(geometry.bounds.max_lon, 103.8)
+
+    def test_multipolygon_rejects_aggregate_vertex_limit_before_extra_scan(self):
+        first_ring = [
+            [
+                math.cos(index * 2 * math.pi / 499),
+                math.sin(index * 2 * math.pi / 499),
+            ]
+            for index in range(499)
+        ]
+        first_ring.append(first_ring[0])
+        second_ring = [[2, 0], [3, 0], [3, 1], [2, 0]]
+
+        with patch("map_platform.geometry._reject_self_intersection") as reject:
+            with self.assertRaisesRegex(GeometryError, "too many vertices"):
+                normalize_geometry(
+                    {
+                        "mode": "custom_polygon",
+                        "geometry": {
+                            "type": "MultiPolygon",
+                            "coordinates": [[first_ring], [second_ring]],
+                        },
+                    }
+                )
+
+        self.assertEqual(reject.call_count, 1)
 
 
 if __name__ == "__main__":

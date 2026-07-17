@@ -19,6 +19,13 @@ class InstallationCredentialTests(unittest.TestCase):
             previous_secrets=[old_secret],
         )
         rotated.verify(installation_id, token)
+        refreshed_id, refreshed_token = rotated.refresh(installation_id, token)
+        self.assertEqual(refreshed_id, installation_id)
+        self.assertNotEqual(refreshed_token, token)
+        InstallationCredentialStore(new_secret).verify(
+            refreshed_id,
+            refreshed_token,
+        )
         with self.assertRaises(InstallationCredentialError):
             InstallationCredentialStore(new_secret).verify(installation_id, token)
         with self.assertRaises(InstallationCredentialError):

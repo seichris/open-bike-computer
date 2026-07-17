@@ -24,7 +24,7 @@ class JobLimits:
     max_active_jobs: int = 25
     max_area_km2: float = 250_000.0
     max_route_points: int = 25_000
-    max_polygon_vertices: int = 5_000
+    max_polygon_vertices: int = 500
 
     def validate_geometry(self, geometry: NormalizedGeometry) -> None:
         if geometry.area_km2 > self.max_area_km2:

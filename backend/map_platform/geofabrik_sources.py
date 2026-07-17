@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -15,6 +17,7 @@ from .sources import SourceResolutionError, contains_bounds
 
 DEFAULT_GEOFABRIK_INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_FAILURE_COOLDOWN_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -31,12 +34,17 @@ class GeofabrikSourceProvider:
         cache_path: str | Path,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         request_timeout_seconds: int = 60,
+        failure_cooldown_seconds: int = DEFAULT_FAILURE_COOLDOWN_SECONDS,
     ):
         self.index_url = index_url
         self.cache_path = Path(cache_path)
         self.cache_ttl_seconds = cache_ttl_seconds
         self.request_timeout_seconds = request_timeout_seconds
+        self.failure_cooldown_seconds = max(1, failure_cooldown_seconds)
         self._regions: list[GeofabrikCatalogRegion] | None = None
+        self._regions_lock = threading.Lock()
+        self._regions_error: SourceResolutionError | None = None
+        self._regions_retry_at = 0.0
 
     @classmethod
     def from_environment(cls, data_root: str | Path) -> "GeofabrikSourceProvider | None":
@@ -55,6 +63,12 @@ class GeofabrikSourceProvider:
             cache_path=cache_path,
             cache_ttl_seconds=int(os.environ.get("MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS)),
             request_timeout_seconds=int(os.environ.get("MAP_PLATFORM_GEOFABRIK_TIMEOUT_SECONDS", "60")),
+            failure_cooldown_seconds=int(
+                os.environ.get(
+                    "MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS",
+                    DEFAULT_FAILURE_COOLDOWN_SECONDS,
+                )
+            ),
         )
 
     def source_regions(self) -> list[SourceRegion]:
@@ -87,31 +101,64 @@ class GeofabrikSourceProvider:
 
     def _catalog_regions(self) -> list[GeofabrikCatalogRegion]:
         if self._regions is None:
-            try:
-                self._regions = self._parse_regions(self._load_catalog())
-            except SourceResolutionError:
-                raise
-            except Exception as exc:
-                raise SourceResolutionError(f"failed to load Geofabrik source catalog: {exc}") from exc
+            self._raise_cached_error_if_active()
+            with self._regions_lock:
+                if self._regions is None:
+                    self._raise_cached_error_if_active()
+                    try:
+                        self._regions = self._parse_regions(self._load_catalog())
+                        self._regions_error = None
+                        self._regions_retry_at = 0.0
+                    except SourceResolutionError as exc:
+                        self._cache_load_error(exc)
+                        raise
+                    except Exception as exc:
+                        error = SourceResolutionError(
+                            f"failed to load Geofabrik source catalog: {exc}"
+                        )
+                        self._cache_load_error(error)
+                        raise error from exc
         return list(self._regions)
 
+    def _cache_load_error(self, error: SourceResolutionError) -> None:
+        self._regions_error = error
+        self._regions_retry_at = (
+            time.monotonic() + self.failure_cooldown_seconds
+        )
+
+    def _raise_cached_error_if_active(self) -> None:
+        if (
+            self._regions_error is not None
+            and time.monotonic() < self._regions_retry_at
+        ):
+            raise SourceResolutionError(str(self._regions_error))
+
     def _load_catalog(self) -> dict[str, Any]:
-        if self._cache_is_fresh():
-            return json.loads(self.cache_path.read_text())
-
-        try:
-            with urllib.request.urlopen(self.index_url, timeout=self.request_timeout_seconds) as response:
-                catalog = json.loads(response.read().decode("utf-8"))
-        except Exception:
-            if self.cache_path.exists():
-                return json.loads(self.cache_path.read_text())
-            raise
-
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
-        tmp_path.replace(self.cache_path)
-        return catalog
+        lock_path = self.cache_path.with_suffix(self.cache_path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if self._cache_is_fresh():
+                return json.loads(self.cache_path.read_text())
+            try:
+                with urllib.request.urlopen(
+                    self.index_url,
+                    timeout=self.request_timeout_seconds,
+                ) as response:
+                    catalog = json.loads(response.read().decode("utf-8"))
+            except Exception:
+                if self.cache_path.exists():
+                    return json.loads(self.cache_path.read_text())
+                raise
+
+            tmp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+            tmp_path.replace(self.cache_path)
+            return catalog
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def _cache_is_fresh(self) -> bool:
         if not self.cache_path.exists():

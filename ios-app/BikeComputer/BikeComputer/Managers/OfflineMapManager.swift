@@ -54,6 +54,67 @@ nonisolated enum OfflineMapSharedSecretMigration {
             defaults.removeObject(forKey: key)
         }
     }
+
+    static func migrateCustomServerValues(
+        defaults: UserDefaults,
+        tokenStore: OfflineMapLegacyBearerTokenStore
+    ) {
+        let candidates = [
+            (
+                serverKey: "offlineMap.activeJobServerURL",
+                tokenKey: "offlineMap.activeJobAPIToken"
+            ),
+            (
+                serverKey: "offlineMap.serverURL",
+                tokenKey: "offlineMap.apiToken"
+            ),
+        ]
+        for candidate in candidates {
+            let server = defaults.string(forKey: candidate.serverKey) ?? ""
+            let token = defaults.string(forKey: candidate.tokenKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !token.isEmpty, !OfflineMapServerIdentity.isManaged(server) else {
+                defaults.removeObject(forKey: candidate.tokenKey)
+                continue
+            }
+            do {
+                try tokenStore.save(token, serverURLString: server)
+                defaults.removeObject(forKey: candidate.tokenKey)
+            } catch {
+                // Leave the legacy value available if secure migration failed.
+            }
+        }
+    }
+
+    static func legacyCustomToken(
+        serverURLString: String,
+        defaults: UserDefaults
+    ) -> String? {
+        guard !OfflineMapServerIdentity.isManaged(serverURLString) else { return nil }
+        let candidates = [
+            (
+                serverKey: "offlineMap.serverURL",
+                tokenKey: "offlineMap.apiToken"
+            ),
+            (
+                serverKey: "offlineMap.activeJobServerURL",
+                tokenKey: "offlineMap.activeJobAPIToken"
+            ),
+        ]
+        for candidate in candidates {
+            guard let candidateServer = defaults.string(forKey: candidate.serverKey),
+                  OfflineMapServerIdentity.normalized(candidateServer) ==
+                    OfflineMapServerIdentity.normalized(serverURLString) else {
+                continue
+            }
+            let token = defaults.string(forKey: candidate.tokenKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !token.isEmpty {
+                return token
+            }
+        }
+        return nil
+    }
 }
 
 @MainActor
@@ -918,6 +979,39 @@ nonisolated enum OfflineMapInstallationIdentity {
     }
 }
 
+nonisolated enum OfflineMapInstallationRefreshBackoff {
+    private static let keyPrefix = "offlineMap.installationRefreshDeferredUntil."
+    static let retryInterval: TimeInterval = 25 * 60 * 60
+
+    private static func key(serverURLString: String) -> String {
+        keyPrefix + OfflineMapServerIdentity.normalized(serverURLString)
+    }
+
+    static func shouldDefer(
+        serverURLString: String,
+        defaults: UserDefaults,
+        now: Date = Date()
+    ) -> Bool {
+        defaults.double(forKey: key(serverURLString: serverURLString)) >
+            now.timeIntervalSince1970
+    }
+
+    static func deferRefresh(
+        serverURLString: String,
+        defaults: UserDefaults,
+        now: Date = Date()
+    ) {
+        defaults.set(
+            now.addingTimeInterval(retryInterval).timeIntervalSince1970,
+            forKey: key(serverURLString: serverURLString)
+        )
+    }
+
+    static func clear(serverURLString: String, defaults: UserDefaults) {
+        defaults.removeObject(forKey: key(serverURLString: serverURLString))
+    }
+}
+
 nonisolated enum OfflineMapInstallationCredentialStoreError: LocalizedError {
     case persistenceFailure(Int32)
 
@@ -967,6 +1061,69 @@ nonisolated struct OfflineMapInstallationCredentialStore {
     ) throws {
         let account = OfflineMapServerIdentity.normalized(serverURLString)
         let data = try JSONEncoder().encode(credential)
+#if os(iOS)
+        let identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+        ]
+        let update: [String: Any] = [kSecValueData as String: data]
+        let updateStatus = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
+        if updateStatus == errSecItemNotFound {
+            var item = identity
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw OfflineMapInstallationCredentialStoreError.persistenceFailure(addStatus)
+            }
+        } else if updateStatus != errSecSuccess {
+            throw OfflineMapInstallationCredentialStoreError.persistenceFailure(updateStatus)
+        }
+#else
+        defaults.set(data, forKey: Self.fallbackKeyPrefix + account)
+#endif
+    }
+}
+
+nonisolated struct OfflineMapLegacyBearerTokenStore {
+    private static let service = "org.openbikecomputer.map-platform-legacy-bearer-v1"
+    private static let fallbackKeyPrefix = "offlineMap.legacyBearerCredential."
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func load(serverURLString: String) -> String? {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+#if os(iOS)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else {
+            return nil
+        }
+#else
+        guard let data = defaults.data(forKey: Self.fallbackKeyPrefix + account) else {
+            return nil
+        }
+#endif
+        guard let token = String(data: data, encoding: .utf8), !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    func save(_ token: String, serverURLString: String) throws {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        let data = Data(token.utf8)
 #if os(iOS)
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -1272,6 +1429,7 @@ final class OfflineMapManager: ObservableObject {
     private let metadataSave: SavedMapArtifactMetadataSaveOperation
     private let cacheDirectoryOverride: URL?
     private let installationCredentialStore: OfflineMapInstallationCredentialStore
+    private let legacyBearerTokenStore: OfflineMapLegacyBearerTokenStore
     private let mapStreamTrustStore: BikeMapStreamTrustStore
     private let legacyClientInstallationId: String
     private(set) var clientInstallationId: String
@@ -1333,6 +1491,12 @@ final class OfflineMapManager: ObservableObject {
         self.metadataSave = metadataSave
         self.cacheDirectoryOverride = cacheDirectory
         self.installationCredentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
+        let legacyBearerTokenStore = OfflineMapLegacyBearerTokenStore(defaults: defaults)
+        OfflineMapSharedSecretMigration.migrateCustomServerValues(
+            defaults: defaults,
+            tokenStore: legacyBearerTokenStore
+        )
+        self.legacyBearerTokenStore = legacyBearerTokenStore
         self.mapStreamTrustStore = mapStreamTrustStore
         let resolvedServerURL = Self.resolvedServerURL(defaults: defaults)
         let installationCredential = installationCredentialStore.load(
@@ -1358,7 +1522,6 @@ final class OfflineMapManager: ObservableObject {
             self.lastTransferOutcome = restoredTransferOutcome
         }
         defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
-        OfflineMapSharedSecretMigration.removeLegacyValues(defaults: defaults)
         defaults.set(lastTransferOutcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
         refreshCachedPacks()
         restoreLastTransferPresentation()
@@ -1418,13 +1581,18 @@ final class OfflineMapManager: ObservableObject {
 
         startMapJobTask { manager in
             var client = try manager.makeClient()
+            if client.clientInstallationToken?.isEmpty == false {
+                client = try await manager.ensureRegisteredInstallation(client: client)
+            }
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: bleManager
             ) {
                 return
             }
-            client = try await manager.ensureRegisteredInstallation(client: client)
+            if client.clientInstallationToken?.isEmpty != false {
+                client = try await manager.ensureRegisteredInstallation(client: client)
+            }
             let request = OfflineMapJobRequest
                 .customBBox(OfflineMapBounds(
                     center: location.coordinate,
@@ -1464,10 +1632,21 @@ final class OfflineMapManager: ObservableObject {
         }
 
         startMapJobTask { manager in
+            if let persistedJobId,
+               try await manager.finishDownloadedRecoveredJobIfAvailable(
+                    jobId: persistedJobId,
+                    installOnDevice: persistedInstallIntent,
+                    bleManager: bleManager
+               ) {
+                return
+            }
             let recoveryServerURL = manager.recoveryServerURL(
                 persistedServerURL: persistedServerURL
             )
-            let client = try manager.makeClient(serverURLString: recoveryServerURL)
+            var client = try manager.makeClient(serverURLString: recoveryServerURL)
+            if client.clientInstallationToken?.isEmpty == false {
+                client = try await manager.ensureRegisteredInstallation(client: client)
+            }
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
 
@@ -1987,13 +2166,18 @@ final class OfflineMapManager: ObservableObject {
         guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
             var client = try manager.makeClient()
+            if client.clientInstallationToken?.isEmpty == false {
+                client = try await manager.ensureRegisteredInstallation(client: client)
+            }
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: nil
             ) {
                 return
             }
-            client = try await manager.ensureRegisteredInstallation(client: client)
+            if client.clientInstallationToken?.isEmpty != false {
+                client = try await manager.ensureRegisteredInstallation(client: client)
+            }
             manager.currentJob = nil
             manager.downloadURL = nil
             manager.downloadedPackURL = nil
@@ -2257,8 +2441,14 @@ final class OfflineMapManager: ObservableObject {
         }
         let credential = installationCredentialStore.load(serverURLString: value)
         let installationID = credential?.clientInstallationId ?? legacyClientInstallationId
+        let legacyBearerToken = legacyBearerTokenStore.load(serverURLString: value) ??
+            OfflineMapSharedSecretMigration.legacyCustomToken(
+                serverURLString: value,
+                defaults: defaults
+            )
         return OfflineMapPlatformClient(
             baseURL: url,
+            legacyBearerToken: legacyBearerToken,
             clientInstallationId: installationID,
             clientInstallationToken: credential?.clientInstallationToken,
             session: mapPlatformSession
@@ -2266,34 +2456,98 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func ensureRegisteredInstallation(
-        client: OfflineMapPlatformClient
+        client: OfflineMapPlatformClient,
+        honorRefreshBackoff: Bool = true
     ) async throws -> OfflineMapPlatformClient {
-        if client.clientInstallationToken?.isEmpty == false {
-            return client
+        if honorRefreshBackoff,
+           client.clientInstallationToken?.isEmpty == false,
+           OfflineMapInstallationRefreshBackoff.shouldDefer(
+                serverURLString: client.baseURL.absoluteString,
+                defaults: defaults
+           ) {
+            do {
+                _ = try await client.jobs()
+                return client
+            } catch let error as OfflineMapPlatformError {
+                guard case .serverStatus(let status, _) = error,
+                      status == 401 else {
+                    return client
+                }
+                OfflineMapInstallationRefreshBackoff.clear(
+                    serverURLString: client.baseURL.absoluteString,
+                    defaults: defaults
+                )
+                return try await ensureRegisteredInstallation(
+                    client: client,
+                    honorRefreshBackoff: false
+                )
+            } catch {
+                return client
+            }
         }
         do {
             let credential = try await client.registerInstallation()
-            try installationCredentialStore.save(
-                credential,
-                serverURLString: client.baseURL.absoluteString
-            )
-            if OfflineMapServerIdentity.normalized(client.baseURL.absoluteString) ==
-                OfflineMapServerIdentity.normalized(serverURLString) {
-                clientInstallationId = credential.clientInstallationId
-                clientInstallationToken = credential.clientInstallationToken
+            if !client.canAdoptInstallationCredential(credential) {
+                // Servers predating credential refresh ignore the existing ID
+                // and issue a replacement. Keep the proven credential so owned
+                // jobs are not orphaned during a staggered deployment. Back off
+                // before probing again so the legacy endpoint's issuance quota
+                // cannot be exhausted by normal map actions.
+                OfflineMapInstallationRefreshBackoff.deferRefresh(
+                    serverURLString: client.baseURL.absoluteString,
+                    defaults: defaults
+                )
+                return client
             }
-            return OfflineMapPlatformClient(
-                baseURL: client.baseURL,
-                clientInstallationId: credential.clientInstallationId,
-                clientInstallationToken: credential.clientInstallationToken,
-                session: mapPlatformSession
+            OfflineMapInstallationRefreshBackoff.clear(
+                serverURLString: client.baseURL.absoluteString,
+                defaults: defaults
             )
+            return try registeredClient(credential, replacing: client)
         } catch let error as OfflineMapPlatformError {
             if case .serverStatus(let status, _) = error, status == 404 || status == 405 {
                 return client
             }
+            if case .serverStatus(let status, _) = error,
+               status == 401,
+               client.clientInstallationToken?.isEmpty == false {
+                let replacement = OfflineMapPlatformClient(
+                    baseURL: client.baseURL,
+                    legacyBearerToken: client.legacyBearerToken,
+                    clientInstallationId: legacyClientInstallationId,
+                    mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
+                    mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
+                    session: mapPlatformSession
+                )
+                let credential = try await replacement.registerInstallation()
+                return try registeredClient(credential, replacing: replacement)
+            }
             throw error
         }
+    }
+
+    private func registeredClient(
+        _ credential: OfflineMapInstallationCredential,
+        replacing client: OfflineMapPlatformClient
+    ) throws -> OfflineMapPlatformClient {
+        try installationCredentialStore.save(
+            credential,
+            serverURLString: client.baseURL.absoluteString
+        )
+        if OfflineMapServerIdentity.normalized(client.baseURL.absoluteString) ==
+            OfflineMapServerIdentity.normalized(serverURLString) {
+            clientInstallationId = credential.clientInstallationId
+            clientInstallationToken = credential.clientInstallationToken
+        }
+        return OfflineMapPlatformClient(
+            baseURL: client.baseURL,
+            legacyBearerToken: client.legacyBearerToken,
+            clientInstallationId: credential.clientInstallationId,
+            clientInstallationToken: credential.clientInstallationToken,
+            mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
+            mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
+            session: mapPlatformSession
+        )
     }
 
     private func recoveryServerURL(
@@ -2614,31 +2868,11 @@ final class OfflineMapManager: ObservableObject {
         client: OfflineMapPlatformClient,
         bleManager: BLEManager?
     ) async throws {
-        if installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
-            guard let bleManager,
-                  bleManager.isConnected,
-                  bleManager.isNavigationReady else {
-                statusMessage = "map downloaded; reconnect device to install"
-                return
-            }
-            if let downloadedPackURL {
-                let deviceState = await cachedPackDeviceState(
-                    downloadedPackURL,
-                    bleManager: bleManager
-                )
-                if deviceState == .pending {
-                    statusMessage = "map activation is still running on device"
-                    return
-                }
-                if deviceState == .installed {
-                    statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
-                    updateLastTransferOutcome("installed")
-                    clearPersistedJob(markHandled: true)
-                    return
-                }
-            }
-            try await transferReadyPack(bleManager: bleManager)
-            clearPersistedJob(markHandled: true)
+        if try await finishDownloadedRecoveredJobIfAvailable(
+            jobId: jobId,
+            installOnDevice: installOnDevice,
+            bleManager: bleManager
+        ) {
             return
         }
 
@@ -2685,6 +2919,41 @@ final class OfflineMapManager: ObservableObject {
             try await transferReadyPack(bleManager: bleManager)
         }
         clearPersistedJob(markHandled: true)
+    }
+
+    private func finishDownloadedRecoveredJobIfAvailable(
+        jobId: String,
+        installOnDevice: Bool,
+        bleManager: BLEManager?
+    ) async throws -> Bool {
+        if installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
+            guard let bleManager,
+                  bleManager.isConnected,
+                  bleManager.isNavigationReady else {
+                statusMessage = "map downloaded; reconnect device to install"
+                return true
+            }
+            if let downloadedPackURL {
+                let deviceState = await cachedPackDeviceState(
+                    downloadedPackURL,
+                    bleManager: bleManager
+                )
+                if deviceState == .pending {
+                    statusMessage = "map activation is still running on device"
+                    return true
+                }
+                if deviceState == .installed {
+                    statusMessage = "map installed: \(displayName(forCachedPack: downloadedPackURL))"
+                    updateLastTransferOutcome("installed")
+                    clearPersistedJob(markHandled: true)
+                    return true
+                }
+            }
+            try await transferReadyPack(bleManager: bleManager)
+            clearPersistedJob(markHandled: true)
+            return true
+        }
+        return false
     }
 
     private func cachedPackDeviceState(

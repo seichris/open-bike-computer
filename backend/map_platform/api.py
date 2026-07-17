@@ -44,6 +44,7 @@ from .rate_limits import (
     RateLimitExceeded,
     RateLimitPolicy,
 )
+from .request_limits import RequestBodyLimitMiddleware
 from .source_cache import SourceCache, SourceCacheError
 from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
@@ -60,6 +61,9 @@ def create_app():
         os.environ.get("MAP_PLATFORM_SOURCE_INDEX", repo_root / "backend" / "config" / "source-regions.json")
     )
     data_root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", repo_root / "backend" / "data"))
+    max_request_body_bytes = int(
+        os.environ.get("MAP_PLATFORM_MAX_REQUEST_BODY_BYTES", "2097152")
+    )
     admin_token = os.environ.get("MAP_PLATFORM_ADMIN_TOKEN")
     installation_secret = os.environ.get("MAP_PLATFORM_INSTALLATION_SECRET", "")
     previous_installation_secrets = [
@@ -177,8 +181,13 @@ def create_app():
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_body_bytes=max_request_body_bytes,
+    )
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
+    app.state.job_store = service.store
     app.state.map_stream_rollout = map_stream_rollout
     app.state.rate_limiter = rate_limiter
 
@@ -359,9 +368,25 @@ def create_app():
         )
 
     @app.post("/v1/installations")
-    def create_installation(request: Request) -> dict[str, str]:
-        enforce_rate_limits((installation_issue_policy, client_ip(request)))
-        installation_id, token = installation_store.issue()
+    def create_installation(
+        request: Request,
+        clientInstallationId: str | None = None,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, str]:
+        if clientInstallationId is None:
+            enforce_rate_limits((installation_issue_policy, client_ip(request)))
+            installation_id, token = installation_store.issue()
+        else:
+            try:
+                installation_id, token = installation_store.refresh(
+                    clientInstallationId,
+                    x_installation_token,
+                )
+            except InstallationCredentialError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
         return {
             "clientInstallationId": installation_id,
             "clientInstallationToken": token,
@@ -410,20 +435,37 @@ def create_app():
                 payload.get("clientInstallationId"),
                 x_installation_token,
             )
-            rules = [(map_create_ip_policy, client_ip(request))]
-            if registered_installation_id is not None:
-                rules.append(
-                    (map_create_installation_policy, registered_installation_id)
-                )
-            enforce_rate_limits(*rules)
-            return public_job(
-                service.create_job(payload),
-                payload.get("clientInstallationId"),
-                trust_capabilities,
-                app_build,
-                app_git_sha,
-                app_build_sha256,
+            client_installation_id, client_request_id, _ = (
+                service.resolve_client_request(payload)
             )
+            with service.lock_client_request(
+                client_installation_id,
+                client_request_id,
+            ):
+                _, _, existing = service.resolve_client_request(payload)
+                if existing is not None:
+                    return public_job(
+                        existing,
+                        payload.get("clientInstallationId"),
+                        trust_capabilities,
+                        app_build,
+                        app_git_sha,
+                        app_build_sha256,
+                    )
+                rules = [(map_create_ip_policy, client_ip(request))]
+                if registered_installation_id is not None:
+                    rules.append(
+                        (map_create_installation_policy, registered_installation_id)
+                    )
+                enforce_rate_limits(*rules)
+                return public_job(
+                    service.create_job(payload),
+                    payload.get("clientInstallationId"),
+                    trust_capabilities,
+                    app_build,
+                    app_git_sha,
+                    app_build_sha256,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

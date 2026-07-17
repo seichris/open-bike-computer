@@ -112,8 +112,10 @@ conservative and can be tuned with:
 - `MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY` (default `20` per IP)
 - `MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR` (default `30` per installation)
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
+- `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
 
-Set `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to the comma-separated CIDRs of the
+Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
+comma-separated CIDRs of the
 Coolify reverse proxies that overwrite or append `X-Forwarded-For`. Forwarded
 addresses are ignored unless the immediate peer is trusted, and the resolver
 walks the chain from the right to prevent client-supplied spoofing. IPv6
@@ -206,6 +208,8 @@ Useful production environment variables:
   `$MAP_PLATFORM_DATA_ROOT/source-catalogs/geofabrik-index-v1.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS`: catalog cache TTL, default
   `86400`.
+- `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared
+  by concurrent catalog callers after an upstream failure, default `30`.
 
 Completed jobs expose an `artifacts` array. A client refreshes the immutable
 stream URL with:
@@ -217,9 +221,12 @@ POST /v1/map-packs/{mapId}/artifacts/bike-map-stream-v1/download-url
   &signedManifestReceipt={receipt}
 ```
 
-Before creating v2 jobs, the app calls `POST /v1/installations` once and stores
+Before creating v2 jobs, the app calls `POST /v1/installations` and stores
 the returned installation ID and high-entropy token in the Keychain. Requests
 for that registered installation send the token as `X-Installation-Token`.
+Existing credentials periodically call the same endpoint with their installation
+ID and token so the server can refresh them onto the current installation secret
+before a previous secret is retired.
 An app build with production stream keys also sends `X-Map-Stream-Trust` as a
 comma-separated set of exact `keyId=SHA256(X9.63 public key)` capabilities.
 It sends its `CFBundleVersion` as `X-Map-Stream-App-Build`. Without both
@@ -229,8 +236,9 @@ cohort.
 Artifact URL refresh always requires this installation-bound credential; the
 bundled app API token and a caller-supplied installation ID are not sufficient.
 Issuance is stateless: the server writes no per-installation file, so repeated
-bootstrap calls cannot consume the map data volume. Apply ordinary edge rate
-limits to the endpoint to control request abuse.
+bootstrap calls cannot consume the map data volume. New issuance is protected
+by the persistent IP quota; authenticated refreshes remain subject to the
+general public API quota.
 
 The receipt is required for stream URL refresh, so an expired URL can be
 replaced without changing artifact identity. Filesystem storage returns a

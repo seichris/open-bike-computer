@@ -1,8 +1,11 @@
 import json
 import hashlib
 import os
+import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -12,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
+from map_platform.models import MapJob
 
 
 class MapJobRunAPITests(unittest.TestCase):
@@ -156,7 +160,7 @@ class MapJobRunAPITests(unittest.TestCase):
         job_path = Path(self.tmp.name) / "jobs" / f"{job_id}.json"
         job = json.loads(job_path.read_text())
         job.update(values)
-        job_path.write_text(json.dumps(job))
+        self.client.app.state.job_store.save(MapJob.from_dict(job))
 
     def test_installation_issuance_is_public_but_rate_limited(self):
         limited_root = Path(self.tmp.name) / "installation-limit"
@@ -179,6 +183,43 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(blocked.status_code, 429)
         self.assertEqual(blocked.json()["detail"], "request rate limit exceeded")
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_installation_token_refresh_preserves_identity_across_rotation(self):
+        from map_platform.installations import InstallationCredentialStore
+
+        old_secret = "old-installation-secret-at-least-32-bytes"
+        new_secret = "new-installation-secret-at-least-32-bytes"
+        installation_id, old_token = InstallationCredentialStore(old_secret).issue()
+        rotated_root = Path(self.tmp.name) / "installation-rotation"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(rotated_root),
+                "MAP_PLATFORM_INSTALLATION_SECRET": new_secret,
+                "MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS": old_secret,
+                "MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                refreshed = client.post(
+                    "/v1/installations",
+                    params={"clientInstallationId": installation_id},
+                    headers={"X-Installation-Token": old_token},
+                )
+                newly_issued = client.post("/v1/installations")
+                blocked_new_issue = client.post("/v1/installations")
+            finally:
+                client.close()
+
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.json()["clientInstallationId"], installation_id)
+        refreshed_token = refreshed.json()["clientInstallationToken"]
+        self.assertNotEqual(refreshed_token, old_token)
+        InstallationCredentialStore(new_secret).verify(installation_id, refreshed_token)
+        self.assertEqual(newly_issued.status_code, 200)
+        self.assertEqual(blocked_new_issue.status_code, 429)
 
     def test_map_creation_is_limited_by_installation(self):
         limited_root = Path(self.tmp.name) / "map-create-limit"
@@ -203,14 +244,71 @@ class MapJobRunAPITests(unittest.TestCase):
                     "clientRequestId": "rate-limit-request-1",
                 }
                 first = client.post("/v1/map-jobs", headers=headers, json=payload)
+                replay = client.post("/v1/map-jobs", headers=headers, json=payload)
                 payload["clientRequestId"] = "rate-limit-request-2"
                 blocked = client.post("/v1/map-jobs", headers=headers, json=payload)
             finally:
                 client.close()
 
         self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["jobId"], first.json()["jobId"])
         self.assertEqual(blocked.status_code, 429)
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_concurrent_idempotent_replay_consumes_quota_once(self):
+        limited_root = Path(self.tmp.name) / "concurrent-idempotency-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR": "1",
+                "MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY": "1",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            clients = [TestClient(app), TestClient(app)]
+            try:
+                credential = clients[0].post("/v1/installations").json()
+                headers = {
+                    "X-Installation-Token": credential["clientInstallationToken"]
+                }
+                payload = {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "clientInstallationId": credential["clientInstallationId"],
+                    "clientRequestId": "concurrent-rate-request",
+                }
+                barrier = Barrier(2)
+
+                def create(client):
+                    barrier.wait(timeout=5)
+                    return client.post("/v1/map-jobs", headers=headers, json=payload)
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    responses = list(executor.map(create, clients))
+                blocked = clients[0].post(
+                    "/v1/map-jobs",
+                    headers=headers,
+                    json={**payload, "clientRequestId": "new-rate-request"},
+                )
+            finally:
+                for client in clients:
+                    client.close()
+
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        self.assertEqual(len({response.json()["jobId"] for response in responses}), 1)
+        self.assertEqual(blocked.status_code, 429)
+        with sqlite3.connect(limited_root / "rate-limits.sqlite3") as connection:
+            counts = dict(
+                connection.execute(
+                    "SELECT scope, request_count FROM rate_limits "
+                    "WHERE scope LIKE 'map-create-%'"
+                ).fetchall()
+            )
+        self.assertEqual(counts["map-create-installation"], 1)
+        self.assertEqual(counts["map-create-ip"], 1)
 
     def test_download_url_is_limited_by_installation(self):
         limited_root = Path(self.tmp.name) / "download-url-limit"
@@ -247,7 +345,7 @@ class MapJobRunAPITests(unittest.TestCase):
                     mapId="download-limit-map",
                     packPath=str(pack_path),
                 )
-                job_path.write_text(json.dumps(job))
+                client.app.state.job_store.save(MapJob.from_dict(job))
                 params = {
                     "clientInstallationId": credential["clientInstallationId"],
                     "jobId": created["jobId"],
@@ -293,6 +391,61 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(blocked.status_code, 429)
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_map_creation_rejects_unknown_fields_and_oversized_bodies(self):
+        unknown = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "padding": "not persisted",
+            },
+        )
+        self.assertEqual(unknown.status_code, 400)
+        self.assertIn("invalid fields", unknown.json()["detail"])
+
+        limited_root = Path(self.tmp.name) / "request-body-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_MAX_REQUEST_BODY_BYTES": "128",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app())
+            try:
+                oversized = client.post(
+                    "/v1/map-jobs",
+                    content=json.dumps(
+                        {
+                            "mode": "custom_bbox",
+                            "bbox": [103.75, 1.24, 103.93, 1.37],
+                            "displayName": "x" * 256,
+                        }
+                    ),
+                    headers={"Content-Type": "application/json"},
+                )
+            finally:
+                client.close()
+        self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(oversized.json()["detail"], "request body is too large")
+
+    def test_default_body_limit_accepts_maximum_route_corridor(self):
+        route = [
+            [103.8 + index / 10_000_000, 1.3 + index / 10_000_000]
+            for index in range(25_000)
+        ]
+        response = self.client.post(
+            "/v1/map-jobs",
+            json={
+                "mode": "route_corridor",
+                "route": route,
+                "corridorWidthM": 100,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
 
     def test_public_limit_does_not_interfere_with_admin_authentication(self):
         limited_root = Path(self.tmp.name) / "public-route-limit"

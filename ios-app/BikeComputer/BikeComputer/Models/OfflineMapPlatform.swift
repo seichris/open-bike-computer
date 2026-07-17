@@ -2299,6 +2299,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
 
 struct OfflineMapPlatformClient {
     let baseURL: URL
+    let legacyBearerToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
     let mapStreamTrustCapabilities: String?
@@ -2307,6 +2308,7 @@ struct OfflineMapPlatformClient {
 
     init(
         baseURL: URL,
+        legacyBearerToken: String? = nil,
         clientInstallationId: String,
         clientInstallationToken: String? = nil,
         mapStreamTrustCapabilities: String? = BikeMapStreamTrustStore.production.capabilityHeaderValue,
@@ -2314,6 +2316,7 @@ struct OfflineMapPlatformClient {
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
+        self.legacyBearerToken = legacyBearerToken?.isEmpty == true ? nil : legacyBearerToken
         self.clientInstallationId = clientInstallationId
         self.clientInstallationToken = clientInstallationToken
         self.mapStreamTrustCapabilities = mapStreamTrustCapabilities
@@ -2334,10 +2337,31 @@ struct OfflineMapPlatformClient {
     }
 
     func registerInstallation() async throws -> OfflineMapInstallationCredential {
-        var request = URLRequest(
-            url: try Self.endpointURL(baseURL: baseURL, path: "/v1/installations")
-        )
+        let endpoint = try Self.endpointURL(baseURL: baseURL, path: "/v1/installations")
+        let url: URL
+        if clientInstallationToken?.isEmpty == false {
+            guard var components = URLComponents(
+                url: endpoint,
+                resolvingAgainstBaseURL: false
+            ) else {
+                throw OfflineMapPlatformError.invalidBaseURL
+            }
+            components.queryItems = [
+                URLQueryItem(
+                    name: "clientInstallationId",
+                    value: clientInstallationId
+                )
+            ]
+            guard let refreshedURL = components.url else {
+                throw OfflineMapPlatformError.invalidBaseURL
+            }
+            url = refreshedURL
+        } else {
+            url = endpoint
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        authorizeInstallation(&request)
         let credential: OfflineMapInstallationCredential = try await send(request: request)
         guard credential.clientInstallationId.range(
             of: "^inst_v2_[0-9a-f]{32}$",
@@ -2350,6 +2374,13 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         return credential
+    }
+
+    func canAdoptInstallationCredential(
+        _ credential: OfflineMapInstallationCredential
+    ) -> Bool {
+        clientInstallationToken?.isEmpty != false ||
+            credential.clientInstallationId == clientInstallationId
     }
 
     func job(id: String) async throws -> OfflineMapJob {
@@ -2589,6 +2620,12 @@ struct OfflineMapPlatformClient {
     }
 
     private func authorizeInstallation(_ request: inout URLRequest) {
+        if let legacyBearerToken {
+            request.setValue(
+                "Bearer \(legacyBearerToken)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
         if let clientInstallationToken, !clientInstallationToken.isEmpty {
             request.setValue(
                 clientInstallationToken,

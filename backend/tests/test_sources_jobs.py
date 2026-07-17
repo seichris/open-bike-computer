@@ -1,5 +1,7 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -172,6 +174,79 @@ class SourceAndJobTests(unittest.TestCase):
         self.assertEqual(source, self.singapore)
         self.assertEqual(provider.calls, 0)
 
+    def test_dynamic_catalog_initialization_is_singleflight(self):
+        from map_platform.geofabrik_sources import GeofabrikSourceProvider
+
+        catalog = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "id": "singapore",
+                        "name": "Singapore",
+                        "urls": {"pbf": "https://example.invalid/singapore.osm.pbf"},
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [[103, 1], [104, 1], [104, 2], [103, 2], [103, 1]]
+                        ],
+                    },
+                }
+            ],
+        }
+
+        class CountingProvider(GeofabrikSourceProvider):
+            calls = 0
+            calls_lock = threading.Lock()
+
+            def _load_catalog(self):
+                with self.calls_lock:
+                    self.calls += 1
+                time.sleep(0.02)
+                return catalog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = CountingProvider(
+                "https://example.invalid/index.json",
+                cache_path=Path(tmp) / "cache.json",
+            )
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(lambda _: provider.source_regions(), range(16)))
+
+        self.assertEqual(provider.calls, 1)
+        self.assertTrue(all(len(result) == 1 for result in results))
+
+    def test_dynamic_catalog_failure_is_singleflight_during_cooldown(self):
+        from map_platform.geofabrik_sources import GeofabrikSourceProvider
+
+        class FailingProvider(GeofabrikSourceProvider):
+            calls = 0
+            calls_lock = threading.Lock()
+
+            def _load_catalog(self):
+                with self.calls_lock:
+                    self.calls += 1
+                time.sleep(0.02)
+                raise OSError("catalog unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = FailingProvider(
+                "https://example.invalid/index.json",
+                cache_path=Path(tmp) / "cache.json",
+                failure_cooldown_seconds=30,
+            )
+
+            def load(_):
+                with self.assertRaisesRegex(SourceResolutionError, "catalog unavailable"):
+                    provider.source_regions()
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(load, range(16)))
+
+        self.assertEqual(provider.calls, 1)
+
     def test_geofabrik_preview_geometry_is_persisted_but_not_public(self):
         source = SourceRegion(
             id="geofabrik-sg",
@@ -325,6 +400,172 @@ class SourceAndJobTests(unittest.TestCase):
             changed["bbox"] = [103.76, 1.25, 103.94, 1.38]
             with self.assertRaisesRegex(ValueError, "different map request"):
                 service.create_job(changed)
+
+    def test_map_request_validates_bounded_metadata_before_persisting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)))
+            base = {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+            }
+            with self.assertRaisesRegex(ValueError, "target must be an object"):
+                service.create_job({**base, "target": "esp32-fmb"})
+            with self.assertRaisesRegex(ValueError, "renderer must be esp32-fmb"):
+                service.create_job({**base, "target": {"renderer": "unknown"}})
+            with self.assertRaisesRegex(ValueError, "displayName must be at most"):
+                service.create_job({**base, "displayName": "x" * 81})
+
+            job = service.create_job(
+                {
+                    **base,
+                    "displayName": "  Singapore ride  ",
+                    "target": {
+                        "renderer": "esp32-fmb",
+                        "firmwareVersion": " 1.2.3 ",
+                    },
+                }
+            )
+
+            self.assertEqual(job.request["displayName"], "Singapore ride")
+            self.assertEqual(job.request["target"]["firmwareVersion"], "1.2.3")
+
+    def test_filtered_job_list_does_not_parse_unrelated_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(root))
+            owned = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "clientInstallationId": "installation-12345678",
+                    "clientRequestId": "request-12345678",
+                }
+            )
+            unrelated = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.25, 103.94, 1.38],
+                    "clientInstallationId": "installation-other",
+                    "clientRequestId": "request-other-123",
+                }
+            )
+            (root / f"{unrelated.job_id}.json").write_text(
+                '{\n  "clientInstallationId": "installation-other",\n  invalid\n'
+            )
+            owned_path = root / f"{owned.job_id}.json"
+            legacy_owned = json.loads(owned_path.read_text())
+            legacy_owned.pop("clientInstallationId")
+            legacy_owned.pop("clientRequestId")
+            owned_path.write_text(json.dumps(legacy_owned, separators=(",", ":")))
+
+            recovered = service.list_jobs(
+                client_installation_id="installation-12345678"
+            )
+
+            self.assertEqual([job.job_id for job in recovered], [owned.job_id])
+
+    def test_idempotency_lookup_does_not_parse_unrelated_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = MapJobService(SourceIndex([self.singapore]), JobStore(root))
+            request = {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": "installation-12345678",
+                "clientRequestId": "request-12345678",
+            }
+            owned = service.create_job(request)
+            unrelated = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.25, 103.94, 1.38],
+                    "clientInstallationId": "installation-other",
+                    "clientRequestId": "request-other-123",
+                }
+            )
+            (root / f"{unrelated.job_id}.json").write_text("not-json")
+
+            _, _, replay = service.resolve_client_request(dict(request))
+            missing = service.find_by_client_request(
+                "installation-missing",
+                "request-missing-123",
+            )
+
+            self.assertEqual(replay.job_id, owned.job_id)
+            self.assertIsNone(missing)
+
+    def test_client_request_locks_use_a_bounded_stripe_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            for index in range(600):
+                with store.lock_client_request(
+                    "installation-12345678",
+                    f"request-{index:08d}",
+                ):
+                    pass
+
+            lock_files = list((Path(tmp) / ".client-requests").glob("*.lock"))
+
+            self.assertLessEqual(len(lock_files), 256)
+
+    def test_map_id_lookup_does_not_parse_unrelated_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            service = MapJobService(SourceIndex([self.singapore]), store)
+            owned = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            ready = store.update_status(
+                owned.job_id,
+                JobStatus.READY,
+                map_id="indexed-map",
+            )
+            unrelated = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.25, 103.94, 1.38],
+                }
+            )
+            (root / f"{unrelated.job_id}.json").write_text("not-json")
+
+            found = service.find_by_map_id(
+                "indexed-map",
+                allow_owned_without_installation=True,
+            )
+            missing = service.find_by_map_id(
+                "missing-map",
+                allow_owned_without_installation=True,
+            )
+
+            self.assertEqual(found.job_id, ready.job_id)
+            self.assertIsNone(missing)
+
+    def test_active_job_limit_does_not_parse_terminal_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root)
+            service = MapJobService(SourceIndex([self.singapore]), store)
+            terminal = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+            store.update_status(terminal.job_id, JobStatus.CANCELLED, finished=True)
+            (root / f"{terminal.job_id}.json").write_text("not-json")
+
+            created = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.76, 1.25, 103.94, 1.38],
+                }
+            )
+
+            self.assertEqual(created.status, JobStatus.QUEUED)
 
     def test_concurrent_idempotent_creates_persist_one_job(self):
         with tempfile.TemporaryDirectory() as tmp:

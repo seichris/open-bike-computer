@@ -6,7 +6,7 @@ from typing import Any
 from .models import Bounds, GeometryMode, NormalizedGeometry
 
 MAX_CUSTOM_AREA_KM2 = 250_000.0
-MAX_POLYGON_VERTICES = 5_000
+MAX_POLYGON_VERTICES = 500
 MAX_ROUTE_POINTS = 25_000
 MAX_CORRIDOR_WIDTH_M = 50_000.0
 EARTH_KM_PER_DEG_LAT = 111.32
@@ -95,14 +95,14 @@ def normalize_polygon_geometry(geometry: dict[str, Any] | None) -> NormalizedGeo
         vertex_count = 0
         for polygon in coordinates or []:
             rings = _validate_polygon_coordinates(polygon)
+            vertex_count += sum(len(ring) for ring in rings)
+            if vertex_count > MAX_POLYGON_VERTICES:
+                raise GeometryError("polygon has too many vertices")
             _reject_self_intersection(rings[0])
             polygons.append(rings)
-            vertex_count += sum(len(ring) for ring in rings)
             all_points.extend(point for ring in rings for point in ring)
         if not polygons:
             raise GeometryError("multipolygon must contain at least one polygon")
-        if vertex_count > MAX_POLYGON_VERTICES:
-            raise GeometryError("polygon has too many vertices")
         bounds = _bounds_for_points(all_points)
         area = ensure_area_limit(bounds)
         return NormalizedGeometry(
@@ -224,16 +224,25 @@ def _bounds_for_route_points(points: list[list[float]]) -> Bounds:
 def _reject_self_intersection(ring: list[list[float]]) -> None:
     segments = list(zip(ring, ring[1:]))
     for i, segment_a in enumerate(segments):
-        for j, segment_b in enumerate(segments):
-            if abs(i - j) <= 1:
-                continue
+        for j in range(i + 2, len(segments)):
             if i == 0 and j == len(segments) - 1:
                 continue
-            if _segments_intersect(segment_a[0], segment_a[1], segment_b[0], segment_b[1]):
+            segment_b = segments[j]
+            if _segments_intersect(
+                segment_a[0],
+                segment_a[1],
+                segment_b[0],
+                segment_b[1],
+            ):
                 raise GeometryError("polygon outer ring self-intersects")
 
 
-def _segments_intersect(a: list[float], b: list[float], c: list[float], d: list[float]) -> bool:
+def _segments_intersect(
+    a: list[float],
+    b: list[float],
+    c: list[float],
+    d: list[float],
+) -> bool:
     def orientation(p: list[float], q: list[float], r: list[float]) -> float:
         return (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
 

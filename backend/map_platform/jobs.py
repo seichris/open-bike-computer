@@ -15,7 +15,7 @@ from typing import Any
 
 from .artifacts import ArtifactRecord
 from .geometry import GeometryError, normalize_geometry
-from .limits import JobLimits, LimitError
+from .limits import ACTIVE_STATUSES, JobLimits, LimitError
 from .models import JobStatus, MapDownloadReceipt, MapJob, utc_now_iso
 from .reuse import parent_contains_child_blocks
 from .sources import SourceIndex, SourceResolutionError
@@ -24,6 +24,8 @@ from .sources import SourceIndex, SourceResolutionError
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
+    _local_client_request_locks_guard = threading.Lock()
+    _local_client_request_locks: dict[str, threading.Lock] = {}
     _local_artifact_locks_guard = threading.Lock()
     _local_artifact_locks: dict[str, threading.Lock] = {}
 
@@ -33,8 +35,17 @@ class JobStore:
         self.lock_path = self.root / ".queue.lock"
         self.artifact_lock_root = self.root / ".artifact-locks"
         self.artifact_lock_root.mkdir(exist_ok=True)
+        self.client_request_index_root = self.root / ".client-requests"
+        self.client_request_index_root.mkdir(exist_ok=True)
+        self.installation_index_root = self.root / ".installations"
+        self.installation_index_root.mkdir(exist_ok=True)
+        self.map_id_index_root = self.root / ".map-ids"
+        self.map_id_index_root.mkdir(exist_ok=True)
+        self.active_index_root = self.root / ".active-jobs"
+        self.active_index_root.mkdir(exist_ok=True)
         self.artifact_gc_cursor_path = self.root / ".artifact-gc-cursor"
         self.lock_stale_seconds = lock_stale_seconds
+        self._rebuild_lookup_indexes()
 
     def save(self, job: MapJob) -> None:
         path = self._path(job.job_id)
@@ -43,6 +54,10 @@ class JobStore:
             json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True) + "\n"
         )
         tmp_path.replace(path)
+        self._index_job_ownership(job)
+        self._index_map_id(job)
+        self._index_client_request(job)
+        self._index_active_status(job)
 
     def get(self, job_id: str) -> MapJob:
         path = self._path(job_id)
@@ -53,26 +68,212 @@ class JobStore:
     def list(self) -> list[MapJob]:
         return [MapJob.from_dict(json.loads(path.read_text())) for path in sorted(self.root.glob("*.json"))]
 
+    def list_for_installation(self, client_installation_id: str) -> list[MapJob]:
+        """Read only records named by the per-installation lookup index."""
+        matches: list[MapJob] = []
+        index_root = self._installation_index_path(client_installation_id)
+        for path in sorted(index_root.glob("*.idx")):
+            try:
+                entry = json.loads(path.read_text())
+                if entry.get("clientInstallationId") != client_installation_id:
+                    continue
+                job = self.get(entry["jobId"])
+            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if job.client_installation_id == client_installation_id:
+                matches.append(job)
+        return matches
+
+    def list_for_map_id(self, map_id: str) -> list[MapJob]:
+        matches: list[MapJob] = []
+        index_root = self._map_id_index_path(map_id)
+        for path in sorted(index_root.glob("*.idx")):
+            try:
+                entry = json.loads(path.read_text())
+                if entry.get("mapId") != map_id:
+                    continue
+                job = self.get(entry["jobId"])
+            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if job.map_id == map_id:
+                matches.append(job)
+        return matches
+
+    def list_active(self) -> list[MapJob]:
+        active: list[MapJob] = []
+        for path in sorted(self.active_index_root.glob("*.idx")):
+            try:
+                job = self.get(path.stem)
+            except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if job.status in ACTIVE_STATUSES:
+                active.append(job)
+        return active
+
     @contextmanager
     def lock_artifact_references(self):
         """Hold the queue lock while artifact references are inspected and pruned."""
         with self._queue_lock():
             yield self.list()
 
+    @contextmanager
+    def lock_job_creation(self):
+        with self._queue_lock():
+            yield
+
     def save_if_client_request_absent(self, job: MapJob) -> MapJob:
         if not job.client_installation_id or not job.client_request_id:
             raise ValueError("job is missing client idempotency metadata")
         with self._queue_lock():
-            for existing in self.list():
-                if (
-                    existing.client_installation_id == job.client_installation_id
-                    and existing.client_request_id == job.client_request_id
-                ):
-                    if existing.request != job.request:
-                        raise ValueError("clientRequestId was already used for a different map request")
-                    return existing
+            existing = self.get_by_client_request(
+                job.client_installation_id,
+                job.client_request_id,
+            )
+            if existing is not None:
+                if existing.request != job.request:
+                    raise ValueError("clientRequestId was already used for a different map request")
+                return existing
             self.save(job)
             return job
+
+    def get_by_client_request(
+        self,
+        client_installation_id: str,
+        client_request_id: str,
+    ) -> MapJob | None:
+        path = self._client_request_index_path(
+            client_installation_id,
+            client_request_id,
+        )
+        if not path.exists():
+            return None
+        try:
+            job = self.get(path.read_text().strip())
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            return None
+        if (
+            job.client_installation_id != client_installation_id
+            or job.client_request_id != client_request_id
+        ):
+            return None
+        return job
+
+    @contextmanager
+    def lock_client_request(
+        self,
+        client_installation_id: str,
+        client_request_id: str,
+    ):
+        digest = self._client_request_index_path(
+            client_installation_id,
+            client_request_id,
+        ).stem
+        # A fixed stripe set keeps rejected unique request IDs from creating
+        # unbounded lock files or in-process lock objects.
+        lock_path = self.client_request_index_root / f"{digest[:2]}.lock"
+        local_key = str(lock_path.resolve())
+        with self._local_client_request_locks_guard:
+            local_lock = self._local_client_request_locks.setdefault(
+                local_key,
+                threading.Lock(),
+            )
+        with local_lock:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def _rebuild_lookup_indexes(self) -> None:
+        """Index existing records once at startup so public lookups stay bounded."""
+        with self._queue_lock():
+            for path in sorted(self.root.glob("*.json")):
+                try:
+                    job = MapJob.from_dict(json.loads(path.read_text()))
+                except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+                self._index_job_ownership(job)
+                self._index_map_id(job)
+                self._index_client_request(job)
+                self._index_active_status(job)
+
+    def _index_job_ownership(self, job: MapJob) -> None:
+        if not job.client_installation_id:
+            return
+        root = self._installation_index_path(job.client_installation_id)
+        root.mkdir(exist_ok=True)
+        path = root / f"{job.job_id}.idx"
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps(
+                {
+                    "clientInstallationId": job.client_installation_id,
+                    "jobId": job.job_id,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        tmp_path.replace(path)
+
+    def _index_map_id(self, job: MapJob) -> None:
+        if not job.map_id:
+            return
+        root = self._map_id_index_path(job.map_id)
+        root.mkdir(exist_ok=True)
+        path = root / f"{job.job_id}.idx"
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps(
+                {"mapId": job.map_id, "jobId": job.job_id},
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        tmp_path.replace(path)
+
+    def _index_active_status(self, job: MapJob) -> None:
+        path = self.active_index_root / f"{job.job_id}.idx"
+        if job.status not in ACTIVE_STATUSES:
+            path.unlink(missing_ok=True)
+            return
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(job.job_id + "\n")
+        tmp_path.replace(path)
+
+    def _index_client_request(self, job: MapJob) -> None:
+        if not job.client_installation_id or not job.client_request_id:
+            return
+        path = self._client_request_index_path(
+            job.client_installation_id,
+            job.client_request_id,
+        )
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(job.job_id + "\n")
+        tmp_path.replace(path)
+
+    def _client_request_index_path(
+        self,
+        client_installation_id: str,
+        client_request_id: str,
+    ) -> Path:
+        digest = hashlib.sha256(
+            json.dumps(
+                [client_installation_id, client_request_id],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return self.client_request_index_root / f"{digest}.idx"
+
+    def _installation_index_path(self, client_installation_id: str) -> Path:
+        digest = hashlib.sha256(client_installation_id.encode("utf-8")).hexdigest()
+        return self.installation_index_root / digest
+
+    def _map_id_index_path(self, map_id: str) -> Path:
+        digest = hashlib.sha256(map_id.encode("utf-8")).hexdigest()
+        return self.map_id_index_root / digest
 
     def update_status(
         self,
@@ -853,23 +1054,17 @@ class MapJobService:
         self.limits = limits or JobLimits()
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
-        client_installation_id = _client_identifier(request, "clientInstallationId")
-        client_request_id = _client_identifier(request, "clientRequestId")
-        if bool(client_installation_id) != bool(client_request_id):
-            raise ValueError("clientInstallationId and clientRequestId must be provided together")
+        client_installation_id, client_request_id, existing = self.resolve_client_request(
+            request
+        )
         install_on_device = request.get("installOnDevice", False)
         if not isinstance(install_on_device, bool):
             raise ValueError("installOnDevice must be a boolean")
-        if client_installation_id and client_request_id:
-            existing = self.find_by_client_request(client_installation_id, client_request_id)
-            if existing is not None:
-                if existing.request != request:
-                    raise ValueError("clientRequestId was already used for a different map request")
-                return existing
+        if existing is not None:
+            return existing
         try:
             geometry = normalize_geometry(request)
             self.limits.validate_geometry(geometry)
-            self.limits.validate_active_jobs(self.store.list())
             source = self.source_index.resolve_for_bounds(geometry.bounds)
         except (GeometryError, LimitError, SourceResolutionError) as exc:
             raise ValueError(str(exc)) from exc
@@ -883,10 +1078,56 @@ class MapJobService:
             client_request_id=client_request_id,
             install_on_device=install_on_device,
         )
-        if client_installation_id and client_request_id:
-            return self.store.save_if_client_request_absent(job)
-        self.store.save(job)
-        return job
+        with self.store.lock_job_creation():
+            if client_installation_id and client_request_id:
+                existing = self.store.get_by_client_request(
+                    client_installation_id,
+                    client_request_id,
+                )
+                if existing is not None:
+                    if existing.request != job.request:
+                        raise ValueError(
+                            "clientRequestId was already used for a different map request"
+                        )
+                    return existing
+            self.limits.validate_active_jobs(self.store.list_active())
+            self.store.save(job)
+            return job
+
+    @contextmanager
+    def lock_client_request(
+        self,
+        client_installation_id: str | None,
+        client_request_id: str | None,
+    ):
+        if client_installation_id is None or client_request_id is None:
+            yield
+            return
+        with self.store.lock_client_request(
+            client_installation_id,
+            client_request_id,
+        ):
+            yield
+
+    def resolve_client_request(
+        self,
+        request: dict[str, Any],
+    ) -> tuple[str | None, str | None, MapJob | None]:
+        """Validate idempotency fields and return an existing matching request."""
+        _validate_map_job_fields(request)
+        client_installation_id = _client_identifier(request, "clientInstallationId")
+        client_request_id = _client_identifier(request, "clientRequestId")
+        if bool(client_installation_id) != bool(client_request_id):
+            raise ValueError("clientInstallationId and clientRequestId must be provided together")
+        if not client_installation_id or not client_request_id:
+            return client_installation_id, client_request_id, None
+        existing = self.find_by_client_request(
+            client_installation_id,
+            client_request_id,
+        )
+        if existing is not None and existing.request != request:
+            raise ValueError("clientRequestId was already used for a different map request")
+        return client_installation_id, client_request_id, existing
 
     def get_job(self, job_id: str) -> MapJob:
         return self.store.get(job_id)
@@ -907,20 +1148,16 @@ class MapJobService:
         return job
 
     def list_jobs(self, *, client_installation_id: str | None = None) -> list[MapJob]:
-        jobs = self.store.list()
         if client_installation_id is None:
-            return jobs
+            return self.store.list()
         normalized = _validate_identifier(client_installation_id, "clientInstallationId")
-        return [job for job in jobs if job.client_installation_id == normalized]
+        return self.store.list_for_installation(normalized)
 
     def find_by_client_request(self, client_installation_id: str, client_request_id: str) -> MapJob | None:
-        for job in self.store.list():
-            if (
-                job.client_installation_id == client_installation_id
-                and job.client_request_id == client_request_id
-            ):
-                return job
-        return None
+        return self.store.get_by_client_request(
+            client_installation_id,
+            client_request_id,
+        )
 
     def find_by_map_id(
         self,
@@ -936,7 +1173,7 @@ class MapJobService:
         )
         candidates = [
             job
-            for job in self.store.list()
+            for job in self.store.list_for_map_id(map_id)
             if job.map_id == map_id and job.status == JobStatus.READY
         ]
         if normalized is not None:
@@ -1029,6 +1266,18 @@ _CLIENT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _DOWNLOAD_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
 _ARTIFACT_FORMAT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAP_JOB_REQUEST_FIELDS = {
+    "mode",
+    "bbox",
+    "geometry",
+    "route",
+    "corridorWidthM",
+    "displayName",
+    "clientInstallationId",
+    "clientRequestId",
+    "installOnDevice",
+    "target",
+}
 
 
 def _client_identifier(request: dict[str, Any], key: str) -> str | None:
@@ -1038,6 +1287,37 @@ def _client_identifier(request: dict[str, Any], key: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
     return _validate_identifier(value, key)
+
+
+def _validate_map_job_fields(request: dict[str, Any]) -> None:
+    unexpected = sorted(set(request) - _MAP_JOB_REQUEST_FIELDS)
+    if unexpected:
+        raise ValueError(f"map request has invalid fields: {', '.join(unexpected)}")
+    if "displayName" in request:
+        request["displayName"] = _normalize_user_label(request["displayName"])
+    if "target" in request:
+        target = request["target"]
+        if not isinstance(target, dict):
+            raise ValueError("target must be an object")
+        unexpected_target = sorted(set(target) - {"renderer", "firmwareVersion"})
+        if unexpected_target:
+            raise ValueError(
+                f"target has invalid fields: {', '.join(unexpected_target)}"
+            )
+        normalized_target: dict[str, str] = {}
+        if "renderer" in target:
+            if target["renderer"] != "esp32-fmb":
+                raise ValueError("target renderer must be esp32-fmb")
+            normalized_target["renderer"] = "esp32-fmb"
+        if "firmwareVersion" in target:
+            firmware_version = target["firmwareVersion"]
+            if not isinstance(firmware_version, str):
+                raise ValueError("target firmwareVersion must be a string")
+            firmware_version = firmware_version.strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", firmware_version):
+                raise ValueError("target firmwareVersion is invalid")
+            normalized_target["firmwareVersion"] = firmware_version
+        request["target"] = normalized_target
 
 
 def _validate_identifier(value: str, key: str) -> str:

@@ -31,6 +31,11 @@ class InstallationCredentialStore:
         installation_id = f"{INSTALLATION_ID_PREFIX}{uuid.uuid4().hex}"
         return installation_id, self._token(installation_id, self._secrets[0])
 
+    def refresh(self, installation_id: str, token: str | None) -> tuple[str, str]:
+        """Exchange any accepted installation token for one using the current secret."""
+        self.verify(installation_id, token)
+        return installation_id, self._token(installation_id, self._secrets[0])
+
     def is_registered(self, installation_id: str) -> bool:
         return bool(
             isinstance(installation_id, str)

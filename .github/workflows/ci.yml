@@ -143,6 +143,7 @@ jobs:
         env:
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
           MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
           MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
         run: docker compose config
       - name: Build backend production image

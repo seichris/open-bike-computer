@@ -17,6 +17,7 @@ __all__ = [
     "pipeline",
     "preview",
     "rate_limits",
+    "request_limits",
     "source_cache",
     "sources",
     "strict_json",
