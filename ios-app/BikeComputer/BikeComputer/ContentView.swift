@@ -7,6 +7,7 @@
 
 import SwiftUI
 import MapKit
+import UIKit
 
 struct ContentView: View {
     
@@ -104,13 +105,21 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            updateIdleTimer()
             coordinator.applicationDidBecomeActive()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
+            updateIdleTimer(for: newValue)
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+        }
+        .onChange(of: coordinator.isNavigating) { _ in
+            updateIdleTimer()
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in
             schedulePendingMapInstallResume()
@@ -143,6 +152,11 @@ struct ContentView: View {
             guard deviceMapMissingCandidate else { return }
             confirmedDeviceMapMissing = true
         }
+    }
+
+    private func updateIdleTimer(for phase: ScenePhase? = nil) {
+        UIApplication.shared.isIdleTimerDisabled =
+            coordinator.isNavigating && (phase ?? scenePhase) == .active
     }
 
     private func schedulePendingMapInstallResume() {
