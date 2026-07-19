@@ -228,6 +228,15 @@ jobs:
             tools/tests/test_device_screen_protocol.cpp \
             -o /tmp/test_device_screen_protocol
           /tmp/test_device_screen_protocol
+      - name: Device ownership crypto host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DDEVICE_OWNERSHIP_HOST_TEST \
+            lib/ble_navigation/device_ownership_crypto.cpp \
+            tools/tests/test_device_ownership_crypto.cpp \
+            $(pkg-config --cflags --libs mbedcrypto) \
+            -o /tmp/test_device_ownership_crypto
+          /tmp/test_device_ownership_crypto
       - name: Destination picker protocol host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

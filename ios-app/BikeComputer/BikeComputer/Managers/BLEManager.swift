@@ -434,6 +434,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var signalStrength: Int = 0
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
+    @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
+    @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
+    @Published private(set) var activeDeviceID: String?
+    @Published private(set) var connectedDeviceID: String?
+    @Published private(set) var pairingPrompt: BikeComputerPairingPrompt?
+    @Published private(set) var isPairingConfirmedOnDevice = false
+    @Published private(set) var pairingStatusMessage: String?
+    @Published private(set) var pairingError: String?
     @Published var debugEvents: [String] = []
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
@@ -544,15 +552,28 @@ class BLEManager: NSObject, ObservableObject {
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
-    private enum AuthWriteState {
+    private enum AuthFlowState {
         case idle
-        case helloInFlight
-        case waitingForServer
-        case clientProofPending(Data)
-        case clientProofInFlight
-        case waitingForOK
+        case waitingForInfo
+        case legacy(nonce: String)
+        case pairing
+        case awaitingPairingConfirmation
+        case owner(nonce: String, deviceID: String, ownerID: Data, ownerKey: Data)
+        case authenticated
     }
-    private var authWriteState: AuthWriteState = .idle
+    private var authFlowState: AuthFlowState = .idle
+    private var authWriteInFlight = false
+    private var queuedAuthMessages: [Data] = []
+    private var authInfoFallbackTimer: Timer?
+    private let deviceRegistry = BikeComputerDeviceRegistry()
+    private var pendingPairingSession: DevicePairingSession?
+    private var pendingPairingMaterial: DevicePairingMaterial?
+    private var pendingPairingCandidate: DiscoveredBikeComputerDevice?
+    private var pendingDeregistrationDeviceID: String?
+    private var pendingRenameDeviceID: String?
+    private var isDiscoveringDevices = false
+    private var pendingConnectionAfterDisconnect: UUID?
+    private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     
     private var autoReconnect: Bool = true
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -587,7 +608,6 @@ class BLEManager: NSObject, ObservableObject {
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
-    private var shouldPairAfterDisconnect: Bool = false
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
         isConnected || isConnecting || connectedPeripheral != nil
@@ -671,6 +691,8 @@ class BLEManager: NSObject, ObservableObject {
 #endif
         loadSettings()
         loadLastPeripheralIdentifier()
+        migrateLegacyPeripheralIfNeeded()
+        refreshKnownDevices()
         updateTrustedPeripheralDescription()
         log("BLE debug session started")
     }
@@ -864,6 +886,36 @@ class BLEManager: NSObject, ObservableObject {
         lastConnectedPeripheralIdentifier = UUID(uuidString: uuidString)
         updateTrustedPeripheralDescription()
     }
+
+    private func migrateLegacyPeripheralIfNeeded() {
+        guard deviceRegistry.devices.isEmpty,
+              let identifier = lastConnectedPeripheralIdentifier else { return }
+        let legacy = KnownBikeComputerDevice(
+            deviceID: "legacy:\(identifier.uuidString.lowercased())",
+            peripheralIdentifier: identifier,
+            name: DeviceOwnershipProtocol.defaultDeviceName,
+            lastConnectedAt: .distantPast,
+            isLegacy: true
+        )
+        deviceRegistry.upsert(legacy, makeActive: true)
+    }
+
+    private func refreshKnownDevices() {
+        knownDevices = deviceRegistry.devices
+        activeDeviceID = deviceRegistry.activeDeviceID
+        if let activeDeviceID,
+           let active = knownDevices.first(where: { $0.deviceID == activeDeviceID }) {
+            lastConnectedPeripheralIdentifier = active.peripheralIdentifier
+            UserDefaults.standard.set(
+                active.peripheralIdentifier.uuidString,
+                forKey: SettingsKeys.lastPeripheralIdentifier
+            )
+        } else if knownDevices.isEmpty {
+            lastConnectedPeripheralIdentifier = nil
+            UserDefaults.standard.removeObject(forKey: SettingsKeys.lastPeripheralIdentifier)
+        }
+        updateTrustedPeripheralDescription()
+    }
     
     func saveSettings() {
         let defaults = UserDefaults.standard
@@ -927,7 +979,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Bluetooth not powered on")
             return
         }
-        guard !hasActiveBLESession else {
+        guard !hasActiveBLESession || isDiscoveringDevices else {
             log("Skipping BLE scan: connection already active")
             return
         }
@@ -935,7 +987,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping BLE scan: scan already active")
             return
         }
-        guard lastConnectedPeripheralIdentifier != nil || isPairingMode else {
+        guard lastConnectedPeripheralIdentifier != nil || isPairingMode || isDiscoveringDevices else {
             log("Skipping BLE scan: no trusted peripheral saved and pairing mode is not active")
             return
         }
@@ -974,15 +1026,150 @@ class BLEManager: NSObject, ObservableObject {
         resetReconnectionState()
 
         if let peripheral = connectedPeripheral {
-            log("Restarting active BLE connection with fresh pairing scan")
-            shouldPairAfterDisconnect = true
+            log("Restarting connection to the active Bike Computer")
+            pendingConnectionAfterDisconnect = peripheral.identifier
             stopMonitoringRSSI()
             centralManager.cancelPeripheralConnection(peripheral)
             return
         }
 
-        forgetTrustedPeripheralForFreshScan()
-        beginPairing()
+        if lastConnectedPeripheralIdentifier == nil {
+            startDeviceDiscovery()
+        } else {
+            reconnectToLastDevice()
+        }
+    }
+
+    func startDeviceDiscovery() {
+        guard centralManager.state == .poweredOn else {
+            pairingError = "Turn on Bluetooth to add a Bike Computer."
+            return
+        }
+        pairingError = nil
+        pairingStatusMessage = "Looking for nearby Bike Computers…"
+        discoveredDevices = []
+        discoveredPeripherals = [:]
+        isDiscoveringDevices = true
+        isPairingMode = true
+        startScanning()
+    }
+
+    func cancelDeviceDiscovery() {
+        if isScanning {
+            stopScanning()
+        }
+        isDiscoveringDevices = false
+        isPairingMode = false
+        pairingStatusMessage = nil
+    }
+
+    func pair(with candidate: DiscoveredBikeComputerDevice, name: String) {
+        guard let ownerID = deviceRegistry.installationOwnerID() else {
+            pairingError = "Could not create a secure owner identity on this iPhone."
+            return
+        }
+        do {
+            pendingPairingSession = try DevicePairingSession(
+                peripheralIdentifier: candidate.peripheralIdentifier,
+                ownerID: ownerID,
+                deviceName: name
+            )
+        } catch {
+            pairingError = "Could not begin secure pairing."
+            return
+        }
+        pendingPairingCandidate = candidate
+        pendingPairingMaterial = nil
+        pairingPrompt = nil
+        isPairingConfirmedOnDevice = false
+        pairingError = nil
+        pairingStatusMessage = "Connecting to \(candidate.advertisedName)…"
+        isPairingMode = true
+        isDiscoveringDevices = false
+        autoReconnect = false
+        if isScanning { stopScanning() }
+
+        if let connectedPeripheral,
+           connectedPeripheral.identifier != candidate.peripheralIdentifier {
+            pendingConnectionAfterDisconnect = candidate.peripheralIdentifier
+            autoReconnect = false
+            centralManager.cancelPeripheralConnection(connectedPeripheral)
+            return
+        }
+        connectDiscoveredPeripheral(identifier: candidate.peripheralIdentifier)
+    }
+
+    func confirmPairing() {
+        guard let material = pendingPairingMaterial,
+              let peripheral = connectedPeripheral else { return }
+        pairingStatusMessage = "Registering this iPhone…"
+        startAuthenticationTimeout(for: peripheral)
+        enqueueAuthMessage(material.confirmationCommand)
+    }
+
+    func cancelPairing() {
+        pendingPairingSession = nil
+        pendingPairingMaterial = nil
+        pendingPairingCandidate = nil
+        pairingPrompt = nil
+        isPairingConfirmedOnDevice = false
+        pairingStatusMessage = nil
+        pairingError = nil
+        authFlowState = .idle
+        if let peripheral = connectedPeripheral, !isConnected {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+    }
+
+    func connect(to device: KnownBikeComputerDevice) {
+        deviceRegistry.activeDeviceID = device.deviceID
+        refreshKnownDevices()
+        autoReconnect = true
+        if let peripheral = connectedPeripheral {
+            if peripheral.identifier == device.peripheralIdentifier, isConnected { return }
+            pendingConnectionAfterDisconnect = device.peripheralIdentifier
+            centralManager.cancelPeripheralConnection(peripheral)
+            return
+        }
+        reconnectToLastDevice()
+    }
+
+    func rename(device: KnownBikeComputerDevice, to proposedName: String) {
+        guard connectedDeviceID == device.deviceID, isConnected else {
+            pairingError = "Connect to this Bike Computer before renaming it."
+            return
+        }
+        let name = DeviceOwnershipProtocol.normalizedName(proposedName)
+        pairingError = nil
+        pairingStatusMessage = "Saving Bike Computer name…"
+        pendingRenameDeviceID = device.deviceID
+        enqueueAuthMessage("NAME|\(Data(name.utf8).ownershipHex)")
+    }
+
+    func deregister(device: KnownBikeComputerDevice) {
+        guard connectedDeviceID == device.deviceID, isConnected, !device.isLegacy else {
+            pairingError = "Connect to this Bike Computer before deregistering it."
+            return
+        }
+        pendingDeregistrationDeviceID = device.deviceID
+        pairingError = nil
+        pairingStatusMessage = "Deregistering \(device.name)…"
+        autoReconnect = false
+        enqueueAuthMessage("UNPAIR")
+    }
+
+    func isConnected(to device: KnownBikeComputerDevice) -> Bool {
+        isConnected && connectedDeviceID == device.deviceID
+    }
+
+    private func connectDiscoveredPeripheral(identifier: UUID) {
+        if let peripheral = discoveredPeripherals[identifier] ??
+            centralManager.retrievePeripherals(withIdentifiers: [identifier]).first {
+            connectToPeripheral(peripheral)
+        } else {
+            pairingError = "That Bike Computer is no longer nearby."
+            startDeviceDiscovery()
+        }
     }
     
     /// Send navigation data to ESP32
@@ -1805,19 +1992,6 @@ class BLEManager: NSObject, ObservableObject {
         log("Sent debug navigation packet")
     }
 
-    func forgetTrustedPeripheral() {
-        autoReconnect = false
-        lastConnectedPeripheralIdentifier = nil
-        UserDefaults.standard.removeObject(forKey: SettingsKeys.lastPeripheralIdentifier)
-        updateTrustedPeripheralDescription()
-        log("Forgot trusted BikeComputer peripheral")
-        if let peripheral = connectedPeripheral {
-            centralManager.cancelPeripheralConnection(peripheral)
-        } else {
-            clearConnectionState()
-        }
-    }
-
     var debugLogText: String {
         debugEvents.joined(separator: "\n")
     }
@@ -1860,6 +2034,7 @@ class BLEManager: NSObject, ObservableObject {
 
         stopScanning()
         connectedPeripheral = peripheral
+        connectedDeviceID = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
         routeGeometryCharacteristic = nil
@@ -1872,7 +2047,11 @@ class BLEManager: NSObject, ObservableObject {
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
-        authWriteState = .idle
+        authFlowState = .idle
+        authWriteInFlight = false
+        queuedAuthMessages.removeAll()
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = nil
         writeWithResponseInFlight = false
         navigationWriteWithResponseFailureHandler = nil
         navigationWriteQueue.removeAll()
@@ -1889,27 +2068,6 @@ class BLEManager: NSObject, ObservableObject {
         startConnectionTimeout(for: peripheral)
     }
 
-    private func beginPairing() {
-        guard centralManager.state == .poweredOn else {
-            log("Cannot pair: Bluetooth not powered on")
-            return
-        }
-
-        isPairingMode = true
-        log("Starting pairing scan")
-        startScanning()
-    }
-
-    private func forgetTrustedPeripheralForFreshScan() {
-        if lastConnectedPeripheralIdentifier != nil {
-            log("Forgetting trusted BikeComputer peripheral for fresh scan")
-        }
-
-        lastConnectedPeripheralIdentifier = nil
-        UserDefaults.standard.removeObject(forKey: SettingsKeys.lastPeripheralIdentifier)
-        updateTrustedPeripheralDescription()
-    }
-
     private func startConnectionTimeout(for peripheral: CBPeripheral) {
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self, weak peripheral] _ in
@@ -1920,11 +2078,12 @@ class BLEManager: NSObject, ObservableObject {
                 return
             }
 
-            self.log("BLE connection timed out; starting fresh pairing scan")
+            self.log("BLE connection timed out")
+            if self.pendingPairingSession != nil {
+                self.pairingError = "Could not connect to that Bike Computer."
+                self.suppressNextReconnect = true
+            }
             self.centralManager.cancelPeripheralConnection(peripheral)
-            self.clearConnectionState()
-            self.forgetTrustedPeripheralForFreshScan()
-            self.beginPairing()
         }
     }
 
@@ -1933,6 +2092,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnecting = false
         supportsDeviceSettings = false
         connectedPeripheral = nil
+        connectedDeviceID = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
         routeGeometryCharacteristic = nil
@@ -1943,7 +2103,11 @@ class BLEManager: NSObject, ObservableObject {
         writeWithResponseInFlight = false
         navigationWriteWithResponseFailureHandler = nil
         pendingAuthNonce = nil
-        authWriteState = .idle
+        authFlowState = .idle
+        authWriteInFlight = false
+        queuedAuthMessages.removeAll()
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = nil
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -2011,7 +2175,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func updateTrustedPeripheralDescription() {
-        trustedPeripheralDescription = lastConnectedPeripheralIdentifier?.uuidString ?? "none"
+        if let activeDeviceID,
+           let active = knownDevices.first(where: { $0.deviceID == activeDeviceID }) {
+            trustedPeripheralDescription = "\(active.name) (\(active.shortIdentifier))"
+        } else {
+            trustedPeripheralDescription = lastConnectedPeripheralIdentifier?.uuidString ?? "none"
+        }
     }
 
     private func log(_ message: String) {
@@ -2071,15 +2240,26 @@ class BLEManager: NSObject, ObservableObject {
             guard let self,
                   let peripheral,
                   self.connectedPeripheral?.identifier == peripheral.identifier,
-                  !self.isNavigationReady else {
-                return
+                  !self.isNavigationReady else { return }
+            self.log("BLE authentication timed out")
+            if self.pendingPairingSession != nil {
+                self.pairingError = "Pairing timed out. Bring the Bike Computer closer and try again."
             }
-
-            self.log("BLE auth timed out; restarting fresh pairing scan")
-            self.clearConnectionState()
-            self.forgetTrustedPeripheralForFreshScan()
             self.centralManager.cancelPeripheralConnection(peripheral)
-            self.beginPairing()
+        }
+    }
+
+    private func startPairingConfirmationTimeout(for peripheral: CBPeripheral) {
+        authTimeoutTimer?.invalidate()
+        authTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 115.0, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self,
+                  let peripheral,
+                  self.connectedPeripheral?.identifier == peripheral.identifier,
+                  case .awaitingPairingConfirmation = self.authFlowState else { return }
+            self.failAuthentication(
+                "The pairing code expired. Start again to generate a new code.",
+                peripheral: peripheral
+            )
         }
     }
 
@@ -2088,41 +2268,26 @@ class BLEManager: NSObject, ObservableObject {
             log("BLE auth not ready from \(source): navigation characteristic missing")
             return
         }
-        guard let authCharacteristic else {
+        guard authCharacteristic != nil else {
             log("BLE auth not ready from \(source): auth characteristic missing")
             return
         }
-        guard pendingAuthNonce == nil, case .idle = authWriteState else {
-            return
+        guard case .idle = authFlowState else { return }
+        authFlowState = .waitingForInfo
+        enqueueAuthMessage("INFO")
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
+            guard let self, case .waitingForInfo = self.authFlowState else { return }
+            self.beginLegacyAuthentication()
         }
-
-        guard let writeType = preferredWriteType(for: authCharacteristic) else {
-            log("Auth characteristic does not support writes; props=\(authCharacteristic.properties.debugDescription)")
-            return
-        }
-
-        guard let nonce = BLEPairingAuthenticator.makeNonce() else {
-            log("Failed to generate BLE auth nonce")
-            return
-        }
-
-        let challenge = "HELLO|\(nonce)"
-        guard let challengeData = challenge.data(using: .utf8) else { return }
-        pendingAuthNonce = nonce
-        authWriteState = writeType == .withResponse ? .helloInFlight : .waitingForServer
-        peripheral.writeValue(challengeData, for: authCharacteristic, type: writeType)
-        log("Sent BLE auth challenge via \(authWriteLabel(writeType)); props=\(authCharacteristic.properties.debugDescription)")
+        log("Requested Bike Computer ownership information from \(source)")
     }
 
     private func preferredWriteType(
         for characteristic: CBCharacteristic
     ) -> CBCharacteristicWriteType? {
-        if characteristic.properties.contains(.write) {
-            return .withResponse
-        }
-        if characteristic.properties.contains(.writeWithoutResponse) {
-            return .withoutResponse
-        }
+        if characteristic.properties.contains(.write) { return .withResponse }
+        if characteristic.properties.contains(.writeWithoutResponse) { return .withoutResponse }
         return nil
     }
 
@@ -2137,46 +2302,318 @@ class BLEManager: NSObject, ObservableObject {
         }
         log("Received BLE auth response: \(message.prefix(16))... (\(data.count) bytes)")
 
-        if message == "LOCKED" {
-            log("Ignoring initial BLE auth state")
+        if message == "LOCKED" { return }
+        if message.hasPrefix("DEVICE|") {
+            handleDeviceInformation(message, peripheral: peripheral)
             return
         }
-
-        guard let nonce = pendingAuthNonce else {
-            log("Ignoring BLE auth response without a pending challenge")
-            return
-        }
-
-        if message.hasPrefix("SERVER|") {
-            guard BLEPairingAuthenticator.isValidServerResponse(message, nonce: nonce) else {
-                log("BLE auth failed: invalid server proof")
-                isPairingMode = false
-                clearConnectionState()
-                centralManager.cancelPeripheralConnection(peripheral)
+        if message.hasPrefix("PAIRING|") {
+            guard let session = pendingPairingSession else {
+                failAuthentication("Received an unexpected pairing response.", peripheral: peripheral)
                 return
             }
-
-            let clientProof = BLEPairingAuthenticator.clientProof(nonce: nonce)
-            let proofMessage = "CLIENT|\(nonce)|\(clientProof)"
-            guard let proofData = proofMessage.data(using: .utf8) else { return }
-            sendOrQueueClientProof(proofData, peripheral: peripheral, characteristic: characteristic)
+            do {
+                let material = try session.material(from: message)
+                pendingPairingMaterial = material
+                authFlowState = .awaitingPairingConfirmation
+                startPairingConfirmationTimeout(for: peripheral)
+                pairingPrompt = BikeComputerPairingPrompt(
+                    peripheralIdentifier: peripheral.identifier,
+                    deviceName: session.deviceName,
+                    shortIdentifier: pendingPairingCandidate?.shortIdentifier ?? String(material.deviceID.suffix(8)).uppercased(),
+                    comparisonCode: material.comparisonCode
+                )
+                pairingStatusMessage = nil
+            } catch {
+                failAuthentication("The Bike Computer returned an invalid secure-pairing response.", peripheral: peripheral)
+            }
             return
         }
-
-        if message == "OK|\(nonce)" {
+        if message.hasPrefix("PAIRED|") {
+            handlePairedResponse(message, peripheral: peripheral)
+            return
+        }
+        if message.hasPrefix("PAIR_READY|") {
+            let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2,
+                  let material = pendingPairingMaterial,
+                  parts[1].lowercased() == material.deviceID else {
+                failAuthentication("The physical pairing confirmation did not match this device.", peripheral: peripheral)
+                return
+            }
+            isPairingConfirmedOnDevice = true
+            confirmPairing()
+            return
+        }
+        if message.hasPrefix("SERVER2|") {
+            handleOwnerServerProof(message, peripheral: peripheral)
+            return
+        }
+        if message.hasPrefix("OK2|") {
+            guard case .owner(let nonce, let deviceID, _, _) = authFlowState else {
+                failAuthentication("Received an unexpected owner confirmation.", peripheral: peripheral)
+                return
+            }
+            let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 3, parts[1] == deviceID, parts[2] == nonce else {
+                failAuthentication("The owner confirmation did not match this connection.", peripheral: peripheral)
+                return
+            }
             completeAuthentication(for: peripheral)
             return
         }
+        if message.hasPrefix("NAME_OK|") {
+            handleRenameResponse(message)
+            return
+        }
+        if message.hasPrefix("UNPAIRED|") {
+            let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2, pendingDeregistrationDeviceID == parts[1] else { return }
+            deviceRegistry.remove(deviceID: parts[1])
+            pendingDeregistrationDeviceID = nil
+            connectedDeviceID = nil
+            refreshKnownDevices()
+            pairingError = nil
+            pairingStatusMessage = "Bike Computer deregistered."
+            centralManager.cancelPeripheralConnection(peripheral)
+            return
+        }
+        if message.hasPrefix("OWNED|") || message.hasPrefix("DENIED|") {
+            autoReconnect = false
+            failAuthentication(
+                "This Bike Computer belongs to another iPhone. Hold BOOT for 8 seconds to reset ownership.",
+                peripheral: peripheral
+            )
+            return
+        }
+        if message.hasPrefix("ERROR|") {
+            let detail = message.split(separator: "|", maxSplits: 1).last.map(String.init) ?? "unknown error"
+            if pendingRenameDeviceID != nil {
+                pendingRenameDeviceID = nil
+                pairingStatusMessage = nil
+                pairingError = "Could not rename the Bike Computer: \(detail.replacingOccurrences(of: "_", with: " "))."
+                return
+            }
+            if pendingDeregistrationDeviceID != nil {
+                pendingDeregistrationDeviceID = nil
+                pairingStatusMessage = nil
+                pairingError = "Could not deregister the Bike Computer: \(detail.replacingOccurrences(of: "_", with: " "))."
+                autoReconnect = true
+                return
+            }
+            failAuthentication(
+                "Bike Computer pairing failed: \(detail.replacingOccurrences(of: "_", with: " ")).",
+                peripheral: peripheral
+            )
+            return
+        }
+        if message.hasPrefix("SERVER|") {
+            guard case .legacy(let nonce) = authFlowState,
+                  BLEPairingAuthenticator.isValidServerResponse(message, nonce: nonce) else {
+                failAuthentication("The Bike Computer failed authentication.", peripheral: peripheral)
+                return
+            }
+            let proof = BLEPairingAuthenticator.clientProof(nonce: nonce)
+            enqueueAuthMessage("CLIENT|\(nonce)|\(proof)")
+            return
+        }
+        if case .legacy(let nonce) = authFlowState, message == "OK|\(nonce)" {
+            completeAuthentication(for: peripheral)
+            return
+        }
+        log("Ignoring unexpected BLE auth response: \(message.prefix(24))")
+    }
 
-        log("BLE auth failed: unexpected response")
-        isPairingMode = false
-        clearConnectionState()
+    private func handleDeviceInformation(_ message: String, peripheral: CBPeripheral) {
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = nil
+        let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 5, parts[1] == "2",
+              let deviceID = Data(ownershipHex: parts[2]),
+              deviceID.count == DeviceOwnershipProtocol.deviceIDLength,
+              let nameData = Data(ownershipHex: parts[4]),
+              let reportedName = String(data: nameData, encoding: .utf8) else {
+            failAuthentication("The Bike Computer returned invalid identity information.", peripheral: peripheral)
+            return
+        }
+        let deviceIDHex = parts[2].lowercased()
+        let isClaimed = parts[3] == "1"
+        connectedDeviceID = deviceIDHex
+        peripheralName = reportedName
+
+        if let session = pendingPairingSession {
+            guard !isClaimed else {
+                if let ownerKey = deviceRegistry.ownerKey(deviceID: deviceIDHex),
+                   let ownerID = deviceRegistry.installationOwnerID() {
+                    beginOwnerAuthentication(deviceID: deviceIDHex, ownerID: ownerID, ownerKey: ownerKey)
+                } else {
+                    autoReconnect = false
+                    failAuthentication("This Bike Computer is already registered to another iPhone.", peripheral: peripheral)
+                }
+                return
+            }
+            authFlowState = .pairing
+            enqueueAuthMessage(session.pairingCommand)
+            pairingStatusMessage = "Preparing secure comparison…"
+            return
+        }
+
+        if isClaimed,
+           let ownerKey = deviceRegistry.ownerKey(deviceID: deviceIDHex),
+           let ownerID = deviceRegistry.installationOwnerID() {
+            deviceRegistry.upsert(KnownBikeComputerDevice(
+                deviceID: deviceIDHex,
+                peripheralIdentifier: peripheral.identifier,
+                name: reportedName,
+                lastConnectedAt: Date(),
+                isLegacy: false
+            ))
+            refreshKnownDevices()
+            beginOwnerAuthentication(deviceID: deviceIDHex, ownerID: ownerID, ownerKey: ownerKey)
+        } else if isClaimed {
+            autoReconnect = false
+            failAuthentication(
+                "This Bike Computer belongs to another iPhone. Hold BOOT for 8 seconds to reset ownership.",
+                peripheral: peripheral
+            )
+        } else {
+            autoReconnect = false
+            failAuthentication(
+                "This Bike Computer is not registered yet. Add it from Settings → Bike Computers.",
+                peripheral: peripheral
+            )
+        }
+    }
+
+    private func handlePairedResponse(_ message: String, peripheral: CBPeripheral) {
+        let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3,
+              let material = pendingPairingMaterial,
+              let session = pendingPairingSession,
+              parts[1].lowercased() == material.deviceID,
+              let nameData = Data(ownershipHex: parts[2]),
+              let name = String(data: nameData, encoding: .utf8),
+              deviceRegistry.saveOwnerKey(material.ownerKey, deviceID: material.deviceID) else {
+            failAuthentication("The secure owner credential could not be saved.", peripheral: peripheral)
+            return
+        }
+        deviceRegistry.upsert(KnownBikeComputerDevice(
+            deviceID: material.deviceID,
+            peripheralIdentifier: peripheral.identifier,
+            name: name,
+            lastConnectedAt: Date(),
+            isLegacy: false
+        ), makeActive: true)
+        refreshKnownDevices()
+        connectedDeviceID = material.deviceID
+        pairingPrompt = nil
+        isPairingConfirmedOnDevice = false
+        pairingStatusMessage = "Finishing secure connection…"
+        startAuthenticationTimeout(for: peripheral)
+        beginOwnerAuthentication(
+            deviceID: material.deviceID,
+            ownerID: session.ownerID,
+            ownerKey: material.ownerKey
+        )
+    }
+
+    private func beginOwnerAuthentication(deviceID: String, ownerID: Data, ownerKey: Data) {
+        guard let nonce = BLEPairingAuthenticator.makeNonce() else { return }
+        pendingAuthNonce = nonce
+        authFlowState = .owner(nonce: nonce, deviceID: deviceID, ownerID: ownerID, ownerKey: ownerKey)
+        enqueueAuthMessage("OWNER|\(ownerID.ownershipHex)|\(nonce)")
+    }
+
+    private func handleOwnerServerProof(_ message: String, peripheral: CBPeripheral) {
+        guard case .owner(let nonce, let deviceID, let ownerID, let ownerKey) = authFlowState else {
+            failAuthentication("Received an unexpected owner challenge.", peripheral: peripheral)
+            return
+        }
+        let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let expected = DeviceOwnerAuthenticator.proof(
+            key: ownerKey,
+            message: DeviceOwnerAuthenticator.serverMessage(deviceID: deviceID, ownerID: ownerID, nonce: nonce)
+        )
+        guard parts.count == 4, parts[1] == deviceID, parts[2] == nonce,
+              DeviceOwnerAuthenticator.isValidProof(parts[3], expected: expected) else {
+            failAuthentication("The Bike Computer owner proof was invalid.", peripheral: peripheral)
+            return
+        }
+        let clientProof = DeviceOwnerAuthenticator.proof(
+            key: ownerKey,
+            message: DeviceOwnerAuthenticator.clientMessage(deviceID: deviceID, ownerID: ownerID, nonce: nonce)
+        )
+        enqueueAuthMessage("PROOF|\(ownerID.ownershipHex)|\(nonce)|\(clientProof)")
+    }
+
+    private func beginLegacyAuthentication() {
+        guard let nonce = BLEPairingAuthenticator.makeNonce() else { return }
+        pendingAuthNonce = nonce
+        authFlowState = .legacy(nonce: nonce)
+        enqueueAuthMessage("HELLO|\(nonce)")
+        log("Ownership protocol unavailable; trying legacy authentication")
+    }
+
+    private func enqueueAuthMessage(_ message: String) {
+        guard let data = message.data(using: .utf8) else { return }
+        queuedAuthMessages.append(data)
+        flushAuthMessageQueue()
+    }
+
+    private func flushAuthMessageQueue() {
+        guard !authWriteInFlight,
+              !queuedAuthMessages.isEmpty,
+              let peripheral = connectedPeripheral,
+              let authCharacteristic,
+              let writeType = preferredWriteType(for: authCharacteristic) else { return }
+        let data = queuedAuthMessages.removeFirst()
+        authWriteInFlight = writeType == .withResponse
+        peripheral.writeValue(data, for: authCharacteristic, type: writeType)
+        log("Sent ownership command via \(authWriteLabel(writeType))")
+        if writeType == .withoutResponse { flushAuthMessageQueue() }
+    }
+
+    private func authWriteCompleted(error: Error?, peripheral: CBPeripheral) {
+        authWriteInFlight = false
+        if let error {
+            failAuthentication("Could not send secure ownership data: \(error.localizedDescription)", peripheral: peripheral)
+            return
+        }
+        flushAuthMessageQueue()
+    }
+
+    private func failAuthentication(_ message: String, peripheral: CBPeripheral) {
+        pairingError = message
+        pairingStatusMessage = nil
+        pairingPrompt = nil
+        isPairingConfirmedOnDevice = false
+        pendingPairingMaterial = nil
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = nil
+        log("BLE auth failed: \(message)")
+        suppressNextReconnect = pendingPairingSession != nil
         centralManager.cancelPeripheralConnection(peripheral)
     }
 
+    private func handleRenameResponse(_ message: String) {
+        guard let deviceID = pendingRenameDeviceID else { return }
+        let parts = message.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2,
+              let nameData = Data(ownershipHex: parts[1]),
+              let name = String(data: nameData, encoding: .utf8),
+              var device = knownDevices.first(where: { $0.deviceID == deviceID }) else { return }
+        device.name = name
+        deviceRegistry.upsert(device)
+        pendingRenameDeviceID = nil
+        peripheralName = name
+        pairingStatusMessage = nil
+        pairingError = nil
+        refreshKnownDevices()
+    }
+
     private func completeAuthentication(for peripheral: CBPeripheral) {
-        guard let characteristic = navigationCharacteristic else { return }
-        guard let navigationWriteType = preferredWriteType(for: characteristic) else {
+        guard let characteristic = navigationCharacteristic,
+              let navigationWriteType = preferredWriteType(for: characteristic) else {
             log("Navigation characteristic is not writable after authentication")
             return
         }
@@ -2186,24 +2623,20 @@ class BLEManager: NSObject, ObservableObject {
             expectsWriteResponse: navigationWriteType == .withResponse,
             canSend: { [weak self, weak peripheral] in
                 guard let self, let peripheral else { return false }
-                if navigationWriteType == .withResponse {
-                    return !self.writeWithResponseInFlight
-                }
-                return peripheral.canSendWriteWithoutResponse
+                return navigationWriteType == .withResponse
+                    ? !self.writeWithResponseInFlight
+                    : peripheral.canSendWriteWithoutResponse
             },
             write: { [weak self, weak peripheral, weak characteristic] data in
                 guard let self, let peripheral, let characteristic else { return }
-                self.writeDeviceData(
-                    data,
-                    to: characteristic,
-                    on: peripheral,
-                    type: navigationWriteType
-                )
+                self.writeDeviceData(data, to: characteristic, on: peripheral, type: navigationWriteType)
             }
         ))
 
         pendingAuthNonce = nil
-        authWriteState = .idle
+        authFlowState = .authenticated
+        authWriteInFlight = false
+        queuedAuthMessages.removeAll()
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
@@ -2214,7 +2647,39 @@ class BLEManager: NSObject, ObservableObject {
         authTimeoutTimer = nil
         lastConnectedPeripheralIdentifier = peripheral.identifier
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: SettingsKeys.lastPeripheralIdentifier)
-        updateTrustedPeripheralDescription()
+
+        if let connectedDeviceID {
+            var device = knownDevices.first(where: { $0.deviceID == connectedDeviceID })
+                ?? KnownBikeComputerDevice(
+                    deviceID: connectedDeviceID,
+                    peripheralIdentifier: peripheral.identifier,
+                    name: peripheralName.isEmpty ? DeviceOwnershipProtocol.defaultDeviceName : peripheralName,
+                    lastConnectedAt: Date(),
+                    isLegacy: connectedDeviceID.hasPrefix("legacy:")
+                )
+            device.peripheralIdentifier = peripheral.identifier
+            device.lastConnectedAt = Date()
+            deviceRegistry.upsert(device, makeActive: deviceRegistry.activeDeviceID == nil)
+        } else if connectedDeviceID == nil {
+            let legacyID = "legacy:\(peripheral.identifier.uuidString.lowercased())"
+            connectedDeviceID = legacyID
+            deviceRegistry.upsert(KnownBikeComputerDevice(
+                deviceID: legacyID,
+                peripheralIdentifier: peripheral.identifier,
+                name: peripheralName.isEmpty ? DeviceOwnershipProtocol.defaultDeviceName : peripheralName,
+                lastConnectedAt: Date(),
+                isLegacy: true
+            ), makeActive: knownDevices.isEmpty)
+        }
+        refreshKnownDevices()
+        pairingPrompt = nil
+        isPairingConfirmedOnDevice = false
+        pairingStatusMessage = nil
+        pairingError = nil
+        pendingPairingSession = nil
+        pendingPairingMaterial = nil
+        pendingPairingCandidate = nil
+        autoReconnect = true
         log("BLE peripheral authenticated")
         requestDeviceCapabilities()
         sendSetting(id: 6, value: Int32(mapRotationMode))
@@ -2224,45 +2689,6 @@ class BLEManager: NSObject, ObservableObject {
                     value: disconnectedSleepTimeout.settingValue)
         requestDeviceTransferStatus()
         requestMapTransferStatus()
-    }
-
-    private func sendOrQueueClientProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        switch authWriteState {
-        case .helloInFlight:
-            authWriteState = .clientProofPending(proofData)
-            log("Queued BLE client auth proof until challenge write completes")
-        case .waitingForServer:
-            writeClientAuthProof(proofData, peripheral: peripheral, characteristic: characteristic)
-        default:
-            log("Ignoring duplicate BLE server auth response")
-        }
-    }
-
-    private func writeClientAuthProof(_ proofData: Data, peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let writeType = preferredWriteType(for: characteristic) else {
-            log("Cannot send BLE client auth proof: auth characteristic is not writable")
-            isPairingMode = false
-            clearConnectionState()
-            centralManager.cancelPeripheralConnection(peripheral)
-            return
-        }
-
-        authWriteState = writeType == .withResponse ? .clientProofInFlight : .waitingForOK
-        peripheral.writeValue(proofData, for: characteristic, type: writeType)
-        log("Sent BLE client auth proof via \(authWriteLabel(writeType))")
-    }
-
-    private func authWriteCompleted(for peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        switch authWriteState {
-        case .helloInFlight:
-            authWriteState = .waitingForServer
-        case .clientProofPending(let proofData):
-            writeClientAuthProof(proofData, peripheral: peripheral, characteristic: characteristic)
-        case .clientProofInFlight:
-            authWriteState = .waitingForOK
-        default:
-            break
-        }
     }
 
     private func enqueueNavigationWrite(
@@ -2484,7 +2910,7 @@ extension BLEManager: CBCentralManagerDelegate {
             if lastConnectedPeripheralIdentifier != nil {
                 reconnectToLastDevice()
             } else {
-                log("No trusted BikeComputer peripheral saved; tap reconnect to pair")
+                log("No Bike Computer saved; add one from Settings")
             }
             
         case .poweredOff:
@@ -2528,12 +2954,31 @@ extension BLEManager: CBCentralManagerDelegate {
         }
     }
     
-    func centralManager(_ central: CBCentralManager, 
-                       didDiscover peripheral: CBPeripheral, 
-                       advertisementData: [String : Any], 
+    func centralManager(_ central: CBCentralManager,
+                       didDiscover peripheral: CBPeripheral,
+                       advertisementData: [String : Any],
                        rssi RSSI: NSNumber) {
         
         log("Discovered: \(peripheral.name ?? "Unknown") (RSSI: \(RSSI))")
+
+        discoveredPeripherals[peripheral.identifier] = peripheral
+        let candidate = DiscoveredBikeComputerDevice.parse(
+            peripheralIdentifier: peripheral.identifier,
+            localName: advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name,
+            manufacturerData: advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
+            rssi: RSSI.intValue
+        )
+        if let index = discoveredDevices.firstIndex(where: { $0.id == candidate.id }) {
+            discoveredDevices[index] = candidate
+        } else {
+            discoveredDevices.append(candidate)
+        }
+        discoveredDevices.sort { $0.rssi > $1.rssi }
+
+        if isDiscoveringDevices {
+            pairingStatusMessage = discoveredDevices.isEmpty ? "Looking for nearby Bike Computers…" : nil
+            return
+        }
 
         if let trustedIdentifier = lastConnectedPeripheralIdentifier,
            peripheral.identifier != trustedIdentifier {
@@ -2600,7 +3045,11 @@ extension BLEManager: CBCentralManagerDelegate {
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
-        authWriteState = .idle
+        authFlowState = .idle
+        authWriteInFlight = false
+        queuedAuthMessages.removeAll()
+        authInfoFallbackTimer?.invalidate()
+        authInfoFallbackTimer = nil
         writeWithResponseInFlight = false
         navigationWriteWithResponseFailureHandler = nil
         navigationWriteQueue.removeAll()
@@ -2609,12 +3058,19 @@ extension BLEManager: CBCentralManagerDelegate {
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         stopMonitoringRSSI()
+        connectedDeviceID = nil
 
-        if shouldPairAfterDisconnect {
-            shouldPairAfterDisconnect = false
-            forgetTrustedPeripheralForFreshScan()
-            beginPairing()
+        if let nextIdentifier = pendingConnectionAfterDisconnect {
+            pendingConnectionAfterDisconnect = nil
+            connectDiscoveredPeripheral(identifier: nextIdentifier)
             return
+        }
+
+        if pendingPairingSession != nil && pairingError == nil {
+            pairingPrompt = nil
+            isPairingConfirmedOnDevice = false
+            pairingStatusMessage = nil
+            pairingError = "Pairing was interrupted. Cancel and add the Bike Computer again."
         }
 
         if suppressNextReconnect {
@@ -2672,8 +3128,9 @@ extension BLEManager: CBCentralManagerDelegate {
             log("Connection error: \(error.localizedDescription)")
         }
         
-        // Retry after delay
-        if autoReconnect {
+        if pendingPairingSession != nil {
+            pairingError = "Could not connect to that Bike Computer."
+        } else if autoReconnect {
             scheduleReconnectWithBackoff()
         }
     }
@@ -2807,10 +3264,7 @@ extension BLEManager: CBPeripheralDelegate {
         if let error = error {
             log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if characteristic.uuid == authCharacteristicUUID {
-                suppressNextReconnect = true
-                isPairingMode = false
-                clearConnectionState()
-                centralManager.cancelPeripheralConnection(peripheral)
+                authWriteCompleted(error: error, peripheral: peripheral)
             } else {
                 completeNavigationWrite(error: error)
             }
@@ -2818,7 +3272,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
 
         if characteristic.uuid == authCharacteristicUUID {
-            authWriteCompleted(for: peripheral, characteristic: characteristic)
+            authWriteCompleted(error: nil, peripheral: peripheral)
         } else {
             completeNavigationWrite(error: nil)
         }

@@ -531,6 +531,7 @@ struct NavigationProtocolTests {
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
+        testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
@@ -8359,6 +8360,85 @@ struct NavigationProtocolTests {
         )
         assertEqual(BLEPairingAuthenticator.clientProof(nonce: nonce), clientProof, "client proof matches firmware vector")
         assertEqual(BLEPairingAuthenticator.makeNonce()?.count, 32, "generated nonce uses 16 random bytes encoded as hex")
+    }
+
+    static func testDeviceOwnershipProtocol() {
+        var appPrivate = Data(repeating: 0, count: 32)
+        appPrivate[31] = 1
+        var devicePrivate = Data(repeating: 0, count: 32)
+        devicePrivate[31] = 2
+        let ownerID = Data((0..<16).map { UInt8(0xF0 + $0) })
+        let deviceID = Data((0..<16).map(UInt8.init))
+        let peripheralID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let session = try! DevicePairingSession(
+            peripheralIdentifier: peripheralID,
+            ownerID: ownerID,
+            deviceName: "Chris’ bike",
+            privateKeyRawRepresentation: appPrivate
+        )
+        let deviceKey = try! P256.KeyAgreement.PrivateKey(rawRepresentation: devicePrivate)
+        let response = "PAIRING|\(deviceID.ownershipHex)|\(deviceKey.publicKey.x963Representation.ownershipHex)"
+        let material = try! session.material(from: response)
+
+        assertEqual(
+            material.ownerKey.ownershipHex,
+            "024d0fb0b003b6d22569ef8e5a382eaa9bbd29ebeaee683d93992ae1399900cf",
+            "P-256 and HKDF owner key matches the firmware vector"
+        )
+        assertEqual(material.comparisonCode, 983668, "pairing comparison code matches the firmware vector")
+        assert(material.confirmationCommand.hasPrefix("CONFIRM|f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff|"),
+               "confirmation binds the installation owner ID")
+        assert(material.confirmationCommand.hasSuffix("|4368726973e280992062696b65"),
+               "confirmation transmits the normalized device name as UTF-8 hex")
+
+        let advertisement = Data([0xFF, 0xFF, 2, 1, 0xAB, 0xCD, 0x12, 0x34])
+        let discovered = DiscoveredBikeComputerDevice.parse(
+            peripheralIdentifier: peripheralID,
+            localName: "Chris’ bike",
+            manufacturerData: advertisement,
+            rssi: -55
+        )
+        assertEqual(discovered.shortIdentifier, "ABCD1234", "advertising exposes the short device identifier")
+        assertEqual(discovered.isClaimed, true, "advertising exposes ownership state")
+        assertEqual(discovered.advertisedName, "Chris’ bike", "advertising exposes the user-assigned name")
+
+        assertEqual(DeviceOwnershipProtocol.normalizedName("   "), "My bike", "empty names use the privacy-safe default")
+        assertEqual(DeviceOwnershipProtocol.normalizedName("Road|Bike"), "RoadBike", "names remove protocol delimiters")
+        assert(DeviceOwnershipProtocol.normalizedName(String(repeating: "🚲", count: 10)).utf8.count <= 24,
+               "device names are truncated on Character boundaries to the firmware limit")
+
+        let suiteName = "DeviceOwnershipProtocolTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let credentials = InMemoryDeviceCredentialStore()
+        let registry = BikeComputerDeviceRegistry(defaults: defaults, credentialStore: credentials)
+        let generatedOwnerID = registry.installationOwnerID()
+        assertEqual(generatedOwnerID?.count, 16, "registry creates a 128-bit installation owner ID")
+        assertEqual(registry.installationOwnerID(), generatedOwnerID, "installation owner ID is stable")
+        assert(registry.saveOwnerKey(material.ownerKey, deviceID: material.deviceID), "registry stores device owner key")
+
+        let first = KnownBikeComputerDevice(
+            deviceID: material.deviceID,
+            peripheralIdentifier: peripheralID,
+            name: "Chris’ bike",
+            lastConnectedAt: Date(timeIntervalSince1970: 10),
+            isLegacy: false
+        )
+        let second = KnownBikeComputerDevice(
+            deviceID: String(repeating: "a", count: 32),
+            peripheralIdentifier: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+            name: "Cargo bike",
+            lastConnectedAt: Date(timeIntervalSince1970: 20),
+            isLegacy: false
+        )
+        registry.upsert(first, makeActive: true)
+        registry.upsert(second)
+        assertEqual(registry.devices.count, 2, "registry supports multiple Bike Computers")
+        assertEqual(registry.activeDeviceID, first.deviceID, "adding another device does not silently switch the current device")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), material.ownerKey, "owner key can be retrieved for authentication")
+        registry.remove(deviceID: first.deviceID)
+        assertEqual(registry.activeDeviceID, second.deviceID, "removing the current device selects the remaining device")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), nil, "deregistering deletes the owner key")
     }
 
     static func testBLEManagerRequiresNavigationReadinessForWrites() {

@@ -52,6 +52,16 @@ struct SettingsView: View {
                     }
                 }
 
+                Section {
+                    NavigationLink {
+                        BikeComputersSettingsView()
+                    } label: {
+                        Label("Bike Computers", systemImage: "bicycle")
+                    }
+                } footer: {
+                    Text("Choose, name, and securely register the Bike Computers that belong to this iPhone.")
+                }
+
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
                 DeviceScreensSettingsSection()
                 SavedMapsSettingsSection(
@@ -1285,10 +1295,10 @@ private struct DeveloperSettingsView: View {
                     Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
                 }
 
-                Button(role: .destructive, action: {
-                    bleManager.forgetTrustedPeripheral()
-                }) {
-                    Label("Forget Device", systemImage: "trash")
+                NavigationLink {
+                    BikeComputersSettingsView()
+                } label: {
+                    Label("Manage Bike Computers", systemImage: "bicycle")
                 }
 
                 Button(action: {

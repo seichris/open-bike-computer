@@ -173,6 +173,7 @@ static void processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
 
   static bool waitingForRelease = false;
+  static bool handledPairingConfirmation = false;
   static uint32_t releaseStartMs = 0;
   static uint32_t pressStartMs = 0;
 
@@ -186,10 +187,16 @@ static void processWaveshareBootButton() {
     }
 
     waitingForRelease = true;
+    handledPairingConfirmation = false;
     releaseStartMs = 0;
     pressStartMs = now;
-    log_i("Waveshare BOOT pressed; handling forward action");
-    toggleNavigationScreen();
+    if (bleNavServer.confirmOwnershipPairing()) {
+      handledPairingConfirmation = true;
+      log_i("Waveshare BOOT pressed; confirmed ownership pairing");
+    } else {
+      log_i("Waveshare BOOT pressed; handling forward action");
+      toggleNavigationScreen();
+    }
     return;
   }
 
@@ -211,6 +218,13 @@ static void processWaveshareBootButton() {
   const uint32_t pressDurationMs = now - pressStartMs;
   log_i("Waveshare BOOT released after %lu ms",
         static_cast<unsigned long>(pressDurationMs));
+  if (pressDurationMs >= 8000 && !handledPairingConfirmation) {
+    if (bleNavServer.forgetOwner()) {
+      log_i("Waveshare BOOT long press cleared the registered iPhone");
+    } else {
+      log_i("Waveshare BOOT long press: no registered iPhone to clear");
+    }
+  }
 }
 #endif
 extern Gps gps;

@@ -201,6 +201,12 @@ public:
    */
   void process();
 
+  /**
+   * @brief Clear the registered iPhone owner after physical recovery input.
+   */
+  bool forgetOwner();
+  bool confirmOwnershipPairing();
+
   BLEDebugStats getDebugStats() const;
 
 private:

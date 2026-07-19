@@ -1,7 +1,19 @@
 # BLE Protocol
 
 The ESP32 advertises BLE service UUID
-`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` as `BikeComputer`.
+`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
+An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from
+its stable random device ID.
+
+The advertisement carries an eight-byte manufacturer payload:
+
+```text
+FF FF | ProtocolVersion: UInt8 | Flags: UInt8 | DeviceID suffix: 4 bytes
+```
+
+Protocol version is currently `2`; flag bit `0` means the device already has an
+owner. The suffix lets the app and device show the same short identifier when
+several Bike Computers are nearby without advertising the complete identity.
 
 All navigation/map writes require the authenticated session established through
 the auth characteristic. The iOS app completes auth before it marks the device as
@@ -31,13 +43,87 @@ Fallback frame prefixes:
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
 
-## Auth
+## Device ownership and authentication
 
-The shared local key is `BikeComputer BLE v1 local pairing key`.
+Every ownership-capable ESP32 creates a random 128-bit device ID on first boot
+and keeps it in NVS. The iOS installation similarly creates a random 128-bit
+owner ID and stores it in the Keychain. iOS may register multiple Bike
+Computers, but maintains one current BLE connection at a time. Automatic
+reconnect targets only the current device; changing devices is explicit in
+Settings.
 
-Handshake:
+### Initial registration
 
-1. iOS writes `HELLO|<nonce>` to auth characteristic.
+Registration is allowed only while the device is unclaimed. The two sides use
+ephemeral P-256 ECDH, HKDF-SHA256, and a comparison code shown independently on
+the iPhone and Bike Computer. The derived 256-bit owner key is never sent over
+BLE.
+
+All binary fields below are lowercase hex. `AppPublicKey` and
+`DevicePublicKey` are 65-byte uncompressed X9.63 P-256 keys.
+
+1. iOS writes `INFO`.
+2. ESP32 notifies
+   `DEVICE|2|<DeviceID>|<Claimed 0-or-1>|<UTF8NameHex>`.
+3. iOS writes `PAIR|<OwnerID>|<AppPublicKey>`.
+4. ESP32 derives the owner key and notifies
+   `PAIRING|<DeviceID>|<DevicePublicKey>`.
+5. Both sides hash `"BikeComputer ownership v2" || DeviceID || OwnerID ||
+   AppPublicKey || DevicePublicKey`, then derive the owner key with that hash as
+   HKDF salt and `BikeComputer owner key v2` as HKDF info.
+6. Both show the six-digit big-endian value from the first four bytes of
+   `HMAC-SHA256(OwnerKey, "compare|" || TranscriptHash)`, modulo `1,000,000`.
+7. After verifying that the displays match, the user presses BOOT on the Bike
+   Computer. ESP32 notifies `PAIR_READY|<DeviceID>`. This physical action is
+   required so a nearby client cannot silently claim an unattended device.
+8. iOS writes
+   `CONFIRM|<OwnerID>|<HMAC-SHA256(OwnerKey, "claim|" || TranscriptHash)>|<UTF8NameHex>`.
+9. ESP32 persists the owner ID, owner key, and name, then notifies
+   `PAIRED|<DeviceID>|<UTF8NameHex>`.
+
+Pairing expires after 120 seconds. Names are non-empty UTF-8, exclude control
+characters and `|`, and are limited to 24 bytes. The app starts with the
+privacy-safe editable suggestion `My bike`; iOS does not expose the Apple ID
+owner name to apps.
+
+### Owner session authentication
+
+Every BLE connection performs a fresh mutual challenge using a random 16-byte
+nonce. No navigation, map, settings, rename, or deregistration command is
+accepted before this completes.
+
+1. iOS writes `OWNER|<OwnerID>|<Nonce>`.
+2. ESP32 notifies
+   `SERVER2|<DeviceID>|<Nonce>|<HMAC-SHA256(OwnerKey, "server2|<DeviceID>|<OwnerID>|<Nonce>")>`.
+3. iOS verifies the server proof, then writes
+   `PROOF|<OwnerID>|<Nonce>|<HMAC-SHA256(OwnerKey, "client2|<DeviceID>|<OwnerID>|<Nonce>")>`.
+4. ESP32 verifies the owner and nonce, then notifies
+   `OK2|<DeviceID>|<Nonce>` and opens the authenticated session.
+
+An owned device replies `OWNED|<DeviceID>` or `DENIED|<DeviceID>` to an
+unauthorized client and does not fall back to the global legacy key.
+
+### Rename, deregistration, and recovery
+
+After owner authentication, iOS can rename with `NAME|<UTF8NameHex>`; ESP32
+persists the name and replies `NAME_OK|<UTF8NameHex>`. `UNPAIR` removes the
+owner ID, owner key, and name from the hardware; ESP32 replies
+`UNPAIRED|<DeviceID>` before restarting its BLE state. iOS deletes its Keychain
+credential only after that acknowledgement.
+
+If the owner iPhone is lost, holding the ESP32 BOOT button for eight seconds
+clears ownership locally and makes the device available for registration again.
+The stable device ID remains unchanged.
+
+### Legacy compatibility
+
+Older firmware and an unclaimed ownership-capable device still accept the v1
+shared-key handshake so existing app/firmware combinations can connect during
+migration. An owned v2 device rejects this path.
+
+The legacy shared local key is `BikeComputer BLE v1 local pairing key`:
+
+1. iOS writes `HELLO|<nonce>`.
 2. ESP32 notifies `SERVER|<nonce>|<hmac_sha256_hex("server|<nonce>")>`.
 3. iOS writes `CLIENT|<nonce>|<hmac_sha256_hex("client|<nonce>")>`.
 4. ESP32 notifies `OK|<nonce>` and accepts navigation/map writes.
