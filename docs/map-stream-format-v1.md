@@ -1,9 +1,8 @@
 # Bike Map Stream Format v1
 
 This document is the normative byte-level contract for Bike Map Stream format
-v1, carried by map install protocol v2. The broader installation, recovery, and
-rollout design lives in
-[`streaming-map-installation-implementation-plan.md`](streaming-map-installation-implementation-plan.md).
+v1, carried by map install protocol v2. Production rollout and recovery
+procedures live in [`map-stream-rollout-runbook.md`](map-stream-rollout-runbook.md).
 
 ## Encoding
 
