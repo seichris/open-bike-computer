@@ -1,10 +1,15 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 1)
+    static let current = Self(major: 1, minor: 3)
 
     let major: UInt16
     let minor: UInt16
+}
+
+nonisolated enum WorkoutTerminalOutcomeV1: String, Codable, Sendable {
+    case saved
+    case discarded
 }
 
 nonisolated enum WorkoutMessageKind: String, Codable, Sendable {
@@ -101,6 +106,9 @@ nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
     case anotherWorkoutActive
     case watchUnavailable
     case setupRequired
+    case finalSummaryUnavailable
+    case terminalChoiceConflict
+    case terminalChoiceUnconfirmed
     case sessionFailed
     case unknown
 
@@ -112,6 +120,50 @@ nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+}
+
+nonisolated enum WorkoutStartDisclosureV1 {
+    enum Choice: Sendable {
+        case cancel
+        case startAnyway
+    }
+
+    static let title = "Start Ride?"
+    static let message = "BikeComputer can’t check whether another workout app is active. Starting may end that workout."
+    static let cancelTitle = "Cancel"
+    static let confirmTitle = "Start Anyway"
+
+    static func perform(_ choice: Choice, start: () -> Void) {
+        guard case .startAnyway = choice else { return }
+        start()
+    }
+}
+
+nonisolated enum WorkoutDiscardDisclosureV1 {
+    enum Choice: Sendable {
+        case cancel
+        case confirmDiscard
+    }
+
+    static let title = "Discard Workout?"
+    static let message = "This can’t be undone. This ride will not be saved to Health."
+    static let cancelTitle = "Keep Riding"
+    static let confirmTitle = "Discard Workout"
+
+    private static func perform(_ choice: Choice, discard: () -> Void) {
+        guard case .confirmDiscard = choice else { return }
+        discard()
+    }
+
+    static func perform(
+        _ choice: Choice,
+        expectedSessionID: UUID,
+        currentSessionID: UUID?,
+        discard: () -> Void
+    ) {
+        guard expectedSessionID == currentSessionID else { return }
+        perform(choice, discard: discard)
     }
 }
 
@@ -132,6 +184,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
     let location: WorkoutLocationV1?
     let availability: WorkoutAvailabilityMaskV1
     let errorCode: WorkoutSafeErrorCodeV1?
+    let terminalOutcome: WorkoutTerminalOutcomeV1?
 
     init(
         state: WorkoutSessionStateV1,
@@ -149,7 +202,8 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         heartRateZoneDurations: WorkoutZoneDurationsV1? = nil,
         location: WorkoutLocationV1? = nil,
         availability: WorkoutAvailabilityMaskV1 = [],
-        errorCode: WorkoutSafeErrorCodeV1? = nil
+        errorCode: WorkoutSafeErrorCodeV1? = nil,
+        terminalOutcome: WorkoutTerminalOutcomeV1? = nil
     ) {
         self.state = state
         self.startDate = startDate
@@ -167,6 +221,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         self.location = location
         self.availability = availability
         self.errorCode = errorCode
+        self.terminalOutcome = terminalOutcome
     }
 }
 
@@ -196,6 +251,10 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
     let transportGenerationID: UUID?
     let sequence: UInt64
     let capturedAt: Date
+    /// Identifies one iPhone process' control sequence space. A fresh process
+    /// gets a fresh identifier so Watch can retire the old replay watermark
+    /// without weakening replay protection for delayed controls.
+    let controlSenderID: UUID?
     let snapshot: WorkoutSnapshotV1?
     let control: WorkoutControlV1?
     let acknowledgement: WorkoutAcknowledgementV1?
@@ -209,6 +268,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         transportGenerationID: UUID? = nil,
         sequence: UInt64,
         capturedAt: Date,
+        controlSenderID: UUID? = nil,
         snapshot: WorkoutSnapshotV1? = nil,
         control: WorkoutControlV1? = nil,
         acknowledgement: WorkoutAcknowledgementV1? = nil,
@@ -221,6 +281,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         self.transportGenerationID = transportGenerationID
         self.sequence = sequence
         self.capturedAt = capturedAt
+        self.controlSenderID = controlSenderID
         self.snapshot = snapshot
         self.control = control
         self.acknowledgement = acknowledgement
@@ -284,6 +345,9 @@ nonisolated enum WorkoutContractCodec {
         guard envelope.sessionToken != 0 else {
             throw WorkoutContractError.zeroSessionToken
         }
+        if envelope.controlSenderID == emptyUUID {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
         guard envelope.transportGenerationID != emptyUUID else {
             throw WorkoutContractError.invalidEnvelopePayload
         }
@@ -304,6 +368,7 @@ nonisolated enum WorkoutContractCodec {
         switch envelope.kind {
         case .snapshot:
             guard let snapshot = envelope.snapshot,
+                  envelope.controlSenderID == nil,
                   envelope.control == nil,
                   envelope.acknowledgement == nil,
                   envelope.error == nil else {
@@ -319,6 +384,7 @@ nonisolated enum WorkoutContractCodec {
             }
         case .acknowledgement:
             guard envelope.snapshot == nil,
+                  envelope.controlSenderID == nil,
                   envelope.control == nil,
                   envelope.acknowledgement != nil,
                   envelope.error == nil else {
@@ -326,6 +392,7 @@ nonisolated enum WorkoutContractCodec {
             }
         case .error:
             guard envelope.snapshot == nil,
+                  envelope.controlSenderID == nil,
                   envelope.control == nil,
                   envelope.acknowledgement == nil,
                   envelope.error != nil else {
@@ -340,6 +407,9 @@ nonisolated enum WorkoutContractCodec {
     ) throws {
         if snapshot.state.requiresStartDate && snapshot.startDate == nil {
             throw WorkoutContractError.invalidDate
+        }
+        if snapshot.terminalOutcome != nil, snapshot.state != .ended {
+            throw WorkoutContractError.invalidEnvelopePayload
         }
         if let startDate = snapshot.startDate {
             guard startDate.timeIntervalSinceReferenceDate.isFinite,
@@ -560,9 +630,13 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
     private(set) var startDateBySession: [UUID: Date] = [:]
     private(set) var latestCapturedAtBySession: [UUID: Date] = [:]
     private(set) var currentSnapshotEnvelope: WorkoutEnvelopeV1?
+    private var retiredSessionIDs: Set<UUID> = []
 
     mutating func ingest(_ envelope: WorkoutEnvelopeV1) throws -> Bool {
         try WorkoutContractCodec.validate(envelope)
+        guard !retiredSessionIDs.contains(envelope.sessionID) else {
+            return false
+        }
         let canonicalToken = sessionTokenBySession[envelope.sessionID]
         let canonicalGeneration = transportGenerationBySession[envelope.sessionID]
         if canonicalGeneration != nil,
@@ -620,6 +694,12 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
         return true
     }
 
+    mutating func retireCurrentSession() {
+        guard let sessionID = currentSnapshotEnvelope?.sessionID else { return }
+        retiredSessionIDs.insert(sessionID)
+        currentSnapshotEnvelope = nil
+    }
+
     private func canAcceptGenerationReset(
         _ envelope: WorkoutEnvelopeV1
     ) -> Bool {
@@ -646,11 +726,15 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
 
     mutating func ingestBatch(_ envelopes: [WorkoutEnvelopeV1]) -> WorkoutEnvelopeBatchResult {
         var latestAcceptedSnapshot: WorkoutEnvelopeV1?
+        var acceptedEnvelopes: [WorkoutEnvelopeV1] = []
         var rejections: [WorkoutEnvelopeBatchRejection] = []
         for (index, envelope) in envelopes.enumerated() {
             do {
-                if try ingest(envelope), envelope.snapshot != nil {
-                    latestAcceptedSnapshot = envelope
+                if try ingest(envelope) {
+                    acceptedEnvelopes.append(envelope)
+                    if envelope.snapshot != nil {
+                        latestAcceptedSnapshot = envelope
+                    }
                 }
             } catch let error as WorkoutContractError {
                 rejections.append(WorkoutEnvelopeBatchRejection(index: index, error: error))
@@ -662,6 +746,7 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
         }
         return WorkoutEnvelopeBatchResult(
             latestSnapshotEnvelope: latestAcceptedSnapshot,
+            acceptedEnvelopes: acceptedEnvelopes,
             rejections: rejections
         )
     }
@@ -709,5 +794,6 @@ nonisolated struct WorkoutEnvelopeBatchRejection: Equatable, Sendable {
 
 nonisolated struct WorkoutEnvelopeBatchResult: Equatable, Sendable {
     let latestSnapshotEnvelope: WorkoutEnvelopeV1?
+    let acceptedEnvelopes: [WorkoutEnvelopeV1]
     let rejections: [WorkoutEnvelopeBatchRejection]
 }

@@ -1,3 +1,4 @@
+import HealthKit
 import WatchKit
 
 @MainActor
@@ -6,5 +7,9 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
 
     func handleActiveWorkoutRecovery() {
         workoutManager.handleActiveWorkoutRecovery()
+    }
+
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        workoutManager.handleWorkoutConfiguration(workoutConfiguration)
     }
 }

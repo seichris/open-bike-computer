@@ -5,16 +5,31 @@ nonisolated protocol WorkoutRecoveryPersistence {
     func save(_ data: Data) throws
     func clear() throws
     func quarantine(_ data: Data) throws
+    func loadTakeoverJournal() throws -> Data?
+    func saveTakeoverJournal(_ data: Data) throws
+    func clearTakeoverJournal() throws
 }
 
 nonisolated extension WorkoutRecoveryPersistence {
     func quarantine(_ data: Data) throws {
         throw RecoveryStoreError.quarantineUnsupported
     }
+
+    func loadTakeoverJournal() throws -> Data? { nil }
+
+    func saveTakeoverJournal(_ data: Data) throws {
+        throw RecoveryStoreError.takeoverJournalUnsupported
+    }
+
+    func clearTakeoverJournal() throws {}
 }
 
 nonisolated struct WorkoutRecoveryFilePersistence: WorkoutRecoveryPersistence {
     let fileURL: URL
+
+    private var takeoverJournalURL: URL {
+        fileURL.appendingPathExtension("takeover-journal")
+    }
 
     func load() throws -> Data? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
@@ -37,6 +52,28 @@ nonisolated struct WorkoutRecoveryFilePersistence: WorkoutRecoveryPersistence {
                 "\(baseName)-corrupt-\(UUID().uuidString)\(extensionSuffix)"
             )
         try writeDurably(data, to: quarantineURL)
+    }
+
+    func loadTakeoverJournal() throws -> Data? {
+        guard FileManager.default.fileExists(
+            atPath: takeoverJournalURL.path
+        ) else {
+            return nil
+        }
+        return try Data(contentsOf: takeoverJournalURL)
+    }
+
+    func saveTakeoverJournal(_ data: Data) throws {
+        try writeDurably(data, to: takeoverJournalURL)
+    }
+
+    func clearTakeoverJournal() throws {
+        guard FileManager.default.fileExists(
+            atPath: takeoverJournalURL.path
+        ) else {
+            return
+        }
+        try FileManager.default.removeItem(at: takeoverJournalURL)
     }
 
     private func writeDurably(_ data: Data, to destination: URL) throws {
@@ -83,17 +120,20 @@ nonisolated final class WatchWorkoutRecoveryStore {
         let requestedAt: Date
         var phase: WorkoutFinalizationPhase
         var routeStatus: WorkoutRouteSaveStatus?
+        var terminalErrorCode: WorkoutSafeErrorCodeV1?
 
         init(
             disposition: WorkoutFinishDisposition,
             requestedAt: Date,
             phase: WorkoutFinalizationPhase = .requested,
-            routeStatus: WorkoutRouteSaveStatus? = nil
+            routeStatus: WorkoutRouteSaveStatus? = nil,
+            terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
         ) {
             self.disposition = disposition
             self.requestedAt = requestedAt
             self.phase = phase
             self.routeStatus = routeStatus
+            self.terminalErrorCode = terminalErrorCode
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -101,6 +141,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
             case requestedAt
             case phase
             case routeStatus
+            case terminalErrorCode
         }
 
         init(from decoder: Decoder) throws {
@@ -118,6 +159,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
                 WorkoutRouteSaveStatus.self,
                 forKey: .routeStatus
             )
+            terminalErrorCode = try container.decodeIfPresent(
+                WorkoutSafeErrorCodeV1.self,
+                forKey: .terminalErrorCode
+            )
         }
     }
 
@@ -132,6 +177,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
         let transportGenerationID: UUID?
         let startDate: Date
         var sequenceHighWatermark: UInt64
+        var remoteControlCheckpoint:
+            WorkoutRemoteControlSequenceGate.Checkpoint? = nil
+        var remoteTerminalAcknowledgement:
+            RemoteTerminalAcknowledgement? = nil
         var finishRequest: FinishRequest?
         /// A rider-confirmed corrupt-state reset cannot recover the lost
         /// Save/Discard choice. Keep that provenance durable until the rider
@@ -141,6 +190,28 @@ nonisolated final class WatchWorkoutRecoveryStore {
         /// metadata-less recovered builder. It may later bind once to the
         /// builder's genuine validated UUID, but can never become saveable.
         var corruptResetSyntheticCleanupIdentity: Bool?
+    }
+
+    struct RemoteTerminalAcknowledgement: Codable, Equatable {
+        let control: WorkoutControlV1
+        let controlSenderID: UUID?
+        let acknowledgedSequence: UInt64
+        /// Captured time of the accepted iPhone control, used for exact replay.
+        let capturedAt: Date
+        /// Pre-reserved Watch sequence for idempotent acknowledgement replay.
+        let envelopeSequence: UInt64
+        let envelopeCapturedAt: Date
+
+        var disposition: WorkoutFinishDisposition? {
+            switch control {
+            case .endAndSave:
+                .save
+            case .discard:
+                .discard
+            case .requestCurrentSnapshot, .pause, .resume:
+                nil
+            }
+        }
     }
 
     struct TerminalTombstone: Codable, Equatable {
@@ -212,10 +283,21 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var corruptResetAuthorization: CorruptResetAuthorization?
     }
 
+    /// Write-ahead provenance for a cross-app takeover. This lives outside the
+    /// primary identity file so a failed identity save followed by process
+    /// death cannot turn a displaced partial ride into an unexplained result.
+    private struct TakeoverJournal: Codable, Equatable {
+        let sessionID: UUID
+        let disposition: WorkoutFinishDisposition
+        let requestedAt: Date
+        let explicitRiderChoice: Bool
+    }
+
     private let persistence: any WorkoutRecoveryPersistence
     private var identity: Identity?
     private var terminalTombstones: [TerminalTombstone]
     private var corruptResetAuthorization: CorruptResetAuthorization?
+    private var takeoverJournal: TakeoverJournal?
     private var sequenceLease: WorkoutSequenceLease?
     private(set) var loadState: LoadState
 
@@ -228,6 +310,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
         identity = nil
         terminalTombstones = []
         corruptResetAuthorization = nil
+        takeoverJournal = nil
         loadState = .missing
         reload()
     }
@@ -239,6 +322,8 @@ nonisolated final class WatchWorkoutRecoveryStore {
                 identity = nil
                 terminalTombstones = []
                 corruptResetAuthorization = nil
+                takeoverJournal = nil
+                try? persistence.clearTakeoverJournal()
                 loadState = .missing
                 return
             }
@@ -246,6 +331,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
                 identity = nil
                 terminalTombstones = []
                 corruptResetAuthorization = nil
+                takeoverJournal = nil
                 loadState = .corrupt
                 return
             }
@@ -253,10 +339,12 @@ nonisolated final class WatchWorkoutRecoveryStore {
             terminalTombstones = state.terminalTombstones
             corruptResetAuthorization = state.corruptResetAuthorization
             loadState = .valid
+            try loadAndMergeTakeoverJournal()
         } catch {
             identity = nil
             terminalTombstones = []
             corruptResetAuthorization = nil
+            takeoverJournal = nil
             loadState = .unavailable
         }
     }
@@ -430,13 +518,183 @@ nonisolated final class WatchWorkoutRecoveryStore {
     }
 
     @discardableResult
+    func persistRemoteControlCheckpoint(
+        _ checkpoint: WorkoutRemoteControlSequenceGate.Checkpoint,
+        finishing disposition: WorkoutFinishDisposition? = nil,
+        requestedAt: Date? = nil,
+        explicitRiderChoice: Bool = true,
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil,
+        terminalAcknowledgement: RemoteTerminalAcknowledgement? = nil
+    ) throws -> WorkoutFinishDisposition? {
+        guard checkpoint.isValid,
+              (disposition == nil) == (requestedAt == nil),
+              terminalAcknowledgement.map({ acknowledgement in
+                  guard acknowledgement.disposition != nil,
+                        acknowledgement.capturedAt
+                            .timeIntervalSinceReferenceDate.isFinite,
+                        acknowledgement.envelopeSequence > 0,
+                        acknowledgement.envelopeCapturedAt
+                            .timeIntervalSinceReferenceDate.isFinite else {
+                      return false
+                  }
+                  if let senderID = acknowledgement.controlSenderID {
+                      return checkpoint.seenSenderIDs.contains(senderID)
+                          && (checkpoint.currentSenderID != senderID
+                              || checkpoint.highestSequence
+                                  >= acknowledgement.acknowledgedSequence)
+                  }
+                  return checkpoint.legacyHighestSequence
+                      >= acknowledgement.acknowledgedSequence
+              }) ?? true,
+              var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.remoteControlCheckpoint = checkpoint
+        let effectiveDisposition: WorkoutFinishDisposition?
+        var takeoverJournalRequest: (
+            disposition: WorkoutFinishDisposition,
+            requestedAt: Date,
+            explicitRiderChoice: Bool
+        )?
+        if let disposition, let requestedAt {
+            let resolvedTerminalErrorCode = WorkoutTerminalErrorPolicy.resolve(
+                summaryError: terminalErrorCode,
+                persistedFinishError: identity.finishRequest?.terminalErrorCode
+                    ?? (takeoverJournal?.sessionID == identity.sessionID
+                        ? .anotherWorkoutActive
+                        : nil)
+            )
+            effectiveDisposition = try applyFinishRequest(
+                to: &identity,
+                disposition: disposition,
+                requestedAt: requestedAt,
+                explicitRiderChoice: explicitRiderChoice,
+                terminalErrorCode: resolvedTerminalErrorCode
+            )
+            if resolvedTerminalErrorCode == .anotherWorkoutActive,
+               let effectiveDisposition {
+                takeoverJournalRequest = (
+                    disposition: effectiveDisposition,
+                    requestedAt: requestedAt,
+                    explicitRiderChoice: explicitRiderChoice
+                )
+            }
+        } else {
+            effectiveDisposition = nil
+        }
+        if let terminalAcknowledgement {
+            guard terminalAcknowledgement.disposition
+                    == identity.finishRequest?.disposition,
+                  terminalAcknowledgement.envelopeSequence
+                    <= identity.sequenceHighWatermark else {
+                throw RecoveryStoreError.missingOrInvalidIdentity
+            }
+            identity.remoteTerminalAcknowledgement =
+                terminalAcknowledgement
+        }
+        if let takeoverJournalRequest {
+            try writeTakeoverJournal(
+                sessionID: identity.sessionID,
+                disposition: takeoverJournalRequest.disposition,
+                requestedAt: takeoverJournalRequest.requestedAt,
+                explicitRiderChoice:
+                    takeoverJournalRequest.explicitRiderChoice
+            )
+            // If the primary transaction fails, later recovery writes must
+            // flush checkpoint and acknowledgement obligation together.
+            self.identity = identity
+        }
+        try persist(identity)
+        self.identity = identity
+        return effectiveDisposition
+    }
+
+    @discardableResult
     func markFinishing(
         disposition: WorkoutFinishDisposition,
         requestedAt: Date,
-        explicitRiderChoice: Bool = true
+        explicitRiderChoice: Bool = true,
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
     ) throws -> WorkoutFinishDisposition {
+        guard var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        let resolvedTerminalErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: terminalErrorCode,
+            persistedFinishError: identity.finishRequest?.terminalErrorCode
+                ?? (takeoverJournal?.sessionID == identity.sessionID
+                    ? .anotherWorkoutActive
+                    : nil)
+        )
+        let retainedExplicitJournalChoice = !explicitRiderChoice
+            ? takeoverJournal.flatMap { journal in
+                journal.sessionID == identity.sessionID
+                    && journal.explicitRiderChoice
+                    ? journal.disposition
+                    : nil
+            }
+            : nil
+        let effectiveExplicitRiderChoice = explicitRiderChoice
+            || retainedExplicitJournalChoice != nil
+        let effectiveDisposition = try applyFinishRequest(
+            to: &identity,
+            disposition: retainedExplicitJournalChoice ?? disposition,
+            requestedAt: requestedAt,
+            explicitRiderChoice: effectiveExplicitRiderChoice,
+            terminalErrorCode: resolvedTerminalErrorCode
+        )
+        if resolvedTerminalErrorCode == .anotherWorkoutActive {
+            try writeTakeoverJournal(
+                sessionID: identity.sessionID,
+                disposition: effectiveDisposition,
+                requestedAt: requestedAt,
+                explicitRiderChoice: effectiveExplicitRiderChoice
+            )
+            self.identity = identity
+        }
+        try persist(identity)
+        self.identity = identity
+        return effectiveDisposition
+    }
+
+    func markTerminalError(
+        _ terminalErrorCode: WorkoutSafeErrorCodeV1
+    ) throws {
         guard var identity,
-              requestedAt.timeIntervalSinceReferenceDate.isFinite else {
+              var request = identity.finishRequest else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        let resolvedErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: terminalErrorCode,
+            persistedFinishError: request.terminalErrorCode
+                ?? (takeoverJournal?.sessionID == identity.sessionID
+                    ? .anotherWorkoutActive
+                    : nil)
+        )
+        guard request.terminalErrorCode != resolvedErrorCode else { return }
+        request.terminalErrorCode = resolvedErrorCode
+        identity.finishRequest = request
+        if resolvedErrorCode == .anotherWorkoutActive {
+            try writeTakeoverJournal(
+                sessionID: identity.sessionID,
+                disposition: request.disposition,
+                requestedAt: request.requestedAt,
+                explicitRiderChoice: true
+            )
+            self.identity = identity
+        }
+        try persist(identity)
+        self.identity = identity
+    }
+
+    private func applyFinishRequest(
+        to identity: inout Identity,
+        disposition: WorkoutFinishDisposition,
+        requestedAt: Date,
+        explicitRiderChoice: Bool,
+        terminalErrorCode: WorkoutSafeErrorCodeV1?
+    ) throws -> WorkoutFinishDisposition {
+        guard requestedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw RecoveryStoreError.missingOrInvalidIdentity
         }
         let effectiveDisposition = identity.corruptResetPendingFinishChoice == true
@@ -449,10 +707,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
         identity.finishRequest = FinishRequest(
             disposition: effectiveDisposition,
             requestedAt: requestedAt,
-            phase: .requested
+            phase: .requested,
+            terminalErrorCode: terminalErrorCode
+                ?? identity.finishRequest?.terminalErrorCode
         )
-        try persist(identity)
-        self.identity = identity
         return effectiveDisposition
     }
 
@@ -696,6 +954,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
            authorization == nil {
             try persistence.clear()
             loadState = .missing
+            clearTakeoverJournalBestEffort()
             return
         }
         let state = PersistedState(
@@ -706,6 +965,91 @@ nonisolated final class WatchWorkoutRecoveryStore {
         let data = try PropertyListEncoder().encode(state)
         try persistence.save(data)
         loadState = .valid
+        if let activeIdentity {
+            clearTakeoverJournalIfCovered(by: activeIdentity)
+        } else if let takeoverJournal,
+                  terminalTombstones.contains(where: {
+                      $0.sessionID == takeoverJournal.sessionID
+                  }) {
+            clearTakeoverJournalBestEffort()
+        }
+    }
+
+    private func loadAndMergeTakeoverJournal() throws {
+        guard let data = try persistence.loadTakeoverJournal() else {
+            takeoverJournal = nil
+            return
+        }
+        guard let journal = try? PropertyListDecoder().decode(
+            TakeoverJournal.self,
+            from: data
+        ),
+        journal.sessionID != Self.zeroUUID,
+        journal.requestedAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw RecoveryStoreError.invalidTakeoverJournal
+        }
+        guard var identity, identity.sessionID == journal.sessionID else {
+            try? persistence.clearTakeoverJournal()
+            takeoverJournal = nil
+            return
+        }
+        if var request = identity.finishRequest {
+            request.terminalErrorCode = WorkoutTerminalErrorPolicy.resolve(
+                summaryError: request.terminalErrorCode,
+                persistedFinishError: .anotherWorkoutActive
+            )
+            identity.finishRequest = request
+        } else {
+            identity.finishRequest = FinishRequest(
+                disposition: journal.disposition,
+                requestedAt: journal.requestedAt,
+                terminalErrorCode: .anotherWorkoutActive
+            )
+            if journal.explicitRiderChoice {
+                identity.corruptResetPendingFinishChoice = false
+            }
+        }
+        self.identity = identity
+        takeoverJournal = journal
+    }
+
+    private func writeTakeoverJournal(
+        sessionID: UUID,
+        disposition: WorkoutFinishDisposition,
+        requestedAt: Date,
+        explicitRiderChoice: Bool
+    ) throws {
+        let journal = TakeoverJournal(
+            sessionID: sessionID,
+            disposition: disposition,
+            requestedAt: requestedAt,
+            explicitRiderChoice: explicitRiderChoice
+        )
+        let data = try PropertyListEncoder().encode(journal)
+        try persistence.saveTakeoverJournal(data)
+        takeoverJournal = journal
+    }
+
+    private func clearTakeoverJournalIfCovered(by identity: Identity) {
+        guard let takeoverJournal,
+              takeoverJournal.sessionID == identity.sessionID,
+              identity.finishRequest?.terminalErrorCode
+                == .anotherWorkoutActive else {
+            return
+        }
+        clearTakeoverJournalBestEffort()
+    }
+
+    private func clearTakeoverJournalBestEffort() {
+        guard takeoverJournal != nil else { return }
+        do {
+            try persistence.clearTakeoverJournal()
+            takeoverJournal = nil
+        } catch {
+            // The write-ahead record is idempotent and scoped to one session.
+            // Keeping it is safer than reporting failure after the primary
+            // identity already became durable.
+        }
     }
 
     private static func decodeState(from data: Data) -> PersistedState? {
@@ -748,9 +1092,38 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.sessionToken != 0,
               identity.transportGenerationID != zeroUUID,
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
+              identity.remoteControlCheckpoint?.isValid ?? true,
               identity.finishRequest?.requestedAt.timeIntervalSinceReferenceDate.isFinite
                 ?? true else {
             return nil
+        }
+        if let acknowledgement = identity.remoteTerminalAcknowledgement {
+            guard let checkpoint = identity.remoteControlCheckpoint,
+                  acknowledgement.disposition
+                    == identity.finishRequest?.disposition,
+                  acknowledgement.capturedAt
+                    .timeIntervalSinceReferenceDate.isFinite,
+                  acknowledgement.envelopeSequence > 0,
+                  acknowledgement.envelopeSequence
+                    <= identity.sequenceHighWatermark,
+                  acknowledgement.envelopeCapturedAt
+                    .timeIntervalSinceReferenceDate.isFinite
+            else {
+                return nil
+            }
+            if let senderID = acknowledgement.controlSenderID {
+                guard checkpoint.seenSenderIDs.contains(senderID),
+                      checkpoint.currentSenderID != senderID
+                        || checkpoint.highestSequence
+                            >= acknowledgement.acknowledgedSequence else {
+                    return nil
+                }
+            } else {
+                guard checkpoint.legacyHighestSequence
+                        >= acknowledgement.acknowledgedSequence else {
+                    return nil
+                }
+            }
         }
         if identity.corruptResetSyntheticCleanupIdentity == true {
             guard identity.corruptResetPendingFinishChoice == true,
@@ -812,5 +1185,7 @@ private nonisolated enum RecoveryStoreError: Error {
     case missingOrInvalidIdentity
     case unreadableOrOccupiedState
     case quarantineUnsupported
+    case takeoverJournalUnsupported
+    case invalidTakeoverJournal
     case stateChanged
 }

@@ -18,6 +18,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \
@@ -27,6 +28,10 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"

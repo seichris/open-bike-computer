@@ -15,6 +15,9 @@
 		57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003002F00000100000001 /* WatchWorkoutManager.swift */; };
 		57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003012F00000100000001 /* WatchRouteRecorder.swift */; };
 		57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */; };
+		57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004002F00000100000001 /* WorkoutMirrorManager.swift */; };
+		57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004012F00000100000001 /* WorkoutMetricsStore.swift */; };
+		57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +54,9 @@
 		57A003002F00000100000001 /* WatchWorkoutManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutManager.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutManager.swift; sourceTree = "<group>"; };
 		57A003012F00000100000001 /* WatchRouteRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchRouteRecorder.swift (Tests)"; path = BikeComputerWatch/Managers/WatchRouteRecorder.swift; sourceTree = "<group>"; };
 		57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputerWatchTests/WatchWorkoutManagerTests.swift; sourceTree = "<group>"; };
+		57A004002F00000100000001 /* WorkoutMirrorManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMirrorManager.swift; sourceTree = "<group>"; };
+		57A004012F00000100000001 /* WorkoutMetricsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMetricsStore.swift; sourceTree = "<group>"; };
+		57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/WorkoutMirrorManagerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -138,6 +144,9 @@
 				57A003002F00000100000001 /* WatchWorkoutManager.swift */,
 				57A003012F00000100000001 /* WatchRouteRecorder.swift */,
 				57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */,
+				57A004002F00000100000001 /* WorkoutMirrorManager.swift */,
+				57A004012F00000100000001 /* WorkoutMetricsStore.swift */,
+				57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */,
 				83E6EF982EED853C00AE5F9B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -347,6 +356,9 @@
 			files = (
 				57A001032F00000100000001 /* WorkoutContractTests.swift in Sources */,
 				57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
+				57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */,
+				57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */,
+				57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

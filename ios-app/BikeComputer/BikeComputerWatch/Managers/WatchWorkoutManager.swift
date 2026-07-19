@@ -15,6 +15,7 @@ enum WatchWorkoutSetupState: Equatable {
 
 enum WatchWorkoutFinishRequestError: Equatable {
     case persistenceFailed
+    case terminalErrorPersistenceFailed
     case saveFailed
     case reconciliationFailed
     case identityMetadataFailed
@@ -33,6 +34,27 @@ struct WatchWorkoutSummary: Equatable {
     let activeEnergyKilocalories: Double?
     let averageHeartRate: Double?
     let routeStatus: WorkoutRouteSaveStatus
+    let terminalErrorCode: WorkoutSafeErrorCodeV1?
+
+    init(
+        outcome: Outcome,
+        endedAt: Date,
+        duration: TimeInterval?,
+        distanceMeters: Double?,
+        activeEnergyKilocalories: Double?,
+        averageHeartRate: Double?,
+        routeStatus: WorkoutRouteSaveStatus,
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
+    ) {
+        self.outcome = outcome
+        self.endedAt = endedAt
+        self.duration = duration
+        self.distanceMeters = distanceMeters
+        self.activeEnergyKilocalories = activeEnergyKilocalories
+        self.averageHeartRate = averageHeartRate
+        self.routeStatus = routeStatus
+        self.terminalErrorCode = terminalErrorCode
+    }
 }
 
 struct RecoveredSaveResolution {
@@ -252,8 +274,24 @@ struct WatchRecoveredSaveReconciliationGate: Equatable {
     }
 }
 
+typealias WatchMirrorStartOperation = @MainActor (
+    HKWorkoutSession,
+    @escaping @Sendable (Bool, Error?) -> Void
+) -> Void
+
+typealias WatchMirrorSendOperation = @MainActor (
+    HKWorkoutSession,
+    Data,
+    @escaping @Sendable (Bool, Error?) -> Void
+) -> Void
+
 @MainActor
 final class WatchWorkoutManager: NSObject, ObservableObject {
+    private enum ConfirmedTerminalCompletion {
+        case saved(summary: WatchWorkoutSummary, at: Date)
+        case discarded(summary: WatchWorkoutSummary, at: Date)
+    }
+
     @Published private(set) var setupState: WatchWorkoutSetupState = .checking
     @Published private(set) var snapshot = WorkoutSnapshotV1(state: .idle)
     @Published private(set) var latestEnvelope: WorkoutEnvelopeV1?
@@ -294,6 +332,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         ((WorkoutSaveFinalizationMode?) -> Void)?
     private let injectedRecoveredDiscardFinalizationAdapter:
         WatchRecoveredDiscardFinalizationAdapter?
+    private let injectedWorkoutConfigurationHandler:
+        (@MainActor (HKWorkoutConfiguration) -> Void)?
+    private let injectedRemotePauseOperation:
+        (@MainActor (HKWorkoutSession) -> Void)?
+    private let injectedRemoteResumeOperation:
+        (@MainActor (HKWorkoutSession) -> Void)?
+    private let injectedMirrorStartOperation: WatchMirrorStartOperation?
+    private let injectedMirrorSendOperation: WatchMirrorSendOperation?
+    private let injectedMirrorShutdownEndSession: (
+        @MainActor (HKWorkoutSession) -> Void
+    )?
+    private let mirrorRetryDelay: TimeInterval
+    private let mirrorShutdownDeliveryTimeout: TimeInterval
     private var cancellables: Set<AnyCancellable> = []
 
     private var session: HKWorkoutSession?
@@ -303,6 +354,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var periodicSnapshotTask: Task<Void, Never>?
     private var coalescedSnapshotTask: Task<Void, Never>?
     private var finalizationTask: Task<Void, Never>?
+    private var mirrorRetryTask: Task<Void, Never>?
+    private var mirrorShutdownWatchdogTask: Task<Void, Never>?
     private var authoritativeFinalizationEndDate: Date?
     private var isBuilderReadyForFinalization = false
     private var isIdentityMetadataRetryPending = false
@@ -322,6 +375,28 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var isFinishFailureRollbackPending = false
     private var lastSnapshotPublishedAt = Date.distantPast
     private var lastErrorCode: WorkoutSafeErrorCodeV1?
+    private var mirrorEnvelopeBuffer = WorkoutLatestEnvelopeBuffer()
+    private var isMirroring = false
+    private var isMirrorStartInFlight = false
+    private var mirrorStartAttemptID: UUID?
+    private var mirrorSendAttemptID: UUID?
+    private var remoteControlGate = WorkoutRemoteControlSequenceGate()
+    private var pendingRemoteStateAcknowledgement: (
+        control: WorkoutControlV1,
+        sequence: UInt64
+    )?
+    private var isTerminalMirrorDeliveryPending = false
+    private var isStartFailureMirrorDeliveryPending = false
+    private var shutdownMirrorFailureRetryCount = 0
+    private var pendingWorkoutConfiguration: HKWorkoutConfiguration?
+    private var pendingTerminalErrorPersistence: (
+        code: WorkoutSafeErrorCodeV1,
+        endDate: Date
+    )?
+    private var pendingTerminalErrorCodeForNextFinish:
+        WorkoutSafeErrorCodeV1?
+    private var pendingTerminalCauseConfirmedCompletion:
+        ConfirmedTerminalCompletion?
 
     private var currentHeartRate: WorkoutMetricV1?
     private var averageHeartRate: WorkoutMetricV1?
@@ -350,6 +425,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             initialFinishFailureRollbackPending: false,
             finalizationClaimObserver: nil,
             recoveredDiscardFinalizationAdapter: nil,
+            workoutConfigurationHandler: nil,
+            remotePauseOperation: nil,
+            remoteResumeOperation: nil,
+            mirrorStartOperation: nil,
+            mirrorSendOperation: nil,
+            mirrorShutdownEndSession: nil,
+            mirrorRetryDelay: 5,
+            mirrorShutdownDeliveryTimeout: 10,
             initializeOnLaunch: true
         )
     }
@@ -385,6 +468,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             ((WorkoutSaveFinalizationMode?) -> Void)? = nil,
         recoveredDiscardFinalizationAdapter:
             WatchRecoveredDiscardFinalizationAdapter? = nil,
+        workoutConfigurationHandler:
+            (@MainActor (HKWorkoutConfiguration) -> Void)? = nil,
+        remotePauseOperation:
+            (@MainActor (HKWorkoutSession) -> Void)? = nil,
+        remoteResumeOperation:
+            (@MainActor (HKWorkoutSession) -> Void)? = nil,
+        mirrorStartOperation: WatchMirrorStartOperation? = nil,
+        mirrorSendOperation: WatchMirrorSendOperation? = nil,
+        mirrorShutdownEndSession:
+            (@MainActor (HKWorkoutSession) -> Void)? = nil,
+        mirrorRetryDelay: TimeInterval = 5,
+        mirrorShutdownDeliveryTimeout: TimeInterval = 10,
         initializeOnLaunch: Bool = true
     ) {
         self.healthStore = healthStore
@@ -403,6 +498,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedFinalizationClaimObserver = finalizationClaimObserver
         self.injectedRecoveredDiscardFinalizationAdapter =
             recoveredDiscardFinalizationAdapter
+        self.injectedWorkoutConfigurationHandler = workoutConfigurationHandler
+        self.injectedRemotePauseOperation = remotePauseOperation
+        self.injectedRemoteResumeOperation = remoteResumeOperation
+        self.injectedMirrorStartOperation = mirrorStartOperation
+        self.injectedMirrorSendOperation = mirrorSendOperation
+        self.injectedMirrorShutdownEndSession = mirrorShutdownEndSession
+        self.mirrorRetryDelay = mirrorRetryDelay
+        self.mirrorShutdownDeliveryTimeout = mirrorShutdownDeliveryTimeout
         self.locationAuthorizationState = routeRecorder.authorizationState
         super.init()
 
@@ -436,12 +539,22 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         periodicSnapshotTask?.cancel()
         coalescedSnapshotTask?.cancel()
         finalizationTask?.cancel()
+        mirrorRetryTask?.cancel()
+        mirrorShutdownWatchdogTask?.cancel()
     }
 
     var state: WorkoutSessionStateV1 { lifecycle.state }
     var isWorkoutActive: Bool { lifecycle.state.isActive }
+    var activeSessionID: UUID? {
+        guard isWorkoutActive else { return nil }
+        return recoveryStore.recoveredIdentity?.sessionID ?? identity?.sessionID
+    }
     var isAwaitingDetachedSessionCleanup: Bool {
-        if isTerminalPublicationPending { return true }
+        if isTerminalPublicationPending
+            || isTerminalMirrorDeliveryPending
+            || isStartFailureMirrorDeliveryPending {
+            return true
+        }
         guard session == nil else { return false }
         return isTerminalArchivePending
             || recoveryStore.recoveredIdentity?.finishRequest?.disposition == .discard
@@ -508,6 +621,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
+    func handleWorkoutConfiguration(_ configuration: HKWorkoutConfiguration) {
+        guard configuration.activityType == .cycling,
+              configuration.locationType == .outdoor else {
+            setupState = .failed
+            return
+        }
+        pendingWorkoutConfiguration = configuration
+        drainPendingWorkoutConfigurationIfPossible()
+    }
+
     func pause() {
         guard lifecycle.state == .running else { return }
         session?.pause()
@@ -529,16 +652,44 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func retryFinalization() {
         guard finishRequestError == .reconciliationFailed
                 || finishRequestError == .saveFailed
-                || finishRequestError == .identityMetadataFailed,
+                || finishRequestError == .identityMetadataFailed
+                || finishRequestError == .terminalErrorPersistenceFailed,
               lifecycle.state == .ending,
               finalizationTask == nil else {
             return
+        }
+        var terminalCauseRetryEndDate: Date?
+        if let pendingTerminalErrorPersistence {
+            let retryEndDate = pendingTerminalErrorPersistence.endDate
+            let hasRetainedCompletion =
+                pendingTerminalCauseConfirmedCompletion != nil
+            authoritativeFinalizationEndDate =
+                authoritativeFinalizationEndDate ?? retryEndDate
+            guard persistTerminalErrorForCurrentFinish(
+                pendingTerminalErrorPersistence.code,
+                endDate: retryEndDate
+            ) else {
+                publishSnapshotImmediately()
+                return
+            }
+            if hasRetainedCompletion { return }
+            terminalCauseRetryEndDate = retryEndDate
         }
         finishRequestError = nil
         Task { [weak self] in
             guard let self else { return }
             if isIdentityMetadataRetryPending {
                 await retryIdentityMetadataAttachmentForFinalization()
+            } else if let terminalCauseRetryEndDate,
+                      let session,
+                      !Self.canRetryFinalization(
+                        sessionState: injectedRecoveredSaveRuntimeAdapter?
+                            .sessionState() ?? session.state
+                      ) {
+                stopSessionForFinalization(
+                    session,
+                    at: terminalCauseRetryEndDate
+                )
             } else if lifecycle.finishDisposition == .discard,
                       session != nil
                         || injectedRecoveredDiscardFinalizationAdapter != nil {
@@ -564,6 +715,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         guard lifecycle.apply(.reset) else { return }
         finishRequestError = nil
         summary = nil
+        pendingTerminalErrorPersistence = nil
+        pendingTerminalErrorCodeForNextFinish = nil
+        pendingTerminalCauseConfirmedCompletion = nil
         snapshot = WorkoutSnapshotV1(state: .idle)
         latestEnvelope = nil
         routeRecorder.discardRoute()
@@ -607,19 +761,21 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func handleAttachedSessionRelease() {
-        guard session == nil,
-              recoverySignalQueue.consumeAfterSessionRelease() else {
-            return
-        }
-        if !isRecoveryLoopRunning {
+        guard session == nil else { return }
+        if recoverySignalQueue.consumeAfterSessionRelease(),
+           !isRecoveryLoopRunning {
             isRecovering = false
             startRecoveryLoopIfNeeded()
         }
+        drainPendingWorkoutConfigurationIfPossible()
     }
 
     private func initialize() async {
         isRecoveryLoopRunning = true
-        defer { isRecoveryLoopRunning = false }
+        defer {
+            isRecoveryLoopRunning = false
+            drainPendingWorkoutConfigurationIfPossible()
+        }
         guard HKHealthStore.isHealthDataAvailable() else {
             setupState = .unavailable
             isRecovering = false
@@ -668,6 +824,33 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             break
         }
         isRecovering = terminalCleanupSessionID != nil
+    }
+
+    private func drainPendingWorkoutConfigurationIfPossible() {
+        guard let configuration = pendingWorkoutConfiguration else { return }
+        if let session, isWorkoutActive {
+            pendingWorkoutConfiguration = nil
+            startMirroringIfNeeded(for: session)
+            publishSnapshotImmediately()
+            return
+        }
+        guard !isRecovering,
+              !isRecoveryLoopRunning,
+              session == nil,
+              !isAwaitingDetachedSessionCleanup,
+              [.missing, .valid].contains(recoveryStore.loadState) else {
+            return
+        }
+        pendingWorkoutConfiguration = nil
+        if let injectedWorkoutConfigurationHandler {
+            injectedWorkoutConfigurationHandler(configuration)
+            return
+        }
+        Task { [weak self] in
+            await self?.startOutdoorCyclingWorkout(
+                configuration: configuration
+            )
+        }
     }
 
     private func refreshAuthorizationState() async {
@@ -723,7 +906,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
-    func startOutdoorCyclingWorkout() async {
+    func startOutdoorCyclingWorkout(
+        configuration suppliedConfiguration: HKWorkoutConfiguration? = nil
+    ) async {
         let admissionRecoveryGeneration = recoverySignalQueue.generation
         guard !isRecovering,
               !isWorkoutActive,
@@ -751,6 +936,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
         summary = nil
         finishRequestError = nil
+        pendingTerminalErrorPersistence = nil
+        pendingTerminalErrorCodeForNextFinish = nil
+        pendingTerminalCauseConfirmedCompletion = nil
         clearMetrics()
         lastErrorCode = nil
         isBuilderReadyForFinalization = false
@@ -760,9 +948,21 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         preparedRouteForFinalization = nil
         let startDate = Date()
 
-        let configuration = HKWorkoutConfiguration()
-        configuration.activityType = .cycling
-        configuration.locationType = .outdoor
+        let configuration: HKWorkoutConfiguration
+        if let suppliedConfiguration {
+            guard suppliedConfiguration.activityType == .cycling,
+                  suppliedConfiguration.locationType == .outdoor else {
+                setupState = .failed
+                _ = lifecycle.apply(.fail)
+                return
+            }
+            configuration = suppliedConfiguration
+        } else {
+            let outdoorCycling = HKWorkoutConfiguration()
+            outdoorCycling.activityType = .cycling
+            outdoorCycling.locationType = .outdoor
+            configuration = outdoorCycling
+        }
 
         do {
             identity = try recoveryStore.begin(startDate: startDate)
@@ -789,6 +989,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             ) { [weak self] in
                 self?.scheduleCoalescedSnapshot()
             }
+            startMirroringIfNeeded(for: session)
             publishSnapshotImmediately()
 
             session.startActivity(with: startDate)
@@ -880,14 +1081,20 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func requestEnd(
         _ disposition: WorkoutFinishDisposition,
         requestedAt: Date = Date(),
-        explicitRiderChoice: Bool = false
+        explicitRiderChoice: Bool = false,
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
     ) {
         guard [.starting, .running, .paused].contains(lifecycle.state) else { return }
         guard persistFinishRequest(
             disposition: disposition,
             requestedAt: requestedAt,
-            explicitRiderChoice: explicitRiderChoice
+            explicitRiderChoice: explicitRiderChoice,
+            terminalErrorCode: terminalErrorCode
         ) else { return }
+        beginPersistedFinishRequest(requestedAt: requestedAt)
+    }
+
+    private func beginPersistedFinishRequest(requestedAt: Date) {
         guard let durableDisposition = recoveryStore.recoveredIdentity?
                 .finishRequest?.disposition,
               lifecycle.apply(.requestEnd(durableDisposition)) else { return }
@@ -905,17 +1112,30 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func persistFinishRequest(
         disposition: WorkoutFinishDisposition,
         requestedAt: Date,
-        explicitRiderChoice: Bool = true
+        explicitRiderChoice: Bool = true,
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
     ) -> Bool {
+        let effectiveTerminalErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: terminalErrorCode,
+            persistedFinishError: pendingTerminalErrorCodeForNextFinish
+        )
         do {
             try recoveryStore.markFinishing(
                 disposition: disposition,
                 requestedAt: requestedAt,
-                explicitRiderChoice: explicitRiderChoice
+                explicitRiderChoice: explicitRiderChoice,
+                terminalErrorCode: effectiveTerminalErrorCode
             )
+            if effectiveTerminalErrorCode != nil {
+                pendingTerminalErrorCodeForNextFinish = nil
+            }
             finishRequestError = nil
             return true
         } catch {
+            if let effectiveTerminalErrorCode {
+                pendingTerminalErrorCodeForNextFinish =
+                    effectiveTerminalErrorCode
+            }
             finishRequestError = .persistenceFailed
             return false
         }
@@ -944,11 +1164,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         periodicSnapshotTask = nil
         coalescedSnapshotTask?.cancel()
         coalescedSnapshotTask = nil
-        let failedSession = session
         routeRecorder.discardRoute()
         builder?.discardWorkout()
-        failedSession?.end()
-        session = nil
         builder = nil
         isBuilderReadyForFinalization = false
         isIdentityMetadataRetryPending = false
@@ -961,7 +1178,28 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             setupState = .denied
         }
         _ = lifecycle.apply(.fail)
-        publishFailureSnapshot()
+        let didPublish = publishFailureSnapshot()
+        if didPublish,
+           let shutdownSession = session,
+           mirrorEnvelopeBuffer.inFlight != nil
+                || mirrorEnvelopeBuffer.pending != nil {
+            isStartFailureMirrorDeliveryPending = true
+            shutdownMirrorFailureRetryCount = 0
+            beginBoundedShutdownMirrorDelivery(for: shutdownSession)
+            return
+        }
+        finishStartFailureRuntime()
+    }
+
+    private func finishStartFailureRuntime() {
+        mirrorShutdownWatchdogTask?.cancel()
+        mirrorShutdownWatchdogTask = nil
+        let failedSession = session
+        if let failedSession {
+            endMirrorShutdownSession(failedSession)
+        }
+        resetMirrorTransport()
+        session = nil
         identity = nil
         try? recoveryStore.clear()
         handleAttachedSessionRelease()
@@ -1152,7 +1390,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 return .failed
             }
         }
-        identity = recoveredIdentity
+        adoptRecoveredIdentityForRuntime(recoveredIdentity)
         let recoveredFinishRequest = recoveredIdentity.finishRequest
         session = recoveredSession
         builder = recoveredBuilder
@@ -1190,6 +1428,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
         updateAllMetrics(from: recoveredBuilder, capturedAt: Date())
         setupState = .ready
+        startMirroringIfNeeded(for: recoveredSession)
         publishSnapshotImmediately()
 
         if [.stopped, .ended].contains(recoveredState),
@@ -1597,7 +1836,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
-    private func completeTerminalTombstoneSessionCleanup(
+    func completeTerminalTombstoneSessionCleanup(
         _ recoveredSession: HKWorkoutSession,
         builder recoveredBuilder: HKLiveWorkoutBuilder,
         sessionID: UUID,
@@ -1650,6 +1889,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         } else {
             isRecovering = false
         }
+        drainPendingWorkoutConfigurationIfPossible()
     }
 
     private func attachRecoveredRouteBuilder(
@@ -1905,7 +2145,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func beginFinalizationAfterStop(at endDate: Date) {
         guard recoveredSaveReconciliationGate.allowsFinalization,
               !requiresRecoveredSaveReconciliation,
-              !isFinishFailureRollbackPending else {
+              !isFinishFailureRollbackPending,
+              pendingTerminalErrorPersistence == nil else {
             return
         }
         if let injectedFinalizationClaimObserver {
@@ -2045,7 +2286,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             return
         }
-        guard let builder, let session else {
+        guard let builder, session != nil else {
             handleStartFailure(nil)
             return
         }
@@ -2100,9 +2341,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 workoutSavedPersistenceFailed: { [weak self] in
                     self?.isTerminalArchivePending = true
                 },
-                endSession: {
-                    session.end()
-                }
+                // The primary session is ended only after the final full
+                // snapshot has been handed to HealthKit's mirror transport.
+                endSession: {}
             )
             switch outcome {
             case .discarded:
@@ -2142,21 +2383,38 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 )
             }
         } catch {
-            if case WorkoutFinalizationPersistenceError
-                .finishFailureRollbackPending = error {
-                isFinishFailureRollbackPending = true
-            }
-            lastErrorCode = .sessionFailed
-            lifecycle.releaseFinalizationClaimForRetry()
-            finishRequestError = .saveFailed
-            publishSnapshotImmediately()
+            handleFinalizationFailure(error)
         }
+    }
+
+    func handleFinalizationFailure(_ error: Error) {
+        if case WorkoutFinalizationPersistenceError
+            .finishFailureRollbackPending = error {
+            isFinishFailureRollbackPending = true
+        }
+        lastErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: pendingTerminalErrorPersistence?.code,
+            persistedFinishError: durableTerminalErrorCode
+        ) ?? .sessionFailed
+        lifecycle.releaseFinalizationClaimForRetry()
+        finishRequestError = pendingTerminalErrorPersistence == nil
+            ? .saveFailed
+            : .terminalErrorPersistenceFailed
+        publishSnapshotImmediately()
     }
 
     func completeConfirmedSave(
         summary: WatchWorkoutSummary,
         savedAt: Date
     ) {
+        if pendingTerminalErrorPersistence != nil {
+            pendingTerminalCauseConfirmedCompletion = .saved(
+                summary: summary,
+                at: savedAt
+            )
+            finishRequestError = .terminalErrorPersistenceFailed
+            return
+        }
         identity = identity ?? recoveryStore.recoveredIdentity
         let didPublish = WatchTerminalPublicationCoordinator.perform(
             publishTerminal: { [self] in
@@ -2173,6 +2431,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         summary: WatchWorkoutSummary,
         discardedAt: Date
     ) {
+        if pendingTerminalErrorPersistence != nil {
+            pendingTerminalCauseConfirmedCompletion = .discarded(
+                summary: summary,
+                at: discardedAt
+            )
+            finishRequestError = .terminalErrorPersistenceFailed
+            return
+        }
         identity = identity ?? recoveryStore.recoveredIdentity
         let didPublish = WatchTerminalPublicationCoordinator.perform(
             publishTerminal: { [self] in
@@ -2241,12 +2507,35 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func completeFinalization(
         summary: WatchWorkoutSummary
     ) -> Bool {
+        guard pendingTerminalErrorPersistence == nil else {
+            finishRequestError = .terminalErrorPersistenceFailed
+            return false
+        }
+        let durableErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: summary.terminalErrorCode,
+            persistedFinishError: recoveryStore.recoveredIdentity?
+                .finishRequest?.terminalErrorCode
+                ?? identity?.finishRequest?.terminalErrorCode
+        )
+        let terminalSummary = WatchWorkoutSummary(
+            outcome: summary.outcome,
+            endedAt: summary.endedAt,
+            duration: summary.duration,
+            distanceMeters: summary.distanceMeters,
+            activeEnergyKilocalories: summary.activeEnergyKilocalories,
+            averageHeartRate: summary.averageHeartRate,
+            routeStatus: summary.routeStatus,
+            terminalErrorCode: durableErrorCode
+        )
         finishRequestError = nil
-        lastErrorCode = nil
+        pendingTerminalErrorPersistence = nil
+        pendingTerminalErrorCodeForNextFinish = nil
+        pendingTerminalCauseConfirmedCompletion = nil
+        lastErrorCode = durableErrorCode
         confirmedTerminalSummarySessionID = (
             recoveryStore.recoveredIdentity ?? identity
         )?.sessionID
-        self.summary = summary
+        self.summary = terminalSummary
         _ = lifecycle.apply(.sessionEnded)
         let terminalSnapshot = makeSnapshot(capturedAt: Date())
         confirmedTerminalSnapshot = terminalSnapshot
@@ -2265,8 +2554,35 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func finishTerminalRuntimeAfterPublication(_ didPublish: Bool) {
         guard didPublish else { return }
+        if session != nil,
+           mirrorEnvelopeBuffer.inFlight != nil
+                || mirrorEnvelopeBuffer.pending != nil {
+            isTerminalMirrorDeliveryPending = true
+            shutdownMirrorFailureRetryCount = 0
+            if let shutdownSession = session {
+                beginBoundedShutdownMirrorDelivery(for: shutdownSession)
+            }
+            return
+        }
+        finishDeferredTerminalRuntime()
+    }
+
+    private func finishDeferredTerminalRuntime() {
+        guard !isTerminalMirrorDeliveryPending
+                || mirrorEnvelopeBuffer.inFlight == nil else {
+            return
+        }
+        isTerminalMirrorDeliveryPending = false
+        mirrorShutdownWatchdogTask?.cancel()
+        mirrorShutdownWatchdogTask = nil
+        let terminalSession = session
+        if let terminalSession {
+            endMirrorShutdownSession(terminalSession)
+        }
         if isTerminalArchivePending {
-            releaseHealthKitObjectsAfterTerminalPublicationFailure()
+            releaseHealthKitObjectsAfterTerminalPublicationFailure(
+                endSession: false
+            )
         } else {
             clearActiveObjects()
         }
@@ -2299,14 +2615,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         finishRequestError = isTerminalArchivePending
             ? .reconciliationFailed
             : nil
-        if isTerminalArchivePending {
-            releaseHealthKitObjectsAfterTerminalPublicationFailure()
-        } else {
-            clearActiveObjects()
-        }
+        finishTerminalRuntimeAfterPublication(true)
     }
 
-    private func releaseHealthKitObjectsAfterTerminalPublicationFailure() {
+    private func releaseHealthKitObjectsAfterTerminalPublicationFailure(
+        endSession: Bool = true
+    ) {
+        if endSession {
+            session?.end()
+        }
+        resetMirrorTransport()
         session = nil
         builder = nil
         authoritativeFinalizationEndDate = nil
@@ -2325,6 +2643,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func clearActiveObjects() {
+        resetMirrorTransport()
         session = nil
         builder = nil
         identity = nil
@@ -2456,6 +2775,640 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
+    private func startMirroringIfNeeded(for workoutSession: HKWorkoutSession) {
+        guard session === workoutSession,
+              lifecycle.state.isActive,
+              !isMirroring,
+              !isMirrorStartInFlight else {
+            return
+        }
+        mirrorRetryTask?.cancel()
+        mirrorRetryTask = nil
+        isMirrorStartInFlight = true
+        let attemptID = UUID()
+        mirrorStartAttemptID = attemptID
+        let callbackReference = WorkoutWeakReference(self)
+        let completion: @Sendable (Bool, Error?) -> Void = { success, _ in
+            Task { @MainActor in
+                guard let manager = callbackReference.value,
+                      manager.session === workoutSession,
+                      manager.mirrorStartAttemptID == attemptID else { return }
+                manager.mirrorStartAttemptID = nil
+                manager.isMirrorStartInFlight = false
+                manager.isMirroring = success
+                if success {
+                    if let latestEnvelope = manager.latestEnvelope {
+                        manager.mirrorEnvelopeBuffer.offer(latestEnvelope)
+                    }
+                    manager.drainMirrorEnvelopeBuffer()
+                } else {
+                    manager.scheduleMirrorRetry(for: workoutSession)
+                }
+            }
+        }
+        if let injectedMirrorStartOperation {
+            injectedMirrorStartOperation(workoutSession, completion)
+        } else {
+            workoutSession.startMirroringToCompanionDevice(
+                completion: completion
+            )
+        }
+    }
+
+    private func scheduleMirrorRetry(for workoutSession: HKWorkoutSession) {
+        guard mirrorRetryTask == nil,
+              session === workoutSession,
+              lifecycle.state.isActive else {
+            return
+        }
+        let retryDelay = mirrorRetryDelay.isFinite
+            ? min(max(0, mirrorRetryDelay), 60)
+            : 5
+        mirrorRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(
+                        max(0, retryDelay) * 1_000_000_000
+                    )
+                )
+            } catch {
+                return
+            }
+            guard let self, self.session === workoutSession else { return }
+            self.mirrorRetryTask = nil
+            self.startMirroringIfNeeded(for: workoutSession)
+        }
+    }
+
+    private func scheduleMirrorShutdownWatchdog(
+        for workoutSession: HKWorkoutSession?
+    ) {
+        guard let workoutSession else { return }
+        mirrorShutdownWatchdogTask?.cancel()
+        let delay = mirrorShutdownDeliveryTimeout.isFinite
+            ? min(max(0, mirrorShutdownDeliveryTimeout), 60)
+            : 10
+        mirrorShutdownWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard let self,
+                  session === workoutSession,
+                  isTerminalMirrorDeliveryPending
+                    || isStartFailureMirrorDeliveryPending else {
+                return
+            }
+            // HealthKit accepted an attempt but provided neither completion
+            // nor disconnect. Invalidate any eventual callback and release
+            // the primary session after the bounded delivery attempt.
+            mirrorShutdownWatchdogTask = nil
+            mirrorSendAttemptID = nil
+            mirrorEnvelopeBuffer.interruptInFlight()
+            if isStartFailureMirrorDeliveryPending {
+                finishStartFailureRuntime()
+            } else {
+                finishDeferredTerminalRuntime()
+            }
+        }
+    }
+
+    private func beginBoundedShutdownMirrorDelivery(
+        for workoutSession: HKWorkoutSession
+    ) {
+        guard session === workoutSession,
+              let shutdownEnvelope = latestEnvelope,
+              shutdownEnvelope.snapshot.map({
+                  $0.state == .ended || $0.state == .failed
+              }) == true else {
+            return
+        }
+        if mirrorEnvelopeBuffer.prioritizeShutdownEnvelope(shutdownEnvelope) {
+            // The older HealthKit send cannot be cancelled, but it must not
+            // own the buffer or mutate state after the final attempt begins.
+            mirrorSendAttemptID = nil
+        }
+        if mirrorEnvelopeBuffer.inFlight == nil {
+            drainMirrorEnvelopeBuffer(forceAttempt: true)
+        }
+        guard session === workoutSession,
+              isTerminalMirrorDeliveryPending
+                || isStartFailureMirrorDeliveryPending else {
+            return
+        }
+        // Start the bound only after the ended/failed envelope has been
+        // submitted, so an older hung live send cannot consume this window.
+        scheduleMirrorShutdownWatchdog(for: workoutSession)
+    }
+
+    private func offerEnvelopeToMirror(_ envelope: WorkoutEnvelopeV1) {
+        mirrorEnvelopeBuffer.offer(envelope)
+        drainMirrorEnvelopeBuffer()
+    }
+
+    private func drainMirrorEnvelopeBuffer(forceAttempt: Bool = false) {
+        guard isMirroring || forceAttempt,
+              let workoutSession = session,
+              let envelope = mirrorEnvelopeBuffer.beginNext() else {
+            return
+        }
+        let data: Data
+        do {
+            data = try WorkoutContractCodec.encode(envelope)
+        } catch {
+            mirrorEnvelopeBuffer.complete(succeeded: true)
+            if mirrorEnvelopeBuffer.pending != nil {
+                drainMirrorEnvelopeBuffer(
+                    forceAttempt: isTerminalMirrorDeliveryPending
+                        || isStartFailureMirrorDeliveryPending
+                )
+            } else if isStartFailureMirrorDeliveryPending {
+                finishStartFailureRuntime()
+            } else if isTerminalMirrorDeliveryPending {
+                finishDeferredTerminalRuntime()
+            }
+            return
+        }
+        let callbackReference = WorkoutWeakReference(self)
+        let attemptID = UUID()
+        mirrorSendAttemptID = attemptID
+        let completion: @Sendable (Bool, Error?) -> Void = { success, _ in
+            Task { @MainActor in
+                guard let manager = callbackReference.value,
+                      manager.mirrorSendAttemptID == attemptID else { return }
+                manager.mirrorSendAttemptID = nil
+                let isShutdownEnvelope = envelope.snapshot.map {
+                    [.ended, .failed].contains($0.state)
+                } ?? false
+                let shouldRetryShutdownEnvelope = !success
+                    && isShutdownEnvelope
+                    && (manager.isTerminalMirrorDeliveryPending
+                        || manager.isStartFailureMirrorDeliveryPending)
+                    && manager.shutdownMirrorFailureRetryCount < 1
+                if shouldRetryShutdownEnvelope {
+                    manager.shutdownMirrorFailureRetryCount += 1
+                }
+                manager.mirrorEnvelopeBuffer.complete(
+                    succeeded: success
+                        || (isShutdownEnvelope
+                            && !shouldRetryShutdownEnvelope)
+                )
+                guard manager.session === workoutSession else { return }
+                if manager.isStartFailureMirrorDeliveryPending {
+                    if manager.mirrorEnvelopeBuffer.pending != nil {
+                        manager.drainMirrorEnvelopeBuffer(forceAttempt: true)
+                    } else {
+                        manager.finishStartFailureRuntime()
+                    }
+                    return
+                }
+                if manager.isTerminalMirrorDeliveryPending {
+                    if manager.mirrorEnvelopeBuffer.pending != nil {
+                        manager.drainMirrorEnvelopeBuffer(forceAttempt: true)
+                    } else {
+                        manager.finishDeferredTerminalRuntime()
+                    }
+                    return
+                }
+                if success {
+                    manager.drainMirrorEnvelopeBuffer()
+                } else {
+                    manager.isMirroring = false
+                    manager.scheduleMirrorRetry(for: workoutSession)
+                }
+            }
+        }
+        if let injectedMirrorSendOperation {
+            injectedMirrorSendOperation(workoutSession, data, completion)
+        } else {
+            workoutSession.sendToRemoteWorkoutSession(
+                data: data,
+                completion: completion
+            )
+        }
+    }
+
+    private func endMirrorShutdownSession(_ workoutSession: HKWorkoutSession) {
+        if let injectedMirrorShutdownEndSession {
+            injectedMirrorShutdownEndSession(workoutSession)
+        } else {
+            workoutSession.end()
+        }
+    }
+
+    func handleMirrorDisconnect(from workoutSession: HKWorkoutSession) {
+        guard session === workoutSession else { return }
+        isMirroring = false
+        isMirrorStartInFlight = false
+        mirrorStartAttemptID = nil
+        mirrorSendAttemptID = nil
+        mirrorEnvelopeBuffer.interruptInFlight()
+        // A shutdown envelope was already handed to HealthKit before this
+        // disconnect. There is no active lifecycle in which to restart
+        // mirroring, so abandon only the transport retry and release the
+        // primary session instead of wedging workout admission forever.
+        if isStartFailureMirrorDeliveryPending {
+            finishStartFailureRuntime()
+            return
+        }
+        if isTerminalMirrorDeliveryPending {
+            finishDeferredTerminalRuntime()
+            return
+        }
+        scheduleMirrorRetry(for: workoutSession)
+    }
+
+#if DEBUG
+    func configureMirrorRuntimeForTesting(
+        session: HKWorkoutSession,
+        identity: WatchWorkoutRecoveryStore.Identity,
+        state: WorkoutSessionStateV1
+    ) {
+        resetMirrorTransport()
+        self.session = session
+        adoptRecoveredIdentityForRuntime(identity)
+        lifecycle = WorkoutLifecycleReducer()
+        _ = lifecycle.apply(.requestStart)
+        if state == .running || state == .paused || state == .ending {
+            _ = lifecycle.apply(.sessionRunning)
+        }
+        if state == .paused {
+            _ = lifecycle.apply(.sessionPaused)
+        }
+        if state == .ending {
+            _ = lifecycle.apply(
+                .requestEnd(identity.finishRequest?.disposition ?? .save)
+            )
+        }
+        snapshot = WorkoutSnapshotV1(
+            state: state,
+            startDate: identity.startDate
+        )
+    }
+
+    func startMirroringForTesting() {
+        guard let session else { return }
+        startMirroringIfNeeded(for: session)
+    }
+
+    @discardableResult
+    func publishMirrorSnapshotForTesting() -> Bool {
+        publishSnapshotImmediately()
+    }
+
+    func markMirrorShutdownDeliveryPendingForTesting(startFailure: Bool) {
+        let didPublish: Bool
+        if startFailure {
+            _ = lifecycle.apply(.fail)
+            lastErrorCode = .sessionFailed
+            isStartFailureMirrorDeliveryPending = true
+            didPublish = publishFailureSnapshot()
+        } else {
+            _ = lifecycle.apply(.requestEnd(.save))
+            _ = lifecycle.apply(.sessionEnded)
+            isTerminalMirrorDeliveryPending = true
+            didPublish = publishSnapshotImmediately()
+        }
+        if didPublish, let session {
+            beginBoundedShutdownMirrorDelivery(for: session)
+        }
+    }
+
+    var hasAttachedSessionForTesting: Bool { session != nil }
+    var mirrorSendIsInFlightForTesting: Bool {
+        mirrorEnvelopeBuffer.inFlight != nil
+    }
+#endif
+
+    private func adoptRecoveredIdentityForRuntime(
+        _ recoveredIdentity: WatchWorkoutRecoveryStore.Identity
+    ) {
+        identity = recoveredIdentity
+        remoteControlGate = WorkoutRemoteControlSequenceGate(
+            checkpoint: recoveredIdentity.remoteControlCheckpoint
+        )
+    }
+
+    private func resetMirrorTransport() {
+        mirrorRetryTask?.cancel()
+        mirrorRetryTask = nil
+        mirrorShutdownWatchdogTask?.cancel()
+        mirrorShutdownWatchdogTask = nil
+        isMirroring = false
+        isMirrorStartInFlight = false
+        mirrorStartAttemptID = nil
+        mirrorSendAttemptID = nil
+        mirrorEnvelopeBuffer.reset()
+        remoteControlGate.reset()
+        pendingRemoteStateAcknowledgement = nil
+        isTerminalMirrorDeliveryPending = false
+        isStartFailureMirrorDeliveryPending = false
+        shutdownMirrorFailureRetryCount = 0
+    }
+
+    func handleRemoteWorkoutEnvelopes(
+        _ envelopes: [WorkoutEnvelopeV1],
+        from workoutSession: HKWorkoutSession
+    ) {
+        guard session === workoutSession,
+              let identity else {
+            return
+        }
+        let expectedGeneration = identity.transportGenerationID
+            ?? identity.sessionID
+        let receivedAt = Date()
+
+        for envelope in envelopes {
+            guard envelope.sessionID == identity.sessionID,
+                  envelope.sessionToken == identity.sessionToken,
+                  envelope.transportGenerationID == expectedGeneration,
+                  envelope.kind == .control,
+                  let control = envelope.control else {
+                continue
+            }
+            let requestedTerminalDisposition: WorkoutFinishDisposition?
+            if [.starting, .running, .paused].contains(lifecycle.state) {
+                switch control {
+                case .endAndSave:
+                    requestedTerminalDisposition = .save
+                case .discard:
+                    requestedTerminalDisposition = .discard
+                case .requestCurrentSnapshot, .pause, .resume:
+                    requestedTerminalDisposition = nil
+                }
+            } else {
+                requestedTerminalDisposition = nil
+            }
+            let persistedTerminalDisposition: WorkoutFinishDisposition?
+            let pendingTerminalErrorCode = requestedTerminalDisposition == nil
+                ? nil
+                : pendingTerminalErrorCodeForNextFinish
+            let controlDisposition = Self.finishDisposition(for: control)
+            let durableFinishDisposition = recoveryStore.recoveredIdentity?
+                .finishRequest?.disposition ?? identity.finishRequest?.disposition
+            let shouldPersistTerminalAcknowledgement = controlDisposition.map {
+                requestedTerminalDisposition == $0
+                    || ([.ending, .ended].contains(lifecycle.state)
+                        && durableFinishDisposition == $0)
+            } ?? false
+            var issuedNativeStateChange = false
+            do {
+                var candidateGate = remoteControlGate
+                guard try candidateGate.ingest(
+                    envelope,
+                    receivedAt: receivedAt
+                ) else {
+                    _ = publishDurableTerminalAcknowledgement(
+                        matching: envelope
+                    )
+                    continue
+                }
+                let terminalAcknowledgement:
+                    WatchWorkoutRecoveryStore.RemoteTerminalAcknowledgement?
+                if shouldPersistTerminalAcknowledgement {
+                    guard let acknowledgementSequence =
+                            recoveryStore.nextSequence() else {
+                        finishRequestError = .persistenceFailed
+                        continue
+                    }
+                    terminalAcknowledgement = .init(
+                        control: control,
+                        controlSenderID: envelope.controlSenderID,
+                        acknowledgedSequence: envelope.sequence,
+                        capturedAt: envelope.capturedAt,
+                        envelopeSequence: acknowledgementSequence,
+                        envelopeCapturedAt: Date()
+                    )
+                } else {
+                    terminalAcknowledgement = nil
+                }
+                switch control {
+                case .pause where lifecycle.state == .running:
+                    pendingRemoteStateAcknowledgement = (
+                        control,
+                        envelope.sequence
+                    )
+                    issuedNativeStateChange = true
+                    if let injectedRemotePauseOperation {
+                        injectedRemotePauseOperation(workoutSession)
+                    } else {
+                        workoutSession.pause()
+                    }
+                case .resume where lifecycle.state == .paused:
+                    pendingRemoteStateAcknowledgement = (
+                        control,
+                        envelope.sequence
+                    )
+                    issuedNativeStateChange = true
+                    if let injectedRemoteResumeOperation {
+                        injectedRemoteResumeOperation(workoutSession)
+                    } else {
+                        workoutSession.resume()
+                    }
+                case .requestCurrentSnapshot, .pause, .resume,
+                     .endAndSave, .discard:
+                    break
+                }
+                persistedTerminalDisposition = try recoveryStore
+                    .persistRemoteControlCheckpoint(
+                        candidateGate.checkpoint,
+                        finishing: requestedTerminalDisposition,
+                        requestedAt: requestedTerminalDisposition == nil
+                            ? nil
+                            : receivedAt,
+                        explicitRiderChoice: true,
+                        terminalErrorCode: pendingTerminalErrorCode,
+                        terminalAcknowledgement: terminalAcknowledgement
+                    )
+                if persistedTerminalDisposition != nil {
+                    finishRequestError = nil
+                    if pendingTerminalErrorCode != nil {
+                        pendingTerminalErrorCodeForNextFinish = nil
+                    }
+                }
+                remoteControlGate = candidateGate
+                if let persistedIdentity = recoveryStore.recoveredIdentity {
+                    self.identity = persistedIdentity
+                }
+            } catch {
+                if requestedTerminalDisposition != nil {
+                    finishRequestError = .persistenceFailed
+                }
+                continue
+            }
+
+            switch control {
+            case .requestCurrentSnapshot:
+                publishSnapshotImmediately()
+            case .pause:
+                if issuedNativeStateChange { break }
+                if lifecycle.state == .paused {
+                    publishAcknowledgement(
+                        for: control,
+                        acknowledgedSequence: envelope.sequence
+                    )
+                }
+            case .resume:
+                if issuedNativeStateChange { break }
+                if lifecycle.state == .running {
+                    publishAcknowledgement(
+                        for: control,
+                        acknowledgedSequence: envelope.sequence
+                    )
+                }
+            case .endAndSave:
+                if persistedTerminalDisposition == .save {
+                    _ = publishDurableTerminalAcknowledgement(
+                        matching: envelope,
+                        resultingState: .ending
+                    )
+                    beginPersistedFinishRequest(requestedAt: receivedAt)
+                } else if lifecycle.state == .ending,
+                   lifecycle.finishDisposition == .save {
+                    _ = publishDurableTerminalAcknowledgement(
+                        matching: envelope
+                    )
+                }
+            case .discard:
+                if persistedTerminalDisposition == .discard {
+                    _ = publishDurableTerminalAcknowledgement(
+                        matching: envelope,
+                        resultingState: .ending
+                    )
+                    beginPersistedFinishRequest(requestedAt: receivedAt)
+                } else if lifecycle.state == .ending,
+                   lifecycle.finishDisposition == .discard {
+                    _ = publishDurableTerminalAcknowledgement(
+                        matching: envelope
+                    )
+                }
+            }
+        }
+    }
+
+    private static func finishDisposition(
+        for control: WorkoutControlV1
+    ) -> WorkoutFinishDisposition? {
+        switch control {
+        case .endAndSave:
+            .save
+        case .discard:
+            .discard
+        case .requestCurrentSnapshot, .pause, .resume:
+            nil
+        }
+    }
+
+    @discardableResult
+    private func publishDurableTerminalAcknowledgement(
+        matching envelope: WorkoutEnvelopeV1,
+        resultingState: WorkoutSessionStateV1? = nil
+    ) -> Bool {
+        let acknowledgementState = resultingState ?? lifecycle.state
+        guard [.ending, .ended].contains(acknowledgementState),
+              let control = envelope.control,
+              let durableIdentity = recoveryStore.recoveredIdentity ?? identity,
+              let record = durableIdentity.remoteTerminalAcknowledgement,
+              record.control == control,
+              record.controlSenderID == envelope.controlSenderID,
+              record.acknowledgedSequence == envelope.sequence,
+              record.capturedAt == envelope.capturedAt,
+              record.disposition == durableIdentity.finishRequest?.disposition
+        else {
+            return false
+        }
+        let acknowledgementSequence: UInt64
+        let acknowledgementCapturedAt: Date
+        if let latestEnvelope,
+           record.envelopeSequence <= latestEnvelope.sequence {
+            guard let currentSequence = recoveryStore.nextSequence(),
+                  currentSequence > latestEnvelope.sequence else {
+                return false
+            }
+            acknowledgementSequence = currentSequence
+            acknowledgementCapturedAt = Date()
+        } else {
+            acknowledgementSequence = record.envelopeSequence
+            acknowledgementCapturedAt = record.envelopeCapturedAt
+        }
+        let acknowledgementEnvelope = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: durableIdentity.sessionID,
+            sessionToken: durableIdentity.sessionToken,
+            transportGenerationID:
+                durableIdentity.transportGenerationID
+                    ?? durableIdentity.sessionID,
+            sequence: acknowledgementSequence,
+            capturedAt: acknowledgementCapturedAt,
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: record.control,
+                resultingState: acknowledgementState,
+                acknowledgedSequence: record.acknowledgedSequence
+            )
+        )
+        guard (try? WorkoutContractCodec.validate(
+            acknowledgementEnvelope
+        )) != nil else {
+            return false
+        }
+        offerEnvelopeToMirror(acknowledgementEnvelope)
+        return true
+    }
+
+    private func publishAcknowledgement(
+        for control: WorkoutControlV1,
+        acknowledgedSequence: UInt64
+    ) {
+        guard let identity,
+              let sequence = recoveryStore.nextSequence() else {
+            return
+        }
+        let capturedAt = Date()
+        let envelope = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID:
+                identity.transportGenerationID ?? identity.sessionID,
+            sequence: sequence,
+            capturedAt: capturedAt,
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: control,
+                resultingState: lifecycle.state,
+                acknowledgedSequence: acknowledgedSequence
+            )
+        )
+        guard (try? WorkoutContractCodec.validate(envelope)) != nil else {
+            return
+        }
+        offerEnvelopeToMirror(envelope)
+    }
+
+    private func publishPendingRemoteStateAcknowledgementIfConfirmed() {
+        guard let pendingRemoteStateAcknowledgement else { return }
+        let isConfirmed: Bool
+        switch pendingRemoteStateAcknowledgement.control {
+        case .pause:
+            isConfirmed = lifecycle.state == .paused
+        case .resume:
+            isConfirmed = lifecycle.state == .running
+        case .endAndSave, .discard:
+            isConfirmed = lifecycle.state == .ending
+                || lifecycle.state == .ended
+        case .requestCurrentSnapshot:
+            isConfirmed = true
+        }
+        guard isConfirmed else { return }
+        self.pendingRemoteStateAcknowledgement = nil
+        publishAcknowledgement(
+            for: pendingRemoteStateAcknowledgement.control,
+            acknowledgedSequence: pendingRemoteStateAcknowledgement.sequence
+        )
+    }
+
     private func startPeriodicSnapshots() {
         guard periodicSnapshotTask == nil else { return }
         periodicSnapshotTask = Task { [weak self] in
@@ -2512,10 +3465,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return false
         }
         latestEnvelope = envelope
+        offerEnvelopeToMirror(envelope)
         return true
     }
 
-    private func publishFailureSnapshot() {
+    @discardableResult
+    private func publishFailureSnapshot() -> Bool {
         let capturedAt = Date()
         let failedSnapshot = WorkoutSnapshotV1(
             state: .failed,
@@ -2528,7 +3483,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
         guard let identity,
               let sequence = recoveryStore.nextSequence() else {
-            return
+            return false
         }
         let envelope = WorkoutEnvelopeV1(
             kind: .snapshot,
@@ -2540,8 +3495,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             capturedAt: capturedAt,
             snapshot: failedSnapshot
         )
-        guard (try? WorkoutContractCodec.validate(envelope)) != nil else { return }
+        guard (try? WorkoutContractCodec.validate(envelope)) != nil else {
+            return false
+        }
         latestEnvelope = envelope
+        offerEnvelopeToMirror(envelope)
+        return true
     }
 
     private func makeSnapshot(capturedAt: Date) -> WorkoutSnapshotV1 {
@@ -2640,6 +3599,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         if location != nil { availability.insert(.location) }
         if location?.altitude != nil { availability.insert(.altitude) }
 
+        let terminalOutcome: WorkoutTerminalOutcomeV1?
+        switch summary?.outcome {
+        case .saved? where lifecycle.state == .ended:
+            terminalOutcome = .saved
+        case .discarded? where lifecycle.state == .ended:
+            terminalOutcome = .discarded
+        default:
+            terminalOutcome = nil
+        }
+
         return WorkoutSnapshotV1(
             state: lifecycle.state,
             startDate: identity?.startDate,
@@ -2656,7 +3625,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             heartRateZoneDurations: nil,
             location: location,
             availability: availability,
-            errorCode: lastErrorCode
+            errorCode: lastErrorCode,
+            terminalOutcome: terminalOutcome
         )
     }
 
@@ -2705,7 +3675,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             )?.value,
             activeEnergyKilocalories: activeEnergy?.value,
             averageHeartRate: averageHeartRate?.value,
-            routeStatus: routeStatus
+            routeStatus: routeStatus,
+            terminalErrorCode: durableTerminalErrorCode
         )
     }
 
@@ -2734,7 +3705,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             distanceMeters: distance,
             activeEnergyKilocalories: energy,
             averageHeartRate: averageHeartRate,
-            routeStatus: routeStatus
+            routeStatus: routeStatus,
+            terminalErrorCode: durableTerminalErrorCode
         )
     }
 
@@ -2750,8 +3722,54 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             distanceMeters: nil,
             activeEnergyKilocalories: nil,
             averageHeartRate: nil,
-            routeStatus: request?.routeStatus ?? .unknown
+            routeStatus: request?.routeStatus ?? .unknown,
+            terminalErrorCode: request?.terminalErrorCode
         )
+    }
+
+    private var durableTerminalErrorCode: WorkoutSafeErrorCodeV1? {
+        recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode
+            ?? identity?.finishRequest?.terminalErrorCode
+    }
+
+    @discardableResult
+    private func persistTerminalErrorForCurrentFinish(
+        _ terminalErrorCode: WorkoutSafeErrorCodeV1,
+        endDate: Date
+    ) -> Bool {
+        let resolvedTerminalErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: terminalErrorCode,
+            persistedFinishError: pendingTerminalErrorPersistence?.code
+                ?? durableTerminalErrorCode
+        ) ?? terminalErrorCode
+        do {
+            try recoveryStore.markTerminalError(resolvedTerminalErrorCode)
+            identity = recoveryStore.recoveredIdentity ?? identity
+            pendingTerminalErrorPersistence = nil
+            if finishRequestError == .terminalErrorPersistenceFailed {
+                finishRequestError = nil
+            }
+            if let confirmedCompletion = pendingTerminalCauseConfirmedCompletion {
+                pendingTerminalCauseConfirmedCompletion = nil
+                switch confirmedCompletion {
+                case .saved(let summary, let savedAt):
+                    completeConfirmedSave(summary: summary, savedAt: savedAt)
+                case .discarded(let summary, let discardedAt):
+                    completeConfirmedDiscard(
+                        summary: summary,
+                        discardedAt: discardedAt
+                    )
+                }
+            }
+            return true
+        } catch {
+            pendingTerminalErrorPersistence = (
+                code: resolvedTerminalErrorCode,
+                endDate: endDate
+            )
+            finishRequestError = .terminalErrorPersistenceFailed
+            return false
+        }
     }
 
     private func clearMetrics() {
@@ -3075,6 +4093,7 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                     routeRecorder.setPaused(false, at: date)
                     startPeriodicSnapshots()
                     publishSnapshotImmediately()
+                    publishPendingRemoteStateAcknowledgementIfConfirmed()
                 case .stopSession:
                     stopSessionForFinalization(
                         workoutSession,
@@ -3094,6 +4113,7 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                 _ = lifecycle.apply(.sessionPaused)
                 routeRecorder.setPaused(true, at: date)
                 publishSnapshotImmediately()
+                publishPendingRemoteStateAcknowledgementIfConfirmed()
             case .stopped, .ended:
                 handleSessionReadyForFinalization(
                     at: workoutSession.endDate ?? date
@@ -3123,25 +4143,82 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                 )
                 return
             }
-            lastErrorCode = Self.safeErrorCode(for: error)
-            switch WorkoutSessionFailurePolicy.action(for: lifecycle.state) {
-            case .failStart:
-                handleStartFailure(error)
-            case .savePartialWorkout:
-                requestEnd(
-                    .save,
-                    requestedAt: workoutSession.endDate ?? Date()
-                )
-            case .finishRequestedDisposition:
-                stopSessionForFinalization(
-                    workoutSession,
-                    at: authoritativeFinalizationEndDate
-                        ?? workoutSession.endDate
-                        ?? Date()
-                )
-            case .ignore:
-                break
+            let safeErrorCode = Self.safeErrorCode(for: error)
+            handleSessionFailure(
+                workoutSession,
+                error: error,
+                safeErrorCode: safeErrorCode,
+                failureEndDate: authoritativeFinalizationEndDate
+                    ?? workoutSession.endDate
+                    ?? Date()
+            )
+        }
+    }
+
+    func handleSessionFailure(
+        _ workoutSession: HKWorkoutSession,
+        error: Error? = nil,
+        safeErrorCode: WorkoutSafeErrorCodeV1,
+        failureEndDate: Date
+    ) {
+        guard workoutSession === session else { return }
+        let resolvedErrorCode = WorkoutTerminalErrorPolicy.resolve(
+            summaryError: safeErrorCode,
+            persistedFinishError: pendingTerminalErrorPersistence?.code
+                ?? pendingTerminalErrorCodeForNextFinish
+                ?? durableTerminalErrorCode
+        ) ?? safeErrorCode
+        lastErrorCode = resolvedErrorCode
+        switch WorkoutSessionFailurePolicy.action(for: lifecycle.state) {
+        case .failStart:
+            handleStartFailure(error)
+        case .savePartialWorkout:
+            requestEnd(
+                .save,
+                requestedAt: failureEndDate,
+                terminalErrorCode: resolvedErrorCode
+            )
+        case .finishRequestedDisposition:
+            guard persistTerminalErrorForCurrentFinish(
+                resolvedErrorCode,
+                endDate: failureEndDate
+            ) else {
+                publishSnapshotImmediately()
+                return
             }
+            guard lifecycle.state == .ending else { return }
+            publishSnapshotImmediately()
+            stopSessionForFinalization(
+                workoutSession,
+                at: failureEndDate
+            )
+        case .ignore:
+            break
+        }
+    }
+
+    nonisolated func workoutSession(
+        _ workoutSession: HKWorkoutSession,
+        didReceiveDataFromRemoteWorkoutSession data: [Data]
+    ) {
+        let envelopes = data.compactMap { payload in
+            try? WorkoutContractCodec.decode(payload)
+        }
+        guard !envelopes.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            self?.handleRemoteWorkoutEnvelopes(
+                envelopes,
+                from: workoutSession
+            )
+        }
+    }
+
+    nonisolated func workoutSession(
+        _ workoutSession: HKWorkoutSession,
+        didDisconnectFromRemoteDeviceWithError error: Error?
+    ) {
+        Task { @MainActor [weak self] in
+            self?.handleMirrorDisconnect(from: workoutSession)
         }
     }
 }

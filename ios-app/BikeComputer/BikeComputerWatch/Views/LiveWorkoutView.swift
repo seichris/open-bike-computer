@@ -1,8 +1,23 @@
 import SwiftUI
 
+private enum WorkoutFinishPrompt {
+    case options(sessionID: UUID)
+    case discardConfirmation(sessionID: UUID)
+
+    var showsOptions: Bool {
+        if case .options = self { return true }
+        return false
+    }
+
+    var showsDiscardConfirmation: Bool {
+        if case .discardConfirmation = self { return true }
+        return false
+    }
+}
+
 struct LiveWorkoutView: View {
     @ObservedObject var manager: WatchWorkoutManager
-    @State private var showsEndOptions = false
+    @State private var finishPrompt: WorkoutFinishPrompt?
 
     var body: some View {
         ScrollView {
@@ -21,13 +36,26 @@ struct LiveWorkoutView: View {
 
                         if finishError == .reconciliationFailed
                             || finishError == .saveFailed
-                            || finishError == .identityMetadataFailed {
+                            || finishError == .identityMetadataFailed
+                            || finishError == .terminalErrorPersistenceFailed {
                             Button(manager.isDiscarding ? "Retry Recovery" : "Retry Save") {
                                 manager.retryFinalization()
                             }
                             .font(.caption2)
                         }
                     }
+                }
+
+                if manager.snapshot.errorCode == .anotherWorkoutActive {
+                    Label(
+                        WorkoutCrossAppTakeoverCopyV1.live(
+                            disposition: manager.isDiscarding ? .discard : .save
+                        ),
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
                 }
 
                 Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
@@ -109,7 +137,9 @@ struct LiveWorkoutView: View {
                     .accessibilityLabel(manager.state == .paused ? "Resume ride" : "Pause ride")
 
                     Button(role: .destructive) {
-                        showsEndOptions = true
+                        if let sessionID = manager.activeSessionID {
+                            finishPrompt = .options(sessionID: sessionID)
+                        }
                     } label: {
                         Image(systemName: "stop.fill")
                     }
@@ -119,16 +149,87 @@ struct LiveWorkoutView: View {
             }
             .padding(.horizontal, 6)
         }
-        .confirmationDialog("Finish this ride?", isPresented: $showsEndOptions) {
-            Button("End and Save") {
-                manager.endAndSave()
+        .confirmationDialog(
+            "Finish this ride?",
+            isPresented: finishOptionsPresented
+        ) {
+            if case .options(let sessionID) = finishPrompt {
+                Button("End and Save") {
+                    finishPrompt = nil
+                    guard manager.activeSessionID == sessionID else { return }
+                    manager.endAndSave()
+                }
+                Button("Discard Workout", role: .destructive) {
+                    requestDiscardConfirmation(for: sessionID)
+                }
+                Button("Keep Riding", role: .cancel) {
+                    finishPrompt = nil
+                }
             }
-            Button("Discard Workout", role: .destructive) {
-                manager.discard()
-            }
-            Button("Keep Riding", role: .cancel) {}
         } message: {
             Text("Saving creates one workout in Health. Discarding saves nothing.")
+        }
+        .alert(
+            WorkoutDiscardDisclosureV1.title,
+            isPresented: discardConfirmationPresented
+        ) {
+            if case .discardConfirmation(let sessionID) = finishPrompt {
+                Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
+                    WorkoutDiscardDisclosureV1.perform(
+                        .cancel,
+                        expectedSessionID: sessionID,
+                        currentSessionID: manager.activeSessionID,
+                        discard: manager.discard
+                    )
+                }
+                Button(
+                    WorkoutDiscardDisclosureV1.confirmTitle,
+                    role: .destructive
+                ) {
+                    WorkoutDiscardDisclosureV1.perform(
+                        .confirmDiscard,
+                        expectedSessionID: sessionID,
+                        currentSessionID: manager.activeSessionID,
+                        discard: manager.discard
+                    )
+                }
+            }
+        } message: {
+            Text(WorkoutDiscardDisclosureV1.message)
+        }
+        .onChange(of: manager.activeSessionID) {
+            finishPrompt = nil
+        }
+    }
+
+    private var finishOptionsPresented: Binding<Bool> {
+        Binding(
+            get: { finishPrompt?.showsOptions == true },
+            set: { isPresented in
+                if !isPresented, finishPrompt?.showsOptions == true {
+                    finishPrompt = nil
+                }
+            }
+        )
+    }
+
+    private var discardConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { finishPrompt?.showsDiscardConfirmation == true },
+            set: { isPresented in
+                if !isPresented,
+                   finishPrompt?.showsDiscardConfirmation == true {
+                    finishPrompt = nil
+                }
+            }
+        )
+    }
+
+    private func requestDiscardConfirmation(for sessionID: UUID) {
+        finishPrompt = nil
+        DispatchQueue.main.async {
+            guard manager.activeSessionID == sessionID else { return }
+            finishPrompt = .discardConfirmation(sessionID: sessionID)
         }
     }
 
@@ -202,6 +303,8 @@ struct LiveWorkoutView: View {
         switch error {
         case .persistenceFailed:
             "Couldn’t end the ride. It’s still active—try again."
+        case .terminalErrorPersistenceFailed:
+            "Couldn’t preserve why this ride ended. Retry recovery."
         case .saveFailed:
             "Couldn’t save the ride yet. Retry safely."
         case .reconciliationFailed:

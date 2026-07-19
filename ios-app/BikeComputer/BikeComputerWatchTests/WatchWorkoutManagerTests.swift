@@ -4,6 +4,1194 @@ import XCTest
 
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_050)
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .starting
+        )
+
+        persistence.failsSave = true
+        XCTAssertFalse(manager.publishMirrorSnapshotForTesting())
+        XCTAssertNil(manager.latestEnvelope)
+        XCTAssertEqual(manager.activeSessionID, identity.sessionID)
+    }
+
+    func testPhoneConfigurationWaitsForColdLaunchRecovery() async throws {
+        let recovery = RecoveryProbe()
+        var deliveredConfigurations: [HKWorkoutConfiguration] = []
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            workoutConfigurationHandler: {
+                deliveredConfigurations.append($0)
+            },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        manager.handleWorkoutConfiguration(configuration)
+        XCTAssertTrue(deliveredConfigurations.isEmpty)
+
+        recovery.completeWithoutSession()
+        try await waitUntil { deliveredConfigurations.count == 1 }
+        XCTAssertTrue(deliveredConfigurations[0] === configuration)
+        XCTAssertFalse(manager.isRecovering)
+    }
+
+    func testProductionMirrorStartRetryAndBackpressure() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session,
+            identity: runtime.identity,
+            state: .running
+        )
+
+        runtime.manager.startMirroringForTesting()
+        XCTAssertEqual(probe.startCallCount, 1)
+        probe.completeNextStart(succeeded: false)
+        try await waitUntil { probe.startCallCount == 2 }
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertEqual(probe.sentData.count, 1)
+        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertEqual(
+            probe.sentData.count,
+            1,
+            "backpressure must retain only one in-flight send"
+        )
+
+        let first = try WorkoutContractCodec.decode(probe.sentData[0])
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { probe.sentData.count == 2 }
+        let newest = try WorkoutContractCodec.decode(probe.sentData[1])
+        XCTAssertGreaterThan(newest.sequence, first.sequence)
+        XCTAssertEqual(newest, runtime.manager.latestEnvelope)
+
+        runtime.manager.workoutSession(
+            runtime.session,
+            didDisconnectFromRemoteDeviceWithError: nil
+        )
+        try await waitUntil { probe.startCallCount == 3 }
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 3 }
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(probe.sentData[2]),
+            newest,
+            "reconnect should resend only the newest interrupted snapshot"
+        )
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(
+            runtime.manager.mirrorSendIsInFlightForTesting,
+            "the superseded pre-reconnect callback must not clear the replacement attempt"
+        )
+        XCTAssertEqual(probe.sentData.count, 3)
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil {
+            !runtime.manager.mirrorSendIsInFlightForTesting
+        }
+    }
+
+    func testProductionSnapshotRequestRespondsAndReplayCannotDiscard() async throws {
+        let senderID = UUID()
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session,
+            identity: runtime.identity,
+            state: .running
+        )
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+
+        let request = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: runtime.identity.sessionID,
+            sessionToken: runtime.identity.sessionToken,
+            transportGenerationID: runtime.identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: runtime.identity.startDate.addingTimeInterval(1),
+            controlSenderID: senderID,
+            control: .requestCurrentSnapshot
+        )
+        runtime.manager.workoutSession(
+            runtime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(request),
+            ]
+        )
+        try await waitUntil { probe.sentData.count == 1 }
+        let response = try WorkoutContractCodec.decode(probe.sentData[0])
+        XCTAssertEqual(response.kind, .snapshot)
+        XCTAssertEqual(response.snapshot?.state, .running)
+        XCTAssertEqual(response.sessionID, runtime.identity.sessionID)
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+
+        let replayedDiscard = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: runtime.identity.sessionID,
+            sessionToken: runtime.identity.sessionToken,
+            transportGenerationID: runtime.identity.transportGenerationID,
+            sequence: request.sequence,
+            capturedAt: request.capturedAt.addingTimeInterval(1),
+            controlSenderID: senderID,
+            control: .discard
+        )
+        runtime.manager.workoutSession(
+            runtime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(replayedDiscard),
+            ]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(runtime.manager.state, .running)
+        XCTAssertNil(runtime.store.recoveredIdentity?.finishRequest)
+        XCTAssertEqual(probe.sentData.count, 1)
+    }
+
+    func testProductionControlReplayGateSurvivesWatchProcessRecovery() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let firstStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try firstStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_100)
+        )
+        let firstHealthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let firstSession = try HKWorkoutSession(
+            healthStore: firstHealthStore,
+            configuration: configuration
+        )
+        let firstManager = WatchWorkoutManager(
+            healthStore: firstHealthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: firstStore,
+            initializeOnLaunch: false
+        )
+        firstManager.configureMirrorRuntimeForTesting(
+            session: firstSession,
+            identity: identity,
+            state: .running
+        )
+
+        let senderA = UUID()
+        let senderB = UUID()
+        let capture = Date().addingTimeInterval(-5)
+        func control(
+            _ value: WorkoutControlV1,
+            senderID: UUID,
+            sequence: UInt64,
+            offset: TimeInterval
+        ) -> WorkoutEnvelopeV1 {
+            WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: identity.sessionID,
+                sessionToken: identity.sessionToken,
+                transportGenerationID: identity.transportGenerationID,
+                sequence: sequence,
+                capturedAt: capture.addingTimeInterval(offset),
+                controlSenderID: senderID,
+                control: value
+            )
+        }
+
+        let senderARequest = control(
+            .requestCurrentSnapshot,
+            senderID: senderA,
+            sequence: 1,
+            offset: 0
+        )
+        firstManager.workoutSession(
+            firstSession,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(senderARequest),
+            ]
+        )
+        try await waitUntil {
+            firstStore.recoveredIdentity?.remoteControlCheckpoint?
+                .currentSenderID == senderA
+        }
+
+        let senderBRequest = control(
+            .requestCurrentSnapshot,
+            senderID: senderB,
+            sequence: 2,
+            offset: 1
+        )
+        firstManager.workoutSession(
+            firstSession,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(senderBRequest),
+            ]
+        )
+        try await waitUntil {
+            firstStore.recoveredIdentity?.remoteControlCheckpoint?
+                .currentSenderID == senderB
+        }
+
+        let recoveredStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let recoveredIdentity = try XCTUnwrap(recoveredStore.recoveredIdentity)
+        XCTAssertEqual(
+            recoveredIdentity.remoteControlCheckpoint?.seenSenderIDs,
+            Set([senderA, senderB])
+        )
+        let recoveredHealthStore = HKHealthStore()
+        let recoveredSession = try HKWorkoutSession(
+            healthStore: recoveredHealthStore,
+            configuration: configuration
+        )
+        let recoveredManager = WatchWorkoutManager(
+            healthStore: recoveredHealthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveredStore,
+            initializeOnLaunch: false
+        )
+        recoveredManager.configureMirrorRuntimeForTesting(
+            session: recoveredSession,
+            identity: recoveredIdentity,
+            state: .running
+        )
+
+        let replayedCurrentSenderRequest = control(
+            .discard,
+            senderID: senderB,
+            sequence: 2,
+            offset: 2
+        )
+        recoveredManager.workoutSession(
+            recoveredSession,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(replayedCurrentSenderRequest),
+            ]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(recoveredManager.state, .running)
+        XCTAssertNil(
+            recoveredStore.recoveredIdentity?.finishRequest,
+            "the production recovery seam must restore the current sender's sequence watermark"
+        )
+
+        let delayedRetiredDiscard = control(
+            .discard,
+            senderID: senderA,
+            sequence: 3,
+            offset: 3
+        )
+        recoveredManager.workoutSession(
+            recoveredSession,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(delayedRetiredDiscard),
+            ]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(recoveredManager.state, .running)
+        XCTAssertNil(recoveredStore.recoveredIdentity?.finishRequest)
+
+        let currentSenderSave = control(
+            .endAndSave,
+            senderID: senderB,
+            sequence: 3,
+            offset: 4
+        )
+        recoveredManager.workoutSession(
+            recoveredSession,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(currentSenderSave),
+            ]
+        )
+        try await waitUntil { recoveredManager.state == .ending }
+        XCTAssertEqual(
+            recoveredStore.recoveredIdentity?.finishRequest?.disposition,
+            .save,
+            "the restored current sender must remain admissible"
+        )
+    }
+
+    func testProductionControlFailsClosedUntilReplayCheckpointPersists() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_200)
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let discard = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID: identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            control: .discard
+        )
+        let payload = try WorkoutContractCodec.encode(discard)
+
+        persistence.failsSave = true
+        manager.workoutSession(
+            session,
+            didReceiveDataFromRemoteWorkoutSession: [payload]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(manager.state, .running)
+        XCTAssertNil(recoveryStore.recoveredIdentity?.finishRequest)
+        XCTAssertNil(
+            recoveryStore.recoveredIdentity?.remoteControlCheckpoint,
+            "a control must not execute when its replay watermark is not durable"
+        )
+        XCTAssertEqual(manager.finishRequestError, .persistenceFailed)
+
+        persistence.failsSave = false
+        manager.workoutSession(
+            session,
+            didReceiveDataFromRemoteWorkoutSession: [payload]
+        )
+        try await waitUntil { manager.state == .ending }
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+            .discard
+        )
+        XCTAssertNil(manager.finishRequestError)
+    }
+
+    func testPauseResumeSideEffectPrecedesReplayCheckpointPersistence() async throws {
+        for (index, scenario) in [
+            (
+                control: WorkoutControlV1.pause,
+                initialState: WorkoutSessionStateV1.running,
+                recoveredState: WorkoutSessionStateV1.paused
+            ),
+            (
+                control: WorkoutControlV1.resume,
+                initialState: WorkoutSessionStateV1.paused,
+                recoveredState: WorkoutSessionStateV1.running
+            ),
+        ].enumerated() {
+            let persistence = ToggleRecoveryPersistence()
+            let firstStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let identity = try firstStore.begin(
+                startDate: Date(
+                    timeIntervalSinceReferenceDate:
+                        800_060_300 + TimeInterval(index * 100)
+                )
+            )
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let firstSession = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            var pauseCallCount = 0
+            var resumeCallCount = 0
+            let firstManager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: firstStore,
+                remotePauseOperation: { _ in pauseCallCount += 1 },
+                remoteResumeOperation: { _ in resumeCallCount += 1 },
+                initializeOnLaunch: false
+            )
+            firstManager.configureMirrorRuntimeForTesting(
+                session: firstSession,
+                identity: identity,
+                state: scenario.initialState
+            )
+            let envelope = WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: identity.sessionID,
+                sessionToken: identity.sessionToken,
+                transportGenerationID: identity.transportGenerationID,
+                sequence: 1,
+                capturedAt: Date(),
+                controlSenderID: UUID(),
+                control: scenario.control
+            )
+            let payload = try WorkoutContractCodec.encode(envelope)
+
+            persistence.failOnSaveCall = persistence.saveCallCount + 1
+            firstManager.workoutSession(
+                firstSession,
+                didReceiveDataFromRemoteWorkoutSession: [payload]
+            )
+            try await waitUntil {
+                scenario.control == .pause
+                    ? pauseCallCount == 1
+                    : resumeCallCount == 1
+            }
+            XCTAssertEqual(
+                scenario.control == .pause ? pauseCallCount : resumeCallCount,
+                1,
+                "the idempotent HealthKit state request must be issued before its replay checkpoint write"
+            )
+            XCTAssertNil(
+                firstStore.recoveredIdentity?.remoteControlCheckpoint
+            )
+
+            persistence.failOnSaveCall = nil
+            let recoveredStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let recoveredIdentity = try XCTUnwrap(
+                recoveredStore.recoveredIdentity
+            )
+            let recoveredSession = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let recoveredManager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveredStore,
+                remotePauseOperation: { _ in pauseCallCount += 1 },
+                remoteResumeOperation: { _ in resumeCallCount += 1 },
+                initializeOnLaunch: false
+            )
+            recoveredManager.configureMirrorRuntimeForTesting(
+                session: recoveredSession,
+                identity: recoveredIdentity,
+                state: scenario.recoveredState
+            )
+            recoveredManager.workoutSession(
+                recoveredSession,
+                didReceiveDataFromRemoteWorkoutSession: [payload]
+            )
+            try await waitUntil {
+                recoveredStore.recoveredIdentity?.remoteControlCheckpoint?
+                    .highestSequence == 1
+            }
+
+            XCTAssertEqual(
+                scenario.control == .pause ? pauseCallCount : resumeCallCount,
+                1,
+                "recovery in the requested state must acknowledge without repeating the side effect"
+            )
+            XCTAssertEqual(
+                recoveredStore.recoveredIdentity?.remoteControlCheckpoint?
+                    .highestSequence,
+                1
+            )
+        }
+    }
+
+    func testRemoteTerminalCheckpointAndFinishRequestUseOneDurableWrite() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_250)
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        XCTAssertNotNil(recoveryStore.nextSequence())
+        let discard = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID: identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            control: .discard
+        )
+
+        let writesBeforeControl = persistence.saveCallCount
+        persistence.failOnSaveCall = writesBeforeControl + 2
+        manager.workoutSession(
+            session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(discard),
+            ]
+        )
+        try await waitUntil { manager.state == .ending }
+
+        XCTAssertEqual(
+            persistence.saveCallCount,
+            writesBeforeControl + 1,
+            "the terminal checkpoint, finish request, and acknowledgement obligation must use one durable write"
+        )
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+            .discard
+        )
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.remoteControlCheckpoint?
+                .highestSequence,
+            1
+        )
+        let relaunchedStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        XCTAssertEqual(
+            relaunchedStore.recoveredIdentity?.finishRequest?.disposition,
+            .discard
+        )
+        XCTAssertEqual(
+            relaunchedStore.recoveredIdentity?.remoteControlCheckpoint?
+                .highestSequence,
+            1,
+            "the terminal intent and replay watermark must survive together even when the next persistence operation fails"
+        )
+    }
+
+    func testProductionRemoteControlRejectsFutureSenderWithoutPoisoningRelaunch() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session,
+            identity: runtime.identity,
+            state: .running
+        )
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+
+        let receivedAt = Date()
+        let futureRequest = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: runtime.identity.sessionID,
+            sessionToken: runtime.identity.sessionToken,
+            transportGenerationID: runtime.identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: receivedAt.addingTimeInterval(100),
+            controlSenderID: UUID(),
+            control: .requestCurrentSnapshot
+        )
+        runtime.manager.workoutSession(
+            runtime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(futureRequest),
+            ]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(
+            probe.sentData.isEmpty,
+            "a future sender must be rejected before it can request data"
+        )
+
+        let correctedRequest = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: runtime.identity.sessionID,
+            sessionToken: runtime.identity.sessionToken,
+            transportGenerationID: runtime.identity.transportGenerationID,
+            sequence: 2,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            control: .requestCurrentSnapshot
+        )
+        runtime.manager.workoutSession(
+            runtime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(correctedRequest),
+            ]
+        )
+        try await waitUntil { probe.sentData.count == 1 }
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(probe.sentData[0]).kind,
+            .snapshot,
+            "the corrected-clock relaunch must remain admissible"
+        )
+    }
+
+    func testTerminalControlAcknowledgesOnlyDurableDisposition() async throws {
+        let cases: [(
+            accepted: WorkoutControlV1,
+            opposite: WorkoutControlV1,
+            disposition: WorkoutFinishDisposition
+        )] = [
+            (.endAndSave, .discard, .save),
+            (.discard, .endAndSave, .discard),
+        ]
+
+        for testCase in cases {
+            let senderID = UUID()
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(probe: probe)
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+
+            let accepted = WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: runtime.identity.sessionID,
+                sessionToken: runtime.identity.sessionToken,
+                transportGenerationID: runtime.identity.transportGenerationID,
+                sequence: 1,
+                capturedAt: runtime.identity.startDate.addingTimeInterval(1),
+                controlSenderID: senderID,
+                control: testCase.accepted
+            )
+            runtime.manager.workoutSession(
+                runtime.session,
+                didReceiveDataFromRemoteWorkoutSession: [
+                    try WorkoutContractCodec.encode(accepted),
+                ]
+            )
+            try await waitUntil {
+                runtime.manager.state == .ending
+                    && probe.sentData.contains {
+                        (try? WorkoutContractCodec.decode($0))?
+                            .acknowledgement?.acknowledgedSequence
+                            == accepted.sequence
+                    }
+            }
+            let acknowledgement = try XCTUnwrap(
+                probe.sentData.compactMap {
+                    try? WorkoutContractCodec.decode($0)
+                }.first {
+                    $0.acknowledgement?.acknowledgedSequence
+                        == accepted.sequence
+                }
+            )
+            XCTAssertEqual(
+                acknowledgement.acknowledgement?.control,
+                testCase.accepted
+            )
+            XCTAssertEqual(
+                acknowledgement.acknowledgement?.acknowledgedSequence,
+                accepted.sequence
+            )
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil { probe.sentData.count == 2 }
+            probe.completeNextSend(succeeded: true)
+            await Task.yield()
+            let acknowledgementCount = probe.sentData.compactMap {
+                try? WorkoutContractCodec.decode($0)
+            }.filter { $0.acknowledgement != nil }.count
+
+            let opposite = WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: runtime.identity.sessionID,
+                sessionToken: runtime.identity.sessionToken,
+                transportGenerationID: runtime.identity.transportGenerationID,
+                sequence: 2,
+                capturedAt: accepted.capturedAt.addingTimeInterval(1),
+                controlSenderID: senderID,
+                control: testCase.opposite
+            )
+            runtime.manager.handleRemoteWorkoutEnvelopes(
+                [opposite],
+                from: runtime.session
+            )
+            XCTAssertEqual(
+                runtime.store.recoveredIdentity?.finishRequest?.disposition,
+                testCase.disposition
+            )
+            XCTAssertEqual(
+                probe.sentData.compactMap {
+                    try? WorkoutContractCodec.decode($0)
+                }.filter { $0.acknowledgement != nil }.count,
+                acknowledgementCount,
+                "an opposite terminal choice must not be acknowledged"
+            )
+        }
+    }
+
+    func testProductionRemoteControlGateRejectsMalformedReplayAndRoutesFinish() async throws {
+        let senderID = UUID()
+        let saveProbe = WatchMirrorTransportProbe()
+        let saveRuntime = try makeMirrorRuntime(probe: saveProbe)
+        saveRuntime.manager.configureMirrorRuntimeForTesting(
+            session: saveRuntime.session,
+            identity: saveRuntime.identity,
+            state: .running
+        )
+        let wrongIdentity = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: UUID(),
+            sessionToken: saveRuntime.identity.sessionToken,
+            transportGenerationID: saveRuntime.identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: saveRuntime.identity.startDate.addingTimeInterval(1),
+            controlSenderID: senderID,
+            control: .discard
+        )
+        saveRuntime.manager.workoutSession(
+            saveRuntime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                Data([0x00, 0x01]),
+                try WorkoutContractCodec.encode(wrongIdentity),
+            ]
+        )
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(saveRuntime.manager.state, .running)
+
+        let save = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: saveRuntime.identity.sessionID,
+            sessionToken: saveRuntime.identity.sessionToken,
+            transportGenerationID: saveRuntime.identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: saveRuntime.identity.startDate.addingTimeInterval(2),
+            controlSenderID: senderID,
+            control: .endAndSave
+        )
+        saveRuntime.manager.workoutSession(
+            saveRuntime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(save),
+                try WorkoutContractCodec.encode(save),
+            ]
+        )
+        try await waitUntil { saveRuntime.manager.state == .ending }
+        XCTAssertEqual(saveRuntime.manager.state, .ending)
+        XCTAssertEqual(
+            saveRuntime.store.recoveredIdentity?.finishRequest?.disposition,
+            .save
+        )
+
+        let discardProbe = WatchMirrorTransportProbe()
+        let discardRuntime = try makeMirrorRuntime(probe: discardProbe)
+        discardRuntime.manager.configureMirrorRuntimeForTesting(
+            session: discardRuntime.session,
+            identity: discardRuntime.identity,
+            state: .running
+        )
+        let discard = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: discardRuntime.identity.sessionID,
+            sessionToken: discardRuntime.identity.sessionToken,
+            transportGenerationID: discardRuntime.identity.transportGenerationID,
+            sequence: 1,
+            capturedAt: discardRuntime.identity.startDate.addingTimeInterval(2),
+            controlSenderID: UUID(),
+            control: .discard
+        )
+        discardRuntime.manager.workoutSession(
+            discardRuntime.session,
+            didReceiveDataFromRemoteWorkoutSession: [
+                try WorkoutContractCodec.encode(discard),
+            ]
+        )
+        try await waitUntil { discardRuntime.manager.state == .ending }
+        XCTAssertEqual(discardRuntime.manager.state, .ending)
+        XCTAssertEqual(
+            discardRuntime.store.recoveredIdentity?.finishRequest?.disposition,
+            .discard
+        )
+    }
+
+    func testMirrorDisconnectReleasesTerminalAndFailedShutdown() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(probe: probe)
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            XCTAssertEqual(probe.sentData.count, 2)
+            let shutdownEnvelope = try WorkoutContractCodec.decode(
+                XCTUnwrap(probe.sentData.last)
+            )
+            XCTAssertEqual(
+                shutdownEnvelope.snapshot?.state,
+                startFailure ? .failed : .ended
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+
+            runtime.manager.workoutSession(
+                runtime.session,
+                didDisconnectFromRemoteDeviceWithError: nil
+            )
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+            XCTAssertFalse(runtime.manager.hasAttachedSessionForTesting)
+            XCTAssertFalse(runtime.manager.isAwaitingDetachedSessionCleanup)
+        }
+    }
+
+    func testQueuedPhoneStartDrainsAfterFinalMirrorCleanup() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            var deliveredConfigurations: [HKWorkoutConfiguration] = []
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                workoutConfigurationHandler: {
+                    deliveredConfigurations.append($0)
+                }
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            runtime.manager.handleWorkoutConfiguration(configuration)
+            XCTAssertTrue(deliveredConfigurations.isEmpty)
+
+            probe.completeNextSend(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(deliveredConfigurations.isEmpty)
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil { deliveredConfigurations.count == 1 }
+
+            XCTAssertTrue(deliveredConfigurations[0] === configuration)
+            XCTAssertFalse(runtime.manager.hasAttachedSessionForTesting)
+        }
+    }
+
+    func testMirrorShutdownWatchdogReleasesHungSendExactlyOnce() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                shutdownTimeout: 0.02
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            XCTAssertEqual(
+                probe.sentData.count,
+                2,
+                "the final envelope must be attempted despite the hung live send"
+            )
+            let shutdownEnvelope = try WorkoutContractCodec.decode(
+                XCTUnwrap(probe.sentData.last)
+            )
+            XCTAssertEqual(
+                shutdownEnvelope.snapshot?.state,
+                startFailure ? .failed : .ended
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+            XCTAssertFalse(runtime.manager.isAwaitingDetachedSessionCleanup)
+            XCTAssertFalse(runtime.manager.hasPendingWorkoutRecovery)
+
+            probe.completeNextSend(succeeded: true)
+            probe.completeNextSend(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            XCTAssertEqual(
+                probe.endSessionCallCount,
+                1,
+                "a late HealthKit completion must not repeat cleanup"
+            )
+        }
+    }
+
+    func testSupersededLiveCallbackCannotCompleteFinalShutdownSend() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                shutdownTimeout: 1
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            XCTAssertEqual(probe.sentData.count, 1)
+
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            XCTAssertEqual(
+                probe.sentData.count,
+                2,
+                "shutdown must preempt the live send with one final envelope"
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+
+            probe.completeNextSend(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.hasAttachedSessionForTesting)
+            XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+            XCTAssertEqual(
+                probe.endSessionCallCount,
+                0,
+                "the stale live callback must not authorize shutdown cleanup"
+            )
+
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+        }
+    }
+
+    func testFailedFinalMirrorSendRetriesBeforeCleanup() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                shutdownTimeout: 1
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil {
+                !runtime.manager.mirrorSendIsInFlightForTesting
+            }
+
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            XCTAssertEqual(probe.sentData.count, 2)
+            let firstFinalEnvelope = try WorkoutContractCodec.decode(
+                XCTUnwrap(probe.sentData.last)
+            )
+            XCTAssertEqual(
+                firstFinalEnvelope.snapshot?.state,
+                startFailure ? .failed : .ended
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+
+            probe.completeNextSend(succeeded: false)
+            try await waitUntil { probe.sentData.count == 3 }
+            let retryEnvelope = try WorkoutContractCodec.decode(
+                XCTUnwrap(probe.sentData.last)
+            )
+            XCTAssertEqual(retryEnvelope, firstFinalEnvelope)
+            XCTAssertTrue(runtime.manager.hasAttachedSessionForTesting)
+            XCTAssertEqual(probe.endSessionCallCount, 0)
+
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+        }
+    }
+
+    func testFailedFinalRetryExhaustionCleansUpExactlyOnce() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                shutdownTimeout: 1
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil {
+                !runtime.manager.mirrorSendIsInFlightForTesting
+            }
+
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+            probe.completeNextSend(succeeded: false)
+            try await waitUntil { probe.sentData.count == 3 }
+            probe.completeNextSend(succeeded: false)
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+
+            XCTAssertEqual(probe.sentData.count, 3)
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+            await Task.yield()
+            XCTAssertEqual(
+                probe.endSessionCallCount,
+                1,
+                "retry exhaustion must not repeat cleanup"
+            )
+        }
+    }
+
+    func testHungFinalRetryUsesWatchdogAndIgnoresLateCompletion() async throws {
+        for startFailure in [false, true] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(
+                probe: probe,
+                shutdownTimeout: 0.05
+            )
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session,
+                identity: runtime.identity,
+                state: .running
+            )
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+            probe.completeNextSend(succeeded: true)
+            try await waitUntil {
+                !runtime.manager.mirrorSendIsInFlightForTesting
+            }
+
+            runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
+                startFailure: startFailure
+            )
+            if !startFailure {
+                try runtime.store.clear()
+            }
+            probe.completeNextSend(succeeded: false)
+            try await waitUntil { probe.sentData.count == 3 }
+            XCTAssertTrue(runtime.manager.hasAttachedSessionForTesting)
+
+            try await waitUntil {
+                !runtime.manager.hasAttachedSessionForTesting
+            }
+            XCTAssertEqual(probe.endSessionCallCount, 1)
+            probe.completeNextSend(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            XCTAssertEqual(
+                probe.endSessionCallCount,
+                1,
+                "a late retry completion must not repeat watchdog cleanup"
+            )
+        }
+    }
+
     func testAuthorizationPoliciesFailClosedWithoutInventingPermission() {
         XCTAssertEqual(
             WatchWorkoutManager.resolveSetupState(
@@ -2776,6 +3964,1471 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
+    func testCrossAppDisplacementSurvivesRecoveryAndTerminalPublication() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let initialStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try initialStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_048_000)
+        )
+        let endedAt = identity.startDate.addingTimeInterval(60)
+        try initialStore.markFinishing(
+            disposition: .save,
+            requestedAt: endedAt,
+            explicitRiderChoice: false,
+            terminalErrorCode: .anotherWorkoutActive
+        )
+
+        let recoveredStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        XCTAssertEqual(
+            recoveredStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive,
+            "the takeover reason must survive a Watch process relaunch"
+        )
+        try recoveredStore.markCollectionEnded()
+        try recoveredStore.markFinishAttempted()
+        try recoveredStore.markWorkoutSaved()
+
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveredStore,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveredStore.recoveredIdentity)
+            )
+        )
+        manager.completeConfirmedSave(
+            summary: WatchWorkoutSummary(
+                outcome: .saved,
+                endedAt: endedAt,
+                duration: 60,
+                distanceMeters: 500,
+                activeEnergyKilocalories: 40,
+                averageHeartRate: 135,
+                routeStatus: .present
+            ),
+            savedAt: endedAt
+        )
+
+        XCTAssertEqual(
+            manager.summary?.terminalErrorCode,
+            .anotherWorkoutActive,
+            "the Watch summary must explain why the partial ride ended"
+        )
+        XCTAssertEqual(
+            manager.snapshot.errorCode,
+            .anotherWorkoutActive,
+            "the final local snapshot must retain cross-app displacement"
+        )
+        XCTAssertEqual(
+            manager.latestEnvelope?.snapshot?.errorCode,
+            .anotherWorkoutActive,
+            "the authoritative terminal iPhone envelope must retain displacement"
+        )
+    }
+
+    func testTakeoverDuringExistingFinishPreservesChoicePhaseAndRecovery() throws {
+        for disposition in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_500)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+            if disposition == .save {
+                manager.endAndSave()
+            } else {
+                manager.discard()
+            }
+            XCTAssertEqual(manager.state, .ending)
+            if disposition == .save {
+                try recoveryStore.markCollectionEnded()
+            }
+            let before = try XCTUnwrap(
+                recoveryStore.recoveredIdentity?.finishRequest
+            )
+            let failureEndDate = startDate.addingTimeInterval(61)
+
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: failureEndDate
+            )
+
+            let after = try XCTUnwrap(
+                recoveryStore.recoveredIdentity?.finishRequest
+            )
+            XCTAssertEqual(after.disposition, disposition)
+            XCTAssertEqual(after.requestedAt, before.requestedAt)
+            XCTAssertEqual(after.phase, before.phase)
+            XCTAssertEqual(after.routeStatus, before.routeStatus)
+            XCTAssertEqual(after.terminalErrorCode, .anotherWorkoutActive)
+            XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+
+            let relaunchedStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            XCTAssertEqual(
+                relaunchedStore.recoveredIdentity?.finishRequest,
+                after,
+                "takeover after an existing \(disposition) request must survive relaunch"
+            )
+        }
+    }
+
+    func testActiveTakeoverAlwaysPersistsAndPublishesPartialSave() throws {
+        for activeState in [
+            WorkoutSessionStateV1.running,
+            WorkoutSessionStateV1.paused,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_550)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: activeState
+            )
+            let endedAt = startDate.addingTimeInterval(60)
+
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: endedAt
+            )
+
+            XCTAssertEqual(manager.state, .ending)
+            XCTAssertEqual(
+                recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+                .save,
+                "\(activeState) takeover must always preserve the partial ride"
+            )
+            XCTAssertEqual(
+                recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            XCTAssertEqual(
+                WatchWorkoutRecoveryStore(persistence: persistence)
+                    .recoveredIdentity?.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+
+            try recoveryStore.markCollectionEnded()
+            try recoveryStore.markFinishAttempted()
+            manager.completeConfirmedSave(
+                summary: WatchWorkoutSummary(
+                    outcome: .saved,
+                    endedAt: endedAt,
+                    duration: 60,
+                    distanceMeters: 350,
+                    activeEnergyKilocalories: 30,
+                    averageHeartRate: 128,
+                    routeStatus: .present
+                ),
+                savedAt: endedAt
+            )
+            XCTAssertEqual(manager.summary?.outcome, .saved)
+            XCTAssertEqual(
+                manager.summary?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+        }
+    }
+
+    func testWatchDelegateTranslatesHealthKitTakeoverError() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_575)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+
+        manager.workoutSession(
+            session,
+            didFailWithError: NSError(
+                domain: HKErrorDomain,
+                code: HKError.Code.errorAnotherWorkoutSessionStarted.rawValue
+            )
+        )
+
+        try await waitUntil {
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode
+                == .anotherWorkoutActive
+        }
+        XCTAssertEqual(manager.state, .ending)
+        XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+    }
+
+    func testFailedInitialTakeoverSaveCarriesCauseIntoRiderRetry() throws {
+        for riderChoice in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_600)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+
+            persistence.failsSave = true
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: startDate.addingTimeInterval(60)
+            )
+            XCTAssertEqual(manager.state, .running)
+            XCTAssertEqual(manager.finishRequestError, .persistenceFailed)
+            XCTAssertEqual(
+                recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive,
+                "the write-ahead journal must preserve the cause in memory after the primary save fails"
+            )
+            XCTAssertEqual(
+                WatchWorkoutRecoveryStore(persistence: persistence)
+                    .recoveredIdentity?.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive,
+                "process relaunch must merge the write-ahead takeover journal"
+            )
+
+            persistence.failsSave = false
+            if riderChoice == .save {
+                manager.endAndSave()
+            } else {
+                manager.discard()
+            }
+            XCTAssertEqual(manager.state, .ending)
+            XCTAssertEqual(
+                recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+                riderChoice
+            )
+            XCTAssertEqual(
+                recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive,
+                "the original takeover cause must survive a later rider \(riderChoice) retry"
+            )
+        }
+    }
+
+    func testPendingTakeoverOutranksLaterGenericFailure() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_625)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: startDate.addingTimeInterval(60)
+        )
+        persistence.failsSave = false
+
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .sessionFailed,
+            failureEndDate: startDate.addingTimeInterval(61)
+        )
+
+        XCTAssertEqual(manager.state, .ending)
+        XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+        XCTAssertEqual(
+            WatchWorkoutRecoveryStore(persistence: persistence)
+                .recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+    }
+
+    func testRemoteTerminalRetryCarriesPendingTakeoverCauseAtomically() async throws {
+        for control in [WorkoutControlV1.endAndSave, .discard] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_640)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+            XCTAssertNotNil(
+                recoveryStore.nextSequence(),
+                "the test must reserve the outbound acknowledgement lease before persistence becomes unavailable"
+            )
+            persistence.failsSave = true
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: startDate.addingTimeInterval(60)
+            )
+            let envelope = WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: identity.sessionID,
+                sessionToken: identity.sessionToken,
+                transportGenerationID: identity.transportGenerationID,
+                sequence: 1,
+                capturedAt: startDate.addingTimeInterval(61),
+                controlSenderID: UUID(),
+                control: control
+            )
+
+            let saveCallsBeforeRemoteControl = persistence.saveCallCount
+            manager.workoutSession(
+                session,
+                didReceiveDataFromRemoteWorkoutSession: [
+                    try WorkoutContractCodec.encode(envelope),
+                ]
+            )
+
+            let expectedDisposition: WorkoutFinishDisposition = control
+                == .endAndSave ? .save : .discard
+            try await waitUntil {
+                persistence.saveCallCount > saveCallsBeforeRemoteControl
+            }
+            XCTAssertEqual(
+                manager.state,
+                .running,
+                "the replay checkpoint and finish request must not execute when their primary transaction fails"
+            )
+            let inMemoryIdentity = try XCTUnwrap(
+                recoveryStore.recoveredIdentity
+            )
+            let checkpointAfterFailedPrimary = try XCTUnwrap(
+                inMemoryIdentity.remoteControlCheckpoint
+            )
+            let acknowledgementAfterFailedPrimary = try XCTUnwrap(
+                inMemoryIdentity.remoteTerminalAcknowledgement
+            )
+            XCTAssertNotNil(inMemoryIdentity.finishRequest)
+
+            persistence.failsSave = false
+            manager.handleSessionReadyForFinalization(
+                at: startDate.addingTimeInterval(62)
+            )
+            let relaunchedStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let relaunchedIdentity = try XCTUnwrap(
+                relaunchedStore.recoveredIdentity
+            )
+            XCTAssertEqual(
+                relaunchedIdentity.remoteControlCheckpoint,
+                checkpointAfterFailedPrimary,
+                "a later successful implicit write must flush the checkpoint retained by the failed primary transaction"
+            )
+            XCTAssertEqual(
+                relaunchedIdentity.remoteTerminalAcknowledgement,
+                acknowledgementAfterFailedPrimary,
+                "the checkpoint must never become durable without its exact acknowledgement obligation"
+            )
+            XCTAssertEqual(
+                relaunchedIdentity.finishRequest?.disposition,
+                expectedDisposition
+            )
+            XCTAssertEqual(
+                relaunchedIdentity.finishRequest?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            let finishRequestBeforeReplay = try XCTUnwrap(
+                relaunchedIdentity.finishRequest
+            )
+            let relaunchedHealthStore = HKHealthStore()
+            let relaunchedSession = try HKWorkoutSession(
+                healthStore: relaunchedHealthStore,
+                configuration: configuration
+            )
+            let relaunchedProbe = WatchMirrorTransportProbe()
+            let relaunchedManager = WatchWorkoutManager(
+                healthStore: relaunchedHealthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: relaunchedStore,
+                mirrorStartOperation: relaunchedProbe.start,
+                mirrorSendOperation: relaunchedProbe.send,
+                mirrorShutdownEndSession: relaunchedProbe.endSession,
+                initializeOnLaunch: false
+            )
+            relaunchedManager.configureMirrorRuntimeForTesting(
+                session: relaunchedSession,
+                identity: relaunchedIdentity,
+                state: .ending
+            )
+            XCTAssertEqual(
+                relaunchedManager.state,
+                .ending,
+                "relaunch must exercise the already-durable Ending branch"
+            )
+
+            relaunchedManager.startMirroringForTesting()
+            relaunchedProbe.completeNextStart(succeeded: true)
+            await Task.yield()
+            persistence.failsSave = true
+            let saveCallsBeforeExactReplay = persistence.saveCallCount
+            relaunchedManager.handleRemoteWorkoutEnvelopes(
+                [envelope],
+                from: relaunchedSession
+            )
+            for _ in 0..<8 {
+                let hasAcknowledgement = relaunchedProbe.sentData.contains {
+                    (try? WorkoutContractCodec.decode($0))?
+                        .acknowledgement?.acknowledgedSequence
+                        == envelope.sequence
+                }
+                if hasAcknowledgement { break }
+                relaunchedProbe.completeNextSend(succeeded: true)
+                await Task.yield()
+            }
+            XCTAssertTrue(
+                relaunchedProbe.sentData.contains {
+                    guard let decoded = try? WorkoutContractCodec.decode($0),
+                          let acknowledgement = decoded.acknowledgement else {
+                        return false
+                    }
+                    return decoded.sessionID == relaunchedIdentity.sessionID
+                        && decoded.sessionToken
+                            == relaunchedIdentity.sessionToken
+                        && decoded.transportGenerationID
+                            == (relaunchedIdentity.transportGenerationID
+                                ?? relaunchedIdentity.sessionID)
+                        && acknowledgement.control == control
+                        && acknowledgement.resultingState == .ending
+                        && acknowledgement.acknowledgedSequence
+                            == envelope.sequence
+                },
+                "the reconstructed manager must durably replay and acknowledge the remote terminal choice"
+            )
+            XCTAssertEqual(
+                persistence.saveCallCount,
+                saveCallsBeforeExactReplay,
+                "an exact gate-rejected replay must emit its durable acknowledgement with zero persistence writes"
+            )
+            let exactAcknowledgementEnvelope = try XCTUnwrap(
+                relaunchedProbe.sentData.compactMap {
+                    try? WorkoutContractCodec.decode($0)
+                }.first {
+                    $0.acknowledgement?.acknowledgedSequence
+                        == envelope.sequence
+                        && $0.acknowledgement?.control == control
+                }
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.sequence,
+                acknowledgementAfterFailedPrimary.envelopeSequence
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.capturedAt,
+                acknowledgementAfterFailedPrimary.envelopeCapturedAt
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.sessionID,
+                relaunchedIdentity.sessionID
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.sessionToken,
+                relaunchedIdentity.sessionToken
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.transportGenerationID,
+                relaunchedIdentity.transportGenerationID
+                    ?? relaunchedIdentity.sessionID
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.acknowledgement?.resultingState,
+                .ending
+            )
+            XCTAssertEqual(
+                exactAcknowledgementEnvelope.acknowledgement?
+                    .acknowledgedSequence,
+                envelope.sequence
+            )
+            XCTAssertEqual(
+                relaunchedStore.recoveredIdentity,
+                relaunchedIdentity,
+                "exact replay must not mutate any durable recovery field"
+            )
+            XCTAssertEqual(
+                relaunchedStore.recoveredIdentity?.finishRequest,
+                finishRequestBeforeReplay
+            )
+
+            relaunchedProbe.completeNextSend(succeeded: true)
+            await Task.yield()
+            XCTAssertFalse(
+                relaunchedManager.mirrorSendIsInFlightForTesting
+            )
+
+            let oppositeControl: WorkoutControlV1 = control == .endAndSave
+                ? .discard
+                : .endAndSave
+            let nearMatches = [
+                WorkoutEnvelopeV1(
+                    kind: .control,
+                    sessionID: envelope.sessionID,
+                    sessionToken: envelope.sessionToken,
+                    transportGenerationID: envelope.transportGenerationID,
+                    sequence: envelope.sequence,
+                    capturedAt: envelope.capturedAt.addingTimeInterval(0.5),
+                    controlSenderID: envelope.controlSenderID,
+                    control: control
+                ),
+                WorkoutEnvelopeV1(
+                    kind: .control,
+                    sessionID: envelope.sessionID,
+                    sessionToken: envelope.sessionToken,
+                    transportGenerationID: envelope.transportGenerationID,
+                    sequence: envelope.sequence,
+                    capturedAt: envelope.capturedAt,
+                    controlSenderID: UUID(),
+                    control: control
+                ),
+                WorkoutEnvelopeV1(
+                    kind: .control,
+                    sessionID: envelope.sessionID,
+                    sessionToken: envelope.sessionToken,
+                    transportGenerationID: envelope.transportGenerationID,
+                    sequence: envelope.sequence + 1,
+                    capturedAt: envelope.capturedAt,
+                    controlSenderID: envelope.controlSenderID,
+                    control: control
+                ),
+                WorkoutEnvelopeV1(
+                    kind: .control,
+                    sessionID: envelope.sessionID,
+                    sessionToken: envelope.sessionToken,
+                    transportGenerationID: envelope.transportGenerationID,
+                    sequence: envelope.sequence,
+                    capturedAt: envelope.capturedAt,
+                    controlSenderID: envelope.controlSenderID,
+                    control: oppositeControl
+                ),
+            ]
+            for nearMatch in nearMatches {
+                let sentCount = relaunchedProbe.sentData.count
+                relaunchedManager.handleRemoteWorkoutEnvelopes(
+                    [nearMatch],
+                    from: relaunchedSession
+                )
+                XCTAssertEqual(
+                    relaunchedProbe.sentData.count,
+                    sentCount,
+                    "sender, sequence, capture time, and control must all match before durable acknowledgement replay"
+                )
+                XCTAssertEqual(
+                    relaunchedStore.recoveredIdentity,
+                    relaunchedIdentity,
+                    "near-match replay must fail closed when persistence is unavailable"
+                )
+            }
+
+            persistence.failsSave = false
+            let recoverySnapshotStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let recoverySnapshotIdentity = try XCTUnwrap(
+                recoverySnapshotStore.recoveredIdentity
+            )
+            let recoverySnapshotHealthStore = HKHealthStore()
+            let recoverySnapshotSession = try HKWorkoutSession(
+                healthStore: recoverySnapshotHealthStore,
+                configuration: configuration
+            )
+            let recoverySnapshotProbe = WatchMirrorTransportProbe()
+            let recoverySnapshotManager = WatchWorkoutManager(
+                healthStore: recoverySnapshotHealthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoverySnapshotStore,
+                mirrorStartOperation: recoverySnapshotProbe.start,
+                mirrorSendOperation: recoverySnapshotProbe.send,
+                mirrorShutdownEndSession: recoverySnapshotProbe.endSession,
+                initializeOnLaunch: false
+            )
+            recoverySnapshotManager.configureMirrorRuntimeForTesting(
+                session: recoverySnapshotSession,
+                identity: recoverySnapshotIdentity,
+                state: .ending
+            )
+            XCTAssertTrue(
+                recoverySnapshotManager.publishMirrorSnapshotForTesting(),
+                "production recovery publishes a fresh snapshot before a delayed exact control replay"
+            )
+            let recoverySnapshot = try XCTUnwrap(
+                recoverySnapshotManager.latestEnvelope
+            )
+            XCTAssertGreaterThan(
+                recoverySnapshot.sequence,
+                acknowledgementAfterFailedPrimary.envelopeSequence
+            )
+            recoverySnapshotManager.startMirroringForTesting()
+            recoverySnapshotProbe.completeNextStart(succeeded: true)
+            try await waitUntil { recoverySnapshotProbe.sentData.count == 1 }
+            XCTAssertEqual(
+                try WorkoutContractCodec.decode(
+                    recoverySnapshotProbe.sentData[0]
+                ),
+                recoverySnapshot
+            )
+
+            persistence.failsSave = true
+            let saveCallsBeforeOrderedReplay = persistence.saveCallCount
+            recoverySnapshotManager.handleRemoteWorkoutEnvelopes(
+                [envelope],
+                from: recoverySnapshotSession
+            )
+            XCTAssertEqual(
+                recoverySnapshotProbe.sentData.count,
+                1,
+                "the newer recovery snapshot remains the sole in-flight envelope"
+            )
+            recoverySnapshotProbe.completeNextSend(succeeded: true)
+            try await waitUntil { recoverySnapshotProbe.sentData.count == 2 }
+            let orderedAcknowledgement = try WorkoutContractCodec.decode(
+                recoverySnapshotProbe.sentData[1]
+            )
+            XCTAssertEqual(orderedAcknowledgement.kind, .acknowledgement)
+            XCTAssertGreaterThan(
+                orderedAcknowledgement.sequence,
+                recoverySnapshot.sequence,
+                "replay must upgrade the durable fallback sequence through the already-reserved recovery lease"
+            )
+            XCTAssertEqual(
+                orderedAcknowledgement.acknowledgement?.control,
+                control
+            )
+            XCTAssertEqual(
+                orderedAcknowledgement.acknowledgement?
+                    .acknowledgedSequence,
+                envelope.sequence
+            )
+            XCTAssertEqual(
+                persistence.saveCallCount,
+                saveCallsBeforeOrderedReplay,
+                "the active recovery lease must support ordered replay while persistence is unavailable"
+            )
+
+            var phoneReducer = WorkoutMirrorStateReducer()
+            let phoneReceivedAt = Date()
+            phoneReducer.attachMirroredSession(at: phoneReceivedAt)
+            XCTAssertTrue(
+                phoneReducer.markPendingControl(
+                    control,
+                    sequence: envelope.sequence
+                )
+            )
+            _ = phoneReducer.ingestBatch(
+                [recoverySnapshot],
+                receivedAt: phoneReceivedAt
+            )
+            _ = phoneReducer.ingestBatch(
+                [orderedAcknowledgement],
+                receivedAt: Date()
+            )
+            XCTAssertNil(
+                phoneReducer.presentation.pendingControl,
+                "iPhone monotonic sequencing must accept the upgraded acknowledgement after the recovery snapshot"
+            )
+        }
+    }
+
+    func testTerminalCauseRetryRunsOlderMetadataPrerequisiteFirst() async throws {
+        enum RetryFailure: Error { case expected }
+
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_650)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var metadataAttempts = 0
+        var resumeAttempts = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            identityMetadataRetryAdapter:
+                WatchWorkoutIdentityMetadataRetryAdapter(
+                    attachMetadata: { metadataAttempts += 1 },
+                    isContextCurrent: { true },
+                    resumeFinalization: { resumeAttempts += 1 }
+                ),
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.endAndSave()
+        XCTAssertTrue(
+            manager.retainCollectedFinishForIdentityMetadataRetry(
+                RetryFailure.expected
+            )
+        )
+
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: startDate.addingTimeInterval(60)
+        )
+        XCTAssertEqual(
+            manager.finishRequestError,
+            .terminalErrorPersistenceFailed
+        )
+
+        persistence.failsSave = false
+        manager.retryFinalization()
+        try await waitUntil {
+            metadataAttempts == 1 && resumeAttempts == 1
+        }
+        XCTAssertNil(manager.finishRequestError)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+        XCTAssertEqual(metadataAttempts, 1)
+        XCTAssertEqual(resumeAttempts, 1)
+    }
+
+    func testTerminalCauseRetryPersistsRollbackBeforeRecoveredFinalization() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_660)
+        _ = try recoveryStore.begin(startDate: startDate)
+        try recoveryStore.markFinishing(
+            disposition: .save,
+            requestedAt: startDate.addingTimeInterval(60)
+        )
+        try recoveryStore.markCollectionEnded()
+        try recoveryStore.markFinishAttempted()
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var finalizationPhases: [WorkoutFinalizationPhase?] = []
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: builder,
+                sessionState: { .stopped }
+            ),
+            recoveredSaveResolver: { _, _ in
+                RecoveredSaveResolution(
+                    action: .finalize(.full),
+                    workout: nil
+                )
+            },
+            initialFinishFailureRollbackPending: true,
+            finalizationClaimObserver: { _ in
+                finalizationPhases.append(
+                    recoveryStore.recoveredIdentity?.finishRequest?.phase
+                )
+            },
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: startDate.addingTimeInterval(61)
+        )
+        persistence.failsSave = false
+
+        manager.retryFinalization()
+        try await waitUntil { finalizationPhases.count == 1 }
+
+        XCTAssertEqual(finalizationPhases, [.collectionEnded])
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+    }
+
+    func testTerminalCauseRetryReconcilesBeforeRecoveredFinalization() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_665)
+        _ = try recoveryStore.begin(startDate: startDate)
+        try recoveryStore.markFinishing(
+            disposition: .save,
+            requestedAt: startDate.addingTimeInterval(60)
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var events: [String] = []
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: builder,
+                sessionState: { .stopped }
+            ),
+            recoveredSaveResolver: { _, _ in
+                events.append("reconcile")
+                return RecoveredSaveResolution(
+                    action: .finalize(.full),
+                    workout: nil
+                )
+            },
+            finalizationClaimObserver: { _ in events.append("finalize") },
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: startDate.addingTimeInterval(61)
+        )
+        persistence.failsSave = false
+
+        manager.retryFinalization()
+        try await waitUntil { events.contains("finalize") }
+
+        XCTAssertEqual(events, ["reconcile", "finalize"])
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+    }
+
+    func testClaimedFinalizationWaitsForTerminalCauseBeforePublication() throws {
+        for disposition in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_675)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            var finalizationClaims = 0
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                finalizationClaimObserver: { _ in finalizationClaims += 1 },
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+            if disposition == .save {
+                manager.endAndSave()
+                try recoveryStore.markCollectionEnded()
+                try recoveryStore.markFinishAttempted()
+            } else {
+                manager.discard()
+            }
+            let endedAt = startDate.addingTimeInterval(60)
+            manager.handleSessionReadyForFinalization(at: endedAt)
+            XCTAssertEqual(finalizationClaims, 1)
+
+            persistence.failsSave = true
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: endedAt
+            )
+            let confirmedSummary = WatchWorkoutSummary(
+                outcome: disposition == .save ? .saved : .discarded,
+                endedAt: endedAt,
+                duration: 60,
+                distanceMeters: disposition == .save ? 300 : nil,
+                activeEnergyKilocalories: disposition == .save ? 25 : nil,
+                averageHeartRate: disposition == .save ? 125 : nil,
+                routeStatus: .unavailable,
+                terminalErrorCode: .sessionFailed
+            )
+            if disposition == .save {
+                manager.completeConfirmedSave(
+                    summary: confirmedSummary,
+                    savedAt: endedAt
+                )
+            } else {
+                manager.completeConfirmedDiscard(
+                    summary: confirmedSummary,
+                    discardedAt: endedAt
+                )
+            }
+
+            XCTAssertEqual(manager.state, .ending)
+            XCTAssertNil(manager.summary)
+            XCTAssertNotNil(recoveryStore.recoveredIdentity)
+            XCTAssertTrue(recoveryStore.recoveredTerminalTombstones.isEmpty)
+            XCTAssertEqual(
+                manager.finishRequestError,
+                .terminalErrorPersistenceFailed
+            )
+
+            persistence.failsSave = false
+            manager.retryFinalization()
+            XCTAssertEqual(manager.state, .ended)
+            XCTAssertEqual(manager.summary?.outcome, confirmedSummary.outcome)
+            XCTAssertEqual(
+                manager.summary?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            XCTAssertEqual(
+                recoveryStore.terminalTombstone(
+                    externalUUID: identity.sessionID.uuidString
+                )?.disposition,
+                disposition
+            )
+            XCTAssertNil(recoveryStore.recoveredIdentity)
+            XCTAssertEqual(
+                finalizationClaims,
+                1,
+                "cause retry must publish the confirmed outcome without another HealthKit finalization"
+            )
+        }
+    }
+
+    func testFinalizationFailurePreservesPendingTakeoverRetry() throws {
+        enum FinalizationFailure: Error { case expected }
+
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_680)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.endAndSave()
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: startDate.addingTimeInterval(60)
+        )
+
+        manager.handleFinalizationFailure(FinalizationFailure.expected)
+
+        XCTAssertEqual(manager.state, .ending)
+        XCTAssertEqual(
+            manager.finishRequestError,
+            .terminalErrorPersistenceFailed
+        )
+        XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+    }
+
+    func testFinalizationFailurePreservesDurableTakeoverPresentation() throws {
+        enum FinalizationFailure: Error { case expected }
+
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_682)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        try recoveryStore.markFinishing(
+            disposition: .save,
+            requestedAt: startDate.addingTimeInterval(60)
+        )
+        try recoveryStore.markTerminalError(.anotherWorkoutActive)
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+
+        manager.handleFinalizationFailure(FinalizationFailure.expected)
+
+        XCTAssertEqual(manager.state, .ending)
+        XCTAssertEqual(manager.finishRequestError, .saveFailed)
+        XCTAssertEqual(manager.snapshot.errorCode, .anotherWorkoutActive)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.sessionID,
+            identity.sessionID
+        )
+    }
+
+    func testTakeoverJournalSurvivesProcessDeathAfterConfirmedCompletion() async throws {
+        for disposition in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let firstStore = WatchWorkoutRecoveryStore(persistence: persistence)
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_685)
+            let identity = try firstStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let firstManager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: firstStore,
+                initializeOnLaunch: false
+            )
+            firstManager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+            if disposition == .save {
+                firstManager.endAndSave()
+                try firstStore.markCollectionEnded()
+                try firstStore.markFinishAttempted()
+                try firstStore.markWorkoutSaved()
+            } else {
+                firstManager.discard()
+            }
+            let endedAt = startDate.addingTimeInterval(60)
+            persistence.failsSave = true
+            firstManager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: endedAt
+            )
+            let confirmedSummary = WatchWorkoutSummary(
+                outcome: disposition == .save ? .saved : .discarded,
+                endedAt: endedAt,
+                duration: 60,
+                distanceMeters: disposition == .save ? 300 : nil,
+                activeEnergyKilocalories: disposition == .save ? 25 : nil,
+                averageHeartRate: disposition == .save ? 125 : nil,
+                routeStatus: .unavailable
+            )
+            if disposition == .save {
+                firstManager.completeConfirmedSave(
+                    summary: confirmedSummary,
+                    savedAt: endedAt
+                )
+            } else {
+                firstManager.completeConfirmedDiscard(
+                    summary: confirmedSummary,
+                    discardedAt: endedAt
+                )
+            }
+            XCTAssertNil(firstManager.summary)
+
+            let relaunchedStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            XCTAssertEqual(
+                relaunchedStore.recoveredIdentity?.finishRequest?
+                    .terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            XCTAssertEqual(
+                relaunchedStore.recoveredIdentity?.finishRequest?.disposition,
+                disposition
+            )
+            persistence.failsSave = false
+            let relaunchedManager = WatchWorkoutManager(
+                healthStore: HKHealthStore(),
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: relaunchedStore,
+                recoverActiveWorkoutSession: { (nil, nil) },
+                refreshAuthorization: {},
+                authorizationRefreshState: .ready,
+                initializeOnLaunch: true
+            )
+            try await waitUntil {
+                relaunchedManager.summary != nil
+            }
+            XCTAssertEqual(relaunchedManager.state, .ended)
+            XCTAssertEqual(
+                relaunchedManager.summary?.terminalErrorCode,
+                .anotherWorkoutActive,
+                "relaunch recovery must not publish a clean terminal result after a blocked takeover write"
+            )
+            XCTAssertEqual(
+                relaunchedManager.summary?.outcome,
+                confirmedSummary.outcome
+            )
+        }
+    }
+
+    func testLaterFailureFlushesRetainedTakeoverCompletion() throws {
+        for disposition in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let startDate = Date(timeIntervalSinceReferenceDate: 800_048_690)
+            let identity = try recoveryStore.begin(startDate: startDate)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let session = try HKWorkoutSession(
+                healthStore: healthStore,
+                configuration: configuration
+            )
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: identity,
+                state: .running
+            )
+            if disposition == .save {
+                manager.endAndSave()
+                try recoveryStore.markCollectionEnded()
+                try recoveryStore.markFinishAttempted()
+            } else {
+                manager.discard()
+            }
+            let endedAt = startDate.addingTimeInterval(60)
+            persistence.failsSave = true
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .anotherWorkoutActive,
+                failureEndDate: endedAt
+            )
+            let confirmedSummary = WatchWorkoutSummary(
+                outcome: disposition == .save ? .saved : .discarded,
+                endedAt: endedAt,
+                duration: 60,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable
+            )
+            if disposition == .save {
+                manager.completeConfirmedSave(
+                    summary: confirmedSummary,
+                    savedAt: endedAt
+                )
+            } else {
+                manager.completeConfirmedDiscard(
+                    summary: confirmedSummary,
+                    discardedAt: endedAt
+                )
+            }
+            persistence.failsSave = false
+
+            manager.handleSessionFailure(
+                session,
+                safeErrorCode: .sessionFailed,
+                failureEndDate: endedAt
+            )
+
+            XCTAssertEqual(manager.state, .ended)
+            XCTAssertEqual(manager.summary?.outcome, confirmedSummary.outcome)
+            XCTAssertEqual(
+                manager.summary?.terminalErrorCode,
+                .anotherWorkoutActive
+            )
+            XCTAssertEqual(
+                recoveryStore.terminalTombstone(
+                    externalUUID: identity.sessionID.uuidString
+                )?.disposition,
+                disposition
+            )
+        }
+    }
+
+    func testEndingTakeoverPersistenceFailureBlocksUntilExplicitRetry() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let startDate = Date(timeIntervalSinceReferenceDate: 800_048_700)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.discard()
+        let phaseBeforeFailure = recoveryStore.recoveredIdentity?
+            .finishRequest?.phase
+        let failureEndDate = startDate.addingTimeInterval(62)
+
+        persistence.failsSave = true
+        manager.handleSessionFailure(
+            session,
+            safeErrorCode: .anotherWorkoutActive,
+            failureEndDate: failureEndDate
+        )
+        XCTAssertEqual(
+            manager.finishRequestError,
+            .terminalErrorPersistenceFailed
+        )
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive,
+            "the separate durable journal must preserve takeover provenance while the primary update is blocked"
+        )
+        XCTAssertEqual(
+            WatchWorkoutRecoveryStore(persistence: persistence)
+                .recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.phase,
+            phaseBeforeFailure
+        )
+
+        persistence.failsSave = false
+        manager.retryFinalization()
+        XCTAssertNil(manager.finishRequestError)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.terminalErrorCode,
+            .anotherWorkoutActive
+        )
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.finishRequest?.phase,
+            phaseBeforeFailure
+        )
+    }
+
+    func testSuccessfulTerminalizationDoesNotPublishStaleRetryFailure() throws {
+        enum RetryFailure: Error { case expected }
+
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try recoveryStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_048_900)
+        )
+        let endedAt = identity.startDate.addingTimeInterval(60)
+        try recoveryStore.markFinishing(
+            disposition: .save,
+            requestedAt: endedAt
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+        XCTAssertTrue(
+            manager.retainCollectedFinishForIdentityMetadataRetry(
+                RetryFailure.expected
+            )
+        )
+        XCTAssertEqual(manager.snapshot.errorCode, .sessionFailed)
+
+        manager.completeConfirmedSave(
+            summary: WatchWorkoutSummary(
+                outcome: .saved,
+                endedAt: endedAt,
+                duration: 60,
+                distanceMeters: 400,
+                activeEnergyKilocalories: 35,
+                averageHeartRate: 130,
+                routeStatus: .present
+            ),
+            savedAt: endedAt
+        )
+
+        XCTAssertEqual(manager.state, .ended)
+        XCTAssertNil(manager.summary?.terminalErrorCode)
+        XCTAssertNil(manager.snapshot.errorCode)
+        XCTAssertNil(manager.latestEnvelope?.snapshot?.errorCode)
+    }
+
     func testAttachedTerminalArchiveFailureRetainsProofUntilRetry() throws {
         for disposition in [WorkoutFinishDisposition.save, .discard] {
             let persistence = ToggleRecoveryPersistence()
@@ -3335,6 +5988,54 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
     }
 
+    func testQueuedPhoneStartDrainsAfterRecoveredTombstoneCleanup() throws {
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let terminalIdentity = try archiveSavedIdentity(in: recoveryStore)
+        let healthStore = HKHealthStore()
+        let sessionConfiguration = HKWorkoutConfiguration()
+        sessionConfiguration.activityType = .cycling
+        sessionConfiguration.locationType = .outdoor
+        let recoveredSession = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: sessionConfiguration
+        )
+        let recoveredBuilder = recoveredSession.associatedWorkoutBuilder()
+        var deliveredConfigurations: [HKWorkoutConfiguration] = []
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: recoveredSession,
+                builder: recoveredBuilder,
+                sessionState: { .running }
+            ),
+            workoutConfigurationHandler: {
+                deliveredConfigurations.append($0)
+            },
+            initializeOnLaunch: false
+        )
+        let queuedConfiguration = HKWorkoutConfiguration()
+        queuedConfiguration.activityType = .cycling
+        queuedConfiguration.locationType = .outdoor
+
+        manager.handleWorkoutConfiguration(queuedConfiguration)
+        XCTAssertTrue(deliveredConfigurations.isEmpty)
+
+        manager.completeTerminalTombstoneSessionCleanup(
+            recoveredSession,
+            builder: recoveredBuilder,
+            sessionID: terminalIdentity.sessionID,
+            disposition: .save
+        )
+
+        XCTAssertEqual(deliveredConfigurations.count, 1)
+        XCTAssertTrue(deliveredConfigurations[0] === queuedConfiguration)
+        XCTAssertFalse(manager.hasAttachedSessionForTesting)
+    }
+
     func testTerminalTombstoneRemovalFailureEndsSessionButRetainsProof() throws {
         let persistence = ToggleRecoveryPersistence()
         let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
@@ -3886,6 +6587,46 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
     }
 
+    private func makeMirrorRuntime(
+        probe: WatchMirrorTransportProbe,
+        shutdownTimeout: TimeInterval = 10,
+        workoutConfigurationHandler:
+            (@MainActor (HKWorkoutConfiguration) -> Void)? = nil
+    ) throws -> (
+        manager: WatchWorkoutManager,
+        session: HKWorkoutSession,
+        identity: WatchWorkoutRecoveryStore.Identity,
+        store: WatchWorkoutRecoveryStore
+    ) {
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try store.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_000)
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            workoutConfigurationHandler: workoutConfigurationHandler,
+            mirrorStartOperation: probe.start,
+            mirrorSendOperation: probe.send,
+            mirrorShutdownEndSession: probe.endSession,
+            mirrorRetryDelay: 0.01,
+            mirrorShutdownDeliveryTimeout: shutdownTimeout,
+            initializeOnLaunch: false
+        )
+        return (manager, session, identity, store)
+    }
+
     private func waitUntil(
         timeout: Duration = .seconds(2),
         condition: @MainActor () -> Bool
@@ -3937,12 +6678,53 @@ final class WatchWorkoutManagerTests: XCTestCase {
     }
 }
 
+@MainActor
+private final class WatchMirrorTransportProbe {
+    private(set) var startCallCount = 0
+    private(set) var sentData: [Data] = []
+    private(set) var endSessionCallCount = 0
+    private var startCompletions: [@Sendable (Bool, Error?) -> Void] = []
+    private var sendCompletions: [@Sendable (Bool, Error?) -> Void] = []
+
+    func start(
+        _ session: HKWorkoutSession,
+        _ completion: @escaping @Sendable (Bool, Error?) -> Void
+    ) {
+        startCallCount += 1
+        startCompletions.append(completion)
+    }
+
+    func send(
+        _ session: HKWorkoutSession,
+        _ data: Data,
+        _ completion: @escaping @Sendable (Bool, Error?) -> Void
+    ) {
+        sentData.append(data)
+        sendCompletions.append(completion)
+    }
+
+    func endSession(_ session: HKWorkoutSession) {
+        endSessionCallCount += 1
+    }
+
+    func completeNextStart(succeeded: Bool) {
+        guard !startCompletions.isEmpty else { return }
+        startCompletions.removeFirst()(succeeded, nil)
+    }
+
+    func completeNextSend(succeeded: Bool) {
+        guard !sendCompletions.isEmpty else { return }
+        sendCompletions.removeFirst()(succeeded, nil)
+    }
+}
+
 private final class ToggleRecoveryPersistence: WorkoutRecoveryPersistence {
     enum Failure: Error {
         case requested
     }
 
     var data: Data?
+    var takeoverJournalData: Data?
     var failsLoad = false
     var failsSave = false
     var failsClear = false
@@ -3974,6 +6756,18 @@ private final class ToggleRecoveryPersistence: WorkoutRecoveryPersistence {
     func quarantine(_ data: Data) throws {
         if failsQuarantine { throw Failure.requested }
         quarantinedData.append(data)
+    }
+
+    func loadTakeoverJournal() throws -> Data? {
+        takeoverJournalData
+    }
+
+    func saveTakeoverJournal(_ data: Data) throws {
+        takeoverJournalData = data
+    }
+
+    func clearTakeoverJournal() throws {
+        takeoverJournalData = nil
     }
 }
 

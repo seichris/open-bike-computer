@@ -16,6 +16,18 @@ struct WorkoutSummaryView: View {
                 Text(summary.outcome == .saved ? "Ride Saved" : "Ride Discarded")
                     .font(.headline)
 
+                if summary.terminalErrorCode == .anotherWorkoutActive {
+                    Label(
+                        WorkoutCrossAppTakeoverCopyV1.summary(
+                            disposition: summary.outcome == .saved ? .save : .discard
+                        ),
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                }
+
                 if summary.outcome == .saved {
                     summaryRow("Time", WorkoutValueFormatter.duration(summary.duration))
                     summaryRow(

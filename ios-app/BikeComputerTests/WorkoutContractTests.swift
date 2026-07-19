@@ -18,6 +18,7 @@ private nonisolated final class ControllableRecoveryPersistence: WorkoutRecovery
     }
 
     var data: Data?
+    var takeoverJournalData: Data?
     var failsLoad = false
     var failsSave = false
     var failsClear = false
@@ -36,6 +37,18 @@ private nonisolated final class ControllableRecoveryPersistence: WorkoutRecovery
         if failsClear { throw Failure.requested }
         data = nil
     }
+
+    func loadTakeoverJournal() throws -> Data? {
+        takeoverJournalData
+    }
+
+    func saveTakeoverJournal(_ data: Data) throws {
+        takeoverJournalData = data
+    }
+
+    func clearTakeoverJournal() throws {
+        takeoverJournalData = nil
+    }
 }
 
 private struct WorkoutContractTestSuite {
@@ -43,6 +56,7 @@ private struct WorkoutContractTestSuite {
 
     mutating func run() async {
         testSnapshotRoundTrip()
+        testTerminalOutcomeRoundTripAndValidation()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
@@ -82,9 +96,33 @@ private struct WorkoutContractTestSuite {
         testRouteRecoveryDistanceAndAssociatedFinalizationPolicies()
         testRecoverySequenceLeasesNeverReuseReservedValues()
         testRecoveryStorePersistsIdentityAndLeases()
+        testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery()
 #if WORKOUT_CONTRACT_HOST
         testRecoveryStoreSurvivesProcessRelaunch()
 #endif
+        testMirrorReducerSupportsBothStartDirections()
+        testMirrorReducerStartTimeoutIsAttemptScoped()
+        testMirrorReducerDelayedBatchesCannotRollBackState()
+        testMirrorReducerRejectsFutureCaptureBeforeStateOrdering()
+        testMirrorReducerDisconnectAndStalenessStayHonest()
+        testMirrorReducerNativeStateConfirmationBeatsOlderData()
+        testMirrorReducerAcknowledgesRemoteControls()
+        testMirrorReducerReplacesTerminalSessionCleanly()
+        testMirrorReducerWaitsForFinalSnapshotBeforeReset()
+        testTerminalResetRetiresOldSessionWithoutRetainingWallClockOrder()
+        testMirrorReducerLateNativeConfirmationClearsCommandError()
+        testMirrorReducerDoesNotTurnFailedStartIntoFinishedRide()
+        testControlSequencerSurvivesPhoneProcessRestart()
+        testRemoteControlGateRejectsFutureSenderWithoutPoisoningRelaunch()
+        testIPhoneFallbackMergePreservesWatchPrecedence()
+        testLatestEnvelopeBufferCoalescesBackpressure()
+        testWorkoutErrorCopyDistinguishesTerminalUncertainty()
+        testTerminalErrorAndTakeoverCopyUseDurableDisposition()
+        testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation()
+        testWorkoutDiscardDisclosureRequiresFinalConfirmation()
+        testEveryRiderInitiatedStartSurfaceUsesDisclosure()
+        testEveryDiscardSurfaceRequiresFinalConfirmation()
+        testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
     }
 
@@ -165,6 +203,41 @@ private struct WorkoutContractTestSuite {
             expect(try roundTripWorkoutEnvelope(envelope) == envelope, "snapshot should round-trip")
         } catch {
             expect(false, "snapshot round-trip threw \(error)")
+        }
+    }
+
+    private mutating func testTerminalOutcomeRoundTripAndValidation() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_050)
+        let discarded = makeEnvelope(
+            sequence: 1,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .ended,
+                startDate: now.addingTimeInterval(-30),
+                terminalOutcome: .discarded
+            )
+        )
+        do {
+            let decoded = try roundTripWorkoutEnvelope(discarded)
+            expect(
+                decoded.snapshot?.terminalOutcome == .discarded,
+                "a terminal discard outcome should round-trip"
+            )
+        } catch {
+            expect(false, "terminal outcome round-trip threw \(error)")
+        }
+
+        let invalidRunningOutcome = makeEnvelope(
+            sequence: 2,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: now.addingTimeInterval(-30),
+                terminalOutcome: .saved
+            )
+        )
+        expectThrows(.invalidEnvelopePayload, "nonterminal outcome") {
+            try WorkoutContractCodec.validate(invalidRunningOutcome)
         }
     }
 
@@ -2923,6 +2996,58 @@ private struct WorkoutContractTestSuite {
         }
     }
 
+    private mutating func testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery() {
+        for disposition in [
+            WorkoutFinishDisposition.save,
+            WorkoutFinishDisposition.discard,
+        ] {
+            let persistence = ControllableRecoveryPersistence()
+            let store = WatchWorkoutRecoveryStore(persistence: persistence)
+            do {
+                let identity = try store.begin(
+                    startDate: Date(timeIntervalSinceReferenceDate: 800_070_000)
+                )
+                let requestedAt = identity.startDate.addingTimeInterval(45)
+                try store.markFinishing(
+                    disposition: disposition,
+                    requestedAt: requestedAt
+                )
+                if disposition == .save {
+                    try store.markPreparedRoute(.present)
+                    try store.markCollectionEnded()
+                }
+                let before = store.recoveredIdentity?.finishRequest
+
+                try store.markTerminalError(.anotherWorkoutActive)
+                let after = store.recoveredIdentity?.finishRequest
+                expect(after?.disposition == disposition, "takeover persistence must preserve Save or Discard")
+                expect(after?.requestedAt == requestedAt, "takeover persistence must preserve the rider request time")
+                expect(after?.phase == before?.phase, "takeover persistence must preserve finalization progress")
+                expect(after?.routeStatus == before?.routeStatus, "takeover persistence must preserve route progress")
+                expect(after?.terminalErrorCode == .anotherWorkoutActive, "takeover persistence must store the terminal cause")
+
+                persistence.failsSave = true
+                try store.markTerminalError(.sessionFailed)
+                expect(
+                    store.recoveredIdentity?.finishRequest?.terminalErrorCode
+                        == .anotherWorkoutActive,
+                    "a later generic failure must neither rewrite nor block an already-durable takeover cause"
+                )
+                persistence.failsSave = false
+
+                let relaunched = WatchWorkoutRecoveryStore(
+                    persistence: persistence
+                )
+                expect(
+                    relaunched.recoveredIdentity?.finishRequest == after,
+                    "the updated terminal cause and untouched finish request must survive relaunch"
+                )
+            } catch {
+                expect(false, "terminal-error recovery fixture threw \(error)")
+            }
+        }
+    }
+
 #if WORKOUT_CONTRACT_HOST
     private mutating func testRecoveryStoreSurvivesProcessRelaunch() {
         let directory = FileManager.default.temporaryDirectory
@@ -2977,6 +3102,1348 @@ private struct WorkoutContractTestSuite {
     }
 #endif
 
+    private mutating func testMirrorReducerSupportsBothStartDirections() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_050_000)
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: now
+        )
+
+        var watchStarted = WorkoutMirrorStateReducer()
+        watchStarted.attachMirroredSession(at: now)
+        expect(
+            watchStarted.presentation.connectionState == .awaitingFirstSnapshot,
+            "a Watch-started mirror should wait for its first coherent snapshot"
+        )
+        _ = watchStarted.ingestBatch(
+            [makeEnvelope(sequence: 1, capturedAt: now, snapshot: snapshot)],
+            receivedAt: now
+        )
+        expect(
+            watchStarted.presentation.connectionState == .connected,
+            "a Watch-started workout should become connected after its first snapshot"
+        )
+        expect(
+            watchStarted.presentation.sessionState == .running,
+            "a Watch-started mirror should publish the Watch state"
+        )
+
+        var phoneStarted = WorkoutMirrorStateReducer()
+        let launchID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
+        expect(
+            phoneStarted.beginWatchLaunch(id: launchID, at: now),
+            "an idle iPhone should admit one Watch launch"
+        )
+        phoneStarted.completeWatchLaunch(
+            id: launchID,
+            succeeded: true,
+            error: nil
+        )
+        phoneStarted.attachMirroredSession(at: now.addingTimeInterval(1))
+        _ = phoneStarted.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 1,
+                    capturedAt: now.addingTimeInterval(1),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now.addingTimeInterval(1)
+                    )
+                ),
+            ],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        expect(
+            phoneStarted.presentation.connectionState == .connected,
+            "an iPhone-started workout should wait for and then adopt the Watch mirror"
+        )
+        expect(
+            !phoneStarted.beginWatchLaunch(id: UUID(), at: now.addingTimeInterval(2)),
+            "an active mirrored workout must reject a second iPhone start"
+        )
+    }
+
+    private mutating func testMirrorReducerStartTimeoutIsAttemptScoped() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_051_000)
+        let firstID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000010")!
+        let secondID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000011")!
+        var reducer = WorkoutMirrorStateReducer()
+
+        expect(
+            reducer.beginWatchLaunch(id: firstID, at: now, timeout: 5),
+            "the first launch should be admitted"
+        )
+        reducer.completeWatchLaunch(id: firstID, succeeded: true, error: nil)
+        expect(
+            !reducer.timeOutWatchLaunch(id: firstID, at: now.addingTimeInterval(4.9)),
+            "a launch must not time out before its deadline"
+        )
+        expect(
+            reducer.timeOutWatchLaunch(id: firstID, at: now.addingTimeInterval(5)),
+            "a launch without a mirrored session should time out at its deadline"
+        )
+        expect(
+            reducer.presentation.errorCode == .setupRequired,
+            "a silent Watch launch should direct the rider to finish setup on Watch"
+        )
+
+        expect(
+            reducer.beginWatchLaunch(
+                id: secondID,
+                at: now.addingTimeInterval(6),
+                timeout: 5
+            ),
+            "a timed-out launch should be retryable"
+        )
+        reducer.completeWatchLaunch(
+            id: firstID,
+            succeeded: false,
+            error: .watchUnavailable
+        )
+        expect(
+            reducer.presentation.connectionState == .launchingWatch,
+            "a late callback from an old launch must not fail the retry"
+        )
+        reducer.attachMirroredSession(at: now.addingTimeInterval(7))
+        expect(
+            !reducer.timeOutWatchLaunch(id: secondID, at: now.addingTimeInterval(20)),
+            "a delivered mirrored session must cancel its launch timeout"
+        )
+    }
+
+    private mutating func testMirrorReducerDelayedBatchesCannotRollBackState() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_052_000)
+        let generation = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000001")!
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+
+        let running = makeEnvelope(
+            transportGenerationID: generation,
+            sequence: 2,
+            capturedAt: start.addingTimeInterval(2),
+            snapshot: WorkoutSnapshotV1(state: .running, startDate: start)
+        )
+        _ = reducer.ingestBatch([running], receivedAt: start.addingTimeInterval(2))
+
+        let delayedOlder = makeEnvelope(
+            transportGenerationID: generation,
+            sequence: 1,
+            capturedAt: start.addingTimeInterval(1),
+            snapshot: WorkoutSnapshotV1(state: .starting, startDate: start)
+        )
+        let paused = makeEnvelope(
+            transportGenerationID: generation,
+            sequence: 3,
+            capturedAt: start.addingTimeInterval(3),
+            snapshot: WorkoutSnapshotV1(state: .paused, startDate: start)
+        )
+        let result = reducer.ingestBatch(
+            [delayedOlder, paused],
+            receivedAt: start.addingTimeInterval(4)
+        )
+        expect(
+            result.acceptedEnvelopes.map(\.sequence) == [3],
+            "a resumed batch should accept only envelopes newer than displayed state"
+        )
+        expect(
+            reducer.presentation.sessionState == .paused,
+            "a delayed batch must publish only its newest coherent state"
+        )
+        expect(
+            reducer.presentation.capturedAt == paused.capturedAt,
+            "capture age must be based on the newest accepted Watch timestamp"
+        )
+    }
+
+    private mutating func testMirrorReducerRejectsFutureCaptureBeforeStateOrdering() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_052_500)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 1,
+                    capturedAt: start,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: start
+                    )
+                ),
+            ],
+            receivedAt: start
+        )
+
+        let future = makeEnvelope(
+            sequence: 2,
+            capturedAt: start.addingTimeInterval(100),
+            snapshot: WorkoutSnapshotV1(state: .paused, startDate: start)
+        )
+        let rejected = reducer.ingestBatch(
+            [future],
+            receivedAt: start.addingTimeInterval(1)
+        )
+        expect(
+            rejected.acceptedEnvelopes.isEmpty
+                && rejected.rejections == [
+                    WorkoutEnvelopeBatchRejection(
+                        index: 0,
+                        error: .invalidDate
+                    ),
+                ],
+            "a Watch envelope beyond the bounded clock skew must be rejected"
+        )
+        expect(
+            reducer.presentation.sessionState == .running
+                && reducer.presentation.capturedAt == start,
+            "a rejected future snapshot must not poison presentation ordering"
+        )
+
+        reducer.confirmSessionState(.ended, at: start.addingTimeInterval(2))
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 2,
+                    capturedAt: start.addingTimeInterval(2),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: start,
+                        terminalOutcome: .saved
+                    )
+                ),
+            ],
+            receivedAt: start.addingTimeInterval(2)
+        )
+        expect(
+            reducer.presentation.sessionState == .ended
+                && reducer.presentation.connectionState == .ended,
+            "native and Watch terminal evidence must remain admissible after a rejected future snapshot"
+        )
+    }
+
+    private mutating func testMirrorReducerDisconnectAndStalenessStayHonest() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_053_000)
+        let envelope = makeEnvelope(
+            sequence: 1,
+            capturedAt: start,
+            snapshot: WorkoutSnapshotV1(state: .running, startDate: start)
+        )
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+        _ = reducer.ingestBatch([envelope], receivedAt: start)
+
+        reducer.refreshFreshness(at: start.addingTimeInterval(10))
+        expect(
+            reducer.presentation.connectionState == .connected,
+            "a snapshot at the freshness boundary should remain live"
+        )
+        reducer.refreshFreshness(at: start.addingTimeInterval(10.001))
+        expect(
+            reducer.presentation.connectionState == .stale,
+            "an overdue snapshot should become explicitly stale"
+        )
+        reducer.disconnect(error: nil)
+        expect(
+            reducer.presentation.connectionState == .disconnected,
+            "a remote disconnect should not masquerade as ordinary staleness"
+        )
+        expect(
+            reducer.presentation.snapshot == envelope.snapshot,
+            "disconnect must preserve the last coherent metrics without inventing zeroes"
+        )
+        reducer.refreshFreshness(at: start.addingTimeInterval(30))
+        expect(
+            reducer.presentation.connectionState == .disconnected,
+            "freshness ticks must not hide a known disconnect"
+        )
+    }
+
+    private mutating func testMirrorReducerNativeStateConfirmationBeatsOlderData() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_054_000)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+        reducer.confirmSessionState(.paused, at: start.addingTimeInterval(5))
+
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 1,
+                    capturedAt: start.addingTimeInterval(4),
+                    snapshot: WorkoutSnapshotV1(state: .running, startDate: start)
+                ),
+            ],
+            receivedAt: start.addingTimeInterval(6)
+        )
+        expect(
+            reducer.presentation.sessionState == .paused,
+            "an older delivered snapshot must not undo a newer native HealthKit pause callback"
+        )
+
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 2,
+                    capturedAt: start.addingTimeInterval(7),
+                    snapshot: WorkoutSnapshotV1(state: .paused, startDate: start)
+                ),
+            ],
+            receivedAt: start.addingTimeInterval(7)
+        )
+        expect(
+            reducer.presentation.sessionState == .paused,
+            "a newer Watch snapshot should converge with native session confirmation"
+        )
+    }
+
+    private mutating func testMirrorReducerAcknowledgesRemoteControls() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_055_000)
+        let sessionID = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000001")!
+        let generation = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000002")!
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: now)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(state: .running, startDate: now)
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            reducer.markPendingControl(.endAndSave, sequence: 1),
+            "one remote end request should enter the pending state"
+        )
+        let acknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 2,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .endAndSave,
+                resultingState: .ending,
+                acknowledgedSequence: 1
+            )
+        )
+        let result = reducer.ingestBatch(
+            [acknowledgement],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        expect(
+            result.acceptedEnvelopes == [acknowledgement],
+            "a valid acknowledgement should share the Watch envelope ordering stream"
+        )
+        expect(
+            reducer.presentation.pendingControl == nil,
+            "the matching Watch acknowledgement should clear the pending control"
+        )
+
+        expect(
+            reducer.markPendingControl(.endAndSave, sequence: 42),
+            "a retry should carry its own control sequence"
+        )
+        let lateAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 3,
+            capturedAt: now.addingTimeInterval(2),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .endAndSave,
+                resultingState: .ending,
+                acknowledgedSequence: 1
+            )
+        )
+        _ = reducer.ingestBatch(
+            [lateAcknowledgement],
+            receivedAt: now.addingTimeInterval(2)
+        )
+        expect(
+            reducer.presentation.pendingControl == .endAndSave
+                && reducer.pendingControlSequence == 42,
+            "a late acknowledgement for attempt A must not clear attempt B"
+        )
+
+        let invalidStateAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 4,
+            capturedAt: now.addingTimeInterval(3),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .endAndSave,
+                resultingState: .running,
+                acknowledgedSequence: 42
+            )
+        )
+        _ = reducer.ingestBatch(
+            [invalidStateAcknowledgement],
+            receivedAt: now.addingTimeInterval(3)
+        )
+        expect(
+            reducer.presentation.pendingControl == .endAndSave,
+            "an acknowledgement with an incompatible result must not confirm control"
+        )
+
+        reducer.confirmSessionState(
+            .ending,
+            at: now.addingTimeInterval(4)
+        )
+        expect(
+            reducer.presentation.pendingControl == .endAndSave,
+            "generic HealthKit ending state must not confirm a save/discard choice"
+        )
+        reducer.confirmSessionState(
+            .ended,
+            at: now.addingTimeInterval(4.5)
+        )
+        expect(
+            reducer.presentation.pendingControl == .endAndSave,
+            "outcome-free native ended state must not confirm a save/discard choice"
+        )
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 5,
+                    capturedAt: now.addingTimeInterval(4),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ending,
+                        startDate: now
+                    )
+                ),
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 6,
+                    capturedAt: now.addingTimeInterval(5),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: now,
+                        terminalOutcome: .discarded
+                    )
+                ),
+            ],
+            receivedAt: now.addingTimeInterval(5)
+        )
+        expect(
+            reducer.presentation.pendingControl == nil
+                && reducer.presentation.errorCode == .terminalChoiceConflict,
+            "an explicit opposite terminal outcome must reject the pending choice immediately"
+        )
+
+        var matchingOutcomeReducer = WorkoutMirrorStateReducer()
+        matchingOutcomeReducer.attachMirroredSession(at: now)
+        _ = matchingOutcomeReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            matchingOutcomeReducer.markPendingControl(.discard, sequence: 20),
+            "a discard choice should become pending"
+        )
+        _ = matchingOutcomeReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 2,
+                    capturedAt: now.addingTimeInterval(1),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ending,
+                        startDate: now
+                    )
+                ),
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 3,
+                    capturedAt: now.addingTimeInterval(2),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: now,
+                        terminalOutcome: .discarded
+                    )
+                ),
+            ],
+            receivedAt: now.addingTimeInterval(2)
+        )
+        expect(
+            matchingOutcomeReducer.presentation.pendingControl == nil,
+            "a matching explicit terminal outcome may confirm the pending choice"
+        )
+    }
+
+    private mutating func testMirrorReducerReplacesTerminalSessionCleanly() {
+        let firstStart = Date(timeIntervalSinceReferenceDate: 800_055_100)
+        let secondStart = firstStart.addingTimeInterval(60)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: firstStart)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: UUID(uuidString: "DDDDDDDD-0000-0000-0000-000000000001")!,
+                    sequence: 1,
+                    capturedAt: firstStart.addingTimeInterval(10),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: firstStart,
+                        terminalOutcome: .saved
+                    )
+                ),
+            ],
+            receivedAt: firstStart.addingTimeInterval(10)
+        )
+        reducer.attachMirroredSession(at: secondStart)
+        expect(
+            reducer.presentation.connectionState == .awaitingFirstSnapshot,
+            "a handler for a new workout must not present the old terminal session"
+        )
+        expect(
+            reducer.presentation.sessionID == nil,
+            "a new mirrored session must clear old terminal credentials"
+        )
+
+        let secondID = UUID(
+            uuidString: "DDDDDDDD-0000-0000-0000-000000000002"
+        )!
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: secondID,
+                    sequence: 1,
+                    capturedAt: secondStart,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: secondStart
+                    )
+                ),
+            ],
+            receivedAt: secondStart
+        )
+        expect(
+            reducer.presentation.sessionID == secondID
+                && reducer.presentation.sessionState == .running,
+            "the first snapshot should atomically adopt the new workout"
+        )
+    }
+
+    private mutating func testMirrorReducerWaitsForFinalSnapshotBeforeReset() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_055_150)
+        let sessionID = UUID(
+            uuidString: "DDDDDDDD-1000-0000-0000-000000000001"
+        )!
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 1,
+                    capturedAt: start,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: start
+                    )
+                ),
+            ],
+            receivedAt: start
+        )
+        reducer.confirmSessionState(.ended, at: start.addingTimeInterval(10))
+        expect(
+            !reducer.canResetTerminalPresentation
+                && !reducer.resetTerminalPresentation(),
+            "native end must not permit dismissal before the final Watch snapshot"
+        )
+        expect(
+            reducer.timeOutFinalSnapshot()
+                && reducer.presentation.errorCode == .finalSummaryUnavailable
+                && reducer.canResetTerminalPresentation,
+            "a bounded final-snapshot timeout must explain the missing result before permitting dismissal"
+        )
+        expect(
+            reducer.resetTerminalPresentation()
+                && reducer.presentation.connectionState == .idle,
+            "the rider may dismiss after the honest bounded timeout"
+        )
+
+        var deliveredReducer = WorkoutMirrorStateReducer()
+        deliveredReducer.attachMirroredSession(at: start)
+        _ = deliveredReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 1,
+                    capturedAt: start,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: start
+                    )
+                ),
+            ],
+            receivedAt: start
+        )
+        deliveredReducer.confirmSessionState(
+            .ended,
+            at: start.addingTimeInterval(10)
+        )
+        _ = deliveredReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 2,
+                    capturedAt: start.addingTimeInterval(11),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: start,
+                        terminalOutcome: .saved
+                    )
+                ),
+            ],
+            receivedAt: start.addingTimeInterval(11)
+        )
+        expect(
+            deliveredReducer.canResetTerminalPresentation
+                && deliveredReducer.presentation.finalSnapshot?.terminalOutcome
+                    == .saved,
+            "the authoritative terminal envelope must enable dismissal immediately"
+        )
+    }
+
+    private mutating func testTerminalResetRetiresOldSessionWithoutRetainingWallClockOrder() {
+        let firstStart = Date(timeIntervalSinceReferenceDate: 800_055_180)
+        let correctedStart = firstStart.addingTimeInterval(-120)
+        let firstID = UUID(
+            uuidString: "DDDDDDDD-2000-0000-0000-000000000001"
+        )!
+        let secondID = UUID(
+            uuidString: "DDDDDDDD-2000-0000-0000-000000000002"
+        )!
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: firstStart)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: firstID,
+                    sequence: 1,
+                    capturedAt: firstStart.addingTimeInterval(30),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: firstStart,
+                        terminalOutcome: .saved
+                    )
+                ),
+            ],
+            receivedAt: firstStart.addingTimeInterval(30)
+        )
+        expect(
+            reducer.resetTerminalPresentation(),
+            "a confirmed terminal session should reset"
+        )
+
+        let delayedOldResult = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: firstID,
+                    sequence: 2,
+                    capturedAt: firstStart.addingTimeInterval(31),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .ended,
+                        startDate: firstStart,
+                        terminalOutcome: .saved
+                    )
+                ),
+            ],
+            receivedAt: firstStart.addingTimeInterval(31)
+        )
+        expect(
+            delayedOldResult.acceptedEnvelopes.isEmpty,
+            "reset must permanently reject delayed traffic from the dismissed session"
+        )
+
+        reducer.attachMirroredSession(at: correctedStart)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: secondID,
+                    sequence: 1,
+                    capturedAt: correctedStart,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: correctedStart
+                    )
+                ),
+            ],
+            receivedAt: correctedStart
+        )
+        expect(
+            reducer.presentation.sessionID == secondID
+                && reducer.presentation.sessionState == .running,
+            "a new workout must be admitted after reset even when the wall clock moved backward"
+        )
+    }
+
+    private mutating func testMirrorReducerLateNativeConfirmationClearsCommandError() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_055_200)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: start)
+        _ = reducer.ingestBatch(
+            [makeEnvelope(sequence: 1, capturedAt: start)],
+            receivedAt: start
+        )
+        expect(reducer.markPendingControl(.pause), "pause should become pending")
+        reducer.failPendingControl(.pause, error: .watchUnavailable)
+        expect(
+            reducer.presentation.errorCode == .watchUnavailable,
+            "a timed-out command should surface a safe error"
+        )
+        reducer.confirmSessionState(.paused, at: start.addingTimeInterval(11))
+        expect(
+            reducer.presentation.sessionState == .paused
+                && reducer.presentation.errorCode == nil,
+            "a late native confirmation should clear the obsolete timeout error"
+        )
+    }
+
+    private mutating func testControlSequencerSurvivesPhoneProcessRestart() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_055_300)
+        let sessionID = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000001"
+        )!
+        let generation = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000002"
+        )!
+        let currentWatchEnvelope = makeEnvelope(
+            sessionID: sessionID,
+            sessionToken: 12,
+            transportGenerationID: generation,
+            sequence: 40,
+            capturedAt: now
+        )
+        let priorSender = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000003"
+        )!
+        let relaunchedSender = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000004"
+        )!
+        let priorControl = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 12,
+            transportGenerationID: generation,
+            sequence: 41,
+            capturedAt: now,
+            controlSenderID: priorSender,
+            control: .requestCurrentSnapshot
+        )
+        var watchGate = WorkoutRemoteControlSequenceGate()
+        do {
+            expect(try watchGate.ingest(priorControl), "Watch should seed its replay gate")
+            var relaunchedPhone = WorkoutControlEnvelopeSequencer(
+                controlSenderID: relaunchedSender
+            )
+            let end = relaunchedPhone.makeEnvelope(
+                control: .endAndSave,
+                currentEnvelope: currentWatchEnvelope,
+                capturedAt: now.addingTimeInterval(1)
+            )
+            expect(
+                end?.sequence == 41,
+                "a new phone process should also advance from the last Watch sequence for legacy compatibility"
+            )
+            expect(
+                try end.map { try watchGate.ingest($0) } == true,
+                "the first post-relaunch control should pass the retained Watch replay gate"
+            )
+            let delayedRetiredControl = WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: sessionID,
+                sessionToken: 12,
+                transportGenerationID: generation,
+                sequence: 42,
+                capturedAt: now.addingTimeInterval(2),
+                controlSenderID: priorSender,
+                control: .discard
+            )
+            expect(
+                try watchGate.ingest(delayedRetiredControl) == false,
+                "a retired phone process must never resume after relaunch"
+            )
+        } catch {
+            expect(false, "post-relaunch control sequencing threw \(error)")
+        }
+    }
+
+    private mutating func testRemoteControlGateRejectsFutureSenderWithoutPoisoningRelaunch() {
+        let receivedAt = Date(timeIntervalSinceReferenceDate: 800_055_350)
+        let sessionID = UUID(
+            uuidString: "EFEFEFEF-0000-0000-0000-000000000001"
+        )!
+        let generation = UUID(
+            uuidString: "EFEFEFEF-0000-0000-0000-000000000002"
+        )!
+        let futureSender = UUID(
+            uuidString: "EFEFEFEF-0000-0000-0000-000000000003"
+        )!
+        let correctedSender = UUID(
+            uuidString: "EFEFEFEF-0000-0000-0000-000000000004"
+        )!
+        let futureControl = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 22,
+            transportGenerationID: generation,
+            sequence: 10,
+            capturedAt: receivedAt.addingTimeInterval(100),
+            controlSenderID: futureSender,
+            control: .requestCurrentSnapshot
+        )
+        let correctedControl = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 22,
+            transportGenerationID: generation,
+            sequence: 11,
+            capturedAt: receivedAt.addingTimeInterval(1),
+            controlSenderID: correctedSender,
+            control: .endAndSave
+        )
+        var gate = WorkoutRemoteControlSequenceGate()
+        do {
+            expect(
+                try !gate.ingest(futureControl, receivedAt: receivedAt),
+                "a phone control beyond the bounded clock skew must be rejected"
+            )
+            expect(
+                gate.currentSenderID == nil
+                    && gate.latestCapturedAt == nil,
+                "a rejected future sender must not advance Watch generation state"
+            )
+            expect(
+                try gate.ingest(
+                    correctedControl,
+                    receivedAt: receivedAt.addingTimeInterval(1)
+                ),
+                "a corrected-clock phone relaunch must remain admissible"
+            )
+            expect(
+                gate.currentSenderID == correctedSender,
+                "only the corrected sender should become canonical"
+            )
+        } catch {
+            expect(false, "future control gating threw \(error)")
+        }
+    }
+
+    private mutating func testMirrorReducerDoesNotTurnFailedStartIntoFinishedRide() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_055_400)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: now)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .failed,
+                        errorCode: .setupRequired
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        reducer.confirmSessionState(.ended, at: now.addingTimeInterval(1))
+        expect(
+            reducer.presentation.connectionState == .failed
+                && reducer.presentation.errorCode == .setupRequired,
+            "native session teardown must preserve a mirrored startup failure"
+        )
+
+        var noSnapshotReducer = WorkoutMirrorStateReducer()
+        noSnapshotReducer.attachMirroredSession(at: now)
+        noSnapshotReducer.confirmSessionState(.ended, at: now)
+        expect(
+            noSnapshotReducer.presentation.connectionState == .failed,
+            "native end without any verified snapshot must fail safely"
+        )
+    }
+
+    private mutating func testIPhoneFallbackMergePreservesWatchPrecedence() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_055_500)
+        let capture = start.addingTimeInterval(20)
+        var reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: capture)
+        _ = reducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sequence: 1,
+                    capturedAt: capture,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: start
+                    )
+                ),
+            ],
+            receivedAt: capture
+        )
+        let phoneLocation = WorkoutLocationV1(
+            latitude: 1.30,
+            longitude: 103.80,
+            capturedAt: capture,
+            horizontalAccuracy: 4,
+            altitude: 25,
+            verticalAccuracy: 3,
+            course: 90,
+            speed: 7
+        )
+        let phone = WorkoutIPhoneTelemetryV1(
+            isNavigating: true,
+            capturedAt: capture,
+            navigationDistanceMeters: 123,
+            routeRemainingDistanceMeters: 456,
+            routeRemainingTime: 78,
+            instruction: "Turn left",
+            location: phoneLocation
+        )
+        let fallback = WorkoutIPhoneTelemetryMerge.presentation(
+            reducer.presentation,
+            phone: phone,
+            at: capture
+        )
+        expect(
+            fallback.snapshot.cyclingDistance?.value == 123
+                && fallback.snapshot.cyclingDistance?.source == .iPhoneNavigation,
+            "iPhone navigation distance should fill an unavailable Watch distance"
+        )
+        expect(
+            fallback.snapshot.currentSpeed?.value == 7
+                && fallback.snapshot.currentSpeed?.source == .iPhoneLocation,
+            "iPhone location speed should fill an unavailable Watch speed"
+        )
+        expect(
+            fallback.snapshot.location == phoneLocation
+                && fallback.navigation.routeRemainingDistanceMeters == 456,
+            "iPhone location and navigation-only context should remain available"
+        )
+
+        let watchLocation = WorkoutLocationV1(
+            latitude: 1.31,
+            longitude: 103.81,
+            capturedAt: capture,
+            horizontalAccuracy: 2,
+            altitude: 30,
+            verticalAccuracy: 2,
+            course: 100,
+            speed: 8
+        )
+        let watchSnapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: start,
+            cyclingDistance: metric(200, .meters, capture, .healthKit),
+            currentSpeed: metric(9, .metersPerSecond, capture, .pairedCyclingSensor),
+            location: watchLocation,
+            availability: [.cyclingDistance, .currentSpeed, .location, .altitude]
+        )
+        let watchPresentation = WorkoutMirrorPresentationV1(
+            connectionState: .connected,
+            snapshot: watchSnapshot,
+            sessionID: UUID(),
+            capturedAt: capture,
+            receivedAt: capture,
+            confirmedSessionState: .running,
+            errorCode: nil,
+            pendingControl: nil,
+            finalSnapshot: nil,
+            navigation: .empty
+        )
+        let preferred = WorkoutIPhoneTelemetryMerge.presentation(
+            watchPresentation,
+            phone: phone,
+            at: capture
+        )
+        expect(
+            preferred.snapshot.cyclingDistance?.value == 200
+                && preferred.snapshot.currentSpeed?.value == 9
+                && preferred.snapshot.location == watchLocation,
+            "available Watch metrics must retain precedence over iPhone fallbacks"
+        )
+
+        let nativeEndedPresentation = WorkoutMirrorPresentationV1(
+            connectionState: .ended,
+            snapshot: reducer.presentation.snapshot,
+            sessionID: reducer.presentation.sessionID,
+            capturedAt: reducer.presentation.capturedAt,
+            receivedAt: reducer.presentation.receivedAt,
+            confirmedSessionState: .ended,
+            errorCode: nil,
+            pendingControl: nil,
+            finalSnapshot: nil,
+            navigation: .empty
+        )
+        let endedFallback = WorkoutIPhoneTelemetryMerge.presentation(
+            nativeEndedPresentation,
+            phone: phone,
+            at: capture
+        )
+        expect(
+            endedFallback.snapshot == reducer.presentation.snapshot,
+            "phone telemetry must not mutate a natively ended workout while its last Watch snapshot is still active"
+        )
+
+        let stalePhoneLocation = WorkoutLocationV1(
+            latitude: 1.29,
+            longitude: 103.79,
+            capturedAt: start.addingTimeInterval(-1),
+            horizontalAccuracy: 4,
+            altitude: 20,
+            verticalAccuracy: 3,
+            course: nil,
+            speed: 5
+        )
+        let stalePhone = WorkoutIPhoneTelemetryV1(
+            isNavigating: true,
+            capturedAt: start.addingTimeInterval(-1),
+            navigationDistanceMeters: 99,
+            routeRemainingDistanceMeters: nil,
+            routeRemainingTime: nil,
+            instruction: nil,
+            location: stalePhoneLocation
+        )
+        let rejectedStaleFallback = WorkoutIPhoneTelemetryMerge.presentation(
+            reducer.presentation,
+            phone: stalePhone,
+            at: capture
+        )
+        expect(
+            rejectedStaleFallback.snapshot.cyclingDistance == nil
+                && rejectedStaleFallback.snapshot.currentSpeed == nil
+                && rejectedStaleFallback.snapshot.location == nil,
+            "phone telemetry captured before the Watch workout must not fill metrics"
+        )
+
+        let agedLocation = WorkoutLocationV1(
+            latitude: 1.29,
+            longitude: 103.79,
+            capturedAt: start.addingTimeInterval(1),
+            horizontalAccuracy: 4,
+            altitude: 20,
+            verticalAccuracy: 3,
+            course: nil,
+            speed: 5
+        )
+        var agedPhone = phone
+        agedPhone.location = agedLocation
+        let rejectedAgedLocation = WorkoutIPhoneTelemetryMerge.presentation(
+            reducer.presentation,
+            phone: agedPhone,
+            at: capture
+        )
+        expect(
+            rejectedAgedLocation.snapshot.currentSpeed == nil
+                && rejectedAgedLocation.snapshot.location == nil,
+            "expired phone speed, location, and altitude must become unavailable"
+        )
+
+        var futurePhone = phone
+        futurePhone.location = WorkoutLocationV1(
+            latitude: phoneLocation.latitude,
+            longitude: phoneLocation.longitude,
+            capturedAt: capture.addingTimeInterval(1),
+            horizontalAccuracy: 4,
+            altitude: 25,
+            verticalAccuracy: 3,
+            course: 90,
+            speed: 7
+        )
+        let rejectedFutureLocation = WorkoutIPhoneTelemetryMerge.presentation(
+            reducer.presentation,
+            phone: futurePhone,
+            at: capture
+        )
+        expect(
+            rejectedFutureLocation.snapshot.currentSpeed == nil
+                && rejectedFutureLocation.snapshot.location == nil,
+            "future-dated phone location must not fill current metrics"
+        )
+
+        let watchWithoutAltitude = WorkoutLocationV1(
+            latitude: 1.31,
+            longitude: 103.81,
+            capturedAt: capture,
+            horizontalAccuracy: 2,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: 100,
+            speed: 8
+        )
+        let farPhone = WorkoutIPhoneTelemetryV1(
+            isNavigating: false,
+            capturedAt: nil,
+            navigationDistanceMeters: nil,
+            routeRemainingDistanceMeters: nil,
+            routeRemainingTime: nil,
+            instruction: nil,
+            location: WorkoutLocationV1(
+                latitude: 1.40,
+                longitude: 103.90,
+                capturedAt: capture,
+                horizontalAccuracy: 3,
+                altitude: 40,
+                verticalAccuracy: 2,
+                course: nil,
+                speed: nil
+            )
+        )
+        let noAltitudeMix = WorkoutIPhoneTelemetryMerge.presentation(
+            WorkoutMirrorPresentationV1(
+                connectionState: .connected,
+                snapshot: WorkoutSnapshotV1(
+                    state: .running,
+                    startDate: start,
+                    location: watchWithoutAltitude,
+                    availability: [.location]
+                ),
+                sessionID: UUID(),
+                capturedAt: capture,
+                receivedAt: capture,
+                confirmedSessionState: .running,
+                errorCode: nil,
+                pendingControl: nil,
+                finalSnapshot: nil,
+                navigation: .empty
+            ),
+            phone: farPhone,
+            at: capture
+        )
+        expect(
+            noAltitudeMix.snapshot.location == watchWithoutAltitude,
+            "phone altitude must not be mixed into unrelated Watch coordinates"
+        )
+    }
+
+    private mutating func testWorkoutErrorCopyDistinguishesTerminalUncertainty() {
+        let terminalDetail = WorkoutErrorCopyV1.detail(
+            .terminalChoiceUnconfirmed
+        )
+        expect(
+            WorkoutErrorCopyV1.title(.terminalChoiceUnconfirmed)
+                == "Finish choice unconfirmed",
+            "terminal uncertainty should have its own user-facing title"
+        )
+        expect(
+            terminalDetail.contains("Save or Discard")
+                && terminalDetail.contains("Check BikeComputer on Apple Watch"),
+            "terminal uncertainty should tell the rider what was not confirmed and where to check"
+        )
+        expect(
+            !terminalDetail.contains("workout continues on Watch"),
+            "terminal uncertainty must not claim that an accepted finish command is still running"
+        )
+
+        let now = Date(timeIntervalSinceReferenceDate: 800_055_900)
+        var activeReducer = WorkoutMirrorStateReducer()
+        activeReducer.attachMirroredSession(at: now)
+        _ = activeReducer.ingestBatch(
+            [makeEnvelope(sequence: 1, capturedAt: now)],
+            receivedAt: now.addingTimeInterval(0.25)
+        )
+        let activeContext = WorkoutErrorCopyV1.context(
+            for: activeReducer.presentation
+        )
+        expect(
+            activeContext == .activeWorkout,
+            "an active presentation should derive continuity guidance"
+        )
+        expect(
+            WorkoutErrorCopyV1.detail(
+                .watchUnavailable,
+                context: activeContext
+            )
+                .contains("workout continues on Watch"),
+            "ordinary Watch unavailability should retain its distinct continuity guidance"
+        )
+
+        let launchID = UUID()
+        var launchReducer = WorkoutMirrorStateReducer()
+        expect(
+            launchReducer.beginWatchLaunch(
+                id: launchID,
+                at: now,
+                timeout: 15
+            ),
+            "launch context fixture should start"
+        )
+        launchReducer.completeWatchLaunch(
+            id: launchID,
+            succeeded: false,
+            error: .watchUnavailable
+        )
+        let launchContext = WorkoutErrorCopyV1.context(
+            for: launchReducer.presentation
+        )
+        let launchDetail = WorkoutErrorCopyV1.detail(
+            .watchUnavailable,
+            context: launchContext
+        )
+        expect(
+            launchContext == .workoutLaunch
+                && launchDetail.contains("workout did not start")
+                && !launchDetail.contains("workout continues on Watch"),
+            "failed Watch launch must say the workout did not start"
+        )
+
+        var fatalReducer = WorkoutMirrorStateReducer()
+        fatalReducer.attachMirroredSession(at: now)
+        fatalReducer.failSession(error: .watchUnavailable)
+        let fatalContext = WorkoutErrorCopyV1.context(
+            for: fatalReducer.presentation
+        )
+        expect(
+            fatalContext == .general
+                && !WorkoutErrorCopyV1.detail(
+                .watchUnavailable,
+                context: fatalContext
+            ).contains("workout continues on Watch"),
+            "pre-snapshot mirrored-session failure must stay neutral about workout continuity"
+        )
+    }
+
+    private mutating func testLatestEnvelopeBufferCoalescesBackpressure() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_056_000)
+        let first = makeEnvelope(sequence: 1, capturedAt: now)
+        let second = makeEnvelope(
+            sequence: 2,
+            capturedAt: now.addingTimeInterval(1)
+        )
+        let third = makeEnvelope(
+            sequence: 3,
+            capturedAt: now.addingTimeInterval(2),
+            snapshot: WorkoutSnapshotV1(
+                state: .paused,
+                startDate: now.addingTimeInterval(-1)
+            )
+        )
+        var buffer = WorkoutLatestEnvelopeBuffer()
+        buffer.offer(first)
+        expect(buffer.beginNext() == first, "the first envelope should send immediately")
+        buffer.offer(second)
+        buffer.offer(third)
+        expect(
+            buffer.pending == third,
+            "backpressure must retain only the newest complete pending snapshot"
+        )
+        buffer.complete(succeeded: true)
+        expect(buffer.beginNext() == third, "the next send should skip the obsolete middle snapshot")
+        buffer.complete(succeeded: false)
+        expect(
+            buffer.beginNext() == third,
+            "a failed final send should remain available for one reconnect retry"
+        )
+        buffer.interruptInFlight()
+        expect(
+            buffer.pending == third && buffer.inFlight == nil,
+            "a disconnect should safely return the interrupted full snapshot to pending"
+        )
+
+        let acknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: second.sessionID,
+            sessionToken: second.sessionToken,
+            transportGenerationID: second.transportGenerationID,
+            sequence: 4,
+            capturedAt: now.addingTimeInterval(3),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .pause,
+                resultingState: .paused,
+                acknowledgedSequence: 1
+            )
+        )
+        var priorityBuffer = WorkoutLatestEnvelopeBuffer()
+        priorityBuffer.offer(second)
+        priorityBuffer.offer(acknowledgement)
+        expect(
+            priorityBuffer.pending == second,
+            "a later acknowledgement must not evict a pending full metric snapshot"
+        )
+        expect(
+            priorityBuffer.beginNext() == second,
+            "the earlier snapshot should preserve sequence order"
+        )
+        priorityBuffer.complete(succeeded: true)
+        expect(
+            priorityBuffer.beginNext() == acknowledgement,
+            "the acknowledgement must remain queued after the snapshot"
+        )
+
+        var staleOfferBuffer = WorkoutLatestEnvelopeBuffer()
+        staleOfferBuffer.offer(third)
+        expect(
+            staleOfferBuffer.beginNext() == third,
+            "the newest snapshot should enter flight"
+        )
+        staleOfferBuffer.offer(second)
+        staleOfferBuffer.complete(succeeded: true)
+        expect(
+            staleOfferBuffer.beginNext() == nil,
+            "an older offer must not replay after a newer in-flight snapshot"
+        )
+
+        let terminal = makeEnvelope(
+            sequence: 5,
+            capturedAt: now.addingTimeInterval(4),
+            snapshot: WorkoutSnapshotV1(
+                state: .ended,
+                startDate: now.addingTimeInterval(-1),
+                terminalOutcome: .saved
+            )
+        )
+        var shutdownBuffer = WorkoutLatestEnvelopeBuffer()
+        shutdownBuffer.offer(first)
+        expect(
+            shutdownBuffer.beginNext() == first,
+            "the live snapshot should be in flight before shutdown"
+        )
+        shutdownBuffer.offer(acknowledgement)
+        shutdownBuffer.offer(terminal)
+        expect(
+            shutdownBuffer.prioritizeShutdownEnvelope(terminal),
+            "shutdown should supersede an older hung live send"
+        )
+        expect(
+            shutdownBuffer.beginNext() == terminal,
+            "the final snapshot must become the bounded shutdown attempt"
+        )
+        shutdownBuffer.complete(succeeded: true)
+        expect(
+            shutdownBuffer.beginNext() == nil,
+            "obsolete pre-terminal traffic must not follow the final snapshot"
+        )
+    }
+
     private mutating func testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero() {
         expect(WorkoutValueFormatter.heartRate(nil) == "--", "missing heart rate should be unavailable")
         expect(WorkoutValueFormatter.heartRate(0) == "--", "zero heart rate should be unavailable")
@@ -2991,6 +4458,436 @@ private struct WorkoutContractTestSuite {
         expect(
             WorkoutValueFormatter.duration(Double.greatestFiniteMagnitude) == "596523:14:07",
             "huge finite duration should saturate instead of trapping"
+        )
+    }
+
+    private mutating func testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation() {
+        var startCount = 0
+        let start = { startCount += 1 }
+
+        WorkoutStartDisclosureV1.perform(.cancel, start: start)
+        expect(
+            startCount == 0,
+            "Cancel must not launch the Watch or create a workout session"
+        )
+
+        WorkoutStartDisclosureV1.perform(.startAnyway, start: start)
+        expect(
+            startCount == 1,
+            "Start Anyway must invoke the existing Watch-owned start exactly once"
+        )
+        expect(
+            WorkoutStartDisclosureV1.message.contains("can’t check")
+                && WorkoutStartDisclosureV1.message.contains("may end"),
+            "the disclosure must state both the public-API limitation and displacement risk"
+        )
+        expect(
+            WorkoutStartDisclosureV1.cancelTitle == "Cancel"
+                && WorkoutStartDisclosureV1.confirmTitle == "Start Anyway",
+            "the start decision must remain explicit and unambiguous"
+        )
+    }
+
+    private mutating func testWorkoutDiscardDisclosureRequiresFinalConfirmation() {
+        var discardCount = 0
+        let discard = { discardCount += 1 }
+        let expectedSessionID = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000001"
+        )!
+        let replacementSessionID = UUID(
+            uuidString: "EEEEEEEE-0000-0000-0000-000000000002"
+        )!
+
+        WorkoutDiscardDisclosureV1.perform(
+            .cancel,
+            expectedSessionID: expectedSessionID,
+            currentSessionID: expectedSessionID,
+            discard: discard
+        )
+        expect(
+            discardCount == 0,
+            "Keep Riding must not discard or end the active workout"
+        )
+
+        WorkoutDiscardDisclosureV1.perform(
+            .confirmDiscard,
+            expectedSessionID: expectedSessionID,
+            currentSessionID: replacementSessionID,
+            discard: discard
+        )
+        expect(
+            discardCount == 0,
+            "a stale warning must not discard a replacement workout"
+        )
+
+        WorkoutDiscardDisclosureV1.perform(
+            .confirmDiscard,
+            expectedSessionID: expectedSessionID,
+            currentSessionID: expectedSessionID,
+            discard: discard
+        )
+        expect(
+            discardCount == 1,
+            "the final destructive confirmation must discard exactly once"
+        )
+        expect(
+            WorkoutDiscardDisclosureV1.message.contains("can’t be undone")
+                && WorkoutDiscardDisclosureV1.message.contains("not be saved to Health"),
+            "the final discard warning must disclose irreversibility and the Health outcome"
+        )
+        expect(
+            WorkoutDiscardDisclosureV1.cancelTitle == "Keep Riding"
+                && WorkoutDiscardDisclosureV1.confirmTitle == "Discard Workout",
+            "the final discard decision must remain explicit and unambiguous"
+        )
+    }
+
+    private mutating func testTerminalErrorAndTakeoverCopyUseDurableDisposition() {
+        expect(
+            WorkoutTerminalErrorPolicy.resolve(
+                summaryError: nil,
+                persistedFinishError: nil
+            ) == nil,
+            "a successful retry must not promote a transient failure into the terminal result"
+        )
+        expect(
+            WorkoutTerminalErrorPolicy.resolve(
+                summaryError: nil,
+                persistedFinishError: .anotherWorkoutActive
+            ) == .anotherWorkoutActive,
+            "a persisted takeover cause must reach the terminal result"
+        )
+        expect(
+            WorkoutTerminalErrorPolicy.resolve(
+                summaryError: .terminalChoiceConflict,
+                persistedFinishError: .anotherWorkoutActive
+            ) == .anotherWorkoutActive,
+            "a durable takeover cause must outrank an older generic summary error"
+        )
+
+        let liveDiscard = WorkoutCrossAppTakeoverCopyV1.live(
+            disposition: .discard
+        )
+        let summaryDiscard = WorkoutCrossAppTakeoverCopyV1.summary(
+            disposition: .discard
+        )
+        expect(
+            liveDiscard.contains("discarding")
+                && !liveDiscard.contains("saving"),
+            "live takeover copy must describe the rider's Discard choice"
+        )
+        expect(
+            summaryDiscard.contains("discarded")
+                && !summaryDiscard.contains(" saved"),
+            "terminal takeover copy must never claim a discarded ride was saved"
+        )
+        expect(
+            WorkoutCrossAppTakeoverCopyV1.summary(disposition: .save)
+                .contains("saved"),
+            "saved takeover copy must still identify the partial save"
+        )
+    }
+
+    private mutating func testEveryRiderInitiatedStartSurfaceUsesDisclosure() {
+        let iosAppDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer")
+        let iPhoneViewURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let watchViewURL = iosAppDirectory
+            .appendingPathComponent("BikeComputerWatch/Views/WorkoutStartView.swift")
+        guard let iPhoneSource = try? String(
+            contentsOf: iPhoneViewURL,
+            encoding: .utf8
+        ),
+        let watchSource = try? String(
+            contentsOf: watchViewURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "start-surface source files must be available")
+            return
+        }
+
+        let iPhoneDisclosureCount = iPhoneSource
+            .components(separatedBy: "WorkoutStartConfirmationButton(action: onStart)")
+            .count - 1
+        expect(
+            iPhoneDisclosureCount == 4,
+            "all four iPhone idle, dashboard, failed, and disconnected start routes must use the disclosure component"
+        )
+        expect(
+            !iPhoneSource.contains("Button(\"Try Again\", action: onStart)"),
+            "iPhone retry controls must not call the Watch launch closure directly"
+        )
+        let iPhoneConfirmationComponent = iPhoneSource
+            .components(separatedBy: "struct WorkoutCompactCard").first ?? ""
+        let compactIPhoneConfirmation = iPhoneConfirmationComponent.filter {
+            !$0.isWhitespace
+        }
+        expect(
+            iPhoneConfirmationComponent.contains(
+                "Button {\n            showingConfirmation = true\n        } label:"
+            )
+                && !iPhoneConfirmationComponent.contains("action()")
+                && iPhoneConfirmationComponent.contains(
+                    "WorkoutStartDisclosureV1.perform(.startAnyway, start: action)"
+                ),
+            "the iPhone confirmation component must open the alert without directly launching"
+        )
+        expect(
+            compactIPhoneConfirmation.contains(
+                "Button(WorkoutStartDisclosureV1.cancelTitle,role:.cancel){WorkoutStartDisclosureV1.perform(.cancel,start:action)}"
+            )
+                && compactIPhoneConfirmation.contains(
+                    "Button(WorkoutStartDisclosureV1.confirmTitle){WorkoutStartDisclosureV1.perform(.startAnyway,start:action)}"
+                )
+                && compactIPhoneConfirmation.contains(
+                    "isPresented:$showingConfirmation"
+                ),
+            "iPhone Cancel and Start Anyway must map to their matching shared-policy choices"
+        )
+
+        let watchDisclosureActionCount = watchSource
+            .components(separatedBy: "start: manager.startOutdoorCycling")
+            .count - 1
+        expect(
+            watchSource.contains("showingStartConfirmation = true")
+                && watchDisclosureActionCount == 2
+                && !watchSource.contains("manager.startOutdoorCycling()"),
+            "Watch Start Ride must expose only Cancel and Start Anyway through the shared disclosure policy"
+        )
+        let compactWatchSource = watchSource.filter { !$0.isWhitespace }
+        expect(
+            compactWatchSource.contains(
+                "Button(WorkoutStartDisclosureV1.cancelTitle,role:.cancel){WorkoutStartDisclosureV1.perform(.cancel,start:manager.startOutdoorCycling)}"
+            )
+                && compactWatchSource.contains(
+                    "Button(WorkoutStartDisclosureV1.confirmTitle){WorkoutStartDisclosureV1.perform(.startAnyway,start:manager.startOutdoorCycling)}"
+                )
+                && compactWatchSource.contains(
+                    "isPresented:$showingStartConfirmation"
+                ),
+            "Watch Cancel and Start Anyway must map to their matching shared-policy choices"
+        )
+    }
+
+    private mutating func testEveryDiscardSurfaceRequiresFinalConfirmation() {
+        let iosAppDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer")
+        let iPhoneViewURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let watchViewURL = iosAppDirectory
+            .appendingPathComponent("BikeComputerWatch/Views/LiveWorkoutView.swift")
+        guard let iPhoneSource = try? String(
+            contentsOf: iPhoneViewURL,
+            encoding: .utf8
+        ),
+        let watchSource = try? String(
+            contentsOf: watchViewURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "discard-surface source files must be available")
+            return
+        }
+
+        for (surface, source, sessionSource, discardClosure) in [
+            ("iPhone", iPhoneSource, "store.presentation.sessionID", "onDiscard"),
+            ("Watch", watchSource, "manager.activeSessionID", "manager.discard"),
+        ] {
+            let compactSource = source.filter { !$0.isWhitespace }
+            expect(
+                compactSource.contains(
+                    "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
+                ),
+                "\(surface) finish options must request, not execute, discard"
+            )
+            expect(
+                compactSource.contains(
+                    "WorkoutDiscardDisclosureV1.perform(.cancel,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
+                )
+                    && compactSource.contains(
+                        "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
+                    ),
+                "\(surface) final warning must map Keep Riding and Discard to shared policy choices"
+            )
+            expect(
+                compactSource.contains(
+                    "isPresented:discardConfirmationPresented"
+                ),
+                "\(surface) must present the dedicated final discard warning"
+            )
+            expect(
+                compactSource.contains(
+                    "caseoptions(sessionID:UUID)"
+                )
+                    && compactSource.contains(
+                        "casediscardConfirmation(sessionID:UUID)"
+                    )
+                    && compactSource.contains(".onChange(of:\(sessionSource))"),
+                "\(surface) finish prompts must be scoped to and invalidated with their session"
+            )
+        }
+    }
+
+    private mutating func testWorkoutUICompositionRetainsPhaseThreeExitCriteria() {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputer/Views/WorkoutViews.swift"
+            )
+        let contentViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputer/ContentView.swift")
+        let liveWatchViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift"
+            )
+        let summaryWatchViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputerWatch/Views/WorkoutSummaryView.swift"
+            )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8),
+              let contentViewSource = try? String(
+                contentsOf: contentViewURL,
+                encoding: .utf8
+              ),
+              let liveWatchViewSource = try? String(
+                contentsOf: liveWatchViewURL,
+                encoding: .utf8
+              ),
+              let summaryWatchViewSource = try? String(
+                contentsOf: summaryWatchViewURL,
+                encoding: .utf8
+              ) else {
+            expect(false, "workout UI source must be available")
+            return
+        }
+
+        for metricTitle in [
+            "Heart Rate",
+            "HR Zone",
+            "Speed",
+            "Distance",
+            "Energy",
+            "Power",
+            "Cadence",
+            "Average HR",
+            "Altitude",
+        ] {
+            expect(
+                source.contains("metric(\n                        \"\(metricTitle)\""),
+                "dashboard must retain the \(metricTitle) metric tile"
+            )
+        }
+        expect(
+            source.contains("TimelineView(.periodic(from: Date(), by: 1))")
+                && source.contains("captureAgeLabel(age)"),
+            "dashboard must render live capture age"
+        )
+        for controlRoute in [
+            "Button(action: onResume)",
+            "Button(action: onPause)",
+            "Button(\"End and Save\") {",
+            "onEndAndSave()",
+            "WorkoutDiscardDisclosureV1.perform(",
+            "discard: onDiscard",
+            "if onDone()",
+        ] {
+            expect(
+                source.contains(controlRoute),
+                "dashboard must retain control wiring: (controlRoute)"
+            )
+        }
+        expect(
+            source.contains("connectionState == .unsupported")
+                && source.contains("connectionState == .disconnected")
+                && source.contains("connectionState == .ended")
+                && source.contains("Waiting for the final saved or discarded result")
+                && source.contains("Saved by Apple Watch")
+                && source.contains("Not saved to Health")
+                && source.contains("Finished on Apple Watch"),
+            "dashboard must retain unsupported, disconnected, final-wait, and terminal summary states"
+        )
+
+        let compactSource = source.filter { !$0.isWhitespace }
+        for metricBinding in [
+            "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
+            "metric(\"HRZone\",zoneValue(snapshot),\"ZONE\"",
+            "metric(\"Speed\",WorkoutValueFormatter.speed(snapshot.currentSpeed?.value),\"KM/H\"",
+            "metric(\"Distance\",WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),WorkoutValueFormatter.distanceUnit(snapshot.cyclingDistance?.value)",
+            "metric(\"Energy\",WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),\"KCAL\"",
+            "metric(\"Power\",WorkoutValueFormatter.whole(snapshot.cyclingPower?.value),\"W\"",
+            "metric(\"Cadence\",WorkoutValueFormatter.whole(snapshot.cyclingCadence?.value),\"RPM\"",
+            "metric(\"AverageHR\",WorkoutValueFormatter.heartRate(snapshot.averageHeartRate?.value),\"BPM\"",
+            "metric(\"Altitude\",altitudeValue(snapshot.location?.altitude),\"M\"",
+        ] {
+            expect(
+                compactSource.contains(metricBinding),
+                "each workout metric title must remain bound to its matching snapshot value"
+            )
+        }
+        expect(
+            compactSource.contains(
+                "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"ResumeWorkout\""
+            )
+                && compactSource.contains(
+                    "else{Button(action:onPause){Label(\"PauseWorkout\""
+                )
+                && compactSource.contains(
+                    "Button(\"EndandSave\"){finishPrompt=nilguardstore.presentation.sessionID==sessionIDelse{return}onEndAndSave()}"
+                )
+                && compactSource.contains(
+                    "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
+                )
+                && compactSource.contains(
+                    "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
+                )
+                && compactSource.contains(
+                    "Button(role:.destructive){ifletsessionID=store.presentation.sessionID{finishPrompt=.options(sessionID:sessionID)}}label:{Label(\"EndWorkout\""
+                ),
+            "dashboard labels must remain bound to the matching control closures"
+        )
+        expect(
+            compactSource.contains(
+                "ifletage=store.presentation.captureAge(at:context.date){Text(captureAgeLabel(age))"
+            ),
+            "capture age must remain bound to the TimelineView's current date"
+        )
+
+        let compactContentView = contentViewSource.filter { !$0.isWhitespace }
+        expect(
+            compactContentView.contains(
+                "WorkoutCompactCard(store:workoutStore,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
+            )
+                && compactContentView.contains(
+                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                ),
+            "ContentView must present the dashboard from its exact state and inject each production manager action"
+        )
+
+        let compactLiveWatchView = liveWatchViewSource.filter {
+            !$0.isWhitespace
+        }
+        let compactSummaryWatchView = summaryWatchViewSource.filter {
+            !$0.isWhitespace
+        }
+        expect(
+            compactLiveWatchView.contains(
+                "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
+            )
+                && compactSummaryWatchView.contains(
+                    "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
+                ),
+            "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
         )
     }
 

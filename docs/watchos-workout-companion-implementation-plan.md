@@ -39,13 +39,20 @@ was removed from the repository.
   workout.
 - The BikeComputer Watch app, not Apple's Workout app, owns the active
   HKWorkoutSession.
-- Apple Watch permits only one active workout session. If Apple Workout or
-  another workout app is already running, BikeComputer shows the conflict and
-  does not create a second workout.
+- Apple Watch permits only one active workout session, but public HealthKit APIs
+  do not expose whether another app currently owns it. Before every
+  rider-initiated start from Watch or iPhone, BikeComputer warns that it cannot
+  check for another app's workout and that starting may end that workout.
+  `Cancel` creates no BikeComputer session; `Start Anyway` proceeds with the
+  Watch-owned start. If another app later takes ownership, BikeComputer reports
+  that displacement explicitly and never retries in a loop.
 - Workout and navigation are independent:
   - starting navigation does not silently start a workout;
   - ending navigation does not end a workout;
   - ending a workout does not end navigation.
+- Discard is a two-step destructive action on both Watch and iPhone. Selecting
+  `Discard Workout` from the finish menu opens a final warning; only confirming
+  that warning discards the ride, while `Keep Riding` leaves it active.
 - A later opt-in setting may offer Start workout with navigation, but it must
   default off and still require a reachable Watch.
 - The workout continues and saves on Watch if iPhone or ESP32 disconnects.
@@ -200,7 +207,8 @@ If HealthKit access is denied:
 
 - navigation and ESP32 connectivity continue to work;
 - the Watch app explains that it cannot start a BikeComputer workout;
-- the iPhone exposes a link to the appropriate system settings;
+- the iPhone provides exact on-Watch authorization guidance; Apple exposes no
+  public iPhone deep link to the Watch app's Health authorization surface;
 - no synthetic HKWorkout is created later.
 
 If location access is denied on Watch, the session may still collect heart
@@ -234,6 +242,10 @@ source matters.
 When a Watch workout is current, Watch-owned speed, distance, elapsed time, and
 sensor values win on the iPhone and ESP32. When there is no Watch workout, the
 existing iPhone navigation telemetry remains available exactly as it is today.
+An iPhone location fallback is instantaneous data: reject future samples and
+expire speed, coordinates, and altitude after 10 seconds. Only merge iPhone
+altitude into Watch coordinates when the samples are temporally and spatially
+coherent; preserve the oldest component timestamp.
 
 ### Heart-rate zones
 
@@ -266,6 +278,12 @@ WorkoutEnvelopeV1 contains:
 - monotonically increasing UInt64 sequence;
 - capturedAt timestamp.
 
+Version 1.3 controls also carry an optional iPhone control-sender UUID. It
+identifies one iPhone process' sequence space so a relaunched phone can advance
+to a fresh sender generation without reusing the Watch's retained replay
+watermark. Watch retires prior sender UUIDs for the workout; delayed controls
+from a retired process cannot resume.
+
 WorkoutSnapshotV1 contains:
 
 - session state: idle, starting, running, paused, ending, ended, or failed;
@@ -281,7 +299,12 @@ WorkoutSnapshotV1 contains:
 - latest location coordinate, timestamp, horizontal/vertical accuracy, course,
   speed, and altitude;
 - a compact availability/source mask;
-- an optional user-safe error code, never raw sensitive data.
+- an optional user-safe error code, never raw sensitive data; an explicit
+  opposite Save/Discard outcome is presented as a terminal-choice conflict,
+  not as a connectivity failure; an outcome-free native end keeps the choice
+  pending until an acknowledgement, explicit outcome, or honest unconfirmed
+  timeout;
+- an optional terminal outcome distinguishing a Watch save from discard.
 
 WorkoutControlV1 contains:
 
@@ -301,6 +324,8 @@ Decoder rules:
 - reject empty session IDs, token zero, non-finite numbers, impossible negative
   totals, and invalid coordinates;
 - keep the highest sequence per session and discard older snapshots;
+- keep the highest control sequence per iPhone sender generation, accept only
+  one newer unseen sender generation, and reject retired senders;
 - permit a same-session token change only for an unseen explicit transport
   generation with the canonical start date and a newer capture time; remember
   retired generations so they cannot resume, even with newer sequence numbers;
@@ -385,6 +410,11 @@ The Watch owns finalization:
    discarded, then publish one final ended snapshot and summary.
 7. Stop mirroring only after final state delivery has been attempted.
 8. Clear in-memory raw route points and the durable finish request.
+
+The final-state attempt is bounded. If HealthKit returns neither a mirror-send
+completion nor a disconnect callback within 10 seconds, invalidate that send,
+end the retained primary session exactly once, and release new-workout
+admission rather than wedging cleanup indefinitely.
 
 An iPhone End action sends a request-end control to Watch so Watch can perform
 this ordered finalization. If Watch is unreachable, iPhone explains that the
@@ -478,8 +508,10 @@ Create one long-lived manager, available on iOS 17 and later.
 - Decode remote envelopes on the HealthKit delegate queue and hand validated
   snapshots to a MainActor store.
 - Expose start, pause, resume, end, and discard requests.
-- Track launch timeout, remote disconnect, stale data, and session conflict as
-  explicit states.
+- Track launch timeout, remote disconnect, stale data, and cross-app session
+  displacement as explicit states.
+- Treat native terminal state as sticky: freshness ticks or delayed active
+  snapshots cannot move an ended session back to connected or stale.
 - Never save a second iPhone HKWorkout for a Watch-owned session.
 
 ### WorkoutMetricsStore
@@ -512,7 +544,8 @@ Add:
 - Start on Apple Watch while idle;
 - Pause, Resume, and End while active;
 - a clear Watch unavailable/setup-required state;
-- a final summary after save.
+- a final summary after save or discard; keep Done unavailable while a terminal
+  choice is still awaiting acknowledgement, explicit outcome, or timeout.
 
 Navigation and workout controls must remain separately labelled. The existing
 End navigation button never ends the workout.
@@ -726,7 +759,8 @@ Presentation rules:
 | No paired/reachable Watch | iPhone start fails clearly; navigation remains usable. |
 | HealthKit denied | No workout starts; no synthetic workout is saved. |
 | Location denied on Watch | Continue supported sensor metrics; route/elevation unavailable. |
-| Apple Workout already active | Show single-session conflict and do not retry in a loop. |
+| Apple Workout already active before BikeComputer starts | Require the cross-app warning before launch/start. Cancel creates no session; Start Anyway may end the existing workout, as disclosed. |
+| Another app starts while BikeComputer is active | Report that BikeComputer was displaced, stop safely, and do not retry in a loop. |
 | iPhone disconnects | Watch continues and saves; buffer only the newest pending snapshot. |
 | Mirroring reconnects | Replace session reference and request a full snapshot. |
 | ESP32 disconnects | App continues; resend latest core and extended frames after auth. |
@@ -876,7 +910,10 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 7. Background iPhone without navigation and verify honest stale behavior.
 8. Pause/resume from Watch and iPhone.
 9. End from Watch and from iPhone.
-10. Attempt start while Apple Workout is active.
+10. With Apple Workout active, open each BikeComputer start surface: verify the
+    warning appears, Cancel leaves Apple Workout active, and Start Anyway only
+    proceeds after the explicit choice and transfers workout ownership as
+    disclosed.
 11. Deny HealthKit, then deny Watch location separately.
 12. Ride without external sensors.
 13. Ride with cycling speed, power, and cadence sensors.
@@ -901,7 +938,9 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 - Reconnection restores one coherent latest snapshot without stale replay.
 - Exactly one HKWorkout is saved, by Watch, with a route when permitted.
 - Navigation and workout can start/end independently.
-- Apple Workout conflict is handled explicitly.
+- Cross-app workout ownership is handled explicitly: both start surfaces require
+  the warning, Cancel never launches or creates a session, and displacement of
+  an active BikeComputer workout is reported honestly.
 - Existing iPhone navigation and legacy firmware GPS telemetry remain working.
 - No raw health metrics are persisted on ESP32 or sent to a backend.
 - iOS, watchOS, and both firmware targets pass their relevant automated and

@@ -41,7 +41,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private let idleGpsSyncInterval: TimeInterval = 10 * 60
     private var lastIdleGpsSyncTime: Date = .distantPast
     private var rideStartDate: Date?
-    private var rideDistanceMeters: CLLocationDistance = 0
+    @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
     private let now: () -> Date

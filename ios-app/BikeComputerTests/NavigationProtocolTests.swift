@@ -503,6 +503,7 @@ struct NavigationProtocolTests {
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorReroutesAndAppliesLatestRoute()
+        testWorkoutAndNavigationLifecyclesStayIndependent()
         testCoordinatorRejectsStaleRerouteLocations()
         testCoordinatorDetectsDeviationFromCurrentStep()
         testCoordinatorEnforcesRerouteCooldown()
@@ -2554,6 +2555,133 @@ struct NavigationProtocolTests {
             coordinator.processNavigationLocationForTesting(cooldownDeviation)
         }
         assertEqual(factory.tasks.count, 2, "cooldown suppresses an immediate repeated reroute")
+    }
+
+    @MainActor
+    static func testWorkoutAndNavigationLifecyclesStayIndependent() {
+        let suite = "CoordinatorWorkoutIndependence.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let now = Date(timeIntervalSinceReferenceDate: 800_300_000)
+        let store = WorkoutMetricsStore()
+        store.attachMirroredSession(at: now)
+        _ = store.ingestBatch(
+            [
+                WorkoutEnvelopeV1(
+                    kind: .snapshot,
+                    sessionID: UUID(),
+                    sessionToken: 3,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            workoutMetricsStore: store,
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.01,
+            longitude: -122.0
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        factory.tasks[0].succeed(with: [route])
+        assert(coordinator.isNavigating, "navigation should start beside a workout")
+        assert(
+            store.presentation.navigation.routeRemainingDistanceMeters != nil,
+            "coordinator should publish navigation-only context to the workout store"
+        )
+        let firstFix = CLLocation(
+            coordinate: sourceCoordinate,
+            altitude: 12,
+            horizontalAccuracy: 4,
+            verticalAccuracy: 3,
+            course: 0,
+            speed: 6,
+            timestamp: Date()
+        )
+        let secondFix = CLLocation(
+            coordinate: CLLocationCoordinate2D(
+                latitude: 37.0001,
+                longitude: -122.0
+            ),
+            altitude: 13,
+            horizontalAccuracy: 4,
+            verticalAccuracy: 3,
+            course: 0,
+            speed: 7,
+            timestamp: Date()
+        )
+        coordinator.processNavigationLocationForTesting(firstFix)
+        coordinator.processNavigationLocationForTesting(secondFix)
+        assertEqual(
+            store.presentation.snapshot.currentSpeed?.source,
+            .iPhoneLocation,
+            "coordinator should publish iPhone speed when Watch speed is unavailable"
+        )
+        assertEqual(
+            store.presentation.snapshot.location?.latitude,
+            secondFix.coordinate.latitude,
+            "coordinator should publish the latest valid iPhone location fallback"
+        )
+        assert(
+            (store.presentation.snapshot.cyclingDistance?.value ?? 0) > 0
+                && store.presentation.snapshot.cyclingDistance?.source
+                    == .iPhoneNavigation,
+            "coordinator should publish workout-relative navigation distance"
+        )
+        coordinator.stopNavigation()
+        assertEqual(
+            store.presentation.sessionState,
+            .running,
+            "ending navigation must not end the Watch-owned workout"
+        )
+        assert(
+            store.presentation.snapshot.cyclingDistance == nil
+                && store.presentation.navigation == .empty,
+            "ending navigation should clear only iPhone navigation fallbacks"
+        )
+
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        factory.tasks[1].succeed(with: [route])
+        store.confirmSessionState(.ended, at: now.addingTimeInterval(60))
+        assert(
+            coordinator.isNavigating,
+            "ending the workout must not stop navigation"
+        )
     }
 
     @MainActor

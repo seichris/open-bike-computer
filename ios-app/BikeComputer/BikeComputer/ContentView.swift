@@ -13,13 +13,16 @@ struct ContentView: View {
     
     // MARK: - State
     
-    @StateObject private var coordinator = BikeComputerCoordinator()
+    @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var offlineMapManager = OfflineMapManager()
+    @ObservedObject private var workoutStore: WorkoutMetricsStore
+    private let workoutMirrorManager: WorkoutMirrorManager
     @Environment(\.scenePhase) private var scenePhase
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
+    @State private var showingWorkoutDashboard = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
@@ -27,6 +30,19 @@ struct ContentView: View {
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
     @State private var offlineMapSelectionDragStartFrame: CGRect?
+
+    init(workoutMirrorManager: WorkoutMirrorManager) {
+        self.workoutMirrorManager = workoutMirrorManager
+        _workoutStore = ObservedObject(
+            wrappedValue: workoutMirrorManager.store
+        )
+        _coordinator = StateObject(
+            wrappedValue: BikeComputerCoordinator(
+                destinationStore: SavedDestinationStore(),
+                workoutMetricsStore: workoutMirrorManager.store
+            )
+        )
+    }
     
     var body: some View {
         GeometryReader { proxy in
@@ -47,6 +63,16 @@ struct ContentView: View {
                         navigationInstructionBanner
                             .padding(.horizontal, 14)
                             .padding(.top, 8)
+                    }
+
+                    if !offlineMapManager.isMapAreaSelectionActive {
+                        WorkoutCompactCard(
+                            store: workoutStore,
+                            onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                            onOpen: { showingWorkoutDashboard = true }
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
                     }
 
                     Spacer()
@@ -103,16 +129,29 @@ struct ContentView: View {
                 )
                     .environmentObject(coordinator.bleManager)
             }
+            .sheet(isPresented: $showingWorkoutDashboard) {
+                WorkoutDashboardView(
+                    store: workoutStore,
+                    onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                    onPause: workoutMirrorManager.pause,
+                    onResume: workoutMirrorManager.resume,
+                    onEndAndSave: workoutMirrorManager.endAndSave,
+                    onDiscard: workoutMirrorManager.discard,
+                    onDone: workoutMirrorManager.resetTerminalPresentation
+                )
+            }
         }
         .onAppear {
             updateIdleTimer()
             coordinator.applicationDidBecomeActive()
+            workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
             updateIdleTimer(for: newValue)
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
+            workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: coordinator.isNavigating) { _ in
@@ -525,6 +564,6 @@ private enum OfflineMapSelectionResizeEdge {
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView()
+        ContentView(workoutMirrorManager: WorkoutMirrorManager())
     }
 }

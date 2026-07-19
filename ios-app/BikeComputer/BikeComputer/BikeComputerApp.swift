@@ -15,20 +15,23 @@ struct BikeComputerApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(workoutMirrorManager: appDelegate.workoutMirrorManager)
         }
     }
 }
 
 // MARK: - App Delegate for Background Tasks
 
+@MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
+    let workoutMirrorManager = WorkoutMirrorManager()
     
     func application(_ application: UIApplication, 
                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
         
         // Configure for background location updates
         print("BikeComputer app launched")
+        workoutMirrorManager.installMirroringHandler()
         
         return true
     }

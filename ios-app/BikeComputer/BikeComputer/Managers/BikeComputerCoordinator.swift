@@ -64,6 +64,7 @@ class BikeComputerCoordinator: ObservableObject {
     let bleManager = BLEManager()  // Accessible for settings view
     let firmwareUpdateManager = FirmwareUpdateManager()
     let destinationStore: SavedDestinationStore
+    let workoutMetricsStore: WorkoutMetricsStore
     private let navEngine = NavigationEngine()
     private let locationManager = CurrentLocationManager()
     private let directionsFactory: NavigationDirectionsFactory
@@ -141,6 +142,7 @@ class BikeComputerCoordinator: ObservableObject {
 
     init(
         destinationStore: SavedDestinationStore,
+        workoutMetricsStore: WorkoutMetricsStore? = nil,
         directionsFactory: @escaping NavigationDirectionsFactory = {
             MapKitNavigationDirectionsTask(request: $0)
         },
@@ -148,6 +150,8 @@ class BikeComputerCoordinator: ObservableObject {
         now: @escaping () -> Date = Date.init
     ) {
         self.destinationStore = destinationStore
+        self.workoutMetricsStore = workoutMetricsStore
+            ?? WorkoutMetricsStore(now: now)
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
@@ -211,9 +215,37 @@ class BikeComputerCoordinator: ObservableObject {
         navEngine.$expectedArrivalDate
             .assign(to: &$expectedArrivalDate)
 
+        Publishers.CombineLatest4(
+            navEngine.$isNavigating,
+            navEngine.$rideDistanceMeters,
+            navEngine.$routeRemainingDistance,
+            navEngine.$routeRemainingTime
+        )
+        .combineLatest(navEngine.$currentInstruction)
+        .sink { [weak self] navigation, instruction in
+            guard let self else { return }
+            let (isNavigating, distance, remainingDistance, remainingTime) =
+                navigation
+            workoutMetricsStore.updateNavigationFallback(
+                isNavigating: isNavigating,
+                distanceTraveledMeters: distance,
+                routeRemainingDistanceMeters: remainingDistance,
+                routeRemainingTime: remainingTime,
+                instruction: instruction,
+                capturedAt: now()
+            )
+        }
+        .store(in: &cancellables)
+
         // Bind location manager state
         locationManager.$currentLocation
             .assign(to: &$currentLocation)
+
+        locationManager.$currentLocation
+            .sink { [weak self] location in
+                self?.updateWorkoutLocationFallback(location)
+            }
+            .store(in: &cancellables)
 
         locationManager.$currentLocation
             .compactMap { $0 }
@@ -349,9 +381,48 @@ class BikeComputerCoordinator: ObservableObject {
         }
     }
 
+    private static func workoutFallbackLocation(
+        _ location: CLLocation
+    ) -> WorkoutLocationV1? {
+        let coordinate = location.coordinate
+        guard CLLocationCoordinate2DIsValid(coordinate),
+              location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0,
+              location.timestamp.timeIntervalSinceReferenceDate.isFinite else {
+            return nil
+        }
+        let hasAltitude = location.altitude.isFinite
+            && location.verticalAccuracy.isFinite
+            && location.verticalAccuracy >= 0
+        let course = location.course.isFinite
+            && (0..<360).contains(location.course)
+            ? location.course
+            : nil
+        let speed = location.speed.isFinite && location.speed >= 0
+            ? location.speed
+            : nil
+        return WorkoutLocationV1(
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            capturedAt: location.timestamp,
+            horizontalAccuracy: location.horizontalAccuracy,
+            altitude: hasAltitude ? location.altitude : nil,
+            verticalAccuracy: hasAltitude ? location.verticalAccuracy : nil,
+            course: course,
+            speed: speed
+        )
+    }
+
+    private func updateWorkoutLocationFallback(_ location: CLLocation?) {
+        workoutMetricsStore.updateIPhoneLocationFallback(
+            location.flatMap(Self.workoutFallbackLocation)
+        )
+    }
+
 #if HOST_TESTING
     func processNavigationLocationForTesting(_ location: CLLocation) {
         currentLocation = location
+        updateWorkoutLocationFallback(location)
         processNavigationLocation(location)
     }
 #endif
