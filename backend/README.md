@@ -85,9 +85,19 @@ persisted with the job before the worker downloads the matching PBF.
 
 ## Coolify
 
-Use `backend/docker-compose.yml` as the first Coolify deployment shape. The
-service stores mutable state in the `map-platform-data` volume. The host needs
-enough CPU, RAM, and temporary disk for the largest allowed PBF cut-out.
+Use `deploy/map-platform/compose.yaml` for Coolify production. It independently
+pins the API/maintenance control plane and the signed-map worker to immutable
+GHCR digests and is updated by a reviewed image-promotion pull request.
+`backend/docker-compose.yml` remains the local development and image-build
+shape. The service stores mutable state in the `map-platform-data` volume. The
+host needs enough CPU, RAM, and temporary disk for the largest allowed PBF
+cut-out.
+
+Configure the existing Coolify resource with repository base directory `/`,
+Docker Compose location `/deploy/map-platform/compose.yaml`, and watch path
+`deploy/map-platform/compose.yaml`. Keep runtime secrets in Coolify, but do not
+set image-selection variables there; the production Compose is the deployment
+source of truth. See `deploy/map-platform/README.md` for promotion and rollback.
 
 Required Coolify secrets:
 
@@ -157,12 +167,16 @@ Percentage and global modes refuse to start unless the promotion, current
 hardware-requirements hash, and every signing key match the checked-in approval
 and production trust registries. They serve only artifacts whose signed worker
 content, key material, requesting iOS build, and required device firmware
-identity match that approval. Pin `MAP_PLATFORM_WORKER_IMAGE` as the immutable
+identity match that approval. Pin the image anchor in
+`deploy/map-platform/compose.yaml` to the immutable
 `registry/repository@sha256:<digest>` reference used by the hardware run when
-promoting. The same Compose value supplies the worker image and the API/worker
-admission identity, while registry signature/provenance policy verifies that
-digest before deployment. The API image may advance to carry the approval
-record without rebuilding the tested worker. See
+promoting. The worker pin supplies both the worker service image and the
+API/worker admission identity, while the independently pinned control-plane
+image can advance to carry a reviewed approval record without replacing that
+tested worker. CI verifies that both digests resolve for Linux/AMD64 and carry
+GitHub provenance from this repository's image workflow before the promotion
+can merge. Coolify then deploys the reviewed immutable references without
+selecting an image tag at runtime. See
 `docs/map-stream-rollout-runbook.md` for commissioning, hardware acceptance,
 promotion, rollback, retention, and rotation.
 

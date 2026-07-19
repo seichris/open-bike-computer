@@ -4,24 +4,51 @@ on:
   push:
     paths:
       - ".github/workflows/map-platform-image.yml"
+      - ".github/workflows/ci.yml"
       - "backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
+      - "config/map-stream-hardware-gate.json"
+      - "config/map-stream-rollout-approvals.json"
       - "config/map-stream-trust.json"
+      - "deploy/map-platform/detect_worker_change.py"
+      - "deploy/map-platform/select_worker_promotion.py"
+      - "deploy/map-platform/update_image.py"
+      - "deploy/map-platform/verify_registry_images.py"
   workflow_dispatch:
+    inputs:
+      pending_worker:
+        description: How to handle an open worker-moving promotion
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - preserve-pending
+          - promote-candidate
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
-  attestations: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   publish:
     name: Publish worker image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
 
@@ -35,9 +62,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/open-bike-computer-map-platform
-          tags: |
-            type=raw,value=${{ github.sha }}
-            type=raw,value=latest,enable={{is_default_branch}}
+          tags: type=raw,value=${{ github.sha }}
 
       - id: image
         name: Build and publish image
@@ -58,8 +83,335 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
+      - name: Move latest to the successful default-branch image
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          current_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if test "$current_sha" != "$GITHUB_SHA"; then
+            git fetch --no-tags origin "$current_sha"
+            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+              --before "$GITHUB_SHA" \
+              --after "$current_sha" \
+              --scope promotion)"
+            if test "$superseded" = "true"; then
+              echo "::notice::Skipping latest because a newer main commit changes image or promotion inputs"
+              exit 0
+            fi
+          fi
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform"
+          docker buildx imagetools create \
+            --tag "${repository}:latest" \
+            "${repository}@${IMAGE_DIGEST}"
+
       - name: Record immutable deployment reference
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           echo "ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+  propose-production:
+    name: Propose production image
+    needs: publish
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      attestations: read
+      contents: write
+      packages: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: base
+        name: Reconcile with the live default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          default_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          git fetch --no-tags origin "$default_sha"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$default_sha"; then
+            echo "::error::The workflow source is not an ancestor of live ${DEFAULT_BRANCH}"
+            exit 1
+          fi
+          if test "$default_sha" != "$GITHUB_SHA"; then
+            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+              --before "$GITHUB_SHA" \
+              --after "$default_sha" \
+              --scope promotion)"
+            if test "$superseded" = "true"; then
+              echo "::notice::A newer main commit owns the production proposal"
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          git switch --detach "$default_sha"
+          echo "sha=${default_sha}" >> "$GITHUB_OUTPUT"
+          echo "superseded=false" >> "$GITHUB_OUTPUT"
+
+      - id: pending
+        name: Load the exact repository-owned production promotion
+        if: steps.base.outputs.superseded == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_BRANCH: deploy/map-platform-production
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          promotion_branch_sha="$(git ls-remote --heads origin \
+            "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
+          echo "branch_sha=${promotion_branch_sha}" >> "$GITHUB_OUTPUT"
+          current_state="$(python3 deploy/map-platform/update_image.py \
+            deploy/map-platform/compose.yaml \
+            --check)"
+          printf '%s\n' "$current_state"
+          current_worker_source="$(printf '%s\n' "$current_state" | awk '$1 == "worker" {print $2}')"
+          current_worker_reference="$(printf '%s\n' "$current_state" | awk '$1 == "worker" {print $3}')"
+          echo "current_worker_source=${current_worker_source}" >> "$GITHUB_OUTPUT"
+          echo "current_worker_reference=${current_worker_reference}" >> "$GITHUB_OUTPUT"
+
+          pending_rows="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f base="$DEFAULT_BRANCH" \
+            -f head="${GITHUB_REPOSITORY_OWNER}:${PROMOTION_BRANCH}" \
+            --jq '.[] | [.number, .head.sha, .head.repo.full_name, .head.ref] | @tsv')"
+          row_count="$(printf '%s\n' "$pending_rows" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if test "$row_count" -gt 1; then
+            echo "::error::Multiple repository-owned production promotions are open"
+            exit 1
+          fi
+          if test "$row_count" -eq 0; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "moves_worker=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IFS=$'\t' read -r pending_number pending_sha pending_repository pending_ref \
+            <<< "$pending_rows"
+          if test "$pending_repository" != "$GITHUB_REPOSITORY" \
+            || test "$pending_ref" != "$PROMOTION_BRANCH"; then
+            echo "::error::Promotion pull request head is not repository-owned"
+            exit 1
+          fi
+          if test "$pending_sha" != "$promotion_branch_sha"; then
+            echo "::error::Promotion branch changed while its pull request was loaded"
+            exit 1
+          fi
+          git fetch --no-tags origin "$pending_sha"
+          git show "${pending_sha}:deploy/map-platform/compose.yaml" \
+            > "$RUNNER_TEMP/pending-map-platform-compose.yaml"
+          pending_state="$(python3 deploy/map-platform/update_image.py \
+            "$RUNNER_TEMP/pending-map-platform-compose.yaml" \
+            --check)"
+          printf '%s\n' "$pending_state"
+          pending_worker_source="$(printf '%s\n' "$pending_state" | awk '$1 == "worker" {print $2}')"
+          pending_worker_reference="$(printf '%s\n' "$pending_state" | awk '$1 == "worker" {print $3}')"
+          if test "$pending_worker_source" = "$current_worker_source" \
+            && test "$pending_worker_reference" = "$current_worker_reference"; then
+            moves_worker=false
+          else
+            moves_worker=true
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "number=${pending_number}" >> "$GITHUB_OUTPUT"
+          echo "moves_worker=${moves_worker}" >> "$GITHUB_OUTPUT"
+          echo "worker_source=${pending_worker_source}" >> "$GITHUB_OUTPUT"
+          echo "worker_reference=${pending_worker_reference}" >> "$GITHUB_OUTPUT"
+
+      - id: scope
+        name: Select the worker promotion policy
+        if: steps.base.outputs.superseded == 'false'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          PENDING_AVAILABLE: ${{ steps.pending.outputs.available }}
+          PENDING_MOVES_WORKER: ${{ steps.pending.outputs.moves_worker }}
+          PENDING_WORKER_SOURCE: ${{ steps.pending.outputs.worker_source }}
+          PENDING_WORKER_POLICY: ${{ inputs.pending_worker }}
+          CURRENT_WORKER_SOURCE: ${{ steps.pending.outputs.current_worker_source }}
+        run: |
+          adjacent_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+            --before "$BEFORE_SHA" \
+            --after "$GITHUB_SHA")"
+          accumulated_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+            --before "$CURRENT_WORKER_SOURCE" \
+            --after "$GITHUB_SHA")"
+          pending_worker_changed=false
+          if test "$PENDING_AVAILABLE" = "true"; then
+            pending_worker_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+              --before "$PENDING_WORKER_SOURCE" \
+              --after "$GITHUB_SHA")"
+          fi
+          python3 deploy/map-platform/select_worker_promotion.py \
+            --event-name "$EVENT_NAME" \
+            --requested-policy "$PENDING_WORKER_POLICY" \
+            --pending-available "$PENDING_AVAILABLE" \
+            --pending-moves-worker "$PENDING_MOVES_WORKER" \
+            --pending-worker-changed "$pending_worker_changed" \
+            --adjacent-changed "$adjacent_changed" \
+            --accumulated-changed "$accumulated_changed" \
+            >> "$GITHUB_OUTPUT"
+
+      - id: update
+        name: Update and validate production lock
+        if: steps.base.outputs.superseded == 'false'
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          WORKER_CHANGED: ${{ steps.scope.outputs.worker_changed }}
+          PRESERVE_PENDING: ${{ steps.scope.outputs.preserve_pending }}
+          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
+          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base_state="$(python3 deploy/map-platform/update_image.py \
+            deploy/map-platform/compose.yaml \
+            --check)"
+          base_worker="$(printf '%s\n' "$base_state" | awk '$1 == "worker" {print $2 " " $3}')"
+          update_args=(
+            deploy/map-platform/compose.yaml
+            --control-plane-digest "$IMAGE_DIGEST"
+            --source-commit "$GITHUB_SHA"
+          )
+          if test "$WORKER_CHANGED" = "true"; then
+            update_args+=(--worker-digest "$IMAGE_DIGEST")
+          elif test "$PRESERVE_PENDING" = "true"; then
+            update_args+=(
+              --preserve-worker-from
+              "$RUNNER_TEMP/pending-map-platform-compose.yaml"
+            )
+          fi
+          python3 deploy/map-platform/update_image.py "${update_args[@]}"
+          final_state="$(python3 deploy/map-platform/update_image.py \
+            deploy/map-platform/compose.yaml \
+            --check)"
+          printf '%s\n' "$final_state"
+          final_worker="$(printf '%s\n' "$final_state" | awk '$1 == "worker" {print $2 " " $3}')"
+          final_worker_source="$(printf '%s\n' "$final_state" | awk '$1 == "worker" {print $2}')"
+          final_worker_reference="$(printf '%s\n' "$final_state" | awk '$1 == "worker" {print $3}')"
+          if test "$final_worker" = "$base_worker"; then
+            moves_worker=false
+          else
+            moves_worker=true
+          fi
+          echo "moves_worker=${moves_worker}" >> "$GITHUB_OUTPUT"
+          echo "worker_source=${final_worker_source}" >> "$GITHUB_OUTPUT"
+          echo "worker_reference=${final_worker_reference}" >> "$GITHUB_OUTPUT"
+          docker compose -f deploy/map-platform/compose.yaml config >/dev/null
+          python3 deploy/map-platform/verify_registry_images.py \
+            deploy/map-platform/compose.yaml
+          git diff --check
+          if git diff --quiet -- deploy/map-platform/compose.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or refresh production promotion pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          MOVES_WORKER: ${{ steps.update.outputs.moves_worker }}
+          WORKER_REFERENCE: ${{ steps.update.outputs.worker_reference }}
+          WORKER_SELECTION: ${{ steps.scope.outputs.worker_selection }}
+          WORKER_SOURCE: ${{ steps.update.outputs.worker_source }}
+          PROMOTION_BRANCH: deploy/map-platform-production
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROPOSAL_BASE_SHA: ${{ steps.base.outputs.sha }}
+          EXPECTED_PROMOTION_SHA: ${{ steps.pending.outputs.branch_sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$PROMOTION_BRANCH"
+          git add deploy/map-platform/compose.yaml
+          short_sha="${GITHUB_SHA:0:12}"
+          git commit -m "Promote map platform image ${short_sha}"
+
+          latest_default_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if test "$latest_default_sha" != "$PROPOSAL_BASE_SHA"; then
+            git fetch --no-tags origin "$latest_default_sha"
+            if ! git merge-base --is-ancestor "$PROPOSAL_BASE_SHA" "$latest_default_sha"; then
+              echo "::error::Live ${DEFAULT_BRANCH} no longer descends from the proposal base"
+              exit 1
+            fi
+            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+              --before "$PROPOSAL_BASE_SHA" \
+              --after "$latest_default_sha" \
+              --scope promotion)"
+            if test "$superseded" = "true" \
+              || ! git diff --quiet "$PROPOSAL_BASE_SHA" "$latest_default_sha" \
+                -- deploy/map-platform/compose.yaml; then
+              echo "::error::Live ${DEFAULT_BRANCH} changed production inputs; re-run the workflow"
+              exit 1
+            fi
+            git rebase "$latest_default_sha"
+          fi
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
+          if test "$remote_sha" != "$EXPECTED_PROMOTION_SHA"; then
+            echo "::error::Promotion branch changed during candidate validation"
+            exit 1
+          fi
+          if test -n "$EXPECTED_PROMOTION_SHA"; then
+            git push \
+              --force-with-lease="refs/heads/${PROMOTION_BRANCH}:${EXPECTED_PROMOTION_SHA}" \
+              origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          fi
+
+          image_reference="ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform@${IMAGE_DIGEST}"
+          title="Promote map platform image ${short_sha}"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(printf '%s\n' \
+            '## Production image' \
+            '' \
+            "- Source commit: \`${GITHUB_SHA}\`" \
+            "- Image: \`${image_reference}\`" \
+            "- Moves signed worker pin relative to main: \`${MOVES_WORKER}\`" \
+            "- Worker selection: \`${WORKER_SELECTION}\`" \
+            "- Worker source: \`${WORKER_SOURCE}\`" \
+            "- Worker image: \`${WORKER_REFERENCE}\`" \
+            "- Build and attestation: ${run_url}" \
+            '' \
+            '## Deployment' \
+            '' \
+            'Merging this pull request updates the digest-pinned production Compose consumed by Coolify. It does not rebuild the image or mutate Coolify environment variables.' \
+            '' \
+            'Review the candidate and required hardware rollout gates before merging.')"
+
+          pr_number="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f base="$DEFAULT_BRANCH" \
+            -f head="${GITHUB_REPOSITORY_OWNER}:${PROMOTION_BRANCH}" \
+            --jq '.[0].number // empty')"
+          if test -n "$pr_number"; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" \
+              -f title="$title" \
+              -f body="$body" >/dev/null
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$DEFAULT_BRANCH" \
+              --head "$PROMOTION_BRANCH" \
+              --title "$title" \
+              --body "$body"
+          fi
+
+          # GITHUB_TOKEN-authored pushes and pull requests do not trigger new
+          # workflow runs. Dispatch CI explicitly for the promotion commit.
+          gh workflow run ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$PROMOTION_BRANCH"

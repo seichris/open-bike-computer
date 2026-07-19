@@ -1,0 +1,127 @@
+# control-plane-source-commit: 1a2e352f5b157b54009f1a56d4dd90d94b86f86e
+# worker-source-commit: 887a3eaf2e1bec440daec65cdfbfb69361b83314
+
+# These digest-pinned images are the production deployment manifest. The API
+# and maintenance control plane may advance to carry a rollout approval while
+# the hardware-tested worker remains pinned. Keep each source commit and digest
+# in sync through update_image.py; never replace a digest with a mutable tag.
+x-map-platform-images:
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:4e95b298cc02ab5588a1d3b2b9cf70f37fef2cd190faa6a7684a1c4d5db524c5
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:4b75542949ddae7e85576eb742910d24637de5dd067fb98bc1fae0b36721af4c
+
+services:
+  map-platform-api:
+    image: *map-platform-control-plane-image
+    environment:
+      MAP_PLATFORM_REPO_ROOT: /app
+      MAP_PLATFORM_DATA_ROOT: /data
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+      MAP_PLATFORM_ADMIN_TOKEN: ${MAP_PLATFORM_ADMIN_TOKEN:-}
+      MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
+      MAP_PLATFORM_INSTALLATION_SECRET: ${MAP_PLATFORM_INSTALLATION_SECRET:?set MAP_PLATFORM_INSTALLATION_SECRET in Coolify secrets}
+      MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS: ${MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS:-}
+      MAP_PLATFORM_TRUSTED_PROXY_CIDRS: ${MAP_PLATFORM_TRUSTED_PROXY_CIDRS:?set MAP_PLATFORM_TRUSTED_PROXY_CIDRS to the Coolify proxy CIDRs}
+      MAP_PLATFORM_MAX_REQUEST_BODY_BYTES: ${MAP_PLATFORM_MAX_REQUEST_BODY_BYTES:-2097152}
+      MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE: ${MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE:-240}
+      MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY: ${MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY:-3}
+      MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR: ${MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR:-4}
+      MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY: ${MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY:-20}
+      MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR: ${MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR:-30}
+      MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR: ${MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR:-60}
+      MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
+      MAP_PLATFORM_ARTIFACT_STORE: ${MAP_PLATFORM_ARTIFACT_STORE:-filesystem}
+      MAP_PLATFORM_ARTIFACT_ROOT: ${MAP_PLATFORM_ARTIFACT_ROOT:-/data/artifacts}
+      MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
+      MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
+      MAP_PLATFORM_S3_ENDPOINT_URL: ${MAP_PLATFORM_S3_ENDPOINT_URL:-}
+      AWS_REGION: ${AWS_REGION:-}
+      MAP_PLATFORM_S3_API_ACCESS_KEY_ID: ${MAP_PLATFORM_S3_API_ACCESS_KEY_ID:-}
+      MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY: ${MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY:-}
+      MAP_PLATFORM_S3_API_SESSION_TOKEN: ${MAP_PLATFORM_S3_API_SESSION_TOKEN:-}
+      MAP_PLATFORM_S3_API_USE_DEFAULT_CREDENTIAL_CHAIN: ${MAP_PLATFORM_S3_API_USE_DEFAULT_CREDENTIAL_CHAIN:-0}
+      MAP_PLATFORM_MAP_STREAM_ENABLED: ${MAP_PLATFORM_MAP_STREAM_ENABLED:-0}
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE:-disabled}
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST:-}
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: ${MAP_PLATFORM_MAP_STREAM_PROMOTION_ID:-}
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
+      MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
+    volumes:
+      - map-platform-data:/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  map-platform-worker:
+    image: *map-platform-worker-image
+    command: ["map-platform", "worker-loop", "--idle-sleep-seconds", "10"]
+    environment:
+      MAP_PLATFORM_REPO_ROOT: /app
+      MAP_PLATFORM_DATA_ROOT: /data
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+      MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
+      MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
+      MAP_PLATFORM_JOB_RETENTION_DAYS: ${MAP_PLATFORM_JOB_RETENTION_DAYS:-30}
+      MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: ${MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS:-3600}
+      MAP_PLATFORM_ARTIFACT_STORE: ${MAP_PLATFORM_ARTIFACT_STORE:-filesystem}
+      MAP_PLATFORM_ARTIFACT_ROOT: ${MAP_PLATFORM_ARTIFACT_ROOT:-/data/artifacts}
+      MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
+      MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
+      MAP_PLATFORM_S3_ENDPOINT_URL: ${MAP_PLATFORM_S3_ENDPOINT_URL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+      MAP_PLATFORM_MAP_STREAM_ENABLED: ${MAP_PLATFORM_MAP_STREAM_ENABLED:-0}
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
+      MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
+      MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}
+      MAP_PLATFORM_WORKER_HEARTBEAT_PATH: /data/health/worker
+      MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS: ${MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS:-120}
+    volumes:
+      - map-platform-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; from pathlib import Path; assert time.time() - Path('/data/health/worker').stat().st_mtime < float(os.environ['MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS'])"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  map-platform-maintenance:
+    image: *map-platform-control-plane-image
+    command: ["map-platform", "maintenance-loop"]
+    environment:
+      MAP_PLATFORM_REPO_ROOT: /app
+      MAP_PLATFORM_DATA_ROOT: /data
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
+      MAP_PLATFORM_JOB_RETENTION_DAYS: ${MAP_PLATFORM_JOB_RETENTION_DAYS:-30}
+      MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: ${MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS:-3600}
+      MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS: ${MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS:-100}
+      MAP_PLATFORM_MAINTENANCE_HEARTBEAT_PATH: /data/health/maintenance
+      MAP_PLATFORM_ARTIFACT_STORE: ${MAP_PLATFORM_ARTIFACT_STORE:-filesystem}
+      MAP_PLATFORM_ARTIFACT_ROOT: ${MAP_PLATFORM_ARTIFACT_ROOT:-/data/artifacts}
+      MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
+      MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
+      MAP_PLATFORM_S3_ENDPOINT_URL: ${MAP_PLATFORM_S3_ENDPOINT_URL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+    volumes:
+      - map-platform-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; from pathlib import Path; maximum=2*float(os.environ['MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS'])+300; assert time.time() - Path('/data/health/maintenance').stat().st_mtime < maximum"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  map-platform-data:
