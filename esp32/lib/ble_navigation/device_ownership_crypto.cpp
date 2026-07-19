@@ -11,7 +11,7 @@
 #ifdef DEVICE_OWNERSHIP_HOST_TEST
 #include <random>
 #else
-#include <esp_system.h>
+#include <esp_random.h>
 #endif
 
 namespace device_ownership {
