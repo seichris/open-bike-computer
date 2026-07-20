@@ -41,8 +41,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 #if !os(macOS)
         locationManager.showsBackgroundLocationIndicator = false
 #endif
-        locationManager.requestWhenInUseAuthorization()
-        // Don't start by default - wait for explicit need
+        // First-run onboarding owns the permission prompt so the user can read
+        // the rationale or skip location before iOS asks for access.
     }
     
     func requestLocation() {
@@ -123,14 +123,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.showsBackgroundLocationIndicator = shouldTrackInBackground
 #endif
         
-        if shouldTrack && (!isLocationUpdating || restart) {
+        if shouldTrack && isLocationAuthorized && (!isLocationUpdating || restart) {
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
             print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
-        } else if !shouldTrack && isLocationUpdating {
+        } else if (!shouldTrack || !isLocationAuthorized) && isLocationUpdating {
             print("🌍 Stopping location updates (not needed)")
             locationManager.stopUpdatingLocation()
             isLocationUpdating = false
@@ -138,7 +138,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     }
     
     func startUpdatingLocation() {
-        if !isLocationUpdating {
+        if isLocationAuthorized && !isLocationUpdating {
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
         }

@@ -23,10 +23,18 @@ struct ContentView: View {
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var showingSettings = false
+    @State private var showingBikeComputerSetup = false
     @State private var showingWorkoutDashboard = false
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
+    @State private var isOfflineMapOnboardingStatePrepared = false
+    @AppStorage("offlineMapOnboarding.firstRunCompleted.v1")
+    private var hasCompletedFirstRunMapOnboarding = false
+    @AppStorage("offlineMapOnboarding.locationStepCompleted.v1")
+    private var hasAdvancedPastMapOnboardingLocation = false
+    @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
+    private var hasMigratedExistingInstallOnboarding = false
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -96,25 +104,32 @@ struct ContentView: View {
 
                 if coordinator.bleManager.supportsDeviceSounds &&
                     !offlineMapManager.isMapAreaSelectionActive &&
-                    !shouldShowOfflineMapOnboarding {
+                    visibleOfflineMapOnboardingStep == nil {
                     DeviceSoundMapButton(bleManager: coordinator.bleManager)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                         .padding(.trailing, 16)
                         .zIndex(9)
                 }
 
-                if shouldShowOfflineMapOnboarding {
+                if let onboardingStep = visibleOfflineMapOnboardingStep {
                     Color.black.opacity(0.18)
                         .ignoresSafeArea()
 
                     OfflineMapOnboardingView(
                         manager: offlineMapManager,
                         bleManager: coordinator.bleManager,
+                        step: onboardingStep,
                         location: coordinator.currentLocation,
                         isLocationAuthorized: coordinator.isLocationAuthorized,
-                        onRequestLocation: { coordinator.requestLocationAuthorization() },
-                        onChooseArea: { offlineMapManager.beginMapAreaSelection() },
-                        onClose: { dismissedOfflineMapOnboarding = true }
+                        onRequestLocation: advancePastLocationAndRequestAccess,
+                        onSkipLocation: advancePastLocation,
+                        onConnectDevice: { showingBikeComputerSetup = true },
+                        onCheckDeviceMaps: {
+                            _ = coordinator.bleManager.requestMapTransferStatus()
+                            _ = coordinator.bleManager.requestDeviceTransferStatus()
+                        },
+                        onChooseArea: beginOnboardingMapSelection,
+                        onClose: dismissOfflineMapOnboarding
                     )
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
                     .zIndex(20)
@@ -142,6 +157,19 @@ struct ContentView: View {
                 )
                     .environmentObject(coordinator.bleManager)
             }
+            .sheet(isPresented: $showingBikeComputerSetup) {
+                NavigationView {
+                    BikeComputersSettingsView()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") {
+                                    showingBikeComputerSetup = false
+                                }
+                            }
+                        }
+                }
+                .environmentObject(coordinator.bleManager)
+            }
             .sheet(isPresented: $showingWorkoutDashboard) {
                 WorkoutDashboardView(
                     store: workoutStore,
@@ -156,6 +184,8 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            migrateExistingInstallOnboardingIfNeeded()
+            isOfflineMapOnboardingStatePrepared = true
             watchAvailability.activate()
             updateIdleTimer()
             coordinator.applicationDidBecomeActive()
@@ -180,6 +210,9 @@ struct ContentView: View {
         }
         .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
             schedulePendingMapInstallResume()
+            if coordinator.bleManager.isNavigationReady {
+                showingBikeComputerSetup = false
+            }
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
@@ -205,6 +238,12 @@ struct ContentView: View {
 
             guard deviceMapMissingCandidate else { return }
             confirmedDeviceMapMissing = true
+        }
+        .task(id: offlineMapOnboardingPresentation) {
+            guard offlineMapOnboardingPresentation == .completeFirstRun else {
+                return
+            }
+            hasCompletedFirstRunMapOnboarding = true
         }
     }
 
@@ -243,18 +282,58 @@ struct ContentView: View {
         )
     }
 
-    private var shouldShowOfflineMapOnboarding: Bool {
-        guard !dismissedOfflineMapOnboarding else { return false }
-        guard !offlineMapManager.isMapAreaSelectionActive else { return false }
+    private var offlineMapOnboardingPresentation: OfflineMapOnboardingPresentation {
+        OfflineMapOnboardingPolicy.presentation(
+            hasCompletedFirstRun: hasCompletedFirstRunMapOnboarding,
+            hasAdvancedPastLocation: hasAdvancedPastMapOnboardingLocation,
+            isLocationAuthorized: coordinator.isLocationAuthorized,
+            isNavigationReady: coordinator.bleManager.isNavigationReady,
+            hasSDCard: coordinator.bleManager.deviceHasSDCard,
+            activeMapId: coordinator.bleManager.mapTransferActiveMapId,
+            confirmedDeviceMapMissing: confirmedDeviceMapMissing
+        )
+    }
+
+    private var visibleOfflineMapOnboardingStep: OfflineMapOnboardingStep? {
+        guard isOfflineMapOnboardingStatePrepared else { return nil }
+        guard !dismissedOfflineMapOnboarding else { return nil }
+        guard !offlineMapManager.isMapAreaSelectionActive else { return nil }
         guard !offlineMapManager.isBusy,
               !offlineMapManager.hasPendingMapJob,
               offlineMapManager.currentJob == nil,
               offlineMapManager.downloadedPackURL == nil,
-              offlineMapManager.errorMessage == nil else { return false }
-        if !coordinator.isLocationAuthorized {
-            return true
+              offlineMapManager.errorMessage == nil else { return nil }
+        guard case .step(let step) = offlineMapOnboardingPresentation else {
+            return nil
         }
-        return confirmedDeviceMapMissing
+        return step
+    }
+
+    private func advancePastLocationAndRequestAccess() {
+        advancePastLocation()
+        coordinator.requestLocationAuthorization()
+    }
+
+    private func advancePastLocation() {
+        hasAdvancedPastMapOnboardingLocation = true
+    }
+
+    private func beginOnboardingMapSelection() {
+        hasCompletedFirstRunMapOnboarding = true
+        offlineMapManager.beginMapAreaSelection()
+    }
+
+    private func dismissOfflineMapOnboarding() {
+        dismissedOfflineMapOnboarding = true
+    }
+
+    private func migrateExistingInstallOnboardingIfNeeded() {
+        guard !hasMigratedExistingInstallOnboarding else { return }
+        hasMigratedExistingInstallOnboarding = true
+
+        guard !coordinator.bleManager.knownDevices.isEmpty else { return }
+        hasAdvancedPastMapOnboardingLocation = true
+        hasCompletedFirstRunMapOnboarding = true
     }
 
     private var topOverlay: some View {
@@ -466,6 +545,7 @@ struct ContentView: View {
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,
+            isUserLocationAuthorized: coordinator.isLocationAuthorized,
             offlineMapSelectionFrame: selectionFrame,
             onMapTapped: {
                 if isSearchPanelExpanded {

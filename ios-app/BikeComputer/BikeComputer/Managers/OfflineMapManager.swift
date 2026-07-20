@@ -803,7 +803,52 @@ nonisolated enum OfflineMapPollingRetryPolicy {
     }
 }
 
+nonisolated enum OfflineMapOnboardingStep: Equatable {
+    case location
+    case device
+    case checkingDevice
+    case download
+    case storageUnavailable
+}
+
+nonisolated enum OfflineMapOnboardingPresentation: Equatable {
+    case hidden
+    case step(OfflineMapOnboardingStep)
+    case completeFirstRun
+}
+
 nonisolated enum OfflineMapOnboardingPolicy {
+    static func presentation(
+        hasCompletedFirstRun: Bool,
+        hasAdvancedPastLocation: Bool,
+        isLocationAuthorized: Bool,
+        isNavigationReady: Bool,
+        hasSDCard: Bool?,
+        activeMapId: String,
+        confirmedDeviceMapMissing: Bool
+    ) -> OfflineMapOnboardingPresentation {
+        if !hasCompletedFirstRun {
+            if !isLocationAuthorized && !hasAdvancedPastLocation {
+                return .step(.location)
+            }
+            guard isNavigationReady else {
+                return .step(.device)
+            }
+            guard let hasSDCard else {
+                return .step(.checkingDevice)
+            }
+            guard hasSDCard else {
+                return .step(.storageUnavailable)
+            }
+            guard !activeMapId.isEmpty else {
+                return .step(.download)
+            }
+            return .completeFirstRun
+        }
+
+        return confirmedDeviceMapMissing ? .step(.download) : .hidden
+    }
+
     static func shouldOfferDownload(
         isLocationAuthorized: Bool,
         isNavigationReady: Bool,

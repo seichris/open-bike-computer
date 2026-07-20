@@ -50,6 +50,7 @@ struct MapViewContainer: UIViewRepresentable {
     let simulatedPosition: CLLocationCoordinate2D?
     let isSimulationMode: Bool
     let isNavigating: Bool
+    let isUserLocationAuthorized: Bool
     let offlineMapSelectionFrame: CGRect?
     let onMapTapped: (() -> Void)?
     let onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
@@ -58,8 +59,8 @@ struct MapViewContainer: UIViewRepresentable {
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
         mapView.delegate = context.coordinator
-        mapView.showsUserLocation = true
-        mapView.userTrackingMode = .follow
+        mapView.showsUserLocation = isUserLocationAuthorized
+        mapView.userTrackingMode = isUserLocationAuthorized ? .follow : .none
         
         // Configure map appearance
         mapView.showsCompass = false
@@ -158,9 +159,10 @@ struct MapViewContainer: UIViewRepresentable {
             let simAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
             uiView.removeAnnotations(simAnnotations)
             
-            // Re-enable user tracking when navigation stops
-            uiView.userTrackingMode = .follow
-            uiView.showsUserLocation = true 
+            // Re-enable user tracking when navigation stops and location access
+            // has been granted explicitly through onboarding.
+            uiView.userTrackingMode = isUserLocationAuthorized ? .follow : .none
+            uiView.showsUserLocation = isUserLocationAuthorized
             context.coordinator.hasSetInitialRegion = false
             context.coordinator.resetNavigationCamera()
         }
@@ -192,14 +194,22 @@ struct MapViewContainer: UIViewRepresentable {
                 uiView.addAnnotation(annotation)
             }
         } else {
-            // Show real user location if not simulating
-            if !uiView.showsUserLocation {
-                uiView.showsUserLocation = true
-            }
-            if isNavigating && uiView.userTrackingMode != .followWithHeading {
-                uiView.setUserTrackingMode(.followWithHeading, animated: true)
-            } else if !isNavigating && uiView.userTrackingMode == .followWithHeading {
-                uiView.setUserTrackingMode(.follow, animated: true)
+            if isUserLocationAuthorized {
+                if !uiView.showsUserLocation {
+                    uiView.showsUserLocation = true
+                }
+                if isNavigating && uiView.userTrackingMode != .followWithHeading {
+                    uiView.setUserTrackingMode(.followWithHeading, animated: true)
+                } else if !isNavigating && uiView.userTrackingMode == .followWithHeading {
+                    uiView.setUserTrackingMode(.follow, animated: true)
+                }
+            } else {
+                if uiView.showsUserLocation {
+                    uiView.showsUserLocation = false
+                }
+                if uiView.userTrackingMode != .none {
+                    uiView.setUserTrackingMode(.none, animated: false)
+                }
             }
             // Remove sim annotation if present
             if !existingSimAnnotations.isEmpty {
