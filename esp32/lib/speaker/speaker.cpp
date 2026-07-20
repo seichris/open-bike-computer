@@ -88,10 +88,8 @@ float currentDacGainDb = 0.0f;
 speaker_limiter_t playbackLimiter{};
 PowerButtonHonkConfig powerButtonHonkConfig{
     false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
-uint32_t lastPowerButtonPollMs = 0;
 uint32_t lastPowerButtonConfigureAttemptMs = 0;
 
-constexpr uint32_t POWER_BUTTON_POLL_INTERVAL_MS = 100;
 constexpr uint32_t POWER_BUTTON_CONFIGURE_RETRY_MS = 5000;
 constexpr uint32_t POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS = 250;
 constexpr char POWER_BUTTON_PREFERENCES_NAMESPACE[] = "deviceSounds";
@@ -189,8 +187,7 @@ bool configurePowerButtonMonitoringLocked() {
     return false;
   }
   powerButtonMonitoringConfigured =
-      axp2101::setPowerButtonShortPressMonitoring(
-          powerButtonHonkConfig.enabled);
+      axp2101::setPowerButtonEventMonitoring(true);
   lastPowerButtonConfigureAttemptMs = millis();
   return powerButtonMonitoringConfigured;
 }
@@ -682,7 +679,7 @@ bool configurePowerButtonHonk(const PowerButtonHonkConfig &config) {
   return true;
 }
 
-void processPowerButtonHonk() {
+void handlePowerButtonHonkPress() {
   if (!isPowerButtonHonkAvailable()) {
     return;
   }
@@ -692,22 +689,15 @@ void processPowerButtonHonk() {
     return;
   }
 
-  const uint32_t now = millis();
   if (!powerButtonMonitoringConfigured) {
+    const uint32_t now = millis();
     if (now - lastPowerButtonConfigureAttemptMs >=
         POWER_BUTTON_CONFIGURE_RETRY_MS) {
       configurePowerButtonMonitoringLocked();
     }
     return;
   }
-  if (!powerButtonHonkConfig.enabled ||
-      now - lastPowerButtonPollMs < POWER_BUTTON_POLL_INTERVAL_MS) {
-    return;
-  }
-  lastPowerButtonPollMs = now;
-
-  bool pressed = false;
-  if (!axp2101::readAndClearPowerButtonShortPress(pressed) || !pressed) {
+  if (!powerButtonHonkConfig.enabled) {
     return;
   }
   if (!requestPlay(powerButtonHonkConfig.sound,
@@ -731,7 +721,7 @@ bool isSupported(Sound) { return false; }
 bool isPowerButtonHonkAvailable() { return false; }
 bool getPowerButtonHonkConfig(PowerButtonHonkConfig &) { return false; }
 bool configurePowerButtonHonk(const PowerButtonHonkConfig &) { return false; }
-void processPowerButtonHonk() {}
+void handlePowerButtonHonkPress() {}
 
 } // namespace waveshare_board::speaker
 

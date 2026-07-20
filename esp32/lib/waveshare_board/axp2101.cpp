@@ -26,9 +26,15 @@ constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_MASK = 0x03;
 constexpr uint8_t AXP2101_SYSTEM_ON_MASK = 0x10;
 constexpr uint8_t AXP2101_VINDPM_ACTIVE_MASK = 0x08;
 constexpr uint8_t AXP2101_CHARGING_STATUS_MASK = 0x07;
-constexpr uint8_t AXP2101_INTERRUPT_ENABLE_2_REG = 0x41;
-constexpr uint8_t AXP2101_INTERRUPT_STATUS_2_REG = 0x49;
+constexpr uint8_t AXP2101_INTERRUPT_ENABLE_1_REG = 0x41;
+constexpr uint8_t AXP2101_INTERRUPT_STATUS_1_REG = 0x49;
 constexpr uint8_t AXP2101_POWER_BUTTON_SHORT_PRESS_MASK = 0x08;
+constexpr uint8_t AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK = 0x02;
+constexpr uint8_t AXP2101_POWER_BUTTON_POSITIVE_EDGE_MASK = 0x01;
+constexpr uint8_t AXP2101_POWER_BUTTON_EVENT_MASK =
+    AXP2101_POWER_BUTTON_SHORT_PRESS_MASK |
+    AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK |
+    AXP2101_POWER_BUTTON_POSITIVE_EDGE_MASK;
 
 constexpr uint8_t peripheralRailRegs[] = {
     AXP2101_ALDO1_VOLTAGE_REG, AXP2101_ALDO2_VOLTAGE_REG,
@@ -135,50 +141,56 @@ bool readBatteryPercentage(uint8_t &percentage) {
   return readBatteryStatus(percentage, charging);
 }
 
-bool setPowerButtonShortPressMonitoring(bool enabled) {
+bool setPowerButtonEventMonitoring(bool enabled) {
   if (!pmuAvailable) {
     return false;
   }
 
   uint8_t interruptEnable = 0;
-  if (!readRegister(AXP2101_INTERRUPT_ENABLE_2_REG, interruptEnable)) {
+  if (!readRegister(AXP2101_INTERRUPT_ENABLE_1_REG, interruptEnable)) {
     return false;
   }
 
   const uint8_t updatedInterruptEnable =
-      enabled ? interruptEnable | AXP2101_POWER_BUTTON_SHORT_PRESS_MASK
-              : interruptEnable & ~AXP2101_POWER_BUTTON_SHORT_PRESS_MASK;
+      enabled ? interruptEnable | AXP2101_POWER_BUTTON_EVENT_MASK
+              : interruptEnable & ~AXP2101_POWER_BUTTON_EVENT_MASK;
   if (updatedInterruptEnable != interruptEnable &&
-      !writeRegister(AXP2101_INTERRUPT_ENABLE_2_REG,
+      !writeRegister(AXP2101_INTERRUPT_ENABLE_1_REG,
                      updatedInterruptEnable)) {
     return false;
   }
 
   // AXP2101 interrupt status is write-one-to-clear. Remove any stale press so
   // enabling the feature cannot immediately trigger playback.
-  return writeRegister(AXP2101_INTERRUPT_STATUS_2_REG,
-                       AXP2101_POWER_BUTTON_SHORT_PRESS_MASK);
+  return writeRegister(AXP2101_INTERRUPT_STATUS_1_REG,
+                       AXP2101_POWER_BUTTON_EVENT_MASK);
 }
 
-bool readAndClearPowerButtonShortPress(bool &pressed) {
-  pressed = false;
+bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
+  events = {};
   if (!pmuAvailable) {
     return false;
   }
 
   uint8_t interruptStatus = 0;
-  if (!readRegister(AXP2101_INTERRUPT_STATUS_2_REG, interruptStatus)) {
+  if (!readRegister(AXP2101_INTERRUPT_STATUS_1_REG, interruptStatus)) {
     return false;
   }
-  if ((interruptStatus & AXP2101_POWER_BUTTON_SHORT_PRESS_MASK) == 0) {
+  const uint8_t pendingEvents =
+      interruptStatus & AXP2101_POWER_BUTTON_EVENT_MASK;
+  if (pendingEvents == 0) {
     return true;
   }
-  if (!writeRegister(AXP2101_INTERRUPT_STATUS_2_REG,
-                     AXP2101_POWER_BUTTON_SHORT_PRESS_MASK)) {
+  if (!writeRegister(AXP2101_INTERRUPT_STATUS_1_REG, pendingEvents)) {
     return false;
   }
 
-  pressed = true;
+  events.shortPress =
+      (pendingEvents & AXP2101_POWER_BUTTON_SHORT_PRESS_MASK) != 0;
+  events.negativeEdge =
+      (pendingEvents & AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK) != 0;
+  events.positiveEdge =
+      (pendingEvents & AXP2101_POWER_BUTTON_POSITIVE_EDGE_MASK) != 0;
   return true;
 }
 

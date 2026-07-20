@@ -68,12 +68,15 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#include "disconnected_shutdown_policy.hpp"
+#include "ownership_button_policy.hpp"
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "route_overlay.hpp"
 #include "waitingScr.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "axp2101.hpp"
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
@@ -154,6 +157,20 @@ static void updateMapActivationProgressOverlay() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 volatile bool waveshareBootScreenCyclePending = false;
 static portMUX_TYPE waveshareBootButtonMux = portMUX_INITIALIZER_UNLOCKED;
+static ownership_button_policy::FreshBootButtonGate waveshareBootPairingGate;
+static bool waveshareBootWaitingForRelease = false;
+static bool waveshareBootHandledPairingConfirmation = false;
+static uint32_t waveshareBootReleaseStartMs = 0;
+static uint32_t waveshareBootPressStartMs = 0;
+static ownership_button_policy::FreshPowerButtonGate
+    wavesharePowerPairingGate;
+static uint32_t wavesharePowerPairingGeneration = 0;
+
+// Called by the panel driver only after a frame has reached the display. This
+// keeps physical confirmation disabled until the comparison code is visible.
+void appDisplayFlushCompleted() {
+  bleNavServer.noteOwnershipDisplayFlushCompleted();
+}
 
 static void IRAM_ATTR latchWaveshareBootScreenCycle() {
   portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
@@ -172,45 +189,132 @@ static bool takeWaveshareBootScreenCycle() {
 static void processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
 
-  static bool waitingForRelease = false;
-  static uint32_t releaseStartMs = 0;
-  static uint32_t pressStartMs = 0;
-
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
   const bool latchedPress = takeWaveshareBootScreenCycle();
 
-  if (!waitingForRelease) {
+  if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {
+    return;
+  }
+
+  if (!waveshareBootWaitingForRelease) {
     if (!latchedPress && !pressed) {
       return;
     }
 
-    waitingForRelease = true;
-    releaseStartMs = 0;
-    pressStartMs = now;
-    log_i("Waveshare BOOT pressed; handling forward action");
-    toggleNavigationScreen();
+    waveshareBootWaitingForRelease = true;
+    waveshareBootHandledPairingConfirmation = false;
+    waveshareBootReleaseStartMs = 0;
+    waveshareBootPressStartMs = now;
+    waveshareBootHandledPairingConfirmation =
+        ownership_button_policy::handleShortPress(
+            [] { return bleNavServer.confirmOwnershipPairing(); },
+            [] {
+              if (!bleNavServer.hasOwnershipPairingCode()) {
+                toggleNavigationScreen();
+              }
+            });
+    if (waveshareBootHandledPairingConfirmation) {
+      log_i("Waveshare BOOT pressed; handled ownership pairing");
+    } else if (bleNavServer.hasOwnershipPairingCode()) {
+      log_i("Waveshare BOOT press ignored until comparison is ready");
+    } else {
+      log_i("Waveshare BOOT pressed; handling forward action");
+    }
     return;
   }
 
   if (pressed) {
-    releaseStartMs = 0;
+    waveshareBootReleaseStartMs = 0;
     return;
   }
 
-  if (releaseStartMs == 0) {
-    releaseStartMs = now;
+  if (waveshareBootReleaseStartMs == 0) {
+    waveshareBootReleaseStartMs = now;
     return;
   }
 
-  if (now - releaseStartMs < DEBOUNCE_MS) {
+  if (now - waveshareBootReleaseStartMs < DEBOUNCE_MS) {
     return;
   }
 
-  waitingForRelease = false;
-  const uint32_t pressDurationMs = now - pressStartMs;
+  waveshareBootWaitingForRelease = false;
+  const uint32_t pressDurationMs = now - waveshareBootPressStartMs;
   log_i("Waveshare BOOT released after %lu ms",
         static_cast<unsigned long>(pressDurationMs));
+  if (ownership_button_policy::shouldRecoverOwner(
+          pressDurationMs, waveshareBootHandledPairingConfirmation)) {
+    if (bleNavServer.forgetOwner()) {
+      log_i("Waveshare BOOT long press cleared the registered iPhone");
+    } else {
+      log_i("Waveshare BOOT long press: no registered iPhone to clear");
+    }
+  }
+}
+
+static void processWavesharePowerButton() {
+  constexpr uint32_t POLL_INTERVAL_MS = 100;
+  static uint32_t lastPollMs = 0;
+
+  const uint32_t now = millis();
+  if (now - lastPollMs < POLL_INTERVAL_MS) {
+    return;
+  }
+  lastPollMs = now;
+
+  waveshare_board::axp2101::PowerButtonEvents events;
+  if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(events)) {
+    return;
+  }
+
+  if (bleNavServer.hasOwnershipPairingCode()) {
+    if (wavesharePowerPairingGate.acceptEvents(
+            wavesharePowerPairingGeneration, events.negativeEdge,
+            events.positiveEdge, events.shortPress) &&
+        bleNavServer.confirmOwnershipPairing()) {
+      log_i("Waveshare PWR pressed; handled ownership pairing");
+    }
+    // Never honk while a pairing comparison is active, including before the
+    // screen has flushed and the fresh-edge gate has been armed.
+    return;
+  }
+
+  wavesharePowerPairingGate.cancel();
+  wavesharePowerPairingGeneration = 0;
+  if (events.shortPress) {
+    waveshare_board::speaker::handlePowerButtonHonkPress();
+  }
+}
+
+static void armOwnershipPairingAfterRenderedComparison() {
+  uint32_t pairingGeneration = 0;
+  if (!bleNavServer.ownershipPairingRenderedRequest(pairingGeneration)) {
+    return;
+  }
+
+  // A registration can only consume input generated after this comparison
+  // screen was rendered. Discard both hardware latches and require BOOT to be
+  // observed released before its next press.
+  (void)takeWaveshareBootScreenCycle();
+  waveshareBootPairingGate.arm();
+  waveshareBootWaitingForRelease = false;
+  waveshareBootHandledPairingConfirmation = false;
+  waveshareBootReleaseStartMs = 0;
+  waveshareBootPressStartMs = 0;
+  waveshare_board::axp2101::PowerButtonEvents stalePowerButtonEvents;
+  if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(
+          stalePowerButtonEvents)) {
+    return;
+  }
+
+  wavesharePowerPairingGate.arm(pairingGeneration);
+  wavesharePowerPairingGeneration = pairingGeneration;
+  if (bleNavServer.armOwnershipPairingConfirmation(pairingGeneration)) {
+    log_i("Ownership pairing buttons armed after comparison render");
+  } else {
+    wavesharePowerPairingGate.cancel();
+    wavesharePowerPairingGeneration = 0;
+  }
 }
 #endif
 extern Gps gps;
@@ -401,50 +505,34 @@ static void logSystemDebugHeartbeat() {
 }
 
 static void processDisconnectedShutdown() {
-  static uint32_t disconnectedSinceMs = 0;
-  static uint32_t lastTimeoutSeconds = 120;
-  static bool shutdownAnnounced = false;
+  static disconnected_shutdown_policy::Tracker shutdownTracker;
+  const bool connected = bleNavServer.isConnected();
+  const bool ownershipClaimed = bleNavServer.isOwnershipClaimed();
+  const disconnected_shutdown_policy::UpdateResult result =
+      shutdownTracker.update(
+          millis(), connected,
+          mapRenderSettings.disconnectedSleepTimeoutSeconds,
+          ownershipClaimed);
 
-  if (bleNavServer.isConnected()) {
-    disconnectedSinceMs = 0;
-    lastTimeoutSeconds = mapRenderSettings.disconnectedSleepTimeoutSeconds;
-    shutdownAnnounced = false;
+  if (result.action ==
+      disconnected_shutdown_policy::Action::CountdownStarted) {
+    Serial.printf(
+        "Power: app not connected; shutdown in %lu seconds if still "
+        "disconnected%s\n",
+        (unsigned long)result.timeoutSeconds,
+        result.waitingForRegistration ? " (registration grace)" : "");
     return;
   }
 
-  const uint32_t timeoutSeconds =
-      mapRenderSettings.disconnectedSleepTimeoutSeconds;
-  if (timeoutSeconds == 0) {
-    disconnectedSinceMs = 0;
-    lastTimeoutSeconds = 0;
-    shutdownAnnounced = false;
+  if (result.action != disconnected_shutdown_policy::Action::ShutdownDue &&
+      result.action != disconnected_shutdown_policy::Action::ShutdownRetry) {
     return;
   }
 
-  if (timeoutSeconds != lastTimeoutSeconds) {
-    disconnectedSinceMs = 0;
-    lastTimeoutSeconds = timeoutSeconds;
-    shutdownAnnounced = false;
-  }
-
-  const uint32_t now = millis();
-  if (disconnectedSinceMs == 0) {
-    disconnectedSinceMs = now;
-    Serial.printf("Power: app not connected; shutdown in %lu seconds if still "
-                  "disconnected\n",
-                  (unsigned long)timeoutSeconds);
-    return;
-  }
-
-  if (now - disconnectedSinceMs < timeoutSeconds * 1000UL) {
-    return;
-  }
-
-  if (!shutdownAnnounced) {
-    shutdownAnnounced = true;
+  if (result.action == disconnected_shutdown_policy::Action::ShutdownDue) {
     Serial.printf("Power: app was disconnected for %lu seconds; entering deep "
                   "sleep\n",
-                  (unsigned long)timeoutSeconds);
+                  (unsigned long)result.timeoutSeconds);
     Serial.println("Power: press BOOT to wake the device");
     Serial.flush();
   }
@@ -692,6 +780,9 @@ void setup() {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::speaker::begin();
+  if (!waveshare_board::axp2101::setPowerButtonEventMonitoring(true)) {
+    Serial.println("AXP2101: PWR button-event monitoring unavailable");
+  }
 #endif
 
   // Initialize BLE early so device is discoverable while showing waiting screen
@@ -765,6 +856,9 @@ void loop() {
     lvglHandlerCount++;
     lastLvglHandlerMs = millis();
     vTaskDelay(pdMS_TO_TICKS(TASK_SLEEP_PERIOD_MS));
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    armOwnershipPairingAfterRenderedComparison();
+#endif
   }
 
   // Process BLE events
@@ -776,7 +870,7 @@ void loop() {
   waveshare_board::imu::process();
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  waveshare_board::speaker::processPowerButtonHonk();
+  processWavesharePowerButton();
 #endif
 
   logSystemDebugHeartbeat();

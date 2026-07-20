@@ -69,6 +69,17 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        BikeComputersSettingsView()
+                    } label: {
+                        Label(
+                            BikeComputersMenuPolicy.title(
+                                knownDeviceCount: bleManager.knownDevices.count
+                            ),
+                            systemImage: "bicycle"
+                        )
+                    }
+
+                    NavigationLink {
                         UICustomizationSettingsView()
                     } label: {
                         Label("UI Customization", systemImage: "slider.horizontal.3")
@@ -1084,14 +1095,6 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Screen Navigation")) {
-                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                    }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             Section(header: Text("Device Brightness")) {
                 VStack(alignment: .leading) {
                     HStack {
@@ -1123,6 +1126,14 @@ private struct HardwareCustomizationSettingsView: View {
                         value: newValue.settingValue
                     )
                 }
+            }
+            .disabled(!bleManager.supportsDeviceSettings)
+
+            Section(header: Text("Screen Navigation")) {
+                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
+                    }
             }
             .disabled(!bleManager.supportsDeviceSettings)
         }
@@ -1285,10 +1296,10 @@ private struct DeveloperSettingsView: View {
                     Label("Reconnect", systemImage: "antenna.radiowaves.left.and.right")
                 }
 
-                Button(role: .destructive, action: {
-                    bleManager.forgetTrustedPeripheral()
-                }) {
-                    Label("Forget Device", systemImage: "trash")
+                NavigationLink {
+                    BikeComputersSettingsView()
+                } label: {
+                    Label("Manage Bike Computers", systemImage: "bicycle")
                 }
 
                 Button(action: {

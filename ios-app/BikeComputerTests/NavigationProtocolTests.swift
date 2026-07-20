@@ -531,6 +531,7 @@ struct NavigationProtocolTests {
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
+        testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
@@ -8359,6 +8360,607 @@ struct NavigationProtocolTests {
         )
         assertEqual(BLEPairingAuthenticator.clientProof(nonce: nonce), clientProof, "client proof matches firmware vector")
         assertEqual(BLEPairingAuthenticator.makeNonce()?.count, 32, "generated nonce uses 16 random bytes encoded as hex")
+    }
+
+    static func testDeviceOwnershipProtocol() {
+        var appPrivate = Data(repeating: 0, count: 32)
+        appPrivate[31] = 1
+        var devicePrivate = Data(repeating: 0, count: 32)
+        devicePrivate[31] = 2
+        let ownerID = Data((0..<16).map { UInt8(0xF0 + $0) })
+        let deviceID = Data((0..<16).map(UInt8.init))
+        let peripheralID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let session = try! DevicePairingSession(
+            peripheralIdentifier: peripheralID,
+            ownerID: ownerID,
+            deviceName: "Chris’ bike",
+            privateKeyRawRepresentation: appPrivate
+        )
+        let deviceKey = try! P256.KeyAgreement.PrivateKey(rawRepresentation: devicePrivate)
+        let response = "PAIRING|\(deviceID.ownershipHex)|\(deviceKey.publicKey.x963Representation.ownershipHex)"
+        let material = try! session.material(from: response)
+        assert(session.matches(peripheralIdentifier: peripheralID), "pairing sessions bind to their selected peripheral")
+        assert(!session.matches(peripheralIdentifier: UUID()), "pairing sessions reject a different peripheral")
+
+        assertEqual(
+            material.ownerKey.ownershipHex,
+            "024d0fb0b003b6d22569ef8e5a382eaa9bbd29ebeaee683d93992ae1399900cf",
+            "P-256 and HKDF owner key matches the firmware vector"
+        )
+        assertEqual(material.comparisonCode, 983668, "pairing comparison code matches the firmware vector")
+        let leadingZeroPrompt = BikeComputerPairingPrompt(
+            peripheralIdentifier: peripheralID,
+            deviceName: "My bike",
+            shortIdentifier: "1234",
+            comparisonCode: 42,
+            isReplacingExistingRegistration: false
+        )
+        assertEqual(leadingZeroPrompt.formattedCode, "000042",
+                    "comparison codes always display all six digits")
+        assert(material.confirmationCommand.hasPrefix("CONFIRM|f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff|"),
+               "confirmation binds the installation owner ID")
+        assert(material.confirmationCommand.hasSuffix("|4368726973e280992062696b65"),
+               "confirmation transmits the normalized device name as UTF-8 hex")
+
+        let ownershipFixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("docs/device-ownership-test-vectors.json")
+        let ownershipFixture = try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: ownershipFixtureURL)
+        ) as! [String: String]
+        let advertisement = Data(
+            ownershipHex: ownershipFixture["advertisementClaimed"]!
+        )!
+        let discovered = DiscoveredBikeComputerDevice.parse(
+            peripheralIdentifier: peripheralID,
+            localName: "Chris’ bike",
+            manufacturerData: advertisement,
+            rssi: -55
+        )
+        assertEqual(discovered.identitySuffix, "FA85158D", "iOS consumes the firmware-generated identity suffix fixture")
+        assertEqual(discovered.shortIdentifier, "158D", "the UI presents the same short device identifier as firmware")
+        assertEqual(discovered.isClaimed, true, "advertising exposes ownership state")
+        assertEqual(discovered.advertisedName, "Chris’ bike", "advertising exposes the user-assigned name")
+        assertEqual(
+            BLEDiscoveryFreshnessPolicy.retained(
+                [discovered],
+                now: discovered.lastSeenAt.addingTimeInterval(5)
+            ).count,
+            1,
+            "recent Nearby observations remain visible"
+        )
+        assertEqual(
+            BLEDiscoveryFreshnessPolicy.retained(
+                [discovered],
+                now: discovered.lastSeenAt.addingTimeInterval(7)
+            ).count,
+            0,
+            "Nearby observations expire after the freshness window"
+        )
+        let otherPeripheralID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        assert(!BLEPairingCancellationPolicy.shouldDisconnect(
+            connectedPeripheralIdentifier: peripheralID,
+            pairingPeripheralIdentifier: otherPeripheralID,
+            hasActivePairing: true
+        ), "canceling a handoff to another device preserves the current connection")
+        assert(BLEPairingCancellationPolicy.shouldDisconnect(
+            connectedPeripheralIdentifier: otherPeripheralID,
+            pairingPeripheralIdentifier: otherPeripheralID,
+            hasActivePairing: true
+        ), "canceling an active candidate connection disconnects only that candidate")
+        assert(!BLEPairingCancellationPolicy.shouldDisconnect(
+            connectedPeripheralIdentifier: peripheralID,
+            pairingPeripheralIdentifier: otherPeripheralID,
+            hasActivePairing: false
+        ), "closing the pre-Continue naming sheet never disconnects hardware")
+
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 0),
+            "Connect Bike Computer",
+            "an empty registry presents the connect menu"
+        )
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 1),
+            "My Bike Computer",
+            "one registered device uses the singular menu title"
+        )
+        assertEqual(
+            BikeComputersMenuPolicy.title(knownDeviceCount: 2),
+            "My Bike Computers",
+            "multiple registered devices use the plural menu title"
+        )
+        assert(BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+            knownDeviceCount: 0
+        ), "an empty registry starts discovery on menu entry")
+        assert(!BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+            knownDeviceCount: 1
+        ), "a registered device keeps discovery opt-in")
+        assert(!BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+            knownDeviceCount: 0
+        ), "the empty state does not duplicate its automatic discovery action")
+        assert(BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+            knownDeviceCount: 1
+        ), "a registered device offers an explicit add-another action")
+        assert(BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: true,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: false
+        ), "an interrupted owned discovery resumes after its sheet closes")
+        assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: true,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: true
+        ), "successful pairing does not restart Nearby discovery")
+        assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: false,
+            isDiscoveringDevices: false,
+            pairingCompletedDuringPresentation: false
+        ), "discovery waits for Bluetooth to become available")
+        assert(BLEPendingScanPolicy.accepts(
+            discoveredIdentifier: peripheralID,
+            pendingIdentifier: peripheralID
+        ), "fallback scanning accepts only the selected Bike Computer")
+        assert(!BLEPendingScanPolicy.accepts(
+            discoveredIdentifier: otherPeripheralID,
+            pendingIdentifier: peripheralID
+        ), "fallback scanning ignores a different nearby Bike Computer")
+        assertEqual(BLEPendingScanPolicy.timeout, 8,
+                    "fallback scanning has a bounded retry window")
+
+        var lifecycle = BLEOwnershipLifecycle()
+        lifecycle.beginDiscovery()
+        assertEqual(lifecycle.phase, .discovering,
+                    "opening Bike Computers begins Nearby discovery")
+        assert(lifecycle.beginPairing(
+            candidateIdentifier: otherPeripheralID,
+            connectedIdentifier: peripheralID
+        ), "selecting another Bike Computer requests a connected-device handoff")
+        assertEqual(lifecycle.phase, .pairing(otherPeripheralID),
+                    "Continue, not the naming screen, begins pairing")
+        assert(lifecycle.markComparisonReady(for: otherPeripheralID),
+               "the selected Bike Computer can advance to code comparison")
+        assert(lifecycle.beginConfirmation(for: otherPeripheralID),
+               "the matching-code action can submit once")
+        assert(!lifecycle.beginConfirmation(for: otherPeripheralID),
+               "a matching-code confirmation cannot be submitted twice")
+        let handoffCancellation = lifecycle.cancel(
+            connectedIdentifier: peripheralID
+        )
+        assertEqual(handoffCancellation.pairingPeripheralIdentifier, otherPeripheralID,
+                    "cancel clears the selected handoff target")
+        assert(!handoffCancellation.shouldDisconnectPairingPeripheral,
+               "cancel preserves the already-connected Bike Computer")
+        assertEqual(lifecycle.phase, .discovering,
+                    "cancel returns to Nearby discovery")
+
+        assert(lifecycle.beginPairing(
+            candidateIdentifier: otherPeripheralID,
+            connectedIdentifier: nil
+        ) == false, "pairing without a current connection needs no handoff")
+        let candidateCancellation = lifecycle.cancel(
+            connectedIdentifier: otherPeripheralID
+        )
+        assert(candidateCancellation.shouldDisconnectPairingPeripheral,
+               "cancel disconnects an actively connected candidate")
+        assert(lifecycle.endDiscovery(resumeAutoReconnect: true),
+               "leaving Bike Computers resumes trusted-device reconnect")
+        assertEqual(lifecycle.phase, .idle,
+                    "leaving Bike Computers closes the discovery lifecycle")
+        lifecycle.beginDiscovery()
+        lifecycle.interrupt()
+        assertEqual(lifecycle.phase, .idle,
+                    "Bluetooth interruption clears the ownership lifecycle")
+        lifecycle.beginDiscovery()
+        lifecycle.complete()
+        assertEqual(lifecycle.phase, .idle,
+                    "successful ownership completion clears the lifecycle")
+
+        let staleDevice = KnownBikeComputerDevice(
+            deviceID: String(repeating: "4", count: 24) + "00004f7b",
+            peripheralIdentifier: peripheralID,
+            name: "BikeComputer",
+            lastConnectedAt: .distantPast,
+            isLegacy: false
+        )
+        let differentPeripheralDevice = KnownBikeComputerDevice(
+            deviceID: String(repeating: "5", count: 24) + "00005555",
+            peripheralIdentifier: UUID(),
+            name: "Cargo bike",
+            lastConnectedAt: .distantPast,
+            isLegacy: false
+        )
+        assertEqual(
+            BLEIdentityObservationPolicy.conflictingDeviceIDs(
+                knownDevices: [staleDevice, differentPeripheralDevice],
+                peripheralIdentifier: peripheralID,
+                observedDeviceID: deviceID.ownershipHex
+            ),
+            [staleDevice.deviceID],
+            "a changed stable identity marks only the saved alias for the same BLE peripheral"
+        )
+        assertEqual(
+            BLEIdentityObservationPolicy.conflictingDeviceIDs(
+                knownDevices: [staleDevice],
+                peripheralIdentifier: peripheralID,
+                observedDeviceID: staleDevice.deviceID
+            ),
+            [],
+            "an unchanged stable identity remains current"
+        )
+
+        assertEqual(DeviceOwnershipProtocol.normalizedName("   "), "My bike", "empty names use the privacy-safe default")
+        assertEqual(DeviceOwnershipProtocol.normalizedName("Road|Bike"), "RoadBike", "names remove protocol delimiters")
+        assert(DeviceOwnershipProtocol.normalizedName(String(repeating: "🚲", count: 10)).utf8.count <= 24,
+               "device names are truncated on Character boundaries to the firmware limit")
+        assertEqual(
+            DeviceOwnershipProtocol.resolvedInfoName(
+                reportedName: "Spoofed name",
+                isClaimed: true,
+                existingName: "Cargo bike",
+                peripheralName: "BikeComputer"
+            ),
+            "Cargo bike",
+            "a compact claimed receipt does not erase the current owner's saved name"
+        )
+
+        let clientNonce = "00112233445566778899aabbccddeeff"
+        let serverNonceA = "102132435465768798a9bacbdcedfe0f"
+        let serverNonceB = "ffeeddccbbaa99887766554433221100"
+        let serverMessageA = DeviceOwnerAuthenticator.serverMessage(
+            deviceID: deviceID.ownershipHex,
+            ownerID: ownerID,
+            clientNonce: clientNonce,
+            serverNonce: serverNonceA
+        )
+        let serverMessageB = DeviceOwnerAuthenticator.serverMessage(
+            deviceID: deviceID.ownershipHex,
+            ownerID: ownerID,
+            clientNonce: clientNonce,
+            serverNonce: serverNonceB
+        )
+        assert(
+            DeviceOwnerAuthenticator.proof(key: material.ownerKey, message: serverMessageA) !=
+                DeviceOwnerAuthenticator.proof(key: material.ownerKey, message: serverMessageB),
+            "device-generated nonces make captured owner challenges non-replayable"
+        )
+        assertEqual(BLEReconnectBackoff.delay(attempt: 0), 1, "reconnect starts promptly")
+        assertEqual(BLEReconnectBackoff.delay(attempt: 100), 60, "reconnect continues indefinitely at the cap")
+        assert(BLEConnectionPersistence.shouldCancelTimedOutConnection(isPairing: true),
+               "interactive pairing connections remain time-bounded")
+        assert(!BLEConnectionPersistence.shouldCancelTimedOutConnection(isPairing: false),
+               "trusted reconnects remain pending for CoreBluetooth background wake")
+        var pendingHandoff: UUID? = peripheralID
+        assertEqual(
+            BLEPendingHandoffPolicy.consume(&pendingHandoff),
+            peripheralID,
+            "a terminal connection failure consumes its pending successor"
+        )
+        assertEqual(pendingHandoff, nil, "consumed handoffs cannot fire again later")
+        assert(BLEDeviceOperationPolicy.canStartPairing(operationDeviceID: nil),
+               "pairing can start when no device mutation is pending")
+        assert(!BLEDeviceOperationPolicy.canStartPairing(operationDeviceID: material.deviceID),
+               "pairing cannot interrupt a rename or deregistration")
+        assertEqual(
+            BikeComputerRemovalPolicy.action(isConnected: true, isLegacy: false),
+            .deregister,
+            "connected ownership-capable devices deregister both sides"
+        )
+        assertEqual(
+            BikeComputerRemovalPolicy.action(isConnected: true, isLegacy: true),
+            .forget,
+            "connected legacy devices remain locally removable"
+        )
+        assertEqual(
+            BikeComputerRemovalPolicy.action(isConnected: false, isLegacy: false),
+            .forget,
+            "disconnected devices expose local Forget"
+        )
+        assert(!BLELocalForgetPolicy.acceptsCallback(
+            peripheralIdentifier: peripheralID,
+            currentIdentifier: peripheralID,
+            forgottenIdentifiers: [peripheralID]
+        ), "late callbacks cannot recreate a locally forgotten device")
+        assert(BLELocalForgetPolicy.acceptsCallback(
+            peripheralIdentifier: peripheralID,
+            currentIdentifier: peripheralID,
+            forgottenIdentifiers: []
+        ), "ordinary current-device callbacks remain enabled")
+        assert(!BLELocalForgetPolicy.acceptsCallback(
+            peripheralIdentifier: peripheralID,
+            currentIdentifier: UUID(),
+            forgottenIdentifiers: []
+        ), "late callbacks from a replaced peripheral cannot mutate the current session")
+        assert(BLELocalForgetPolicy.shouldStopScanning(
+            wasActive: true,
+            hadPendingTransport: false,
+            hasSuccessor: false
+        ), "forgetting the sole active device stops fallback scanning")
+        assert(!BLELocalForgetPolicy.shouldStopScanning(
+            wasActive: true,
+            hadPendingTransport: true,
+            hasSuccessor: true
+        ), "forgetting with a successor keeps reconnection available")
+        assert(!BLENavigationNotificationPolicy.accepts(
+            isAuthenticated: false,
+            isLegacyDevice: false,
+            hasProtectedSession: false,
+            isProtectedFrame: false
+        ), "pre-authentication navigation notifications are rejected")
+        assert(!BLENavigationNotificationPolicy.accepts(
+            isAuthenticated: true,
+            isLegacyDevice: false,
+            hasProtectedSession: true,
+            isProtectedFrame: false
+        ), "v2 sessions reject plaintext navigation notifications")
+        assert(BLENavigationNotificationPolicy.accepts(
+            isAuthenticated: true,
+            isLegacyDevice: false,
+            hasProtectedSession: true,
+            isProtectedFrame: true
+        ), "v2 sessions admit protected navigation notifications for AEAD verification")
+        assert(BLENavigationNotificationPolicy.accepts(
+            isAuthenticated: true,
+            isLegacyDevice: true,
+            hasProtectedSession: false,
+            isProtectedFrame: false
+        ), "authenticated legacy sessions retain plaintext notifications")
+        assert(!BLENavigationNotificationPolicy.accepts(
+            isAuthenticated: true,
+            isLegacyDevice: false,
+            hasProtectedSession: false,
+            isProtectedFrame: false
+        ), "v2 sessions fail closed if their protected transport is missing")
+
+        let restoredA = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
+        let restoredB = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
+        let restoredMissing = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!
+        assertEqual(
+            BLERestorationPolicy.selectedIdentifier(
+                from: [restoredA, restoredB],
+                trustedIdentifier: restoredB
+            ),
+            restoredB,
+            "restoration selects the trusted current peripheral"
+        )
+        assertEqual(
+            BLERestorationPolicy.selectedIdentifier(
+                from: [restoredA, restoredB],
+                trustedIdentifier: restoredMissing
+            ),
+            nil,
+            "restoration rejects stale peripherals when the trusted device is absent"
+        )
+        assertEqual(
+            BLERestorationPolicy.selectedIdentifier(
+                from: [restoredA, restoredB],
+                trustedIdentifier: nil
+            ),
+            nil,
+            "restoration never trusts an arbitrary peripheral without a saved current device"
+        )
+        assertEqual(
+            BLERestorationPolicy.identifiersToCancel(
+                from: [restoredA, restoredB],
+                keeping: restoredB
+            ),
+            [restoredA],
+            "restoration cancels every non-current peripheral"
+        )
+
+        let goldenOwnerKey = Data((0..<32).map(UInt8.init))
+        let goldenDeviceID = "00112233445566778899aabbccddeeff"
+        let goldenClientNonce = "102132435465768798a9babbdcddedef"
+        let goldenServerNonce = "ffeeddccbbaa99887766554433221100"
+        let revocationProof = DeviceOwnerAuthenticator.proof(
+            key: goldenOwnerKey,
+            message: DeviceOwnerAuthenticator.revocationMessage(
+                deviceID: goldenDeviceID,
+                ownerID: ownerID,
+                nonce: goldenServerNonce
+            )
+        )
+        assert(DeviceOwnerAuthenticator.isValidRevocationReceipt(
+            suppliedProof: revocationProof,
+            key: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            ownerID: ownerID,
+            nonce: goldenServerNonce
+        ), "a signed deregistration receipt is accepted")
+        let invalidRevocationProof = String(revocationProof.dropLast()) +
+            (revocationProof.last == "0" ? "1" : "0")
+        assert(!DeviceOwnerAuthenticator.isValidRevocationReceipt(
+            suppliedProof: invalidRevocationProof,
+            key: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            ownerID: ownerID,
+            nonce: goldenServerNonce
+        ), "a forged deregistration receipt is rejected")
+        assert(!DeviceOwnerAuthenticator.isValidRevocationReceipt(
+            suppliedProof: revocationProof,
+            key: Data(repeating: 0x5A, count: DeviceOwnershipProtocol.ownerKeyLength),
+            deviceID: goldenDeviceID,
+            ownerID: ownerID,
+            nonce: goldenServerNonce
+        ), "a retained prior-owner receipt cannot delete the current owner's credential")
+        let protectedSession = AuthenticatedBLEWriteSession(
+            ownerKey: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            clientNonce: goldenClientNonce,
+            serverNonce: goldenServerNonce
+        )
+        let goldenWriteFrame = Data(ownershipHex:
+            "533200000001c486d6a2464da1600aab2af46a3ae0e00442af910dcdc23c8164d0336842cfaa426b31")!
+        assertEqual(
+            protectedSession.frame(
+                payload: Data("NAME|4d792062696b65".utf8),
+                channel: .auth
+            ),
+            goldenWriteFrame,
+            "AES-GCM app write frame matches the shared mbedTLS vector"
+        )
+        assertEqual(
+            protectedSession.frame(payload: Data(), channel: .route),
+            Data(ownershipHex: "533200000001c981669fdeb1b029019459478ef19ff6"),
+            "empty protected route payload has a valid authenticated frame"
+        )
+        let goldenNotifyFrame = Data(ownershipHex:
+            "523200000001f19f6c8cd9263269e34a54aa910f37738270d42cb7d8632c8f0e20bfa6a4588d369304ab9662")!
+        assertEqual(
+            protectedSession.notificationPayload(
+                from: goldenNotifyFrame,
+                channel: .auth
+            ),
+            Data("NAME_OK|4d792062696b65".utf8),
+            "AES-GCM device notification matches the shared mbedTLS vector"
+        )
+        assertEqual(
+            protectedSession.notificationPayload(
+                from: goldenNotifyFrame,
+                channel: .auth
+            ),
+            nil,
+            "protected notification replay is rejected"
+        )
+        var tamperedNotification = goldenNotifyFrame
+        tamperedNotification[tamperedNotification.index(before: tamperedNotification.endIndex)] ^= 1
+        let tamperSession = AuthenticatedBLEWriteSession(
+            ownerKey: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            clientNonce: goldenClientNonce,
+            serverNonce: goldenServerNonce
+        )
+        assertEqual(
+            tamperSession.notificationPayload(
+                from: tamperedNotification,
+                channel: .auth
+            ),
+            nil,
+            "tampered protected notification is rejected"
+        )
+        let navigationNotifySession = AuthenticatedBLEWriteSession(
+            ownerKey: goldenOwnerKey,
+            deviceID: goldenDeviceID,
+            clientNonce: goldenClientNonce,
+            serverNonce: goldenServerNonce
+        )
+        let destinationRequest = Data([0x44, 0x52, 0x45, 0x51,
+                                       1, 0, 0, 0, 2, 0])
+        assertEqual(
+            navigationNotifySession.notificationPayload(
+                from: Data(ownershipHex:
+                    "523200000001a0d24a5355c7de1683c4a586dd2fb19a8c19b6a6c0afe3b4f62e")!,
+                channel: .navigation
+            ),
+            destinationRequest,
+            "device-originated navigation action matches the protected vector"
+        )
+        assertEqual(
+            navigationNotifySession.notificationPayload(
+                from: destinationRequest,
+                channel: .navigation
+            ),
+            nil,
+            "plaintext device actions are rejected once a secure session exists"
+        )
+
+        let suiteName = "DeviceOwnershipProtocolTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let credentials = InMemoryDeviceCredentialStore()
+        let registry = BikeComputerDeviceRegistry(defaults: defaults, credentialStore: credentials)
+        let generatedOwnerID = registry.installationOwnerID()
+        assertEqual(generatedOwnerID?.count, 16, "registry creates a 128-bit installation owner ID")
+        assertEqual(registry.installationOwnerID(), generatedOwnerID, "installation owner ID is stable")
+        assert(registry.saveOwnerKey(material.ownerKey, deviceID: material.deviceID), "registry stores device owner key")
+
+        let first = KnownBikeComputerDevice(
+            deviceID: material.deviceID,
+            peripheralIdentifier: peripheralID,
+            name: "Chris’ bike",
+            lastConnectedAt: Date(timeIntervalSince1970: 10),
+            isLegacy: false
+        )
+        let second = KnownBikeComputerDevice(
+            deviceID: String(repeating: "a", count: 32),
+            peripheralIdentifier: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+            name: "Cargo bike",
+            lastConnectedAt: Date(timeIntervalSince1970: 20),
+            isLegacy: false
+        )
+        let legacyAlias = KnownBikeComputerDevice(
+            deviceID: "legacy:\(peripheralID.uuidString.lowercased())",
+            peripheralIdentifier: peripheralID,
+            name: "Old identity",
+            lastConnectedAt: Date(timeIntervalSince1970: 5),
+            isLegacy: true
+        )
+        registry.upsert(legacyAlias, makeActive: true)
+        registry.upsert(first)
+        registry.upsert(second)
+        assertEqual(registry.devices.count, 2, "registry supports multiple Bike Computers")
+        assert(!registry.devices.contains(where: { $0.isLegacy && $0.peripheralIdentifier == peripheralID }),
+               "a stable v2 identity replaces its legacy peripheral alias")
+        assertEqual(registry.activeDeviceID, first.deviceID, "adding another device does not silently switch the current device")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), material.ownerKey, "owner key can be retrieved for authentication")
+        let secondKey = Data(repeating: 0xA5, count: DeviceOwnershipProtocol.ownerKeyLength)
+        assert(registry.saveOwnerKey(secondKey, deviceID: second.deviceID), "each device stores an independent owner credential")
+        assertEqual(registry.ownerKey(deviceID: second.deviceID), secondKey, "second device credential is independently addressable")
+        let replacementKey = Data(repeating: 0x5A, count: DeviceOwnershipProtocol.ownerKeyLength)
+        assert(registry.saveProvisionalOwnerKey(replacementKey, deviceID: first.deviceID),
+               "replacement pairing stores a separate provisional credential")
+        registry.markProvisionalOwnerKeyConfirmed(deviceID: first.deviceID)
+        assert(!registry.hasConfirmedReplacementCredential(deviceID: first.deviceID),
+               "confirmation alone does not authorize overwriting a prior credential")
+        assert(!registry.promoteProvisionalOwnerKey(deviceID: first.deviceID),
+               "ordinary promotion cannot overwrite a different existing credential")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), material.ownerKey,
+                    "rejected promotion preserves the existing credential")
+        registry.authorizeProvisionalCredentialReplacement(deviceID: first.deviceID)
+        assert(registry.hasConfirmedReplacementCredential(deviceID: first.deviceID),
+               "confirmed authorized replacement recovery takes priority over an old receipt")
+        assert(registry.promoteProvisionalOwnerKey(
+            deviceID: first.deviceID,
+            allowReplacingExisting: true
+        ), "explicit recovery authorization can replace a stale credential")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), replacementKey,
+                    "authorized recovery promotes the verified provisional key")
+        assert(!DeviceOwnershipFlowPolicy.allowsLegacyFallback(knownDevice: first, pairingCandidate: nil),
+               "known v2 devices never downgrade after an INFO timeout")
+        assert(DeviceOwnershipFlowPolicy.allowsLegacyFallback(knownDevice: legacyAlias, pairingCandidate: nil),
+               "known legacy firmware can use the migration handshake")
+        assert(!DeviceOwnershipFlowPolicy.allowsLegacyFallback(knownDevice: nil, pairingCandidate: discovered),
+               "advertised v2 pairing candidates never downgrade")
+        assert(!DeviceOwnershipFlowPolicy.allowsLegacyFallback(knownDevice: nil, pairingCandidate: nil),
+               "an unknown first-time Add never falls back to the shared legacy credential")
+        assert(registry.remove(deviceID: first.deviceID),
+               "credential removal succeeds before the visible registry entry is deleted")
+        assertEqual(registry.activeDeviceID, second.deviceID, "removing the current device selects the remaining device")
+        assertEqual(registry.ownerKey(deviceID: first.deviceID), nil, "deregistering deletes the owner key")
+        assertEqual(registry.ownerKey(deviceID: second.deviceID), secondKey, "deregistering one device preserves another device credential")
+
+        let failureSuiteName = "DeviceOwnershipRemovalFailureTests.\(UUID().uuidString)"
+        let failureDefaults = UserDefaults(suiteName: failureSuiteName)!
+        defer { failureDefaults.removePersistentDomain(forName: failureSuiteName) }
+        let failingCredentials = InMemoryDeviceCredentialStore()
+        let failureRegistry = BikeComputerDeviceRegistry(
+            defaults: failureDefaults,
+            credentialStore: failingCredentials
+        )
+        failureRegistry.upsert(first, makeActive: true)
+        assert(failureRegistry.saveOwnerKey(material.ownerKey, deviceID: first.deviceID),
+               "removal regression fixture stores an owner key")
+        failingCredentials.shouldFailRemoval = true
+        assert(!failureRegistry.remove(deviceID: first.deviceID),
+               "credential deletion failure is surfaced")
+        assertEqual(failureRegistry.devices, [first],
+                    "credential deletion failure keeps the device visible")
+        assertEqual(failureRegistry.ownerKey(deviceID: first.deviceID), material.ownerKey,
+                    "credential deletion failure preserves the owner key")
     }
 
     static func testBLEManagerRequiresNavigationReadinessForWrites() {

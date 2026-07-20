@@ -14,6 +14,6 @@ bool isSupported(Sound sound);
 bool isPowerButtonHonkAvailable();
 bool getPowerButtonHonkConfig(PowerButtonHonkConfig &config);
 bool configurePowerButtonHonk(const PowerButtonHonkConfig &config);
-void processPowerButtonHonk();
+void handlePowerButtonHonkPress();
 
 } // namespace waveshare_board::speaker

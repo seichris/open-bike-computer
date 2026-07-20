@@ -440,6 +440,7 @@ class BikeComputerCoordinator: ObservableObject {
 
     func applicationDidBecomeActive() {
         locationManager.prepareDeviceDestinationRequestsIfNeeded()
+        bleManager.resumeAutoReconnectIfNeeded()
     }
 
     var isLocationAuthorized: Bool {

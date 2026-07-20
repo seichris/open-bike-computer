@@ -22,6 +22,12 @@ struct PowerStatus {
   uint8_t chargingStatus = 0;
 };
 
+struct PowerButtonEvents {
+  bool shortPress = false;
+  bool negativeEdge = false;
+  bool positiveEdge = false;
+};
+
 bool begin();
 bool isAvailable();
 bool readRegister(uint8_t reg, uint8_t &value);
@@ -29,8 +35,8 @@ bool writeRegister(uint8_t reg, uint8_t value);
 bool readPowerStatus(PowerStatus &status);
 bool readBatteryStatus(uint8_t &percentage, bool &charging);
 bool readBatteryPercentage(uint8_t &percentage);
-bool setPowerButtonShortPressMonitoring(bool enabled);
-bool readAndClearPowerButtonShortPress(bool &pressed);
+bool setPowerButtonEventMonitoring(bool enabled);
+bool readAndClearPowerButtonEvents(PowerButtonEvents &events);
 
 bool enableDisplayRails();
 bool enablePeripheralRails();

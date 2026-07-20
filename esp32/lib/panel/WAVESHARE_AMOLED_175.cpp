@@ -17,6 +17,8 @@
 #include "touch.hpp"
 #include "waveshare_board.hpp"
 
+extern void appDisplayFlushCompleted();
+
 // Define Global Variables declared extern in hal.hpp
 uint8_t GPS_TX = GPIO_NUM_43;
 uint8_t GPS_RX = GPIO_NUM_44;
@@ -190,6 +192,10 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx->fillRect(area->x1, area->y1, 1, 1,
                 reinterpret_cast<uint16_t *>(px_map)[0]);
 #endif
+
+  // Notify application policy only after the physical panel write (including
+  // the 2.06-inch commit write) has completed.
+  appDisplayFlushCompleted();
 
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);

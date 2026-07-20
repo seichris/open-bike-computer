@@ -269,13 +269,16 @@ and `Speaker: playing sound N at V% volume`.
 
 The same settings group can enable the PWR button as a honk control. The app
 sends the authenticated configuration as `"SNDH" | Enabled | SoundID | Volume`
-and firmware persists it in NVS. On the 2.06 board, a short PWR press is read
-from AXP2101 interrupt-enable/status register pair `0x41`/`0x49`, bit `3`.
-Firmware polls the latched status only while honk mode is enabled and queues
-playback on the existing speaker task; the PMU's six-second hard power-off is
-unchanged. Versioned capability discovery also returns this persisted
-configuration, so reconnecting from a fresh app does not overwrite device
-state with app defaults.
+and firmware persists it in NVS. PWR button activity is read from the AXP2101
+interrupt-enable/status register pair `0x41`/`0x49`: bit `3` reports a short
+press, while bits `1` and `0` report the press and release edges. Firmware polls
+the latched status while awake and gives an active ownership comparison first
+refusal to confirm physical access. At all other times an enabled honk is queued
+on the existing
+speaker task. The PMU's six-second hard power-off is unchanged. Versioned
+capability discovery also returns the persisted honk configuration, so
+reconnecting from a fresh app does not overwrite device state with app
+defaults.
 
 ### Buttons, External Pads, And Power
 

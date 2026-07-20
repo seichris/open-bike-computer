@@ -1,7 +1,20 @@
 # BLE Protocol
 
 The ESP32 advertises BLE service UUID
-`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` as `BikeComputer`.
+`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
+An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from
+its stable hardware-derived device ID.
+
+The advertisement carries an eight-byte manufacturer payload:
+
+```text
+FF FF | ProtocolVersion: UInt8 | Flags: UInt8 | DeviceID suffix: 4 bytes
+```
+
+Protocol version is currently `2`; flag bit `0` means the device already has an
+owner and the remaining flag bits are reserved. The suffix lets the app and
+device show the same short identifier when
+several Bike Computers are nearby without advertising the complete identity.
 
 All navigation/map writes require the authenticated session established through
 the auth characteristic. The iOS app completes auth before it marks the device as
@@ -31,13 +44,191 @@ Fallback frame prefixes:
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
 
-## Auth
+## Device ownership and authentication
 
-The shared local key is `BikeComputer BLE v1 local pairing key`.
+Every ownership-capable ESP32 derives its stable 128-bit device ID as the first
+16 bytes of `SHA-256("BikeComputer device ID v2" || eFuseBaseMAC)` and caches it
+in NVS. A missing/corrupt cached ID is recreated only when no owner artifacts
+exist; otherwise firmware remains physically recoverable but fail-locked rather
+than binding an existing credential to a new identity. The iOS installation
+similarly creates a random 128-bit
+owner ID and stores it in the Keychain. iOS may register multiple Bike
+Computers, but maintains one current BLE connection at a time. Automatic
+reconnect targets only the current device; changing devices is explicit in
+Settings.
 
-Handshake:
+### Initial registration
 
-1. iOS writes `HELLO|<nonce>` to auth characteristic.
+Registration is allowed only while the device is unclaimed. The two sides use
+ephemeral P-256 ECDH, HKDF-SHA256, and a comparison code shown independently on
+the iPhone and Bike Computer. The derived 256-bit owner key is never sent over
+BLE.
+
+All binary fields below are lowercase hex. `AppPublicKey` and
+`DevicePublicKey` are 65-byte uncompressed X9.63 P-256 keys.
+
+1. iOS writes `INFO` after the user selects the nearby Bike Computer and taps
+   Continue. No device-button press is required yet.
+2. ESP32 notifies
+   `DEVICE|2|<DeviceID>|<Claimed 0-or-1>|<UTF8NameHex>`.
+3. iOS writes `PAIR|<OwnerID>|<AppPublicKey>`. Firmware accepts at most one
+   valid `PAIR` request per BLE connection, limiting unattended clients to one
+   expensive P-256 operation before they must reconnect.
+4. ESP32 derives the owner key and notifies
+   `PAIRING|<DeviceID>|<DevicePublicKey>`.
+5. Both sides hash `"BikeComputer ownership v2" || DeviceID || OwnerID ||
+   AppPublicKey || DevicePublicKey`, then derive the owner key with that hash as
+   HKDF salt and `BikeComputer owner key v2` as HKDF info.
+6. Both show the six-digit big-endian value from the first four bytes of
+   `HMAC-SHA256(OwnerKey, "compare|" || TranscriptHash)`, modulo `1,000,000`.
+7. After verifying that the displays match, the user presses either button on
+   the Bike Computer. ESP32 arms confirmation only after the comparison screen
+   has been rendered, discards older BOOT/PWR events, and requires a fresh
+   press for the active pairing generation before notifying
+   `PAIR_READY|<DeviceID>`. This physical action is required so a nearby client
+   cannot silently claim an unattended device.
+8. The user also taps the matching-code confirmation on iPhone. Replacing a
+   stale credential uses a separate destructive “Replace Registration” action.
+   iOS then writes
+   `CONFIRM|<OwnerID>|<HMAC-SHA256(OwnerKey, "claim|" || TranscriptHash)>|<UTF8NameHex>`.
+9. ESP32 persists the owner ID, owner key, and name, then notifies
+   `PAIRED|<DeviceID>|<UTF8NameHex>`.
+
+iOS keeps the derived key in a provisional Keychain entry through these steps.
+`PAIRED` is not itself trusted: the app promotes the key and mutates the device
+registry only after the subsequent owner-session handshake proves the hardware
+committed that same key. Automatic promotion never overwrites a different final
+credential; the explicit replacement action is persisted so recovery remains
+possible if the final notification is lost.
+
+Pairing expires after 120 seconds. Names are non-empty UTF-8, exclude control
+characters and `|`, and are limited to 24 bytes. The app starts with the
+privacy-safe editable suggestion `My bike`; iOS does not expose the Apple ID
+owner name to apps.
+
+### Owner session authentication
+
+Every BLE connection performs a fresh mutual challenge using independent
+random 16-byte nonces from iOS and the ESP32. The device-generated nonce makes
+a captured handshake unusable on a later connection. No navigation, map,
+settings, rename, or deregistration command is accepted before this completes.
+
+1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
+2. ESP32 notifies
+   `SERVER2|<DeviceID>|<ClientNonce>|<ServerNonce>|<HMAC-SHA256(OwnerKey, "server2|<DeviceID>|<OwnerID>|<ClientNonce>|<ServerNonce>")>`.
+3. iOS verifies the server proof, then writes
+   `PROOF|<OwnerID>|<ClientNonce>|<ServerNonce>|<HMAC-SHA256(OwnerKey, "client2|<DeviceID>|<OwnerID>|<ClientNonce>|<ServerNonce>")>`.
+4. ESP32 verifies the owner and both nonces, then notifies
+   `OK2|<DeviceID>|<ClientNonce>|<ServerNonce>` and opens the authenticated session.
+
+### Protected session frames
+
+After `OK2`, all app-to-device writes on the auth, navigation, route, GPS, and
+settings characteristics use AES-256-GCM. Auth replies and every
+device-to-app navigation notification—including destination requests,
+capabilities, acknowledgements, and transfer status—use the reverse protected
+direction. Plaintext notifications are rejected while a v2 session exists. The
+two directional keys are:
+
+```text
+WriteKey  = HMAC-SHA256(OwnerKey, "session2-write|<DeviceID>|<ClientNonce>|<ServerNonce>")
+NotifyKey = HMAC-SHA256(OwnerKey, "session2-notify|<DeviceID>|<ClientNonce>|<ServerNonce>")
+```
+
+App-to-device frame (`S2`) and device-to-app notification (`R2`):
+
+```text
+Magic: 2 bytes (ASCII S2 or R2)
+Sequence: UInt32 big-endian
+Ciphertext: 0 or more bytes
+Tag: 16-byte AES-GCM tag
+```
+
+Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, and `5=settings`.
+Each direction has an independent strictly increasing sequence per channel.
+Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
+frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
+authenticated data is ASCII `write2|` for `S2` or `notify2|` for `R2`, followed
+by the one-byte channel and four-byte sequence. The frame adds 22 bytes, so iOS
+subtracts that overhead before packet sizing.
+
+Ownership setup messages are each at most 182 bytes and require an ATT MTU of
+at least 185. Firmware checks the negotiated MTU before notifying. Swift and
+mbedTLS tests share exact `S2` and `R2` golden vectors to prevent wire-format
+drift.
+
+An owned device replies `OWNED|<DeviceID>` or `DENIED|<DeviceID>` to an
+unauthorized client and does not fall back to the global legacy key.
+
+### Rename, deregistration, and recovery
+
+Inside protected `S2` frames, iOS can rename with `NAME|<UTF8NameHex>`; ESP32
+persists the name and returns a protected `NAME_OK|<UTF8NameHex>`. `UNPAIR`
+first persists a signed revocation tombstone, removes the owner ID, owner key,
+and name, then returns protected
+`UNPAIRED2|<DeviceID>|<ReceiptNonce>|<ReceiptProof>`, where:
+
+```text
+ReceiptProof = HMAC-SHA256(
+  OwnerKey,
+  "revoked2|<DeviceID>|<OwnerID>|<ReceiptNonce>"
+)
+```
+
+After every owner authentication, iOS sends protected `GET_NAME`; ESP32 returns
+protected `NAME_INFO|<UTF8NameHex>`. Registry name changes are committed only
+from this authenticated response (or `NAME_OK`), so a dropped rename response
+reconciles on reconnect without trusting plaintext `INFO` metadata.
+
+iOS verifies this receipt with its stored credential before deleting that
+credential. If the notification is dropped, the device retains and exposes the
+same compact receipt on subsequent `INFO` responses as
+`DEVICE|2|<DeviceID>|<Claimed>||<ReceiptNonce>|<ReceiptProof>`, including after
+a new owner registers. This lets the prior iPhone reconcile a missed handoff
+without retaining the old secret on the device. Both receipt forms fit the
+supported notification value limit. A disconnected Settings entry also offers
+an explicit local Forget action for devices that were reset, transferred more
+than once, lost, or destroyed.
+
+At boot, firmware distinguishes an interrupted `UNPAIR` from an older handoff
+receipt by verifying the tombstone with the currently committed owner key. If
+it matches, firmware completes owner-record cleanup before advertising. If the
+same iPhone later re-pairs with a different per-device key, the old receipt no
+longer validates under the current credential and remains available to
+reconcile the earlier handoff. A receipt from any historical owner never makes
+an invalid current-owner record appear unclaimed; current-record corruption
+always fails locked until the eight-second physical recovery action.
+
+If the owner iPhone is lost, holding the ESP32 BOOT button for eight seconds
+clears ownership locally and makes the device available for registration again.
+The stable device ID remains unchanged.
+
+### Hardware security boundary
+
+This ownership layer prevents remote/nearby phones from controlling or
+impersonating a registered Bike Computer. Physical possession of the hardware
+is intentionally a recovery authority through the BOOT action; the current
+development firmware does not claim resistance to invasive flash extraction or
+malicious reflashing. Its per-device owner key is stored in ordinary NVS.
+
+A production SKU whose threat model includes stolen-hardware key extraction
+must add a separately provisioned hardware-security profile: NVS encryption,
+flash encryption, Secure Boot, protected signing/encryption keys, disabled or
+controlled debug/download paths, and a tested OTA/recovery ceremony. Those
+eFuse and key-management operations are manufacturing decisions and are not
+enabled implicitly by this application protocol.
+
+### Legacy compatibility
+
+Only genuinely older firmware accepts the v1 shared-key handshake. Protocol-v2
+firmware never accepts the app-wide key, including when pristine, reset, or
+unclaimed; unreadable or partial ownership storage also fails closed. iOS keeps
+the legacy client path solely for a previously known legacy peripheral that
+does not expose v2 identity information.
+
+The legacy shared local key is `BikeComputer BLE v1 local pairing key`:
+
+1. iOS writes `HELLO|<nonce>`.
 2. ESP32 notifies `SERVER|<nonce>|<hmac_sha256_hex("server|<nonce>")>`.
 3. iOS writes `CLIENT|<nonce>|<hmac_sha256_hex("client|<nonce>")>`.
 4. ESP32 notifies `OK|<nonce>` and accepts navigation/map writes.
@@ -109,7 +300,7 @@ Current setting IDs:
 | `12` | Device brightness | `5...100` percent on supported hardware |
 | `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
 | `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
-| `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. |
+| `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. An unclaimed device waiting to be added applies a minimum 600-second registration grace period; `0` still disables automatic disconnected sleep. |
 | `16` | Map + Navigation minimum polygon size | `0...50` |
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
 | `18` | Map + Navigation route line width | `2...48` |

@@ -6,6 +6,9 @@
  */
 
 #include "ble_navigation.hpp"
+#include "ble_connection_policy.hpp"
+#include "device_ownership.hpp"
+#include "ownership_button_policy.hpp"
 #include "device_screen_protocol.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
@@ -34,6 +37,11 @@
 #include <host/ble_hs_id.h>
 #include <mbedtls/md.h>
 #include <WiFi.h>
+
+#if !defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS) || \
+    CONFIG_BT_NIMBLE_MAX_CONNECTIONS != 1
+#error "Bike Computer ownership requires CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1"
+#endif
 
 extern Gps gps;
 extern device_transfer::HttpTransferServer deviceTransferHttp;
@@ -74,8 +82,29 @@ static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
+static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
+              "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+static device_ownership::DeviceOwnership deviceOwnership;
+static bool deviceOwnershipReady = false;
+static bool ownershipPairingActiveSnapshot = false;
+static StaticSemaphore_t deviceOwnershipMutexStorage;
+static SemaphoreHandle_t deviceOwnershipMutex = nullptr;
+static StaticSemaphore_t notificationTransportMutexStorage;
+static SemaphoreHandle_t notificationTransportMutex = nullptr;
+static bool ownershipAdvertisingDirty = false;
+static bool ownershipDisconnectPending = false;
+static bool ownershipRestartRequested = false;
+static uint32_t ownershipRestartRequestedMs = 0;
+static portMUX_TYPE ownershipUiMux = portMUX_INITIALIZER_UNLOCKED;
+static bool ownershipUiUpdatePending = false;
+static char ownershipUiName[device_ownership::MAX_DEVICE_NAME_BYTES + 1] = "";
+static bool ownershipUiClaimed = false;
+static int32_t ownershipUiPairingCode = -1;
+static uint32_t ownershipUiPairingGeneration = 0;
+static ownership_button_policy::ComparisonRenderGate
+    ownershipComparisonRenderGate;
 static ble_transfer::PendingRequest pendingTransferControl;
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
 static DestinationCatalogSnapshot destinationCatalog;
@@ -86,6 +115,71 @@ static SemaphoreHandle_t destinationCatalogReassemblerMutex = nullptr;
 static bool destinationRequestPending = false;
 static uint32_t destinationRequestStartedMs = 0;
 static uint32_t destinationStatusUpdatedMs = 0;
+
+static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
+                                          const uint8_t *data, size_t length);
+
+static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
+                                   uint32_t pairingGeneration = 0) {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+  const std::string name = deviceOwnership.deviceName();
+  const bool claimed = deviceOwnership.isClaimed();
+  xSemaphoreGive(deviceOwnershipMutex);
+  portENTER_CRITICAL(&ownershipUiMux);
+  strncpy(ownershipUiName, name.c_str(), sizeof(ownershipUiName) - 1);
+  ownershipUiName[sizeof(ownershipUiName) - 1] = '\0';
+  ownershipUiClaimed = claimed;
+  ownershipUiPairingCode = pairingCode;
+  ownershipUiPairingGeneration = pairingGeneration;
+  ownershipUiUpdatePending = true;
+  portEXIT_CRITICAL(&ownershipUiMux);
+}
+
+static void applyPendingOwnershipUiUpdate() {
+  char name[sizeof(ownershipUiName)] = "";
+  bool claimed = false;
+  int32_t pairingCode = -1;
+  uint32_t pairingGeneration = 0;
+  portENTER_CRITICAL(&ownershipUiMux);
+  const bool pending = ownershipUiUpdatePending;
+  if (pending) {
+    strncpy(name, ownershipUiName, sizeof(name) - 1);
+    claimed = ownershipUiClaimed;
+    pairingCode = ownershipUiPairingCode;
+    pairingGeneration = ownershipUiPairingGeneration;
+    ownershipUiUpdatePending = false;
+  }
+  portEXIT_CRITICAL(&ownershipUiMux);
+  if (pending) {
+    updateWaitingOwnershipStatus(name, claimed, pairingCode);
+    portENTER_CRITICAL(&ownershipUiMux);
+    if (pairingCode >= 0) {
+      ownershipComparisonRenderGate.request(pairingGeneration);
+    } else {
+      ownershipComparisonRenderGate.cancel();
+    }
+    portEXIT_CRITICAL(&ownershipUiMux);
+  }
+}
+
+static void applyOwnershipAdvertisingData() {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+  const std::string name = deviceOwnership.advertisedName();
+  const std::vector<uint8_t> manufacturerData =
+      deviceOwnership.advertisementManufacturerData();
+  xSemaphoreGive(deviceOwnershipMutex);
+  NimBLEDevice::setDeviceName(name);
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  advertising->setName(name);
+  advertising->setManufacturerData(manufacturerData);
+  ownershipAdvertisingDirty = false;
+}
 
 NavigationData getCurrentNavigationData() { return currentNavData; }
 
@@ -231,8 +325,13 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
   destination_picker_protocol::writeUInt16LE(token, request + 8);
   setDestinationPickerStatus(DestinationPickerStatusCode::Calculating,
                              generation, token, "Starting navigation...");
-  mapTransferStatusCharacteristic->setValue(request, sizeof(request));
-  mapTransferStatusCharacteristic->notify();
+  if (!notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, request,
+                                     sizeof(request))) {
+    finishDestinationRequestIfPending();
+    setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
+                               token, "Secure notification failed");
+    return false;
+  }
   Serial.printf("BLE Destination: requested generation=%lu token=%u\n",
                 (unsigned long)generation, token);
   return true;
@@ -424,6 +523,40 @@ static bool requireAuthenticated(const char *payloadName) {
   return false;
 }
 
+static bool unwrapOwnerAuthenticatedPayload(
+    device_ownership::AuthenticatedChannel channel, const std::string &frame,
+    std::string &payload, const char *payloadName) {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    payload = frame;
+    return !deviceOwnershipReady;
+  }
+  const bool requiresFrame = deviceOwnership.isSessionAuthenticated();
+  const bool authenticationStateDiverged =
+      bleSessionAuthenticated && !requiresFrame;
+  const bool accepted = !authenticationStateDiverged &&
+                        (!requiresFrame ||
+                         deviceOwnership.unwrapAuthenticatedPayload(
+                             channel, frame, payload));
+  if (!requiresFrame) {
+    payload = frame;
+  }
+  xSemaphoreGive(deviceOwnershipMutex);
+  if (authenticationStateDiverged) {
+    bleSessionAuthenticated = false;
+    bleDebugStats.authenticated = false;
+    ownershipDisconnectPending = true;
+    Serial.println("BLE: Ownership session was lost; disconnect requested");
+  }
+  if (!accepted) {
+    bleDebugStats.rejectedUnauthenticatedCount++;
+    bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+    Serial.printf("BLE: Rejected %s: invalid authenticated frame\n",
+                  payloadName == nullptr ? "payload" : payloadName);
+  }
+  return accepted;
+}
+
 static bool isHexNonce(const char *nonce) {
   if (nonce == nullptr || strlen(nonce) != 32) {
     return false;
@@ -484,13 +617,81 @@ static bool constantTimeEquals(const char *a, const char *b) {
   return diff == 0;
 }
 
-static void notifyAuthResponse(const char *response) {
-  if (authCharacteristic == nullptr || response == nullptr) {
+static void notifyAuthResponse(const std::string &response) {
+  if (authCharacteristic == nullptr || response.empty() ||
+      notificationTransportMutex == nullptr ||
+      xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return;
   }
-
-  authCharacteristic->setValue((uint8_t *)response, strlen(response));
+  constexpr size_t kMaximumOwnershipNotificationBytes = 182;
+  if (response.size() > kMaximumOwnershipNotificationBytes) {
+    Serial.printf("BLE: Ownership response too large: %u bytes\n",
+                  static_cast<unsigned>(response.size()));
+    xSemaphoreGive(notificationTransportMutex);
+    return;
+  }
+  uint16_t peerMtu = 23;
+  NimBLEService *service = authCharacteristic->getService();
+  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
+  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+    peerMtu = server->getPeerMTU(activeConnHandle);
+  }
+  if (response.size() > static_cast<size_t>(peerMtu - 3)) {
+    Serial.printf(
+        "BLE: Ownership response needs ATT MTU %u; peer negotiated %u\n",
+        static_cast<unsigned>(response.size() + 3), peerMtu);
+    xSemaphoreGive(notificationTransportMutex);
+    return;
+  }
+  authCharacteristic->setValue(
+      reinterpret_cast<const uint8_t *>(response.data()), response.size());
   authCharacteristic->notify();
+  xSemaphoreGive(notificationTransportMutex);
+}
+
+static void notifyAuthResponse(const char *response) {
+  if (response != nullptr) notifyAuthResponse(std::string(response));
+}
+
+static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
+                                          const uint8_t *data, size_t length) {
+  if (characteristic == nullptr || data == nullptr ||
+      !bleSessionAuthenticated || !deviceOwnershipReady ||
+      deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return false;
+  }
+  std::string frame;
+  const std::string payload(reinterpret_cast<const char *>(data), length);
+  const bool protectedPayload = deviceOwnership.protectAuthenticatedPayload(
+      device_ownership::AuthenticatedChannel::Navigation, payload, frame);
+  if (!protectedPayload || activeConnHandle == BLE_HS_CONN_HANDLE_NONE) {
+    xSemaphoreGive(deviceOwnershipMutex);
+    return false;
+  }
+  if (xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    xSemaphoreGive(deviceOwnershipMutex);
+    return false;
+  }
+  NimBLEService *service = characteristic->getService();
+  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
+  if (server == nullptr ||
+      frame.size() > static_cast<size_t>(server->getPeerMTU(activeConnHandle) - 3)) {
+    Serial.printf("BLE: Protected navigation notification too large: %u bytes\n",
+                  static_cast<unsigned>(frame.size()));
+    xSemaphoreGive(notificationTransportMutex);
+    xSemaphoreGive(deviceOwnershipMutex);
+    return false;
+  }
+  // Keep sequence assignment, characteristic value publication, and notify in
+  // one critical section. Calls arrive from both NimBLE and application tasks;
+  // splitting these operations can publish R2 sequence N+1 before N.
+  characteristic->setValue(
+      reinterpret_cast<const uint8_t *>(frame.data()), frame.size());
+  characteristic->notify();
+  xSemaphoreGive(notificationTransportMutex);
+  xSemaphoreGive(deviceOwnershipMutex);
+  return true;
 }
 
 static void logAuthPayloadPreview(const std::string &value) {
@@ -510,20 +711,117 @@ static void logAuthPayloadPreview(const std::string &value) {
                 (unsigned)value.length(), ascii, hex);
 }
 
-static void handleAuthPayload(const std::string &value) {
+static void handleAuthPayload(const std::string &frame) {
+  std::string value;
+  if (!unwrapOwnerAuthenticatedPayload(
+          device_ownership::AuthenticatedChannel::Auth, frame, value,
+          "ownership command")) {
+    return;
+  }
   if (value.length() == 2 &&
       (((uint8_t)value[0] == 0x01 && (uint8_t)value[1] == 0x00) ||
        ((uint8_t)value[0] == 0x00 && (uint8_t)value[1] == 0x00))) {
     return;
   }
 
-  if (value.length() > 128) {
+  if (value.length() > 256) {
     Serial.println("BLE: Rejected auth payload: too large");
     logAuthPayloadPreview(value);
     return;
   }
 
-  char payload[129];
+  if (deviceOwnershipReady) {
+    device_ownership::CommandResult ownershipResult;
+    uint32_t pairingCode = 0;
+    uint32_t pairingGeneration = 0;
+    bool ownershipLockAcquired = false;
+    bool ownershipSessionAuthenticated = false;
+    if (deviceOwnershipMutex != nullptr &&
+        xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+      ownershipLockAcquired = true;
+      ownershipResult = deviceOwnership.handle(value, millis());
+      pairingCode = deviceOwnership.pairingCode();
+      pairingGeneration = deviceOwnership.pairingGeneration();
+      if (frame.size() >= 2 && frame[0] == 'S' && frame[1] == '2' &&
+          !ownershipResult.response.empty() &&
+          !(ownershipResult.response.size() >= 2 &&
+            ownershipResult.response[0] == 'R' &&
+            ownershipResult.response[1] == '2') &&
+          deviceOwnership.isSessionAuthenticated()) {
+        std::string protectedResponse;
+        if (deviceOwnership.protectAuthenticatedPayload(
+                device_ownership::AuthenticatedChannel::Auth,
+                ownershipResult.response, protectedResponse)) {
+          ownershipResult.response = std::move(protectedResponse);
+        } else {
+          ownershipResult.response.clear();
+        }
+      }
+      ownershipSessionAuthenticated =
+          deviceOwnership.isSessionAuthenticated();
+      if (!ownershipResult.response.empty()) {
+        // Publish before releasing the ownership lock. This keeps the state
+        // transition, R2 sequence assignment, and transport order atomic with
+        // respect to both a following BLE write and a physical BOOT action.
+        notifyAuthResponse(ownershipResult.response);
+      }
+      xSemaphoreGive(deviceOwnershipMutex);
+    }
+    if (!ownershipLockAcquired) {
+      Serial.println("BLE: Rejected ownership command: state lock unavailable");
+      return;
+    }
+    if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
+      bleSessionAuthenticated = false;
+      bleDebugStats.authenticated = false;
+      ownershipDisconnectPending = true;
+      Serial.println("BLE: Ownership command invalidated session; disconnect requested");
+    }
+    if (ownershipResult.matched) {
+      switch (ownershipResult.event) {
+      case device_ownership::Event::PairingStarted:
+        ownershipPairingActiveSnapshot = true;
+        queueOwnershipUiUpdate(
+            static_cast<int32_t>(pairingCode),
+            pairingGeneration);
+        Serial.println("BLE: Secure ownership comparison started");
+        break;
+      case device_ownership::Event::Paired:
+        ownershipPairingActiveSnapshot = false;
+        ownershipAdvertisingDirty = true;
+        queueOwnershipUiUpdate();
+        Serial.println("BLE: Device ownership registered");
+        break;
+      case device_ownership::Event::Authenticated:
+        bleSessionAuthenticated = true;
+        bleDebugStats.authenticated = true;
+        bleDebugStats.authSuccessCount++;
+        bleDebugStats.lastAuthSuccessMs = millis();
+        queueOwnershipUiUpdate();
+        Serial.println("BLE: Owner session authenticated");
+        break;
+      case device_ownership::Event::Renamed:
+        ownershipAdvertisingDirty = true;
+        queueOwnershipUiUpdate();
+        Serial.println("BLE: Device name updated");
+        break;
+      case device_ownership::Event::Unpaired:
+        bleSessionAuthenticated = false;
+        bleDebugStats.authenticated = false;
+        ownershipAdvertisingDirty = true;
+        queueOwnershipUiUpdate();
+        ownershipRestartRequested = true;
+        ownershipRestartRequestedMs = millis();
+        Serial.println("BLE: Device ownership removed; restart scheduled");
+        break;
+      case device_ownership::Event::None:
+        break;
+      }
+      return;
+    }
+  }
+
+  char payload[257];
   memcpy(payload, value.data(), value.length());
   payload[value.length()] = '\0';
 
@@ -536,6 +834,25 @@ static void handleAuthPayload(const std::string &value) {
       !isHexNonce(nonce)) {
     Serial.println("BLE: Rejected auth payload: invalid format");
     logAuthPayloadPreview(value);
+    return;
+  }
+
+  bool legacyAllowed = false;
+  bool claimed = true;
+  std::string stableDeviceId;
+  if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    legacyAllowed = deviceOwnership.allowsLegacyAuthentication();
+    claimed = deviceOwnership.isClaimed();
+    stableDeviceId = deviceOwnership.deviceIdHex();
+    xSemaphoreGive(deviceOwnershipMutex);
+  }
+  if (!deviceOwnershipReady || !legacyAllowed) {
+    const std::string response =
+        (deviceOwnershipReady && claimed ? "OWNED|" : "ERROR|") +
+        (deviceOwnershipReady ? stableDeviceId : "ownership_unavailable");
+    notifyAuthResponse(response.c_str());
+    Serial.println("BLE: Rejected legacy shared-key authentication");
     return;
   }
 
@@ -851,15 +1168,13 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   uint16_t peerMtu = 23;
   NimBLEService *service = pChar->getService();
   NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
-  if (server != nullptr) {
-    const std::vector<uint16_t> peers = server->getPeerDevices();
-    if (!peers.empty())
-      peerMtu = server->getPeerMTU(peers.front());
+  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+    peerMtu = server->getPeerMTU(activeConnHandle);
   }
-  if (peerMtu >= 3 && legacy.size() <= peerMtu - 3) {
-    pChar->setValue(reinterpret_cast<const uint8_t *>(legacy.data()),
-                    legacy.size());
-    pChar->notify();
+  if (peerMtu >= 25 && legacy.size() <= peerMtu - 25 &&
+      notifyAuthenticatedNavigation(
+          pChar, reinterpret_cast<const uint8_t *>(legacy.data()),
+          legacy.size())) {
     Serial.printf("BLE Map Transfer: status notified (%u bytes, MTU %u)\n",
                   (unsigned)legacy.size(), (unsigned)peerMtu);
     return;
@@ -879,9 +1194,12 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     frame.push_back(static_cast<char>(index));
     frame.push_back(static_cast<char>(chunkCount));
     frame.append(body.data() + offset, length);
-    pChar->setValue(reinterpret_cast<const uint8_t *>(frame.data()),
-                    frame.size());
-    pChar->notify();
+    if (!notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(frame.data()),
+            frame.size())) {
+      Serial.println("BLE Map Transfer: protected status chunk failed");
+      return;
+    }
     delay(2);
   }
   Serial.printf("BLE Map Transfer: status notified (%u bytes, %u chunks)\n",
@@ -896,11 +1214,40 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  std::string response = "DSTS" + genericTransferStatusJson();
-  pChar->setValue((uint8_t *)response.data(), response.size());
-  pChar->notify();
-  Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
-                (unsigned)response.size());
+  constexpr size_t kChunkBytes = 128;
+  static uint8_t transferId = 0;
+  const std::string body = genericTransferStatusJson();
+  const std::string response = "DSTS" + body;
+  if (notifyAuthenticatedNavigation(
+          pChar, reinterpret_cast<const uint8_t *>(response.data()),
+          response.size())) {
+    Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
+                  static_cast<unsigned>(response.size()));
+    return;
+  }
+  const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
+  if (chunkCount == 0 || chunkCount > 255) {
+    Serial.printf("BLE Device Transfer: status too large (%u bytes)\n",
+                  static_cast<unsigned>(body.size()));
+    return;
+  }
+  transferId++;
+  for (size_t index = 0; index < chunkCount; index++) {
+    const size_t offset = index * kChunkBytes;
+    const size_t chunkLength = std::min(kChunkBytes, body.size() - offset);
+    std::string chunk = "DSTC";
+    chunk.push_back(static_cast<char>(transferId));
+    chunk.push_back(static_cast<char>(index));
+    chunk.push_back(static_cast<char>(chunkCount));
+    chunk.append(body.data() + offset, chunkLength);
+    if (!notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(chunk.data()),
+            chunk.size())) {
+      Serial.println("BLE Device Transfer: protected status chunk failed");
+      return;
+    }
+    delay(2);
+  }
 }
 
 static void queueTransferControl(ble_transfer::Action action,
@@ -1030,8 +1377,10 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     }
     responseSize += waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE;
   }
-  pChar->setValue(response, responseSize);
-  pChar->notify();
+  if (!notifyAuthenticatedNavigation(pChar, response, responseSize)) {
+    Serial.println("BLE Capabilities: protected notification failed");
+    return;
+  }
   Serial.printf("BLE Capabilities: notified flags=0x%02X config=%d\n",
                 response[4], responseSize > 5 ? 1 : 0);
 }
@@ -1054,8 +1403,10 @@ static void notifyPowerButtonHonkStatus(
           command, applied, response, responseSize)) {
     return;
   }
-  pChar->setValue(response, responseSize);
-  pChar->notify();
+  if (!notifyAuthenticatedNavigation(pChar, response, responseSize)) {
+    Serial.println("BLE Sound: protected PWR status notification failed");
+    return;
+  }
   Serial.printf("BLE Sound: PWR honk apply status notified success=%d\n",
                 applied ? 1 : 0);
 }
@@ -1749,6 +2100,20 @@ static void handleMapSettingPayload(const uint8_t *data, size_t len,
 // NimBLE Callbacks
 // ============================================================================
 
+static bool resetOwnershipConnectionState() {
+  if (!deviceOwnershipReady) {
+    return true;
+  }
+  if (deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) {
+    return false;
+  }
+  deviceOwnership.resetConnection();
+  ownershipPairingActiveSnapshot = false;
+  xSemaphoreGive(deviceOwnershipMutex);
+  return true;
+}
+
 class MyBLEServerCallbacks : public NimBLEServerCallbacks {
 public:
   BLENavigationServer *server;
@@ -1756,18 +2121,48 @@ public:
   MyBLEServerCallbacks(BLENavigationServer *srv) : server(srv) {}
 
   void onConnect(NimBLEServer *pServer) override {
-    activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
+    // NimBLE-Arduino 1.4 invokes both overloads for the same event. The
+    // descriptor overload below is the only one allowed to mutate state.
+    (void)pServer;
+  }
+
+  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
+    if (desc == nullptr) {
+      Serial.println("BLE: Rejected connection without a handle");
+      return;
+    }
+    if (activeConnHandle == desc->conn_handle && server->connected) {
+      Serial.printf("BLE: Ignoring duplicate connection callback handle=%u\n",
+                    desc->conn_handle);
+      return;
+    }
+    if (!ble_connection_policy::beginSession(
+            activeConnHandle, desc->conn_handle,
+            [] { return resetOwnershipConnectionState(); })) {
+      Serial.printf("BLE: Rejecting connection handle=%u (busy or ownership reset unavailable)\n",
+                    desc->conn_handle);
+      pServer->disconnect(desc->conn_handle);
+      return;
+    }
+    acceptConnection();
+  }
+
+  void acceptConnection() {
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
+    ownershipDisconnectPending = false;
     bleDebugStats.connected = true;
     bleDebugStats.authenticated = false;
     bleDebugStats.connectCount++;
     bleDebugStats.lastConnectMs = millis();
     pendingAuthNonce[0] = '\0';
+    if (deviceOwnershipReady) {
+      queueOwnershipUiUpdate();
+    }
     if (destinationCatalogReassemblerMutex != nullptr &&
         xSemaphoreTake(destinationCatalogReassemblerMutex,
                        pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1779,14 +2174,28 @@ public:
     NimBLEDevice::stopAdvertising();
   }
 
-  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
-    onConnect(pServer);
-    if (desc != nullptr) {
-      activeConnHandle = desc->conn_handle;
+  void onDisconnect(NimBLEServer *pServer,
+                    ble_gap_conn_desc *desc) override {
+    if (desc == nullptr || !ble_connection_policy::endSession(
+                               activeConnHandle, desc->conn_handle,
+                               [] { return resetOwnershipConnectionState(); })) {
+      Serial.printf("BLE: Secondary connection handle=%u disconnected\n",
+                    desc == nullptr ? BLE_HS_CONN_HANDLE_NONE
+                                    : desc->conn_handle);
+      return;
     }
+    disconnectActive();
   }
 
   void onDisconnect(NimBLEServer *pServer) override {
+    // See onConnect(NimBLEServer*): the pinned NimBLE version invokes both.
+    (void)pServer;
+  }
+
+  void disconnectActive() {
+    if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
+      return;
+    }
     queueTransferControl(ble_transfer::Action::DisableMap,
                          ble_transfer::NotifyNone);
     server->connected = false;
@@ -1795,12 +2204,18 @@ public:
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
-    activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
+    ownershipDisconnectPending = false;
     bleDebugStats.connected = false;
     bleDebugStats.authenticated = false;
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
     pendingAuthNonce[0] = '\0';
+    if (deviceOwnershipReady) {
+      if (ownershipAdvertisingDirty) {
+        applyOwnershipAdvertisingData();
+      }
+      queueOwnershipUiUpdate();
+    }
     if (finishDestinationRequestIfPending()) {
       const DestinationPickerStatusSnapshot status =
           getDestinationPickerStatusSnapshot();
@@ -1818,8 +2233,14 @@ public:
 class MyNavCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
-    std::string value = pChar->getValue();
-    if (value.empty()) {
+    const std::string frame = pChar->getValue();
+    if (frame.empty()) {
+      return;
+    }
+    std::string value;
+    if (!unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::Navigation, frame, value,
+            "navigation characteristic")) {
       return;
     }
 
@@ -1918,7 +2339,13 @@ public:
 class MyRouteCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
-    std::string value = pChar->getValue();
+    const std::string frame = pChar->getValue();
+    std::string value;
+    if (!unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::Route, frame, value,
+            "route characteristic")) {
+      return;
+    }
     if (!requireAuthenticated("route geometry")) {
       return;
     }
@@ -1931,7 +2358,13 @@ public:
 class MyGPSCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
-    std::string value = pChar->getValue();
+    const std::string frame = pChar->getValue();
+    std::string value;
+    if (!unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::Gps, frame, value,
+            "GPS characteristic")) {
+      return;
+    }
     if (!requireAuthenticated("GPS position")) {
       return;
     }
@@ -1949,7 +2382,13 @@ public:
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
-    std::string value = pChar->getValue();
+    const std::string frame = pChar->getValue();
+    std::string value;
+    if (!unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::Settings, frame, value,
+            "settings characteristic")) {
+      return;
+    }
 
     if (handleDestinationPickerPayload(value, "native destination picker")) {
       return;
@@ -2096,7 +2535,47 @@ void BLENavigationServer::init(const char *deviceName) {
         &destinationCatalogReassemblerMutexStorage);
   }
 
-  initBleIdentityAndSecurity(deviceName);
+  if (deviceOwnershipMutex == nullptr) {
+    deviceOwnershipMutex =
+        xSemaphoreCreateMutexStatic(&deviceOwnershipMutexStorage);
+  }
+
+  if (notificationTransportMutex == nullptr) {
+    notificationTransportMutex =
+        xSemaphoreCreateMutexStatic(&notificationTransportMutexStorage);
+  }
+
+  deviceOwnershipReady = deviceOwnershipMutex != nullptr &&
+                         notificationTransportMutex != nullptr &&
+                         xSemaphoreTake(deviceOwnershipMutex,
+                                        pdMS_TO_TICKS(250)) == pdTRUE;
+  std::string effectiveDeviceName = deviceName;
+  std::string stableDeviceId;
+  bool ownershipClaimed = true;
+  std::vector<uint8_t> manufacturerData;
+  if (deviceOwnershipReady) {
+    deviceOwnershipReady = deviceOwnership.begin();
+    if (deviceOwnershipReady) {
+      effectiveDeviceName = deviceOwnership.advertisedName();
+      stableDeviceId = deviceOwnership.deviceIdHex();
+      ownershipClaimed = deviceOwnership.isClaimed();
+      manufacturerData = deviceOwnership.advertisementManufacturerData();
+    }
+    xSemaphoreGive(deviceOwnershipMutex);
+  }
+  if (deviceOwnershipReady) {
+    Serial.printf("BLE: Ownership identity=%s claimed=%d name='%s'\n",
+                  stableDeviceId.c_str(), ownershipClaimed,
+                  effectiveDeviceName.c_str());
+    queueOwnershipUiUpdate();
+  } else {
+    portENTER_CRITICAL(&ownershipUiMux);
+    ownershipUiClaimed = true;
+    portEXIT_CRITICAL(&ownershipUiMux);
+    Serial.println("BLE: Ownership storage unavailable; authentication locked");
+  }
+
+  initBleIdentityAndSecurity(effectiveDeviceName.c_str());
   NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
   NimBLEDevice::setMTU(512);              // Increase MTU for route geometry
 
@@ -2152,6 +2631,10 @@ void BLENavigationServer::init(const char *deviceName) {
   // Start advertising
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
+  if (deviceOwnershipReady) {
+    pAdvertising->setName(effectiveDeviceName);
+    pAdvertising->setManufacturerData(manufacturerData);
+  }
   pAdvertising->setScanResponse(true);
   pAdvertising->start();
 
@@ -2159,10 +2642,32 @@ void BLENavigationServer::init(const char *deviceName) {
   bleDebugStats.initialized = true;
   bleDebugStats.connected = connected;
   bleDebugStats.authenticated = bleSessionAuthenticated;
-  Serial.printf("BLE: Server started, advertising as '%s'\n", deviceName);
+  Serial.printf("BLE: Server started, advertising as '%s'\n",
+                effectiveDeviceName.c_str());
 }
 
 void BLENavigationServer::process() {
+  if (deviceOwnershipReady) {
+    bool pairingExpired = false;
+    if (deviceOwnershipMutex != nullptr &&
+        xSemaphoreTake(deviceOwnershipMutex, 0) == pdTRUE) {
+      const bool wasPairing = deviceOwnership.hasPairingCode();
+      deviceOwnership.process(millis());
+      ownershipPairingActiveSnapshot = deviceOwnership.hasPairingCode();
+      pairingExpired = wasPairing && !ownershipPairingActiveSnapshot;
+      xSemaphoreGive(deviceOwnershipMutex);
+    }
+    if (pairingExpired) {
+      queueOwnershipUiUpdate();
+    }
+    applyPendingOwnershipUiUpdate();
+  }
+  if (ownershipRestartRequested &&
+      static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
+    Serial.println("BLE: Restarting after ownership removal");
+    Serial.flush();
+    ESP.restart();
+  }
   processPendingTransferControl();
   const uint32_t nowMs = millis();
   if (destinationCatalogReassemblerMutex != nullptr &&
@@ -2188,9 +2693,23 @@ void BLENavigationServer::process() {
   }
 
   static uint32_t lastLog = 0;
+  if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
+      xSemaphoreTake(deviceOwnershipMutex, 0) == pdTRUE) {
+    ownershipPairingActiveSnapshot = deviceOwnership.hasPairingCode();
+    xSemaphoreGive(deviceOwnershipMutex);
+  }
+  const uint32_t unauthenticatedLimitMs =
+      ownershipPairingActiveSnapshot ? 120000 : 12000;
+  if (connected && ownershipDisconnectPending) {
+    ownershipDisconnectPending = false;
+    unauthTimeoutDisconnectRequested = true;
+    if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+      pServer->disconnect(activeConnHandle);
+    }
+  }
   if (connected && !bleSessionAuthenticated &&
       !unauthTimeoutDisconnectRequested &&
-      millis() - bleDebugStats.lastConnectMs > 12000) {
+      millis() - bleDebugStats.lastConnectMs > unauthenticatedLimitMs) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
@@ -2239,6 +2758,101 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
   stats.connected = connected;
   stats.authenticated = bleSessionAuthenticated;
   return stats;
+}
+
+bool BLENavigationServer::forgetOwner() {
+  bool cleared = false;
+  if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    cleared = deviceOwnership.isClaimed() && deviceOwnership.clearOwner();
+    xSemaphoreGive(deviceOwnershipMutex);
+  }
+  if (!cleared) {
+    return false;
+  }
+  bleSessionAuthenticated = false;
+  bleDebugStats.authenticated = false;
+  ownershipAdvertisingDirty = true;
+  queueOwnershipUiUpdate();
+  ownershipRestartRequested = true;
+  ownershipRestartRequestedMs = millis();
+  Serial.println("BLE: Owner cleared by physical recovery action");
+  return true;
+}
+
+void BLENavigationServer::noteOwnershipDisplayFlushCompleted() {
+  portENTER_CRITICAL(&ownershipUiMux);
+  ownershipComparisonRenderGate.displayFlushed();
+  portEXIT_CRITICAL(&ownershipUiMux);
+}
+
+bool BLENavigationServer::ownershipPairingRenderedRequest(
+    uint32_t &pairingGeneration) {
+  portENTER_CRITICAL(&ownershipUiMux);
+  pairingGeneration = ownershipComparisonRenderGate.renderedGeneration();
+  portEXIT_CRITICAL(&ownershipUiMux);
+  return pairingGeneration != 0;
+}
+
+bool BLENavigationServer::armOwnershipPairingConfirmation(
+    uint32_t pairingGeneration) {
+  portENTER_CRITICAL(&ownershipUiMux);
+  const bool requestMatches = pairingGeneration != 0 &&
+      ownershipComparisonRenderGate.renderedGeneration() ==
+          pairingGeneration;
+  portEXIT_CRITICAL(&ownershipUiMux);
+  if (!requestMatches || !deviceOwnershipReady ||
+      deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) != pdTRUE) {
+    return false;
+  }
+  const bool armed =
+      deviceOwnership.armPairingConfirmation(pairingGeneration);
+  xSemaphoreGive(deviceOwnershipMutex);
+  portENTER_CRITICAL(&ownershipUiMux);
+  ownershipComparisonRenderGate.consumeRendered(pairingGeneration);
+  portEXIT_CRITICAL(&ownershipUiMux);
+  return armed;
+}
+
+bool BLENavigationServer::hasOwnershipPairingCode() {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ownershipPairingActiveSnapshot;
+  }
+  const bool active = deviceOwnership.hasPairingCode();
+  xSemaphoreGive(deviceOwnershipMutex);
+  return active;
+}
+
+bool BLENavigationServer::isOwnershipClaimed() {
+  portENTER_CRITICAL(&ownershipUiMux);
+  const bool claimed = ownershipUiClaimed;
+  portEXIT_CRITICAL(&ownershipUiMux);
+  return claimed;
+}
+
+bool BLENavigationServer::confirmOwnershipPairing() {
+  bool confirmed = false;
+  uint32_t pairingCode = 0;
+  std::string stableDeviceId;
+  if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    confirmed = deviceOwnership.confirmPairingOnDevice();
+    if (confirmed) {
+      stableDeviceId = deviceOwnership.deviceIdHex();
+      pairingCode = deviceOwnership.pairingCode();
+    }
+    xSemaphoreGive(deviceOwnershipMutex);
+  }
+  if (!confirmed) {
+    return false;
+  }
+  const std::string response = "PAIR_READY|" + stableDeviceId;
+  notifyAuthResponse(response.c_str());
+  queueOwnershipUiUpdate(static_cast<int32_t>(pairingCode));
+  Serial.println("BLE: Ownership pairing confirmed with physical button press");
+  return true;
 }
 
 // ============================================================================
