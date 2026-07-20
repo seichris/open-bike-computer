@@ -1,5 +1,6 @@
 import json
 import plistlib
+import re
 import unittest
 from pathlib import Path
 
@@ -16,7 +17,90 @@ def load_plist(path: Path) -> dict:
         return plistlib.load(handle)
 
 
+def project_object(project: str, object_id: str) -> str:
+    match = re.search(
+        rf"^\t\t{re.escape(object_id)} /\* [^\n]+ \*/ = \{{\n"
+        rf"(?P<body>.*?)^\t\t\}};$",
+        project,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"missing Xcode project object {object_id}")
+    return match.group("body")
+
+
+def target_build_configurations(project: str, target_name: str) -> dict[str, str]:
+    target_matches = re.finditer(
+        rf"^\t\t[A-F0-9]+ /\* {re.escape(target_name)} \*/ = \{{\n"
+        rf"(?P<body>.*?)^\t\t\}};$",
+        project,
+        re.MULTILINE | re.DOTALL,
+    )
+    target_body = next(
+        (
+            match.group("body")
+            for match in target_matches
+            if "isa = PBXNativeTarget;" in match.group("body")
+        ),
+        None,
+    )
+    if target_body is None:
+        raise AssertionError(f"missing Xcode target {target_name}")
+
+    configuration_list_match = re.search(
+        r"buildConfigurationList = ([A-F0-9]+) /\*", target_body
+    )
+    if configuration_list_match is None:
+        raise AssertionError(f"missing configuration list for {target_name}")
+
+    configuration_list = project_object(
+        project, configuration_list_match.group(1)
+    )
+    configuration_ids = re.findall(
+        r"^\s+([A-F0-9]+) /\* (Debug|Release) \*/,$",
+        configuration_list,
+        re.MULTILINE,
+    )
+    if {name for _, name in configuration_ids} != {"Debug", "Release"}:
+        raise AssertionError(
+            f"expected Debug and Release configurations for {target_name}"
+        )
+    return {
+        name: project_object(project, configuration_id)
+        for configuration_id, name in configuration_ids
+    }
+
+
 class WorkoutReleaseAssetsTests(unittest.TestCase):
+    def test_release_identity_advances_the_distributed_app(self):
+        project = (
+            IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
+        ).read_text()
+        release_notes = (
+            REPO_ROOT
+            / "docs"
+            / "releases"
+            / "watchos-workout-companion.md"
+        ).read_text()
+
+        targets = {
+            "BikeComputer": "LetItRide.BikeComputer",
+            "BikeComputerWatch": "LetItRide.BikeComputer.watchkitapp",
+        }
+        for target_name, bundle_identifier in targets.items():
+            configurations = target_build_configurations(project, target_name)
+            for configuration_name, settings in configurations.items():
+                with self.subTest(
+                    target=target_name, configuration=configuration_name
+                ):
+                    self.assertIn("CURRENT_PROJECT_VERSION = 6;", settings)
+                    self.assertIn("MARKETING_VERSION = 1.1;", settings)
+                    self.assertIn(
+                        f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier};",
+                        settings,
+                    )
+        self.assertIn("Release candidate: **1.1 (6)**", release_notes)
+
     def test_privacy_policy_is_reachable_and_covers_release_obligations(self):
         shared_policy = (
             IOS_PROJECT / "WorkoutShared" / "AppPrivacyPolicy.swift"
