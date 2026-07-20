@@ -1,6 +1,6 @@
 # Watch workout companion release notes
 
-Release candidate: **1.1 (6)**. App Store version 1.0 is already distributed,
+Release candidate: **1.1 (7)**. App Store version 1.0 is already distributed,
 and App Store Connect already contains builds through 5, so both the marketing
 version and build number must advance for this release.
 
