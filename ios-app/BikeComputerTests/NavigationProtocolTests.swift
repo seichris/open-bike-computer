@@ -11674,19 +11674,40 @@ struct NavigationProtocolTests {
 
     static func testMapTrackingPolicy() {
         assertEqual(
-            MapTrackingPolicy.desiredMode(isNavigating: false, isOfflineMapSelectionActive: false),
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
             .follow,
             "dot mode should follow the current location"
         )
         assertEqual(
-            MapTrackingPolicy.desiredMode(isNavigating: true, isOfflineMapSelectionActive: false),
+            MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
             .followWithHeading,
             "navigation should follow the current location and heading"
         )
         assertEqual(
-            MapTrackingPolicy.desiredMode(isNavigating: false, isOfflineMapSelectionActive: true),
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: true,
+                isDestinationSelectionActive: false
+            ),
             nil,
             "offline map selection should remain free to pan"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: true
+            ),
+            nil,
+            "a pending long-press destination should remain visible while GPS updates"
         )
     }
 

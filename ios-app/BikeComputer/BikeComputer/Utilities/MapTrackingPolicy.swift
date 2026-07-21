@@ -8,9 +8,11 @@ enum MapTrackingBehavior: Equatable {
 enum MapTrackingPolicy {
     static func desiredMode(
         isNavigating: Bool,
-        isOfflineMapSelectionActive: Bool
+        isOfflineMapSelectionActive: Bool,
+        isDestinationSelectionActive: Bool
     ) -> MapTrackingBehavior? {
-        guard !isOfflineMapSelectionActive else { return nil }
+        guard !isOfflineMapSelectionActive,
+              !isDestinationSelectionActive else { return nil }
         return isNavigating ? .followWithHeading : .follow
     }
 }

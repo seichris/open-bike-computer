@@ -200,7 +200,10 @@ struct MapViewContainer: UIViewRepresentable {
                 }
                 if let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                     isNavigating: isNavigating,
-                    isOfflineMapSelectionActive: offlineMapSelectionFrame != nil
+                    isOfflineMapSelectionActive: offlineMapSelectionFrame != nil,
+                    isDestinationSelectionActive: uiView.annotations.contains {
+                        $0 is DestinationAnnotation
+                    }
                 ) {
                     let desiredTrackingMode: MKUserTrackingMode =
                         desiredTrackingBehavior == .followWithHeading ? .followWithHeading : .follow
