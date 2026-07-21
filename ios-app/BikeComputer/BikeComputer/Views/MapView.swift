@@ -201,7 +201,7 @@ struct MapViewContainer: UIViewRepresentable {
                 if let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                     isNavigating: isNavigating,
                     isOfflineMapSelectionActive: offlineMapSelectionFrame != nil,
-                    isDestinationSelectionActive: uiView.annotations.contains {
+                    isDestinationSelectionActive: uiView.selectedAnnotations.contains {
                         $0 is DestinationAnnotation
                     }
                 ) {

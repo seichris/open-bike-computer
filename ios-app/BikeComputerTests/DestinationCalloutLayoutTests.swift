@@ -16,6 +16,12 @@ private final class RecordingMapView: MKMapView {
     var convertedCoordinate: CLLocationCoordinate2D?
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
+    private var recordedSelectedAnnotations: [MKAnnotation] = []
+
+    override var selectedAnnotations: [MKAnnotation] {
+        get { recordedSelectedAnnotations }
+        set { recordedSelectedAnnotations = newValue }
+    }
 
     override func view(for annotation: MKAnnotation) -> MKAnnotationView? {
         let identifier = ObjectIdentifier(annotation as AnyObject)
@@ -34,12 +40,14 @@ private final class RecordingMapView: MKMapView {
 
     override func selectAnnotation(_ annotation: MKAnnotation, animated: Bool) {
         selectionCount += 1
+        recordedSelectedAnnotations = [annotation]
         view(for: annotation)?.setSelected(true, animated: false)
     }
 
     override func deselectAnnotation(_ annotation: MKAnnotation?, animated: Bool) {
         deselectionCount += 1
         if let annotation {
+            recordedSelectedAnnotations.removeAll { $0 === annotation }
             view(for: annotation)?.setSelected(false, animated: false)
         }
     }
@@ -71,11 +79,52 @@ struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
         testLabelExpansion()
+        testDestinationSelectionTrackingPolicy()
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testDestinationSelectionTrackingPolicy() {
+        let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
+        let mapView = RecordingMapView()
+        let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
+        mapView.annotationViewProvider = { annotation in
+            coordinator.mapView(mapView, viewFor: annotation)
+        }
+        coordinator.onDestinationSelected = { _, _ in }
+
+        coordinator.selectDestination(at: coordinate, on: mapView)
+
+        guard let annotation = mapView.selectedAnnotations.first as? DestinationAnnotation else {
+            preconditionFailure("a newly dropped destination should be selected")
+        }
+        precondition(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: true
+            ) == nil,
+            "a selected destination callout should preserve free panning"
+        )
+
+        mapView.deselectAnnotation(annotation, animated: false)
+
+        precondition(
+            !mapView.selectedAnnotations.contains { $0 is DestinationAnnotation },
+            "dismissing the callout should end destination selection"
+        )
+        precondition(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ) == .follow,
+            "dot-mode follow should resume after destination selection ends"
+        )
     }
 
     @MainActor

@@ -11707,7 +11707,7 @@ struct NavigationProtocolTests {
                 isDestinationSelectionActive: true
             ),
             nil,
-            "a pending long-press destination should remain visible while GPS updates"
+            "a selected long-press destination should remain visible while GPS updates"
         )
     }
 
