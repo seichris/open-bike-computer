@@ -518,6 +518,7 @@ struct NavigationProtocolTests {
         testDestinationPickerProtocol()
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
+        testMapTrackingPolicy()
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -569,6 +570,8 @@ struct NavigationProtocolTests {
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
+        testNavigationEngineRestoresPhysicalGPSAfterSimulation()
+        testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
@@ -11626,6 +11629,117 @@ struct NavigationProtocolTests {
         assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
     }
 
+    static func testNavigationEngineRestoresPhysicalGPSAfterSimulation() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let initialPhysicalLocation = CLLocation(latitude: 37.1, longitude: -122.1)
+        engine.processExternalLocation(initialPhysicalLocation)
+        manager.sentGPSPositions.removeAll()
+
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                CLLocationCoordinate2D(latitude: 1.30, longitude: 103.80),
+                CLLocationCoordinate2D(latitude: 1.31, longitude: 103.81)
+            ]
+        )
+        engine.startNavigation(with: route, isTestMode: true)
+
+        let latestPhysicalLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.2, longitude: -122.2),
+            altitude: 88,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 45,
+            speed: 7,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(latestPhysicalLocation)
+        assertEqual(
+            manager.sentGPSPositions.count,
+            0,
+            "physical GPS should be cached without overriding active simulation"
+        )
+
+        engine.stopNavigation()
+
+        assertEqual(
+            manager.sentGPSPositions.count,
+            1,
+            "stopping simulation should immediately restore the latest physical GPS"
+        )
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readInt32LE(packet, offset: 0), 37_200_000, "restored GPS should use physical latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_200_000, "restored GPS should use physical longitude")
+        assertEqual(
+            readUInt16LE(packet, offset: 14),
+            DeviceGPSPacketBuilder.invalidSpeedCmps,
+            "restored idle GPS should omit ride speed"
+        )
+        assertEqual(readInt16LE(packet, offset: 16), 0, "restored idle GPS should omit altitude")
+        assertEqual(readUInt32LE(packet, offset: 18), 0, "restored idle GPS should omit distance")
+        assertEqual(readUInt32LE(packet, offset: 22), 0, "restored idle GPS should omit elapsed time")
+        assertEqual(
+            readUInt32LE(packet, offset: 26),
+            DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
+            "restored idle GPS should omit route remaining distance"
+        )
+    }
+
+    static func testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let physicalLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.3, longitude: -122.3),
+            altitude: 91,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 50,
+            speed: 8,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(physicalLocation)
+        manager.sentGPSPositions.removeAll()
+
+        let routeCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+            CLLocationCoordinate2D(latitude: 37.001, longitude: -122.0)
+        ]
+        let route = TestRoute(
+            steps: [
+                TestRouteStep(instructions: "Continue", coordinates: routeCoordinates),
+                TestRouteStep(instructions: "", coordinates: [])
+            ],
+            coordinates: routeCoordinates
+        )
+        engine.startNavigation(with: route, isTestMode: true)
+        engine.updateSimulationForTesting(timeInterval: 10)
+
+        assertEqual(
+            manager.sentGPSPositions.count,
+            1,
+            "step-based simulation completion should leave one restored physical GPS packet"
+        )
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readInt32LE(packet, offset: 0), 37_300_000, "completion should retain physical latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_300_000, "completion should retain physical longitude")
+        assertEqual(
+            readUInt16LE(packet, offset: 14),
+            DeviceGPSPacketBuilder.invalidSpeedCmps,
+            "completion restore should remain idle telemetry"
+        )
+    }
+
     static func testNavigationEngineOmitsRideTelemetryWhenIdle() {
         let manager = TestBLEManager()
         manager.isConnected = true
@@ -11645,8 +11759,21 @@ struct NavigationProtocolTests {
         )
         engine.processExternalLocation(idleLocation)
 
-        assertEqual(manager.sentGPSPositions.count, 1, "idle GPS sync should still send position/time")
-        let packet = manager.sentGPSPositions[0]
+        let updatedIdleLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.0001, longitude: -122.0001),
+            altitude: 43,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: 95,
+            speed: 6,
+            timestamp: Date()
+        )
+        engine.processExternalLocation(updatedIdleLocation)
+
+        assertEqual(manager.sentGPSPositions.count, 2, "every idle map location should update the device position")
+        let packet = manager.sentGPSPositions[1]
+        assertEqual(readInt32LE(packet, offset: 0), 37_000_100, "idle GPS update should use the latest latitude")
+        assertEqual(readInt32LE(packet, offset: 4), -122_000_100, "idle GPS update should use the latest longitude")
         assertEqual(readUInt16LE(packet, offset: 14),
                     DeviceGPSPacketBuilder.invalidSpeedCmps,
                     "idle GPS sync should omit speed telemetry")
@@ -11656,6 +11783,54 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(packet, offset: 26),
                     DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
                     "idle GPS sync should omit route remaining telemetry")
+    }
+
+    static func testMapTrackingPolicy() {
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .follow,
+            "dot mode should follow the current location"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .followWithHeading,
+            "navigation should follow the current location and heading"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: true,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "offline map selection should remain free to pan"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isOfflineMapSelectionActive: true,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "offline map selection should override navigation heading-follow"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: true
+            ),
+            .none,
+            "a selected long-press destination should remain visible while GPS updates"
+        )
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {

@@ -28,6 +28,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -53,6 +54,7 @@ xcrun swiftc \
   -o "${CATALYST_OUT}" \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
 

@@ -16,6 +16,32 @@ private final class RecordingMapView: MKMapView {
     var convertedCoordinate: CLLocationCoordinate2D?
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
+    private(set) var cameraUpdateCount = 0
+    private(set) var regionUpdateCount = 0
+    private var recordedSelectedAnnotations: [MKAnnotation] = []
+    private var recordedUserTrackingMode: MKUserTrackingMode = .none
+
+    override var selectedAnnotations: [MKAnnotation] {
+        get { recordedSelectedAnnotations }
+        set { recordedSelectedAnnotations = newValue }
+    }
+
+    override var userTrackingMode: MKUserTrackingMode {
+        get { recordedUserTrackingMode }
+        set { recordedUserTrackingMode = newValue }
+    }
+
+    override func setUserTrackingMode(_ mode: MKUserTrackingMode, animated: Bool) {
+        recordedUserTrackingMode = mode
+    }
+
+    override func setCamera(_ camera: MKMapCamera, animated: Bool) {
+        cameraUpdateCount += 1
+    }
+
+    override func setRegion(_ region: MKCoordinateRegion, animated: Bool) {
+        regionUpdateCount += 1
+    }
 
     override func view(for annotation: MKAnnotation) -> MKAnnotationView? {
         let identifier = ObjectIdentifier(annotation as AnyObject)
@@ -34,12 +60,14 @@ private final class RecordingMapView: MKMapView {
 
     override func selectAnnotation(_ annotation: MKAnnotation, animated: Bool) {
         selectionCount += 1
+        recordedSelectedAnnotations = [annotation]
         view(for: annotation)?.setSelected(true, animated: false)
     }
 
     override func deselectAnnotation(_ annotation: MKAnnotation?, animated: Bool) {
         deselectionCount += 1
         if let annotation {
+            recordedSelectedAnnotations.removeAll { $0 === annotation }
             view(for: annotation)?.setSelected(false, animated: false)
         }
     }
@@ -66,16 +94,240 @@ private final class RecordingLongPressGestureRecognizer: UILongPressGestureRecog
     }
 }
 
+private final class RecordingRoute: MKRoute {}
+
 @main
 struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
         testLabelExpansion()
+        await testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testDestinationSelectionTrackingIntegration() async {
+        let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
+        let mapView = RecordingMapView()
+        let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
+        coordinator.mapView = mapView
+        coordinator.isUserLocationAuthorized = true
+        mapView.convertedCoordinate = coordinate
+        mapView.annotationViewProvider = { annotation in
+            coordinator.mapView(mapView, viewFor: annotation)
+        }
+        coordinator.onDestinationSelected = { _, _ in }
+        mapView.userTrackingMode = .follow
+
+        let longPress = RecordingLongPressGestureRecognizer(
+            state: .began,
+            location: CGPoint(x: 100, y: 100)
+        )
+        coordinator.handleLongPress(longPress)
+
+        guard let annotation = mapView.selectedAnnotations.first as? DestinationAnnotation else {
+            preconditionFailure("a newly dropped destination should be selected")
+        }
+        precondition(
+            mapView.userTrackingMode == .none,
+            "long-press destination selection should disable tracking"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: false,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .none,
+            "a selected destination callout should preserve free panning"
+        )
+
+        let destinationFreePanActive = coordinator.isFreePanActive(
+            mapView: mapView,
+            isOfflineMapSelectionActive: false
+        )
+        let cameraUpdatesBeforeDestinationRoute = mapView.cameraUpdateCount
+        let destinationRouteCoordinate = CLLocationCoordinate2D(latitude: 1.3525, longitude: 103.8202)
+        coordinator.configureRouteCamera(
+            mapView: mapView,
+            route: RecordingRoute(),
+            location: nil,
+            simulatedPosition: destinationRouteCoordinate,
+            isSimulationMode: true,
+            isNavigating: true,
+            isFreePanActive: destinationFreePanActive
+        )
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: destinationRouteCoordinate,
+            isFreePanActive: destinationFreePanActive,
+            animated: false
+        )
+        precondition(
+            destinationFreePanActive &&
+                mapView.cameraUpdateCount == cameraUpdatesBeforeDestinationRoute,
+            "route start and simulation ticks should preserve a selected destination callout"
+        )
+
+        guard let annotationView = mapView.view(for: annotation) else {
+            preconditionFailure("the selected destination should have an annotation view")
+        }
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
+        precondition(
+            mapView.userTrackingMode == .none,
+            "a temporary callout refresh must not resume tracking after the pin is reselected"
+        )
+
+        mapView.deselectAnnotation(annotation, animated: false)
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
+
+        precondition(
+            !mapView.selectedAnnotations.contains { $0 is DestinationAnnotation },
+            "dismissing the callout should end destination selection"
+        )
+        precondition(
+            mapView.userTrackingMode == .follow,
+            "the MapKit deselection callback should resume dot-mode follow"
+        )
+
+        coordinator.isNavigating = true
+        mapView.userTrackingMode = .none
+        coordinator.mapView(mapView, didDeselect: annotationView)
+        await waitForMainQueue()
+        precondition(
+            mapView.userTrackingMode == .followWithHeading,
+            "the MapKit deselection callback should resume navigation heading-follow"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: true,
+            isOfflineMapSelectionActive: true,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .none,
+            "offline map selection should disable heading-follow during navigation"
+        )
+
+        let cameraUpdatesBeforeSelection = mapView.cameraUpdateCount
+        let simulatedCoordinate = CLLocationCoordinate2D(latitude: 1.353, longitude: 103.82)
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: simulatedCoordinate,
+            isFreePanActive: true,
+            animated: false
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection,
+            "simulated navigation updates should not recenter an offline selection"
+        )
+
+        mapView.userTrackingMode = .followWithHeading
+        coordinator.configureRouteCamera(
+            mapView: mapView,
+            route: RecordingRoute(),
+            location: nil,
+            simulatedPosition: simulatedCoordinate,
+            isSimulationMode: false,
+            isNavigating: true,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection &&
+                mapView.userTrackingMode == .none,
+            "route replacement should not move a navigating offline selection"
+        )
+
+        coordinator.updateSimulatedNavigationCamera(
+            mapView: mapView,
+            coordinate: simulatedCoordinate,
+            isFreePanActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.cameraUpdateCount == cameraUpdatesBeforeSelection + 1,
+            "simulated navigation camera updates should resume after selection"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: true,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .followWithHeading,
+            "real navigation heading-follow should resume after offline selection"
+        )
+
+        let liveLocation = CLLocation(latitude: 1.354, longitude: 103.821)
+        coordinator.hasSetInitialRegion = false
+        let regionUpdatesBeforeLateLocation = mapView.regionUpdateCount
+        coordinator.updateInitialRegionIfNeeded(
+            mapView: mapView,
+            location: liveLocation,
+            simulatedPosition: nil,
+            isSimulationMode: false,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.regionUpdateCount == regionUpdatesBeforeLateLocation &&
+                !coordinator.hasSetInitialRegion,
+            "a late first location should not recenter an active free-pan selection"
+        )
+
+        coordinator.hasSetInitialRegion = true
+        mapView.userTrackingMode = .followWithHeading
+        coordinator.finishNavigationTracking(
+            mapView: mapView,
+            isUserLocationAuthorized: true,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.userTrackingMode == .none && coordinator.hasSetInitialRegion,
+            "stopping navigation should preserve the selected map region"
+        )
+
+        coordinator.updateInitialRegionIfNeeded(
+            mapView: mapView,
+            location: liveLocation,
+            simulatedPosition: nil,
+            isSimulationMode: false,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.regionUpdateCount == regionUpdatesBeforeLateLocation,
+            "the next GPS update should not recenter after navigation stops during selection"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: false,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .follow,
+            "dot-mode follow should resume when free-pan selection exits"
+        )
+    }
+
+    @MainActor
+    private static func waitForMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
+            }
+        }
     }
 
     @MainActor

@@ -33,13 +33,12 @@ class NavigationEngine: NSObject, ObservableObject {
     private var sendTracker = NavigationSendTracker(distanceThreshold: 10)
     private var initialNavigationLocation: CLLocation?
     private var lastDeviceGpsLocation: (location: CLLocation, convertFromMapKitRoute: Bool)?
+    private var latestExternalGpsLocation: CLLocation?
     private var hasAcceptedLiveLocation = false
     private var lastSentGeometryHash: Int = 0
     private var geometrySendInterval: TimeInterval = 2.0
     private var lastGeometrySendTime: Date = .distantPast
     private let geometryWindowSize: Int = 30
-    private let idleGpsSyncInterval: TimeInterval = 10 * 60
-    private var lastIdleGpsSyncTime: Date = .distantPast
     private var rideStartDate: Date?
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
@@ -88,6 +87,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
     @discardableResult
     func processExternalLocation(_ location: CLLocation) -> Bool {
+        latestExternalGpsLocation = location
         guard !isSimulationMode else { return false }
         let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
         let acceptedRouteLocation: CLLocation?
@@ -101,8 +101,9 @@ class NavigationEngine: NSObject, ObservableObject {
             updateRideTelemetry(gpsLocation: location, routeLocation: acceptedRouteLocation)
             sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
         } else {
-            lastDeviceGpsLocation = (location, false)
-            sendIdleDeviceTimeSyncIfNeeded(location)
+            sendDeviceGpsPosition(location,
+                                  convertFromMapKitRoute: false,
+                                  includeRideTelemetry: false)
         }
         return acceptedRouteLocation != nil
     }
@@ -178,6 +179,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Stop navigation
     func stopNavigation() {
+        let externalLocationToRestore = isSimulationMode ? latestExternalGpsLocation : nil
         bleManager?.clearRouteGeometry()
         isNavigating = false
         currentRoute = nil
@@ -191,12 +193,16 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = false
         lastSentGeometryHash = 0
         lastGeometrySendTime = .distantPast
-        lastIdleGpsSyncTime = .distantPast
         routeRemainingDistance = nil
         routeRemainingTime = nil
         expectedArrivalDate = nil
         resetRideTelemetry(startingAt: nil)
         stopSimulation()
+        if let externalLocationToRestore {
+            sendDeviceGpsPosition(externalLocationToRestore,
+                                  convertFromMapKitRoute: false,
+                                  includeRideTelemetry: false)
+        }
         print("Navigation stopped")
     }
     
@@ -221,6 +227,14 @@ class NavigationEngine: NSObject, ObservableObject {
         isSimulationMode = false
         simulatedPosition = nil
     }
+
+    #if HOST_TESTING
+    func updateSimulationForTesting(timeInterval: TimeInterval) {
+        guard isSimulationMode else { return }
+        lastSimulationUpdate = Date().addingTimeInterval(-timeInterval)
+        updateSimulation()
+    }
+    #endif
     
     private func updateSimulation() {
         guard let route = currentRoute, let lastUpdate = lastSimulationUpdate else { return }
@@ -240,7 +254,6 @@ class NavigationEngine: NSObject, ObservableObject {
         if simulationProgress >= 1.0 {
             simulationProgress = 1.0
             print("Simulation complete")
-            stopSimulation()
             stopNavigation()
             return
         }
@@ -261,6 +274,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
             // Also process location for navigation instructions
             processLocation(location)
+            guard isNavigating, isSimulationMode else { return }
             updateRideTelemetry(gpsLocation: location, routeLocation: location)
             sendDeviceGpsPosition(location, convertFromMapKitRoute: true)
         }
@@ -501,15 +515,6 @@ class NavigationEngine: NSObject, ObservableObject {
         sendDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute,
                               includeRideTelemetry: isNavigating)
-    }
-
-    private func sendIdleDeviceTimeSyncIfNeeded(_ location: CLLocation) {
-        let now = Date()
-        guard now.timeIntervalSince(lastIdleGpsSyncTime) >= idleGpsSyncInterval else { return }
-        guard let bleManager, bleManager.isConnected, bleManager.isNavigationReady else { return }
-
-        sendDeviceGpsPosition(location, convertFromMapKitRoute: false, includeRideTelemetry: false)
-        lastIdleGpsSyncTime = now
     }
 
     private func resetRideTelemetry(startingAt location: CLLocation?) {

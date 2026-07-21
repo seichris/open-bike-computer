@@ -87,42 +87,41 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.onMapTapped = onMapTapped
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
+        context.coordinator.isNavigating = isNavigating
+        context.coordinator.isSimulationMode = isSimulationMode
+        context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
+        context.coordinator.simulatedPosition = simulatedPosition
         
         return mapView
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        let isOfflineMapSelectionActive = offlineMapSelectionFrame != nil
+        let isFreePanActive = context.coordinator.isFreePanActive(
+            mapView: uiView,
+            isOfflineMapSelectionActive: isOfflineMapSelectionActive
+        )
+
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
         context.coordinator.onMapTapped = onMapTapped
         context.coordinator.offlineMapSelectionFrame = offlineMapSelectionFrame
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
+        context.coordinator.isNavigating = isNavigating
+        context.coordinator.isSimulationMode = isSimulationMode
+        context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
+        context.coordinator.simulatedPosition = simulatedPosition
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         context.coordinator.updateOfflineMapSelectionBounds()
         
-        // Only set initial region once if not already set
-        if let location = location, 
-           !context.coordinator.hasSetInitialRegion,
-           context.coordinator.lastRoute == nil {
-             // Use simulated position if available and in simulation mode
-             var center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
-             
-             // In China, Apple Maps uses GCJ-02 for its view region
-             // Convert WGS-84 -> GCJ-02 so the map centers correctly on the visual location (blue dot)
-             // Only convert for REAL GPS (which is WGS-84). Simulated position (from MKRoute) is already GCJ-02.
-             if !isSimulationMode && CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
-                 let converted = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
-                 center = converted
-             }
-             
-            let region = MKCoordinateRegion(
-                center: center,
-                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-            )
-            uiView.setRegion(region, animated: false)
-            context.coordinator.hasSetInitialRegion = true
-        }
+        context.coordinator.updateInitialRegionIfNeeded(
+            mapView: uiView,
+            location: location,
+            simulatedPosition: simulatedPosition,
+            isSimulationMode: isSimulationMode,
+            isFreePanActive: isFreePanActive
+        )
         
         // Update route overlay
         if let route = route, context.coordinator.lastRoute !== route {
@@ -137,7 +136,8 @@ struct MapViewContainer: UIViewRepresentable {
                 location: location,
                 simulatedPosition: simulatedPosition,
                 isSimulationMode: isSimulationMode,
-                isNavigating: isNavigating
+                isNavigating: isNavigating,
+                isFreePanActive: isFreePanActive
             )
             
             // Handle simulated position annotation
@@ -159,12 +159,11 @@ struct MapViewContainer: UIViewRepresentable {
             let simAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
             uiView.removeAnnotations(simAnnotations)
             
-            // Re-enable user tracking when navigation stops and location access
-            // has been granted explicitly through onboarding.
-            uiView.userTrackingMode = isUserLocationAuthorized ? .follow : .none
-            uiView.showsUserLocation = isUserLocationAuthorized
-            context.coordinator.hasSetInitialRegion = false
-            context.coordinator.resetNavigationCamera()
+            context.coordinator.finishNavigationTracking(
+                mapView: uiView,
+                isUserLocationAuthorized: isUserLocationAuthorized,
+                isFreePanActive: isFreePanActive
+            )
         }
         
         // Update simulated position
@@ -175,9 +174,10 @@ struct MapViewContainer: UIViewRepresentable {
             if uiView.showsUserLocation {
                 uiView.showsUserLocation = false
             }
-            context.coordinator.updateNavigationCamera(
+            context.coordinator.updateSimulatedNavigationCamera(
                 mapView: uiView,
                 coordinate: simPos,
+                isFreePanActive: isFreePanActive,
                 animated: true
             )
             
@@ -198,11 +198,11 @@ struct MapViewContainer: UIViewRepresentable {
                 if !uiView.showsUserLocation {
                     uiView.showsUserLocation = true
                 }
-                if isNavigating && uiView.userTrackingMode != .followWithHeading {
-                    uiView.setUserTrackingMode(.followWithHeading, animated: true)
-                } else if !isNavigating && uiView.userTrackingMode == .followWithHeading {
-                    uiView.setUserTrackingMode(.follow, animated: true)
-                }
+                context.coordinator.updateUserTrackingMode(
+                    mapView: uiView,
+                    isNavigating: isNavigating,
+                    isOfflineMapSelectionActive: isOfflineMapSelectionActive
+                )
             } else {
                 if uiView.showsUserLocation {
                     uiView.showsUserLocation = false
@@ -231,6 +231,10 @@ struct MapViewContainer: UIViewRepresentable {
         var offlineMapSelectionFrame: CGRect?
         var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
         var onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
+        var isNavigating = false
+        var isSimulationMode = false
+        var isUserLocationAuthorized = false
+        var simulatedPosition: CLLocationCoordinate2D?
         var hasSetInitialRegion = false
         private var compassButton: MKCompassButton?
         private var trackingButton: MKUserTrackingButton?
@@ -277,6 +281,95 @@ struct MapViewContainer: UIViewRepresentable {
             trackingButton?.isHidden = !isNavigating
         }
 
+        func updateUserTrackingMode(
+            mapView: MKMapView,
+            isNavigating: Bool,
+            isOfflineMapSelectionActive: Bool,
+            animated: Bool = true
+        ) {
+            let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
+                $0 is DestinationAnnotation
+            }
+            let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
+                isNavigating: isNavigating,
+                isOfflineMapSelectionActive: isOfflineMapSelectionActive,
+                isDestinationSelectionActive: isDestinationSelectionActive
+            )
+
+            let desiredTrackingMode: MKUserTrackingMode
+            switch desiredTrackingBehavior {
+            case .none:
+                desiredTrackingMode = .none
+            case .follow:
+                desiredTrackingMode = .follow
+            case .followWithHeading:
+                desiredTrackingMode = .followWithHeading
+            }
+            if mapView.userTrackingMode != desiredTrackingMode {
+                mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
+            }
+        }
+
+        func isFreePanActive(
+            mapView: MKMapView,
+            isOfflineMapSelectionActive: Bool
+        ) -> Bool {
+            isOfflineMapSelectionActive || mapView.selectedAnnotations.contains {
+                $0 is DestinationAnnotation
+            }
+        }
+
+        func updateInitialRegionIfNeeded(
+            mapView: MKMapView,
+            location: CLLocation?,
+            simulatedPosition: CLLocationCoordinate2D?,
+            isSimulationMode: Bool,
+            isFreePanActive: Bool
+        ) {
+            guard !isFreePanActive,
+                  let location,
+                  !hasSetInitialRegion,
+                  lastRoute == nil else { return }
+
+            var center = isSimulationMode ? (simulatedPosition ?? location.coordinate) : location.coordinate
+
+            // Apple Maps displays mainland-China coordinates in GCJ-02. Simulated
+            // route positions already use MapKit's coordinate space.
+            if !isSimulationMode,
+               CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
+                center = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
+            }
+
+            let region = MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+            )
+            mapView.setRegion(region, animated: false)
+            hasSetInitialRegion = true
+        }
+
+        func finishNavigationTracking(
+            mapView: MKMapView,
+            isUserLocationAuthorized: Bool,
+            isFreePanActive: Bool
+        ) {
+            mapView.showsUserLocation = isUserLocationAuthorized
+
+            if isFreePanActive {
+                if mapView.userTrackingMode != .none {
+                    mapView.setUserTrackingMode(.none, animated: false)
+                }
+            } else {
+                let desiredMode: MKUserTrackingMode = isUserLocationAuthorized ? .follow : .none
+                if mapView.userTrackingMode != desiredMode {
+                    mapView.setUserTrackingMode(desiredMode, animated: false)
+                }
+                hasSetInitialRegion = false
+            }
+
+            resetNavigationCamera()
+        }
+
         func updateOfflineMapSelectionBounds() {
             guard let mapView,
                   let frame = offlineMapSelectionFrame,
@@ -305,8 +398,16 @@ struct MapViewContainer: UIViewRepresentable {
             location: CLLocation?,
             simulatedPosition: CLLocationCoordinate2D?,
             isSimulationMode: Bool,
-            isNavigating: Bool
+            isNavigating: Bool,
+            isFreePanActive: Bool
         ) {
+            guard !isFreePanActive else {
+                if mapView.userTrackingMode != .none {
+                    mapView.setUserTrackingMode(.none, animated: false)
+                }
+                return
+            }
+
             guard isNavigating else {
                 mapView.setVisibleMapRect(
                     route.polyline.boundingMapRect,
@@ -321,6 +422,26 @@ struct MapViewContainer: UIViewRepresentable {
             } else {
                 mapView.setUserTrackingMode(.followWithHeading, animated: true)
             }
+        }
+
+        func updateSimulatedNavigationCamera(
+            mapView: MKMapView,
+            coordinate: CLLocationCoordinate2D,
+            isFreePanActive: Bool,
+            animated: Bool
+        ) {
+            guard !isFreePanActive else {
+                if mapView.userTrackingMode != .none {
+                    mapView.setUserTrackingMode(.none, animated: false)
+                }
+                return
+            }
+
+            updateNavigationCamera(
+                mapView: mapView,
+                coordinate: coordinate,
+                animated: animated
+            )
         }
 
         func updateNavigationCamera(
@@ -352,6 +473,35 @@ struct MapViewContainer: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             updateOfflineMapSelectionBounds()
+        }
+
+        func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            guard view.annotation is DestinationAnnotation else { return }
+
+            // MapKit reports the temporary deselection used to rebuild a
+            // reverse-geocoded callout too. Defer until a synchronous reselect
+            // has completed, then only resume tracking if free pan truly ended.
+            DispatchQueue.main.async { [weak self, weak mapView] in
+                guard let self, let mapView,
+                      !self.isFreePanActive(
+                          mapView: mapView,
+                          isOfflineMapSelectionActive: self.offlineMapSelectionFrame != nil
+                      ) else { return }
+
+                if self.isSimulationMode, let simulatedPosition = self.simulatedPosition {
+                    self.updateNavigationCamera(
+                        mapView: mapView,
+                        coordinate: simulatedPosition,
+                        animated: true
+                    )
+                } else if self.isUserLocationAuthorized {
+                    self.updateUserTrackingMode(
+                        mapView: mapView,
+                        isNavigating: self.isNavigating,
+                        isOfflineMapSelectionActive: false
+                    )
+                }
+            }
         }
 
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
