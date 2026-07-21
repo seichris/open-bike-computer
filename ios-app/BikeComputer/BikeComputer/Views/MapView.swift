@@ -93,6 +93,10 @@ struct MapViewContainer: UIViewRepresentable {
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
         let isOfflineMapSelectionActive = offlineMapSelectionFrame != nil
+        let isDestinationSelectionActive = uiView.selectedAnnotations.contains {
+            $0 is DestinationAnnotation
+        }
+        let isFreePanActive = isOfflineMapSelectionActive || isDestinationSelectionActive
 
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
@@ -103,28 +107,13 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         context.coordinator.updateOfflineMapSelectionBounds()
         
-        // Only set initial region once if not already set
-        if let location = location, 
-           !context.coordinator.hasSetInitialRegion,
-           context.coordinator.lastRoute == nil {
-             // Use simulated position if available and in simulation mode
-             var center = (isSimulationMode && simulatedPosition != nil) ? simulatedPosition! : location.coordinate
-             
-             // In China, Apple Maps uses GCJ-02 for its view region
-             // Convert WGS-84 -> GCJ-02 so the map centers correctly on the visual location (blue dot)
-             // Only convert for REAL GPS (which is WGS-84). Simulated position (from MKRoute) is already GCJ-02.
-             if !isSimulationMode && CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
-                 let converted = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
-                 center = converted
-             }
-             
-            let region = MKCoordinateRegion(
-                center: center,
-                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-            )
-            uiView.setRegion(region, animated: false)
-            context.coordinator.hasSetInitialRegion = true
-        }
+        context.coordinator.updateInitialRegionIfNeeded(
+            mapView: uiView,
+            location: location,
+            simulatedPosition: simulatedPosition,
+            isSimulationMode: isSimulationMode,
+            isFreePanActive: isFreePanActive
+        )
         
         // Update route overlay
         if let route = route, context.coordinator.lastRoute !== route {
@@ -162,12 +151,11 @@ struct MapViewContainer: UIViewRepresentable {
             let simAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
             uiView.removeAnnotations(simAnnotations)
             
-            // Re-enable user tracking when navigation stops and location access
-            // has been granted explicitly through onboarding.
-            uiView.userTrackingMode = isUserLocationAuthorized ? .follow : .none
-            uiView.showsUserLocation = isUserLocationAuthorized
-            context.coordinator.hasSetInitialRegion = false
-            context.coordinator.resetNavigationCamera()
+            context.coordinator.finishNavigationTracking(
+                mapView: uiView,
+                isUserLocationAuthorized: isUserLocationAuthorized,
+                isFreePanActive: isFreePanActive
+            )
         }
         
         // Update simulated position
@@ -308,6 +296,57 @@ struct MapViewContainer: UIViewRepresentable {
             if mapView.userTrackingMode != desiredTrackingMode {
                 mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
             }
+        }
+
+        func updateInitialRegionIfNeeded(
+            mapView: MKMapView,
+            location: CLLocation?,
+            simulatedPosition: CLLocationCoordinate2D?,
+            isSimulationMode: Bool,
+            isFreePanActive: Bool
+        ) {
+            guard !isFreePanActive,
+                  let location,
+                  !hasSetInitialRegion,
+                  lastRoute == nil else { return }
+
+            var center = isSimulationMode ? (simulatedPosition ?? location.coordinate) : location.coordinate
+
+            // Apple Maps displays mainland-China coordinates in GCJ-02. Simulated
+            // route positions already use MapKit's coordinate space.
+            if !isSimulationMode,
+               CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
+                center = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
+            }
+
+            let region = MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+            )
+            mapView.setRegion(region, animated: false)
+            hasSetInitialRegion = true
+        }
+
+        func finishNavigationTracking(
+            mapView: MKMapView,
+            isUserLocationAuthorized: Bool,
+            isFreePanActive: Bool
+        ) {
+            mapView.showsUserLocation = isUserLocationAuthorized
+
+            if isFreePanActive {
+                if mapView.userTrackingMode != .none {
+                    mapView.setUserTrackingMode(.none, animated: false)
+                }
+            } else {
+                let desiredMode: MKUserTrackingMode = isUserLocationAuthorized ? .follow : .none
+                if mapView.userTrackingMode != desiredMode {
+                    mapView.setUserTrackingMode(desiredMode, animated: false)
+                }
+                hasSetInitialRegion = false
+            }
+
+            resetNavigationCamera()
         }
 
         func updateOfflineMapSelectionBounds() {

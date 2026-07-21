@@ -17,6 +17,7 @@ private final class RecordingMapView: MKMapView {
     private(set) var selectionCount = 0
     private(set) var deselectionCount = 0
     private(set) var cameraUpdateCount = 0
+    private(set) var regionUpdateCount = 0
     private var recordedSelectedAnnotations: [MKAnnotation] = []
     private var recordedUserTrackingMode: MKUserTrackingMode = .none
 
@@ -36,6 +37,10 @@ private final class RecordingMapView: MKMapView {
 
     override func setCamera(_ camera: MKMapCamera, animated: Bool) {
         cameraUpdateCount += 1
+    }
+
+    override func setRegion(_ region: MKCoordinateRegion, animated: Bool) {
+        regionUpdateCount += 1
     }
 
     override func view(for annotation: MKAnnotation) -> MKAnnotationView? {
@@ -230,6 +235,57 @@ struct DestinationCalloutLayoutTests {
         precondition(
             mapView.userTrackingMode == .followWithHeading,
             "real navigation heading-follow should resume after offline selection"
+        )
+
+        let liveLocation = CLLocation(latitude: 1.354, longitude: 103.821)
+        coordinator.hasSetInitialRegion = false
+        let regionUpdatesBeforeLateLocation = mapView.regionUpdateCount
+        coordinator.updateInitialRegionIfNeeded(
+            mapView: mapView,
+            location: liveLocation,
+            simulatedPosition: nil,
+            isSimulationMode: false,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.regionUpdateCount == regionUpdatesBeforeLateLocation &&
+                !coordinator.hasSetInitialRegion,
+            "a late first location should not recenter an active free-pan selection"
+        )
+
+        coordinator.hasSetInitialRegion = true
+        mapView.userTrackingMode = .followWithHeading
+        coordinator.finishNavigationTracking(
+            mapView: mapView,
+            isUserLocationAuthorized: true,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.userTrackingMode == .none && coordinator.hasSetInitialRegion,
+            "stopping navigation should preserve the selected map region"
+        )
+
+        coordinator.updateInitialRegionIfNeeded(
+            mapView: mapView,
+            location: liveLocation,
+            simulatedPosition: nil,
+            isSimulationMode: false,
+            isFreePanActive: true
+        )
+        precondition(
+            mapView.regionUpdateCount == regionUpdatesBeforeLateLocation,
+            "the next GPS update should not recenter after navigation stops during selection"
+        )
+
+        coordinator.updateUserTrackingMode(
+            mapView: mapView,
+            isNavigating: false,
+            isOfflineMapSelectionActive: false,
+            animated: false
+        )
+        precondition(
+            mapView.userTrackingMode == .follow,
+            "dot-mode follow should resume when free-pan selection exits"
         )
     }
 
