@@ -35,7 +35,7 @@
     },
     {
       "path": "public/screenshots/watch/watch-live-workout.jpg",
-      "sha256": "78e8964c3018781b196cc61b04c584ee7bd0c3ed6682bea882bb55e1385be81d"
+      "sha256": "cde97b96d7b8e057ef00d8c3bbedecb70099a3a9989f1b28784811a7bc799d11"
     },
     {
       "path": "scripts/export-playwright.ts",

@@ -1,6 +1,133 @@
 import Combine
 import HealthKit
+import WatchConnectivity
 import XCTest
+
+private final class FakeWorkoutWatchConnectivitySession:
+    WorkoutWatchConnectivitySession
+{
+    enum Failure: Error {
+        case requested
+    }
+
+    weak var delegate: WCSessionDelegate?
+    var activationState: WCSessionActivationState = .notActivated
+    var isPaired = true
+    var isWatchAppInstalled = true
+    var isReachable = false
+    var activationCount = 0
+    var remainingUpdateFailures = 0
+    var applicationContexts: [[String: Any]] = []
+
+    func activate() {
+        activationCount += 1
+    }
+
+    func updateApplicationContext(
+        _ applicationContext: [String: Any]
+    ) throws {
+        if remainingUpdateFailures > 0 {
+            remainingUpdateFailures -= 1
+            throw Failure.requested
+        }
+        applicationContexts.append(applicationContext)
+    }
+}
+
+@MainActor
+private final class ManualWorkoutWatchSyncRetryScheduler {
+    private(set) var delays: [TimeInterval] = []
+    private var actions: [@MainActor () -> Void] = []
+
+    func schedule(
+        after delay: TimeInterval,
+        action: @escaping @MainActor () -> Void
+    ) {
+        delays.append(delay)
+        actions.append(action)
+    }
+
+    func runNext() {
+        guard !actions.isEmpty else { return }
+        actions.removeFirst()()
+    }
+}
+
+@MainActor
+final class WorkoutWatchAvailabilityMonitorProductionTests: XCTestCase {
+    func testPersistedMaximumHeartRatePublishesAfterActivationAndInstall() async throws {
+        let suiteName = "WorkoutWatchAvailabilityMonitorActivationTests"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let session = FakeWorkoutWatchConnectivitySession()
+        session.isWatchAppInstalled = false
+        let scheduler = ManualWorkoutWatchSyncRetryScheduler()
+        let monitor = WorkoutWatchAvailabilityMonitor(
+            heartRateZoneDefaults: defaults,
+            session: session,
+            syncRetryScheduler: scheduler.schedule
+        )
+
+        monitor.activate()
+        XCTAssertEqual(session.activationCount, 1)
+        XCTAssertTrue(session.delegate === monitor)
+
+        monitor.setMaximumHeartRateBPM(205)
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults),
+            205
+        )
+        XCTAssertTrue(session.applicationContexts.isEmpty)
+
+        session.activationState = .activated
+        monitor.session(
+            WCSession.default,
+            activationDidCompleteWith: .activated,
+            error: nil
+        )
+        await Task.yield()
+        XCTAssertTrue(session.applicationContexts.isEmpty)
+
+        session.isWatchAppInstalled = true
+        monitor.sessionWatchStateDidChange(WCSession.default)
+        await Task.yield()
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(
+                from: try XCTUnwrap(session.applicationContexts.last)
+            ),
+            205
+        )
+    }
+
+    func testTransientApplicationContextFailureRetriesLatestValue() throws {
+        let suiteName = "WorkoutWatchAvailabilityMonitorRetryTests"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let session = FakeWorkoutWatchConnectivitySession()
+        session.activationState = .activated
+        session.remainingUpdateFailures = 1
+        let scheduler = ManualWorkoutWatchSyncRetryScheduler()
+        let monitor = WorkoutWatchAvailabilityMonitor(
+            heartRateZoneDefaults: defaults,
+            session: session,
+            syncRetryScheduler: scheduler.schedule
+        )
+
+        monitor.setMaximumHeartRateBPM(215)
+
+        XCTAssertTrue(session.applicationContexts.isEmpty)
+        XCTAssertEqual(scheduler.delays, [1])
+        scheduler.runNext()
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(
+                from: try XCTUnwrap(session.applicationContexts.last)
+            ),
+            215
+        )
+    }
+}
 
 @available(iOS 17.0, *)
 @MainActor

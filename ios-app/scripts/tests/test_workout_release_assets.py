@@ -256,7 +256,6 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             / "docs"
             / "releases"
             / "watchos-workout-companion.md",
-            REPO_ROOT / "docs" / "watchos-workout-companion-validation.md",
             REPO_ROOT
             / "ios-app"
             / "AppStoreScreenshots"
@@ -267,6 +266,23 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         ]
         for path in required_files:
             self.assertTrue(path.is_file(), path)
+
+        validation_issue_url = (
+            "https://github.com/seichris/open-bike-computer/issues/117"
+        )
+        self.assertIn(
+            validation_issue_url,
+            (REPO_ROOT / "ios-app" / "README.md").read_text(),
+        )
+        self.assertIn(
+            validation_issue_url,
+            (
+                REPO_ROOT
+                / "docs"
+                / "releases"
+                / "watchos-workout-companion.md"
+            ).read_text(),
+        )
 
     def test_screenshot_release_package_is_source_bound_in_ci(self):
         screenshot_root = REPO_ROOT / "ios-app" / "AppStoreScreenshots"

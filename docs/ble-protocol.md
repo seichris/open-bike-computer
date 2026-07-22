@@ -347,7 +347,7 @@ newer terminal snapshot that was published as the latest batched state.
 
 Source flag bit `0` means paired cycling-speed sensor, bit `1` Watch GPS speed,
 bit `2` HealthKit cycling distance, bit `3` valid Watch altitude, and bit `4`
-live HealthKit zone data. Bit `5` means the iPhone's mirrored snapshot is
+live heart-rate zone data. Bit `5` means the iPhone's mirrored snapshot is
 current, even when every individual metric is unavailable. Bits `6...7` carry
 the same pair generation (`1...3`) as the core state byte. Generation zero is
 the legacy relay contract. A valid iPhone location fallback may supply altitude

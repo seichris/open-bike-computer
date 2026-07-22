@@ -40,14 +40,11 @@ was removed from the repository.
 - The BikeComputer Watch app, not Apple's Workout app, owns the active
   HKWorkoutSession.
 - Apple Watch permits only one active workout session, but public HealthKit APIs
-  do not expose whether another app currently owns it. A rider-initiated start
-  in the Watch app warns that BikeComputer cannot check for another app's
-  workout: `Cancel` creates no BikeComputer session and `Start Anyway` proceeds.
-  An iPhone start instead checks for a paired Watch and installed BikeComputer
-  companion, then starts directly; transient WatchConnectivity reachability is
-  not a hard gate because HealthKit can wake the Watch app. If another app later
-  takes ownership, BikeComputer reports that displacement explicitly and never
-  retries in a loop.
+  do not expose whether another app currently owns it. Watch and iPhone starts
+  proceed directly after their setup checks; transient WatchConnectivity
+  reachability is not a hard gate because HealthKit can wake the Watch app. If
+  another app owns or later takes ownership of the workout session,
+  BikeComputer reports the outcome explicitly and never retries in a loop.
 - Workout and navigation are independent:
   - starting navigation does not silently start a workout;
   - ending navigation does not end a workout;
@@ -234,8 +231,8 @@ source matters.
 | Current speed | cycling-speed quantity from a paired sensor | Watch CLLocation speed, then iPhone CLLocation speed | Preserve the source for UI and testing. |
 | Cycling power | live builder cycling-power quantity | none | Unavailable without a compatible sensor. |
 | Cycling cadence | live builder cycling-cadence quantity | none | Unavailable without a compatible sensor. |
-| Current HR zone | HealthKit live zone update | none | Availability-gated; do not invent an Apple-equivalent zone. |
-| Zone durations | HealthKit live zone group | completed-workout query | App only; ESP32 needs current zone and zone count. |
+| Current HR zone | BikeComputer max-HR profile applied to fresh Watch heart rate | none | Five app-defined zones; never label them as Apple's system zones. |
+| Zone durations | future HealthKit live zone group | completed-workout query | Unavailable on the current SDK; ESP32 needs only current zone and zone count. |
 | Current location | Watch Core Location | iPhone Core Location for device relay | Keep accuracy and timestamp. |
 | Altitude | Watch CLLocation altitude | iPhone CLLocation, then device GPS | Reject invalid vertical accuracy. |
 | Saved workout route | Watch HKWorkoutRouteBuilder | no route | Store in HealthKit, not in app files. |
@@ -251,17 +248,21 @@ coherent; preserve the oldest component timestamp.
 
 ### Heart-rate zones
 
-The newest public HealthKit zone APIs can provide live zone transitions and
-preferred system/user configurations, but current Apple documentation marks
-parts of this API as beta. Implement zone support behind compile-time and
-runtime availability checks.
+The current shipping SDK does not expose Apple's personalized workout-zone
+stream. BikeComputer therefore provides a separate five-zone profile based on
+the maximum heart rate configured in the iPhone app's Developer Settings: below
+60%, 60-70%, 70-80%, 80-90%, and 90% or more. The default is 190 BPM. Changes
+persist on iPhone and use WatchConnectivity application context to update the
+paired Watch, which retains its last received value and falls back to the
+default before any setting has arrived. The profile reports a one-based current
+zone and a count of five only while the underlying heart-rate sample is fresh
+and valid.
 
-- Use HealthKit's live zone delegate when it is present in the shipping SDK and
-  final OS.
-- Report the one-based current zone and total zone count.
-- Do not approximate Apple's configured zones on older OS versions.
-- On unsupported OS versions, currentZone and zoneCount remain unavailable
-  while heart rate continues normally.
+These values are always described as BikeComputer zones, not approximations of
+Apple's configured system zones. When Apple's workout-zone API is available in
+a shipping SDK supported by the project, prefer its system/user configuration
+behind compile-time and runtime availability checks. Zone-duration data remains
+unavailable until that production source exists.
 
 ## Shared Watch-to-iPhone contract
 
@@ -650,7 +651,7 @@ Initial flag allocation:
 | 1 | Speed came from Watch GPS |
 | 2 | Distance came from HealthKit distance-cycling statistics |
 | 3 | Altitude came from a valid Watch location |
-| 4 | Live HealthKit zone API supplied the zone |
+| 4 | A live heart-rate zone is available |
 | 5 | Mirrored snapshot is current, including current-but-unavailable metrics |
 | 6...7 | Correlated frame-pair generation; zero is the legacy relay contract |
 
@@ -778,7 +779,7 @@ Presentation rules:
 | No paired Watch or missing companion app | iPhone start explains the required setup; navigation remains usable. Transient WatchConnectivity unreachability does not block a paired, installed Watch start. |
 | HealthKit denied | No workout starts; no synthetic workout is saved. |
 | Location denied on Watch | Continue supported sensor metrics; route/elevation unavailable. |
-| Apple Workout already active before BikeComputer starts | A Watch-app start requires the cross-app warning: Cancel creates no session and Start Anyway may end the existing workout, as disclosed. An iPhone start proceeds directly after pairing/install checks because public APIs cannot detect the competing workout. Any resulting displacement is reported honestly. |
+| Apple Workout already active before BikeComputer starts | Watch and iPhone starts proceed directly after setup checks because public APIs cannot detect the competing workout. Any resulting start failure or displacement is reported honestly. |
 | Another app starts while BikeComputer is active | Report that BikeComputer was displaced, stop safely, and do not retry in a loop. |
 | iPhone disconnects | Watch continues and saves; buffer only the newest pending snapshot. |
 | Mirroring reconnects | Replace session reference and request a full snapshot. |
@@ -934,11 +935,8 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 7. Background iPhone without navigation and verify honest stale behavior.
 8. Pause/resume from Watch and iPhone.
 9. End from Watch and from iPhone.
-10. With Apple Workout active, verify the Watch-app start warning: Cancel leaves
-    Apple Workout active and Start Anyway proceeds only after the explicit
-    choice. Separately verify that iPhone start proceeds directly after the
-    paired-Watch/installed-companion check and that any displacement is reported
-    honestly.
+10. With Apple Workout active, start directly from Watch and iPhone in separate
+    runs; verify any start failure or displacement is reported honestly.
 11. Deny HealthKit, then deny Watch location separately.
 12. Ride without external sensors.
 13. Ride with cycling speed, power, and cadence sensors.
@@ -963,10 +961,10 @@ Use a real paired Watch and iPhone; simulator-only validation is insufficient.
 - Reconnection restores one coherent latest snapshot without stale replay.
 - Exactly one HKWorkout is saved, by Watch, with a route when permitted.
 - Navigation and workout can start/end independently.
-- Cross-app workout ownership is handled explicitly: the Watch start surface
-  requires the warning and Cancel never creates a session; the iPhone starts
-  directly after pairing/install checks; displacement of an active
-  BikeComputer workout is reported honestly.
+- Cross-app workout ownership is handled explicitly: Watch and iPhone starts
+  proceed directly after setup checks because public APIs cannot detect another
+  app's workout; displacement of an active BikeComputer workout is reported
+  honestly.
 - Existing iPhone navigation and legacy firmware GPS telemetry remain working.
 - No raw health metrics are persisted on ESP32 or sent to a backend.
 - iOS, watchOS, and both firmware targets pass their relevant automated and

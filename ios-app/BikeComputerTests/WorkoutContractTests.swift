@@ -70,6 +70,7 @@ private struct WorkoutContractTestSuite {
         testCyclingDistanceRequiresSource()
         testComponentTimestampsStayWithinWorkoutWindow()
         testHeartRateZonePayloadIsCoherent()
+        testHeartRateZoneProfileAndPersistence()
         testAltitudeRequiresVerticalAccuracy()
         testUnknownErrorCodesBecomeSafeGenericCodes()
         testSequenceGateRejectsDuplicatesAndOlderSnapshots()
@@ -120,9 +121,9 @@ private struct WorkoutContractTestSuite {
         testTerminalErrorAndTakeoverCopyUseDurableDisposition()
         testWorkoutWatchAvailabilityPolicy()
         testDiscardedWorkoutSummaryDismissalPolicy()
-        testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
-        testIPhoneStartsUseWatchAvailabilityAndWatchStartsKeepDisclosure()
+        testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
+        testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testMainRideControlsComposition()
@@ -903,6 +904,76 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "coherent zone payload should be accepted: \(error)")
         }
+    }
+
+    private mutating func testHeartRateZoneProfileAndPersistence() {
+        let profile = WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 200)
+        expect(profile.zone(for: nil) == nil, "missing heart rate has no zone")
+        expect(profile.zone(for: 0) == nil, "zero heart rate has no zone")
+        expect(profile.zone(for: .nan) == nil, "non-finite heart rate has no zone")
+        expect(profile.zone(for: 119.9) == 1, "below 60 percent is zone 1")
+        expect(profile.zone(for: 120) == 2, "60 percent starts zone 2")
+        expect(profile.zone(for: 140) == 3, "70 percent starts zone 3")
+        expect(profile.zone(for: 160) == 4, "80 percent starts zone 4")
+        expect(profile.zone(for: 180) == 5, "90 percent starts zone 5")
+        expect(profile.zone(for: 220) == 5, "above max remains zone 5")
+        expect(
+            WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 20)
+                .maximumHeartRateBPM == 100,
+            "maximum heart rate clamps to the supported lower bound"
+        )
+        expect(
+            WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 900)
+                .maximumHeartRateBPM == 240,
+            "maximum heart rate clamps to the supported upper bound"
+        )
+
+        let suiteName = "WorkoutHeartRateZoneSettingsTests"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            expect(false, "heart-rate zone test defaults should be available")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == WorkoutHeartRateZoneProfile.defaultMaximumHeartRateBPM,
+            "missing setting uses the documented default"
+        )
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(205, to: defaults)
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == 205,
+            "maximum heart rate persists"
+        )
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(999, to: defaults)
+        expect(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults)
+                == 240,
+            "persisted maximum heart rate is clamped"
+        )
+
+        let applicationContext = WorkoutHeartRateZoneSyncContext
+            .applicationContext(maximumHeartRateBPM: 205)
+        expect(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(
+                from: applicationContext
+            ) == 205,
+            "maximum heart rate round-trips through Watch sync context"
+        )
+        expect(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(
+                from: [
+                    WorkoutHeartRateZoneSyncContext.maximumHeartRateBPMKey: 999
+                ]
+            ) == 240,
+            "Watch sync context clamps a received maximum heart rate"
+        )
+        expect(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(from: [:])
+                == nil,
+            "missing Watch sync context leaves the current/default value unchanged"
+        )
     }
 
     private mutating func testAltitudeRequiresVerticalAccuracy() {
@@ -4472,33 +4543,6 @@ private struct WorkoutContractTestSuite {
         )
     }
 
-    private mutating func testCrossAppWorkoutStartDisclosureRequiresExplicitConfirmation() {
-        var startCount = 0
-        let start = { startCount += 1 }
-
-        WorkoutStartDisclosureV1.perform(.cancel, start: start)
-        expect(
-            startCount == 0,
-            "Cancel must not launch the Watch or create a workout session"
-        )
-
-        WorkoutStartDisclosureV1.perform(.startAnyway, start: start)
-        expect(
-            startCount == 1,
-            "Start Anyway must invoke the existing Watch-owned start exactly once"
-        )
-        expect(
-            WorkoutStartDisclosureV1.message.contains("can’t check")
-                && WorkoutStartDisclosureV1.message.contains("may end"),
-            "the disclosure must state both the public-API limitation and displacement risk"
-        )
-        expect(
-            WorkoutStartDisclosureV1.cancelTitle == "Cancel"
-                && WorkoutStartDisclosureV1.confirmTitle == "Start Anyway",
-            "the start decision must remain explicit and unambiguous"
-        )
-    }
-
     private mutating func testWorkoutWatchAvailabilityPolicy() {
         expect(
             WorkoutWatchAvailabilityPolicyV1.resolve(
@@ -4721,7 +4765,7 @@ private struct WorkoutContractTestSuite {
         )
     }
 
-    private mutating func testIPhoneStartsUseWatchAvailabilityAndWatchStartsKeepDisclosure() {
+    private mutating func testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly() {
         let iosAppDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -4780,27 +4824,66 @@ private struct WorkoutContractTestSuite {
             "iPhone unavailable states must provide paired-Watch and companion-install guidance"
         )
 
-        let watchDisclosureActionCount = watchSource
-            .components(separatedBy: "start: manager.startOutdoorCycling")
-            .count - 1
         expect(
-            watchSource.contains("showingStartConfirmation = true")
-                && watchDisclosureActionCount == 2
-                && !watchSource.contains("manager.startOutdoorCycling()"),
-            "Watch Start Ride must retain its local cross-app workout disclosure"
+            watchSource.contains("manager.startOutdoorCycling()")
+                && !watchSource.contains("showingStartConfirmation")
+                && !watchSource.contains("WorkoutStartDisclosureV1"),
+            "Watch Start Ride must start directly without a confirmation screen"
         )
-        let compactWatchSource = watchSource.filter { !$0.isWhitespace }
         expect(
-            compactWatchSource.contains(
-                "Button(WorkoutStartDisclosureV1.cancelTitle,role:.cancel){WorkoutStartDisclosureV1.perform(.cancel,start:manager.startOutdoorCycling)}"
+            !watchSource.contains("Max HR")
+                && !watchSource.contains("heartRateZoneSettings"),
+            "maximum-heart-rate configuration must not remain on the Watch start screen"
+        )
+    }
+
+    private mutating func testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings() {
+        let iosAppDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer")
+        let settingsURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/SettingsView.swift")
+        let monitorURL = iosAppDirectory
+            .appendingPathComponent(
+                "BikeComputer/Managers/WorkoutWatchAvailabilityMonitor.swift"
             )
-                && compactWatchSource.contains(
-                    "Button(WorkoutStartDisclosureV1.confirmTitle){WorkoutStartDisclosureV1.perform(.startAnyway,start:manager.startOutdoorCycling)}"
+        let watchDelegateURL = iosAppDirectory
+            .appendingPathComponent("BikeComputerWatch/WatchAppDelegate.swift")
+        guard let settingsSource = try? String(
+            contentsOf: settingsURL,
+            encoding: .utf8
+        ), let monitorSource = try? String(
+            contentsOf: monitorURL,
+            encoding: .utf8
+        ), let watchDelegateSource = try? String(
+            contentsOf: watchDelegateURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "heart-zone settings source files must be available")
+            return
+        }
+
+        expect(
+            settingsSource.contains("Text(\"Workout Heart Zones\")")
+                && settingsSource.contains(
+                    "set: watchAvailability.setMaximumHeartRateBPM"
                 )
-                && compactWatchSource.contains(
-                    "isPresented:$showingStartConfirmation"
+                && settingsSource.contains("The default is 190 BPM"),
+            "Developer Settings must own the visible maximum-heart-rate control and document its default"
+        )
+        expect(
+            monitorSource.contains("session.updateApplicationContext(")
+                && monitorSource.contains(
+                    "WorkoutHeartRateZoneSyncContext.applicationContext("
+                )
+                && watchDelegateSource.contains(
+                    "WatchHeartRateZoneSettingsReceiver"
+                )
+                && watchDelegateSource.contains(
+                    "workoutManager.setMaximumHeartRateBPM(value)"
                 ),
-            "Watch Cancel and Start Anyway must map to their matching shared-policy choices"
+            "iPhone maximum heart rate must sync to the paired Watch and update its production manager"
         )
     }
 
@@ -4906,7 +4989,7 @@ private struct WorkoutContractTestSuite {
 
         for metricTitle in [
             "Heart Rate",
-            "HR Zone",
+            "Heart Zone",
             "Speed",
             "Distance",
             "Energy",
@@ -4953,7 +5036,7 @@ private struct WorkoutContractTestSuite {
         let compactSource = source.filter { !$0.isWhitespace }
         for metricBinding in [
             "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
-            "metric(\"HRZone\",zoneValue(snapshot),\"ZONE\"",
+            "metric(\"HeartZone\",zoneValue(snapshot),\"\"",
             "metric(\"Speed\",WorkoutValueFormatter.speed(snapshot.currentSpeed?.value),\"KM/H\"",
             "metric(\"Distance\",WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),WorkoutValueFormatter.distanceUnit(snapshot.cyclingDistance?.value)",
             "metric(\"Energy\",WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),\"KCAL\"",
@@ -5103,7 +5186,7 @@ private struct WorkoutContractTestSuite {
             "label:\"distance\"",
             "label:\"altitude\"",
             "label:\"heartrate\"",
-            "label:\"HRzone\"",
+            "label:\"heartzone\"",
             "label:\"energy\"",
         ] {
             guard let range = compactNavigation.range(
@@ -5118,6 +5201,10 @@ private struct WorkoutContractTestSuite {
             }
             previousMetricIndex = range.upperBound
         }
+        expect(
+            compactNavigation.contains("return\"Zone\\(zone)\""),
+            "the main ride panel must render the zone as Zone N"
+        )
         for control in [
             "\"Pauseworkout\"",
             "\"Resumeworkout\"",

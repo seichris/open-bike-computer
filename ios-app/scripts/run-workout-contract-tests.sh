@@ -15,6 +15,7 @@ xcrun swiftc \
   -D WORKOUT_CONTRACT_HOST \
   -o "${OUT}" \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \

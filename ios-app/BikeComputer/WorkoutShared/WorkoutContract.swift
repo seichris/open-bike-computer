@@ -123,23 +123,6 @@ nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
     }
 }
 
-nonisolated enum WorkoutStartDisclosureV1 {
-    enum Choice: Sendable {
-        case cancel
-        case startAnyway
-    }
-
-    static let title = "Start Ride?"
-    static let message = "BikeComputer can’t check whether another workout app is active. Starting may end that workout."
-    static let cancelTitle = "Cancel"
-    static let confirmTitle = "Start Anyway"
-
-    static func perform(_ choice: Choice, start: () -> Void) {
-        guard case .startAnyway = choice else { return }
-        start()
-    }
-}
-
 nonisolated enum WorkoutDiscardDisclosureV1 {
     enum Choice: Sendable {
         case cancel

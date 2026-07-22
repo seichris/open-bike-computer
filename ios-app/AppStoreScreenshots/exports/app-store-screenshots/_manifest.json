@@ -10,7 +10,7 @@
     "width": 1242,
     "height": 2688,
     "renderer": "playwright",
-    "createdAt": "2026-07-19T20:42:01.887Z",
+    "createdAt": "2026-07-22T06:22:19.133Z",
     "validation": {
       "file": "screenshots/en-us/iphone-6.5/01-01-plan-rides-en-us-iphone-6.5-1242x2688.png",
       "status": "pass",
@@ -32,7 +32,7 @@
     "width": 1242,
     "height": 2688,
     "renderer": "playwright",
-    "createdAt": "2026-07-19T20:42:01.887Z",
+    "createdAt": "2026-07-22T06:22:19.133Z",
     "validation": {
       "file": "screenshots/en-us/iphone-6.5/02-02-follow-route-en-us-iphone-6.5-1242x2688.png",
       "status": "pass",
@@ -54,7 +54,7 @@
     "width": 1242,
     "height": 2688,
     "renderer": "playwright",
-    "createdAt": "2026-07-19T20:42:01.887Z",
+    "createdAt": "2026-07-22T06:22:19.133Z",
     "validation": {
       "file": "screenshots/en-us/iphone-6.5/03-03-bike-display-en-us-iphone-6.5-1242x2688.png",
       "status": "pass",
@@ -76,7 +76,7 @@
     "width": 1242,
     "height": 2688,
     "renderer": "playwright",
-    "createdAt": "2026-07-19T20:42:01.887Z",
+    "createdAt": "2026-07-22T06:22:19.133Z",
     "validation": {
       "file": "screenshots/en-us/iphone-6.5/04-04-watch-workout-en-us-iphone-6.5-1242x2688.png",
       "status": "pass",

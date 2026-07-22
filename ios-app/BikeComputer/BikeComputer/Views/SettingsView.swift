@@ -16,6 +16,8 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
+    @ObservedObject private var watchAvailability:
+        WorkoutWatchAvailabilityMonitor
     @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorized: Bool
     let currentLocation: CLLocation?
@@ -26,12 +28,14 @@ struct SettingsView: View {
         currentLocation: CLLocation?,
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
+        watchAvailability: WorkoutWatchAvailabilityMonitor,
         onStartTestNavigation: @escaping (String) -> Void
     ) {
         self.locationAuthorized = locationAuthorized
         self.currentLocation = currentLocation
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
+        self.watchAvailability = watchAvailability
         self.onStartTestNavigation = onStartTestNavigation
     }
     
@@ -95,6 +99,7 @@ struct SettingsView: View {
                         DeveloperSettingsView(
                             offlineMapManager: offlineMapManager,
                             firmwareUpdateManager: firmwareUpdateManager,
+                            watchAvailability: watchAvailability,
                             currentLocation: currentLocation,
                             onStartTestNavigation: { destination in
                                 onStartTestNavigation(destination)
@@ -1251,6 +1256,7 @@ private struct DeveloperSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var offlineMapManager: OfflineMapManager
     @ObservedObject var firmwareUpdateManager: FirmwareUpdateManager
+    @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let currentLocation: CLLocation?
     let onStartTestNavigation: (String) -> Void
 
@@ -1268,6 +1274,35 @@ private struct DeveloperSettingsView: View {
                 } label: {
                     Label("Use Production Server", systemImage: "checkmark.seal")
                 }
+            }
+
+            Section {
+                Stepper(
+                    value: Binding(
+                        get: { watchAvailability.maximumHeartRateBPM },
+                        set: watchAvailability.setMaximumHeartRateBPM
+                    ),
+                    in: WorkoutHeartRateZoneProfile
+                        .supportedMaximumHeartRateBPM
+                ) {
+                    HStack {
+                        Text("Maximum Heart Rate")
+                        Spacer()
+                        Text("\(watchAvailability.maximumHeartRateBPM) BPM")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                .accessibilityLabel("Maximum heart rate")
+                .accessibilityValue(
+                    "\(watchAvailability.maximumHeartRateBPM) beats per minute"
+                )
+            } header: {
+                Text("Workout Heart Zones")
+            } footer: {
+                Text(
+                    "BikeComputer calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
+                )
             }
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
@@ -1404,6 +1439,7 @@ private struct StatusValueRow: View {
         currentLocation: nil,
         offlineMapManager: OfflineMapManager(),
         firmwareUpdateManager: FirmwareUpdateManager(),
+        watchAvailability: WorkoutWatchAvailabilityMonitor(),
         onStartTestNavigation: { _ in }
     )
         .environmentObject(BLEManager())

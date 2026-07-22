@@ -301,10 +301,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil
     @Published private(set) var isTerminalArchivePending = false
     @Published private(set) var isTerminalPublicationPending = false
+    @Published private(set) var maximumHeartRateBPM: Int
 
     private let healthStore: HKHealthStore
     private let routeRecorder: WatchRouteRecorder
     private let recoveryStore: WatchWorkoutRecoveryStore
+    private let heartRateZoneDefaults: UserDefaults
     private let injectedRecoveryOperation: (
         @MainActor () async -> (session: HKWorkoutSession?, error: Error?)
     )?
@@ -491,11 +493,15 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             (@MainActor (HKWorkoutSession) -> Void)? = nil,
         mirrorRetryDelay: TimeInterval = 5,
         mirrorShutdownDeliveryTimeout: TimeInterval = 10,
-        initializeOnLaunch: Bool = true
+        initializeOnLaunch: Bool = true,
+        heartRateZoneDefaults: UserDefaults = .standard
     ) {
         self.healthStore = healthStore
         self.routeRecorder = routeRecorder
         self.recoveryStore = recoveryStore
+        self.heartRateZoneDefaults = heartRateZoneDefaults
+        self.maximumHeartRateBPM = WorkoutHeartRateZoneSettings
+            .maximumHeartRateBPM(from: heartRateZoneDefaults)
         self.injectedRecoveryOperation = recoverActiveWorkoutSession
         self.injectedAuthorizationRequestOperation = requestAuthorization
         self.injectedAuthorizationRefreshOperation = refreshAuthorization
@@ -629,6 +635,20 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func startOutdoorCycling() {
         Task { [weak self] in
             await self?.startOutdoorCyclingWorkout()
+        }
+    }
+
+    func setMaximumHeartRateBPM(_ value: Int) {
+        let clamped = WorkoutHeartRateZoneProfile
+            .clampedMaximumHeartRateBPM(value)
+        guard clamped != maximumHeartRateBPM else { return }
+        maximumHeartRateBPM = clamped
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(
+            clamped,
+            to: heartRateZoneDefaults
+        )
+        if isWorkoutActive {
+            publishSnapshotImmediately()
         }
     }
 
@@ -3145,6 +3165,17 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         publishSnapshotImmediately()
     }
 
+    func setCurrentHeartRateForTesting(
+        _ beatsPerMinute: Double,
+        capturedAt: Date
+    ) {
+        currentHeartRate = positiveMetric(
+            beatsPerMinute,
+            unit: .beatsPerMinute,
+            capturedAt: capturedAt
+        )
+    }
+
     func markMirrorShutdownDeliveryPendingForTesting(startFailure: Bool) {
         let didPublish: Bool
         if startFailure {
@@ -3685,6 +3716,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         if location != nil { availability.insert(.location) }
         if location?.altitude != nil { availability.insert(.altitude) }
 
+        let currentHeartRateZone = WorkoutHeartRateZoneProfile(
+            maximumHeartRateBPM: maximumHeartRateBPM
+        ).zone(for: currentHeartRate?.value)
+        if currentHeartRateZone != nil {
+            availability.insert(.heartRateZone)
+        }
+
         let terminalOutcome: WorkoutTerminalOutcomeV1?
         switch summary?.outcome {
         case .saved? where lifecycle.state == .ended:
@@ -3706,8 +3744,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             currentSpeed: speed,
             cyclingPower: cyclingPower,
             cyclingCadence: cyclingCadence,
-            currentHeartRateZone: nil,
-            heartRateZoneCount: nil,
+            currentHeartRateZone: currentHeartRateZone,
+            heartRateZoneCount: currentHeartRateZone == nil
+                ? nil
+                : WorkoutHeartRateZoneProfile.zoneCount,
             heartRateZoneDurations: nil,
             location: location,
             availability: availability,

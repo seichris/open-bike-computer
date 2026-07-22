@@ -40,10 +40,13 @@ struct ContentView: View {
     @State private var offlineMapSelectionCenterY: CGFloat?
     @State private var offlineMapSelectionDragStartFrame: CGRect?
 
+    @MainActor
     init(
         workoutMirrorManager: WorkoutMirrorManager,
-        watchAvailability: WorkoutWatchAvailabilityMonitor = WorkoutWatchAvailabilityMonitor()
+        watchAvailability: WorkoutWatchAvailabilityMonitor? = nil
     ) {
+        let watchAvailability = watchAvailability
+            ?? WorkoutWatchAvailabilityMonitor()
         self.workoutMirrorManager = workoutMirrorManager
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
@@ -146,6 +149,7 @@ struct ContentView: View {
                     currentLocation: coordinator.currentLocation,
                     offlineMapManager: offlineMapManager,
                     firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                    watchAvailability: watchAvailability,
                     onStartTestNavigation: { destination in
                         coordinator.startNavigation(
                             from: .currentLocation,

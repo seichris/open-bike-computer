@@ -18,17 +18,19 @@ iPhone, and optional Apple Watch companion.
 
 - The Apple Watch is the workout owner and the only component that saves an
   `HKWorkout`.
-- A workout can be started from either Watch or iPhone. A Watch-app start asks
-  for explicit confirmation; an iPhone start proceeds directly after checking
-  that a Watch is paired and the BikeComputer companion is installed. The Watch
-  must be worn, unlocked, paired, and authorized for Health access. Watch
-  location access is optional; without it, route, elevation, and GPS fallback
-  metrics remain unavailable.
+- A workout can be started directly from either Watch or iPhone after its setup
+  checks. The iPhone verifies that a Watch is paired and the BikeComputer
+  companion is installed. The Watch must be worn, unlocked, paired, and
+  authorized for Health access. Watch location access is optional; without it,
+  route, elevation, and GPS fallback metrics remain unavailable.
 - Live heart rate, elapsed time, distance, speed, active energy, and available
   power and cadence values appear on Watch and iPhone. The iPhone also shows
   available altitude. Firmware advertising workout telemetry capability shows
-  supported current values on the ESP32 Ride Stats pages. Heart-rate-zone
-  fields remain unavailable until a production zone-data source is implemented.
+  supported current values on the ESP32 Ride Stats pages. BikeComputer also
+  calculates five live heart-rate zones from the maximum heart rate configured
+  in iPhone Developer Settings: below 60%, 60–70%, 70–80%, 80–90%, and 90% or
+  more. These are BikeComputer zones, not Apple's personalized system workout
+  zones.
 - Missing sensors stay visibly unavailable; they are not displayed as zero.
 - Saving creates one Health workout. Discarding creates none. Ending navigation
   does not end the workout, and ending the workout does not stop navigation.

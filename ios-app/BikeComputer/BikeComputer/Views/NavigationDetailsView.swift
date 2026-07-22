@@ -338,7 +338,7 @@ struct RideMetricsPanel: View {
                     value: suppressInstantaneous
                         ? "--"
                         : heartRateZone(snapshot),
-                    label: "HR zone"
+                    label: "heart zone"
                 )
                 RideMetricColumn(
                     value: valueWithUnit(
@@ -547,10 +547,7 @@ struct RideMetricsPanel: View {
 
     private func heartRateZone(_ snapshot: WorkoutSnapshotV1) -> String {
         guard let zone = snapshot.currentHeartRateZone else { return "--" }
-        if let count = snapshot.heartRateZoneCount {
-            return "\(zone)/\(count)"
-        }
-        return "\(zone)"
+        return "Zone \(zone)"
     }
 
     private func altitudeValue(_ altitude: Double?) -> String {

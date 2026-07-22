@@ -30,7 +30,7 @@ struct WorkoutDeviceSourceFlags: OptionSet, Equatable, Sendable {
     static let watchSpeed = Self(rawValue: 1 << 1)
     static let healthKitDistance = Self(rawValue: 1 << 2)
     static let watchAltitude = Self(rawValue: 1 << 3)
-    static let liveHealthKitZone = Self(rawValue: 1 << 4)
+    static let liveHeartRateZone = Self(rawValue: 1 << 4)
     static let currentSnapshot = Self(rawValue: 1 << 5)
 }
 
@@ -119,7 +119,7 @@ enum WorkoutDeviceFrameBuilder {
             flags.remove(.watchAltitude)
         }
         if zone == nil {
-            flags.remove(.liveHealthKitZone)
+            flags.remove(.liveHeartRateZone)
         }
         if sample.isCurrentSnapshot {
             flags.insert(.currentSnapshot)
@@ -288,7 +288,7 @@ enum WorkoutDeviceTelemetryMapper {
         if rawSnapshot?.availability.contains(.heartRateZone) == true,
            rawSnapshot?.currentHeartRateZone != nil,
            rawSnapshot?.heartRateZoneCount != nil {
-            flags.insert(.liveHealthKitZone)
+            flags.insert(.liveHeartRateZone)
         }
 
         return WorkoutDeviceTelemetrySample(

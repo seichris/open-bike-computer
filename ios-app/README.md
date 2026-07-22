@@ -21,17 +21,15 @@ Open `BikeComputer/BikeComputer.xcodeproj` in Xcode.
    workout and route permissions.
 3. Allow location while using the Watch app if you want a workout route,
    elevation, and GPS fallback speed.
-4. To start on Watch, return to its start screen, select **Start Ride**, then
-   confirm **Start Anyway**.
+4. To start on Watch, return to its start screen and select **Start Ride**.
 5. To start on iPhone, select **Start workout**. When a Watch is paired and the
    BikeComputer companion is installed, the iPhone starts the Watch-owned
    workout directly. Otherwise it explains the required Watch setup.
 
-The Watch app warns that Apple Watch permits one active workout session and that
-starting may replace another app's workout. **Cancel** must leave the other
-workout untouched and create no BikeComputer session. The iPhone cannot detect
-another app's active workout through public APIs, so its paired-and-installed
-start path does not show that warning.
+Watch and iPhone start immediately after their setup checks. Apple Watch permits
+one active workout session, and public APIs do not reveal whether another app
+currently owns it. If BikeComputer is displaced, it reports that outcome
+instead of retrying in a loop.
 
 ## Workout behavior
 
@@ -43,6 +41,10 @@ Health workout.
 
 Navigation and workout state are deliberately independent. Either can start or
 end without implicitly changing the other.
+
+BikeComputer heart zones use a maximum heart rate configured in iPhone
+**Settings > Developer Settings > Workout Heart Zones**. The default is 190 BPM;
+changes are persisted on iPhone and synced to the paired Watch.
 
 If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
@@ -72,8 +74,8 @@ shared-key device. Ownership-v2 firmware rejects the old app-wide key, so
 release and install the compatible app before that firmware.
 
 The full wire contract is in [`../docs/ble-protocol.md`](../docs/ble-protocol.md).
-The release acceptance matrix is in
-[`../docs/watchos-workout-companion-validation.md`](../docs/watchos-workout-companion-validation.md).
+The remaining release acceptance checklist is tracked in
+[GitHub issue #117](https://github.com/seichris/open-bike-computer/issues/117).
 
 ## Privacy
 

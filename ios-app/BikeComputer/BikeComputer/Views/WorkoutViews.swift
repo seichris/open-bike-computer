@@ -518,11 +518,12 @@ struct WorkoutDashboardView: View {
                         .red
                     )
                     metric(
-                        "HR Zone",
+                        "Heart Zone",
                         zoneValue(snapshot),
-                        "ZONE",
+                        "",
                         "waveform.path.ecg",
-                        .pink
+                        .pink,
+                        source: "Configured max HR"
                     )
                     metric(
                         "Speed",
@@ -790,10 +791,7 @@ struct WorkoutDashboardView: View {
 
     private func zoneValue(_ snapshot: WorkoutSnapshotV1) -> String {
         guard let zone = snapshot.currentHeartRateZone else { return "--" }
-        if let count = snapshot.heartRateZoneCount {
-            return "\(zone)/\(count)"
-        }
-        return "\(zone)"
+        return "Zone \(zone)"
     }
 
     private func altitudeValue(_ altitude: Double?) -> String {

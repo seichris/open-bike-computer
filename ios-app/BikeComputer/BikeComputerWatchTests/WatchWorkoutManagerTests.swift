@@ -1,9 +1,118 @@
 import CoreLocation
 import HealthKit
+import WatchConnectivity
 import XCTest
+
+private final class FakeWatchHeartRateZoneConnectivitySession:
+    WatchHeartRateZoneConnectivitySession
+{
+    weak var delegate: WCSessionDelegate?
+    var receivedApplicationContext: [String: Any] = [:]
+    var activationCount = 0
+
+    func activate() {
+        activationCount += 1
+    }
+}
 
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testProductionSnapshotPublishesConfiguredHeartRateZone() async throws {
+        let defaultsSuiteName = "WatchWorkoutManagerHeartRateZoneTests"
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: defaultsSuiteName)
+        )
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let capturedAt = Date()
+        let startDate = capturedAt.addingTimeInterval(-30)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false,
+            heartRateZoneDefaults: defaults
+        )
+        let syncSession = FakeWatchHeartRateZoneConnectivitySession()
+        syncSession.receivedApplicationContext = WorkoutHeartRateZoneSyncContext
+            .applicationContext(maximumHeartRateBPM: 200)
+        let receiver = WatchHeartRateZoneSettingsReceiver(
+            session: syncSession,
+            applyMaximumHeartRateBPM: manager.setMaximumHeartRateBPM
+        )
+        receiver.activate()
+
+        XCTAssertEqual(syncSession.activationCount, 1)
+        XCTAssertTrue(syncSession.delegate === receiver)
+        receiver.session(
+            WCSession.default,
+            activationDidCompleteWith: .activated,
+            error: nil
+        )
+        try await waitUntil { manager.maximumHeartRateBPM == 200 }
+        XCTAssertEqual(manager.maximumHeartRateBPM, 200)
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults),
+            200
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.setCurrentHeartRateForTesting(
+            160,
+            capturedAt: capturedAt
+        )
+
+        XCTAssertTrue(manager.publishMirrorSnapshotForTesting())
+        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 4)
+        XCTAssertEqual(
+            manager.snapshot.heartRateZoneCount,
+            WorkoutHeartRateZoneProfile.zoneCount
+        )
+        XCTAssertTrue(manager.snapshot.availability.contains(.heartRateZone))
+        XCTAssertNil(manager.snapshot.heartRateZoneDurations)
+
+        receiver.session(
+            WCSession.default,
+            didReceiveApplicationContext: WorkoutHeartRateZoneSyncContext
+                .applicationContext(
+                    maximumHeartRateBPM: 240
+                )
+        )
+        try await waitUntil { manager.maximumHeartRateBPM == 240 }
+        XCTAssertEqual(manager.maximumHeartRateBPM, 240)
+        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 2)
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults),
+            240
+        )
+
+        let reloadedManager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            initializeOnLaunch: false,
+            heartRateZoneDefaults: defaults
+        )
+        XCTAssertEqual(reloadedManager.maximumHeartRateBPM, 240)
+    }
+
     func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
         let persistence = ToggleRecoveryPersistence()
         let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)

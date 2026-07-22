@@ -69,7 +69,7 @@ struct LiveWorkoutView: View {
                         value: WorkoutValueFormatter.heartRate(
                             manager.snapshot.currentHeartRate?.value
                         ),
-                        unit: "BPM",
+                        unit: heartRateUnit,
                         icon: "heart.fill",
                         color: .red
                     )
@@ -275,6 +275,14 @@ struct LiveWorkoutView: View {
 
     private var columns: [GridItem] {
         [GridItem(.flexible()), GridItem(.flexible())]
+    }
+
+    private var heartRateUnit: String {
+        guard let zone = manager.snapshot.currentHeartRateZone,
+              let count = manager.snapshot.heartRateZoneCount else {
+            return "BPM"
+        }
+        return "BPM · Z\(zone)/\(count)"
     }
 
     private var stateLabel: String {

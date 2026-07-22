@@ -8276,7 +8276,7 @@ struct NavigationProtocolTests {
             .watchSpeed,
             .healthKitDistance,
             .watchAltitude,
-            .liveHealthKitZone,
+            .liveHeartRateZone,
         ]
     ) -> WorkoutDeviceTelemetrySample {
         WorkoutDeviceTelemetrySample(
@@ -8512,8 +8512,8 @@ struct NavigationProtocolTests {
                "mapper reports HealthKit distance source")
         assert(live?.sourceFlags.contains(.watchAltitude) == true,
                "mapper reports authoritative Watch altitude")
-        assert(live?.sourceFlags.contains(.liveHealthKitZone) == true,
-               "mapper reports live HealthKit zone availability")
+        assert(live?.sourceFlags.contains(.liveHeartRateZone) == true,
+               "mapper reports live heart-rate zone availability")
 
         let stale = WorkoutDeviceTelemetryMapper.sample(
             presentation: presentation(connectionState: .stale),

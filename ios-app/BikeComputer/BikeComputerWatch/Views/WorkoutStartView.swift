@@ -3,7 +3,6 @@ import SwiftUI
 struct WorkoutStartView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @State private var showingRecoveryResetConfirmation = false
-    @State private var showingStartConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -75,32 +74,13 @@ struct WorkoutStartView: View {
                 .font(.caption)
         case .ready:
             Button {
-                showingStartConfirmation = true
+                manager.startOutdoorCycling()
             } label: {
                 Label("Start Ride", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
             .tint(.green)
             .disabled(manager.state == .failed)
-            .alert(
-                WorkoutStartDisclosureV1.title,
-                isPresented: $showingStartConfirmation
-            ) {
-                Button(WorkoutStartDisclosureV1.cancelTitle, role: .cancel) {
-                    WorkoutStartDisclosureV1.perform(
-                        .cancel,
-                        start: manager.startOutdoorCycling
-                    )
-                }
-                Button(WorkoutStartDisclosureV1.confirmTitle) {
-                    WorkoutStartDisclosureV1.perform(
-                        .startAnyway,
-                        start: manager.startOutdoorCycling
-                    )
-                }
-            } message: {
-                Text(WorkoutStartDisclosureV1.message)
-            }
         case .denied:
             Text("BikeComputer can’t start a workout without permission to save workouts in Health.")
                 .font(.caption)
