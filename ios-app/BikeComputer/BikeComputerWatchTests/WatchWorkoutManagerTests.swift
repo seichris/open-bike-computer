@@ -176,6 +176,64 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertFalse(manager.isRecovering)
     }
 
+    func testComplicationStartWaitsForColdLaunchRecovery() async throws {
+        let recovery = RecoveryProbe()
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            recoverActiveWorkoutSession: { await recovery.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: true
+        )
+        try await waitUntil { recovery.callCount == 1 }
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        recovery.completeWithoutSession()
+        try await waitUntil { startCount == 1 }
+        XCTAssertFalse(manager.isRecovering)
+    }
+
+    func testComplicationStartIgnoresUnknownAndDuplicateURLs() async throws {
+        let start = AsyncVoidProbe()
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            complicationStartOperation: { await start.run() },
+            initializeOnLaunch: false
+        )
+
+        manager.handleLaunchURL(
+            URL(string: "bikecomputer://workout/summary")!
+        )
+        await Task.yield()
+        XCTAssertEqual(start.callCount, 0)
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        try await waitUntil { start.callCount == 1 }
+        start.complete()
+        await Task.yield()
+        XCTAssertEqual(start.callCount, 1)
+    }
+
     func testProductionMirrorStartRetryAndBackpressure() async throws {
         let probe = WatchMirrorTransportProbe()
         let runtime = try makeMirrorRuntime(probe: probe)

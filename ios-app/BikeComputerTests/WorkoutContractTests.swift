@@ -128,6 +128,7 @@ private struct WorkoutContractTestSuite {
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testMainRideControlsComposition()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
+        testWatchWorkoutLaunchRequest()
     }
 
     private mutating func expect(
@@ -5263,6 +5264,27 @@ private struct WorkoutContractTestSuite {
         _ source: WorkoutMetricSourceV1? = nil
     ) -> WorkoutMetricV1 {
         WorkoutMetricV1(value: value, unit: unit, capturedAt: date, source: source)
+    }
+
+    private mutating func testWatchWorkoutLaunchRequest() {
+        expect(
+            WatchWorkoutLaunchRequest(
+                url: WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+            ) == .startOutdoorCycling,
+            "the complication URL must resolve to a start-workout request"
+        )
+        expect(
+            WatchWorkoutLaunchRequest(
+                url: URL(string: "bikecomputer://workout/summary")!
+            ) == nil,
+            "unknown BikeComputer paths must not start a workout"
+        )
+        expect(
+            WatchWorkoutLaunchRequest(
+                url: URL(string: "https://workout/start")!
+            ) == nil,
+            "foreign URL schemes must not start a workout"
+        )
     }
 
     private func makeEnvelope(
