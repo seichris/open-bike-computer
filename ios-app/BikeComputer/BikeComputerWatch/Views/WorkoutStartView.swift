@@ -35,8 +35,13 @@ struct WorkoutStartView: View {
                     .buttonStyle(.borderless)
                 }
 
-                Link("Privacy Policy", destination: AppPrivacyPolicy.url)
-                    .font(.caption2)
+                NavigationLink {
+                    WatchSettingsView()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .accessibilityLabel("Settings")
+                }
+                .buttonStyle(.borderless)
             }
             .padding(.horizontal, 8)
         }
