@@ -284,7 +284,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             ).read_text(),
         )
 
-    def test_screenshot_release_package_is_source_bound_in_ci(self):
+    def test_screenshot_release_package_is_available_for_manual_verification(self):
         screenshot_root = REPO_ROOT / "ios-app" / "AppStoreScreenshots"
         provenance = json.loads(
             (
@@ -311,7 +311,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "tsx scripts/release-package.ts",
         )
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-        self.assertIn("bun run scripts/release-package.ts", workflow)
+        self.assertNotIn("app-store-screenshots:", workflow)
 
 
 if __name__ == "__main__":
