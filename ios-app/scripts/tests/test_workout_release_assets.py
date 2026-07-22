@@ -295,7 +295,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "tsx scripts/release-package.ts",
         )
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-        self.assertIn("bun run verify:release", workflow)
+        self.assertIn("bun run scripts/release-package.ts", workflow)
 
 
 if __name__ == "__main__":
