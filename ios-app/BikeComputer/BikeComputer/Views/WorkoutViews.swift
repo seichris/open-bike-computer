@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private enum WorkoutStartAvailabilityAlert: String, Identifiable {
     case unsupported
@@ -402,11 +403,15 @@ struct WorkoutDashboardView: View {
     let onStart: () -> Void
     let onPause: () -> Void
     let onResume: () -> Void
+    let onMarkSegment: () -> Void
     let onEndAndSave: () -> Void
     let onDiscard: () -> Void
     let onDone: () -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var segmentToast: WorkoutCompletedSegmentV1?
+    @State private var observedSegmentIndex: UInt32?
 
     var body: some View {
         NavigationView {
@@ -433,6 +438,44 @@ struct WorkoutDashboardView: View {
                 }
             }
         }
+        .overlay(alignment: .top) {
+            if let segmentToast {
+                segmentToastView(segmentToast)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .onAppear {
+            observedSegmentIndex = currentCompletedSegment?.index
+        }
+        .onChange(of: currentCompletedSegment?.index) { index in
+            let previousIndex = observedSegmentIndex
+            observedSegmentIndex = index
+            guard scenePhase == .active,
+                  let index,
+                  index != previousIndex,
+                  store.presentation.isWorkoutActive,
+                  let segment = currentCompletedSegment else { return }
+            UINotificationFeedbackGenerator()
+                .notificationOccurred(.success)
+            withAnimation {
+                segmentToast = segment
+            }
+        }
+        .task(id: segmentToast?.index) {
+            guard let index = segmentToast?.index else { return }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard segmentToast?.index == index else { return }
+            withAnimation {
+                segmentToast = nil
+            }
+        }
+    }
+
+    private var currentCompletedSegment: WorkoutCompletedSegmentV1? {
+        (store.presentation.finalSnapshot ?? store.presentation.snapshot)
+            .lastCompletedSegment
     }
 
     @ViewBuilder
@@ -508,6 +551,16 @@ struct WorkoutDashboardView: View {
                     .font(.system(size: 42, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .accessibilityLabel("Elapsed time")
+
+                if let segment = snapshot.lastCompletedSegment,
+                   store.presentation.isWorkoutActive {
+                    Label(
+                        "Segment \(segment.index + 1) in progress",
+                        systemImage: "flag.checkered"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                }
 
                 LazyVGrid(columns: columns, spacing: 12) {
                     metric(
@@ -661,21 +714,44 @@ struct WorkoutDashboardView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         } else if presentation.isWorkoutActive {
+            if !store.supportsSegmentMarking {
+                Text("Update BikeComputer on Apple Watch to mark segments from iPhone.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             HStack(spacing: 12) {
+                Button(action: onMarkSegment) {
+                    Label("Segment", systemImage: "flag.checkered")
+                }
+                .tint(.blue)
+                .disabled(
+                    presentation.sessionState != .running
+                        || presentation.pendingControl != nil
+                        || !store.supportsSegmentMarking
+                        || store.isSegmentConfirmationPending
+                )
+                .accessibilityLabel("Mark workout segment")
+
                 if presentation.sessionState == .paused {
                     Button(action: onResume) {
-                        Label("Resume Workout", systemImage: "play.fill")
+                        Label("Resume", systemImage: "play.fill")
                     }
                     .tint(.green)
-                    .disabled(presentation.pendingControl != nil)
+                    .disabled(
+                        presentation.pendingControl != nil
+                            && presentation.pendingControl != .markSegment
+                    )
                 } else {
                     Button(action: onPause) {
-                        Label("Pause Workout", systemImage: "pause.fill")
+                        Label("Pause", systemImage: "pause.fill")
                     }
                     .tint(.orange)
                     .disabled(
                         presentation.sessionState != .running
-                            || presentation.pendingControl != nil
+                            || (presentation.pendingControl != nil
+                                && presentation.pendingControl
+                                    != .markSegment)
                     )
                 }
 
@@ -684,15 +760,48 @@ struct WorkoutDashboardView: View {
                     onEndAndSave: onEndAndSave,
                     onDiscard: onDiscard
                 ) {
-                    Label("End Workout", systemImage: "stop.fill")
+                    Label("End", systemImage: "stop.fill")
                 }
                 .disabled(
                     presentation.sessionState == .ending
-                        || presentation.pendingControl != nil
+                        || (presentation.pendingControl != nil
+                            && presentation.pendingControl != .markSegment)
                 )
             }
             .buttonStyle(.borderedProminent)
         }
+    }
+
+    private func segmentToastView(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "flag.checkered")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Segment \(segment.index)")
+                    .font(.subheadline.weight(.semibold))
+                Text(segmentSummary(segment))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func segmentSummary(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> String {
+        let duration = WorkoutValueFormatter.duration(segment.duration)
+        guard let distance = segment.distanceMeters else {
+            return duration
+        }
+        return "\(duration)  •  \(WorkoutValueFormatter.distance(distance)) \(WorkoutValueFormatter.distanceUnit(distance))"
     }
 
     private func metric(

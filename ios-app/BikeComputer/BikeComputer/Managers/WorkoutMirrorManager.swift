@@ -106,6 +106,8 @@ final class WorkoutMirrorManager: NSObject {
     private var controlSequencer = WorkoutControlEnvelopeSequencer()
     private var remoteQueue: [RemoteMessage] = []
     private var remoteSendInFlight: RemoteSendAttempt?
+    private var segmentStatusReplayMessage: RemoteMessage?
+    private var segmentReplayAfterSendAttemptID: UUID?
 
     init(
         healthStore: HKHealthStore = HKHealthStore(),
@@ -247,8 +249,13 @@ final class WorkoutMirrorManager: NSObject {
     func pause() {
         guard #available(iOS 17.0, *),
               let session = mirroredTransport,
-              store.presentation.sessionState == .running,
-              store.markPendingControl(.pause) else {
+              store.presentation.sessionState == .running else {
+            return
+        }
+        releasePendingSegmentForLifecycleControl(
+            prioritizeRemoteQueue: false
+        )
+        guard store.markPendingControl(.pause) else {
             return
         }
         session.pause()
@@ -258,19 +265,39 @@ final class WorkoutMirrorManager: NSObject {
     func resume() {
         guard #available(iOS 17.0, *),
               let session = mirroredTransport,
-              store.presentation.sessionState == .paused,
-              store.markPendingControl(.resume) else {
+              store.presentation.sessionState == .paused else {
+            return
+        }
+        releasePendingSegmentForLifecycleControl(
+            prioritizeRemoteQueue: false
+        )
+        guard store.markPendingControl(.resume) else {
             return
         }
         session.resume()
         scheduleControlConfirmationTimeout(for: .resume)
     }
 
+    func markSegment() {
+        guard store.presentation.sessionState == .running,
+              store.supportsSegmentMarking,
+              !store.isSegmentConfirmationPending else {
+            return
+        }
+        enqueueStateChangingControl(.markSegment)
+    }
+
     func endAndSave() {
+        releasePendingSegmentForLifecycleControl(
+            prioritizeRemoteQueue: true
+        )
         enqueueStateChangingControl(.endAndSave)
     }
 
     func discard() {
+        releasePendingSegmentForLifecycleControl(
+            prioritizeRemoteQueue: true
+        )
         enqueueStateChangingControl(.discard)
     }
 
@@ -398,7 +425,9 @@ final class WorkoutMirrorManager: NSObject {
                 $0.control == control
                     && $0.envelope.sequence == sequence
             }
-            if control == .endAndSave || control == .discard {
+            if control == .endAndSave
+                || control == .discard
+                || control == .markSegment {
                 // HealthKit does not provide cancellation for a remote send.
                 // Once the correlated control has exhausted its bounded
                 // confirmation window, invalidate whichever attempt owns the
@@ -411,13 +440,16 @@ final class WorkoutMirrorManager: NSObject {
                 sequence: sequence,
                 error: control == .endAndSave || control == .discard
                     ? .terminalChoiceUnconfirmed
-                    : .watchUnavailable
+                    : control == .markSegment
+                        ? .segmentMarkUnconfirmed
+                        : .watchUnavailable
             )
             pendingControlTimeoutControl = nil
             pendingControlTimeoutSequence = nil
             pendingControlTimeoutTask = nil
             pendingControlTimeoutAttemptID = nil
             synchronizeFinalSnapshotTimeoutWithPresentation()
+            enqueueUnconfirmedSegmentReplayIfNeeded()
             drainRemoteQueue()
         }
     }
@@ -428,6 +460,81 @@ final class WorkoutMirrorManager: NSObject {
         pendingControlTimeoutAttemptID = nil
         pendingControlTimeoutControl = nil
         pendingControlTimeoutSequence = nil
+    }
+
+    private func releasePendingSegmentForLifecycleControl(
+        prioritizeRemoteQueue: Bool
+    ) {
+        guard store.presentation.pendingControl == .markSegment,
+              let sequence = store.currentPendingControlSequence else {
+            if prioritizeRemoteQueue {
+                abandonSegmentStatusReplay()
+            }
+            return
+        }
+        let markWasSubmitted =
+            remoteSendInFlight?.message.control == .markSegment
+                && remoteSendInFlight?.message.envelope.sequence == sequence
+                || pendingControlTimeoutControl == .markSegment
+                    && pendingControlTimeoutSequence == sequence
+        let submittedMarkAttemptID = remoteSendInFlight.flatMap { attempt in
+            attempt.message.control == .markSegment
+                && attempt.message.envelope.sequence == sequence
+                ? attempt.id
+                : nil
+        }
+        remoteQueue.removeAll {
+            $0.control == .markSegment
+                && $0.envelope.sequence == sequence
+        }
+        if prioritizeRemoteQueue {
+            remoteQueue.removeAll {
+                $0.control == .requestCurrentSnapshot
+            }
+            if markWasSubmitted
+                || remoteSendInFlight?.message.control
+                    == .requestCurrentSnapshot {
+                remoteSendInFlight = nil
+            }
+            // A terminal choice supersedes status recovery for this boundary.
+            // Never resurrect the mark after End or Discard has been sent.
+            abandonSegmentStatusReplay()
+        } else {
+            // Pause/resume may overtake a submitted mark. If its transport
+            // callback is still outstanding, replay exactly once when that
+            // particular callback releases the queue.
+            segmentReplayAfterSendAttemptID = submittedMarkAttemptID
+        }
+        cancelControlConfirmationTimeout()
+        store.failPendingControl(
+            .markSegment,
+            sequence: sequence,
+            error: markWasSubmitted
+                ? .segmentMarkUnconfirmed
+                : .segmentMarkFailed
+        )
+        if !prioritizeRemoteQueue {
+            enqueueUnconfirmedSegmentReplayIfNeeded()
+            drainRemoteQueue()
+        }
+    }
+
+    private func abandonSegmentStatusReplay() {
+        guard let message = segmentStatusReplayMessage else {
+            segmentReplayAfterSendAttemptID = nil
+            return
+        }
+        let sequence = message.envelope.sequence
+        remoteQueue.removeAll {
+            $0.control == .markSegment
+                && $0.envelope.sequence == sequence
+        }
+        if remoteSendInFlight?.message.control == .markSegment,
+           remoteSendInFlight?.message.envelope.sequence == sequence {
+            remoteSendInFlight = nil
+        }
+        segmentStatusReplayMessage = nil
+        segmentReplayAfterSendAttemptID = nil
     }
 
     private func synchronizeControlTimeoutWithPresentation() {
@@ -535,7 +642,10 @@ final class WorkoutMirrorManager: NSObject {
 
         // HealthKit can provide a fresh HKWorkoutSession instance after a
         // reconnect. Preserve ordered state, replace the object reference, and
-        // request one full snapshot instead of replaying old metric history.
+        // replay an outcome-unknown segment before requesting one full
+        // snapshot. The exact original sender/sequence is the only safe way
+        // to distinguish it from a Watch-local segment boundary.
+        enqueueUnconfirmedSegmentReplayIfNeeded()
         if store.currentEnvelope?.snapshot?.state.isActive == true {
             enqueueSnapshotRequestIfPossible()
         }
@@ -554,16 +664,20 @@ final class WorkoutMirrorManager: NSObject {
             control,
             sequence: envelope.sequence
         ) else { return }
+        // A best-effort snapshot request must never hold a rider control
+        // behind a callback that HealthKit may delay indefinitely.
+        remoteQueue.removeAll {
+            $0.control == .requestCurrentSnapshot
+        }
+        if remoteSendInFlight?.message.control == .requestCurrentSnapshot {
+            remoteSendInFlight = nil
+        }
         remoteQueue.append(
             RemoteMessage(
                 envelope: envelope,
                 control: control,
                 reportsFailure: true
             )
-        )
-        scheduleControlConfirmationTimeout(
-            for: control,
-            sequence: envelope.sequence
         )
         drainRemoteQueue()
     }
@@ -587,6 +701,43 @@ final class WorkoutMirrorManager: NSObject {
         )
     }
 
+    private func enqueueUnconfirmedSegmentReplayIfNeeded() {
+        guard let message = segmentStatusReplayMessage,
+              message.control == .markSegment,
+              store.currentUnconfirmedSegmentControlSequence
+                == message.envelope.sequence,
+              remoteSendInFlight?.message.envelope.sequence
+                != message.envelope.sequence,
+              !remoteQueue.contains(where: {
+                  $0.control == .markSegment
+                      && $0.envelope.sequence == message.envelope.sequence
+              }) else {
+            return
+        }
+        remoteQueue.insert(message, at: 0)
+    }
+
+    private func synchronizeSegmentStatusReplayWithPresentation() {
+        guard let message = segmentStatusReplayMessage else { return }
+        let sequence = message.envelope.sequence
+        let isStillPending =
+            store.presentation.pendingControl == .markSegment
+                && store.currentPendingControlSequence == sequence
+        let isStillUnconfirmed =
+            store.currentUnconfirmedSegmentControlSequence == sequence
+        guard !isStillPending, !isStillUnconfirmed else { return }
+        remoteQueue.removeAll {
+            $0.control == .markSegment
+                && $0.envelope.sequence == sequence
+        }
+        if remoteSendInFlight?.message.control == .markSegment,
+           remoteSendInFlight?.message.envelope.sequence == sequence {
+            remoteSendInFlight = nil
+        }
+        segmentReplayAfterSendAttemptID = nil
+        segmentStatusReplayMessage = nil
+    }
+
     private func makeControlEnvelope(
         _ control: WorkoutControlV1
     ) -> WorkoutEnvelopeV1? {
@@ -608,6 +759,8 @@ final class WorkoutMirrorManager: NSObject {
         cancelFirstSnapshotTimeout()
         remoteQueue.removeAll()
         remoteSendInFlight = nil
+        segmentStatusReplayMessage = nil
+        segmentReplayAfterSendAttemptID = nil
         controlSequencer.reset()
         cancelControlConfirmationTimeout()
         cancelFinalSnapshotTimeout()
@@ -702,12 +855,31 @@ final class WorkoutMirrorManager: NSObject {
             message: message
         )
         remoteSendInFlight = attempt
+        if message.control == .markSegment {
+            segmentStatusReplayMessage = message
+        }
+        if message.reportsFailure,
+           store.presentation.pendingControl == message.control,
+           store.currentPendingControlSequence == message.envelope.sequence {
+            // A queued control has not reached HealthKit yet, so its
+            // confirmation window must begin only when it is actually
+            // submitted to the mirrored session.
+            scheduleControlConfirmationTimeout(
+                for: message.control,
+                sequence: message.envelope.sequence
+            )
+        }
         let callbackReference = WorkoutWeakReference(self)
         session.send(data: data) { success, error in
             Task { @MainActor in
                 guard let manager = callbackReference.value,
                       manager.remoteSendInFlight?.id == attempt.id else {
                     return
+                }
+                let shouldEnqueueDeferredSegmentReplay =
+                    manager.segmentReplayAfterSendAttemptID == attempt.id
+                if shouldEnqueueDeferredSegmentReplay {
+                    manager.segmentReplayAfterSendAttemptID = nil
                 }
                 manager.remoteSendInFlight = nil
                 if !success, message.reportsFailure {
@@ -718,6 +890,9 @@ final class WorkoutMirrorManager: NSObject {
                     )
                 }
                 manager.synchronizeControlTimeoutWithPresentation()
+                if shouldEnqueueDeferredSegmentReplay {
+                    manager.enqueueUnconfirmedSegmentReplayIfNeeded()
+                }
                 manager.drainRemoteQueue()
             }
         }
@@ -762,6 +937,7 @@ final class WorkoutMirrorManager: NSObject {
         guard isCurrentTransport(transport) else { return }
         let drainSessionID = pendingTerminalFailureSessionID
         let result = store.ingestBatch(envelopes, receivedAt: receivedAt)
+        synchronizeSegmentStatusReplayWithPresentation()
         if let sessionID = result.latestSnapshotEnvelope?.sessionID {
             currentTransportSessionID = sessionID
             currentTransportStartDate = result.latestSnapshotEnvelope?

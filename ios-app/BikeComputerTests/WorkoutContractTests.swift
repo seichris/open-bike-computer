@@ -56,6 +56,7 @@ private struct WorkoutContractTestSuite {
 
     mutating func run() async {
         testSnapshotRoundTrip()
+        testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
@@ -208,6 +209,134 @@ private struct WorkoutContractTestSuite {
             expect(try roundTripWorkoutEnvelope(envelope) == envelope, "snapshot should round-trip")
         } catch {
             expect(false, "snapshot round-trip threw \(error)")
+        }
+    }
+
+    private mutating func testSegmentRoundTripValidationAndAccumulation() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_000_010)
+        let firstEnd = start.addingTimeInterval(60)
+        var accumulator = WorkoutSegmentAccumulator()
+        accumulator.reset(workoutStart: start)
+        let first = accumulator.candidate(
+            endedAt: firstEnd,
+            cumulativeElapsedTime: 55,
+            cumulativeDistanceMeters: 1_000,
+            cumulativeDistanceSource: .watchRoute
+        )
+        expect(first?.completedSegment.index == 1, "first segment should be numbered one")
+        expect(first?.completedSegment.duration == 55, "segment duration should use active workout time")
+        expect(first?.completedSegment.distanceMeters == 1_000, "first segment should begin at zero distance")
+        if let first {
+            expect(accumulator.commit(first), "first segment candidate should commit")
+        }
+
+        let secondEnd = firstEnd.addingTimeInterval(40)
+        let second = accumulator.candidate(
+            endedAt: secondEnd,
+            cumulativeElapsedTime: 90,
+            cumulativeDistanceMeters: 1_650,
+            cumulativeDistanceSource: .watchRoute
+        )
+        expect(second?.completedSegment.index == 2, "segments should increment monotonically")
+        expect(second?.completedSegment.duration == 35, "pause time must not enter the next segment duration")
+        expect(second?.completedSegment.distanceMeters == 650, "segment distance should use cumulative-distance boundaries")
+        if let second {
+            expect(accumulator.commit(second), "second segment candidate should commit")
+        }
+
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: start,
+            elapsedTime: metric(90, .seconds, secondEnd),
+            lastCompletedSegment: accumulator.lastCompletedSegment,
+            availability: [.elapsedTime]
+        )
+        let envelope = makeEnvelope(
+            sequence: 1,
+            capturedAt: secondEnd,
+            snapshot: snapshot
+        )
+        do {
+            let decoded = try roundTripWorkoutEnvelope(envelope)
+            expect(
+                decoded.snapshot?.lastCompletedSegment
+                    == accumulator.lastCompletedSegment,
+                "the latest segment summary should round-trip with live metrics"
+            )
+        } catch {
+            expect(false, "segment snapshot round-trip threw \(error)")
+        }
+
+        var restored = WorkoutSegmentAccumulator()
+        restored.restore(
+            workoutStart: start,
+            lastCompletedSegment: accumulator.lastCompletedSegment,
+            cumulativeElapsedTime: 90,
+            cumulativeDistanceMeters: 1_650,
+            cumulativeDistanceSource: .watchRoute
+        )
+        expect(
+            restored.candidate(
+                endedAt: secondEnd.addingTimeInterval(30),
+                cumulativeElapsedTime: 120,
+                cumulativeDistanceMeters: 2_100,
+                cumulativeDistanceSource: .watchRoute
+            )?.completedSegment.index == 3,
+            "recovered segment state should continue with the next index"
+        )
+
+        let sourceChange = restored.candidate(
+            endedAt: secondEnd.addingTimeInterval(30),
+            cumulativeElapsedTime: 120,
+            cumulativeDistanceMeters: 2_000,
+            cumulativeDistanceSource: .healthKit
+        )
+        expect(
+            sourceChange?.completedSegment.distanceMeters == nil,
+            "a segment must not subtract cumulative totals from different distance sources"
+        )
+
+        let invalidSegment = makeEnvelope(
+            sequence: 2,
+            capturedAt: secondEnd,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: start,
+                lastCompletedSegment: WorkoutCompletedSegmentV1(
+                    index: 0,
+                    startedAt: start,
+                    endedAt: secondEnd,
+                    duration: 90,
+                    distanceMeters: 1_650
+                )
+            )
+        )
+        expectThrows(.invalidMetric, "zero segment index") {
+            try WorkoutContractCodec.validate(invalidSegment)
+        }
+
+        let failedAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: envelope.sessionID,
+            sessionToken: envelope.sessionToken,
+            transportGenerationID: envelope.transportGenerationID,
+            sequence: 3,
+            capturedAt: secondEnd,
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 2,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        do {
+            expect(
+                try roundTripWorkoutEnvelope(failedAcknowledgement)
+                    == failedAcknowledgement,
+                "a correlated segment failure acknowledgement should round-trip"
+            )
+        } catch {
+            expect(false, "segment failure acknowledgement threw \(error)")
         }
     }
 
@@ -3671,6 +3800,254 @@ private struct WorkoutContractTestSuite {
             matchingOutcomeReducer.presentation.pendingControl == nil,
             "a matching explicit terminal outcome may confirm the pending choice"
         )
+
+        var segmentReducer = WorkoutMirrorStateReducer()
+        segmentReducer.attachMirroredSession(at: now)
+        _ = segmentReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            segmentReducer.markPendingControl(.markSegment, sequence: 77),
+            "an iPhone segment request should become pending"
+        )
+        let segmentFailure = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 2,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 77,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        _ = segmentReducer.ingestBatch(
+            [segmentFailure],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        expect(
+            segmentReducer.presentation.pendingControl == nil
+                && segmentReducer.presentation.errorCode
+                    == .segmentMarkFailed,
+            "a correlated segment failure should clear pending state without failing the workout"
+        )
+
+        var unconfirmedSegmentReducer = WorkoutMirrorStateReducer()
+        unconfirmedSegmentReducer.attachMirroredSession(at: now)
+        _ = unconfirmedSegmentReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            unconfirmedSegmentReducer.markPendingControl(
+                .markSegment,
+                sequence: 78
+            ),
+            "a segment request should become pending before its outcome is unknown"
+        )
+        let segmentUnconfirmed = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 2,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 78,
+                errorCode: .segmentMarkUnconfirmed
+            )
+        )
+        _ = unconfirmedSegmentReducer.ingestBatch(
+            [segmentUnconfirmed],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        unconfirmedSegmentReducer.attachMirroredSession(
+            at: now.addingTimeInterval(2)
+        )
+        expect(
+            unconfirmedSegmentReducer.isSegmentConfirmationPending
+                && unconfirmedSegmentReducer.presentation.errorCode
+                    == .segmentMarkUnconfirmed
+                && !unconfirmedSegmentReducer.markPendingControl(
+                    .markSegment,
+                    sequence: 79
+                ),
+            "reconnection must preserve an outcome-unknown segment and block another boundary"
+        )
+        let recoveredSegmentSnapshot = WorkoutEnvelopeV1(
+            kind: .snapshot,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 3,
+            capturedAt: now.addingTimeInterval(3),
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: now,
+                lastCompletedSegment: WorkoutCompletedSegmentV1(
+                    index: 1,
+                    startedAt: now,
+                    endedAt: now.addingTimeInterval(3),
+                    duration: 3,
+                    distanceMeters: nil
+                )
+            )
+        )
+        _ = unconfirmedSegmentReducer.ingestBatch(
+            [recoveredSegmentSnapshot],
+            receivedAt: now.addingTimeInterval(3)
+        )
+        expect(
+            unconfirmedSegmentReducer.isSegmentConfirmationPending,
+            "segment count alone must not attribute a Watch-local boundary to an iPhone command"
+        )
+        let recoveredSegmentAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 4,
+            capturedAt: now.addingTimeInterval(4),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 78
+            )
+        )
+        _ = unconfirmedSegmentReducer.ingestBatch(
+            [recoveredSegmentAcknowledgement],
+            receivedAt: now.addingTimeInterval(4)
+        )
+        expect(
+            !unconfirmedSegmentReducer.isSegmentConfirmationPending
+                && unconfirmedSegmentReducer.presentation.errorCode == nil,
+            "the Watch replay acknowledgement must resolve the exact original segment command"
+        )
+
+        var snapshotFirstReducer = WorkoutMirrorStateReducer()
+        snapshotFirstReducer.attachMirroredSession(at: now)
+        _ = snapshotFirstReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 1,
+                    capturedAt: now,
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now
+                    )
+                ),
+            ],
+            receivedAt: now
+        )
+        expect(
+            snapshotFirstReducer.markPendingControl(
+                .markSegment,
+                sequence: 80
+            ),
+            "the command-time segment baseline must be captured before delivery"
+        )
+        _ = snapshotFirstReducer.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sessionToken: 9,
+                    transportGenerationID: generation,
+                    sequence: 2,
+                    capturedAt: now.addingTimeInterval(1),
+                    snapshot: WorkoutSnapshotV1(
+                        state: .running,
+                        startDate: now,
+                        lastCompletedSegment: WorkoutCompletedSegmentV1(
+                            index: 1,
+                            startedAt: now,
+                            endedAt: now.addingTimeInterval(1),
+                            duration: 1,
+                            distanceMeters: nil
+                        )
+                    )
+                ),
+            ],
+            receivedAt: now.addingTimeInterval(1)
+        )
+        let delayedUnconfirmedAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 3,
+            capturedAt: now.addingTimeInterval(2),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 80,
+                errorCode: .segmentMarkUnconfirmed
+            )
+        )
+        _ = snapshotFirstReducer.ingestBatch(
+            [delayedUnconfirmedAcknowledgement],
+            receivedAt: now.addingTimeInterval(2)
+        )
+        expect(
+            snapshotFirstReducer.isSegmentConfirmationPending
+                && snapshotFirstReducer.presentation.errorCode
+                    == .segmentMarkUnconfirmed,
+            "a delayed unrelated snapshot must not clear the correlated command before Watch acknowledgement"
+        )
+        let snapshotFirstDefinitiveAcknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: generation,
+            sequence: 4,
+            capturedAt: now.addingTimeInterval(3),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: 80
+            )
+        )
+        _ = snapshotFirstReducer.ingestBatch(
+            [snapshotFirstDefinitiveAcknowledgement],
+            receivedAt: now.addingTimeInterval(3)
+        )
+        expect(
+            !snapshotFirstReducer.isSegmentConfirmationPending
+                && snapshotFirstReducer.presentation.errorCode == nil,
+            "a definitive replay acknowledgement must resolve a snapshot-first segment command"
+        )
     }
 
     private mutating func testMirrorReducerReplacesTerminalSessionCleanly() {
@@ -4910,9 +5287,9 @@ private struct WorkoutContractTestSuite {
             return
         }
 
-        for (surface, source, sessionSource, discardClosure) in [
-            ("iPhone", iPhoneSource, "store.presentation.sessionID", "onDiscard"),
-            ("Watch", watchSource, "manager.activeSessionID", "manager.discard"),
+        for (surface, source, sessionSource) in [
+            ("iPhone", iPhoneSource, "store.presentation.sessionID"),
+            ("Watch", watchSource, "manager.activeSessionID"),
         ] {
             let compactSource = source.filter { !$0.isWhitespace }
             expect(
@@ -4920,21 +5297,6 @@ private struct WorkoutContractTestSuite {
                     "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
                 ),
                 "\(surface) finish options must request, not execute, discard"
-            )
-            expect(
-                compactSource.contains(
-                    "WorkoutDiscardDisclosureV1.perform(.cancel,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
-                )
-                    && compactSource.contains(
-                        "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:\(sessionSource),discard:\(discardClosure))"
-                    ),
-                "\(surface) final warning must map Keep Riding and Discard to shared policy choices"
-            )
-            expect(
-                compactSource.contains(
-                    "isPresented:discardConfirmationPresented"
-                ),
-                "\(surface) must present the dedicated final discard warning"
             )
             expect(
                 compactSource.contains(
@@ -4948,15 +5310,32 @@ private struct WorkoutContractTestSuite {
             )
         }
 
+        let compactIPhoneSource = iPhoneSource.filter { !$0.isWhitespace }
+        expect(
+            compactIPhoneSource.contains(
+                "WorkoutDiscardDisclosureV1.perform(.cancel,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
+            )
+                && compactIPhoneSource.contains(
+                    "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
+                )
+                && compactIPhoneSource.contains(
+                    "isPresented:discardConfirmationPresented"
+                ),
+            "iPhone final warning must preserve shared disclosure policy and session capture"
+        )
+
         let compactWatchSource = watchSource.filter { !$0.isWhitespace }
         expect(
             compactWatchSource.contains(
-                "isPresented:discardConfirmationPresented,presenting:discardConfirmationSessionID"
+                "ifcase.discardConfirmation(letsessionID)=finishPrompt{discardConfirmationView(sessionID:sessionID)}"
             )
                 && compactWatchSource.contains(
-                    "){sessionIDinButton(WorkoutDiscardDisclosureV1.cancelTitle"
+                    "Button(WorkoutDiscardDisclosureV1.confirmTitle,role:.destructive){finishPrompt=nilguardmanager.activeSessionID==sessionIDelse{return}manager.discard()}"
+                )
+                && compactWatchSource.contains(
+                    "Button(WorkoutDiscardDisclosureV1.cancelTitle,role:.cancel){finishPrompt=nil}"
                 ),
-            "Watch discard confirmation must capture its session before alert dismissal"
+            "Watch dedicated discard screen must preserve disclosure choices and capture its session before dismissal"
         )
         expect(
             watchSource.contains("\"Finish Ride?\"")
@@ -4984,6 +5363,12 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent(
                 "BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift"
             )
+        let navigationDetailsViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputer/Views/NavigationDetailsView.swift"
+            )
         let summaryWatchViewURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -4997,6 +5382,10 @@ private struct WorkoutContractTestSuite {
               ),
               let liveWatchViewSource = try? String(
                 contentsOf: liveWatchViewURL,
+                encoding: .utf8
+              ),
+              let navigationDetailsViewSource = try? String(
+                contentsOf: navigationDetailsViewURL,
                 encoding: .utf8
               ),
               let summaryWatchViewSource = try? String(
@@ -5029,6 +5418,7 @@ private struct WorkoutContractTestSuite {
             "dashboard must render live capture age"
         )
         for controlRoute in [
+            "Button(action: onMarkSegment)",
             "Button(action: onResume)",
             "Button(action: onPause)",
             "Button(\"End and Save\") {",
@@ -5054,6 +5444,12 @@ private struct WorkoutContractTestSuite {
         )
 
         let compactSource = source.filter { !$0.isWhitespace }
+        let compactContentViewSource =
+            contentViewSource.filter { !$0.isWhitespace }
+        let compactLiveWatchViewSource =
+            liveWatchViewSource.filter { !$0.isWhitespace }
+        let compactNavigationDetailsViewSource =
+            navigationDetailsViewSource.filter { !$0.isWhitespace }
         for metricBinding in [
             "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
             "metric(\"HeartZone\",zoneValue(snapshot),\"\"",
@@ -5072,10 +5468,16 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             compactSource.contains(
-                "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"ResumeWorkout\""
+                "Button(action:onMarkSegment){Label(\"Segment\",systemImage:\"flag.checkered\")}"
             )
                 && compactSource.contains(
-                    "else{Button(action:onPause){Label(\"PauseWorkout\""
+                    "ifpresentation.sessionState==.paused{Button(action:onResume){Label(\"Resume\""
+                )
+                && compactSource.contains(
+                    "else{Button(action:onPause){Label(\"Pause\""
+                )
+                && compactSource.contains(
+                    ".accessibilityLabel(\"Markworkoutsegment\")"
                 )
                 && compactSource.contains(
                     "Button(\"EndandSave\"){finishPrompt=nilguardstore.presentation.sessionID==sessionIDelse{return}onEndAndSave()}"
@@ -5087,9 +5489,45 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"EndWorkout\""
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"End\""
                 ),
             "dashboard labels must remain bound to the matching control closures"
+        )
+        expect(
+            compactSource.contains(
+                "presentation.pendingControl!=nil&&presentation.pendingControl!=.markSegment"
+            )
+                && compactNavigationDetailsViewSource.contains(
+                    "presentation.pendingControl==nil||presentation.pendingControl==.markSegment"
+                ),
+            "iPhone lifecycle controls must remain reachable while a segment is pending"
+        )
+        expect(
+            compactContentViewSource.contains("scenePhase==.active")
+                && compactContentViewSource.contains(
+                    "!showingWorkoutDashboard"
+                )
+                && compactSource.contains("scenePhase==.active"),
+            "segment feedback must be foreground-only and avoid dashboard duplicates"
+        )
+        expect(
+            compactNavigationDetailsViewSource.contains(
+                "WorkoutErrorCopyV1.detail(errorCode,context:WorkoutErrorCopyV1.context(for:presentation))"
+            )
+                && compactNavigationDetailsViewSource.contains(
+                    "delayedWorkoutStatus(at:context.date),color:.orange,detail:workoutRecoveryDetail"
+                )
+                && compactNavigationDetailsViewSource.contains(
+                    "disconnectedWorkoutStatus(at:context.date),color:.red,detail:workoutRecoveryDetail"
+                ),
+            "the active iPhone ride panel must show actionable Watch recovery copy"
+        )
+        expect(
+            compactLiveWatchViewSource.contains("Button(\"SaveAnyway\")")
+                && compactLiveWatchViewSource.contains(
+                    "manager.saveWithoutUnconfirmedSegment()"
+                ),
+            "a permanently unconfirmed segment must leave a rider-visible save escape"
         )
         expect(
             compactSource.contains(
@@ -5104,7 +5542,7 @@ private struct WorkoutContractTestSuite {
                 "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{showingWorkoutDashboard=true})"
             )
                 && compactContentView.contains(
-                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
+                    ".sheet(isPresented:$showingWorkoutDashboard){WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)}"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -5115,6 +5553,16 @@ private struct WorkoutContractTestSuite {
         let compactSummaryWatchView = summaryWatchViewSource.filter {
             !$0.isWhitespace
         }
+        expect(
+            compactLiveWatchView.contains("manager.markSegment()")
+                && compactLiveWatchView.contains(
+                    ".accessibilityLabel(\"Markworkoutsegment\")"
+                )
+                && compactLiveWatchView.contains(
+                    "manager.snapshot.lastCompletedSegment"
+                ),
+            "Watch live workout must expose segment marking and its latest completed segment"
+        )
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"

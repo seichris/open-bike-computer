@@ -292,6 +292,130 @@ nonisolated enum WorkoutRouteSegmentFilter {
     }
 }
 
+nonisolated struct WorkoutSegmentCandidate: Equatable, Sendable {
+    let completedSegment: WorkoutCompletedSegmentV1
+    let cumulativeElapsedTime: TimeInterval
+    let cumulativeDistanceMeters: Double?
+    let cumulativeDistanceSource: WorkoutMetricSourceV1?
+}
+
+/// Tracks sequential user-marked workout segments using active workout time
+/// and cumulative distance. The Watch persists each committed boundary in the
+/// HealthKit event metadata, allowing this state to be reconstructed after
+/// workout recovery without maintaining a second source of truth.
+nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
+    private(set) var workoutStart: Date?
+    private(set) var nextIndex: UInt32 = 1
+    private(set) var segmentStartedAt: Date?
+    private(set) var elapsedTimeAtStart: TimeInterval = 0
+    private(set) var distanceAtStartMeters: Double?
+    private(set) var distanceSourceAtStart: WorkoutMetricSourceV1?
+    private(set) var lastCompletedSegment: WorkoutCompletedSegmentV1?
+
+    var hasCompletedSegments: Bool {
+        lastCompletedSegment != nil
+    }
+
+    mutating func reset(workoutStart: Date) {
+        guard workoutStart.timeIntervalSinceReferenceDate.isFinite else {
+            self = Self()
+            return
+        }
+        self.workoutStart = workoutStart
+        nextIndex = 1
+        segmentStartedAt = workoutStart
+        elapsedTimeAtStart = 0
+        distanceAtStartMeters = 0
+        distanceSourceAtStart = nil
+        lastCompletedSegment = nil
+    }
+
+    mutating func restore(
+        workoutStart: Date,
+        lastCompletedSegment: WorkoutCompletedSegmentV1?,
+        cumulativeElapsedTime: TimeInterval?,
+        cumulativeDistanceMeters: Double?,
+        cumulativeDistanceSource: WorkoutMetricSourceV1? = nil
+    ) {
+        reset(workoutStart: workoutStart)
+        guard let lastCompletedSegment,
+              lastCompletedSegment.index < UInt32.max,
+              let cumulativeElapsedTime,
+              cumulativeElapsedTime.isFinite,
+              cumulativeElapsedTime >= lastCompletedSegment.duration,
+              cumulativeDistanceMeters.map({
+                  $0.isFinite && $0 >= 0
+              }) ?? true else {
+            return
+        }
+        self.lastCompletedSegment = lastCompletedSegment
+        nextIndex = lastCompletedSegment.index + 1
+        segmentStartedAt = lastCompletedSegment.endedAt
+        elapsedTimeAtStart = cumulativeElapsedTime
+        distanceAtStartMeters = cumulativeDistanceMeters
+        distanceSourceAtStart = cumulativeDistanceSource
+    }
+
+    func candidate(
+        endedAt: Date,
+        cumulativeElapsedTime: TimeInterval,
+        cumulativeDistanceMeters: Double?,
+        cumulativeDistanceSource: WorkoutMetricSourceV1? = nil
+    ) -> WorkoutSegmentCandidate? {
+        guard let workoutStart,
+              let segmentStartedAt,
+              nextIndex < UInt32.max,
+              endedAt.timeIntervalSinceReferenceDate.isFinite,
+              endedAt >= workoutStart,
+              endedAt >= segmentStartedAt,
+              cumulativeElapsedTime.isFinite,
+              cumulativeElapsedTime >= elapsedTimeAtStart,
+              cumulativeDistanceMeters.map({
+                  $0.isFinite && $0 >= 0
+              }) ?? true else {
+            return nil
+        }
+        let duration = cumulativeElapsedTime - elapsedTimeAtStart
+        let distanceMeters: Double?
+        if let cumulativeDistanceMeters,
+           let distanceAtStartMeters,
+           cumulativeDistanceMeters >= distanceAtStartMeters,
+           nextIndex == 1
+            || cumulativeDistanceSource == distanceSourceAtStart {
+            distanceMeters = cumulativeDistanceMeters - distanceAtStartMeters
+        } else {
+            distanceMeters = nil
+        }
+        return WorkoutSegmentCandidate(
+            completedSegment: WorkoutCompletedSegmentV1(
+                index: nextIndex,
+                startedAt: segmentStartedAt,
+                endedAt: endedAt,
+                duration: duration,
+                distanceMeters: distanceMeters
+            ),
+            cumulativeElapsedTime: cumulativeElapsedTime,
+            cumulativeDistanceMeters: cumulativeDistanceMeters,
+            cumulativeDistanceSource: cumulativeDistanceSource
+        )
+    }
+
+    mutating func commit(_ candidate: WorkoutSegmentCandidate) -> Bool {
+        guard candidate.completedSegment.index == nextIndex,
+              candidate.completedSegment.startedAt == segmentStartedAt,
+              nextIndex < UInt32.max else {
+            return false
+        }
+        lastCompletedSegment = candidate.completedSegment
+        nextIndex += 1
+        segmentStartedAt = candidate.completedSegment.endedAt
+        elapsedTimeAtStart = candidate.cumulativeElapsedTime
+        distanceAtStartMeters = candidate.cumulativeDistanceMeters
+        distanceSourceAtStart = candidate.cumulativeDistanceSource
+        return true
+    }
+}
+
 nonisolated enum WorkoutRouteQueuePolicy {
     /// Bounds retained-but-not-yet-written location data if HealthKit stalls.
     /// A route is abandoned on overflow instead of silently saving a partial

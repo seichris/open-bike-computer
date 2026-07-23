@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 3)
+    static let current = Self(major: 1, minor: 4)
 
     let major: UInt16
     let minor: UInt16
@@ -109,6 +109,9 @@ nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
     case finalSummaryUnavailable
     case terminalChoiceConflict
     case terminalChoiceUnconfirmed
+    case segmentMarkFailed
+    case segmentMarkUnconfirmed
+    case segmentFinalizationPending
     case sessionFailed
     case unknown
 
@@ -150,6 +153,14 @@ nonisolated enum WorkoutDiscardDisclosureV1 {
     }
 }
 
+nonisolated struct WorkoutCompletedSegmentV1: Codable, Equatable, Sendable {
+    let index: UInt32
+    let startedAt: Date
+    let endedAt: Date
+    let duration: TimeInterval
+    let distanceMeters: Double?
+}
+
 nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
     let state: WorkoutSessionStateV1
     let startDate: Date?
@@ -165,6 +176,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
     let heartRateZoneCount: UInt8?
     let heartRateZoneDurations: WorkoutZoneDurationsV1?
     let location: WorkoutLocationV1?
+    let lastCompletedSegment: WorkoutCompletedSegmentV1?
     let availability: WorkoutAvailabilityMaskV1
     let errorCode: WorkoutSafeErrorCodeV1?
     let terminalOutcome: WorkoutTerminalOutcomeV1?
@@ -184,6 +196,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         heartRateZoneCount: UInt8? = nil,
         heartRateZoneDurations: WorkoutZoneDurationsV1? = nil,
         location: WorkoutLocationV1? = nil,
+        lastCompletedSegment: WorkoutCompletedSegmentV1? = nil,
         availability: WorkoutAvailabilityMaskV1 = [],
         errorCode: WorkoutSafeErrorCodeV1? = nil,
         terminalOutcome: WorkoutTerminalOutcomeV1? = nil
@@ -202,6 +215,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         self.heartRateZoneCount = heartRateZoneCount
         self.heartRateZoneDurations = heartRateZoneDurations
         self.location = location
+        self.lastCompletedSegment = lastCompletedSegment
         self.availability = availability
         self.errorCode = errorCode
         self.terminalOutcome = terminalOutcome
@@ -211,6 +225,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
 nonisolated enum WorkoutControlV1: String, Codable, Sendable {
     case pause
     case resume
+    case markSegment
     case endAndSave
     case discard
     case requestCurrentSnapshot
@@ -220,6 +235,19 @@ nonisolated struct WorkoutAcknowledgementV1: Codable, Equatable, Sendable {
     let control: WorkoutControlV1
     let resultingState: WorkoutSessionStateV1
     let acknowledgedSequence: UInt64
+    let errorCode: WorkoutSafeErrorCodeV1?
+
+    init(
+        control: WorkoutControlV1,
+        resultingState: WorkoutSessionStateV1,
+        acknowledgedSequence: UInt64,
+        errorCode: WorkoutSafeErrorCodeV1? = nil
+    ) {
+        self.control = control
+        self.resultingState = resultingState
+        self.acknowledgedSequence = acknowledgedSequence
+        self.errorCode = errorCode
+    }
 }
 
 nonisolated struct WorkoutErrorV1: Codable, Equatable, Sendable {
@@ -369,9 +397,16 @@ nonisolated enum WorkoutContractCodec {
             guard envelope.snapshot == nil,
                   envelope.controlSenderID == nil,
                   envelope.control == nil,
-                  envelope.acknowledgement != nil,
+                  let acknowledgement = envelope.acknowledgement,
                   envelope.error == nil else {
                 throw WorkoutContractError.invalidEnvelopePayload
+            }
+            if let errorCode = acknowledgement.errorCode {
+                guard acknowledgement.control == .markSegment,
+                      errorCode == .segmentMarkFailed
+                        || errorCode == .segmentMarkUnconfirmed else {
+                    throw WorkoutContractError.invalidEnvelopePayload
+                }
             }
         case .error:
             guard envelope.snapshot == nil,
@@ -504,6 +539,25 @@ nonisolated enum WorkoutContractCodec {
             }
             if (location.altitude == nil) != (location.verticalAccuracy == nil) {
                 throw WorkoutContractError.invalidLocation
+            }
+        }
+        if let segment = snapshot.lastCompletedSegment {
+            guard segment.index > 0,
+                  segment.index < UInt32.max,
+                  segment.startedAt.timeIntervalSinceReferenceDate.isFinite,
+                  segment.endedAt.timeIntervalSinceReferenceDate.isFinite,
+                  segment.startedAt <= segment.endedAt,
+                  snapshot.startDate.map({ segment.startedAt >= $0 }) ?? false,
+                  segment.endedAt <= envelopeCapturedAt,
+                  segment.duration.isFinite,
+                  segment.duration >= 0,
+                  segment.duration
+                    <= segment.endedAt.timeIntervalSince(segment.startedAt)
+                        + 1,
+                  segment.distanceMeters.map({
+                      $0.isFinite && $0 >= 0
+                  }) ?? true else {
+                throw WorkoutContractError.invalidMetric
             }
         }
 

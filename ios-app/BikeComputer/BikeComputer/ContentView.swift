@@ -25,6 +25,8 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingBikeComputerSetup = false
     @State private var showingWorkoutDashboard = false
+    @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
+    @State private var observedWorkoutSegmentIndex: UInt32?
     @State private var isSearchPanelExpanded = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
@@ -139,6 +141,18 @@ struct ContentView: View {
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
                     .zIndex(20)
                 }
+
+                if let workoutSegmentToast,
+                   !showingWorkoutDashboard {
+                    VStack {
+                        workoutSegmentToastView(workoutSegmentToast)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 8)
+                        Spacer()
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(30)
+                }
             }
             .alert("Navigation Error", isPresented: $coordinator.alert.isShowing) {
                 Button("OK", role: .cancel) { }
@@ -183,6 +197,7 @@ struct ContentView: View {
                     onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
                     onPause: workoutMirrorManager.pause,
                     onResume: workoutMirrorManager.resume,
+                    onMarkSegment: workoutMirrorManager.markSegment,
                     onEndAndSave: workoutMirrorManager.endAndSave,
                     onDiscard: workoutMirrorManager.discard,
                     onDone: workoutMirrorManager.resetTerminalPresentation
@@ -197,6 +212,7 @@ struct ContentView: View {
             updateIdleTimer()
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
+            observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
         }
         .onChange(of: scenePhase) { newValue in
@@ -212,6 +228,26 @@ struct ContentView: View {
         }
         .onChange(of: workoutStore.shouldMaintainWorkoutServices) { _ in
             updateIdleTimer()
+        }
+        .onChange(of: currentWorkoutSegment?.index) { index in
+            guard let index,
+                  index != observedWorkoutSegmentIndex else {
+                observedWorkoutSegmentIndex = index
+                return
+            }
+            observedWorkoutSegmentIndex = index
+            guard scenePhase == .active,
+                  !showingWorkoutDashboard,
+                  workoutStore.presentation.isWorkoutActive,
+                  let segment = currentWorkoutSegment else {
+                workoutSegmentToast = nil
+                return
+            }
+            UINotificationFeedbackGenerator()
+                .notificationOccurred(.success)
+            withAnimation {
+                workoutSegmentToast = segment
+            }
         }
         .onDisappear {
             coordinator.setViewingMap(false)
@@ -257,6 +293,51 @@ struct ContentView: View {
             }
             hasCompletedFirstRunMapOnboarding = true
         }
+        .task(id: workoutSegmentToast?.index) {
+            guard let index = workoutSegmentToast?.index else { return }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard workoutSegmentToast?.index == index else { return }
+            withAnimation {
+                workoutSegmentToast = nil
+            }
+        }
+    }
+
+    private var currentWorkoutSegment: WorkoutCompletedSegmentV1? {
+        (workoutStore.presentation.finalSnapshot
+            ?? workoutStore.presentation.snapshot).lastCompletedSegment
+    }
+
+    private func workoutSegmentToastView(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "flag.checkered")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Segment \(segment.index)")
+                    .font(.subheadline.weight(.semibold))
+                Text(workoutSegmentSummary(segment))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func workoutSegmentSummary(
+        _ segment: WorkoutCompletedSegmentV1
+    ) -> String {
+        let duration = WorkoutValueFormatter.duration(segment.duration)
+        guard let distance = segment.distanceMeters else {
+            return duration
+        }
+        return "\(duration)  •  \(WorkoutValueFormatter.distance(distance)) \(WorkoutValueFormatter.distanceUnit(distance))"
     }
 
     private func updateIdleTimer(for phase: ScenePhase? = nil) {

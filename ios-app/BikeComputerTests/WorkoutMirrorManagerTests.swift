@@ -1939,6 +1939,370 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertNil(manager.store.presentation.pendingControl)
     }
 
+    func testProductionSegmentControlReportsWatchWriteFailureWithoutEndingRide()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_350)
+        let manager = WorkoutMirrorManager(now: { now })
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 45, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+
+        manager.markSegment()
+
+        XCTAssertEqual(transport.sentData.count, 1)
+        let control = try WorkoutContractCodec.decode(transport.sentData[0])
+        XCTAssertEqual(control.control, .markSegment)
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .markSegment
+        )
+
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        let acknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: snapshot.sessionID,
+            sessionToken: snapshot.sessionToken,
+            transportGenerationID: snapshot.transportGenerationID,
+            sequence: 46,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: control.sequence,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        manager.applyRemoteEnvelopes(
+            [acknowledgement],
+            receivedAt: now.addingTimeInterval(1),
+            from: transport
+        )
+
+        XCTAssertNil(manager.store.presentation.pendingControl)
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .segmentMarkFailed
+        )
+        XCTAssertEqual(
+            manager.store.presentation.sessionState,
+            .running
+        )
+    }
+
+    func testProductionSegmentControlRequiresWatchSchema14() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_375)
+        let manager = WorkoutMirrorManager(now: { now })
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let current = makeSnapshotEnvelope(sequence: 47, capturedAt: now)
+        let oldWatchSnapshot = WorkoutEnvelopeV1(
+            schemaVersion: WorkoutSchemaVersion(major: 1, minor: 3),
+            kind: .snapshot,
+            sessionID: current.sessionID,
+            sessionToken: current.sessionToken,
+            transportGenerationID: current.transportGenerationID,
+            sequence: current.sequence,
+            capturedAt: current.capturedAt,
+            snapshot: current.snapshot
+        )
+        manager.applyRemoteEnvelopes(
+            [oldWatchSnapshot],
+            receivedAt: now,
+            from: transport
+        )
+
+        XCTAssertFalse(manager.store.supportsSegmentMarking)
+        manager.markSegment()
+        XCTAssertTrue(transport.sentData.isEmpty)
+        XCTAssertNil(manager.store.presentation.pendingControl)
+    }
+
+    func testProductionSegmentTimeoutAcceptsCorrelatedLateSuccess()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_380)
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            controlConfirmationTimeout: 0.02
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 48, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+        manager.markSegment()
+        let control = try WorkoutContractCodec.decode(
+            XCTUnwrap(transport.sentData.first)
+        )
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(manager.store.presentation.pendingControl)
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .segmentMarkUnconfirmed
+        )
+        XCTAssertEqual(transport.sentData.count, 2)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[1]),
+            control
+        )
+
+        // Completing both the invalidated original callback and the replay
+        // callback without an acknowledgement must not create a send loop.
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        XCTAssertEqual(transport.sentData.count, 2)
+
+        manager.markSegment()
+        XCTAssertEqual(transport.sentData.count, 2)
+
+        let acknowledgement = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: snapshot.sessionID,
+            sessionToken: snapshot.sessionToken,
+            transportGenerationID: snapshot.transportGenerationID,
+            sequence: 49,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: control.sequence
+            )
+        )
+        manager.applyRemoteEnvelopes(
+            [acknowledgement],
+            receivedAt: now.addingTimeInterval(1),
+            from: transport
+        )
+        XCTAssertNil(manager.store.presentation.errorCode)
+    }
+
+    func testProductionSegmentReplayRecoversLostFailureAcknowledgement()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_382)
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            controlConfirmationTimeout: 0.02
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 48, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+        manager.markSegment()
+        let control = try WorkoutContractCodec.decode(
+            XCTUnwrap(transport.sentData.first)
+        )
+
+        try await waitUntil { transport.sentData.count == 2 }
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[1]),
+            control
+        )
+        let replayFailure = WorkoutEnvelopeV1(
+            kind: .acknowledgement,
+            sessionID: snapshot.sessionID,
+            sessionToken: snapshot.sessionToken,
+            transportGenerationID: snapshot.transportGenerationID,
+            sequence: 49,
+            capturedAt: now.addingTimeInterval(1),
+            acknowledgement: WorkoutAcknowledgementV1(
+                control: .markSegment,
+                resultingState: .running,
+                acknowledgedSequence: control.sequence,
+                errorCode: .segmentMarkFailed
+            )
+        )
+        manager.applyRemoteEnvelopes(
+            [replayFailure],
+            receivedAt: now.addingTimeInterval(1),
+            from: transport
+        )
+
+        XCTAssertFalse(manager.store.isSegmentConfirmationPending)
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .segmentMarkFailed
+        )
+        manager.markSegment()
+        XCTAssertEqual(transport.sentData.count, 3)
+    }
+
+    func testProductionFinishSupersedesUnconfirmedSegmentReplay()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_383)
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            controlConfirmationTimeout: 0.02
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        manager.applyRemoteEnvelopes(
+            [makeSnapshotEnvelope(sequence: 48, capturedAt: now)],
+            receivedAt: now,
+            from: transport
+        )
+        manager.markSegment()
+        try await waitUntil { transport.sentData.count == 2 }
+
+        manager.endAndSave()
+
+        XCTAssertEqual(transport.sentData.count, 3)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[2]).control,
+            .endAndSave
+        )
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .endAndSave
+        )
+
+        // Stale callbacks for the abandoned original and replay must not send
+        // another mark after the terminal choice.
+        transport.completeNext(succeeded: true)
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        XCTAssertEqual(transport.sentData.count, 3)
+
+        manager.applyRemoteDisconnect(error: nil, from: transport)
+        let replacement = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(replacement)
+        XCTAssertEqual(replacement.sentData.count, 1)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(replacement.sentData[0]).control,
+            .endAndSave
+        )
+    }
+
+    func testProductionSegmentPreemptsSnapshotAndStartsSubmittedTimeout()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_385)
+        let waiter = ControlledWorkoutTimeoutWaiter()
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            controlConfirmationWait: { timeout in
+                try await waiter.wait(timeout)
+            }
+        )
+        let original = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(original)
+        let snapshot = makeSnapshotEnvelope(sequence: 49, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: original
+        )
+
+        let replacement = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(replacement)
+        XCTAssertEqual(replacement.sentData.count, 1)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(replacement.sentData[0]).control,
+            .requestCurrentSnapshot
+        )
+
+        manager.markSegment()
+        try await waitUntil {
+            replacement.sentData.count == 2
+                && waiter.waitCallCount == 1
+        }
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(replacement.sentData[1]).control,
+            .markSegment
+        )
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .markSegment
+        )
+    }
+
+    func testProductionFinishCanSupersedePendingSegmentControl() async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_390)
+        let manager = WorkoutMirrorManager(now: { now })
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 50, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+        manager.markSegment()
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .markSegment
+        )
+
+        manager.endAndSave()
+
+        XCTAssertEqual(transport.sentData.count, 2)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[1]).control,
+            .endAndSave
+        )
+        XCTAssertEqual(
+            manager.store.presentation.pendingControl,
+            .endAndSave
+        )
+
+        // Neither the invalidated mark callback nor the terminal callback may
+        // resurrect the superseded segment after the terminal choice.
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        transport.completeNext(succeeded: true)
+        await Task.yield()
+        XCTAssertEqual(transport.sentData.count, 2)
+    }
+
+    func testProductionPauseReplaysSegmentAfterOutstandingSendCallback()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_395)
+        let manager = WorkoutMirrorManager(now: { now })
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(sequence: 50, capturedAt: now)
+        manager.applyRemoteEnvelopes(
+            [snapshot],
+            receivedAt: now,
+            from: transport
+        )
+        manager.markSegment()
+        let originalControl = try WorkoutContractCodec.decode(
+            XCTUnwrap(transport.sentData.first)
+        )
+
+        manager.pause()
+
+        XCTAssertEqual(transport.pauseCallCount, 1)
+        XCTAssertEqual(transport.sentData.count, 1)
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[0]).control,
+            .markSegment
+        )
+        XCTAssertEqual(manager.store.presentation.pendingControl, .pause)
+        XCTAssertTrue(manager.store.isSegmentConfirmationPending)
+
+        transport.completeNext(succeeded: true)
+        try await waitUntil { transport.sentData.count == 2 }
+        XCTAssertEqual(
+            try WorkoutContractCodec.decode(transport.sentData[1]),
+            originalControl
+        )
+    }
+
     func testProductionReconnectResendsControlBeforeSnapshotRequest() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_400)
         let manager = WorkoutMirrorManager(now: { now })

@@ -54,6 +54,22 @@ final class WorkoutMetricsStore: ObservableObject {
         reducer.pendingControlSequence
     }
 
+    var supportsSegmentMarking: Bool {
+        guard let version = reducer.latestEnvelope?.schemaVersion else {
+            return false
+        }
+        return version.major == WorkoutSchemaVersion.current.major
+            && version.minor >= 4
+    }
+
+    var isSegmentConfirmationPending: Bool {
+        reducer.isSegmentConfirmationPending
+    }
+
+    var currentUnconfirmedSegmentControlSequence: UInt64? {
+        reducer.currentUnconfirmedSegmentControlSequence
+    }
+
     var canResetTerminalPresentation: Bool {
         reducer.canResetTerminalPresentation
     }

@@ -363,27 +363,57 @@ struct RideMetricsPanel: View {
             TimelineView(.periodic(from: Date(), by: 1)) { context in
                 workoutStatus(
                     delayedWorkoutStatus(at: context.date),
-                    color: .orange
+                    color: .orange,
+                    detail: workoutRecoveryDetail
                 )
             }
         } else if presentation.connectionState == .disconnected {
             TimelineView(.periodic(from: Date(), by: 1)) { context in
                 workoutStatus(
                     disconnectedWorkoutStatus(at: context.date),
-                    color: .red
+                    color: .red,
+                    detail: workoutRecoveryDetail
                 )
             }
-        } else if presentation.errorCode != nil {
-            workoutStatus("Workout needs attention", color: .orange)
+        } else if let errorCode = presentation.errorCode {
+            workoutStatus(
+                WorkoutErrorCopyV1.title(errorCode),
+                color: .orange,
+                detail: WorkoutErrorCopyV1.detail(
+                    errorCode,
+                    context: WorkoutErrorCopyV1.context(for: presentation)
+                )
+            )
         }
     }
 
-    private func workoutStatus(_ title: String, color: Color) -> some View {
+    private var workoutRecoveryDetail: String? {
+        let presentation = workoutStore.presentation
+        guard let errorCode = presentation.errorCode else { return nil }
+        return WorkoutErrorCopyV1.detail(
+            errorCode,
+            context: WorkoutErrorCopyV1.context(for: presentation)
+        )
+    }
+
+    private func workoutStatus(
+        _ title: String,
+        color: Color,
+        detail: String? = nil
+    ) -> some View {
         HStack(spacing: 7) {
             Image(systemName: "applewatch.radiowaves.left.and.right")
-            Text(title)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                if let detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                }
+            }
             Spacer(minLength: 0)
         }
         .font(.caption.weight(.semibold))
@@ -483,7 +513,8 @@ struct RideMetricsPanel: View {
     private var canControlWorkout: Bool {
         let presentation = workoutStore.presentation
         return presentation.sessionID != nil
-            && presentation.pendingControl == nil
+            && (presentation.pendingControl == nil
+                || presentation.pendingControl == .markSegment)
             && presentation.connectionState != .disconnected
     }
 

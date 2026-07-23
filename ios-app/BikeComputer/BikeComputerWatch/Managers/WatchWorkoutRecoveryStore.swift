@@ -179,6 +179,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var sequenceHighWatermark: UInt64
         var remoteControlCheckpoint:
             WorkoutRemoteControlSequenceGate.Checkpoint? = nil
+        /// A remotely requested segment boundary is journaled with the replay
+        /// checkpoint before its HealthKit event write begins. This closes the
+        /// crash window where the checkpoint was durable but the event was not.
+        var remoteSegmentIntent: RemoteSegmentIntent? = nil
         var remoteTerminalAcknowledgement:
             RemoteTerminalAcknowledgement? = nil
         var finishRequest: FinishRequest?
@@ -190,6 +194,44 @@ nonisolated final class WatchWorkoutRecoveryStore {
         /// metadata-less recovered builder. It may later bind once to the
         /// builder's genuine validated UUID, but can never become saveable.
         var corruptResetSyntheticCleanupIdentity: Bool?
+    }
+
+    struct RemoteSegmentIntent: Codable, Equatable {
+        let controlSenderID: UUID?
+        let acknowledgedSequence: UInt64
+        let capturedAt: Date
+        let completedSegment: WorkoutCompletedSegmentV1
+        let cumulativeElapsedTime: TimeInterval
+        let cumulativeDistanceMeters: Double?
+        let cumulativeDistanceSource: WorkoutMetricSourceV1?
+
+        var isValid: Bool {
+            acknowledgedSequence > 0
+                && capturedAt.timeIntervalSinceReferenceDate.isFinite
+                && completedSegment.index > 0
+                && completedSegment.startedAt
+                    .timeIntervalSinceReferenceDate.isFinite
+                && completedSegment.endedAt
+                    .timeIntervalSinceReferenceDate.isFinite
+                && completedSegment.endedAt >= completedSegment.startedAt
+                && completedSegment.duration.isFinite
+                && completedSegment.duration >= 0
+                && completedSegment.distanceMeters.map {
+                    $0.isFinite && $0 >= 0
+                } ?? true
+                && cumulativeElapsedTime.isFinite
+                && cumulativeElapsedTime >= completedSegment.duration
+                && cumulativeDistanceMeters.map {
+                    $0.isFinite && $0 >= 0
+                } ?? true
+        }
+
+        func matches(_ envelope: WorkoutEnvelopeV1) -> Bool {
+            envelope.control == .markSegment
+                && envelope.controlSenderID == controlSenderID
+                && envelope.sequence == acknowledgedSequence
+                && envelope.capturedAt == capturedAt
+        }
     }
 
     struct RemoteTerminalAcknowledgement: Codable, Equatable {
@@ -208,7 +250,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
                 .save
             case .discard:
                 .discard
-            case .requestCurrentSnapshot, .pause, .resume:
+            case .requestCurrentSnapshot, .pause, .resume, .markSegment:
                 nil
             }
         }
@@ -607,6 +649,44 @@ nonisolated final class WatchWorkoutRecoveryStore {
         try persist(identity)
         self.identity = identity
         return effectiveDisposition
+    }
+
+    func persistRemoteSegmentControl(
+        checkpoint: WorkoutRemoteControlSequenceGate.Checkpoint,
+        intent: RemoteSegmentIntent
+    ) throws {
+        guard checkpoint.isValid,
+              intent.isValid,
+              intent.controlSenderID.map({ senderID in
+                  checkpoint.seenSenderIDs.contains(senderID)
+                      && (checkpoint.currentSenderID != senderID
+                          || checkpoint.highestSequence
+                              >= intent.acknowledgedSequence)
+              }) ?? (
+                  checkpoint.legacyHighestSequence
+                      >= intent.acknowledgedSequence
+              ),
+              var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.remoteControlCheckpoint = checkpoint
+        identity.remoteSegmentIntent = intent
+        try persist(identity)
+        self.identity = identity
+    }
+
+    func clearRemoteSegmentIntent(
+        matching envelope: WorkoutEnvelopeV1
+    ) throws {
+        guard var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        guard identity.remoteSegmentIntent?.matches(envelope) == true else {
+            return
+        }
+        identity.remoteSegmentIntent = nil
+        try persist(identity)
+        self.identity = identity
     }
 
     @discardableResult
@@ -1093,9 +1173,28 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.transportGenerationID != zeroUUID,
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
               identity.remoteControlCheckpoint?.isValid ?? true,
+              identity.remoteSegmentIntent?.isValid ?? true,
               identity.finishRequest?.requestedAt.timeIntervalSinceReferenceDate.isFinite
                 ?? true else {
             return nil
+        }
+        if let intent = identity.remoteSegmentIntent {
+            guard let checkpoint = identity.remoteControlCheckpoint else {
+                return nil
+            }
+            if let senderID = intent.controlSenderID {
+                guard checkpoint.seenSenderIDs.contains(senderID),
+                      checkpoint.currentSenderID != senderID
+                        || checkpoint.highestSequence
+                            >= intent.acknowledgedSequence else {
+                    return nil
+                }
+            } else {
+                guard checkpoint.legacyHighestSequence
+                        >= intent.acknowledgedSequence else {
+                    return nil
+                }
+            }
         }
         if let acknowledgement = identity.remoteTerminalAcknowledgement {
             guard let checkpoint = identity.remoteControlCheckpoint,
