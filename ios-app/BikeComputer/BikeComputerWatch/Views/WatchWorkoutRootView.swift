@@ -23,7 +23,9 @@ struct WatchWorkoutRootView: View {
             } else if manager.state.isActive {
                 LiveWorkoutView(manager: manager)
             } else {
-                WorkoutStartView(manager: manager)
+                NavigationStack {
+                    WorkoutStartView(manager: manager)
+                }
             }
         }
     }

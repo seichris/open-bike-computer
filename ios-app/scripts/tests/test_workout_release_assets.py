@@ -108,12 +108,6 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         ios_settings = (
             IOS_PROJECT / "BikeComputer" / "Views" / "SettingsView.swift"
         ).read_text()
-        watch_start = (
-            IOS_PROJECT
-            / "BikeComputerWatch"
-            / "Views"
-            / "WorkoutStartView.swift"
-        ).read_text()
         public_policy = (REPO_ROOT / "PRIVACY_POLICY.md").read_text()
         normalized_policy = " ".join(public_policy.split())
         disclosures = (
@@ -122,13 +116,41 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
 
         self.assertIn(PRIVACY_POLICY_URL, shared_policy)
         self.assertIn("AppPrivacyPolicy.url", ios_settings)
-        self.assertIn("AppPrivacyPolicy.url", watch_start)
         self.assertIn("same or equivalent privacy protection", normalized_policy)
         self.assertIn("30 days after a map job becomes ready", normalized_policy)
         self.assertIn("renaming or downloading a map does not extend", normalized_policy)
         self.assertIn("scheduled maintenance process", normalized_policy)
         self.assertIn("until you request its deletion", normalized_policy)
         self.assertIn(PRIVACY_POLICY_URL, disclosures)
+
+    def test_watch_settings_exposes_the_installed_app_version(self):
+        watch_root = (
+            IOS_PROJECT
+            / "BikeComputerWatch"
+            / "Views"
+            / "WatchWorkoutRootView.swift"
+        ).read_text()
+        watch_start = (
+            IOS_PROJECT
+            / "BikeComputerWatch"
+            / "Views"
+            / "WorkoutStartView.swift"
+        ).read_text()
+        watch_settings = (
+            IOS_PROJECT
+            / "BikeComputerWatch"
+            / "Views"
+            / "WatchSettingsView.swift"
+        ).read_text()
+
+        self.assertIn("NavigationStack", watch_root)
+        self.assertIn("WatchSettingsView()", watch_start)
+        self.assertIn('Image(systemName: "gearshape")', watch_start)
+        self.assertIn('accessibilityLabel("Settings")', watch_start)
+        self.assertNotIn("AppPrivacyPolicy.url", watch_start)
+        self.assertIn('LabeledContent("Version"', watch_settings)
+        self.assertIn('"CFBundleShortVersionString"', watch_settings)
+        self.assertIn('"CFBundleVersion"', watch_settings)
 
     def test_permission_copy_and_entitlements_match_workout_ownership(self):
         ios_info = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
