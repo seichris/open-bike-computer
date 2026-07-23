@@ -5,6 +5,7 @@
 //  Main iOS App Entry Point
 //
 
+import AppIntents
 import SwiftUI
 
 @main
@@ -29,6 +30,9 @@ struct BikeComputerApp: App {
 class AppDelegate: NSObject, UIApplicationDelegate {
     let workoutMirrorManager = WorkoutMirrorManager()
     let locationManager = CurrentLocationManager()
+    private var workoutLiveActivityController: AnyObject?
+    private var workoutLiveActivityCommandRouter: AnyObject?
+    private var workoutLiveActivityIntentDispatcher: AnyObject?
     lazy var coordinator = BikeComputerCoordinator(
         destinationStore: SavedDestinationStore(),
         workoutMetricsStore: workoutMirrorManager.store,
@@ -49,16 +53,52 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         print("BikeComputer app launched")
         _ = coordinator
         workoutMirrorManager.installMirroringHandler()
+        if #available(iOS 17.0, *) {
+            let commandRouter = WorkoutLiveActivityCommandRouter(
+                manager: workoutMirrorManager
+            )
+            let dispatcher = WorkoutLiveActivityIntentDispatcher {
+                [weak commandRouter] action, sessionID in
+                guard let commandRouter else { return false }
+                return await commandRouter.perform(
+                    action,
+                    sessionID: sessionID
+                )
+            }
+            AppDependencyManager.shared.add(dependency: dispatcher)
+
+            let controller = WorkoutLiveActivityController(
+                store: workoutMirrorManager.store
+            )
+            controller.start(
+                isApplicationForeground: application.applicationState == .active
+            )
+            workoutLiveActivityCommandRouter = commandRouter
+            workoutLiveActivityIntentDispatcher = dispatcher
+            workoutLiveActivityController = controller
+        }
         
         return true
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         coordinator.applicationDidBecomeActive()
+        if #available(iOS 17.0, *),
+           let controller =
+               workoutLiveActivityController
+                as? WorkoutLiveActivityController {
+            controller.setApplicationForeground(true)
+        }
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
         coordinator.setViewingMap(false)
+        if #available(iOS 17.0, *),
+           let controller =
+               workoutLiveActivityController
+                as? WorkoutLiveActivityController {
+            controller.setApplicationForeground(false)
+        }
         print("App entered background - navigation continues")
     }
     

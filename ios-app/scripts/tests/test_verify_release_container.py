@@ -16,14 +16,17 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
         app = root / "BikeComputer.app"
         watch = app / "Watch" / "BikeComputerWatch.app"
         complication = watch / "PlugIns" / "BikeComputerWatchComplications.appex"
+        live_activity = app / "PlugIns" / "BikeComputerLiveActivity.appex"
         watch.mkdir(parents=True)
         complication.mkdir(parents=True)
+        live_activity.mkdir(parents=True)
 
         for path in [
             app / "BikeComputer",
             watch / "BikeComputerWatch",
             watch / "Assets.car",
             complication / "BikeComputerWatchComplications",
+            live_activity / "BikeComputerLiveActivity",
         ]:
             path.write_bytes(b"fixture")
 
@@ -36,7 +39,13 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             watch / "PrivacyInfo.xcprivacy",
         )
         with (app / "Info.plist").open("wb") as handle:
-            plistlib.dump({"CFBundleIdentifier": "LetItRide.BikeComputer"}, handle)
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": "LetItRide.BikeComputer",
+                    "NSSupportsLiveActivities": True,
+                },
+                handle,
+            )
         with (watch / "Info.plist").open("wb") as handle:
             plistlib.dump(
                 {
@@ -60,6 +69,20 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                     ),
                     "NSExtension": {
                         "NSExtensionPointIdentifier": "com.apple.widgetkit-extension"
+                    },
+                },
+                handle,
+            )
+        with (live_activity / "Info.plist").open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": (
+                        "LetItRide.BikeComputer.WorkoutLiveActivity"
+                    ),
+                    "NSExtension": {
+                        "NSExtensionPointIdentifier": (
+                            "com.apple.widgetkit-extension"
+                        )
                     },
                 },
                 handle,
@@ -117,6 +140,16 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             del payload["CFBundleURLTypes"]
             with watch_info.open("wb") as handle:
                 plistlib.dump(payload, handle)
+
+            result = self.run_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_rejects_container_without_live_activity_extension(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_fixture(Path(temporary))
+            shutil.rmtree(
+                app / "PlugIns" / "BikeComputerLiveActivity.appex"
+            )
 
             result = self.run_verifier(app)
             self.assertNotEqual(result.returncode, 0)

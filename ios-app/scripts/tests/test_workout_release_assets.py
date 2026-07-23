@@ -178,6 +178,32 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
 
+    def test_live_activity_is_enabled_without_push_or_frequent_updates(self):
+        ios_info = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
+        extension_info = load_plist(
+            IOS_PROJECT / "BikeComputerLiveActivity" / "Info.plist"
+        )
+        project = (
+            IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
+        ).read_text()
+
+        self.assertTrue(ios_info["NSSupportsLiveActivities"])
+        self.assertNotIn("NSSupportsLiveActivitiesFrequentUpdates", ios_info)
+        self.assertEqual(
+            extension_info["NSExtension"]["NSExtensionPointIdentifier"],
+            "com.apple.widgetkit-extension",
+        )
+        self.assertIn(
+            "PRODUCT_BUNDLE_IDENTIFIER = "
+            "LetItRide.BikeComputer.WorkoutLiveActivity;",
+            project,
+        )
+        self.assertEqual(
+            project.count("IPHONEOS_DEPLOYMENT_TARGET = 17.0;"),
+            2,
+            "the Live Activity extension must be iOS 17 in Debug and Release",
+        )
+
     def test_privacy_manifests_distinguish_backend_collection_from_healthkit(self):
         ios_privacy = load_plist(
             IOS_PROJECT / "BikeComputer" / "PrivacyInfo.xcprivacy"
