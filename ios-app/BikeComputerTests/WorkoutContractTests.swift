@@ -5661,6 +5661,27 @@ private struct WorkoutContractTestSuite {
                 && !compactNavigation.contains("onToggleExpansion"),
             "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
         )
+        expect(
+            compactNavigation.contains(
+                "count:isExpanded?2:3"
+            )
+                && compactNavigation.contains(
+                    "expandedWorkoutMetrics"
+                )
+                && compactNavigation.contains(
+                    "expandedNavigationMetrics"
+                )
+                && compactNavigation.contains(
+                    "size:isExpanded?42:25"
+                )
+                && compactNavigation.contains(
+                    "size:isExpanded?24:16"
+                )
+                && compactNavigation.contains(
+                    "Text(unit).font(unitFont).foregroundColor(.secondary)"
+                ),
+            "expanded ride stats must use a larger two-column grid while measurement units remain smaller and secondary"
+        )
 
         for binding in [
             "WorkoutValueFormatter.whole(suppressInstantaneous?nil:snapshot.cyclingCadence?.value)",

@@ -300,14 +300,14 @@ struct RideMetricsPanel: View {
                 VStack(alignment: .leading, spacing: 14) {
                     sheetSectionTitle("Workout", systemImage: "figure.outdoor.cycle")
                     workoutStatusBanner
-                    workoutMetrics
+                    expandedWorkoutMetrics
                 }
             }
 
             if isNavigating {
                 VStack(alignment: .leading, spacing: 14) {
                     sheetSectionTitle("Navigation", systemImage: "location.fill")
-                    navigationMetrics
+                    expandedNavigationMetrics
                 }
             }
         }
@@ -319,7 +319,7 @@ struct RideMetricsPanel: View {
         systemImage: String
     ) -> some View {
         Label(title, systemImage: systemImage)
-            .font(.headline)
+            .font(.title3.weight(.semibold))
             .foregroundColor(.secondary)
             .accessibilityAddTraits(.isHeader)
     }
@@ -345,97 +345,131 @@ struct RideMetricsPanel: View {
         .padding(.horizontal, 12)
     }
 
+    private var expandedNavigationMetrics: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 24),
+                GridItem(.flexible(), spacing: 24),
+            ],
+            spacing: 26
+        ) {
+            NavigationMetricColumn(
+                value: formattedArrival,
+                label: "arrival",
+                isExpanded: true
+            )
+            NavigationMetricColumn(
+                value: formattedTime,
+                label: timeUnit,
+                isExpanded: true
+            )
+            NavigationMetricColumn(
+                value: formattedDistance,
+                label: distanceUnit,
+                isExpanded: true
+            )
+        }
+        .padding(.horizontal, 8)
+    }
+
     private var workoutMetrics: some View {
+        workoutMetricGrid(isExpanded: false)
+    }
+
+    private var expandedWorkoutMetrics: some View {
+        workoutMetricGrid(isExpanded: true)
+    }
+
+    private func workoutMetricGrid(isExpanded: Bool) -> some View {
         let snapshot = workoutStore.presentation.snapshot
         let suppressInstantaneous = suppressInstantaneousMetrics
-        return VStack(spacing: 12) {
-            HStack(alignment: .center, spacing: 0) {
-                RideMetricColumn(
-                    value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
-                    label: "elapsed"
-                )
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.whole(
-                            suppressInstantaneous
-                                ? nil
-                                : snapshot.cyclingCadence?.value
-                        ),
-                        unit: "rpm"
-                    ),
-                    label: "cadence"
-                )
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.whole(
-                            suppressInstantaneous
-                                ? nil
-                                : snapshot.cyclingPower?.value
-                        ),
-                        unit: "W"
-                    ),
-                    label: "power"
-                )
-            }
+        let metrics = [
+            RideMetric(
+                value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
+                label: "elapsed"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.whole(
+                    suppressInstantaneous
+                        ? nil
+                        : snapshot.cyclingCadence?.value
+                ),
+                unit: "rpm",
+                label: "cadence"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.whole(
+                    suppressInstantaneous
+                        ? nil
+                        : snapshot.cyclingPower?.value
+                ),
+                unit: "W",
+                label: "power"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.speed(
+                    suppressInstantaneous
+                        ? nil
+                        : snapshot.currentSpeed?.value
+                ),
+                unit: "km/h",
+                label: "speed"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),
+                unit: WorkoutValueFormatter.distanceUnit(
+                    snapshot.cyclingDistance?.value
+                ).lowercased(),
+                label: "distance"
+            ),
+            RideMetric(
+                value: altitudeValue(
+                    suppressInstantaneous
+                        ? nil
+                        : snapshot.location?.altitude
+                ),
+                unit: "m",
+                label: "altitude"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.heartRate(
+                    suppressInstantaneous
+                        ? nil
+                        : snapshot.currentHeartRate?.value
+                ),
+                unit: "bpm",
+                label: "heart rate"
+            ),
+            RideMetric(
+                value: suppressInstantaneous
+                    ? "--"
+                    : heartRateZone(snapshot),
+                label: "heart zone"
+            ),
+            RideMetric(
+                value: WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),
+                unit: "kcal",
+                label: "energy"
+            ),
+        ]
+        let columns = Array(
+            repeating: GridItem(
+                .flexible(),
+                spacing: isExpanded ? 24 : 0
+            ),
+            count: isExpanded ? 2 : 3
+        )
 
-            HStack(alignment: .center, spacing: 0) {
+        return LazyVGrid(
+            columns: columns,
+            spacing: isExpanded ? 26 : 12
+        ) {
+            ForEach(metrics) { metric in
                 RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.speed(
-                            suppressInstantaneous
-                                ? nil
-                                : snapshot.currentSpeed?.value
-                        ),
-                        unit: "km/h"
-                    ),
-                    label: "speed"
-                )
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),
-                        unit: WorkoutValueFormatter.distanceUnit(
-                            snapshot.cyclingDistance?.value
-                        ).lowercased()
-                    ),
-                    label: "distance"
-                )
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        altitudeValue(
-                            suppressInstantaneous
-                                ? nil
-                                : snapshot.location?.altitude
-                        ),
-                        unit: "m"
-                    ),
-                    label: "altitude"
-                )
-            }
-
-            HStack(alignment: .center, spacing: 0) {
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.heartRate(
-                            suppressInstantaneous
-                                ? nil
-                                : snapshot.currentHeartRate?.value
-                        ),
-                        unit: "bpm"
-                    ),
-                    label: "heart rate"
-                )
-                RideMetricColumn(
-                    value: suppressInstantaneous
-                        ? "--"
-                        : heartRateZone(snapshot),
-                    label: "heart zone"
-                )
-                RideMetricColumn(
-                    value: valueWithUnit(
-                        WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),
-                        unit: "kcal"
-                    ),
-                    label: "energy"
+                    value: metric.value,
+                    unit: metric.unit,
+                    label: metric.label,
+                    isExpanded: isExpanded
                 )
             }
         }
@@ -675,10 +709,6 @@ struct RideMetricsPanel: View {
         guard let altitude, altitude.isFinite else { return "--" }
         return String(format: "%.0f", altitude)
     }
-
-    private func valueWithUnit(_ value: String, unit: String) -> String {
-        value == "--" ? value : "\(value) \(unit)"
-    }
 }
 
 private struct RideControlLabel: View {
@@ -699,21 +729,45 @@ private struct RideControlLabel: View {
     }
 }
 
-private struct RideMetricColumn: View {
+private struct RideMetric: Identifiable {
     let value: String
+    let unit: String?
     let label: String
 
+    init(value: String, unit: String? = nil, label: String) {
+        self.value = value
+        self.unit = unit
+        self.label = label
+    }
+
+    var id: String { label }
+}
+
+private struct RideMetricColumn: View {
+    let value: String
+    let unit: String?
+    let label: String
+    let isExpanded: Bool
+
     var body: some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.system(size: 25, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
-                .monospacedDigit()
+        VStack(spacing: isExpanded ? 4 : 2) {
+            HStack(alignment: .firstTextBaseline, spacing: isExpanded ? 6 : 4) {
+                Text(value)
+                    .font(valueFont)
+                    .foregroundColor(.primary)
+                    .monospacedDigit()
+
+                if let unit, value != "--" {
+                    Text(unit)
+                        .font(unitFont)
+                        .foregroundColor(.secondary)
+                }
+            }
                 .lineLimit(1)
                 .minimumScaleFactor(0.55)
 
             Text(label)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(labelFont)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -721,22 +775,59 @@ private struct RideMetricColumn: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
     }
+
+    private var valueFont: Font {
+        .system(
+            size: isExpanded ? 42 : 25,
+            weight: .bold,
+            design: .rounded
+        )
+    }
+
+    private var unitFont: Font {
+        .system(
+            size: isExpanded ? 24 : 16,
+            weight: .semibold,
+            design: .rounded
+        )
+    }
+
+    private var labelFont: Font {
+        .system(
+            size: isExpanded ? 20 : 15,
+            weight: .semibold,
+            design: .rounded
+        )
+    }
 }
 
 private struct NavigationMetricColumn: View {
     let value: String
     let label: String
+    var isExpanded = false
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: isExpanded ? 4 : 2) {
             Text(value)
-                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .font(
+                    .system(
+                        size: isExpanded ? 42 : 34,
+                        weight: .bold,
+                        design: .rounded
+                    )
+                )
                 .foregroundColor(.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
             Text(label)
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .font(
+                    .system(
+                        size: isExpanded ? 20 : 18,
+                        weight: .semibold,
+                        design: .rounded
+                    )
+                )
                 .foregroundColor(.secondary)
                 .lineLimit(1)
         }
