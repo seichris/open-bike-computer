@@ -21,7 +21,7 @@ private enum ContentSheetDestination: String, Identifiable {
 private struct RideMetricsCompactDetent: CustomPresentationDetent {
     static func height(in context: Context) -> CGFloat? {
         let preferredHeight: CGFloat =
-            context.dynamicTypeSize.isAccessibilitySize ? 320 : 236
+            context.dynamicTypeSize.isAccessibilitySize ? 440 : 360
         return min(preferredHeight, context.maxDetentValue * 0.72)
     }
 }
@@ -219,6 +219,9 @@ struct ContentView: View {
         .onChange(of: workoutStore.shouldMaintainWorkoutServices) { _ in
             updateIdleTimer()
         }
+        .onChange(of: workoutStore.presentation.isWorkoutActive) { _ in
+            synchronizeRideMetricsSheet()
+        }
         .onChange(of: currentWorkoutSegment?.index) { index in
             guard let index,
                   index != observedWorkoutSegmentIndex else {
@@ -355,8 +358,7 @@ struct ContentView: View {
         case .rideMetrics:
             rideMetricsPanel(
                 isCompactHeight: false,
-                isSheetExpanded: rideMetricsDetent == .large,
-                onToggleExpansion: toggleRideMetricsDetent
+                isSheetExpanded: rideMetricsDetent == .large
             )
             .presentationDetents(
                 [.rideMetricsCompact, .large],
@@ -374,7 +376,7 @@ struct ContentView: View {
     }
 
     private func synchronizeRideMetricsSheet() {
-        if coordinator.isNavigating {
+        if workoutStore.presentation.isWorkoutActive {
             guard presentedSheet == nil else { return }
             rideMetricsDetent = .rideMetricsCompact
             presentedSheet = .rideMetrics
@@ -384,21 +386,15 @@ struct ContentView: View {
     }
 
     private func restoreRideMetricsSheetIfNeeded() {
-        guard coordinator.isNavigating else { return }
+        guard workoutStore.presentation.isWorkoutActive else { return }
         Task { @MainActor in
             await Task.yield()
-            guard presentedSheet == nil, coordinator.isNavigating else {
+            guard presentedSheet == nil,
+                  workoutStore.presentation.isWorkoutActive else {
                 return
             }
             rideMetricsDetent = .rideMetricsCompact
             presentedSheet = .rideMetrics
-        }
-    }
-
-    private func toggleRideMetricsDetent() {
-        withAnimation {
-            rideMetricsDetent =
-                rideMetricsDetent == .large ? .rideMetricsCompact : .large
         }
     }
 
@@ -567,9 +563,8 @@ struct ContentView: View {
                     .padding(.horizontal, 18)
             }
 
-            if !coordinator.isNavigating,
-               workoutStore.presentation.isWorkoutActive,
-               !isSearchPanelExpanded {
+            if coordinator.isNavigating,
+               !workoutStore.presentation.isWorkoutActive {
                 rideControlPanel(isCompactHeight: isCompactHeight)
             }
 
@@ -593,8 +588,7 @@ struct ContentView: View {
 
     private func rideMetricsPanel(
         isCompactHeight: Bool,
-        isSheetExpanded: Bool? = nil,
-        onToggleExpansion: (() -> Void)? = nil
+        isSheetExpanded: Bool? = nil
     ) -> some View {
         RideMetricsPanel(
             workoutStore: workoutStore,
@@ -610,8 +604,7 @@ struct ContentView: View {
             onResumeWorkout: workoutMirrorManager.resume,
             onEndAndSaveWorkout: workoutMirrorManager.endAndSave,
             onDiscardWorkout: workoutMirrorManager.discard,
-            isSheetExpanded: isSheetExpanded,
-            onToggleExpansion: onToggleExpansion
+            isSheetExpanded: isSheetExpanded
         )
     }
 

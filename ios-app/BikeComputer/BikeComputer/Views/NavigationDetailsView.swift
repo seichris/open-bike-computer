@@ -198,7 +198,6 @@ struct RideMetricsPanel: View {
     let onEndAndSaveWorkout: () -> Void
     let onDiscardWorkout: () -> Void
     let isSheetExpanded: Bool?
-    let onToggleExpansion: (() -> Void)?
 
     var body: some View {
         if let isSheetExpanded {
@@ -254,13 +253,11 @@ struct RideMetricsPanel: View {
 
     private func sheetBody(isExpanded: Bool) -> some View {
         VStack(spacing: 0) {
-            sheetHeader(isExpanded: isExpanded)
-
             if isExpanded {
                 ScrollView(.vertical, showsIndicators: true) {
                     expandedMetricContent
                         .padding(.horizontal, 20)
-                        .padding(.top, 10)
+                        .padding(.top, 28)
                         .padding(.bottom, 24)
                 }
                 .frame(maxHeight: .infinity)
@@ -268,7 +265,8 @@ struct RideMetricsPanel: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     compactSheetMetricContent
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.top, 24)
+                        .padding(.bottom, 8)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -284,36 +282,11 @@ struct RideMetricsPanel: View {
         .accessibilityIdentifier("rideMetricsSheet")
     }
 
-    private func sheetHeader(isExpanded: Bool) -> some View {
-        Button {
-            onToggleExpansion?()
-        } label: {
-            HStack(spacing: 12) {
-                Text("Ride Stats")
-                    .font(.title3.weight(.semibold))
-                    .foregroundColor(.primary)
-
-                Spacer()
-
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundColor(.secondary)
-                    .frame(width: 36, height: 36)
-                    .background(Color(.secondarySystemBackground), in: Circle())
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(onToggleExpansion == nil)
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
-        .accessibilityLabel(isExpanded ? "Collapse ride stats" : "Expand ride stats")
-    }
-
     @ViewBuilder
     private var compactSheetMetricContent: some View {
         if workoutStore.presentation.isWorkoutActive {
             workoutStatusBanner
+            workoutMetrics
         }
 
         if isNavigating {

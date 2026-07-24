@@ -5623,13 +5623,16 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContent.contains(
-                "if!coordinator.isNavigating,workoutStore.presentation.isWorkoutActive,!isSearchPanelExpanded{rideControlPanel"
+                "ifcoordinator.isNavigating,!workoutStore.presentation.isWorkoutActive{rideControlPanel"
             )
                 && compactContent.contains(
                     "if!coordinator.isNavigating{"
                 )
                 && compactContent.contains(
-                    "ifcoordinator.isNavigating{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
+                    ".onChange(of:workoutStore.presentation.isWorkoutActive){_insynchronizeRideMetricsSheet()}"
+                )
+                && compactContent.contains(
+                    "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
                 )
                 && compactContent.contains(
                     ".sheet(item:$presentedSheet,onDismiss:restoreRideMetricsSheetIfNeeded){destinationinpresentedSheetContent(for:destination)}"
@@ -5645,8 +5648,15 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactContent.contains(
                     ".interactiveDismissDisabled()"
-                ),
-            "navigation must use a native expandable stats sheet while workout-only metrics and destination search remain available"
+                )
+                && compactNavigation.contains(
+                    "compactSheetMetricContent:someView{ifworkoutStore.presentation.isWorkoutActive{workoutStatusBannerworkoutMetrics}ifisNavigating{navigationMetrics}}"
+                )
+                && !compactNavigation.contains("Text(\"RideStats\")")
+                && !compactNavigation.contains("chevron.up")
+                && !compactNavigation.contains("chevron.down")
+                && !compactNavigation.contains("onToggleExpansion"),
+            "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
         )
 
         for binding in [
