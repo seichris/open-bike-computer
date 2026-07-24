@@ -1797,7 +1797,13 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
         manager.applyRemoteEnvelopes(
-            [makeSnapshotEnvelope(sequence: 1, capturedAt: now)],
+            [
+                makeSnapshotEnvelope(
+                    sequence: 1,
+                    capturedAt: now,
+                    errorCode: .anotherWorkoutActive
+                ),
+            ],
             receivedAt: now,
             from: transport
         )
@@ -1822,6 +1828,115 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             manager.resetTerminalPresentation(),
             "the bounded timeout must permit dismissal only after publishing honest copy"
         )
+    }
+
+    func testOutcomeLessEndedSnapshotStillUsesFinalSnapshotTimeout()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_272)
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            finalSnapshotTimeout: 0.02
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        manager.applyRemoteEnvelopes(
+            [
+                makeSnapshotEnvelope(sequence: 1, capturedAt: now),
+                makeSnapshotEnvelope(
+                    sequence: 2,
+                    capturedAt: now.addingTimeInterval(1),
+                    state: .ended,
+                    startDate: now.addingTimeInterval(-30)
+                ),
+            ],
+            receivedAt: now.addingTimeInterval(1),
+            from: transport
+        )
+
+        XCTAssertNotNil(manager.store.presentation.finalSnapshot)
+        XCTAssertNil(
+            manager.store.presentation.finalSnapshot?.terminalOutcome
+        )
+        XCTAssertFalse(manager.store.canResetTerminalPresentation)
+
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .finalSummaryUnavailable
+        )
+        XCTAssertTrue(manager.store.canResetTerminalPresentation)
+    }
+
+    func testFinalSnapshotExpirationPublishesSynchronouslyAndBalancesLease() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_273)
+        let lease = FakeWorkoutBackgroundExecutionLease()
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            finalSnapshotTimeout: 10,
+            finalSnapshotBackgroundLease: lease
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        manager.applyRemoteEnvelopes(
+            [makeSnapshotEnvelope(sequence: 1, capturedAt: now)],
+            receivedAt: now,
+            from: transport
+        )
+        manager.applyNativeSessionState(
+            .ended,
+            at: now.addingTimeInterval(1),
+            from: transport
+        )
+        XCTAssertTrue(lease.isActive)
+
+        lease.expireSynchronously()
+
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .finalSummaryUnavailable
+        )
+        XCTAssertTrue(manager.store.canResetTerminalPresentation)
+        XCTAssertFalse(lease.isActive)
+    }
+
+    func testFinalSnapshotWaitLeavesBackgroundFinalizationMargin()
+        async throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_400_274)
+        let waiter = ControlledWorkoutTimeoutWaiter()
+        let lease = FakeWorkoutBackgroundExecutionLease()
+        let manager = WorkoutMirrorManager(
+            now: { now },
+            finalSnapshotTimeout: 10,
+            finalSnapshotWait: { timeout in
+                try await waiter.wait(timeout)
+            },
+            finalSnapshotBackgroundLease: lease,
+            backgroundTimeRemaining: {
+                XCTAssertTrue(
+                    lease.isActive,
+                    "background time is valid only after beginning the lease"
+                )
+                return 8
+            }
+        )
+        let transport = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(transport)
+        manager.applyRemoteEnvelopes(
+            [makeSnapshotEnvelope(sequence: 1, capturedAt: now)],
+            receivedAt: now,
+            from: transport
+        )
+        manager.applyNativeSessionState(
+            .ended,
+            at: now.addingTimeInterval(1),
+            from: transport
+        )
+
+        try await waitUntil { waiter.waitCallCount == 1 }
+        XCTAssertEqual(waiter.timeouts, [3])
+
+        waiter.completeWait(at: 0)
+        await Task.yield()
     }
 
     func testFreshWatchSnapshotDoesNotResurrectStalePhoneLocation() async {
@@ -2647,7 +2762,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_800)
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02
+            controlConfirmationTimeout: 0.02,
+            finalSnapshotTimeout: 0.1
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
@@ -2767,6 +2883,15 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             "an unacknowledged opposite retry must fail honestly"
         )
         XCTAssertEqual(manager.store.presentation.connectionState, .ended)
+        XCTAssertFalse(
+            manager.resetTerminalPresentation(),
+            "terminal uncertainty must retain the final-snapshot correction window"
+        )
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(
+            manager.store.presentation.errorCode,
+            .finalSummaryUnavailable
+        )
         XCTAssertTrue(manager.resetTerminalPresentation())
         XCTAssertEqual(manager.store.presentation.connectionState, .idle)
     }
@@ -2837,12 +2962,17 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let now = Date(timeIntervalSinceReferenceDate: 800_401_000)
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02
+            controlConfirmationTimeout: 0.02,
+            finalSnapshotTimeout: 0.2
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
+        let snapshot = makeSnapshotEnvelope(
+            sequence: 90,
+            capturedAt: now
+        )
         manager.applyRemoteEnvelopes(
-            [makeSnapshotEnvelope(sequence: 90, capturedAt: now)],
+            [snapshot],
             receivedAt: now,
             from: transport
         )
@@ -2879,6 +3009,31 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             manager.store.presentation.errorCode,
             .terminalChoiceUnconfirmed,
             "native end must reclassify an earlier terminal timeout"
+        )
+        XCTAssertFalse(
+            manager.store.canResetTerminalPresentation,
+            "terminal uncertainty must retain the final-snapshot correction window"
+        )
+
+        manager.applyRemoteEnvelopes(
+            terminalEnvelopes(
+                after: snapshot,
+                outcome: .saved,
+                capturedAt: now.addingTimeInterval(2)
+            ),
+            receivedAt: now.addingTimeInterval(3),
+            from: transport
+        )
+        XCTAssertEqual(
+            manager.store.presentation.finalSnapshot?.terminalOutcome,
+            .saved
+        )
+        XCTAssertNil(manager.store.presentation.errorCode)
+        XCTAssertTrue(manager.store.canResetTerminalPresentation)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertNil(
+            manager.store.presentation.errorCode,
+            "late timeout continuation must not replace authoritative final truth"
         )
     }
 
@@ -3405,11 +3560,12 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
 private final class ControlledWorkoutTimeoutWaiter {
     private var continuations: [CheckedContinuation<Void, Error>?] = []
     private var returnedWaits: Set<Int> = []
+    private(set) var timeouts: [TimeInterval] = []
 
     var waitCallCount: Int { continuations.count }
 
     func wait(_ timeout: TimeInterval) async throws {
-        _ = timeout
+        timeouts.append(timeout)
         let index = continuations.count
         try await withCheckedThrowingContinuation { continuation in
             continuations.append(continuation)
@@ -3428,6 +3584,35 @@ private final class ControlledWorkoutTimeoutWaiter {
         }
         continuations[index] = nil
         continuation.resume()
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class FakeWorkoutBackgroundExecutionLease:
+    WorkoutBackgroundExecutionLeasing {
+    private(set) var isActive = false
+    private var expirationHandler:
+        (@MainActor @Sendable () -> Void)?
+
+    func begin(
+        expirationHandler: @escaping @MainActor @Sendable () -> Void
+    ) {
+        guard !isActive else { return }
+        isActive = true
+        self.expirationHandler = expirationHandler
+    }
+
+    func end() {
+        isActive = false
+        expirationHandler = nil
+    }
+
+    func expireSynchronously() {
+        guard isActive else { return }
+        let expirationHandler = expirationHandler
+        expirationHandler?()
+        end()
     }
 }
 

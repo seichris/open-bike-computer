@@ -9,6 +9,7 @@ fi
 APP_PATH="${1%/}"
 WATCH_PATH="${APP_PATH}/Watch/BikeComputerWatch.app"
 COMPLICATION_PATH="${WATCH_PATH}/PlugIns/BikeComputerWatchComplications.appex"
+LIVE_ACTIVITY_PATH="${APP_PATH}/PlugIns/BikeComputerLiveActivity.appex"
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 require_file() {
@@ -66,6 +67,8 @@ require_file "${WATCH_PATH}/PrivacyInfo.xcprivacy"
 require_file "${WATCH_PATH}/Assets.car"
 require_file "${COMPLICATION_PATH}/Info.plist"
 require_file "${COMPLICATION_PATH}/BikeComputerWatchComplications"
+require_file "${LIVE_ACTIVITY_PATH}/Info.plist"
+require_file "${LIVE_ACTIVITY_PATH}/BikeComputerLiveActivity"
 
 cmp "${SOURCE_ROOT}/BikeComputer/BikeComputer/PrivacyInfo.xcprivacy" \
   "${APP_PATH}/PrivacyInfo.xcprivacy"
@@ -88,6 +91,18 @@ require_plist_value \
   "${COMPLICATION_PATH}/Info.plist" \
   ":NSExtension:NSExtensionPointIdentifier" \
   "com.apple.widgetkit-extension"
+require_plist_value \
+  "${LIVE_ACTIVITY_PATH}/Info.plist" \
+  ":CFBundleIdentifier" \
+  "LetItRide.BikeComputer.WorkoutLiveActivity"
+require_plist_value \
+  "${LIVE_ACTIVITY_PATH}/Info.plist" \
+  ":NSExtension:NSExtensionPointIdentifier" \
+  "com.apple.widgetkit-extension"
+require_plist_value \
+  "${APP_PATH}/Info.plist" \
+  ":NSSupportsLiveActivities" \
+  "true"
 require_url_scheme "${WATCH_PATH}/Info.plist" "bikecomputer"
 WATCH_BACKGROUND_MODES="$(
   /usr/libexec/PlistBuddy -c 'Print :WKBackgroundModes' "${WATCH_PATH}/Info.plist"
@@ -106,4 +121,4 @@ if [[ "${WATCH_PRIMARY_ICON}" != "AppIcon" ]]; then
   exit 1
 fi
 
-echo "Release iPhone container, Watch app, and complication extension verified"
+echo "Release iPhone container, Watch app, complication, and Live Activity verified"

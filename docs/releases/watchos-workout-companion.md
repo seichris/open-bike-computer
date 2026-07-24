@@ -14,6 +14,8 @@ Watch, iPhone, and compatible Bike Computer hardware.
   sensor data.
 - Pause, resume, save, or discard from either Apple device.
 - Recover an active Watch workout after an interruption.
+- Follow an active workout from the iPhone Lock Screen and Dynamic Island,
+  including Segment and Pause/Resume controls.
 - Keep navigation and workout controls independent.
 - Show current Watch metrics on the ESP32 Ride Stats pages with compatible
   firmware.
@@ -35,7 +37,8 @@ To test:
    location access.
 3. Select **Start Ride**.
 4. Open BikeComputer on iPhone to view the same live workout and use mirrored
-   pause, resume, save, or discard controls.
+   pause, resume, save, discard, or segment controls. Lock the iPhone to review
+   the Live Activity and authenticate a Segment or Pause/Resume action.
 5. End that workout, then select **Start workout** on iPhone. With the Watch
    paired and the companion installed, this starts the Watch-owned workout
    directly without a second confirmation.
@@ -48,6 +51,13 @@ cannot detect another app's workout, so any resulting displacement is reported
 honestly instead of being retried. Saving creates one Health workout from Watch;
 discarding creates none. A route requires Watch location permission
 and actual outdoor movement.
+
+The Live Activity is created after a verified Watch snapshot while the iPhone
+app is foreground. If a ride starts from Watch while iPhone is backgrounded,
+foreground BikeComputer once to create it. Active workout metrics may remain
+visible on the Lock Screen and Always-On display. Dismissing or disabling the
+Live Activity has no effect on the Watch-owned workout, and no Live Activity
+content is sent to a backend.
 
 No account or external cycling sensor is required. Optional Bluetooth bike
 computer hardware is not required to review the Watch/iPhone workflow.

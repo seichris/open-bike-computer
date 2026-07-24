@@ -50,6 +50,26 @@ If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
 old data as current. Reconnection requests the newest coherent snapshot.
 
+## iPhone Live Activity
+
+On iOS 17 or later, a verified active Watch workout appears on the iPhone Lock
+Screen and Dynamic Island while Live Activities are enabled for BikeComputer.
+It shows active time, speed, distance, optional heart rate, and the most recent
+completed segment. Segment and Pause/Resume use the same replay-safe Watch
+control path as the in-app workout screen; End and Discard remain in the app
+and on Watch.
+
+ActivityKit permits BikeComputer to create the Live Activity only while the
+iPhone app is foreground. A workout started on Watch while iPhone is
+backgrounded therefore appears when BikeComputer next enters the foreground.
+An existing activity continues to receive mirrored updates in the background.
+Lock Screen controls require the normal iPhone authentication, and dismissing
+or disabling the activity never changes the Watch workout.
+
+Active workout metrics may be visible on the Lock Screen, Dynamic Island,
+Always-On display, and other system Live Activity surfaces. No Live Activity
+content is uploaded to a backend.
+
 ## Saving, discarding, and recovery
 
 - **End and Save** creates exactly one cycling workout in Health. A route is

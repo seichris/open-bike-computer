@@ -625,25 +625,35 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
             capturedAt: latestEnvelope?.capturedAt,
             receivedAt: lastReceivedAt,
             confirmedSessionState: confirmedSessionState,
-            errorCode: errorCode == .anotherWorkoutActive
-                || latestEnvelope?.snapshot?.errorCode
-                    == .anotherWorkoutActive
-                ? .anotherWorkoutActive
-                : latestEnvelope?.snapshot?.errorCode
-                    ?? commandErrorCode
-                    ?? errorCode,
+            errorCode: presentationErrorCode,
             pendingControl: pendingControl,
             finalSnapshot: finalSnapshot,
             navigation: .empty
         )
     }
 
+    private var presentationErrorCode: WorkoutSafeErrorCodeV1? {
+        if commandErrorCode == .finalSummaryUnavailable {
+            return .finalSummaryUnavailable
+        }
+        if errorCode == .anotherWorkoutActive
+            || latestEnvelope?.snapshot?.errorCode
+                == .anotherWorkoutActive {
+            return .anotherWorkoutActive
+        }
+        if commandErrorCode == .terminalChoiceUnconfirmed {
+            return commandErrorCode
+        }
+        return latestEnvelope?.snapshot?.errorCode
+            ?? commandErrorCode
+            ?? errorCode
+    }
+
     var canResetTerminalPresentation: Bool {
         guard !presentation.isWorkoutActive,
               pendingControl == nil else { return false }
         guard connectionState == .ended else { return true }
-        return finalSnapshot != nil
-            || commandErrorCode == .terminalChoiceUnconfirmed
+        return finalSnapshot?.terminalOutcome != nil
             || commandErrorCode == .finalSummaryUnavailable
     }
 
@@ -1137,7 +1147,7 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     @discardableResult
     mutating func timeOutFinalSnapshot() -> Bool {
         guard connectionState == .ended,
-              finalSnapshot == nil,
+              finalSnapshot?.terminalOutcome == nil,
               pendingControl == nil else { return false }
         commandErrorCode = .finalSummaryUnavailable
         return true

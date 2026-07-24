@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import UIKit
 
 @available(iOS 17.0, *)
 @MainActor
@@ -48,6 +49,63 @@ private final class HealthKitMirroredSessionTransport:
     }
 }
 
+@MainActor
+protocol WorkoutBackgroundExecutionLeasing: AnyObject {
+    func begin(
+        expirationHandler: @escaping @MainActor @Sendable () -> Void
+    )
+    func end()
+}
+
+nonisolated enum WorkoutBackgroundExecutionBudget {
+    static let finalizationSafetyMargin: TimeInterval = 5
+
+    static func boundedDelay(
+        requested: TimeInterval,
+        backgroundTimeRemaining: TimeInterval
+    ) -> TimeInterval {
+        guard backgroundTimeRemaining.isFinite else {
+            return requested
+        }
+        return min(
+            requested,
+            max(
+                0,
+                backgroundTimeRemaining - finalizationSafetyMargin
+            )
+        )
+    }
+}
+
+@MainActor
+final class SystemWorkoutBackgroundExecutionLease:
+    WorkoutBackgroundExecutionLeasing {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+
+    func begin(
+        expirationHandler: @escaping @MainActor @Sendable () -> Void
+    ) {
+        guard identifier == .invalid else { return }
+        identifier = UIApplication.shared.beginBackgroundTask(
+            withName: "Finalize mirrored workout"
+        ) {
+            // UIKit's expiration callback is synchronous on the main thread.
+            // Do not defer expiration bookkeeping to a Task after the
+            // callback returns.
+            MainActor.assumeIsolated { [self] in
+                expirationHandler()
+                self.end()
+            }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+
 /// Long-lived iPhone bridge for a Watch-owned primary workout session.
 ///
 /// The manager intentionally has no workout builder and never asks HealthKit
@@ -73,6 +131,9 @@ final class WorkoutMirrorManager: NSObject {
         @MainActor @Sendable (TimeInterval) async throws -> Void
     private let finalSnapshotWait:
         @MainActor @Sendable (TimeInterval) async throws -> Void
+    private let finalSnapshotBackgroundLease:
+        any WorkoutBackgroundExecutionLeasing
+    private let backgroundTimeRemaining: () -> TimeInterval
     private let terminalFailureDrainWait:
         @MainActor @Sendable (TimeInterval) async throws -> Void
     private let launchWatchApp: (
@@ -127,6 +188,9 @@ final class WorkoutMirrorManager: NSObject {
         finalSnapshotWait: (@MainActor @Sendable (
             TimeInterval
         ) async throws -> Void)? = nil,
+        finalSnapshotBackgroundLease:
+            (any WorkoutBackgroundExecutionLeasing)? = nil,
+        backgroundTimeRemaining: (() -> TimeInterval)? = nil,
         terminalFailureDrainWait: (@MainActor @Sendable (
             TimeInterval
         ) async throws -> Void)? = nil,
@@ -162,6 +226,11 @@ final class WorkoutMirrorManager: NSObject {
                 nanoseconds: UInt64(timeout * 1_000_000_000)
             )
         }
+        self.finalSnapshotBackgroundLease =
+            finalSnapshotBackgroundLease
+            ?? SystemWorkoutBackgroundExecutionLease()
+        self.backgroundTimeRemaining = backgroundTimeRemaining
+            ?? Self.defaultBackgroundTimeRemaining
         self.terminalFailureDrainWait = terminalFailureDrainWait
             ?? { timeout in
                 try await Task.sleep(
@@ -175,6 +244,14 @@ final class WorkoutMirrorManager: NSObject {
             )
         }
         super.init()
+    }
+
+    private static func defaultBackgroundTimeRemaining() -> TimeInterval {
+#if WORKOUT_CONTRACT_XCTEST
+        .greatestFiniteMagnitude
+#else
+        UIApplication.shared.backgroundTimeRemaining
+#endif
     }
 
     deinit {
@@ -545,17 +622,34 @@ final class WorkoutMirrorManager: NSObject {
     private func synchronizeFinalSnapshotTimeoutWithPresentation() {
         let presentation = store.presentation
         guard presentation.connectionState == .ended,
-              presentation.finalSnapshot == nil,
+              presentation.finalSnapshot?.terminalOutcome == nil,
               presentation.pendingControl == nil,
               !store.canResetTerminalPresentation else {
             cancelFinalSnapshotTimeout()
             return
         }
         guard finalSnapshotTimeoutTask == nil else { return }
-        let timeout = finalSnapshotTimeout
         let attemptID = UUID()
         let wait = finalSnapshotWait
         finalSnapshotTimeoutAttemptID = attemptID
+        finalSnapshotBackgroundLease.begin { [weak self] in
+            guard let self,
+                  finalSnapshotTimeoutAttemptID == attemptID else {
+                return
+            }
+            _ = store.timeOutFinalSnapshot()
+            cancelFinalSnapshotTimeout()
+        }
+        guard finalSnapshotTimeoutAttemptID == attemptID else { return }
+        let timeout = WorkoutBackgroundExecutionBudget.boundedDelay(
+            requested: finalSnapshotTimeout,
+            backgroundTimeRemaining: backgroundTimeRemaining()
+        )
+        if timeout == 0 {
+            _ = store.timeOutFinalSnapshot()
+            cancelFinalSnapshotTimeout()
+            return
+        }
         finalSnapshotTimeoutTask = Task { @MainActor [weak self] in
             do {
                 try await wait(timeout)
@@ -568,8 +662,7 @@ final class WorkoutMirrorManager: NSObject {
                 return
             }
             _ = store.timeOutFinalSnapshot()
-            finalSnapshotTimeoutTask = nil
-            finalSnapshotTimeoutAttemptID = nil
+            cancelFinalSnapshotTimeout()
         }
     }
 
@@ -577,6 +670,7 @@ final class WorkoutMirrorManager: NSObject {
         finalSnapshotTimeoutTask?.cancel()
         finalSnapshotTimeoutTask = nil
         finalSnapshotTimeoutAttemptID = nil
+        finalSnapshotBackgroundLease.end()
     }
 
     @available(iOS 17.0, *)
