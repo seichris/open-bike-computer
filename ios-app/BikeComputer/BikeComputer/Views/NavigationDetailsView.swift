@@ -276,7 +276,7 @@ struct RideMetricsPanel: View {
             controls
                 .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 14 : 20)
                 .padding(.top, 12)
-                .padding(.bottom, 14)
+                .padding(.bottom, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("rideMetricsSheet")

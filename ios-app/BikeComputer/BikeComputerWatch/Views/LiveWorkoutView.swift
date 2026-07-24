@@ -124,29 +124,22 @@ struct LiveWorkoutView: View {
                     .multilineTextAlignment(.center)
                 }
 
-                Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
-                    .font(.system(.title2, design: .rounded, weight: .semibold))
-                    .monospacedDigit()
-                    .accessibilityLabel("Elapsed time")
-
-                if let segment = manager.snapshot.lastCompletedSegment {
-                    Label(
-                        "Segment \(segment.index + 1)",
-                        systemImage: "flag.checkered"
-                    )
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                }
-
                 LazyVGrid(columns: columns, spacing: 8) {
                     metric(
                         title: "Heart",
                         value: WorkoutValueFormatter.heartRate(
                             manager.snapshot.currentHeartRate?.value
                         ),
-                        unit: heartRateUnit,
+                        unit: "BPM",
                         icon: "heart.fill",
                         color: .red
+                    )
+                    metric(
+                        title: "HR Zone",
+                        value: heartRateZoneValue,
+                        unit: heartRateZoneUnit,
+                        icon: "heart.circle.fill",
+                        color: .pink
                     )
                     metric(
                         title: "Distance",
@@ -196,6 +189,20 @@ struct LiveWorkoutView: View {
                         color: .mint
                     )
                 }
+
+                if let segment = manager.snapshot.lastCompletedSegment {
+                    Label(
+                        "Segment \(segment.index + 1)",
+                        systemImage: "flag.checkered"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                }
+
+                Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .monospacedDigit()
+                    .accessibilityLabel("Elapsed time")
 
                 HStack(spacing: 8) {
                     Button {
@@ -315,16 +322,19 @@ struct LiveWorkoutView: View {
         }
     }
 
+    @ViewBuilder
     private var stateHeader: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(stateColor)
-                .frame(width: 7, height: 7)
-            Text(stateLabel)
-                .font(.caption.weight(.semibold))
+        if let stateLabel {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(stateColor)
+                    .frame(width: 7, height: 7)
+                Text(stateLabel)
+                    .font(.caption.weight(.semibold))
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Workout \(stateLabel)")
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Workout \(stateLabel)")
     }
 
     private func metric(
@@ -388,18 +398,24 @@ struct LiveWorkoutView: View {
         [GridItem(.flexible()), GridItem(.flexible())]
     }
 
-    private var heartRateUnit: String {
-        guard let zone = manager.snapshot.currentHeartRateZone,
-              let count = manager.snapshot.heartRateZoneCount else {
-            return "BPM"
+    private var heartRateZoneValue: String {
+        guard let zone = manager.snapshot.currentHeartRateZone else {
+            return "--"
         }
-        return "BPM · Z\(zone)/\(count)"
+        return "Z\(zone)"
     }
 
-    private var stateLabel: String {
+    private var heartRateZoneUnit: String {
+        guard let count = manager.snapshot.heartRateZoneCount else {
+            return "ZONE"
+        }
+        return "OF \(count)"
+    }
+
+    private var stateLabel: String? {
         switch manager.state {
         case .starting: "STARTING"
-        case .running: "LIVE"
+        case .running: nil
         case .paused: "PAUSED"
         case .ending: manager.isDiscarding ? "DISCARDING" : "SAVING"
         case .idle, .ended, .failed: "WORKOUT"

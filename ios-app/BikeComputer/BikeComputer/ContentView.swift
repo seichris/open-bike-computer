@@ -681,11 +681,21 @@ struct ContentView: View {
     }
 
     private var shouldShowOfflineMapStatusChip: Bool {
-        offlineMapManager.isBusy ||
+        guard !isOnlyCheckingForServerMaps else {
+            return false
+        }
+        return offlineMapManager.isBusy ||
             offlineMapManager.hasPendingMapJob ||
             offlineMapManager.currentJob != nil ||
             offlineMapManager.downloadedPackURL != nil ||
             offlineMapManager.errorMessage != nil
+    }
+
+    private var isOnlyCheckingForServerMaps: Bool {
+        offlineMapManager.isServerRecoveryCheckPending
+            && offlineMapManager.currentJob == nil
+            && offlineMapManager.downloadedPackURL == nil
+            && offlineMapManager.errorMessage == nil
     }
 
     private var offlineMapStatusChip: some View {

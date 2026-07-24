@@ -5564,6 +5564,36 @@ private struct WorkoutContractTestSuite {
             "Watch live workout must expose segment marking and its latest completed segment"
         )
         expect(
+            compactLiveWatchView.contains("case.running:nil")
+                && !liveWatchViewSource.contains("\"LIVE\"")
+                && compactLiveWatchView.contains(
+                    "metric(title:\"HRZone\",value:heartRateZoneValue,unit:heartRateZoneUnit"
+                )
+                && compactLiveWatchView.contains(
+                    "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+                ),
+            "Watch live workout must omit LIVE, expose heart-rate zone, and retain the elapsed timer"
+        )
+        if let gridIndex = compactLiveWatchView.range(
+            of: "LazyVGrid(columns:columns,spacing:8)"
+        )?.lowerBound,
+           let timerIndex = compactLiveWatchView.range(
+            of: "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+           )?.lowerBound,
+           let controlsIndex = compactLiveWatchView.range(
+            of: "HStack(spacing:8){Button{manager.markSegment()"
+           )?.lowerBound {
+            expect(
+                gridIndex < timerIndex && timerIndex < controlsIndex,
+                "Watch elapsed timer must appear below the stat grid and above workout controls"
+            )
+        } else {
+            expect(
+                false,
+                "Watch live workout grid, timer, and controls must remain discoverable"
+            )
+        }
+        expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
             )
@@ -5688,8 +5718,20 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactNavigation.contains(
                     ".frame(maxWidth:.infinity,minHeight:36)"
+                )
+                && compactNavigation.contains(
+                    ".padding(.bottom,4)"
                 ),
-            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, and use taller controls"
+            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, use taller controls, and avoid excess space below them"
+        )
+        expect(
+            compactContent.contains(
+                "guard!isOnlyCheckingForServerMapselse{returnfalse}"
+            )
+                && compactContent.contains(
+                    "offlineMapManager.isServerRecoveryCheckPending&&offlineMapManager.currentJob==nil&&offlineMapManager.downloadedPackURL==nil&&offlineMapManager.errorMessage==nil"
+                ),
+            "the passive offline-map recovery scan must not flash a startup status chip"
         )
 
         for binding in [
