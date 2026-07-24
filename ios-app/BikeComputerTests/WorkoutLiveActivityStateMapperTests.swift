@@ -36,6 +36,12 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         XCTAssertEqual(mapped.contentState.currentHeartRateBPM, 140)
         XCTAssertEqual(mapped.contentState.lastCompletedSegmentIndex, 3)
         XCTAssertTrue(mapped.contentState.canMarkSegment)
+        XCTAssertEqual(mapped.contentState.segmentControlTitle, "Segment")
+        XCTAssertEqual(mapped.contentState.pauseControlTitle, "Pause")
+        XCTAssertEqual(
+            mapped.contentState.pauseControlSystemImage,
+            "pause.fill"
+        )
         XCTAssertTrue(mapped.isStartEligible)
     }
 
@@ -122,6 +128,11 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         )
         XCTAssertEqual(paused.contentState.phase, .paused)
         XCTAssertEqual(paused.contentState.pendingAction, .resume)
+        XCTAssertEqual(paused.contentState.pauseControlTitle, "Resuming…")
+        XCTAssertEqual(
+            paused.contentState.pauseControlSystemImage,
+            "hourglass"
+        )
         XCTAssertFalse(paused.contentState.canResume)
 
         let saved = try XCTUnwrap(
@@ -233,6 +244,10 @@ final class WorkoutLiveActivityStateMapperTests: XCTestCase {
         )
         XCTAssertEqual(pending.contentState.pendingAction, .segment)
         XCTAssertEqual(pending.contentState.lastCompletedSegmentIndex, 2)
+        XCTAssertEqual(
+            pending.contentState.segmentControlTitle,
+            "Marking…"
+        )
         XCTAssertFalse(pending.contentState.canMarkSegment)
 
         let rejected = try XCTUnwrap(

@@ -470,6 +470,40 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         XCTAssertTrue(scheduler.requestedIntervals.isEmpty)
     }
 
+    func testIntentFlushAwaitsPendingActivityUpdate() async {
+        let sessionID = UUID()
+        let source = source(sessionID: sessionID)
+        let client = FakeWorkoutLiveActivityClient()
+        let controller = makeController(source: source, client: client)
+        controller.start(isApplicationForeground: true)
+        await settle()
+        client.suspendNextUpdate()
+
+        source.send(
+            makeLiveActivityPresentation(
+                sessionID: sessionID,
+                capturedAt: capturedAt,
+                pendingControl: .pause
+            )
+        )
+        let flushTask = Task {
+            await controller.publishCurrentStateForIntent(
+                sessionID: sessionID
+            )
+        }
+        await settle()
+
+        XCTAssertEqual(
+            client.updateAttempts.map(\.1.pendingAction),
+            [.pause]
+        )
+
+        client.resumeSuspendedUpdate()
+        let published = await flushTask.value
+        XCTAssertTrue(published)
+        XCTAssertEqual(client.updates.last?.1.pendingAction, .pause)
+    }
+
     func testStateTransitionsPublishInOrderWhenEarlierUpdateSuspends()
         async {
         let sessionID = UUID()

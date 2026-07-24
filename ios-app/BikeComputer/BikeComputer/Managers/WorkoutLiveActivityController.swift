@@ -431,6 +431,46 @@ final class WorkoutLiveActivityController {
         enqueue(latestPresentation)
     }
 
+    @discardableResult
+    func publishCurrentStateForIntent(sessionID: UUID) async -> Bool {
+        if let reconciliationTask {
+            await reconciliationTask.value
+        }
+        guard hasReconciled else { return false }
+
+        let presentation = presentationSource.presentation
+        latestPresentation = presentation
+        guard WorkoutLiveActivityStateMapper.map(
+            presentation,
+            at: now(),
+            supportsSegmentMarking:
+                presentationSource.supportsSegmentMarking,
+            isSegmentConfirmationPending:
+                presentationSource.isSegmentConfirmationPending
+        )?.attributes.sessionID == sessionID else {
+            return false
+        }
+
+        enqueue(presentation)
+        while let processingTask = presentationProcessingTask {
+            await processingTask.value
+        }
+
+        guard managedSessionID == sessionID,
+              let publishedContent = lastPublishedContent,
+              let currentContent = WorkoutLiveActivityStateMapper.map(
+                  presentationSource.presentation,
+                  at: now(),
+                  supportsSegmentMarking:
+                      presentationSource.supportsSegmentMarking,
+                  isSegmentConfirmationPending:
+                      presentationSource.isSegmentConfirmationPending
+              )?.contentState else {
+            return false
+        }
+        return publishedContent == currentContent
+    }
+
     private func reconcileExistingActivities() async {
         let allRecords = client.records()
         for record in allRecords {

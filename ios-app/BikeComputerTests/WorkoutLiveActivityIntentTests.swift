@@ -245,6 +245,85 @@ final class WorkoutLiveActivityIntentTests: XCTestCase {
         XCTAssertEqual(pauseCalls.value, 1)
     }
 
+    func testActionResolutionWaitStopsAfterWatchConfirmation() async {
+        let sessionID = UUID()
+        let state = controlState(sessionID: sessionID)
+        var waits: [TimeInterval] = []
+        let router = WorkoutLiveActivityCommandRouter(
+            store: state,
+            actionResolutionTimeout: 1,
+            actionResolutionWait: { interval in
+                waits.append(interval)
+                state.presentation = self.presentation(
+                    sessionID: sessionID,
+                    state: .paused
+                )
+            },
+            markSegment: {},
+            pause: {
+                state.presentation = self.presentation(
+                    sessionID: sessionID,
+                    pending: .pause
+                )
+            },
+            resume: {}
+        )
+
+        let accepted = await router.perform(
+            .pause,
+            sessionID: sessionID
+        )
+        XCTAssertTrue(accepted)
+        await router.waitForResolution(
+            of: .pause,
+            sessionID: sessionID
+        )
+
+        XCTAssertEqual(waits, [0.1])
+        XCTAssertEqual(state.presentation.sessionState, .paused)
+        XCTAssertNil(state.presentation.pendingControl)
+    }
+
+    func testActionResolutionWaitHasBoundedTimeout() async {
+        let sessionID = UUID()
+        let state = controlState(sessionID: sessionID)
+        var waits: [TimeInterval] = []
+        let router = WorkoutLiveActivityCommandRouter(
+            store: state,
+            actionResolutionTimeout: 0.25,
+            actionResolutionWait: { interval in
+                waits.append(interval)
+            },
+            markSegment: {
+                state.presentation = self.presentation(
+                    sessionID: sessionID,
+                    pending: .markSegment
+                )
+            },
+            pause: {},
+            resume: {}
+        )
+
+        let accepted = await router.perform(
+            .segment,
+            sessionID: sessionID
+        )
+        XCTAssertTrue(accepted)
+        await router.waitForResolution(
+            of: .segment,
+            sessionID: sessionID
+        )
+
+        XCTAssertEqual(waits.count, 3)
+        XCTAssertEqual(waits[0], 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(waits[1], 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(waits[2], 0.05, accuracy: 0.000_001)
+        XCTAssertEqual(
+            state.presentation.pendingControl,
+            .markSegment
+        )
+    }
+
     func testMissingAppProcessDependencyFailsSafely() async {
         let accepted = await WorkoutLiveActivityIntentDispatcher.unavailable
             .perform(.pause, sessionID: UUID())

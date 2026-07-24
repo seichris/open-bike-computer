@@ -181,15 +181,24 @@ struct WorkoutLiveActivityControls: View {
                 intent: BikeComputerMarkSegmentIntent(sessionID: sessionID)
             ) {
                 HStack(spacing: 6) {
-                    WorkoutLiveActivitySegmentNumberBadge(
-                        number: state.currentSegmentIndex
-                    )
-                    Text("Segment")
+                    if state.pendingAction == .segment {
+                        Image(systemName: "hourglass")
+                    } else {
+                        WorkoutLiveActivitySegmentNumberBadge(
+                            number: state.currentSegmentIndex
+                        )
+                    }
+                    Text(state.segmentControlTitle)
                 }
                     .frame(maxWidth: .infinity, minHeight: 44)
+                    .invalidatableContent()
             }
             .disabled(!state.canMarkSegment)
-            .accessibilityLabel("Mark workout segment")
+            .accessibilityLabel(
+                state.pendingAction == .segment
+                    ? "Marking workout segment"
+                    : "Mark workout segment"
+            )
             .accessibilityValue(
                 "Current segment \(state.currentSegmentIndex)"
             )
@@ -200,8 +209,12 @@ struct WorkoutLiveActivityControls: View {
                         sessionID: sessionID
                     )
                 ) {
-                    Label("Resume", systemImage: "play.fill")
+                    Label(
+                        state.pauseControlTitle,
+                        systemImage: state.pauseControlSystemImage
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
+                        .invalidatableContent()
                 }
                 .disabled(!state.canResume)
             } else {
@@ -210,8 +223,12 @@ struct WorkoutLiveActivityControls: View {
                         sessionID: sessionID
                     )
                 ) {
-                    Label("Pause", systemImage: "pause.fill")
+                    Label(
+                        state.pauseControlTitle,
+                        systemImage: state.pauseControlSystemImage
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
+                        .invalidatableContent()
                 }
                 .disabled(!state.canPause)
             }

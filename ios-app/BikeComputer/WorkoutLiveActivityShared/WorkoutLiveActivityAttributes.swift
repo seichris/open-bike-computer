@@ -94,6 +94,30 @@ nonisolated struct WorkoutLiveActivityAttributes:
                 && displayError != .controlsUnavailable
         }
 
+        var segmentControlTitle: String {
+            pendingAction == .segment ? "Marking…" : "Segment"
+        }
+
+        var pauseControlTitle: String {
+            switch pendingAction {
+            case .pause:
+                return "Pausing…"
+            case .resume:
+                return "Resuming…"
+            default:
+                return phase == .paused ? "Resume" : "Pause"
+            }
+        }
+
+        var pauseControlSystemImage: String {
+            switch pendingAction {
+            case .pause, .resume:
+                return "hourglass"
+            default:
+                return phase == .paused ? "play.fill" : "pause.fill"
+            }
+        }
+
         var isTerminal: Bool {
             phase == .final
         }

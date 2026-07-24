@@ -5560,6 +5560,12 @@ private struct WorkoutContractTestSuite {
             compactAppSource.contains(
                 "onApplicationActiveChange:{appDelegate.setApplicationActive($0)}"
             )
+                && compactAppSource.contains(
+                    "publishCurrentStateForIntent(sessionID:sessionID)"
+                )
+                && compactAppSource.contains(
+                    "waitForResolution(of:action,sessionID:sessionID)"
+                )
                 && compactContentView.contains(
                     "onApplicationActiveChange(scenePhase==.active)"
                 )
