@@ -43,6 +43,7 @@ struct ContentView: View {
     @ObservedObject private var liveActivityDiagnostics:
         WorkoutLiveActivityDiagnosticStore
     private let workoutMirrorManager: WorkoutMirrorManager
+    private let onApplicationActiveChange: (Bool) -> Void
     @Environment(\.scenePhase) private var scenePhase
     
     @State private var sourceAddress = ""
@@ -72,7 +73,9 @@ struct ContentView: View {
         coordinator: BikeComputerCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
         liveActivityDiagnostics:
-            WorkoutLiveActivityDiagnosticStore? = nil
+            WorkoutLiveActivityDiagnosticStore? = nil,
+        onApplicationActiveChange:
+            @escaping (Bool) -> Void = { _ in }
     ) {
         let watchAvailability = watchAvailability
             ?? WorkoutWatchAvailabilityMonitor()
@@ -83,6 +86,7 @@ struct ContentView: View {
             workoutMetricsStore: workoutMirrorManager.store
         )
         self.workoutMirrorManager = workoutMirrorManager
+        self.onApplicationActiveChange = onApplicationActiveChange
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
@@ -210,6 +214,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            onApplicationActiveChange(scenePhase == .active)
             migrateExistingInstallOnboardingIfNeeded()
             isOfflineMapOnboardingStatePrepared = true
             watchAvailability.activate()
@@ -222,6 +227,7 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
         }
         .onChange(of: scenePhase) { newValue in
+            onApplicationActiveChange(newValue == .active)
             coordinator.setViewingMap(newValue == .active)
             updateIdleTimer(for: newValue)
             guard newValue == .active else { return }

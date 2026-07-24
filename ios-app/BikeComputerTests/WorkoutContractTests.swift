@@ -5365,6 +5365,12 @@ private struct WorkoutContractTestSuite {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("BikeComputer/BikeComputer/ContentView.swift")
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputer/BikeComputerApp.swift"
+            )
         let liveWatchViewURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -5386,6 +5392,10 @@ private struct WorkoutContractTestSuite {
         guard let source = try? String(contentsOf: sourceURL, encoding: .utf8),
               let contentViewSource = try? String(
                 contentsOf: contentViewURL,
+                encoding: .utf8
+              ),
+              let appSource = try? String(
+                contentsOf: appURL,
                 encoding: .utf8
               ),
               let liveWatchViewSource = try? String(
@@ -5545,6 +5555,19 @@ private struct WorkoutContractTestSuite {
         )
 
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
+        let compactAppSource = appSource.filter { !$0.isWhitespace }
+        expect(
+            compactAppSource.contains(
+                "onApplicationActiveChange:{appDelegate.setApplicationActive($0)}"
+            )
+                && compactContentView.contains(
+                    "onApplicationActiveChange(scenePhase==.active)"
+                )
+                && compactContentView.contains(
+                    "onApplicationActiveChange(newValue==.active)"
+                ),
+            "SwiftUI scene phase must drive Live Activity foreground state"
+        )
         expect(
             compactContentView.contains(
                 "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{presentedSheet=.workoutDashboard})"

@@ -20,7 +20,10 @@ struct BikeComputerApp: App {
                 workoutMirrorManager: appDelegate.workoutMirrorManager,
                 coordinator: appDelegate.coordinator,
                 liveActivityDiagnostics:
-                    appDelegate.workoutLiveActivityDiagnostics
+                    appDelegate.workoutLiveActivityDiagnostics,
+                onApplicationActiveChange: {
+                    appDelegate.setApplicationActive($0)
+                }
             )
         }
     }
@@ -88,23 +91,22 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         coordinator.applicationDidBecomeActive()
-        if #available(iOS 17.0, *),
-           let controller =
-               workoutLiveActivityController
-                as? WorkoutLiveActivityController {
-            controller.setApplicationForeground(true)
-        }
+        setApplicationActive(true)
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
         coordinator.setViewingMap(false)
+        setApplicationActive(false)
+        print("App entered background - navigation continues")
+    }
+
+    func setApplicationActive(_ isActive: Bool) {
         if #available(iOS 17.0, *),
            let controller =
                workoutLiveActivityController
                 as? WorkoutLiveActivityController {
-            controller.setApplicationForeground(false)
+            controller.setApplicationForeground(isActive)
         }
-        print("App entered background - navigation continues")
     }
     
     func applicationWillEnterForeground(_ application: UIApplication) {
