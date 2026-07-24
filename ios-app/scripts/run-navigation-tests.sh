@@ -39,6 +39,24 @@ xcrun swiftc \
 
 "${OUT}"
 
+CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
+
+xcrun swiftc \
+  -parse-as-library \
+  -default-isolation MainActor \
+  -o "${CYCLING_SENSOR_OUT}" \
+  ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
+  ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorDetectionCoordinator.swift \
+  ios-app/BikeComputerTests/CyclingSensorTests.swift
+
+"${CYCLING_SENSOR_OUT}"
+
 CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
 IOS_SUPPORT="${MACOS_SDK}/System/iOSSupport"

@@ -150,6 +150,19 @@ status such as **Data received now**, **Last seen recently**, or
 
 Complete this spike before choosing the persisted identity model.
 
+### Implementation decision for PR #133
+
+PR #133 implements **Gate B**. The current
+`HKLiveWorkoutBuilderDelegate` path exposes fresh cadence and power statistics,
+but the branch has no physical-sensor evidence proving that those statistics
+can be correlated to a stable accessory identity. The implementation therefore
+uses explicit local logical profiles and does not claim to identify, rename, or
+control the Apple Watch Bluetooth accessory.
+
+Gate A remains a compatible future upgrade after the physical matrix below
+proves a stable public identity source. No schema 1.5 identity payload is added
+in the Gate B implementation.
+
 ### Test matrix
 
 Run a BikeComputer-owned cycling workout on physical devices with:

@@ -198,6 +198,10 @@ struct RideMetricsPanel: View {
     let onResumeWorkout: () -> Void
     let onEndAndSaveWorkout: () -> Void
     let onDiscardWorkout: () -> Void
+    let enabledSensorCapabilities: CyclingSensorCapabilities
+    let sensorPrompt: CyclingSensorPrompt?
+    let onOpenSensorSettings: () -> Void
+    let onDismissSensorPrompt: () -> Void
     let isSheetExpanded: Bool?
 
     var body: some View {
@@ -270,6 +274,19 @@ struct RideMetricsPanel: View {
                         .padding(.bottom, 8)
                 }
                 .frame(maxHeight: .infinity)
+            }
+
+            if let sensorPrompt {
+                ActionStatusChip(
+                    title: sensorPrompt.title,
+                    subtitle: "Connect sensor?",
+                    systemImage: "dot.radiowaves.left.and.right",
+                    onDismiss: onDismissSensorPrompt,
+                    action: onOpenSensorSettings
+                )
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("cyclingSensorPrompt")
             }
 
             Divider()
@@ -406,29 +423,45 @@ struct RideMetricsPanel: View {
     private var workoutMetricValues: [RideMetric] {
         let snapshot = workoutStore.presentation.snapshot
         let suppressInstantaneous = suppressInstantaneousMetrics
-        return [
+        let tilePolicy = WorkoutMetricTilePolicy(
+            enabledSensorCapabilities: enabledSensorCapabilities
+        )
+        var metrics = [
             RideMetric(
                 value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
                 label: "elapsed"
             ),
-            RideMetric(
-                value: WorkoutValueFormatter.whole(
-                    suppressInstantaneous
-                        ? nil
-                        : snapshot.cyclingCadence?.value
-                ),
-                unit: "rpm",
-                label: "cadence"
-            ),
-            RideMetric(
-                value: WorkoutValueFormatter.whole(
-                    suppressInstantaneous
-                        ? nil
-                        : snapshot.cyclingPower?.value
-                ),
-                unit: "W",
-                label: "power"
-            ),
+        ]
+
+        if tilePolicy.showsCadence {
+            metrics.append(
+                RideMetric(
+                    value: WorkoutValueFormatter.whole(
+                        suppressInstantaneous
+                            ? nil
+                            : snapshot.cyclingCadence?.value
+                    ),
+                    unit: "rpm",
+                    label: "cadence"
+                )
+            )
+        }
+
+        if tilePolicy.showsPower {
+            metrics.append(
+                RideMetric(
+                    value: WorkoutValueFormatter.whole(
+                        suppressInstantaneous
+                            ? nil
+                            : snapshot.cyclingPower?.value
+                    ),
+                    unit: "W",
+                    label: "power"
+                )
+            )
+        }
+
+        metrics.append(contentsOf: [
             RideMetric(
                 value: WorkoutValueFormatter.speed(
                     suppressInstantaneous
@@ -474,7 +507,8 @@ struct RideMetricsPanel: View {
                 unit: "kcal",
                 label: "energy"
             ),
-        ]
+        ])
+        return metrics
     }
 
     private func workoutMetricGrid(

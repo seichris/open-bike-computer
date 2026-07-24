@@ -18,6 +18,10 @@ struct SettingsView: View {
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
     @ObservedObject private var watchAvailability:
         WorkoutWatchAvailabilityMonitor
+    @ObservedObject private var cyclingSensorStore:
+        CyclingSensorStore
+    @ObservedObject private var cyclingSensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorized: Bool
     let currentLocation: CLLocation?
@@ -29,13 +33,27 @@ struct SettingsView: View {
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
         watchAvailability: WorkoutWatchAvailabilityMonitor,
+        cyclingSensorStore: CyclingSensorStore? = nil,
+        cyclingSensorDetectionCoordinator:
+            CyclingSensorDetectionCoordinator? = nil,
         onStartTestNavigation: @escaping (String) -> Void
     ) {
+        let cyclingSensorStore =
+            cyclingSensorStore ?? CyclingSensorStore()
         self.locationAuthorized = locationAuthorized
         self.currentLocation = currentLocation
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
         self.watchAvailability = watchAvailability
+        _cyclingSensorStore = ObservedObject(
+            wrappedValue: cyclingSensorStore
+        )
+        _cyclingSensorDetectionCoordinator = ObservedObject(
+            wrappedValue: cyclingSensorDetectionCoordinator
+                ?? CyclingSensorDetectionCoordinator(
+                    sensorStore: cyclingSensorStore
+                )
+        )
         self.onStartTestNavigation = onStartTestNavigation
     }
     
@@ -73,7 +91,11 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
-                        BikeComputersSettingsView()
+                        BikeComputersSettingsView(
+                            sensorStore: cyclingSensorStore,
+                            sensorDetectionCoordinator:
+                                cyclingSensorDetectionCoordinator
+                        )
                     } label: {
                         Label(
                             BikeComputersMenuPolicy.title(
@@ -100,6 +122,9 @@ struct SettingsView: View {
                             offlineMapManager: offlineMapManager,
                             firmwareUpdateManager: firmwareUpdateManager,
                             watchAvailability: watchAvailability,
+                            cyclingSensorStore: cyclingSensorStore,
+                            cyclingSensorDetectionCoordinator:
+                                cyclingSensorDetectionCoordinator,
                             currentLocation: currentLocation,
                             onStartTestNavigation: { destination in
                                 onStartTestNavigation(destination)
@@ -1257,6 +1282,9 @@ private struct DeveloperSettingsView: View {
     @ObservedObject var offlineMapManager: OfflineMapManager
     @ObservedObject var firmwareUpdateManager: FirmwareUpdateManager
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @ObservedObject var cyclingSensorStore: CyclingSensorStore
+    @ObservedObject var cyclingSensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     let currentLocation: CLLocation?
     let onStartTestNavigation: (String) -> Void
 
@@ -1340,7 +1368,11 @@ private struct DeveloperSettingsView: View {
                 }
 
                 NavigationLink {
-                    BikeComputersSettingsView()
+                    BikeComputersSettingsView(
+                        sensorStore: cyclingSensorStore,
+                        sensorDetectionCoordinator:
+                            cyclingSensorDetectionCoordinator
+                    )
                 } label: {
                     Label("Manage Bike Computers", systemImage: "bicycle")
                 }

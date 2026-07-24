@@ -2,12 +2,30 @@ import SwiftUI
 
 struct BikeComputersSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject private var sensorStore: CyclingSensorStore
+    @ObservedObject private var sensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     @State private var selectedCandidate: DiscoveredBikeComputerDevice?
     @State private var presentedPairingCompletionGeneration: UInt64?
     @State private var ownsDiscoveryLifecycle = false
 
+    init(
+        sensorStore: CyclingSensorStore,
+        sensorDetectionCoordinator: CyclingSensorDetectionCoordinator
+    ) {
+        _sensorStore = ObservedObject(wrappedValue: sensorStore)
+        _sensorDetectionCoordinator = ObservedObject(
+            wrappedValue: sensorDetectionCoordinator
+        )
+    }
+
     private var menuTitle: String {
-        BikeComputersMenuPolicy.title(
+        if sensorDetectionCoordinator.isLooking
+            || !sensorStore.profiles.isEmpty
+            || !sensorDetectionCoordinator.candidates.isEmpty {
+            return "My Bike Computer"
+        }
+        return BikeComputersMenuPolicy.title(
             knownDeviceCount: bleManager.knownDevices.count
         )
     }
@@ -33,9 +51,18 @@ struct BikeComputersSettingsView: View {
                 }
             } header: {
                 if !bleManager.knownDevices.isEmpty {
-                    Text(menuTitle)
+                    Text(
+                        bleManager.knownDevices.count == 1
+                            ? "My Bike Computer"
+                            : "My Bike Computers"
+                    )
                 }
             }
+
+            CyclingSensorsSettingsSections(
+                sensorStore: sensorStore,
+                detectionCoordinator: sensorDetectionCoordinator
+            )
 
             if bleManager.isDiscoveringDevices ||
                 !bleManager.discoveredDevices.isEmpty {
@@ -109,9 +136,7 @@ struct BikeComputersSettingsView: View {
                 .environmentObject(bleManager)
         }
         .onAppear {
-            if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
-                knownDeviceCount: bleManager.knownDevices.count
-            ) {
+            if shouldStartBikeComputerDiscovery {
                 beginDiscovery()
             } else if bleManager.isDiscoveringDevices {
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
@@ -126,7 +151,7 @@ struct BikeComputersSettingsView: View {
         .onChange(of: bleManager.knownDevices.count) { count in
             if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
                 knownDeviceCount: count
-            ) {
+            ), !sensorDetectionCoordinator.isLooking {
                 if !ownsDiscoveryLifecycle {
                     beginDiscovery()
                 }
@@ -135,12 +160,35 @@ struct BikeComputersSettingsView: View {
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
         }
+        .onChange(of: sensorDetectionCoordinator.isLooking) {
+            isLooking in
+            if isLooking {
+                ownsDiscoveryLifecycle = false
+                if bleManager.isDiscoveringDevices {
+                    bleManager.cancelDeviceDiscovery(
+                        resumeAutoReconnect: true
+                    )
+                }
+            } else if shouldStartBikeComputerDiscovery,
+                      !ownsDiscoveryLifecycle {
+                beginDiscovery()
+            }
+        }
         .onDisappear {
             if ownsDiscoveryLifecycle || bleManager.isDiscoveringDevices {
                 ownsDiscoveryLifecycle = false
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
+            sensorDetectionCoordinator.stopLooking()
         }
+    }
+
+    private var shouldStartBikeComputerDiscovery: Bool {
+        BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+            knownDeviceCount: bleManager.knownDevices.count
+        )
+            && !sensorDetectionCoordinator.isLooking
+            && sensorDetectionCoordinator.candidates.isEmpty
     }
 
     private func beginDiscovery() {
