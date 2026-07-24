@@ -46,7 +46,7 @@ IOS_SUPPORT="${MACOS_SDK}/System/iOSSupport"
 xcrun swiftc \
   -D HOST_TESTING \
   -parse-as-library \
-  -target "$(uname -m)-apple-ios15.0-macabi" \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
   -sdk "${MACOS_SDK}" \
   -F "${IOS_SUPPORT}/System/Library/Frameworks" \
   -I "${IOS_SUPPORT}/usr/lib/swift" \
@@ -65,7 +65,7 @@ PREVIEW_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-saved-map-preview-tests"
 xcrun swiftc \
   -D HOST_TESTING \
   -parse-as-library \
-  -target "$(uname -m)-apple-ios15.0-macabi" \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
   -sdk "${MACOS_SDK}" \
   -F "${IOS_SUPPORT}/System/Library/Frameworks" \
   -I "${IOS_SUPPORT}/usr/lib/swift" \

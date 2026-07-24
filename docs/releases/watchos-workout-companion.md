@@ -18,8 +18,8 @@ Watch, iPhone, and compatible Bike Computer hardware.
 - Show current Watch metrics on the ESP32 Ride Stats pages with compatible
   firmware.
 
-The workout companion requires iOS 17 and watchOS 10 or later. Existing iPhone
-navigation remains compatible with iOS 15 and later.
+The workout companion requires iOS 17 and watchOS 10 or later. iPhone
+navigation requires iOS 16.4 or later.
 
 ## App Review notes
 

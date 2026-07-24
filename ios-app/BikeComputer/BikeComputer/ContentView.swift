@@ -9,6 +9,29 @@ import SwiftUI
 import MapKit
 import UIKit
 
+private enum ContentSheetDestination: String, Identifiable {
+    case settings
+    case bikeComputerSetup
+    case workoutDashboard
+    case rideMetrics
+
+    var id: String { rawValue }
+}
+
+private struct RideMetricsCompactDetent: CustomPresentationDetent {
+    static func height(in context: Context) -> CGFloat? {
+        let preferredHeight: CGFloat =
+            context.dynamicTypeSize.isAccessibilitySize ? 320 : 236
+        return min(preferredHeight, context.maxDetentValue * 0.72)
+    }
+}
+
+private extension PresentationDetent {
+    static var rideMetricsCompact: PresentationDetent {
+        .custom(RideMetricsCompactDetent.self)
+    }
+}
+
 struct ContentView: View {
     
     // MARK: - State
@@ -22,9 +45,8 @@ struct ContentView: View {
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
-    @State private var showingSettings = false
-    @State private var showingBikeComputerSetup = false
-    @State private var showingWorkoutDashboard = false
+    @State private var presentedSheet: ContentSheetDestination?
+    @State private var rideMetricsDetent = PresentationDetent.rideMetricsCompact
     @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
     @State private var observedWorkoutSegmentIndex: UInt32?
     @State private var isSearchPanelExpanded = false
@@ -94,7 +116,9 @@ struct ContentView: View {
                             store: workoutStore,
                             watchAvailability: watchAvailability,
                             onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
-                            onOpen: { showingWorkoutDashboard = true }
+                            onOpen: {
+                                presentedSheet = .workoutDashboard
+                            }
                         )
                         .padding(.horizontal, 14)
                         .padding(.top, 8)
@@ -130,7 +154,9 @@ struct ContentView: View {
                         isLocationAuthorized: coordinator.isLocationAuthorized,
                         onRequestLocation: advancePastLocationAndRequestAccess,
                         onSkipLocation: advancePastLocation,
-                        onConnectDevice: { showingBikeComputerSetup = true },
+                        onConnectDevice: {
+                            presentedSheet = .bikeComputerSetup
+                        },
                         onCheckDeviceMaps: {
                             _ = coordinator.bleManager.requestMapTransferStatus()
                             _ = coordinator.bleManager.requestDeviceTransferStatus()
@@ -143,7 +169,7 @@ struct ContentView: View {
                 }
 
                 if let workoutSegmentToast,
-                   !showingWorkoutDashboard {
+                   presentedSheet != .workoutDashboard {
                     VStack {
                         workoutSegmentToastView(workoutSegmentToast)
                             .padding(.horizontal, 14)
@@ -159,49 +185,11 @@ struct ContentView: View {
             } message: {
                 Text(coordinator.alert.message)
             }
-            .sheet(isPresented: $showingSettings) {
-                SettingsView(
-                    locationAuthorized: coordinator.isLocationAuthorized,
-                    currentLocation: coordinator.currentLocation,
-                    offlineMapManager: offlineMapManager,
-                    firmwareUpdateManager: coordinator.firmwareUpdateManager,
-                    watchAvailability: watchAvailability,
-                    onStartTestNavigation: { destination in
-                        coordinator.startNavigation(
-                            from: .currentLocation,
-                            to: .query(destination),
-                            transportType: RouteTransportTypes.cycling,
-                            isTestMode: true
-                        )
-                    }
-                )
-                    .environmentObject(coordinator.bleManager)
-            }
-            .sheet(isPresented: $showingBikeComputerSetup) {
-                NavigationView {
-                    BikeComputersSettingsView()
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Close") {
-                                    showingBikeComputerSetup = false
-                                }
-                            }
-                        }
-                }
-                .environmentObject(coordinator.bleManager)
-            }
-            .sheet(isPresented: $showingWorkoutDashboard) {
-                WorkoutDashboardView(
-                    store: workoutStore,
-                    watchAvailability: watchAvailability,
-                    onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
-                    onPause: workoutMirrorManager.pause,
-                    onResume: workoutMirrorManager.resume,
-                    onMarkSegment: workoutMirrorManager.markSegment,
-                    onEndAndSave: workoutMirrorManager.endAndSave,
-                    onDiscard: workoutMirrorManager.discard,
-                    onDone: workoutMirrorManager.resetTerminalPresentation
-                )
+            .sheet(
+                item: $presentedSheet,
+                onDismiss: restoreRideMetricsSheetIfNeeded
+            ) { destination in
+                presentedSheetContent(for: destination)
             }
         }
         .onAppear {
@@ -214,6 +202,7 @@ struct ContentView: View {
             workoutMirrorManager.refreshFreshness()
             observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            synchronizeRideMetricsSheet()
         }
         .onChange(of: scenePhase) { newValue in
             coordinator.setViewingMap(newValue == .active)
@@ -225,6 +214,7 @@ struct ContentView: View {
         }
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
+            synchronizeRideMetricsSheet()
         }
         .onChange(of: workoutStore.shouldMaintainWorkoutServices) { _ in
             updateIdleTimer()
@@ -237,7 +227,7 @@ struct ContentView: View {
             }
             observedWorkoutSegmentIndex = index
             guard scenePhase == .active,
-                  !showingWorkoutDashboard,
+                  presentedSheet != .workoutDashboard,
                   workoutStore.presentation.isWorkoutActive,
                   let segment = currentWorkoutSegment else {
                 workoutSegmentToast = nil
@@ -259,12 +249,16 @@ struct ContentView: View {
         .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
             schedulePendingMapInstallResume()
             if coordinator.bleManager.isNavigationReady {
-                showingBikeComputerSetup = false
+                if presentedSheet == .bikeComputerSetup {
+                    presentedSheet = nil
+                }
             }
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
-                showingSettings = false
+                if presentedSheet == .settings {
+                    presentedSheet = nil
+                }
                 offlineMapSelectionWidth = nil
                 offlineMapSelectionHeight = nil
                 offlineMapSelectionCenterY = nil
@@ -300,6 +294,111 @@ struct ContentView: View {
             withAnimation {
                 workoutSegmentToast = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private func presentedSheetContent(
+        for destination: ContentSheetDestination
+    ) -> some View {
+        switch destination {
+        case .settings:
+            SettingsView(
+                locationAuthorized: coordinator.isLocationAuthorized,
+                currentLocation: coordinator.currentLocation,
+                offlineMapManager: offlineMapManager,
+                firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                watchAvailability: watchAvailability,
+                onStartTestNavigation: { destination in
+                    coordinator.startNavigation(
+                        from: .currentLocation,
+                        to: .query(destination),
+                        transportType: RouteTransportTypes.cycling,
+                        isTestMode: true
+                    )
+                }
+            )
+            .environmentObject(coordinator.bleManager)
+            .presentationDetents([.large])
+            .presentationBackgroundInteraction(.disabled)
+
+        case .bikeComputerSetup:
+            NavigationView {
+                BikeComputersSettingsView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") {
+                                presentedSheet = nil
+                            }
+                        }
+                    }
+            }
+            .environmentObject(coordinator.bleManager)
+            .presentationDetents([.large])
+            .presentationBackgroundInteraction(.disabled)
+
+        case .workoutDashboard:
+            WorkoutDashboardView(
+                store: workoutStore,
+                watchAvailability: watchAvailability,
+                onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                onPause: workoutMirrorManager.pause,
+                onResume: workoutMirrorManager.resume,
+                onMarkSegment: workoutMirrorManager.markSegment,
+                onEndAndSave: workoutMirrorManager.endAndSave,
+                onDiscard: workoutMirrorManager.discard,
+                onDone: workoutMirrorManager.resetTerminalPresentation
+            )
+            .presentationDetents([.large])
+            .presentationBackgroundInteraction(.disabled)
+
+        case .rideMetrics:
+            rideMetricsPanel(
+                isCompactHeight: false,
+                isSheetExpanded: rideMetricsDetent == .large,
+                onToggleExpansion: toggleRideMetricsDetent
+            )
+            .presentationDetents(
+                [.rideMetricsCompact, .large],
+                selection: $rideMetricsDetent
+            )
+            .presentationDragIndicator(.visible)
+            .presentationBackground(.regularMaterial)
+            .presentationBackgroundInteraction(
+                .enabled(upThrough: .rideMetricsCompact)
+            )
+            .presentationContentInteraction(.resizes)
+            .presentationCornerRadius(32)
+            .interactiveDismissDisabled()
+        }
+    }
+
+    private func synchronizeRideMetricsSheet() {
+        if coordinator.isNavigating {
+            guard presentedSheet == nil else { return }
+            rideMetricsDetent = .rideMetricsCompact
+            presentedSheet = .rideMetrics
+        } else if presentedSheet == .rideMetrics {
+            presentedSheet = nil
+        }
+    }
+
+    private func restoreRideMetricsSheetIfNeeded() {
+        guard coordinator.isNavigating else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard presentedSheet == nil, coordinator.isNavigating else {
+                return
+            }
+            rideMetricsDetent = .rideMetricsCompact
+            presentedSheet = .rideMetrics
+        }
+    }
+
+    private func toggleRideMetricsDetent() {
+        withAnimation {
+            rideMetricsDetent =
+                rideMetricsDetent == .large ? .rideMetricsCompact : .large
         }
     }
 
@@ -441,7 +540,7 @@ struct ContentView: View {
                 onReconnect: { coordinator.reconnect() }
             )
 
-            Button(action: { showingSettings = true }) {
+            Button(action: { presentedSheet = .settings }) {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
                     .foregroundColor(.primary)
@@ -468,8 +567,9 @@ struct ContentView: View {
                     .padding(.horizontal, 18)
             }
 
-            if (coordinator.isNavigating || workoutStore.presentation.isWorkoutActive),
-               (coordinator.isNavigating || !isSearchPanelExpanded) {
+            if !coordinator.isNavigating,
+               workoutStore.presentation.isWorkoutActive,
+               !isSearchPanelExpanded {
                 rideControlPanel(isCompactHeight: isCompactHeight)
             }
 
@@ -491,7 +591,11 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: coordinator.isNavigating)
     }
 
-    private func rideControlPanel(isCompactHeight: Bool) -> some View {
+    private func rideMetricsPanel(
+        isCompactHeight: Bool,
+        isSheetExpanded: Bool? = nil,
+        onToggleExpansion: (() -> Void)? = nil
+    ) -> some View {
         RideMetricsPanel(
             workoutStore: workoutStore,
             watchAvailability: watchAvailability,
@@ -505,9 +609,15 @@ struct ContentView: View {
             onPauseWorkout: workoutMirrorManager.pause,
             onResumeWorkout: workoutMirrorManager.resume,
             onEndAndSaveWorkout: workoutMirrorManager.endAndSave,
-            onDiscardWorkout: workoutMirrorManager.discard
+            onDiscardWorkout: workoutMirrorManager.discard,
+            isSheetExpanded: isSheetExpanded,
+            onToggleExpansion: onToggleExpansion
         )
-        .padding(.horizontal, 12)
+    }
+
+    private func rideControlPanel(isCompactHeight: Bool) -> some View {
+        rideMetricsPanel(isCompactHeight: isCompactHeight)
+            .padding(.horizontal, 12)
     }
 
     private func routeAndWorkoutStartRow(maxHeight: CGFloat) -> some View {
@@ -587,7 +697,7 @@ struct ContentView: View {
 
     private var offlineMapStatusChip: some View {
         Button {
-            showingSettings = true
+            presentedSheet = .settings
         } label: {
             HStack(spacing: 10) {
                 if offlineMapManager.isBusy {

@@ -4,7 +4,7 @@ Open `BikeComputer/BikeComputer.xcodeproj` in Xcode.
 
 ## Requirements
 
-- Existing navigation remains available from iOS 15.
+- Navigation requires iOS 16.4 or later.
 - The mirrored workout experience requires iOS 17 or later and a paired Apple
   Watch running watchOS 10 or later.
 - Real workout validation requires physical devices. HealthKit workout

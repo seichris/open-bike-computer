@@ -197,8 +197,18 @@ struct RideMetricsPanel: View {
     let onResumeWorkout: () -> Void
     let onEndAndSaveWorkout: () -> Void
     let onDiscardWorkout: () -> Void
+    let isSheetExpanded: Bool?
+    let onToggleExpansion: (() -> Void)?
 
     var body: some View {
+        if let isSheetExpanded {
+            sheetBody(isExpanded: isSheetExpanded)
+        } else {
+            overlayBody
+        }
+    }
+
+    private var overlayBody: some View {
         Group {
             if isCompactHeight && dynamicTypeSize.isAccessibilitySize {
                 ScrollView(.vertical, showsIndicators: true) {
@@ -242,6 +252,105 @@ struct RideMetricsPanel: View {
         .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
     }
 
+    private func sheetBody(isExpanded: Bool) -> some View {
+        VStack(spacing: 0) {
+            sheetHeader(isExpanded: isExpanded)
+
+            if isExpanded {
+                ScrollView(.vertical, showsIndicators: true) {
+                    expandedMetricContent
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                        .padding(.bottom, 24)
+                }
+                .frame(maxHeight: .infinity)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    compactSheetMetricContent
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                .frame(maxHeight: .infinity)
+            }
+
+            Divider()
+
+            controls
+                .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 14 : 20)
+                .padding(.top, 12)
+                .padding(.bottom, 14)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("rideMetricsSheet")
+    }
+
+    private func sheetHeader(isExpanded: Bool) -> some View {
+        Button {
+            onToggleExpansion?()
+        } label: {
+            HStack(spacing: 12) {
+                Text("Ride Stats")
+                    .font(.title3.weight(.semibold))
+                    .foregroundColor(.primary)
+
+                Spacer()
+
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 36, height: 36)
+                    .background(Color(.secondarySystemBackground), in: Circle())
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(onToggleExpansion == nil)
+        .padding(.horizontal, 20)
+        .padding(.top, 6)
+        .accessibilityLabel(isExpanded ? "Collapse ride stats" : "Expand ride stats")
+    }
+
+    @ViewBuilder
+    private var compactSheetMetricContent: some View {
+        if workoutStore.presentation.isWorkoutActive {
+            workoutStatusBanner
+        }
+
+        if isNavigating {
+            navigationMetrics
+        }
+    }
+
+    private var expandedMetricContent: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            if workoutStore.presentation.isWorkoutActive {
+                VStack(alignment: .leading, spacing: 14) {
+                    sheetSectionTitle("Workout", systemImage: "figure.outdoor.cycle")
+                    workoutStatusBanner
+                    workoutMetrics
+                }
+            }
+
+            if isNavigating {
+                VStack(alignment: .leading, spacing: 14) {
+                    sheetSectionTitle("Navigation", systemImage: "location.fill")
+                    navigationMetrics
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sheetSectionTitle(
+        _ title: String,
+        systemImage: String
+    ) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline)
+            .foregroundColor(.secondary)
+            .accessibilityAddTraits(.isHeader)
+    }
+
     @ViewBuilder
     private var metricContent: some View {
         if workoutStore.presentation.isWorkoutActive {
@@ -250,13 +359,17 @@ struct RideMetricsPanel: View {
         }
 
         if isNavigating {
-            HStack(alignment: .center, spacing: 0) {
-                NavigationMetricColumn(value: formattedArrival, label: "arrival")
-                NavigationMetricColumn(value: formattedTime, label: timeUnit)
-                NavigationMetricColumn(value: formattedDistance, label: distanceUnit)
-            }
-            .padding(.horizontal, 12)
+            navigationMetrics
         }
+    }
+
+    private var navigationMetrics: some View {
+        HStack(alignment: .center, spacing: 0) {
+            NavigationMetricColumn(value: formattedArrival, label: "arrival")
+            NavigationMetricColumn(value: formattedTime, label: timeUnit)
+            NavigationMetricColumn(value: formattedDistance, label: distanceUnit)
+        }
+        .padding(.horizontal, 12)
     }
 
     private var workoutMetrics: some View {
@@ -264,6 +377,10 @@ struct RideMetricsPanel: View {
         let suppressInstantaneous = suppressInstantaneousMetrics
         return VStack(spacing: 12) {
             HStack(alignment: .center, spacing: 0) {
+                RideMetricColumn(
+                    value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
+                    label: "elapsed"
+                )
                 RideMetricColumn(
                     value: valueWithUnit(
                         WorkoutValueFormatter.whole(

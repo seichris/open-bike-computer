@@ -97,7 +97,7 @@ This plan was prepared from origin/main at 74a1d32b.
 
 1. Watch owns the primary workout session and the saved HKWorkout.
 2. iPhone receives a mirrored session and versioned full-state snapshots.
-3. The app keeps supporting iOS 15 for navigation, but Watch workout features
+3. The app supports iOS 16.4 or later for navigation, but Watch workout features
    are available only on iOS 17 or later with watchOS 10 or later.
 4. Watch and iPhone share one Codable workout contract.
 5. ESP32 workout data uses a dedicated characteristic and two compact,
@@ -118,9 +118,9 @@ ios-app/BikeComputer/BikeComputer.xcodeproj.
 - Watch app bundle identifier: use LetItRide.BikeComputer.watchkitapp unless
   App Store Connect requires an already-reserved identifier.
 - Watch deployment target: watchOS 10.0.
-- Keep the iOS deployment target at 15.0.
+- Set the iOS deployment target to 16.4.
 - Wrap mirrored-workout integration in iOS 17 availability checks so the
-  existing navigation app still launches and builds on iOS 15 and 16.
+  existing navigation app still launches and builds on iOS 16.4.
 - The Watch target is a companion target, not a standalone Watch-only product.
 - Keep version and build numbers aligned across the containing iOS app and
   Watch app.
@@ -848,7 +848,7 @@ Presentation rules:
 
 Exit criteria:
 
-- iOS 15 target still builds without entering workout code.
+- iOS 16.4 target still builds without entering workout code.
 - Watch target builds and installs.
 - Shared-contract tests pass on both platforms.
 
