@@ -40,6 +40,18 @@ struct ViewModel {
   workout_telemetry::OptionalMetric<uint32_t> routeRemainingMeters{};
 };
 
+enum class BottomMetric : uint8_t {
+  Altitude,
+  RouteRemaining,
+  Power,
+  Cadence,
+};
+
+struct BottomMetricSelection {
+  BottomMetric left = BottomMetric::Altitude;
+  BottomMetric right = BottomMetric::RouteRemaining;
+};
+
 inline ViewModel makeViewModel(
     const workout_telemetry::Snapshot &workout,
     const LegacyRideTelemetry &legacy) {
@@ -190,9 +202,60 @@ inline void formatCadence(const ViewModel &model, char *buffer,
   formatTenths(model.cyclingCadenceTenthsRpm.value, buffer, size);
 }
 
+inline BottomMetricSelection selectBottomMetrics(const ViewModel &model) {
+  const bool hasPower = model.cyclingPowerWatts.available;
+  const bool hasCadence = model.cyclingCadenceTenthsRpm.available;
+  if (hasPower && hasCadence) {
+    return {BottomMetric::Power, BottomMetric::Cadence};
+  }
+  if (hasPower) {
+    return {BottomMetric::Power, BottomMetric::RouteRemaining};
+  }
+  if (hasCadence) {
+    return {BottomMetric::Cadence, BottomMetric::RouteRemaining};
+  }
+  return {BottomMetric::Altitude, BottomMetric::RouteRemaining};
+}
+
+inline const char *bottomMetricTitle(BottomMetric metric) {
+  switch (metric) {
+  case BottomMetric::Altitude:
+    return "Altitude m";
+  case BottomMetric::RouteRemaining:
+    return "Route left";
+  case BottomMetric::Power:
+    return "Power W";
+  case BottomMetric::Cadence:
+    return "Cadence rpm";
+  }
+  return "--";
+}
+
+inline void formatBottomMetric(BottomMetric metric, const ViewModel &model,
+                               char *buffer, std::size_t size) {
+  switch (metric) {
+  case BottomMetric::Altitude:
+    formatInteger(model.altitudeMeters, buffer, size);
+    return;
+  case BottomMetric::RouteRemaining:
+    formatDistance(model.routeRemainingMeters, buffer, size);
+    return;
+  case BottomMetric::Power:
+    formatInteger(model.cyclingPowerWatts, buffer, size);
+    return;
+  case BottomMetric::Cadence:
+    formatCadence(model, buffer, size);
+    return;
+  }
+  unavailable(buffer, size);
+}
+
 inline const char *statusLabel(const ViewModel &model) {
   if (!model.usesWorkout) {
     return "LEGACY RIDE";
+  }
+  if (model.stale) {
+    return "LINK LOST";
   }
   switch (model.sessionState) {
   case SessionState::Starting:

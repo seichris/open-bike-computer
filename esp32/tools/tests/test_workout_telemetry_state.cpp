@@ -49,6 +49,16 @@ void assertText(const char *actual, const char *expected) {
   assert(std::strcmp(actual, expected) == 0);
 }
 
+void assertBottomMetrics(
+    const ride_telemetry_presenter::ViewModel &model,
+    ride_telemetry_presenter::BottomMetric expectedLeft,
+    ride_telemetry_presenter::BottomMetric expectedRight) {
+  const auto selection =
+      ride_telemetry_presenter::selectBottomMetrics(model);
+  assert(selection.left == expectedLeft);
+  assert(selection.right == expectedRight);
+}
+
 void assertMetricUnavailableFormatting(
     const ride_telemetry_presenter::ViewModel &model) {
   char value[32];
@@ -233,6 +243,57 @@ int main() {
   ride_telemetry_presenter::formatZone(pausedModel, formatted,
                                        sizeof(formatted));
   assertText(formatted, "Z4/5");
+
+  using ride_telemetry_presenter::BottomMetric;
+  assertBottomMetrics(pausedModel, BottomMetric::Power,
+                      BottomMetric::Cadence);
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::Power, pausedModel, formatted, sizeof(formatted));
+  assertText(formatted, "321");
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::Cadence, pausedModel, formatted, sizeof(formatted));
+  assertText(formatted, "87.6");
+
+  auto zeroSensorModel = pausedModel;
+  zeroSensorModel.cyclingPowerWatts.value = 0;
+  zeroSensorModel.cyclingCadenceTenthsRpm.value = 0;
+  assertBottomMetrics(zeroSensorModel, BottomMetric::Power,
+                      BottomMetric::Cadence);
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::Power, zeroSensorModel, formatted, sizeof(formatted));
+  assertText(formatted, "0");
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::Cadence, zeroSensorModel, formatted, sizeof(formatted));
+  assertText(formatted, "0.0");
+
+  auto noSensorModel = pausedModel;
+  noSensorModel.cyclingPowerWatts.available = false;
+  noSensorModel.cyclingCadenceTenthsRpm.available = false;
+  assertBottomMetrics(noSensorModel, BottomMetric::Altitude,
+                      BottomMetric::RouteRemaining);
+  assertText(ride_telemetry_presenter::bottomMetricTitle(
+                 BottomMetric::Altitude),
+             "Altitude m");
+  assertText(ride_telemetry_presenter::bottomMetricTitle(
+                 BottomMetric::RouteRemaining),
+             "Route left");
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::Altitude, noSensorModel, formatted, sizeof(formatted));
+  assertText(formatted, "-12");
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::RouteRemaining, noSensorModel, formatted,
+      sizeof(formatted));
+  assertText(formatted, "1.5 km");
+
+  auto powerOnlyModel = pausedModel;
+  powerOnlyModel.cyclingCadenceTenthsRpm.available = false;
+  assertBottomMetrics(powerOnlyModel, BottomMetric::Power,
+                      BottomMetric::RouteRemaining);
+
+  auto cadenceOnlyModel = pausedModel;
+  cadenceOnlyModel.cyclingPowerWatts.available = false;
+  assertBottomMetrics(cadenceOnlyModel, BottomMetric::Cadence,
+                      BottomMetric::RouteRemaining);
 
   uint8_t unavailableCore[sizeof(core)]{};
   unavailableCore[0] = 1;
@@ -550,6 +611,7 @@ int main() {
   assertText(formatted, "157");
   assertText(ride_telemetry_presenter::sourceFreshnessLabel(staleModel),
              "WATCH / LINK LOST");
+  assertText(ride_telemetry_presenter::statusLabel(staleModel), "LINK LOST");
 
   uint8_t endedCore[sizeof(core)];
   std::memcpy(endedCore, core, sizeof(core));
