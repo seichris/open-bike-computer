@@ -224,6 +224,11 @@ inline void drawFilledLine(uint16_t *buf, int32_t width, int32_t height,
     return;
 
   lineWidth = std::max<uint8_t>(lineWidth, 1);
+  if (y2 < y1 || (y2 == y1 && x2 < x1)) {
+    std::swap(x1, x2);
+    std::swap(y1, y2);
+  }
+
   const float clipMargin = static_cast<float>(lineWidth) + 2.0f;
   float startX = x1;
   float startY = y1;
@@ -249,8 +254,13 @@ inline void drawFilledLine(uint16_t *buf, int32_t width, int32_t height,
   const float dy = endY - startY;
   const float length = std::sqrt(dx * dx + dy * dy);
   if (length < 0.0001f) {
-    const float radius = (static_cast<float>(lineWidth) - 1.0f) * 0.5f;
-    detail::fillDisc(buf, width, height, stride, startX, startY, radius, color);
+    const bool evenWidth = (lineWidth % 2) == 0;
+    const float centerOffset = evenWidth ? 0.5f : 0.0f;
+    const float radius = evenWidth
+                             ? static_cast<float>(lineWidth) * 0.5f
+                             : (static_cast<float>(lineWidth) - 1.0f) * 0.5f;
+    detail::fillDisc(buf, width, height, stride, startX + centerOffset,
+                     startY + centerOffset, radius, color);
     return;
   }
 
