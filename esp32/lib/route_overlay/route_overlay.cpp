@@ -8,6 +8,7 @@
 
 #include "route_overlay.hpp"
 #include "../ble_navigation/ble_navigation.hpp"
+#include "../utils/src/line_rasterizer.hpp"
 #include "../../utils/src/gpsMath.hpp"
 #include <Arduino.h>
 #include <algorithm>
@@ -185,69 +186,14 @@ int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
   return screenY;
 }
 
-void RouteOverlay::drawLineSegment(uint16_t *buf, int32_t bufW, int32_t bufH,
-                                   uint32_t stride, int16_t x1, int16_t y1,
-                                   int16_t x2, int16_t y2, uint16_t color) {
-  // Bresenham's line algorithm with bounds checking
-  int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-  int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-  int err = dx + dy, e2;
-
-  while (true) {
-    // Bounds check before writing
-    if (x1 >= 0 && x1 < bufW && y1 >= 0 && y1 < bufH) {
-      buf[y1 * stride + x1] = color;
-    }
-
-    if (x1 == x2 && y1 == y2)
-      break;
-
-    e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x1 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y1 += sy;
-    }
-  }
-}
-
 void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
                                  uint32_t stride, int16_t x1, int16_t y1,
                                  int16_t x2, int16_t y2, uint16_t color,
                                  int16_t thickness) {
-  // Calculate line direction
-  float dx = x2 - x1;
-  float dy = y2 - y1;
-  float len = sqrtf(dx * dx + dy * dy);
-
-  if (len < 1.0f) {
-    // Just draw a point
-    if (x1 >= 0 && x1 < bufW && y1 >= 0 && y1 < bufH) {
-      buf[y1 * stride + x1] = color;
-    }
-    return;
-  }
-
-  // Normalize direction
-  dx /= len;
-  dy /= len;
-
-  // Perpendicular direction for thickness
-  float px = -dy;
-  float py = dx;
-
-  // Draw multiple parallel lines for thickness
-  int16_t halfThick = thickness / 2;
-  for (int16_t t = -halfThick; t <= halfThick; t++) {
-    int16_t ox = (int16_t)(px * t);
-    int16_t oy = (int16_t)(py * t);
-
-    drawLineSegment(buf, bufW, bufH, stride, x1 + ox, y1 + oy, x2 + ox, y2 + oy,
-                    color);
-  }
+  const uint8_t lineWidth =
+      static_cast<uint8_t>(std::max<int16_t>(1, thickness));
+  line_rasterizer::drawFilledLine(buf, bufW, bufH, stride, x1, y1, x2, y2,
+                                  color, lineWidth);
 }
 
 void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,

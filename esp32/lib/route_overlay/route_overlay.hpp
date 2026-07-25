@@ -111,12 +111,6 @@ private:
                      int16_t x1, int16_t y1, int16_t x2, int16_t y2,
                      uint16_t color, int16_t thickness);
 
-  /**
-   * @brief Draw a single pixel-width line (Bresenham's algorithm)
-   */
-  void drawLineSegment(uint16_t *buf, int32_t bufW, int32_t bufH,
-                       uint32_t stride, int16_t x1, int16_t y1, int16_t x2,
-                       int16_t y2, uint16_t color);
 };
 
 // Global route overlay instance

@@ -11,6 +11,7 @@
 #include "mapBlockFormat.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
+#include "../../utils/src/line_rasterizer.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
 extern Storage storage;
@@ -1542,7 +1543,7 @@ bool Maps::fillPolygon(const Polygon &p,
 }
 
 /**
- * @brief Draw line directly to canvas buffer (Bresenham's algorithm)
+ * @brief Draw an opaque filled line directly to the canvas buffer
  *
  * @param canvas
  * @param x1
@@ -1560,65 +1561,8 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
   int32_t buf_w = draw_buf->header.w;
   int32_t buf_h = draw_buf->header.h;
   uint32_t stride_pixels = draw_buf->header.stride / 2;
-  const int32_t clipMargin = (int32_t)width + 2;
-  if (!clipLineToRect(x1, y1, x2, y2, -clipMargin, -clipMargin,
-                      buf_w - 1 + clipMargin, buf_h - 1 + clipMargin))
-    return;
-
-  if (width < 2) {
-    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1, y1, x2, y2, color);
-    return;
-  }
-
-  float dx = x2 - x1;
-  float dy = y2 - y1;
-  float len = sqrtf(dx * dx + dy * dy);
-  if (len < 1.0f) {
-    if (x1 >= 0 && x1 < buf_w && y1 >= 0 && y1 < buf_h) {
-      buf[y1 * stride_pixels + x1] = color;
-    }
-    return;
-  }
-
-  dx /= len;
-  dy /= len;
-  float px = -dy;
-  float py = dx;
-
-  int16_t start = -((int16_t)width - 1) / 2;
-  int16_t end = (int16_t)width / 2;
-  for (int16_t t = start; t <= end; t++) {
-    int16_t ox = (int16_t)roundf(px * t);
-    int16_t oy = (int16_t)roundf(py * t);
-    drawLineSegment(buf, buf_w, buf_h, stride_pixels, x1 + ox, y1 + oy,
-                    x2 + ox, y2 + oy, color);
-  }
-}
-
-void Maps::drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
-                           uint32_t stride_pixels, int16_t x1, int16_t y1,
-                           int16_t x2, int16_t y2, uint16_t color) {
-  // Bresenham's Line Algorithm
-  int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-  int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-  int err = dx + dy, e2;
-
-  while (true) {
-    if (x1 >= 0 && x1 < buf_w && y1 >= 0 && y1 < buf_h) {
-      buf[y1 * stride_pixels + x1] = color;
-    }
-    if (x1 == x2 && y1 == y2)
-      break;
-    e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x1 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y1 += sy;
-    }
-  }
+  line_rasterizer::drawFilledLine(buf, buf_w, buf_h, stride_pixels, x1, y1,
+                                  x2, y2, color, width);
 }
 
 /**
