@@ -224,6 +224,12 @@ jobs:
             tools/tests/test_map_profile_protocol.cpp \
             -o /tmp/test_map_profile_protocol
           /tmp/test_map_profile_protocol
+      - name: Filled line rasterizer host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra \
+            tools/tests/test_line_rasterizer.cpp \
+            -o /tmp/test_line_rasterizer
+          /tmp/test_line_rasterizer
       - name: Device screen protocol host tests
         run: |
           g++ -std=c++17 \

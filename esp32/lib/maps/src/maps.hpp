@@ -127,9 +127,6 @@ private:
   bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
-  void drawLineSegment(uint16_t *buf, int32_t buf_w, int32_t buf_h,
-                       uint32_t stride_pixels, int16_t x1, int16_t y1,
-                       int16_t x2, int16_t y2, uint16_t color);
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation);
