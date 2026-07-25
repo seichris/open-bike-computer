@@ -762,42 +762,34 @@ state when it is active/current and legacy GPS ride telemetry otherwise.
 
 ### Ride Stats presentation
 
-Keep the existing Ride Stats screen, but make it capable of showing every
-received workout metric using two pages:
-
-Page 1, Live:
+Keep Ride Stats as one glanceable page:
 
 - hero speed;
 - current heart rate and zone;
 - distance;
 - elapsed time;
-- power;
-- cadence.
+- two adaptive bottom-row metrics.
 
-Page 2, Summary/navigation:
-
-- average heart rate;
-- active energy;
-- altitude;
-- route remaining from the existing navigation state;
-- source/freshness indicator;
-- paused, ended, or failed status.
+The bottom row shows altitude and route remaining when neither optional sensor
+metric is available. One available power or cadence metric replaces altitude.
+When both are available, the row shows power and cadence. Average heart rate,
+active energy, and source/freshness are not shown on the device.
 
 Interaction:
 
 - short tap keeps the existing optional cycle-to-next-screen behavior;
-- long press while on Ride Stats toggles between the two workout pages;
 - a hardware screen-cycle action remains unchanged;
-- page selection is RAM-only and does not add a persisted setting in v1.
+- Ride Stats has no subpages or page-selection state.
 
 Presentation rules:
 
-- show -- for unavailable metrics;
 - never render absent power/cadence/heart rate as zero;
+- replace unavailable power/cadence fields with altitude and route remaining
+  according to the adaptive bottom-row rules;
 - show PAUSED without clearing the last valid numbers;
 - show stale/link-lost state after 10 seconds without current core data;
 - do not interpret a stale Watch speed as current;
-- show the final summary after ended until cleared;
+- retain final values after ended until cleared;
 - retain readable type sizes on both Waveshare 1.75 and 2.06 builds.
 
 ## Privacy and security
@@ -829,7 +821,7 @@ Presentation rules:
 | Mirroring reconnects | Replace session reference and request a full snapshot. |
 | ESP32 disconnects | App continues; resend latest core and extended frames after auth. |
 | iPhone becomes suspended | Show snapshot age after resume; never replay old metrics as live. |
-| Power/cadence sensor absent | Show --; remaining metrics continue. |
+| Power/cadence sensor absent | Show altitude and route remaining in their places; remaining metrics continue. |
 | Watch app crashes | Recover the active workout session and reattach delegates. |
 | Firmware lacks bit 7 | Keep current GPS ride telemetry; hide unsupported device-live status. |
 | Malformed BLE frame | Reject without altering the last valid state. |
@@ -911,7 +903,7 @@ Exit criteria:
 1. Implement RAM-only WorkoutTelemetryState.
 2. Parse authenticated native/fallback frames.
 3. Keep workout and GPS telemetry state independent.
-4. Add two-page Ride Stats presentation and staleness handling.
+4. Add single-page adaptive Ride Stats presentation and staleness handling.
 5. Add host/unit coverage for parser and formatter behavior.
 6. Build both Waveshare environments.
 

@@ -112,7 +112,6 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
 }
 
 static void tapCycleScreenEvent(lv_event_t *event);
-static void rideStatsInteractionEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
 static void updateMapGuidanceOverlay();
 static void refreshMapGuidanceOverlayAsync(void *userData);
@@ -1388,29 +1387,6 @@ static void tapCycleScreenEvent(lv_event_t *event) {
   showNextMainScreen();
 }
 
-static void rideStatsInteractionEvent(lv_event_t *event) {
-  const lv_event_code_t code = lv_event_get_code(event);
-  ride_telemetry_layout::InteractionEvent interaction =
-      ride_telemetry_layout::InteractionEvent::Other;
-  if (code == LV_EVENT_PRESSED) {
-    interaction = ride_telemetry_layout::InteractionEvent::Pressed;
-  } else if (code == LV_EVENT_LONG_PRESSED) {
-    interaction = ride_telemetry_layout::InteractionEvent::LongPressed;
-  } else if (code == LV_EVENT_CLICKED) {
-    interaction = ride_telemetry_layout::InteractionEvent::Clicked;
-  }
-
-  const ride_telemetry_layout::InteractionAction action =
-      handleRideTelemetryInteraction(interaction);
-  if (action == ride_telemetry_layout::InteractionAction::TogglePage) {
-    log_i("UI: toggled Ride Stats page");
-    return;
-  }
-  if (action == ride_telemetry_layout::InteractionAction::CycleScreen) {
-    tapCycleScreenEvent(event);
-  }
-}
-
 static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
   if (mapGuidancePickerExpanded && !hasCurrentNavigationData()) {
     return;
@@ -1467,7 +1443,7 @@ void createMainScr() {
   rideTelemetryScr(rideStatsTile);
   lv_obj_add_event_cb(rideStatsTile, updateRideTelemetryEvent,
                       LV_EVENT_VALUE_CHANGED, NULL);
-  lv_obj_add_event_cb(rideStatsTile, rideStatsInteractionEvent, LV_EVENT_ALL,
+  lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 

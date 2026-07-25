@@ -420,12 +420,13 @@ continue to populate the legacy ride fields and cannot clear or overwrite Watch
 workout state.
 
 Ride Stats uses the Watch workout state whenever a non-idle core frame has been
-accepted, otherwise it displays the legacy GPS ride fields. The Live page shows
-speed, current heart rate and zone, distance, elapsed time, power, and cadence.
-The Summary page shows average heart rate, active energy, altitude, route
-remaining, and source/freshness. Unavailable workout values display as `--`.
-A long press toggles pages; the existing short-tap and hardware screen cycling
-remain unchanged.
+accepted, otherwise it displays the legacy GPS ride fields. Its single page
+shows speed, current heart rate and zone, distance, and elapsed time. The bottom
+row shows altitude and route remaining when neither power nor cadence is
+available. One available power or cadence metric replaces altitude; when both
+are available, power and cadence replace altitude and route remaining.
+Unavailable non-adaptive values display as `--`. Existing short-tap and hardware
+screen cycling remain unchanged.
 
 ## Map Settings (`2A73`)
 
