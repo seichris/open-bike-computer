@@ -2,40 +2,42 @@ import SwiftUI
 
 struct BikeComputersSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject private var sensorStore: CyclingSensorStore
+    @ObservedObject private var sensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     @State private var selectedCandidate: DiscoveredBikeComputerDevice?
     @State private var presentedPairingCompletionGeneration: UInt64?
     @State private var ownsDiscoveryLifecycle = false
+    private let focusSensorsOnAppear: Bool
+    private let startsBikeComputerDiscoveryOnAppear: Bool
+
+    init(
+        sensorStore: CyclingSensorStore,
+        sensorDetectionCoordinator: CyclingSensorDetectionCoordinator,
+        focusSensorsOnAppear: Bool = false,
+        startsBikeComputerDiscoveryOnAppear: Bool = false
+    ) {
+        _sensorStore = ObservedObject(wrappedValue: sensorStore)
+        _sensorDetectionCoordinator = ObservedObject(
+            wrappedValue: sensorDetectionCoordinator
+        )
+        self.focusSensorsOnAppear = focusSensorsOnAppear
+        self.startsBikeComputerDiscoveryOnAppear =
+            startsBikeComputerDiscoveryOnAppear
+    }
 
     private var menuTitle: String {
-        BikeComputersMenuPolicy.title(
-            knownDeviceCount: bleManager.knownDevices.count
+        BikeComputerSettingsPresentationPolicy.title(
+            knownDeviceCount: bleManager.knownDevices.count,
+            isExplicitBikeComputerSetup:
+                startsBikeComputerDiscoveryOnAppear
         )
     }
 
     var body: some View {
         Form {
-            Section {
-                if bleManager.knownDevices.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("No Bike Computers", systemImage: "bicycle")
-                        Text("Add a nearby device and choose a name for it.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(bleManager.knownDevices) { device in
-                        NavigationLink {
-                            BikeComputerDetailView(deviceID: device.deviceID)
-                        } label: {
-                            KnownBikeComputerRow(device: device)
-                        }
-                    }
-                }
-            } header: {
-                if !bleManager.knownDevices.isEmpty {
-                    Text(menuTitle)
-                }
-            }
+            bikeComputerSection
+            sensorProfilesSection
 
             if bleManager.isDiscoveringDevices ||
                 !bleManager.discoveredDevices.isEmpty {
@@ -66,9 +68,8 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            if BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
-                knownDeviceCount: bleManager.knownDevices.count
-            ), !bleManager.isDiscoveringDevices {
+            if shouldShowConnectBikeComputerAction,
+               !bleManager.isDiscoveringDevices {
                 Section {
                     Button {
                         beginDiscovery()
@@ -81,6 +82,8 @@ struct BikeComputersSettingsView: View {
                     .disabled(bleManager.deviceOperationDeviceID != nil)
                 }
             }
+
+            sensorConnectionSection
 
             if let error = bleManager.pairingError {
                 Section {
@@ -109,9 +112,7 @@ struct BikeComputersSettingsView: View {
                 .environmentObject(bleManager)
         }
         .onAppear {
-            if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
-                knownDeviceCount: bleManager.knownDevices.count
-            ) {
+            if shouldStartBikeComputerDiscovery {
                 beginDiscovery()
             } else if bleManager.isDiscoveringDevices {
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
@@ -124,9 +125,7 @@ struct BikeComputersSettingsView: View {
             }
         }
         .onChange(of: bleManager.knownDevices.count) { count in
-            if BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
-                knownDeviceCount: count
-            ) {
+            if shouldStartBikeComputerDiscovery {
                 if !ownsDiscoveryLifecycle {
                     beginDiscovery()
                 }
@@ -135,12 +134,91 @@ struct BikeComputersSettingsView: View {
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
         }
+        .onChange(of: sensorDetectionCoordinator.isLooking) {
+            isLooking in
+            if isLooking {
+                ownsDiscoveryLifecycle = false
+                if bleManager.isDiscoveringDevices {
+                    bleManager.cancelDeviceDiscovery(
+                        resumeAutoReconnect: true
+                    )
+                }
+            } else if shouldStartBikeComputerDiscovery,
+                      !ownsDiscoveryLifecycle {
+                beginDiscovery()
+            }
+        }
         .onDisappear {
             if ownsDiscoveryLifecycle || bleManager.isDiscoveringDevices {
                 ownsDiscoveryLifecycle = false
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
+            sensorDetectionCoordinator.stopLooking()
         }
+    }
+
+    @ViewBuilder
+    private var bikeComputerSection: some View {
+        Section {
+            if bleManager.knownDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("No Bike Computers", systemImage: "bicycle")
+                    Text("Add a nearby device and choose a name for it.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(bleManager.knownDevices) { device in
+                    NavigationLink {
+                        BikeComputerDetailView(deviceID: device.deviceID)
+                    } label: {
+                        KnownBikeComputerRow(device: device)
+                    }
+                }
+            }
+        } header: {
+            if !bleManager.knownDevices.isEmpty {
+                Text(
+                    bleManager.knownDevices.count == 1
+                        ? "My Bike Computer"
+                        : "My Bike Computers"
+                )
+            }
+        }
+    }
+
+    private var sensorProfilesSection: some View {
+        CyclingSensorProfilesSection(
+            sensorStore: sensorStore,
+            detectionCoordinator: sensorDetectionCoordinator,
+            focusOnAppear: focusSensorsOnAppear
+        )
+    }
+
+    private var sensorConnectionSection: some View {
+        CyclingSensorConnectionSection(
+            sensorStore: sensorStore,
+            detectionCoordinator: sensorDetectionCoordinator
+        )
+    }
+
+    private var shouldShowConnectBikeComputerAction: Bool {
+        BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
+            knownDeviceCount: bleManager.knownDevices.count,
+            isExplicitBikeComputerSetup:
+                startsBikeComputerDiscoveryOnAppear
+        )
+    }
+
+    private var shouldStartBikeComputerDiscovery: Bool {
+        BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
+            knownDeviceCount: bleManager.knownDevices.count,
+            isExplicitBikeComputerSetup:
+                startsBikeComputerDiscoveryOnAppear,
+            isSensorLooking: sensorDetectionCoordinator.isLooking,
+            hasSensorCandidates:
+                !sensorDetectionCoordinator.candidates.isEmpty
+        )
     }
 
     private func beginDiscovery() {

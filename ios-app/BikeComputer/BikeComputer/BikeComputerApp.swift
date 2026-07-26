@@ -18,6 +18,9 @@ struct BikeComputerApp: App {
         WindowGroup {
             ContentView(
                 workoutMirrorManager: appDelegate.workoutMirrorManager,
+                cyclingSensorStore: appDelegate.cyclingSensorStore,
+                cyclingSensorDetectionCoordinator:
+                    appDelegate.cyclingSensorDetectionCoordinator,
                 coordinator: appDelegate.coordinator,
                 liveActivityDiagnostics:
                     appDelegate.workoutLiveActivityDiagnostics,
@@ -33,7 +36,10 @@ struct BikeComputerApp: App {
 
 @MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
-    let workoutMirrorManager = WorkoutMirrorManager()
+    let workoutMirrorManager: WorkoutMirrorManager
+    let cyclingSensorStore: CyclingSensorStore
+    let cyclingSensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     let locationManager = CurrentLocationManager()
     let workoutLiveActivityDiagnostics =
         WorkoutLiveActivityDiagnosticStore()
@@ -47,7 +53,20 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     )
 
     override init() {
+        let workoutMirrorManager = WorkoutMirrorManager()
+        let cyclingSensorStore = CyclingSensorStore()
+        let cyclingSensorDetectionCoordinator =
+            CyclingSensorDetectionCoordinator(
+                sensorStore: cyclingSensorStore
+            )
+        self.workoutMirrorManager = workoutMirrorManager
+        self.cyclingSensorStore = cyclingSensorStore
+        self.cyclingSensorDetectionCoordinator =
+            cyclingSensorDetectionCoordinator
         super.init()
+        cyclingSensorDetectionCoordinator.bind(
+            to: workoutMirrorManager.store
+        )
         locationManager.bindWorkoutMetricsStore(
             workoutMirrorManager.store
         )

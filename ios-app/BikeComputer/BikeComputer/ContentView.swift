@@ -12,6 +12,7 @@ import UIKit
 private enum ContentSheetDestination: String, Identifiable {
     case settings
     case bikeComputerSetup
+    case sensorSettings
     case workoutDashboard
     case rideMetrics
 
@@ -42,6 +43,10 @@ struct ContentView: View {
     @ObservedObject private var workoutStore: WorkoutMetricsStore
     @ObservedObject private var liveActivityDiagnostics:
         WorkoutLiveActivityDiagnosticStore
+    @ObservedObject private var cyclingSensorStore:
+        CyclingSensorStore
+    @ObservedObject private var cyclingSensorDetectionCoordinator:
+        CyclingSensorDetectionCoordinator
     private let workoutMirrorManager: WorkoutMirrorManager
     private let onApplicationActiveChange: (Bool) -> Void
     @Environment(\.scenePhase) private var scenePhase
@@ -49,6 +54,8 @@ struct ContentView: View {
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
     @State private var presentedSheet: ContentSheetDestination?
+    @State private var queuedSheetAfterDismiss:
+        ContentSheetDestination?
     @State private var rideMetricsDetent = PresentationDetent.rideMetricsCompact
     @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
     @State private var observedWorkoutSegmentIndex: UInt32?
@@ -70,6 +77,9 @@ struct ContentView: View {
     @MainActor
     init(
         workoutMirrorManager: WorkoutMirrorManager,
+        cyclingSensorStore: CyclingSensorStore? = nil,
+        cyclingSensorDetectionCoordinator:
+            CyclingSensorDetectionCoordinator? = nil,
         coordinator: BikeComputerCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
         liveActivityDiagnostics:
@@ -81,12 +91,28 @@ struct ContentView: View {
             ?? WorkoutWatchAvailabilityMonitor()
         let liveActivityDiagnostics = liveActivityDiagnostics
             ?? WorkoutLiveActivityDiagnosticStore()
+        let cyclingSensorStore =
+            cyclingSensorStore ?? CyclingSensorStore()
+        let cyclingSensorDetectionCoordinator =
+            cyclingSensorDetectionCoordinator
+            ?? CyclingSensorDetectionCoordinator(
+                sensorStore: cyclingSensorStore
+            )
         let coordinator = coordinator ?? BikeComputerCoordinator(
             destinationStore: SavedDestinationStore(),
             workoutMetricsStore: workoutMirrorManager.store
         )
         self.workoutMirrorManager = workoutMirrorManager
         self.onApplicationActiveChange = onApplicationActiveChange
+        cyclingSensorDetectionCoordinator.bind(
+            to: workoutMirrorManager.store
+        )
+        _cyclingSensorStore = ObservedObject(
+            wrappedValue: cyclingSensorStore
+        )
+        _cyclingSensorDetectionCoordinator = ObservedObject(
+            wrappedValue: cyclingSensorDetectionCoordinator
+        )
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
@@ -208,7 +234,7 @@ struct ContentView: View {
             }
             .sheet(
                 item: $presentedSheet,
-                onDismiss: restoreRideMetricsSheetIfNeeded
+                onDismiss: handleSheetDismissal
             ) { destination in
                 presentedSheetContent(for: destination)
             }
@@ -353,6 +379,9 @@ struct ContentView: View {
                 offlineMapManager: offlineMapManager,
                 firmwareUpdateManager: coordinator.firmwareUpdateManager,
                 watchAvailability: watchAvailability,
+                cyclingSensorStore: cyclingSensorStore,
+                cyclingSensorDetectionCoordinator:
+                    cyclingSensorDetectionCoordinator,
                 onStartTestNavigation: { destination in
                     coordinator.startNavigation(
                         from: .currentLocation,
@@ -368,7 +397,12 @@ struct ContentView: View {
 
         case .bikeComputerSetup:
             NavigationView {
-                BikeComputersSettingsView()
+                BikeComputersSettingsView(
+                    sensorStore: cyclingSensorStore,
+                    sensorDetectionCoordinator:
+                        cyclingSensorDetectionCoordinator,
+                    startsBikeComputerDiscoveryOnAppear: true
+                )
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("Close") {
@@ -376,6 +410,26 @@ struct ContentView: View {
                             }
                         }
                     }
+            }
+            .environmentObject(coordinator.bleManager)
+            .presentationDetents([.large])
+            .presentationBackgroundInteraction(.disabled)
+
+        case .sensorSettings:
+            NavigationView {
+                BikeComputersSettingsView(
+                    sensorStore: cyclingSensorStore,
+                    sensorDetectionCoordinator:
+                        cyclingSensorDetectionCoordinator,
+                    focusSensorsOnAppear: true
+                )
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            presentedSheet = nil
+                        }
+                    }
+                }
             }
             .environmentObject(coordinator.bleManager)
             .presentationDetents([.large])
@@ -436,6 +490,42 @@ struct ContentView: View {
             }
             rideMetricsDetent = .rideMetricsCompact
             presentedSheet = .rideMetrics
+        }
+    }
+
+    private func handleSheetDismissal() {
+        switch SensorSettingsRoutingPolicy.dismissalDecision(
+            hasQueuedSheet: queuedSheetAfterDismiss != nil,
+            isWorkoutActive: workoutStore.presentation.isWorkoutActive
+        ) {
+        case .presentQueuedSheet:
+            guard let queuedSheetAfterDismiss else { return }
+            self.queuedSheetAfterDismiss = nil
+            Task { @MainActor in
+                await Task.yield()
+                guard presentedSheet == nil else { return }
+                presentedSheet = queuedSheetAfterDismiss
+            }
+        case .restoreRideMetrics:
+            restoreRideMetricsSheetIfNeeded()
+        case .doNothing:
+            break
+        }
+    }
+
+    private func openSensorSettings() {
+        cyclingSensorDetectionCoordinator.prepareForPromptNavigation()
+        switch SensorSettingsRoutingPolicy.openDecision(
+            hasPresentedSheet: presentedSheet != nil,
+            isSensorSettingsPresented: presentedSheet == .sensorSettings
+        ) {
+        case .presentImmediately:
+            presentedSheet = .sensorSettings
+        case .dismissAndQueue:
+            queuedSheetAfterDismiss = .sensorSettings
+            presentedSheet = nil
+        case .unchanged:
+            break
         }
     }
 
@@ -646,6 +736,13 @@ struct ContentView: View {
             onResumeWorkout: workoutMirrorManager.resume,
             onEndAndSaveWorkout: workoutMirrorManager.endAndSave,
             onDiscardWorkout: workoutMirrorManager.discard,
+            enabledSensorCapabilities:
+                cyclingSensorStore.enabledCapabilities,
+            sensorPrompt:
+                cyclingSensorDetectionCoordinator.activePrompt,
+            onOpenSensorSettings: openSensorSettings,
+            onDismissSensorPrompt:
+                cyclingSensorDetectionCoordinator.dismissPrompt,
             isSheetExpanded: isSheetExpanded
         )
     }
@@ -741,36 +838,22 @@ struct ContentView: View {
     }
 
     private var offlineMapStatusChip: some View {
-        Button {
-            presentedSheet = .settings
-        } label: {
-            HStack(spacing: 10) {
-                if offlineMapManager.isBusy {
-                    ProgressView(value: offlineMapManager.activityProgress)
-                        .frame(width: 22, height: 22)
-                } else {
-                    Image(systemName: offlineMapManager.downloadedPackURL == nil ? "map" : "checkmark.circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(offlineMapManager.downloadedPackURL == nil ? .accentColor : .green)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(offlineMapStatusTitle)
-                        .font(.subheadline.weight(.semibold))
-                    Text("Open Map Settings")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+        ActionStatusChip(
+            title: offlineMapStatusTitle,
+            subtitle: "Open Map Settings",
+            systemImage: offlineMapManager.downloadedPackURL == nil
+                ? "map"
+                : "checkmark.circle.fill",
+            tint: offlineMapManager.downloadedPackURL == nil
+                ? .accentColor
+                : .green,
+            progress: offlineMapManager.isBusy
+                ? offlineMapManager.activityProgress
+                : nil,
+            action: {
+                presentedSheet = .settings
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
+        )
         .accessibilityLabel("Offline map download status")
     }
 

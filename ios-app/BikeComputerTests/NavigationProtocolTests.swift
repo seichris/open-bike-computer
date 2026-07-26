@@ -10122,6 +10122,48 @@ struct NavigationProtocolTests {
             isDiscoveringDevices: false,
             pairingCompletedDuringPresentation: false
         ), "discovery waits for Bluetooth to become available")
+        assertEqual(
+            BikeComputerSettingsPresentationPolicy.title(
+                knownDeviceCount: 0,
+                isExplicitBikeComputerSetup: false
+            ),
+            "My Bike Computer",
+            "combined settings keeps sensors discoverable without a bike computer"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
+                knownDeviceCount: 0,
+                isExplicitBikeComputerSetup: false,
+                isSensorLooking: false,
+                hasSensorCandidates: false
+            ),
+            "combined settings does not start unrelated bike discovery"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
+                knownDeviceCount: 0,
+                isExplicitBikeComputerSetup: false
+            ),
+            "combined settings offers explicit bike setup"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
+                knownDeviceCount: 0,
+                isExplicitBikeComputerSetup: true,
+                isSensorLooking: false,
+                hasSensorCandidates: false
+            ),
+            "explicit bike-computer setup still starts discovery"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
+                knownDeviceCount: 0,
+                isExplicitBikeComputerSetup: true,
+                isSensorLooking: true,
+                hasSensorCandidates: false
+            ),
+            "sensor enrollment takes priority over bike discovery"
+        )
         assert(BLEPendingScanPolicy.accepts(
             discoveredIdentifier: peripheralID,
             pendingIdentifier: peripheralID

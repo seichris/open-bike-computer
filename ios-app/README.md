@@ -50,6 +50,30 @@ If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
 old data as current. Reconnection requests the newest coherent snapshot.
 
+## Cadence and power sensors
+
+Pair compatible Bluetooth cycling sensors in **Apple Watch Settings >
+Bluetooth > Health Devices**. Wake the sensor and start a BikeComputer cycling
+workout so the Watch can collect cadence or power through HealthKit.
+
+When BikeComputer first receives one of these measurements, the active workout
+sheet offers **Connect sensor?**. Open **Settings > My Bike Computer**, or tap
+that prompt, then use **My Sensors > Connect a new Sensor**. The app listens for
+current workout data and lets you name a cadence sensor, power sensor, or
+combined cadence-and-power sensor.
+
+Only capabilities enabled under **My Sensors** appear as live workout tiles. An
+enabled tile stays visible and shows `--` when its measurement is stale or the
+sensor is not currently reporting. Forgetting or disabling the last profile
+for a capability hides its tile.
+
+Apple Watch continues to own the physical Bluetooth connection. The current
+public live-workout statistics identify whether cadence or power data arrived,
+but do not provide BikeComputer with a validated physical peripheral identity.
+Sensor profiles are therefore local logical profiles; BikeComputer does not
+claim to pair, rename, or disconnect the accessory at the system level, and it
+cannot distinguish multiple accessories that report the same capability.
+
 ## iPhone Live Activity
 
 On iOS 17 or later, a verified active Watch workout appears on the iPhone Lock

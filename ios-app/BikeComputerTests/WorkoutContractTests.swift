@@ -5708,7 +5708,19 @@ private struct WorkoutContractTestSuite {
                     "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
                 )
                 && compactContent.contains(
-                    ".sheet(item:$presentedSheet,onDismiss:restoreRideMetricsSheetIfNeeded){destinationinpresentedSheetContent(for:destination)}"
+                    ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
+                )
+                && compactContent.contains(
+                    "SensorSettingsRoutingPolicy.openDecision("
+                )
+                && compactContent.contains(
+                    "case.dismissAndQueue:queuedSheetAfterDismiss=.sensorSettingspresentedSheet=nil"
+                )
+                && compactContent.contains(
+                    "SensorSettingsRoutingPolicy.dismissalDecision("
+                )
+                && compactContent.contains(
+                    "case.presentQueuedSheet:guardletqueuedSheetAfterDismisselse{return}self.queuedSheetAfterDismiss=nil"
                 )
                 && compactContent.contains(
                     ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
@@ -5733,6 +5745,24 @@ private struct WorkoutContractTestSuite {
                 && !compactNavigation.contains("chevron.down")
                 && !compactNavigation.contains("onToggleExpansion"),
             "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
+        )
+        expect(
+            compactNavigation.contains(
+                "lettilePolicy=WorkoutMetricTilePolicy(enabledSensorCapabilities:enabledSensorCapabilities)"
+            )
+                && compactNavigation.contains(
+                    "iftilePolicy.showsCadence{metrics.append("
+                )
+                && compactNavigation.contains(
+                    "iftilePolicy.showsPower{metrics.append("
+                )
+                && compactNavigation.contains(
+                    "ifletsensorPrompt{ActionStatusChip("
+                )
+                && compactContent.contains(
+                    "case.sensorSettings:NavigationView{BikeComputersSettingsView("
+                ),
+            "sensor enrollment must gate cadence and power tiles and route detected sensors to My Bike Computer"
         )
         expect(
             compactNavigation.contains(
