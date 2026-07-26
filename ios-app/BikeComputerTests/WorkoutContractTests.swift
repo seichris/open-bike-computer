@@ -5711,10 +5711,16 @@ private struct WorkoutContractTestSuite {
                     ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
                 )
                 && compactContent.contains(
-                    "queuedSheetAfterDismiss=.sensorSettingspresentedSheet=nil"
+                    "SensorSettingsRoutingPolicy.openDecision("
                 )
                 && compactContent.contains(
-                    "ifletqueuedSheetAfterDismiss{self.queuedSheetAfterDismiss=nil"
+                    "case.dismissAndQueue:queuedSheetAfterDismiss=.sensorSettingspresentedSheet=nil"
+                )
+                && compactContent.contains(
+                    "SensorSettingsRoutingPolicy.dismissalDecision("
+                )
+                && compactContent.contains(
+                    "case.presentQueuedSheet:guardletqueuedSheetAfterDismisselse{return}self.queuedSheetAfterDismiss=nil"
                 )
                 && compactContent.contains(
                     ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"

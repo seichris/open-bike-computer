@@ -25,6 +25,7 @@ private func sensorAssertEqual<T: Equatable>(
 private struct CyclingSensorTestSuite {
     mutating func run() async {
         testTilePolicy()
+        testSensorSettingsRoutingPolicy()
         testRegistryPersistenceAndMutations()
         testCorruptRegistryFailsSafe()
         testFutureRegistryVersionFailsSafe()
@@ -33,7 +34,9 @@ private struct CyclingSensorTestSuite {
         testCombinedMeasurementsRemainSeparateCandidates()
         await testDisabledProfilePromptsUntilEnabled()
         testPromptDismissalResetsForNextWorkout()
+        testPromptDismissalSurvivesRelaunch()
         testCandidateGracePeriodExpiry()
+        await testCandidateExpiresWithoutAnotherPresentation()
         testInactiveStaleFutureAndDisconnectedDataDoNotPrompt()
         print("Cycling sensor tests passed")
     }
@@ -59,6 +62,57 @@ private struct CyclingSensorTestSuite {
         )
         sensorAssert(combined.showsCadence, "combined shows cadence")
         sensorAssert(combined.showsPower, "combined shows power")
+    }
+
+    private func testSensorSettingsRoutingPolicy() {
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.openDecision(
+                hasPresentedSheet: false,
+                isSensorSettingsPresented: false
+            ),
+            .presentImmediately,
+            "sensor settings presents immediately when no sheet is open"
+        )
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.openDecision(
+                hasPresentedSheet: true,
+                isSensorSettingsPresented: false
+            ),
+            .dismissAndQueue,
+            "sensor settings queues behind the ride metrics sheet"
+        )
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.openDecision(
+                hasPresentedSheet: true,
+                isSensorSettingsPresented: true
+            ),
+            .unchanged,
+            "an existing sensor settings sheet is not replaced"
+        )
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.dismissalDecision(
+                hasQueuedSheet: true,
+                isWorkoutActive: true
+            ),
+            .presentQueuedSheet,
+            "a queued sensor sheet wins over ride metrics restoration"
+        )
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.dismissalDecision(
+                hasQueuedSheet: false,
+                isWorkoutActive: true
+            ),
+            .restoreRideMetrics,
+            "ride metrics returns after sensor settings closes"
+        )
+        sensorAssertEqual(
+            SensorSettingsRoutingPolicy.dismissalDecision(
+                hasQueuedSheet: false,
+                isWorkoutActive: false
+            ),
+            .doNothing,
+            "no sheet is restored after the workout ends"
+        )
     }
 
     private func testRegistryPersistenceAndMutations() {
@@ -89,6 +143,10 @@ private struct CyclingSensorTestSuite {
             store.enabledCapabilities,
             .cadence,
             "enabled enrollment exposes cadence"
+        )
+        sensorAssert(
+            profile?.lastObservedAt == nil,
+            "manual enrollment does not invent a last-seen timestamp"
         )
         store.rename(profileID: profileID, to: "Morning Bike")
         store.setEnabled(false, profileID: profileID)
@@ -205,6 +263,11 @@ private struct CyclingSensorTestSuite {
             .cadence,
             "fresh cadence creates prompt"
         )
+        sensorAssertEqual(
+            fixture.coordinator.activePrompt?.action,
+            .connect,
+            "unknown cadence offers connection"
+        )
         sensorAssert(
             fixture.store.enabledCapabilities.isEmpty,
             "observation does not auto-enroll"
@@ -283,6 +346,15 @@ private struct CyclingSensorTestSuite {
             .power,
             "disabled observed profile prompts"
         )
+        sensorAssertEqual(
+            fixture.coordinator.activePrompt?.action,
+            .enable,
+            "disabled observed profile offers enable instead of duplicate enrollment"
+        )
+        sensorAssert(
+            fixture.coordinator.candidates.isEmpty,
+            "disabled profiles are not duplicated as nearby candidates"
+        )
 
         fixture.store.setEnabled(true, profileID: profile.id)
         await Task.yield()
@@ -338,6 +410,59 @@ private struct CyclingSensorTestSuite {
         )
     }
 
+    private func testPromptDismissalSurvivesRelaunch() {
+        let fixture = makeFixture("dismiss-relaunch")
+        let sessionID = UUID()
+        fixture.coordinator.ingest(
+            presentation(
+                sessionID: sessionID,
+                at: fixture.now,
+                cadence: 84
+            ),
+            at: fixture.now
+        )
+        fixture.coordinator.dismissPrompt()
+
+        let restoredStore = CyclingSensorStore(
+            defaults: fixture.defaults,
+            storageKey: "sensors",
+            now: { fixture.now }
+        )
+        let restoredCoordinator = CyclingSensorDetectionCoordinator(
+            sensorStore: restoredStore,
+            now: { fixture.now },
+            dismissalDefaults: fixture.defaults,
+            dismissalStorageKey: "prompt-dismissal"
+        )
+        restoredCoordinator.ingest(
+            presentation(
+                sessionID: sessionID,
+                at: fixture.now,
+                cadence: 85
+            ),
+            at: fixture.now
+        )
+        sensorAssert(
+            restoredCoordinator.activePrompt == nil,
+            "same-workout dismissal survives coordinator recreation"
+        )
+
+        let nextTime = fixture.now.addingTimeInterval(1)
+        restoredCoordinator.ingest(
+            presentation(
+                sessionID: UUID(),
+                at: nextTime,
+                cadence: 86
+            ),
+            at: nextTime
+        )
+        sensorAssertEqual(
+            restoredCoordinator.activePrompt?.action,
+            .connect,
+            "a new workout can offer the sensor again after relaunch"
+        )
+    }
+
     private func testCandidateGracePeriodExpiry() {
         let fixture = makeFixture("candidate-expiry")
         let sessionID = UUID()
@@ -364,6 +489,42 @@ private struct CyclingSensorTestSuite {
         sensorAssert(
             fixture.coordinator.activePrompt == nil,
             "expired candidate no longer prompts"
+        )
+    }
+
+    private mutating func testCandidateExpiresWithoutAnotherPresentation()
+        async {
+        let (defaults, suiteName) = makeDefaults("scheduled-expiry")
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = CyclingSensorStore(
+            defaults: defaults,
+            storageKey: "sensors"
+        )
+        let coordinator = CyclingSensorDetectionCoordinator(
+            sensorStore: store,
+            candidateGracePeriod: 0.03,
+            dismissalDefaults: defaults,
+            dismissalStorageKey: "prompt-dismissal"
+        )
+        let detectedAt = Date()
+        coordinator.ingest(
+            presentation(
+                sessionID: UUID(),
+                at: detectedAt,
+                cadence: 72
+            ),
+            at: detectedAt
+        )
+        sensorAssertEqual(
+            coordinator.candidates.count,
+            1,
+            "scheduled-expiry fixture starts with a candidate"
+        )
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        sensorAssert(
+            coordinator.candidates.isEmpty,
+            "candidate expires on wall-clock time without another presentation"
         )
     }
 
@@ -449,7 +610,9 @@ private struct CyclingSensorTestSuite {
         )
         let coordinator = CyclingSensorDetectionCoordinator(
             sensorStore: store,
-            now: { now }
+            now: { now },
+            dismissalDefaults: defaults,
+            dismissalStorageKey: "prompt-dismissal"
         )
         return SensorFixture(
             defaults: defaults,

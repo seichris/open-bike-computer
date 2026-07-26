@@ -184,6 +184,46 @@ enum BikeComputersMenuPolicy {
     }
 }
 
+enum BikeComputerSettingsPresentationPolicy {
+    static func title(
+        knownDeviceCount: Int,
+        isExplicitBikeComputerSetup: Bool
+    ) -> String {
+        if isExplicitBikeComputerSetup {
+            return BikeComputersMenuPolicy.title(
+                knownDeviceCount: knownDeviceCount
+            )
+        }
+        return knownDeviceCount > 1
+            ? "My Bike Computers"
+            : "My Bike Computer"
+    }
+
+    static func shouldStartDiscovery(
+        knownDeviceCount: Int,
+        isExplicitBikeComputerSetup: Bool,
+        isSensorLooking: Bool,
+        hasSensorCandidates: Bool
+    ) -> Bool {
+        isExplicitBikeComputerSetup
+            && BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
+                knownDeviceCount: knownDeviceCount
+            )
+            && !isSensorLooking
+            && !hasSensorCandidates
+    }
+
+    static func shouldShowConnectAction(
+        knownDeviceCount: Int,
+        isExplicitBikeComputerSetup: Bool
+    ) -> Bool {
+        !isExplicitBikeComputerSetup
+            || BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
+                knownDeviceCount: knownDeviceCount
+            )
+    }
+}
+
 enum BLEPendingScanPolicy {
     static let timeout: TimeInterval = 8
 

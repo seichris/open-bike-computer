@@ -1,6 +1,56 @@
 import SwiftUI
 
-struct CyclingSensorsSettingsSections: View {
+struct CyclingSensorProfilesSection: View {
+    @ObservedObject var sensorStore: CyclingSensorStore
+    @ObservedObject var detectionCoordinator:
+        CyclingSensorDetectionCoordinator
+    @AccessibilityFocusState private var isSensorSectionFocused: Bool
+    var focusOnAppear = false
+
+    var body: some View {
+        Section {
+            if sensorStore.profiles.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("No Sensors", systemImage: "gauge")
+                    Text(
+                        "Add a sensor after BikeComputer receives cadence or power data from your Apple Watch."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(sensorStore.profiles) { profile in
+                    NavigationLink {
+                        CyclingSensorDetailView(
+                            profileID: profile.id,
+                            sensorStore: sensorStore,
+                            detectionCoordinator:
+                                detectionCoordinator
+                        )
+                    } label: {
+                        CyclingSensorProfileRow(
+                            profile: profile,
+                            detectionCoordinator:
+                                detectionCoordinator
+                        )
+                    }
+                }
+            }
+        } header: {
+            Text("My Sensors")
+                .accessibilityFocused($isSensorSectionFocused)
+                .onAppear {
+                    guard focusOnAppear else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        isSensorSectionFocused = true
+                    }
+                }
+        }
+    }
+}
+
+struct CyclingSensorConnectionSection: View {
     @ObservedObject var sensorStore: CyclingSensorStore
     @ObservedObject var detectionCoordinator:
         CyclingSensorDetectionCoordinator
@@ -8,38 +58,6 @@ struct CyclingSensorsSettingsSections: View {
 
     var body: some View {
         Group {
-            Section {
-                if sensorStore.profiles.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("No Sensors", systemImage: "gauge")
-                        Text(
-                            "Add a sensor after BikeComputer receives cadence or power data from your Apple Watch."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(sensorStore.profiles) { profile in
-                        NavigationLink {
-                            CyclingSensorDetailView(
-                                profileID: profile.id,
-                                sensorStore: sensorStore,
-                                detectionCoordinator:
-                                    detectionCoordinator
-                            )
-                        } label: {
-                            CyclingSensorProfileRow(
-                                profile: profile,
-                                detectionCoordinator:
-                                    detectionCoordinator
-                            )
-                        }
-                    }
-                }
-            } header: {
-                Text("My Sensors")
-            }
-
             if detectionCoordinator.isLooking {
                 Section {
                     if detectionCoordinator.candidates.isEmpty {
@@ -82,7 +100,7 @@ struct CyclingSensorsSettingsSections: View {
                     }
                 } footer: {
                     Text(
-                        "Apple Watch manages the Bluetooth connection. BikeComputer adds a sensor after it receives workout data."
+                        "This connects sensors like cadence or power meters to your Apple Watch and shows their data on your Bike Computer."
                     )
                 }
             }
@@ -251,7 +269,13 @@ private struct CyclingSensorEnrollmentSheet: View {
                     Button("Connect Sensor") {
                         guard sensorStore.enroll(
                             name: sensorName,
-                            capabilities: capabilityChoice.capabilities
+                            capabilities: capabilityChoice.capabilities,
+                            lastObservedAt:
+                                capabilityChoice.capabilities.intersection(
+                                    candidate.capabilities
+                                ).isEmpty
+                                    ? nil
+                                    : candidate.lastObservedAt
                         ) != nil else {
                             return
                         }

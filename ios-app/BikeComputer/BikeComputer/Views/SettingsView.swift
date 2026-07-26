@@ -98,8 +98,10 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label(
-                            BikeComputersMenuPolicy.title(
-                                knownDeviceCount: bleManager.knownDevices.count
+                            BikeComputerSettingsPresentationPolicy.title(
+                                knownDeviceCount:
+                                    bleManager.knownDevices.count,
+                                isExplicitBikeComputerSetup: false
                             ),
                             systemImage: "bicycle"
                         )

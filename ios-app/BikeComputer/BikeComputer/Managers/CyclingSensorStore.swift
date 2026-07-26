@@ -47,10 +47,12 @@ final class CyclingSensorStore: ObservableObject {
     @discardableResult
     func enroll(
         name: String,
-        capabilities: CyclingSensorCapabilities
+        capabilities: CyclingSensorCapabilities,
+        lastObservedAt: Date? = nil
     ) -> CyclingSensorProfile? {
         let normalizedCapabilities = capabilities.intersection(.supported)
         guard !normalizedCapabilities.isEmpty else { return nil }
+        let createdAt = now()
 
         let profile = CyclingSensorProfile(
             id: idGenerator(),
@@ -61,8 +63,8 @@ final class CyclingSensorStore: ObservableObject {
             capabilities: normalizedCapabilities,
             isEnabled: true,
             identityKind: .logical,
-            createdAt: now(),
-            lastObservedAt: now()
+            createdAt: createdAt,
+            lastObservedAt: lastObservedAt
         )
         profiles.append(profile)
         persist()

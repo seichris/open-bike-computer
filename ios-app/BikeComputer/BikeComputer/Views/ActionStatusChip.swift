@@ -43,7 +43,7 @@ struct ActionStatusChip: View {
                     Image(systemName: "xmark")
                         .font(.caption.weight(.bold))
                         .foregroundColor(.secondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

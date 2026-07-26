@@ -1,10 +1,20 @@
 import Combine
 import Foundation
 
+private struct CyclingSensorPromptDismissalEnvelope: Codable {
+    static let currentVersion = 1
+
+    let version: Int
+    let sessionID: UUID
+    let capabilities: CyclingSensorCapabilities
+}
+
 @MainActor
 final class CyclingSensorDetectionCoordinator: ObservableObject {
-    static let candidateGracePeriod: TimeInterval = 30 * 60
-    static let reportingFreshness: TimeInterval = 10
+    nonisolated static let candidateGracePeriod: TimeInterval = 30 * 60
+    nonisolated static let reportingFreshness: TimeInterval = 10
+    nonisolated static let defaultDismissalStorageKey =
+        "cyclingSensors.promptDismissal.v1"
 
     @Published private(set) var candidates: [CyclingSensorCandidate] = []
     @Published private(set) var activePrompt: CyclingSensorPrompt?
@@ -16,24 +26,40 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
     private let sensorStore: CyclingSensorStore
     private let now: () -> Date
     private let idGenerator: () -> UUID
+    private let candidateGracePeriod: TimeInterval
+    private let dismissalDefaults: UserDefaults
+    private let dismissalStorageKey: String
     private var presentationCancellable: AnyCancellable?
     private var profileCancellable: AnyCancellable?
+    private var candidateExpiryTask: Task<Void, Never>?
     private var currentSessionID: UUID?
     private var dismissedCapabilities = CyclingSensorCapabilities()
 
     init(
         sensorStore: CyclingSensorStore,
         now: @escaping () -> Date = Date.init,
-        idGenerator: @escaping () -> UUID = UUID.init
+        idGenerator: @escaping () -> UUID = UUID.init,
+        candidateGracePeriod: TimeInterval =
+            CyclingSensorDetectionCoordinator.candidateGracePeriod,
+        dismissalDefaults: UserDefaults = .standard,
+        dismissalStorageKey: String =
+            CyclingSensorDetectionCoordinator.defaultDismissalStorageKey
     ) {
         self.sensorStore = sensorStore
         self.now = now
         self.idGenerator = idGenerator
+        self.candidateGracePeriod = candidateGracePeriod
+        self.dismissalDefaults = dismissalDefaults
+        self.dismissalStorageKey = dismissalStorageKey
 
         profileCancellable = sensorStore.$profiles.sink {
             [weak self] profiles in
             self?.reconcileCandidatesAndPrompt(profiles: profiles)
         }
+    }
+
+    deinit {
+        candidateExpiryTask?.cancel()
     }
 
     func bind(to workoutStore: WorkoutMetricsStore) {
@@ -59,8 +85,12 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
     }
 
     func dismissPrompt() {
-        guard let prompt = activePrompt else { return }
+        guard let prompt = activePrompt,
+              currentSessionID != nil else {
+            return
+        }
         dismissedCapabilities.formUnion(prompt.capabilities)
+        persistPromptDismissal()
         activePrompt = nil
     }
 
@@ -69,6 +99,7 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
             !$0.capabilities.intersection(capabilities).isEmpty
         }
         dismissedCapabilities.subtract(capabilities)
+        persistPromptDismissal()
         reconcileCandidatesAndPrompt()
     }
 
@@ -77,6 +108,7 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
             !$0.capabilities.intersection(capabilities).isEmpty
         }
         dismissedCapabilities.formUnion(capabilities)
+        persistPromptDismissal()
         reconcileCandidatesAndPrompt()
     }
 
@@ -121,7 +153,9 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
 
         if currentSessionID != sessionID {
             currentSessionID = sessionID
-            dismissedCapabilities = []
+            dismissedCapabilities = restoredDismissedCapabilities(
+                for: sessionID
+            )
             candidates.removeAll()
             lastObservedAtByCapability = [:]
         }
@@ -163,6 +197,7 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
                 )
             )
         }
+        scheduleCandidateExpiry()
     }
 
     private func isFresh(
@@ -181,8 +216,9 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
     private func pruneCandidates(at date: Date) {
         candidates.removeAll {
             date.timeIntervalSince($0.lastObservedAt)
-                > Self.candidateGracePeriod
+                >= candidateGracePeriod
         }
+        scheduleCandidateExpiry()
     }
 
     private func reconcileCandidatesAndPrompt(
@@ -202,6 +238,7 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         candidates.removeAll { candidate in
             !matchingProfiles(candidate.capabilities).isEmpty
         }
+        scheduleCandidateExpiry()
 
         guard hasActiveWorkout else {
             activePrompt = nil
@@ -209,6 +246,8 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         }
 
         var unresolved = CyclingSensorCapabilities()
+        var enrollmentCapabilities = CyclingSensorCapabilities()
+        var enableCapabilities = CyclingSensorCapabilities()
 
         for capability in CyclingSensorCapabilities.supported
             .individualCapabilities {
@@ -220,13 +259,100 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
             )
             if !isEnabled && hasCurrentObservation {
                 unresolved.insert(capability)
+                if matches.isEmpty {
+                    enrollmentCapabilities.insert(capability)
+                } else {
+                    enableCapabilities.insert(capability)
+                }
             }
         }
 
         unresolved.subtract(dismissedCapabilities)
-        activePrompt = unresolved.isEmpty
-            ? nil
-            : CyclingSensorPrompt(capabilities: unresolved)
+        guard !unresolved.isEmpty else {
+            activePrompt = nil
+            return
+        }
+        let needsEnrollment =
+            !enrollmentCapabilities.intersection(unresolved).isEmpty
+        let needsEnable =
+            !enableCapabilities.intersection(unresolved).isEmpty
+        let action: CyclingSensorPrompt.Action
+        if needsEnrollment && needsEnable {
+            action = .review
+        } else if needsEnable {
+            action = .enable
+        } else {
+            action = .connect
+        }
+        activePrompt = CyclingSensorPrompt(
+            capabilities: unresolved,
+            action: action
+        )
+    }
+
+    private func scheduleCandidateExpiry() {
+        candidateExpiryTask?.cancel()
+        candidateExpiryTask = nil
+        guard let nextExpiry = candidates.map({
+            $0.lastObservedAt.addingTimeInterval(candidateGracePeriod)
+        }).min() else {
+            return
+        }
+
+        let delay = max(0, nextExpiry.timeIntervalSince(now()))
+        let nanoseconds = UInt64(
+            min(delay, Double(UInt64.max) / 1_000_000_000)
+                * 1_000_000_000
+        )
+        candidateExpiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.candidateExpiryTask = nil
+            let date = self.now()
+            self.pruneCandidates(at: date)
+            self.reconcileCandidatesAndPrompt(at: date)
+        }
+    }
+
+    private func restoredDismissedCapabilities(
+        for sessionID: UUID
+    ) -> CyclingSensorCapabilities {
+        guard let data = dismissalDefaults.data(
+            forKey: dismissalStorageKey
+        ),
+        let envelope = try? JSONDecoder().decode(
+            CyclingSensorPromptDismissalEnvelope.self,
+            from: data
+        ),
+        envelope.version
+            == CyclingSensorPromptDismissalEnvelope.currentVersion,
+        envelope.sessionID == sessionID else {
+            dismissalDefaults.removeObject(forKey: dismissalStorageKey)
+            return []
+        }
+        return envelope.capabilities.intersection(.supported)
+    }
+
+    private func persistPromptDismissal() {
+        guard let currentSessionID,
+              !dismissedCapabilities.isEmpty else {
+            dismissalDefaults.removeObject(forKey: dismissalStorageKey)
+            return
+        }
+        let envelope = CyclingSensorPromptDismissalEnvelope(
+            version: CyclingSensorPromptDismissalEnvelope.currentVersion,
+            sessionID: currentSessionID,
+            capabilities:
+                dismissedCapabilities.intersection(.supported)
+        )
+        guard let data = try? JSONEncoder().encode(envelope) else {
+            return
+        }
+        dismissalDefaults.set(data, forKey: dismissalStorageKey)
     }
 }
 

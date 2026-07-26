@@ -400,7 +400,8 @@ struct ContentView: View {
                 BikeComputersSettingsView(
                     sensorStore: cyclingSensorStore,
                     sensorDetectionCoordinator:
-                        cyclingSensorDetectionCoordinator
+                        cyclingSensorDetectionCoordinator,
+                    startsBikeComputerDiscoveryOnAppear: true
                 )
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -419,7 +420,8 @@ struct ContentView: View {
                 BikeComputersSettingsView(
                     sensorStore: cyclingSensorStore,
                     sensorDetectionCoordinator:
-                        cyclingSensorDetectionCoordinator
+                        cyclingSensorDetectionCoordinator,
+                    focusSensorsOnAppear: true
                 )
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -492,25 +494,38 @@ struct ContentView: View {
     }
 
     private func handleSheetDismissal() {
-        if let queuedSheetAfterDismiss {
+        switch SensorSettingsRoutingPolicy.dismissalDecision(
+            hasQueuedSheet: queuedSheetAfterDismiss != nil,
+            isWorkoutActive: workoutStore.presentation.isWorkoutActive
+        ) {
+        case .presentQueuedSheet:
+            guard let queuedSheetAfterDismiss else { return }
             self.queuedSheetAfterDismiss = nil
             Task { @MainActor in
                 await Task.yield()
                 guard presentedSheet == nil else { return }
                 presentedSheet = queuedSheetAfterDismiss
             }
-            return
+        case .restoreRideMetrics:
+            restoreRideMetricsSheetIfNeeded()
+        case .doNothing:
+            break
         }
-        restoreRideMetricsSheetIfNeeded()
     }
 
     private func openSensorSettings() {
         cyclingSensorDetectionCoordinator.prepareForPromptNavigation()
-        if presentedSheet == nil {
+        switch SensorSettingsRoutingPolicy.openDecision(
+            hasPresentedSheet: presentedSheet != nil,
+            isSensorSettingsPresented: presentedSheet == .sensorSettings
+        ) {
+        case .presentImmediately:
             presentedSheet = .sensorSettings
-        } else if presentedSheet != .sensorSettings {
+        case .dismissAndQueue:
             queuedSheetAfterDismiss = .sensorSettings
             presentedSheet = nil
+        case .unchanged:
+            break
         }
     }
 

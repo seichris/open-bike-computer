@@ -64,7 +64,14 @@ struct CyclingSensorCandidate: Identifiable, Equatable, Sendable {
 }
 
 struct CyclingSensorPrompt: Equatable, Sendable {
+    enum Action: Equatable, Sendable {
+        case connect
+        case enable
+        case review
+    }
+
     let capabilities: CyclingSensorCapabilities
+    let action: Action
 
     var title: String {
         switch capabilities.intersection(.supported) {
@@ -74,6 +81,17 @@ struct CyclingSensorPrompt: Equatable, Sendable {
             return "Power sensor detected"
         default:
             return "Cycling sensor detected"
+        }
+    }
+
+    var actionTitle: String {
+        switch action {
+        case .connect:
+            return "Connect sensor?"
+        case .enable:
+            return "Enable sensor?"
+        case .review:
+            return "Review sensors"
         }
     }
 }
@@ -87,5 +105,39 @@ struct WorkoutMetricTilePolicy: Equatable, Sendable {
 
     var showsPower: Bool {
         enabledSensorCapabilities.contains(.power)
+    }
+}
+
+enum SensorSettingsRouteDecision: Equatable, Sendable {
+    case presentImmediately
+    case dismissAndQueue
+    case unchanged
+}
+
+enum SheetDismissalDecision: Equatable, Sendable {
+    case presentQueuedSheet
+    case restoreRideMetrics
+    case doNothing
+}
+
+struct SensorSettingsRoutingPolicy: Sendable {
+    static func openDecision(
+        hasPresentedSheet: Bool,
+        isSensorSettingsPresented: Bool
+    ) -> SensorSettingsRouteDecision {
+        if isSensorSettingsPresented {
+            return .unchanged
+        }
+        return hasPresentedSheet ? .dismissAndQueue : .presentImmediately
+    }
+
+    static func dismissalDecision(
+        hasQueuedSheet: Bool,
+        isWorkoutActive: Bool
+    ) -> SheetDismissalDecision {
+        if hasQueuedSheet {
+            return .presentQueuedSheet
+        }
+        return isWorkoutActive ? .restoreRideMetrics : .doNothing
     }
 }

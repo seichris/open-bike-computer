@@ -279,7 +279,7 @@ struct RideMetricsPanel: View {
             if let sensorPrompt {
                 ActionStatusChip(
                     title: sensorPrompt.title,
-                    subtitle: "Connect sensor?",
+                    subtitle: sensorPrompt.actionTitle,
                     systemImage: "dot.radiowaves.left.and.right",
                     onDismiss: onDismissSensorPrompt,
                     action: onOpenSensorSettings
