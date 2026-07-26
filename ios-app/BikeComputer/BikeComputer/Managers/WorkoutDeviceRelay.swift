@@ -735,26 +735,70 @@ final class WorkoutDeviceRelay {
         )
 
         var needsRetry = false
-        for transmission in schedule.transmissions {
-            let accepted = bleManager.sendWorkoutTelemetryFrame(
-                transmission.data,
-                prioritized: transmission.prioritized,
-                onWrite: { [weak self] in
+        if schedule.transmissions.count == 2,
+           let core = schedule.transmissions.first(where: { $0.kind == .core }),
+           let extended = schedule.transmissions.first(where: {
+               $0.kind == .extended
+           }) {
+            let transmissionsByData = Dictionary(
+                uniqueKeysWithValues: schedule.transmissions.map {
+                    ($0.data, $0)
+                }
+            )
+            let accepted = bleManager.sendWorkoutTelemetryPair(
+                core: core.data,
+                extended: extended.data,
+                prioritized: core.prioritized || extended.prioritized,
+                onWrite: { [weak self] data in
+                    guard let transmission = transmissionsByData[data] else {
+                        return
+                    }
                     self?.completeWrite(transmission)
                 },
-                onDrop: { [weak self] in
+                onDrop: { [weak self] data in
+                    guard let transmission = transmissionsByData[data] else {
+                        return
+                    }
                     self?.dropWrite(transmission)
                 },
-                onWriteFailure: { [weak self] in
+                onWriteFailure: { [weak self] data in
+                    guard let transmission = transmissionsByData[data] else {
+                        return
+                    }
                     self?.failWrite(transmission)
                 }
             )
             if !accepted {
-                scheduler.didNotWrite(
-                    kind: transmission.kind,
-                    data: transmission.data
-                )
+                for transmission in schedule.transmissions {
+                    scheduler.didNotWrite(
+                        kind: transmission.kind,
+                        data: transmission.data
+                    )
+                }
                 needsRetry = true
+            }
+        } else {
+            for transmission in schedule.transmissions {
+                let accepted = bleManager.sendWorkoutTelemetryFrame(
+                    transmission.data,
+                    prioritized: transmission.prioritized,
+                    onWrite: { [weak self] in
+                        self?.completeWrite(transmission)
+                    },
+                    onDrop: { [weak self] in
+                        self?.dropWrite(transmission)
+                    },
+                    onWriteFailure: { [weak self] in
+                        self?.failWrite(transmission)
+                    }
+                )
+                if !accepted {
+                    scheduler.didNotWrite(
+                        kind: transmission.kind,
+                        data: transmission.data
+                    )
+                    needsRetry = true
+                }
             }
         }
 

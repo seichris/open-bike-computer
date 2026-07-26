@@ -8985,6 +8985,8 @@ struct NavigationProtocolTests {
                     "authentication sends both latest workout frames")
         assert(schedule.transmissions.first?.prioritized == true,
                "initial core synchronization uses the priority lane")
+        assert(schedule.transmissions.count == 2,
+               "a generated workout update always schedules a complete pair")
         let initialPairGeneration = schedule.transmissions[0].data[1] >> 6
         assert(initialPairGeneration > 0,
                "new relay frames carry a non-zero pair generation")
@@ -9426,6 +9428,45 @@ struct NavigationProtocolTests {
                     [Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
                         Data([DeviceBLEProtocol.deviceCapabilitiesVersion])],
                     "native workout traffic cannot wedge later response-backed navigation writes")
+
+        let atomicPairManager = BLEManager()
+        assert(atomicPairManager.handleDeviceCapabilitiesNotification(capability),
+               "atomic pair manager receives workout capability")
+        atomicPairManager.isConnected = true
+        atomicPairManager.isNavigationReady = true
+        var atomicTransportReady = false
+        var atomicPairWrites: [Data] = []
+        atomicPairManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: true,
+                canSend: { atomicTransportReady },
+                write: { atomicPairWrites.append($0) }
+            )
+        )
+        assert(atomicPairManager.requestDeviceCapabilities(),
+               "ordinary reconnect traffic is queued before workout telemetry")
+        assert(atomicPairManager.sendWorkoutTelemetryPair(
+            core: frame,
+            extended: extendedFrame,
+            prioritized: true,
+            onWrite: { _ in },
+            onDrop: { _ in },
+            onWriteFailure: { _ in }
+        ), "a complete workout pair is admitted atomically under backpressure")
+        assert(atomicPairWrites.isEmpty,
+               "blocked transport exposes neither half of the pair")
+        atomicTransportReady = true
+        atomicPairManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(atomicPairWrites.count, 1,
+                    "acknowledged transport sends only the core before its response")
+        assertEqual(Data(atomicPairWrites[0].dropFirst(4)), frame,
+                    "the prioritized core precedes ordinary reconnect traffic")
+        atomicPairManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(atomicPairWrites.count, 2,
+                    "the response callback drains the paired extended frame")
+        assertEqual(Data(atomicPairWrites[1].dropFirst(4)), extendedFrame,
+                    "the correlated extended frame remains adjacent to its core")
 
         let coalescingManager = BLEManager()
         assert(coalescingManager.handleDeviceCapabilitiesNotification(capability),
