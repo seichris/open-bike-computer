@@ -50,6 +50,31 @@ struct WorkoutTelemetryWriteEndpoint {
     }
 }
 
+enum WorkoutTelemetryWriteRoute: Equatable {
+    case nativeWithResponse
+    case navigationFallback
+    case nativeWithoutResponse
+}
+
+enum WorkoutTelemetryWriteRouting {
+    static func route(
+        hasNativeWriteWithResponse: Bool,
+        hasNativeWriteWithoutResponse: Bool,
+        navigationExpectsWriteResponse: Bool
+    ) -> WorkoutTelemetryWriteRoute {
+        if hasNativeWriteWithResponse {
+            return .nativeWithResponse
+        }
+        if navigationExpectsWriteResponse {
+            return .navigationFallback
+        }
+        if hasNativeWriteWithoutResponse {
+            return .nativeWithoutResponse
+        }
+        return .navigationFallback
+    }
+}
+
 enum DeviceBLEProtocol {
     static let serviceUUIDString = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800"
     static let navigationCharacteristicUUIDString = "2A6E"
@@ -586,7 +611,9 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
         maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity,
-        priorityMaxCount: 2
+        // One complete workout pair plus the latest destination status must be
+        // able to coexist while an acknowledged write is in flight.
+        priorityMaxCount: 3
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
     private var isConnecting: Bool = false
@@ -1676,28 +1703,166 @@ class BLEManager: NSObject, ObservableObject {
         let coalescingKey = isCore
             ? DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
             : DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+        guard let write = workoutTelemetryWrite(
+            frame,
+            navigationEndpoint: navigationEndpoint,
+            coalescingKey: coalescingKey,
+            onWrite: onWrite,
+            onDrop: onDrop,
+            onWriteFailure: onWriteFailure
+        ) else { return false }
+        let didEnqueue = navigationWriteQueue.enqueueCoalescing(
+            write,
+            prioritized: prioritized && isCore
+        )
+        guard didEnqueue else {
+            log("Workout telemetry frame not queued: write queue unavailable")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: navigationEndpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        return true
+    }
+
+    /// Admits the correlated core and extended frames as one queue transaction.
+    /// Firmware publishes a generated update only after both halves arrive, so
+    /// exposing the core to the transport before the extended frame is admitted
+    /// can leave the device displaying no workout state under backpressure.
+    @discardableResult
+    func sendWorkoutTelemetryPair(
+        core: Data,
+        extended: Data,
+        prioritized: Bool,
+        onWrite: @escaping (Data) -> Void,
+        onDrop: @escaping (Data) -> Void,
+        onWriteFailure: @escaping (Data) -> Void
+    ) -> Bool {
+        guard core.count == DeviceBLEProtocol.workoutTelemetryFrameLength,
+              core.first == 1,
+              extended.count == DeviceBLEProtocol.workoutTelemetryFrameLength,
+              extended.first == 2,
+              isConnected,
+              isNavigationReady,
+              hasReceivedDeviceCapabilities,
+              supportsWorkoutTelemetry,
+              let navigationEndpoint = navigationWriteEndpoint,
+              let coreWrite = workoutTelemetryWrite(
+                  core,
+                  navigationEndpoint: navigationEndpoint,
+                  coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey,
+                  onWrite: { onWrite(core) },
+                  onDrop: { onDrop(core) },
+                  onWriteFailure: { onWriteFailure(core) }
+              ),
+              let extendedWrite = workoutTelemetryWrite(
+                  extended,
+                  navigationEndpoint: navigationEndpoint,
+                  coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey,
+                  onWrite: { onWrite(extended) },
+                  onDrop: { onDrop(extended) },
+                  onWriteFailure: { onWriteFailure(extended) }
+              ) else {
+            return false
+        }
+
+        let writes = [coreWrite, extendedWrite]
+        let didEnqueue = prioritized
+            ? navigationWriteQueue.enqueuePrioritizedAtomically(writes)
+            : navigationWriteQueue.enqueueAtomically(writes)
+        guard didEnqueue else {
+            log("Workout telemetry pair not queued: insufficient write queue capacity")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: navigationEndpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        return true
+    }
+
+    private func workoutTelemetryWrite(
+        _ frame: Data,
+        navigationEndpoint: NavigationWriteEndpoint,
+        coalescingKey: String,
+        onWrite: (() -> Void)?,
+        onDrop: (() -> Void)?,
+        onWriteFailure: (() -> Void)?
+    ) -> NavigationWrite? {
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
         let transportCanSend: (() -> Bool)?
         let transportExpectsWriteResponse: Bool?
 
-        if let testEndpoint = workoutTelemetryWriteEndpointForTesting {
-            guard frame.count <= testEndpoint.maximumWriteLength else {
-                return false
+        let testEndpoint = workoutTelemetryWriteEndpointForTesting
+        let characteristic = workoutTelemetryCharacteristic
+        let route = WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse:
+                characteristic?.properties.contains(.write) == true,
+            hasNativeWriteWithoutResponse:
+                testEndpoint != nil ||
+                characteristic?.properties.contains(.writeWithoutResponse) == true,
+            navigationExpectsWriteResponse:
+                navigationEndpoint.expectsWriteResponse
+        )
+
+        switch route {
+        case .nativeWithResponse:
+            guard let peripheral = connectedPeripheral,
+                  let characteristic,
+                  frame.count <= peripheral.maximumWriteValueLength(
+                    for: .withResponse
+                  ) else {
+                return nil
             }
             payload = frame
             label = "native workout telemetry"
-            transportWrite = testEndpoint.write
-            transportCanSend = testEndpoint.canSend
-            transportExpectsWriteResponse = false
-        } else if let peripheral = connectedPeripheral,
-                  let characteristic = workoutTelemetryCharacteristic,
-                  characteristic.properties.contains(.writeWithoutResponse) {
-            guard frame.count <= peripheral.maximumWriteValueLength(
-                for: .withoutResponse
-            ) else {
-                return false
+            transportCanSend = { [weak self] in
+                self?.writeWithResponseInFlight == false
+            }
+            transportExpectsWriteResponse = true
+            transportWrite = { [weak self, weak peripheral, weak characteristic] data in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    data,
+                    to: characteristic,
+                    on: peripheral,
+                    type: .withResponse
+                )
+            }
+        case .navigationFallback:
+            var fallback = Data(
+                DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8
+            )
+            fallback.append(frame)
+            guard fallback.count == 20,
+                  fallback.count <= navigationEndpoint.maximumWriteLength else {
+                return nil
+            }
+            payload = fallback
+            label = "fallback workout telemetry"
+            transportWrite = nil
+            transportCanSend = nil
+            transportExpectsWriteResponse = nil
+        case .nativeWithoutResponse:
+            if let testEndpoint {
+                guard frame.count <= testEndpoint.maximumWriteLength else {
+                    return nil
+                }
+                payload = frame
+                label = "native workout telemetry"
+                transportWrite = testEndpoint.write
+                transportCanSend = testEndpoint.canSend
+                transportExpectsWriteResponse = false
+                break
+            }
+            guard let peripheral = connectedPeripheral,
+                  let characteristic,
+                  characteristic.properties.contains(.writeWithoutResponse),
+                  frame.count <= peripheral.maximumWriteValueLength(
+                    for: .withoutResponse
+                  ) else {
+                return nil
             }
             payload = frame
             label = "native workout telemetry"
@@ -1714,21 +1879,9 @@ class BLEManager: NSObject, ObservableObject {
                     type: .withoutResponse
                 )
             }
-        } else {
-            var fallback = Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8)
-            fallback.append(frame)
-            guard fallback.count == 20,
-                  fallback.count <= navigationEndpoint.maximumWriteLength else {
-                return false
-            }
-            payload = fallback
-            label = "fallback workout telemetry"
-            transportWrite = nil
-            transportCanSend = nil
-            transportExpectsWriteResponse = nil
         }
 
-        let write = NavigationWrite(
+        return NavigationWrite(
             data: payload,
             label: label,
             transportWrite: transportWrite,
@@ -1739,17 +1892,6 @@ class BLEManager: NSObject, ObservableObject {
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             coalescingKey: coalescingKey
         )
-        let didEnqueue = navigationWriteQueue.enqueueCoalescing(
-            write,
-            prioritized: prioritized && isCore
-        )
-        guard didEnqueue else {
-            log("Workout telemetry frame not queued: write queue unavailable")
-            return false
-        }
-        flushPendingNavigationWrites(endpoint: navigationEndpoint)
-        scheduleNavigationFlushRetryIfNeeded()
-        return true
     }
 
     /// Persist and send a runtime map setting to ESP32 when supported.
@@ -2712,6 +2854,16 @@ class BLEManager: NSObject, ObservableObject {
         _ endpoint: WorkoutTelemetryWriteEndpoint?
     ) {
         workoutTelemetryWriteEndpointForTesting = endpoint
+    }
+
+    func installNavigationWriteQueueForTesting(
+        maxCount: Int,
+        priorityMaxCount: Int = 3
+    ) {
+        navigationWriteQueue = NavigationWriteQueue(
+            maxCount: maxCount,
+            priorityMaxCount: priorityMaxCount
+        )
     }
 #endif
 
@@ -4265,8 +4417,8 @@ extension BLEManager: CBPeripheralDelegate {
             }
 
             if characteristic.uuid == workoutTelemetryCharacteristicUUID {
-                guard characteristic.properties.contains(.writeWithoutResponse) else {
-                    log("Workout telemetry characteristic is not writable without response")
+                guard preferredWriteType(for: characteristic) != nil else {
+                    log("Workout telemetry characteristic is not writable")
                     continue
                 }
                 workoutTelemetryCharacteristic = characteristic

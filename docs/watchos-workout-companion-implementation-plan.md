@@ -638,8 +638,11 @@ Capability negotiation:
   and Ride Stats presentation are all available;
 - old firmware ignores the feature and continues receiving existing GPS data.
 
-For cached GATT tables where the characteristic is not discovered, support the
-existing authenticated command channel fallback:
+Use the existing authenticated command-channel fallback when a cached GATT
+table does not expose the characteristic. Also prefer it when `2A6E` supports
+write-with-response but the native workout characteristic supports only
+write-without-response, so each correlated core-plus-extended pair is
+serialized through acknowledgements:
 
     WTLM | 16-byte workout frame
 
@@ -943,7 +946,8 @@ Exit criteria:
 - Core and extended packet exact bytes.
 - Numeric saturation and sentinel behavior.
 - Capability bit absent/present.
-- Native characteristic and WTLM fallback selection.
+- Acknowledged native, acknowledged WTLM fallback, and unacknowledged native
+  routing selection.
 - Reconnect sends the latest full state once.
 - Workout end does not stop navigation and vice versa.
 
