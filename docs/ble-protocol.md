@@ -37,7 +37,11 @@ firmware field to wrap.
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
 `2A73`, or the workout characteristic, the app falls back to framed binary
-writes over authenticated `2A6E`.
+writes over authenticated `2A6E`. Workout telemetry also uses its `2A6E`
+fallback when that channel supports acknowledged writes but the discovered
+native workout characteristic supports only write-without-response. This keeps
+each correlated core-plus-extended publication serialized through response
+callbacks.
 Fallback frame prefixes:
 
 | Prefix | Payload |
@@ -281,12 +285,13 @@ Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 
 ## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
 
-Workout telemetry is iOS-to-device, write-without-response, RAM-only, and
-accepted only after the existing local authentication handshake. The logical
-native payload is exactly 16 bytes. In an ownership-v2 session it is carried in
-an `S2` frame on protected channel `6`, for a 38-byte native wire write. A
-cached GATT table carries the same logical payload in the authenticated `2A6E`
-navigation-channel fallback instead:
+Workout telemetry is iOS-to-device, RAM-only, and accepted only after the
+existing local authentication handshake. The logical native payload is exactly
+16 bytes. In an ownership-v2 session it is carried in an `S2` frame on protected
+channel `6`, for a 38-byte native wire write. Current firmware exposes that
+native characteristic as write-without-response and exposes acknowledged writes
+on authenticated `2A6E`, so iOS uses the navigation-channel fallback to sequence
+each correlated pair. A cached GATT table uses the same fallback:
 
 ```text
 "WTLM" | 16-byte workout frame
@@ -296,6 +301,9 @@ The fallback plaintext is exactly 20 bytes before ownership-v2 protection and
 the protected fallback wire write is 42 bytes. Native and fallback payloads use
 the same parser after their authenticated channel is unwrapped. The ownership
 handshake already requires an ATT MTU large enough for either protected write.
+iOS prefers an acknowledged native workout characteristic when available,
+otherwise prefers acknowledged `WTLM`, and uses native write-without-response
+when the navigation transport is also unacknowledged.
 iOS sends no workout frames unless capability bit `7` is present, so older
 firmware continues using the existing GPS ride fields unchanged.
 

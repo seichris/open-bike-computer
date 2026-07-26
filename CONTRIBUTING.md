@@ -164,7 +164,10 @@ Workout telemetry uses the `WTLM` prefix plus the same 16-byte native payload;
 the resulting fallback plaintext is exactly 20 bytes. Ownership-v2 protection
 expands it to a 42-byte wire write, while a native logical frame becomes a
 38-byte wire write on protected channel `6`. The ownership handshake already
-requires a sufficient ATT MTU. Devices must keep capability bit `7` clear until
+requires a sufficient ATT MTU. The app also prefers acknowledged `WTLM` when
+`2A6E` supports write-with-response but the native workout characteristic only
+supports write-without-response, keeping each correlated pair serialized.
+Devices must keep capability bit `7` clear until
 their authenticated parser, RAM-only state, and Ride Stats presentation are all
 available. The Waveshare targets implement that complete path and advertise bit
 `7`; new targets must meet the same gate before enabling it.

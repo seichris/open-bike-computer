@@ -579,6 +579,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceTelemetryMapping()
         testWorkoutDeviceRelayScheduling()
         testWorkoutDeviceRelayPublicationIntegration()
+        testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
         testDevicePacketRouting()
         testDeviceSoundProtocol()
@@ -9311,6 +9312,124 @@ struct NavigationProtocolTests {
         withExtendedLifetime(relay) {}
     }
 
+    @MainActor
+    static func testWorkoutDeviceRelayRegularRetryIntegration() {
+        let clock = TestClock(Date(timeIntervalSince1970: 30_000))
+        let sessionID = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
+        let store = WorkoutMetricsStore(now: clock.now)
+        store.attachMirroredSession(at: clock.now())
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 92,
+                sequence: 1,
+                capturedAt: clock.now(),
+                snapshot: WorkoutSnapshotV1(
+                    state: .running,
+                    startDate: clock.now()
+                )
+            ),
+        ], receivedAt: clock.now())
+
+        let initialSample = WorkoutDeviceTelemetryMapper.sample(
+            presentation: store.presentation,
+            envelope: store.currentEnvelope
+        )!
+        let initialFrames = WorkoutDeviceFrameBuilder.frames(for: initialSample)!
+        var primedScheduler = WorkoutDeviceRelayScheduler()
+        let initialSchedule = primedScheduler.update(
+            frames: initialFrames,
+            transportReady: true,
+            at: clock.now()
+        )
+        for transmission in initialSchedule.transmissions {
+            primedScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: clock.now()
+            )
+        }
+
+        let manager = BLEManager()
+        manager.installNavigationWriteQueueForTesting(maxCount: 2)
+        var transportReady = false
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            expectsWriteResponse: true,
+            canSend: { transportReady },
+            write: { writes.append($0) }
+        ))
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let capability = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.workoutTelemetryCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "regular retry manager receives workout capability")
+
+        let relay = WorkoutDeviceRelay(
+            store: store,
+            bleManager: manager,
+            now: clock.now,
+            scheduler: primedScheduler
+        )
+        assert(manager.requestDeviceCapabilities(),
+               "first ordinary write fills the regular queue")
+        assert(manager.requestDeviceCapabilities(),
+               "second ordinary write fills the regular queue")
+
+        clock.advance(by: 1)
+        let heartRate = WorkoutMetricV1(
+            value: 130,
+            unit: .beatsPerMinute,
+            capturedAt: clock.now(),
+            source: .healthKit
+        )
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 92,
+                sequence: 2,
+                capturedAt: clock.now(),
+                snapshot: WorkoutSnapshotV1(
+                    state: .running,
+                    startDate: Date(timeIntervalSince1970: 30_000),
+                    currentHeartRate: heartRate,
+                    availability: [.currentHeartRate]
+                )
+            ),
+        ], receivedAt: clock.now())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(writes.isEmpty,
+               "a regular pair exposes neither half when only a full queue is available")
+
+        transportReady = true
+        manager.completeNavigationWriteForTesting(error: nil)
+        manager.completeNavigationWriteForTesting(error: nil)
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.map { String(data: $0.prefix(4), encoding: .utf8) },
+                    ["CAPS", "CAPS"],
+                    "failed atomic admission preserves existing regular traffic")
+
+        assert(waitForMainLoop(timeout: 1) {
+            writes.filter {
+                String(data: $0.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.workoutTelemetryFallbackPrefix
+            }.count == 1
+        }, "relay retries the non-prioritized pair after capacity becomes available")
+        manager.completeNavigationWriteForTesting(error: nil)
+        let workoutWrites = writes.filter {
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.workoutTelemetryFallbackPrefix
+        }
+        assertEqual(workoutWrites.map { $0[4] }, [1, 2],
+                    "regular-lane retry delivers one adjacent correlated pair")
+        manager.completeNavigationWriteForTesting(error: nil)
+        withExtendedLifetime(relay) {}
+    }
+
     static func testWorkoutTelemetryBLETransport() {
         let channelManager = BLEManager()
         let nativeWorkoutPayload = Data(ownershipHex:
@@ -9339,6 +9458,25 @@ struct NavigationProtocolTests {
         let extendedFrame = WorkoutDeviceFrameBuilder.frames(
             for: workoutDeviceSample()
         )!.extended
+
+        assertEqual(WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
+        ), .nativeWithResponse,
+                    "an acknowledged native workout characteristic is preferred")
+        assertEqual(WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse: false,
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
+        ), .navigationFallback,
+                    "current firmware uses acknowledged WTLM despite native write-without-response")
+        assertEqual(WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse: false,
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: false
+        ), .nativeWithoutResponse,
+                    "native write-without-response remains available for unacknowledged navigation transports")
 
         let unauthenticated = BLEManager()
         assert(unauthenticated.handleDeviceCapabilitiesNotification(capability),
@@ -9406,7 +9544,7 @@ struct NavigationProtocolTests {
         var laterNavigationWrites: [Data] = []
         nativeManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 20,
-            expectsWriteResponse: true,
+            expectsWriteResponse: false,
             canSend: { true },
             write: { laterNavigationWrites.append($0) }
         ))
@@ -9436,12 +9574,19 @@ struct NavigationProtocolTests {
         atomicPairManager.isNavigationReady = true
         var atomicTransportReady = false
         var atomicPairWrites: [Data] = []
+        var unexpectedAtomicNativeWrites: [Data] = []
         atomicPairManager.installNavigationWriteEndpoint(
             NavigationWriteEndpoint(
                 maximumWriteLength: 20,
                 expectsWriteResponse: true,
                 canSend: { atomicTransportReady },
                 write: { atomicPairWrites.append($0) }
+            )
+        )
+        atomicPairManager.installWorkoutTelemetryWriteEndpoint(
+            WorkoutTelemetryWriteEndpoint(
+                maximumWriteLength: 20,
+                write: { unexpectedAtomicNativeWrites.append($0) }
             )
         )
         assert(atomicPairManager.requestDeviceCapabilities(),
@@ -9467,6 +9612,89 @@ struct NavigationProtocolTests {
                     "the response callback drains the paired extended frame")
         assertEqual(Data(atomicPairWrites[1].dropFirst(4)), extendedFrame,
                     "the correlated extended frame remains adjacent to its core")
+        assert(unexpectedAtomicNativeWrites.isEmpty,
+               "an acknowledged navigation endpoint bypasses native write-without-response")
+        atomicPairManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(
+            atomicPairWrites[2],
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+                Data([DeviceBLEProtocol.deviceCapabilitiesVersion]),
+            "ordinary reconnect traffic drains after the complete workout pair"
+        )
+
+        func destinationStatusPrefix(_ data: Data) -> String? {
+            String(data: data.prefix(4), encoding: .utf8)
+        }
+
+        let statusFirstManager = BLEManager()
+        assert(statusFirstManager.handleDeviceCapabilitiesNotification(capability),
+               "status-first manager receives workout capability")
+        statusFirstManager.isConnected = true
+        statusFirstManager.isNavigationReady = true
+        var statusFirstReady = false
+        var statusFirstWrites: [Data] = []
+        statusFirstManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            expectsWriteResponse: true,
+            canSend: { statusFirstReady },
+            write: { statusFirstWrites.append($0) }
+        ))
+        assert(statusFirstManager.sendDestinationStatus(
+            generation: 7,
+            token: 11,
+            status: .calculating,
+            message: "Starting"
+        ), "destination status is admitted before an urgent workout pair")
+        assert(statusFirstManager.sendWorkoutTelemetryPair(
+            core: frame,
+            extended: extendedFrame,
+            prioritized: true,
+            onWrite: { _ in },
+            onDrop: { _ in },
+            onWriteFailure: { _ in }
+        ), "urgent workout pair coexists with an earlier destination status")
+        statusFirstReady = true
+        statusFirstManager.completeNavigationWriteForTesting(error: nil)
+        statusFirstManager.completeNavigationWriteForTesting(error: nil)
+        statusFirstManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(statusFirstWrites.map(destinationStatusPrefix),
+                    ["DNST", "WTLM", "WTLM"],
+                    "an earlier destination status is preserved ahead of the adjacent pair")
+
+        let pairFirstManager = BLEManager()
+        assert(pairFirstManager.handleDeviceCapabilitiesNotification(capability),
+               "pair-first manager receives workout capability")
+        pairFirstManager.isConnected = true
+        pairFirstManager.isNavigationReady = true
+        var pairFirstReady = false
+        var pairFirstWrites: [Data] = []
+        pairFirstManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            expectsWriteResponse: true,
+            canSend: { pairFirstReady },
+            write: { pairFirstWrites.append($0) }
+        ))
+        assert(pairFirstManager.sendWorkoutTelemetryPair(
+            core: frame,
+            extended: extendedFrame,
+            prioritized: true,
+            onWrite: { _ in },
+            onDrop: { _ in },
+            onWriteFailure: { _ in }
+        ), "urgent workout pair is admitted before a destination status")
+        assert(pairFirstManager.sendDestinationStatus(
+            generation: 8,
+            token: 12,
+            status: .started,
+            message: "Started"
+        ), "destination status coexists with an earlier urgent workout pair")
+        pairFirstReady = true
+        pairFirstManager.completeNavigationWriteForTesting(error: nil)
+        pairFirstManager.completeNavigationWriteForTesting(error: nil)
+        pairFirstManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(pairFirstWrites.map(destinationStatusPrefix),
+                    ["WTLM", "WTLM", "DNST"],
+                    "the adjacent pair is preserved ahead of a later destination status")
 
         let coalescingManager = BLEManager()
         assert(coalescingManager.handleDeviceCapabilitiesNotification(capability),
