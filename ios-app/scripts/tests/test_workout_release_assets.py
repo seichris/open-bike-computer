@@ -204,6 +204,22 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "the Live Activity extension must be iOS 17 in Debug and Release",
         )
 
+    def test_app_intent_descriptions_avoid_reserved_product_names(self):
+        intent_source = (
+            IOS_PROJECT
+            / "WorkoutLiveActivityShared"
+            / "WorkoutLiveActivityIntents.swift"
+        ).read_text()
+        descriptions = re.findall(
+            r'IntentDescription\(\s*"([^"]+)"\s*\)',
+            intent_source,
+        )
+
+        self.assertGreaterEqual(len(descriptions), 3)
+        for description in descriptions:
+            with self.subTest(description=description):
+                self.assertNotRegex(description.lower(), r"\bapple\b")
+
     def test_privacy_manifests_distinguish_backend_collection_from_healthkit(self):
         ios_privacy = load_plist(
             IOS_PROJECT / "BikeComputer" / "PrivacyInfo.xcprivacy"
