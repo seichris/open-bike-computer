@@ -32,6 +32,7 @@ int main() {
              batteryLayout.bottomMargin ==
          rideLayout.screenHeight);
   assert(batteryLayout.gap >= 16);
+  assert(batteryLayout.gap <= 36);
   static_assert(ride_telemetry_layout::isValid(rideLayout));
   assert(rideLayout.metrics.size() == 6);
   assert(rideLayout.heroUnit.bottom() == rideLayout.metrics[0].y);

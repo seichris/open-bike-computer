@@ -21,7 +21,7 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
   int32_t diameter =
       squareDisplay ? (shortestSide * 36) / 100 : (shortestSide * 46) / 100;
   const bool hasLargeDeviceChrome = height >= 400;
-  const int32_t edgeInset = hasLargeDeviceChrome ? 32 : 6;
+  const int32_t edgeInset = hasLargeDeviceChrome ? 48 : 6;
   const int32_t minimumGap = hasLargeDeviceChrome ? 16 : 6;
   const int32_t maximumDiameter =
       (height - (edgeInset * 2) - minimumGap) / 2;

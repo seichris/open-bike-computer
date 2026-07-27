@@ -73,6 +73,7 @@ struct DestinationRowContext {
 static constexpr lv_point_precise_t MAP_GUIDANCE_STAR_POINTS[] = {
     {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
     {3, 18}, {5, 11}, {0, 7},  {7, 6},   {9, 0}};
+static constexpr int32_t MAP_GUIDANCE_DESTINATION_ROW_HEIGHT = 88;
 static DestinationRowContext
     mapGuidanceRowContexts[destination_picker_protocol::MAX_ITEMS];
 
@@ -441,7 +442,8 @@ static void updateMapGuidanceOverlay() {
 
           lv_obj_t *row = lv_btn_create(mapGuidanceDestinationPicker);
           lv_obj_remove_style_all(row);
-          lv_obj_set_size(row, LV_PCT(100), 64);
+          lv_obj_set_size(row, LV_PCT(100),
+                          MAP_GUIDANCE_DESTINATION_ROW_HEIGHT);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
           lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -488,7 +490,7 @@ static void updateMapGuidanceOverlay() {
           lv_obj_set_style_pad_right(label, 4, 0);
           lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
           lv_obj_set_style_text_color(label, lv_color_white(), 0);
-          lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+          lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
           lv_label_set_text(label, destination.label);
           lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
         }

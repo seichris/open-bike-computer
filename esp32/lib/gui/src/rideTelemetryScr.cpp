@@ -139,7 +139,8 @@ void updateStatusLabel(lv_obj_t *label,
                        const ride_telemetry_presenter::ViewModel &model) {
   const char *statusText = ride_telemetry_presenter::statusLabel(model);
   setLabelIfChanged(label, statusText);
-  if (std::strcmp(statusText, "LEGACY RIDE") == 0) {
+  if (std::strcmp(statusText, "LEGACY RIDE") == 0 ||
+      std::strcmp(statusText, "LIVE") == 0) {
     lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
     return;
   }
