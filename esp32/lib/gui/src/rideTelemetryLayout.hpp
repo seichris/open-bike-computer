@@ -58,8 +58,8 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
   layout.screenHeight = height;
   layout.page = {0, 0, width, height};
   layout.status = {16, 8, width - 32, 24};
-  layout.hero = {0, 30, width, 60};
-  layout.heroUnit = {0, 92, width, 24};
+  layout.hero = {0, 45, width, 61};
+  layout.heroUnit = {0, 112, width, 24};
   layout.metrics = {{
       {leftX, metricFirstY, columnWidth, metricCellHeight},
       {rightX, metricFirstY, columnWidth, metricCellHeight},

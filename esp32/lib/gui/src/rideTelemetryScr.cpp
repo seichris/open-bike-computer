@@ -15,7 +15,7 @@
 extern Gps gps;
 LV_FONT_DECLARE(ride_value_font_56);
 LV_FONT_DECLARE(ride_value_font_64);
-LV_FONT_DECLARE(ride_speed_font_72);
+LV_FONT_DECLARE(ride_speed_font_84);
 
 namespace {
 
@@ -185,7 +185,7 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   rideSpeedValue = lv_label_create(ridePage);
   lv_obj_set_width(rideSpeedValue, rideLayout.hero.width);
   lv_obj_set_pos(rideSpeedValue, rideLayout.hero.x, rideLayout.hero.y);
-  lv_obj_set_style_text_font(rideSpeedValue, &ride_speed_font_72, 0);
+  lv_obj_set_style_text_font(rideSpeedValue, &ride_speed_font_84, 0);
   lv_obj_set_style_text_color(rideSpeedValue, lv_color_white(), 0);
   lv_obj_set_style_text_align(rideSpeedValue, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(rideSpeedValue, "0.0");

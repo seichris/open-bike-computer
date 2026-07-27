@@ -25,6 +25,7 @@ int main() {
 #endif
   static_assert(ride_telemetry_layout::isValid(rideLayout));
   assert(rideLayout.metrics.size() == 6);
+  assert(rideLayout.heroUnit.bottom() == rideLayout.metrics[0].y);
   assert(rideLayout.metrics[0].right() <= rideLayout.metrics[1].x);
   for (std::size_t row = 0; row + 1 < 3; ++row) {
     assert(rideLayout.metrics[(row + 1) * 2].y -
