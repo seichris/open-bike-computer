@@ -71,17 +71,10 @@ enum class MetricValueFontTier : uint8_t {
 struct HeartRatePresentation {
   bool showHeart = false;
   MetricValueFontTier fontTier = MetricValueFontTier::RegularCompact;
+  Rect unavailableValue{};
+  int32_t maximumValueWidth = 0;
+  int32_t fontSelectionWidth = 0;
 };
-
-constexpr HeartRatePresentation makeHeartRatePresentation(
-    int32_t screenWidth, bool heartRateAvailable) {
-  return {
-      heartRateAvailable,
-      useLargeMetricValueFont(screenWidth)
-          ? MetricValueFontTier::RegularLarge
-          : MetricValueFontTier::RegularCompact,
-  };
-}
 
 enum class ZoneUpdateAction : uint8_t {
   None,
@@ -92,6 +85,20 @@ enum class ZoneUpdateAction : uint8_t {
 struct ZoneUpdate {
   ZoneUpdateAction action = ZoneUpdateAction::None;
   int8_t zoneIndex = -1;
+};
+
+struct ZonePresentation {
+  ZoneUpdate update{};
+  std::array<bool, kHeartRateZoneCount> segmentVisible{};
+  std::array<Rect, kHeartRateZoneCount> segments{};
+  std::array<uint32_t, kHeartRateZoneCount> segmentColors{};
+  bool heartVisible = false;
+  bool labelVisible = false;
+  Rect heart{};
+  Rect label{};
+  uint32_t foregroundColor = 0xFFFFFF;
+  uint8_t labelZoneNumber = 0;
+  std::array<char, 7> labelText{};
 };
 
 constexpr ZoneUpdate makeZoneUpdate(int8_t displayedZoneIndex,
@@ -124,6 +131,27 @@ constexpr int32_t heartRateHeartSize(int32_t screenWidth) {
 
 constexpr int32_t heartRateHeartGap(int32_t screenWidth) {
   return useLargeMetricValueFont(screenWidth) ? 8 : 6;
+}
+
+constexpr HeartRatePresentation makeHeartRatePresentation(
+    const Rect &metric, int32_t screenWidth, bool heartRateAvailable) {
+  HeartRatePresentation presentation{};
+  presentation.showHeart = heartRateAvailable;
+  presentation.fontTier =
+      useLargeMetricValueFont(screenWidth)
+          ? MetricValueFontTier::RegularLarge
+          : MetricValueFontTier::RegularCompact;
+  presentation.unavailableValue = {
+      metric.x,
+      metric.y + kMetricValueOffsetY,
+      metric.width,
+      metricValueLineHeight(screenWidth),
+  };
+  presentation.maximumValueWidth =
+      metric.width - heartRateHeartSize(screenWidth) -
+      heartRateHeartGap(screenWidth);
+  presentation.fontSelectionWidth = presentation.maximumValueWidth - 4;
+  return presentation;
 }
 
 constexpr ValueWithHeartLayout makeHeartRateValueLayout(
@@ -199,6 +227,36 @@ constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
       labelLineHeight,
   };
   return layout;
+}
+
+constexpr ZonePresentation makeZonePresentation(
+    const Rect &metric, int32_t screenWidth, int8_t displayedZoneIndex,
+    int8_t nextZoneIndex) {
+  ZonePresentation presentation{};
+  presentation.update = makeZoneUpdate(displayedZoneIndex, nextZoneIndex);
+  if (presentation.update.action != ZoneUpdateAction::Show) {
+    return presentation;
+  }
+
+  const std::size_t activeIndex =
+      static_cast<std::size_t>(presentation.update.zoneIndex);
+  const ZoneStripLayout strip =
+      makeZoneStripLayout(metric, screenWidth, activeIndex);
+  for (std::size_t index = 0; index < kHeartRateZoneCount; ++index) {
+    presentation.segmentVisible[index] = true;
+    presentation.segments[index] = strip.segments[index];
+    presentation.segmentColors[index] =
+        zoneColorHex(index, index == activeIndex);
+  }
+  presentation.heartVisible = true;
+  presentation.labelVisible = true;
+  presentation.heart = strip.heart;
+  presentation.label = strip.label;
+  presentation.foregroundColor = zoneForegroundColorHex(activeIndex);
+  presentation.labelZoneNumber = static_cast<uint8_t>(activeIndex + 1);
+  presentation.labelText = {'Z', 'O', 'N', 'E', ' ',
+                            static_cast<char>('1' + activeIndex), '\0'};
+  return presentation;
 }
 
 constexpr Layout makeLayout(int32_t width, int32_t height) {

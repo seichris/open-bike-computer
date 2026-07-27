@@ -183,12 +183,6 @@ inline int8_t fiveZoneIndex(const ViewModel &model) {
   return static_cast<int8_t>(model.currentHeartRateZone.value - 1);
 }
 
-inline void formatFiveZoneLabel(uint8_t zeroBasedZoneIndex, char *buffer,
-                                std::size_t size) {
-  std::snprintf(buffer, size, "ZONE %u",
-                static_cast<unsigned>(zeroBasedZoneIndex + 1));
-}
-
 inline void formatEnergy(const ViewModel &model, char *buffer,
                          std::size_t size) {
   if (!model.activeEnergyTenthsKilocalorie.available) {

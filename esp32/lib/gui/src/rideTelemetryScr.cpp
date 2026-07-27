@@ -179,15 +179,6 @@ MetricLabels createMetric(lv_obj_t *page, const char *title,
   return labels;
 }
 
-lv_color_t zoneColor(std::size_t index, bool active) {
-  return lv_color_hex(ride_telemetry_layout::zoneColorHex(index, active));
-}
-
-lv_color_t zoneForegroundColor(std::size_t index) {
-  return lv_color_hex(
-      ride_telemetry_layout::zoneForegroundColorHex(index));
-}
-
 void drawHeartIcon(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_DRAW_POST_END) {
     return;
@@ -264,16 +255,18 @@ void createZoneMetric(lv_obj_t *page,
 }
 
 void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
-  const ride_telemetry_layout::ZoneUpdate update =
-      ride_telemetry_layout::makeZoneUpdate(
-          displayedZoneIndex,
+  const ride_telemetry_layout::ZonePresentation presentation =
+      ride_telemetry_layout::makeZonePresentation(
+          rideLayout.metrics[1], rideLayout.screenWidth, displayedZoneIndex,
           ride_telemetry_presenter::fiveZoneIndex(model));
-  if (update.action == ride_telemetry_layout::ZoneUpdateAction::None) {
+  if (presentation.update.action ==
+      ride_telemetry_layout::ZoneUpdateAction::None) {
     return;
   }
-  displayedZoneIndex = update.zoneIndex;
+  displayedZoneIndex = presentation.update.zoneIndex;
 
-  if (update.action == ride_telemetry_layout::ZoneUpdateAction::Hide) {
+  if (presentation.update.action ==
+      ride_telemetry_layout::ZoneUpdateAction::Hide) {
     for (lv_obj_t *segment : rideZoneSegments) {
       lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
     }
@@ -282,36 +275,40 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
     return;
   }
 
-  const std::size_t activeIndex =
-      static_cast<std::size_t>(update.zoneIndex);
-  const ride_telemetry_layout::ZoneStripLayout layout =
-      ride_telemetry_layout::makeZoneStripLayout(rideLayout.metrics[1],
-                                                 rideLayout.screenWidth,
-                                                 activeIndex);
   for (std::size_t index = 0; index < rideZoneSegments.size(); ++index) {
-    const ride_telemetry_layout::Rect &segmentRect = layout.segments[index];
+    const ride_telemetry_layout::Rect &segmentRect =
+        presentation.segments[index];
     lv_obj_set_pos(rideZoneSegments[index], segmentRect.x, segmentRect.y);
     lv_obj_set_size(rideZoneSegments[index], segmentRect.width,
                     segmentRect.height);
-    lv_obj_set_style_bg_color(rideZoneSegments[index],
-                              zoneColor(index, index == activeIndex), 0);
-    lv_obj_clear_flag(rideZoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(
+        rideZoneSegments[index],
+        lv_color_hex(presentation.segmentColors[index]), 0);
+    if (presentation.segmentVisible[index]) {
+      lv_obj_clear_flag(rideZoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
-  const lv_color_t foreground = zoneForegroundColor(activeIndex);
-  lv_obj_set_pos(rideZoneHeart, layout.heart.x, layout.heart.y);
-  lv_obj_set_size(rideZoneHeart, layout.heart.width, layout.heart.height);
+  const lv_color_t foreground =
+      lv_color_hex(presentation.foregroundColor);
+  lv_obj_set_pos(rideZoneHeart, presentation.heart.x,
+                 presentation.heart.y);
+  lv_obj_set_size(rideZoneHeart, presentation.heart.width,
+                  presentation.heart.height);
   lv_obj_set_style_text_color(rideZoneHeart, foreground, 0);
-  lv_obj_clear_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+  if (presentation.heartVisible) {
+    lv_obj_clear_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+  }
 
-  lv_obj_set_pos(rideZoneLabel, layout.label.x, layout.label.y);
-  lv_obj_set_size(rideZoneLabel, layout.label.width, layout.label.height);
+  lv_obj_set_pos(rideZoneLabel, presentation.label.x,
+                 presentation.label.y);
+  lv_obj_set_size(rideZoneLabel, presentation.label.width,
+                  presentation.label.height);
   lv_obj_set_style_text_color(rideZoneLabel, foreground, 0);
-  char label[8];
-  ride_telemetry_presenter::formatFiveZoneLabel(
-      static_cast<uint8_t>(activeIndex), label, sizeof(label));
-  setLabelIfChanged(rideZoneLabel, label);
-  lv_obj_clear_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
+  setLabelIfChanged(rideZoneLabel, presentation.labelText.data());
+  if (presentation.labelVisible) {
+    lv_obj_clear_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void updateHeartRateMetric(
@@ -322,29 +319,27 @@ void updateHeartRateMetric(
                                           sizeof(value));
   const ride_telemetry_layout::HeartRatePresentation presentation =
       ride_telemetry_layout::makeHeartRatePresentation(
-          rideLayout.screenWidth, model.currentHeartRateBpm.available);
+          metric, rideLayout.screenWidth,
+          model.currentHeartRateBpm.available);
 
   if (!presentation.showHeart) {
-    lv_obj_set_pos(rideHeartRateValue, metric.x,
-                   metric.y + ride_telemetry_layout::kMetricValueOffsetY);
-    lv_obj_set_width(rideHeartRateValue, metric.width);
+    lv_obj_set_pos(rideHeartRateValue, presentation.unavailableValue.x,
+                   presentation.unavailableValue.y);
+    lv_obj_set_width(rideHeartRateValue,
+                     presentation.unavailableValue.width);
     lv_obj_set_style_text_align(rideHeartRateValue, LV_TEXT_ALIGN_CENTER, 0);
     setMetricValueIfChanged(rideHeartRateValue, value);
     lv_obj_add_flag(rideHeartRateHeart, LV_OBJ_FLAG_HIDDEN);
     return;
   }
 
-  const int32_t maximumValueWidth =
-      metric.width -
-      ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) -
-      ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
-  lv_obj_set_width(rideHeartRateValue, maximumValueWidth);
+  lv_obj_set_width(rideHeartRateValue, presentation.maximumValueWidth);
   // Select against the stable maximum width, not the tightly measured label
   // width from the previous refresh. Ordinary heart rates therefore keep the
   // normal metric size, while anomalous protocol-valid values still shrink
   // enough to remain fully visible beside the heart.
   const lv_font_t *font = metricValueFontForWidth(
-      value, maximumValueWidth - 4,
+      value, presentation.fontSelectionWidth,
       presentation.fontTier ==
           ride_telemetry_layout::MetricValueFontTier::RegularLarge);
   if (lv_obj_get_style_text_font(rideHeartRateValue, LV_PART_MAIN) != font) {
