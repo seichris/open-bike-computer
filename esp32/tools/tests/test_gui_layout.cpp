@@ -68,6 +68,19 @@ int main() {
     assert(ride_telemetry_layout::fits(
         metric, rideLayout.screenWidth, rideLayout.screenHeight));
   }
+  constexpr int32_t representativeHeartRateTextWidth = 100;
+  const auto heartRate = ride_telemetry_layout::makeHeartRateValueLayout(
+      rideLayout.metrics[0], rideLayout.screenWidth,
+      representativeHeartRateTextWidth);
+  assert(heartRate.value.x >= rideLayout.metrics[0].x);
+  assert(heartRate.value.y >= rideLayout.metrics[0].y +
+                                  ride_telemetry_layout::kMetricValueOffsetY);
+  assert(heartRate.value.right() + heartRate.gap == heartRate.heart.x);
+  assert(heartRate.heart.right() <= rideLayout.metrics[0].right());
+  assert(heartRate.heart.bottom() <= rideLayout.metrics[0].bottom());
+  assert(heartRate.heart.width ==
+         ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth));
+  assert(heartRate.value.width == representativeHeartRateTextWidth);
   for (std::size_t activeIndex = 0;
        activeIndex < ride_telemetry_layout::kHeartRateZoneCount;
        ++activeIndex) {

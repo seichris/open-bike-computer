@@ -30,6 +30,7 @@ lv_obj_t *ridePage = nullptr;
 lv_obj_t *rideStatus = nullptr;
 lv_obj_t *rideSpeedValue = nullptr;
 lv_obj_t *rideHeartRateValue = nullptr;
+lv_obj_t *rideHeartRateHeart = nullptr;
 lv_obj_t *rideDistanceValue = nullptr;
 lv_obj_t *rideElapsedValue = nullptr;
 std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
@@ -196,6 +197,11 @@ void drawHeartIcon(lv_event_t *event) {
   lv_layer_t *layer = lv_event_get_layer(event);
   lv_area_t coordinates{};
   lv_obj_get_coords(heart, &coordinates);
+  const int32_t width = lv_area_get_width(&coordinates);
+  const int32_t height = lv_area_get_height(&coordinates);
+  const int32_t lobeEnd = width / 2;
+  const int32_t rightLobeStart = lobeEnd - 1;
+  const int32_t triangleTop = height * 2 / 7;
 
   lv_draw_rect_dsc_t circle{};
   lv_draw_rect_dsc_init(&circle);
@@ -204,9 +210,10 @@ void drawHeartIcon(lv_event_t *event) {
   circle.radius = LV_RADIUS_CIRCLE;
 
   lv_area_t leftCircle = {coordinates.x1, coordinates.y1,
-                          coordinates.x1 + 7, coordinates.y1 + 7};
-  lv_area_t rightCircle = {coordinates.x1 + 6, coordinates.y1,
-                           coordinates.x1 + 13, coordinates.y1 + 7};
+                          coordinates.x1 + lobeEnd,
+                          coordinates.y1 + lobeEnd};
+  lv_area_t rightCircle = {coordinates.x1 + rightLobeStart, coordinates.y1,
+                           coordinates.x2, coordinates.y1 + lobeEnd};
   lv_draw_rect(layer, &circle, &leftCircle);
   lv_draw_rect(layer, &circle, &rightCircle);
 
@@ -214,10 +221,21 @@ void drawHeartIcon(lv_event_t *event) {
   lv_draw_triangle_dsc_init(&triangle);
   triangle.bg_color = circle.bg_color;
   triangle.bg_opa = LV_OPA_COVER;
-  triangle.p[0] = {coordinates.x1, coordinates.y1 + 4};
-  triangle.p[1] = {coordinates.x1 + 13, coordinates.y1 + 4};
-  triangle.p[2] = {coordinates.x1 + 6, coordinates.y1 + 13};
+  triangle.p[0] = {coordinates.x1, coordinates.y1 + triangleTop};
+  triangle.p[1] = {coordinates.x2, coordinates.y1 + triangleTop};
+  triangle.p[2] = {coordinates.x1 + width / 2, coordinates.y2};
   lv_draw_triangle(layer, &triangle);
+}
+
+lv_obj_t *createHeartIcon(lv_obj_t *page) {
+  lv_obj_t *heart = lv_obj_create(page);
+  lv_obj_remove_style_all(heart);
+  lv_obj_add_event_cb(heart, drawHeartIcon, LV_EVENT_DRAW_POST_END, nullptr);
+  lv_obj_clear_flag(
+      heart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE |
+                                        LV_OBJ_FLAG_CLICKABLE));
+  lv_obj_add_flag(heart, LV_OBJ_FLAG_HIDDEN);
+  return heart;
 }
 
 void createZoneMetric(lv_obj_t *page,
@@ -236,14 +254,7 @@ void createZoneMetric(lv_obj_t *page,
     lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
   }
 
-  rideZoneHeart = lv_obj_create(page);
-  lv_obj_remove_style_all(rideZoneHeart);
-  lv_obj_add_event_cb(rideZoneHeart, drawHeartIcon,
-                      LV_EVENT_DRAW_POST_END, nullptr);
-  lv_obj_clear_flag(
-      rideZoneHeart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE |
-                                                LV_OBJ_FLAG_CLICKABLE));
-  lv_obj_add_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+  rideZoneHeart = createHeartIcon(page);
 
   rideZoneLabel = lv_label_create(page);
   lv_obj_set_style_text_font(rideZoneLabel, &lv_font_montserrat_14, 0);
@@ -297,6 +308,48 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
                 static_cast<unsigned>(activeIndex + 1));
   setLabelIfChanged(rideZoneLabel, label);
   lv_obj_clear_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void updateHeartRateMetric(
+    const ride_telemetry_presenter::ViewModel &model) {
+  const ride_telemetry_layout::Rect &metric = rideLayout.metrics[0];
+  char value[24];
+  ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
+                                          sizeof(value));
+
+  if (!model.currentHeartRateBpm.available) {
+    lv_obj_set_pos(rideHeartRateValue, metric.x,
+                   metric.y + ride_telemetry_layout::kMetricValueOffsetY);
+    lv_obj_set_width(rideHeartRateValue, metric.width);
+    lv_obj_set_style_text_align(rideHeartRateValue, LV_TEXT_ALIGN_CENTER, 0);
+    setMetricValueIfChanged(rideHeartRateValue, value);
+    lv_obj_add_flag(rideHeartRateHeart, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  const int32_t maximumValueWidth =
+      metric.width -
+      ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) -
+      ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
+  lv_obj_set_width(rideHeartRateValue, maximumValueWidth);
+  setMetricValueIfChanged(rideHeartRateValue, value);
+  const lv_font_t *font =
+      lv_obj_get_style_text_font(rideHeartRateValue, LV_PART_MAIN);
+  const int32_t textWidth = lv_text_get_width(
+      value, static_cast<uint32_t>(std::strlen(value)), font, 0);
+  const ride_telemetry_layout::ValueWithHeartLayout layout =
+      ride_telemetry_layout::makeHeartRateValueLayout(
+          metric, rideLayout.screenWidth, textWidth);
+
+  lv_obj_set_pos(rideHeartRateValue, layout.value.x, layout.value.y);
+  lv_obj_set_width(rideHeartRateValue, layout.value.width);
+  lv_obj_set_style_text_align(rideHeartRateValue, LV_TEXT_ALIGN_LEFT, 0);
+
+  lv_obj_set_pos(rideHeartRateHeart, layout.heart.x, layout.heart.y);
+  lv_obj_set_size(rideHeartRateHeart, layout.heart.width,
+                  layout.heart.height);
+  lv_obj_set_style_text_color(rideHeartRateHeart, lv_color_hex(0xFF3B30), 0);
+  lv_obj_clear_flag(rideHeartRateHeart, LV_OBJ_FLAG_HIDDEN);
 }
 
 ride_telemetry_presenter::ViewModel currentViewModel() {
@@ -377,7 +430,8 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_label_set_text_static(speedUnit, "km/h");
 
   rideHeartRateValue =
-      createMetric(ridePage, "Heart bpm", rideLayout.metrics[0]).value;
+      createMetric(ridePage, "Heart rate", rideLayout.metrics[0]).value;
+  rideHeartRateHeart = createHeartIcon(ridePage);
   createZoneMetric(ridePage, rideLayout.metrics[1]);
   rideDistanceValue =
       createMetric(ridePage, "Distance", rideLayout.metrics[2]).value;
@@ -398,9 +452,7 @@ void updateRideTelemetryEvent(lv_event_t *) {
   char value[24];
   ride_telemetry_presenter::formatSpeed(model, value, sizeof(value));
   setLabelIfChanged(rideSpeedValue, value);
-  ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
-                                          sizeof(value));
-  setMetricValueIfChanged(rideHeartRateValue, value);
+  updateHeartRateMetric(model);
   updateZoneMetric(model);
   ride_telemetry_presenter::formatDistance(model.distanceMeters, value,
                                            sizeof(value));

@@ -57,6 +57,47 @@ struct ZoneStripLayout {
   Rect label{};
 };
 
+struct ValueWithHeartLayout {
+  Rect value{};
+  Rect heart{};
+  int32_t gap = 0;
+};
+
+constexpr int32_t heartRateHeartSize(int32_t screenWidth) {
+  return useLargeMetricValueFont(screenWidth) ? 30 : 24;
+}
+
+constexpr int32_t heartRateHeartGap(int32_t screenWidth) {
+  return useLargeMetricValueFont(screenWidth) ? 8 : 6;
+}
+
+constexpr ValueWithHeartLayout makeHeartRateValueLayout(
+    const Rect &metric, int32_t screenWidth, int32_t requestedTextWidth) {
+  const int32_t heartSize = heartRateHeartSize(screenWidth);
+  const int32_t gap = heartRateHeartGap(screenWidth);
+  const int32_t maximumTextWidth = metric.width - gap - heartSize;
+  const int32_t textWidth = requestedTextWidth < 0
+                                ? 0
+                                : (requestedTextWidth > maximumTextWidth
+                                       ? maximumTextWidth
+                                       : requestedTextWidth);
+  const int32_t groupWidth = textWidth + gap + heartSize;
+  const int32_t valueY = metric.y + kMetricValueOffsetY;
+  const int32_t valueHeight = metricValueLineHeight(screenWidth);
+  const int32_t groupX = metric.x + (metric.width - groupWidth) / 2;
+
+  ValueWithHeartLayout layout{};
+  layout.value = {groupX, valueY, textWidth, valueHeight};
+  layout.heart = {
+      layout.value.right() + gap,
+      valueY + (valueHeight - heartSize) / 2,
+      heartSize,
+      heartSize,
+  };
+  layout.gap = gap;
+  return layout;
+}
+
 constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
                                                int32_t screenWidth,
                                                std::size_t activeIndex) {
