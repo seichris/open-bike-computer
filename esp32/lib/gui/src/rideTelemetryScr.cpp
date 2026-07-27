@@ -6,9 +6,11 @@
 #include "rideTelemetryScr.hpp"
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "gps.hpp"
+#include "rideMetricFontSelection.hpp"
 #include "rideTelemetryLayout.hpp"
 #include "rideTelemetryPresenter.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 
@@ -35,23 +37,61 @@ MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 ride_telemetry_layout::Layout rideLayout{};
 
-const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
-  if (!ride_telemetry_layout::useLargeMetricValueFont(
-          rideLayout.screenWidth)) {
-    return &lv_font_montserrat_42;
+bool fontSupportsText(const lv_font_t *font, const char *text) {
+  for (std::size_t index = 0; text[index] != '\0'; ++index) {
+    // Ride telemetry formatters emit only ASCII digits, punctuation and units.
+    const uint32_t letter = static_cast<uint8_t>(text[index]);
+    const uint32_t nextLetter = static_cast<uint8_t>(text[index + 1]);
+    lv_font_glyph_dsc_t glyph{};
+    if (!lv_font_get_glyph_dsc(font, &glyph, letter, nextLetter) ||
+        glyph.is_placeholder) {
+      return false;
+    }
   }
+  return true;
+}
 
+template <std::size_t N>
+const lv_font_t *firstFittingFont(
+    const std::array<const lv_font_t *, N> &fonts, const char *text,
+    uint32_t textLength, int32_t availableWidth) {
+  std::array<ride_metric_font_selection::Candidate, N> candidates{};
+  for (std::size_t index = 0; index < N; ++index) {
+    candidates[index] = {
+        lv_text_get_width(text, textLength, fonts[index], 0),
+        fontSupportsText(fonts[index], text),
+    };
+  }
+  const std::size_t selected =
+      ride_metric_font_selection::firstFittingIndex(candidates,
+                                                    availableWidth);
+  return selected < N ? fonts[selected] : fonts[N - 1];
+}
+
+const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
   const int32_t availableWidth = lv_obj_get_width(label) - 4;
   const uint32_t textLength = static_cast<uint32_t>(std::strlen(text));
-  if (lv_text_get_width(text, textLength, &ride_value_font_64, 0) <=
-      availableWidth) {
-    return &ride_value_font_64;
+
+  if (ride_telemetry_layout::useLargeMetricValueFont(
+          rideLayout.screenWidth)) {
+    constexpr std::size_t fontCount = 7;
+    const std::array<const lv_font_t *, fontCount> fonts = {
+        &ride_value_font_64,     &ride_value_font_56,
+        &lv_font_montserrat_48,  &lv_font_montserrat_42,
+        &lv_font_montserrat_38,  &lv_font_montserrat_24,
+        &lv_font_montserrat_18,
+    };
+    return firstFittingFont(fonts, text, textLength, availableWidth);
   }
-  if (lv_text_get_width(text, textLength, &ride_value_font_56, 0) <=
-      availableWidth) {
-    return &ride_value_font_56;
-  }
-  return &lv_font_montserrat_48;
+
+  constexpr std::size_t fontCount = 4;
+  const std::array<const lv_font_t *, fontCount> fonts = {
+      &lv_font_montserrat_42,
+      &lv_font_montserrat_38,
+      &lv_font_montserrat_24,
+      &lv_font_montserrat_18,
+  };
+  return firstFittingFont(fonts, text, textLength, availableWidth);
 }
 
 void setLabelIfChanged(lv_obj_t *label, const char *text) {
@@ -139,8 +179,7 @@ void updateStatusLabel(lv_obj_t *label,
                        const ride_telemetry_presenter::ViewModel &model) {
   const char *statusText = ride_telemetry_presenter::statusLabel(model);
   setLabelIfChanged(label, statusText);
-  if (std::strcmp(statusText, "LEGACY RIDE") == 0 ||
-      std::strcmp(statusText, "LIVE") == 0) {
+  if (!ride_telemetry_presenter::shouldShowStatus(model)) {
     lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
     return;
   }

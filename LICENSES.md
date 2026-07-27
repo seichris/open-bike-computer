@@ -62,6 +62,12 @@ The Battery Status screen's bicycle geometry in
 `esp32/lib/gui/src/batteryStatusScr.cpp` is adapted from the Lucide Bike icon
 and remains available under the [Lucide ISC license](LICENSES/Lucide-ISC.txt).
 
+The generated Ride Stats fonts in `esp32/lib/gui/src/rideSpeedFont84.c`,
+`esp32/lib/gui/src/rideValueFont64.c`, and
+`esp32/lib/gui/src/rideValueFont56.c` are derived from Montserrat Medium 7.200
+and remain available under the
+[SIL Open Font License 1.1](LICENSES/Montserrat-OFL-1.1.txt).
+
 Documentation, artwork, trademarks, hardware reference documents, and other
 non-software material are not licensed by the software licenses above. All
 rights in that material remain with their respective copyright or other rights

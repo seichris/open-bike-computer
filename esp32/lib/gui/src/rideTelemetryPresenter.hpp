@@ -276,6 +276,17 @@ inline const char *statusLabel(const ViewModel &model) {
   return "--";
 }
 
+inline bool shouldShowStatus(const ViewModel &model) {
+  if (!model.usesWorkout) {
+    return false;
+  }
+  if (model.stale) {
+    return true;
+  }
+  return model.sessionState != SessionState::Running &&
+         model.sessionState != SessionState::Idle;
+}
+
 inline const char *sourceFreshnessLabel(const ViewModel &model) {
   if (!model.usesWorkout) {
     return "PHONE GPS";

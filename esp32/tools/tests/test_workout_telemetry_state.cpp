@@ -230,6 +230,11 @@ int main() {
       workout_telemetry::makeSnapshot(reducer.state(), 9001), legacy);
   assert(pausedModel.usesWorkout);
   assertText(ride_telemetry_presenter::statusLabel(pausedModel), "PAUSED");
+  assert(ride_telemetry_presenter::shouldShowStatus(pausedModel));
+  auto runningModel = pausedModel;
+  runningModel.sessionState = SessionState::Running;
+  assertText(ride_telemetry_presenter::statusLabel(runningModel), "LIVE");
+  assert(!ride_telemetry_presenter::shouldShowStatus(runningModel));
   char formatted[32];
   ride_telemetry_presenter::formatSpeed(pausedModel, formatted,
                                         sizeof(formatted));
@@ -612,6 +617,7 @@ int main() {
   assertText(ride_telemetry_presenter::sourceFreshnessLabel(staleModel),
              "WATCH / LINK LOST");
   assertText(ride_telemetry_presenter::statusLabel(staleModel), "LINK LOST");
+  assert(ride_telemetry_presenter::shouldShowStatus(staleModel));
 
   uint8_t endedCore[sizeof(core)];
   std::memcpy(endedCore, core, sizeof(core));
@@ -1002,6 +1008,7 @@ int main() {
   assert(!legacyModel.usesWorkout);
   assertText(ride_telemetry_presenter::statusLabel(legacyModel),
              "LEGACY RIDE");
+  assert(!ride_telemetry_presenter::shouldShowStatus(legacyModel));
   ride_telemetry_presenter::formatSpeed(legacyModel, formatted,
                                         sizeof(formatted));
   assertText(formatted, "27.0");
