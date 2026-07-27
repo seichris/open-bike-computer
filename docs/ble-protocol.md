@@ -456,7 +456,7 @@ Current setting IDs:
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
 | `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
-| `9` | Map street line width boost | `0...24` px added to known road/path line style widths; legacy unknown lines are boosted when their stored style width is at least 3px; final rendered width is capped at 24px |
+| `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
 | `12` | Device brightness | `5...100` percent on supported hardware |
@@ -468,7 +468,7 @@ Current setting IDs:
 | `18` | Map + Navigation route line width | `2...48` |
 | `19` | Map + Navigation zoom level | `0...5` |
 | `20` | Map + Navigation feature visibility mask | feature bits and the extended-mask marker use the same meanings as ID `8`; navigation overlay bits remain global via ID `8` |
-| `21` | Map + Navigation street line width boost | `0...24` px |
+| `21` | Map + Navigation street width | Absolute rendered width is `1...24` px, encoded as `width - 4` (`-3...20`) for compatibility. |
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
@@ -487,11 +487,12 @@ the persisted Map values. Map rotation mode remains Map-only; Map + Navigation
 automatically uses course-up while navigating. Route and current-position
 overlay visibility remains shared by both profiles.
 
-Fresh Map + Navigation profiles default to low detail with Major Roads and
-Residential & Local Roads visible. Buildings, Service Roads, Paths & Footways,
-Tracks, Railways, and Other Areas default to hidden; green space and water
-remain visible. Existing persisted or migrated profiles keep their saved
-values.
+Fresh Map profiles default to high detail, zoom level `3`, a `4` px route line,
+`4` px streets, and a `2x` position marker. Fresh Map + Navigation profiles
+default to low detail, zoom level `3`, a `15` px route line, `4` px streets, a
+`2x` position marker, and only Major Roads, Residential & Local Roads, and
+Water visible. Existing customized profiles keep their saved values; profiles
+that still exactly match the former recommendations migrate once.
 
 Apps that support the extended visibility classes set marker bit `12`. Without
 that marker, firmware preserves the legacy behavior by applying bit `4` to both

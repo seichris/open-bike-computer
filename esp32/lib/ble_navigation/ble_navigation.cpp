@@ -1862,15 +1862,16 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                   mapRenderSettings.mapStyle.routeLineWidth);
     break;
   case 9:
-    mapRenderSettings.mapStyle.streetLineWidthBoost =
-        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    mapRenderSettings.mapStyle.streetLineWidth = static_cast<uint8_t>(
+        map_profile_protocol::absoluteStreetWidthFromLegacyBoost(
+            map_profile_protocol::clampValue(settingId, settingValue)));
     if (mirrorLegacyMapProfile) {
-      mapRenderSettings.mapNavigationStyle.streetLineWidthBoost =
-          mapRenderSettings.mapStyle.streetLineWidthBoost;
+      mapRenderSettings.mapNavigationStyle.streetLineWidth =
+          mapRenderSettings.mapStyle.streetLineWidth;
     }
     persistMapProfileSetting();
-    Serial.printf("BLE Settings: streetLineWidthBoost = %d (saved)\n",
-                  mapRenderSettings.mapStyle.streetLineWidthBoost);
+    Serial.printf("BLE Settings: streetLineWidth = %d px (saved)\n",
+                  mapRenderSettings.mapStyle.streetLineWidth);
     break;
   case 10:
     mapRenderSettings.mapStyle.positionMarkerScale =
@@ -2011,8 +2012,10 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     persistMapProfileSetting();
     break;
   case 21:
-    mapRenderSettings.mapNavigationStyle.streetLineWidthBoost =
-        (uint8_t)map_profile_protocol::clampValue(settingId, settingValue);
+    mapRenderSettings.mapNavigationStyle.streetLineWidth =
+        static_cast<uint8_t>(
+            map_profile_protocol::absoluteStreetWidthFromLegacyBoost(
+                map_profile_protocol::clampValue(settingId, settingValue)));
     persistMapProfileSetting();
     break;
   case 22:
@@ -2372,7 +2375,7 @@ public:
 /**
  * @brief Settings characteristic callback - receives runtime config from iOS
  * app Format: [settingId:1][value:4] = 5 bytes Setting IDs: 1=minPolygonSize,
- * 2=detailLevel, 3=routeLineWidth, 9=streetLineWidthBoost,
+ * 2=detailLevel, 3=routeLineWidth, 9=streetLineWidth,
  * 10=positionMarkerScale
  */
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
@@ -2500,13 +2503,13 @@ static void loadSettingsFromNVS() {
   prefs.end();
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
-                "detailLevel=%d, routeWidth=%d, streetBoost=%d, "
+                "detailLevel=%d, routeWidth=%d, streetWidth=%d, "
                 "markerScale=%d, tapSwitch=%d, "
                 "screenMask=0x%02X, defaultScreen=%d, discSleepSec=%lu\n",
                 mapRenderSettings.mapStyle.minPolygonSize,
                 mapRenderSettings.mapStyle.detailLevel,
                 mapRenderSettings.mapStyle.routeLineWidth,
-                mapRenderSettings.mapStyle.streetLineWidthBoost,
+                mapRenderSettings.mapStyle.streetLineWidth,
                 mapRenderSettings.mapStyle.positionMarkerScale,
                 mapRenderSettings.tapToSwitchScreens,
                 mapRenderSettings.enabledScreensMask,

@@ -1958,11 +1958,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         };
 
         Point16 p1 = transformPoint(line.points[0]);
-        int32_t streetBoost = shouldBoostLineWidth(line.typeId, line.width)
-                                  ? blockStyle.streetLineWidthBoost
-                                  : 0;
-        uint8_t lineWidth = (uint8_t)std::min<int32_t>(
-            std::max<int32_t>(line.width, 1) + streetBoost, 24);
+        uint8_t lineWidth = shouldBoostLineWidth(line.typeId, line.width)
+                                ? blockStyle.streetLineWidth
+                                : static_cast<uint8_t>(
+                                      std::max<int32_t>(line.width, 1));
 
         for (int i = 0; i < (int)line.points.size() - 1; i++) {
           if ((i & 0x0F) == 0 &&

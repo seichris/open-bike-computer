@@ -10,7 +10,7 @@ struct TestProfile {
   uint8_t minPolygonSize = 0;
   uint8_t detailLevel = 0;
   uint8_t routeLineWidth = 0;
-  uint8_t streetLineWidthBoost = 0;
+  uint8_t streetLineWidth = 0;
   uint8_t positionMarkerScale = 0;
   uint8_t zoomLevel = 0;
   uint32_t visibilityMask = 0;
@@ -59,8 +59,18 @@ int main() {
   TestProfile loadedMap;
   TestProfile loadedNavigation;
   map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
+  assert(loadedMap.detailLevel == MAP_DEFAULT_DETAIL_LEVEL);
+  assert(loadedMap.routeLineWidth == MAP_DEFAULT_ROUTE_LINE_WIDTH);
+  assert(loadedMap.streetLineWidth == DEFAULT_STREET_WIDTH);
+  assert(loadedMap.positionMarkerScale == 2);
+  assert(loadedMap.zoomLevel == MAP_DEFAULT_ZOOM_LEVEL);
   assert(loadedNavigation.detailLevel ==
          MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
+  assert(loadedNavigation.routeLineWidth ==
+         MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH);
+  assert(loadedNavigation.streetLineWidth == DEFAULT_STREET_WIDTH);
+  assert(loadedNavigation.positionMarkerScale == 2);
+  assert(loadedNavigation.zoomLevel == MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL);
   assert(loadedNavigation.visibilityMask ==
          MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK);
 
@@ -69,13 +79,16 @@ int main() {
   legacyStore.putUChar("minPolySize", legacyMap.minPolygonSize);
   legacyStore.putUChar("detailLevel", legacyMap.detailLevel);
   legacyStore.putUChar("routeWidth", legacyMap.routeLineWidth);
-  legacyStore.putUChar("streetBoost", legacyMap.streetLineWidthBoost);
+  legacyStore.putUChar("streetBoost", 4);
   legacyStore.putUChar("markerScale", legacyMap.positionMarkerScale);
   legacyStore.putUChar("zoomLevel", legacyMap.zoomLevel);
   legacyStore.putUInt("visMask", legacyMap.visibilityMask);
   map_profile_persistence::load(legacyStore, loadedMap, loadedNavigation);
   assert(loadedMap.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
+  assert(loadedMap.streetLineWidth == 8);
+  assert(legacyStore.getUChar("streetWidth", 0) == 8);
   assert(loadedNavigation.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
+  assert(loadedNavigation.streetLineWidth == 8);
   assert(loadedNavigation.zoomLevel == legacyMap.zoomLevel);
 
   FakeStore mirroredStore;

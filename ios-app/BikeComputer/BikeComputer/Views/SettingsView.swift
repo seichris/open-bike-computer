@@ -842,18 +842,6 @@ private struct UICustomizationSettingsView: View {
             .disabled(!bleManager.supportsDeviceSettings ||
                       !bleManager.hasReceivedDeviceCapabilities)
 
-            Section(header: Text("Map Mode"), footer: Text("Applies only to the Map screen. Map + Navigation automatically uses course-up while navigating.")) {
-                Picker("Rotation", selection: $bleManager.mapRotationMode) {
-                    Text("North Up").tag(0)
-                    Text("Course Up").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: bleManager.mapRotationMode) { newValue in
-                    bleManager.sendSetting(id: 6, value: Int32(newValue))
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             Section(header: Text("Navigation Overlays"), footer: Text("Show or hide live navigation layers drawn above both map screens.")) {
                 Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
                     .onChange(of: bleManager.showRouteOverlay) { _ in bleManager.sendVisibilityMask() }
@@ -923,8 +911,8 @@ private struct MapStyleSettingsView: View {
         binding(map: \.routeLineWidth, mapPlusNavigation: \.mapPlusNavigationRouteLineWidth)
     }
 
-    private var streetLineWidthBoost: Binding<Double> {
-        binding(map: \.streetLineWidthBoost, mapPlusNavigation: \.mapPlusNavigationStreetLineWidthBoost)
+    private var streetLineWidth: Binding<Double> {
+        binding(map: \.streetLineWidth, mapPlusNavigation: \.mapPlusNavigationStreetLineWidth)
     }
 
     private var positionMarkerScale: Binding<Double> {
@@ -1003,6 +991,19 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
+            if screen == .map {
+                Section(header: Text("Map Mode")) {
+                    Picker("Rotation", selection: $bleManager.mapRotationMode) {
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: bleManager.mapRotationMode) { newValue in
+                        bleManager.sendSetting(id: 6, value: Int32(newValue))
+                    }
+                }
+            }
+
             Section(header: Text("Roads & Paths"), footer: Text("Service roads commonly include driveways and internal compound roads. Separate Service Roads and Tracks require current v2 map downloads; legacy maps keep each pair combined.")) {
                 Toggle("Major Roads", isOn: showMajorRoads)
                     .onChange(of: showMajorRoads.wrappedValue) { _ in sendVisibilityMask() }
@@ -1070,15 +1071,15 @@ private struct MapStyleSettingsView: View {
                 settingSlider(title: "Route Line Width", value: routeLineWidth, range: 2...48, prefix: "", suffix: " px") { newValue in
                     sendSetting(mapID: 3, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID, value: Int32(newValue))
                 }
-                settingSlider(title: "Street Width Boost", value: streetLineWidthBoost, range: 0...24, prefix: "+", suffix: " px") { newValue in
-                    sendSetting(mapID: 9, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, value: Int32(newValue))
+                settingSlider(title: "Street Width", value: streetLineWidth, range: 1...24, prefix: "", suffix: " px") { newValue in
+                    sendSetting(mapID: 9, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID, value: Int32(newValue))
                 }
                 settingSlider(title: "Position Marker Size", value: positionMarkerScale, range: 1...5, prefix: "", suffix: "x") { newValue in
                     sendSetting(mapID: 10, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, value: Int32(newValue))
                 }
             }
 
-            Section(header: Text("Zoom Level"), footer: Text("0 = Super Zoom, 5 = Farthest")) {
+            Section(header: Text("Zoom Level"), footer: Text("0 = Closest, 5 = Farthest")) {
                 Picker("Zoom", selection: zoomLevel) {
                     ForEach(0...5, id: \.self) { level in
                         Text("\(level)").tag(level)

@@ -17,12 +17,20 @@ int main() {
   assert(clientSupportsIndependentProfiles(3));
   assert(!clientSupportsExtendedVisibility(2));
   assert(clientSupportsExtendedVisibility(3));
+  assert(DEFAULT_STREET_WIDTH == 4);
+  assert(MAP_DEFAULT_DETAIL_LEVEL == 2);
+  assert(MAP_DEFAULT_ROUTE_LINE_WIDTH == 4);
+  assert(MAP_DEFAULT_ZOOM_LEVEL == 3);
   assert(MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL == 0);
+  assert(MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH == 15);
+  assert(MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL == 3);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_MAJOR_ROADS) !=
          0);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_LOCAL_STREETS) !=
          0);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_BUILDINGS) == 0);
+  assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_GREEN_SPACE) ==
+         0);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_SERVICE_ROADS) ==
          0);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_PATHS) == 0);
@@ -81,10 +89,19 @@ int main() {
   assert(clampValue(18, 49) == 48);
   assert(clampValue(7, 6) == 5);
   assert(clampValue(19, -1) == 0);
-  assert(clampValue(9, 25) == 24);
-  assert(clampValue(21, -1) == 0);
+  assert(clampValue(9, 25) == 20);
+  assert(clampValue(21, -4) == -3);
   assert(clampValue(10, 0) == 1);
   assert(clampValue(22, 6) == 5);
+  assert(absoluteStreetWidthFromLegacyBoost(-3) == 1);
+  assert(absoluteStreetWidthFromLegacyBoost(0) == 4);
+  assert(absoluteStreetWidthFromLegacyBoost(4) == 8);
+  assert(absoluteStreetWidthFromLegacyBoost(24) == 24);
+  assert(clampAbsoluteStreetWidth(0) == 1);
+  assert(clampAbsoluteStreetWidth(25) == 24);
+  assert(legacyStreetWidthBoostFromAbsolute(1) == -3);
+  assert(legacyStreetWidthBoostFromAbsolute(4) == 0);
+  assert(legacyStreetWidthBoostFromAbsolute(24) == 20);
 
   const TestProfile map{1};
   const TestProfile mapNavigation{2};
