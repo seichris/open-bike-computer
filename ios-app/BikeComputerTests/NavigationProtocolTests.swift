@@ -4809,6 +4809,9 @@ struct NavigationProtocolTests {
                 isBusy: false,
                 hasPendingJob: true,
                 hasPendingActivation: false,
+                isServerRecoveryCheckPending: false,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
                 errorMessage: nil
             ),
             "paused persisted jobs keep the resume section reachable"
@@ -4818,6 +4821,9 @@ struct NavigationProtocolTests {
                 isBusy: false,
                 hasPendingJob: false,
                 hasPendingActivation: false,
+                isServerRecoveryCheckPending: false,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
                 errorMessage: nil
             ),
             "idle map settings omit an empty downloading section"
@@ -4827,9 +4833,60 @@ struct NavigationProtocolTests {
                 isBusy: false,
                 hasPendingJob: false,
                 hasPendingActivation: true,
+                isServerRecoveryCheckPending: false,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
                 errorMessage: nil
             ),
             "device-owned activation keeps its status section visible"
+        )
+        assert(
+            !OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: true,
+                hasPendingJob: true,
+                hasPendingActivation: false,
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
+                errorMessage: nil
+            ),
+            "launch recovery checks stay hidden until a real map job is found"
+        )
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: true,
+                hasPendingJob: true,
+                hasPendingActivation: true,
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
+                errorMessage: nil
+            ),
+            "device activation remains visible during a server recovery check"
+        )
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: true,
+                hasPendingJob: true,
+                hasPendingActivation: false,
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
+                errorMessage: "Map server unavailable"
+            ),
+            "launch recovery errors remain visible"
+        )
+        assert(
+            OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: true,
+                hasPendingJob: true,
+                hasPendingActivation: false,
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: true,
+                hasDownloadedPack: false,
+                errorMessage: nil
+            ),
+            "a recovered map job remains visible"
         )
         assert(
             OfflineMapAutomaticRecoveryTrigger.shouldResume(
