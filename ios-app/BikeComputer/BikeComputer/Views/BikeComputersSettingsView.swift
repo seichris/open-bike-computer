@@ -334,22 +334,6 @@ private struct PairBikeComputerSheet: View {
                 }
 
                 if let prompt = matchingPrompt {
-                    Section {
-                        Text(prompt.formattedCode)
-                            .font(.system(size: 44, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(maxWidth: .infinity)
-                            .accessibilityLabel("Pairing code \(prompt.formattedCode)")
-                    } header: {
-                        Text("Confirm the Code")
-                    } footer: {
-                        if prompt.isReplacingExistingRegistration {
-                            Text("This Bike Computer was reset. Match this code, then press either button on the device to replace its old registration on this iPhone.")
-                        } else {
-                            Text("If this exact code is also displayed on your Bike Computer, press either button on the device to confirm physical access.")
-                        }
-                    }
-
                     if bleManager.isPairingConfirmationSubmitting {
                         Section {
                             HStack(spacing: 12) {
@@ -360,14 +344,28 @@ private struct PairBikeComputerSheet: View {
                     } else if bleManager.isPairingConfirmedOnDevice {
                         Section {
                             Button(
-                                prompt.isReplacingExistingRegistration
-                                    ? "Codes Match — Replace Registration"
-                                    : "Codes Match — Register This iPhone",
+                                "Codes Match",
                                 role: prompt.isReplacingExistingRegistration
                                     ? .destructive
                                     : nil
                             ) {
                                 bleManager.confirmPairingAfterCodeMatch()
+                            }
+                        }
+                    } else {
+                        Section {
+                            Text(prompt.formattedCode)
+                                .font(.system(size: 44, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .frame(maxWidth: .infinity)
+                                .accessibilityLabel("Pairing code \(prompt.formattedCode)")
+                        } header: {
+                            Text("Confirm the Code")
+                        } footer: {
+                            if prompt.isReplacingExistingRegistration {
+                                Text("This Bike Computer was reset. Match this code, then press either button on the device to replace its old registration on this iPhone.")
+                            } else {
+                                Text("If this exact code is also displayed on your Bike Computer, press either button on the device to confirm physical access.")
                             }
                         }
                     }
