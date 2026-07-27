@@ -1,6 +1,7 @@
 #include "../../lib/gui/src/batteryStatusLayout.hpp"
 #include "../../lib/gui/src/destinationPickerLayout.hpp"
 #include "../../lib/gui/src/guiLayout.hpp"
+#include "../../lib/gui/src/mapTileTransition.hpp"
 #include "../../lib/gui/src/rideMetricFontSelection.hpp"
 #include "../../lib/gui/src/rideTelemetryLayout.hpp"
 #include "../../lib/maps/src/mapLineStyle.hpp"
@@ -8,6 +9,19 @@
 #include <cassert>
 
 int main() {
+  map_tile_transition::State mapTransition;
+  assert(!mapTransition.canReveal(false, false));
+  mapTransition.begin();
+  assert(!mapTransition.canReveal(true, true));
+  assert(!mapTransition.canReveal(true, false));
+  assert(!mapTransition.canReveal(false, true));
+  assert(mapTransition.canReveal(false, false));
+  mapTransition.complete();
+  assert(!mapTransition.canReveal(false, false));
+  mapTransition.begin();
+  mapTransition.cancel();
+  assert(!mapTransition.canReveal(false, false));
+
 #if defined(WAVESHARE_AMOLED_206)
   // 2.06-inch viewport: 502px screen with 72px reserved UI space.
   assert(gui_layout::mapViewportHeight(502) == 430);
