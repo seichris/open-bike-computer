@@ -185,6 +185,8 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var remoteSegmentIntent: RemoteSegmentIntent? = nil
         var remoteTerminalAcknowledgement:
             RemoteTerminalAcknowledgement? = nil
+        var heartRateZoneCheckpoint:
+            WorkoutHeartRateZoneDurationAccumulator.Checkpoint? = nil
         var finishRequest: FinishRequest?
         /// A rider-confirmed corrupt-state reset cannot recover the lost
         /// Save/Discard choice. Keep that provenance durable until the rider
@@ -685,6 +687,17 @@ nonisolated final class WatchWorkoutRecoveryStore {
             return
         }
         identity.remoteSegmentIntent = nil
+        try persist(identity)
+        self.identity = identity
+    }
+
+    func persistHeartRateZoneCheckpoint(
+        _ checkpoint: WorkoutHeartRateZoneDurationAccumulator.Checkpoint
+    ) throws {
+        guard checkpoint.isValid, var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.heartRateZoneCheckpoint = checkpoint
         try persist(identity)
         self.identity = identity
     }

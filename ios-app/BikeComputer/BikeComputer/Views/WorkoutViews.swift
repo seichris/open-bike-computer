@@ -247,7 +247,7 @@ struct WorkoutCompactCard: View {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
-                Text(detail)
+                detail
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -322,40 +322,60 @@ struct WorkoutCompactCard: View {
         }
     }
 
-    private var detail: String {
+    @ViewBuilder
+    private var detail: some View {
         let presentation = store.presentation
         switch presentation.connectionState {
         case .unsupported:
-            return "Requires iOS 17 and watchOS 10"
+            Text("Requires iOS 17 and watchOS 10")
         case .idle:
-            return "Recorded and saved by Apple Watch"
+            Text("Recorded and saved by Apple Watch")
         case .launchingWatch:
-            return "Keep your Watch unlocked"
+            Text("Keep your Watch unlocked")
         case .awaitingFirstSnapshot:
-            return "Waiting for live metrics"
+            Text("Waiting for live metrics")
         case .failed:
-            return errorDetail(
-                presentation.errorCode,
-                context: WorkoutErrorCopyV1.context(for: presentation)
+            Text(
+                errorDetail(
+                    presentation.errorCode,
+                    context: WorkoutErrorCopyV1.context(for: presentation)
+                )
             )
         case .ended:
-            return summaryDetail(presentation.finalSnapshot ?? presentation.snapshot)
+            Text(
+                summaryDetail(
+                    presentation.finalSnapshot ?? presentation.snapshot
+                )
+            )
         case .disconnected:
             if !presentation.isWorkoutActive {
-                return errorDetail(
-                    presentation.errorCode ?? .watchUnavailable,
-                    context: WorkoutErrorCopyV1.context(for: presentation)
+                Text(
+                    errorDetail(
+                        presentation.errorCode ?? .watchUnavailable,
+                        context: WorkoutErrorCopyV1.context(for: presentation)
+                    )
                 )
+            } else if let errorCode = presentation.errorCode {
+                Text(
+                    errorDetail(
+                        errorCode,
+                        context: WorkoutErrorCopyV1.context(for: presentation)
+                    )
+                )
+            } else {
+                liveDetail(presentation.snapshot)
             }
-            fallthrough
         case .connected, .stale:
             if let errorCode = presentation.errorCode {
-                return errorDetail(
-                    errorCode,
-                    context: WorkoutErrorCopyV1.context(for: presentation)
+                Text(
+                    errorDetail(
+                        errorCode,
+                        context: WorkoutErrorCopyV1.context(for: presentation)
+                    )
                 )
+            } else {
+                liveDetail(presentation.snapshot)
             }
-            return liveDetail(presentation.snapshot)
         }
     }
 
@@ -381,11 +401,27 @@ struct WorkoutCompactCard: View {
         }
     }
 
-    private func liveDetail(_ snapshot: WorkoutSnapshotV1) -> String {
+    private func liveDetail(_ snapshot: WorkoutSnapshotV1) -> some View {
         let elapsed = WorkoutValueFormatter.duration(snapshot.elapsedTime?.value)
         let heart = WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value)
         let speed = WorkoutValueFormatter.speed(snapshot.currentSpeed?.value)
-        return "\(elapsed)  •  \(heart) BPM  •  \(speed) KM/H"
+        return HStack(spacing: 3) {
+            Text(elapsed)
+            Text("•")
+            Text(heart)
+            if heart != "--" {
+                Image(systemName: "heart.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+            }
+            Text("•")
+            Text(speed)
+            Text("KM/H")
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "Workout time \(elapsed), heart rate \(heart) beats per minute, speed \(speed) kilometers per hour"
+        )
     }
 
     private func summaryDetail(_ snapshot: WorkoutSnapshotV1) -> String {
@@ -563,7 +599,7 @@ struct WorkoutDashboardView: View {
                 Text(WorkoutValueFormatter.duration(snapshot.elapsedTime?.value))
                     .font(.system(size: 42, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .accessibilityLabel("Elapsed time")
+                    .accessibilityLabel("Workout time")
 
                 if snapshot.lastCompletedSegment != nil,
                    store.presentation.isWorkoutActive {
