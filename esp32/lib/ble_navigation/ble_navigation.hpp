@@ -89,17 +89,29 @@ static inline uint32_t normalizedMapFeatureVisibilityMask(uint32_t mask) {
 
 struct ScreenMapRenderSettings {
   uint8_t minPolygonSize = 0; // 0-50: Skip polygons smaller than N pixels²
-  uint8_t detailLevel = 2;    // 0=Low, 1=Med, 2=High
-  uint8_t routeLineWidth = 4; // 2-48: Route overlay line width in pixels
-  uint8_t streetLineWidthBoost = 0; // 0-24: Extra map street width in pixels
+  uint8_t detailLevel = map_profile_protocol::MAP_DEFAULT_DETAIL_LEVEL;
+  uint8_t routeLineWidth = map_profile_protocol::MAP_DEFAULT_ROUTE_LINE_WIDTH;
+  uint8_t streetLineWidth = map_profile_protocol::DEFAULT_STREET_WIDTH;
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
-  uint8_t zoomLevel = 2;             // 0-5: Zoom level (0=super, 2=default)
+  uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
   uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
 };
 
 struct MapRenderSettings {
   ScreenMapRenderSettings mapStyle;
-  ScreenMapRenderSettings mapNavigationStyle;
+  ScreenMapRenderSettings mapNavigationStyle = [] {
+    ScreenMapRenderSettings settings;
+    settings.detailLevel =
+        map_profile_protocol::MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL;
+    settings.routeLineWidth =
+        map_profile_protocol::MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH;
+    settings.streetLineWidth = map_profile_protocol::DEFAULT_STREET_WIDTH;
+    settings.positionMarkerScale = 2;
+    settings.zoomLevel = map_profile_protocol::MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL;
+    settings.visibilityMask =
+        map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK;
+    return settings;
+  }();
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =

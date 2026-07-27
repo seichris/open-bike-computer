@@ -127,6 +127,7 @@ enum DeviceBLEProtocol {
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
     static let tracksVisibilityMask: Int32 = 1 << 11
     static let extendedVisibilityMarker: Int32 = 1 << 12
+    static let defaultStreetWidth: Int32 = 4
 
     static let brightnessSettingID: UInt8 = 12
     static let enabledScreensSettingID: UInt8 = 13
@@ -137,7 +138,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationRouteLineWidthSettingID: UInt8 = 18
     static let mapPlusNavigationZoomLevelSettingID: UInt8 = 19
     static let mapPlusNavigationVisibilityMaskSettingID: UInt8 = 20
-    static let mapPlusNavigationStreetLineWidthBoostSettingID: UInt8 = 21
+    static let mapPlusNavigationStreetLineWidthSettingID: UInt8 = 21
     static let mapPlusNavigationPositionMarkerScaleSettingID: UInt8 = 22
     static let phoneBatteryLevelSettingID: UInt8 = 23
     static let phoneBatteryChargingSettingID: UInt8 = 24
@@ -165,6 +166,18 @@ enum DeviceBLEProtocol {
 
     static func phoneBatteryChargingValue(isCharging: Bool) -> Int32 {
         isCharging ? 1 : 0
+    }
+
+    static func absoluteStreetWidth(fromLegacyBoost boost: Double) -> Double {
+        normalizedStreetWidth(Double(defaultStreetWidth) + boost)
+    }
+
+    static func normalizedStreetWidth(_ width: Double) -> Double {
+        min(max(width, 1), 24)
+    }
+
+    static func legacyStreetWidthBoost(fromAbsoluteWidth width: Int32) -> Int32 {
+        min(max(width, 1), 24) - defaultStreetWidth
     }
 
     static func hardwareLabel(model: String?, hardware: String?) -> String {
@@ -451,12 +464,12 @@ private extension CBCharacteristicProperties {
 private enum MapPlusNavigationDefaults {
     static let minPolygonSize: Double = 0
     static let detailLevel = 0
-    static let routeLineWidth: Double = 4
-    static let streetLineWidthBoost: Double = 0
+    static let routeLineWidth: Double = 15
+    static let streetLineWidth: Double = 4
     static let positionMarkerScale: Double = 2
-    static let zoomLevel = 2
+    static let zoomLevel = 3
     static let showBuildings = false
-    static let showGreenSpace = true
+    static let showGreenSpace = false
     static let showPaths = false
     static let showTracks = false
     static let showMajorRoads = true
@@ -539,14 +552,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var minPolygonSize: Double = 0
     @Published var detailLevel: Int = 2
     @Published var routeLineWidth: Double = 4
-    @Published var streetLineWidthBoost: Double = 0
+    @Published var streetLineWidth: Double = 4
     @Published var positionMarkerScale: Double = 2
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up
-    @Published var zoomLevel: Int = 2 // 0-4: 0=super-zoom, 1=closest, 4=farthest
+    @Published var zoomLevel: Int = 3 // 0-5: 0=closest, 5=farthest
     @Published var mapPlusNavigationMinPolygonSize = MapPlusNavigationDefaults.minPolygonSize
     @Published var mapPlusNavigationDetailLevel = MapPlusNavigationDefaults.detailLevel
     @Published var mapPlusNavigationRouteLineWidth = MapPlusNavigationDefaults.routeLineWidth
-    @Published var mapPlusNavigationStreetLineWidthBoost = MapPlusNavigationDefaults.streetLineWidthBoost
+    @Published var mapPlusNavigationStreetLineWidth = MapPlusNavigationDefaults.streetLineWidth
     @Published var mapPlusNavigationPositionMarkerScale = MapPlusNavigationDefaults.positionMarkerScale
     @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
     @Published var tapToSwitchScreens: Bool = false
@@ -698,7 +711,8 @@ class BLEManager: NSObject, ObservableObject {
         static let minPolygonSize = "mapSettings.minPolygonSize"
         static let detailLevel = "mapSettings.detailLevel"
         static let routeLineWidth = "mapSettings.routeLineWidth"
-        static let streetLineWidthBoost = "mapSettings.streetLineWidthBoost"
+        static let streetLineWidth = "mapSettings.streetLineWidth"
+        static let legacyStreetLineWidthBoost = "mapSettings.streetLineWidthBoost"
         static let positionMarkerScale = "mapSettings.positionMarkerScale"
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
@@ -706,7 +720,8 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationMinPolygonSize = "mapPlusNavigationSettings.minPolygonSize"
         static let mapPlusNavigationDetailLevel = "mapPlusNavigationSettings.detailLevel"
         static let mapPlusNavigationRouteLineWidth = "mapPlusNavigationSettings.routeLineWidth"
-        static let mapPlusNavigationStreetLineWidthBoost = "mapPlusNavigationSettings.streetLineWidthBoost"
+        static let mapPlusNavigationStreetLineWidth = "mapPlusNavigationSettings.streetLineWidth"
+        static let legacyMapPlusNavigationStreetLineWidthBoost = "mapPlusNavigationSettings.streetLineWidthBoost"
         static let mapPlusNavigationPositionMarkerScale = "mapPlusNavigationSettings.positionMarkerScale"
         static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
         static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
@@ -720,6 +735,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
+        static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
@@ -812,7 +828,16 @@ class BLEManager: NSObject, ObservableObject {
         minPolygonSize = defaults.double(forKey: SettingsKeys.minPolygonSize)
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
         routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
-        streetLineWidthBoost = defaults.object(forKey: SettingsKeys.streetLineWidthBoost) as? Double ?? 0.0
+        if let storedWidth = defaults.object(forKey: SettingsKeys.streetLineWidth) as? Double {
+            streetLineWidth = DeviceBLEProtocol.normalizedStreetWidth(storedWidth)
+        } else {
+            let legacyBoost = defaults.object(
+                forKey: SettingsKeys.legacyStreetLineWidthBoost
+            ) as? Double ?? 0
+            streetLineWidth = DeviceBLEProtocol.absoluteStreetWidth(
+                fromLegacyBoost: legacyBoost
+            )
+        }
         positionMarkerScale = defaults.object(forKey: SettingsKeys.positionMarkerScale) as? Double ?? 2.0
         if defaults.bool(forKey: SettingsKeys.resetMapRotationModeToNorthUp) {
             mapRotationMode = defaults.object(forKey: SettingsKeys.mapRotationMode) as? Int ?? 0
@@ -821,7 +846,7 @@ class BLEManager: NSObject, ObservableObject {
             defaults.set(0, forKey: SettingsKeys.mapRotationMode)
             defaults.set(true, forKey: SettingsKeys.resetMapRotationModeToNorthUp)
         }
-        zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 2
+        zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 3
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
             ?? DeviceScreen.allScreensMask
@@ -875,7 +900,8 @@ class BLEManager: NSObject, ObservableObject {
             SettingsKeys.minPolygonSize,
             SettingsKeys.detailLevel,
             SettingsKeys.routeLineWidth,
-            SettingsKeys.streetLineWidthBoost,
+            SettingsKeys.streetLineWidth,
+            SettingsKeys.legacyStreetLineWidthBoost,
             SettingsKeys.positionMarkerScale,
             SettingsKeys.zoomLevel,
             SettingsKeys.showBuildings,
@@ -899,7 +925,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationMinPolygonSize = minPolygonSize
             mapPlusNavigationDetailLevel = detailLevel
             mapPlusNavigationRouteLineWidth = routeLineWidth
-            mapPlusNavigationStreetLineWidthBoost = streetLineWidthBoost
+            mapPlusNavigationStreetLineWidth = streetLineWidth
             mapPlusNavigationPositionMarkerScale = positionMarkerScale
             mapPlusNavigationZoomLevel = zoomLevel
             mapPlusNavigationShowBuildings = showBuildings
@@ -922,9 +948,21 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationRouteLineWidth = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationRouteLineWidth
             ) as? Double ?? MapPlusNavigationDefaults.routeLineWidth
-            mapPlusNavigationStreetLineWidthBoost = defaults.object(
-                forKey: SettingsKeys.mapPlusNavigationStreetLineWidthBoost
-            ) as? Double ?? MapPlusNavigationDefaults.streetLineWidthBoost
+            if let storedWidth = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationStreetLineWidth
+            ) as? Double {
+                mapPlusNavigationStreetLineWidth = DeviceBLEProtocol.normalizedStreetWidth(
+                    storedWidth
+                )
+            } else if let legacyBoost = defaults.object(
+                forKey: SettingsKeys.legacyMapPlusNavigationStreetLineWidthBoost
+            ) as? Double {
+                mapPlusNavigationStreetLineWidth = DeviceBLEProtocol.absoluteStreetWidth(
+                    fromLegacyBoost: legacyBoost
+                )
+            } else {
+                mapPlusNavigationStreetLineWidth = MapPlusNavigationDefaults.streetLineWidth
+            }
             mapPlusNavigationPositionMarkerScale = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale
             ) as? Double ?? MapPlusNavigationDefaults.positionMarkerScale
@@ -962,9 +1000,44 @@ class BLEManager: NSObject, ObservableObject {
                 forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
             ) as? Bool ?? MapPlusNavigationDefaults.showOtherAreas
         }
+        let shouldMigrateRecommendedDefaults = !defaults.bool(
+            forKey: SettingsKeys.recommendedMapDefaultsMigrated
+        )
+        if shouldMigrateRecommendedDefaults {
+            if detailLevel == 2,
+               routeLineWidth == 4,
+               streetLineWidth == 4,
+               positionMarkerScale == 2,
+               zoomLevel == 2 {
+                zoomLevel = 3
+            }
+            if mapPlusNavigationDetailLevel == 0,
+               mapPlusNavigationRouteLineWidth == 4,
+               mapPlusNavigationStreetLineWidth == 4,
+               mapPlusNavigationPositionMarkerScale == 2,
+               mapPlusNavigationZoomLevel == 2,
+               !mapPlusNavigationShowBuildings,
+               mapPlusNavigationShowGreenSpace,
+               !mapPlusNavigationShowPaths,
+               !mapPlusNavigationShowTracks,
+               mapPlusNavigationShowMajorRoads,
+               mapPlusNavigationShowLocalStreets,
+               !mapPlusNavigationShowServiceRoads,
+               mapPlusNavigationShowWater,
+               !mapPlusNavigationShowRailways,
+               !mapPlusNavigationShowOtherAreas {
+                mapPlusNavigationRouteLineWidth = 15
+                mapPlusNavigationZoomLevel = 3
+                mapPlusNavigationShowGreenSpace = false
+            }
+            defaults.set(true, forKey: SettingsKeys.recommendedMapDefaultsMigrated)
+        }
         showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
         showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true
-        if shouldMigrateMapPlusNavigationProfile {
+        if shouldMigrateMapPlusNavigationProfile ||
+            shouldMigrateRecommendedDefaults ||
+            defaults.object(forKey: SettingsKeys.streetLineWidth) == nil ||
+            defaults.object(forKey: SettingsKeys.mapPlusNavigationStreetLineWidth) == nil {
             defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
             saveSettings()
         }
@@ -1018,14 +1091,14 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(minPolygonSize, forKey: SettingsKeys.minPolygonSize)
         defaults.set(detailLevel, forKey: SettingsKeys.detailLevel)
         defaults.set(routeLineWidth, forKey: SettingsKeys.routeLineWidth)
-        defaults.set(streetLineWidthBoost, forKey: SettingsKeys.streetLineWidthBoost)
+        defaults.set(streetLineWidth, forKey: SettingsKeys.streetLineWidth)
         defaults.set(positionMarkerScale, forKey: SettingsKeys.positionMarkerScale)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
         defaults.set(mapPlusNavigationMinPolygonSize, forKey: SettingsKeys.mapPlusNavigationMinPolygonSize)
         defaults.set(mapPlusNavigationDetailLevel, forKey: SettingsKeys.mapPlusNavigationDetailLevel)
         defaults.set(mapPlusNavigationRouteLineWidth, forKey: SettingsKeys.mapPlusNavigationRouteLineWidth)
-        defaults.set(mapPlusNavigationStreetLineWidthBoost, forKey: SettingsKeys.mapPlusNavigationStreetLineWidthBoost)
+        defaults.set(mapPlusNavigationStreetLineWidth, forKey: SettingsKeys.mapPlusNavigationStreetLineWidth)
         defaults.set(mapPlusNavigationPositionMarkerScale, forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale)
         defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
@@ -1910,7 +1983,15 @@ class BLEManager: NSObject, ObservableObject {
             log("Independent map setting id=\(id) not sent: connected firmware does not advertise support")
             return
         }
-        guard sendSettingPacket(id: id, value: value, label: "setting id=\(id)") else {
+        let deviceValue: Int32
+        if id == 9 || id == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID {
+            deviceValue = DeviceBLEProtocol.legacyStreetWidthBoost(
+                fromAbsoluteWidth: value
+            )
+        } else {
+            deviceValue = value
+        }
+        guard sendSettingPacket(id: id, value: deviceValue, label: "setting id=\(id)") else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
             return
         }
@@ -2009,7 +2090,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
         case 9:
-            mapPlusNavigationStreetLineWidthBoost = streetLineWidthBoost
+            mapPlusNavigationStreetLineWidth = streetLineWidth
         case 10:
             mapPlusNavigationPositionMarkerScale = positionMarkerScale
         default:
@@ -2041,8 +2122,8 @@ class BLEManager: NSObject, ObservableObject {
                         value: Int32(mapPlusNavigationDetailLevel))
             sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID,
                         value: Int32(mapPlusNavigationRouteLineWidth))
-            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID,
-                        value: Int32(mapPlusNavigationStreetLineWidthBoost))
+            sendSetting(id: DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID,
+                        value: Int32(mapPlusNavigationStreetLineWidth))
             sendSetting(id: DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID,
                         value: Int32(mapPlusNavigationPositionMarkerScale))
             sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
@@ -2055,7 +2136,7 @@ class BLEManager: NSObject, ObservableObject {
             sendSetting(id: 1, value: Int32(minPolygonSize))
             sendSetting(id: 2, value: Int32(detailLevel))
             sendSetting(id: 3, value: Int32(routeLineWidth))
-            sendSetting(id: 9, value: Int32(streetLineWidthBoost))
+            sendSetting(id: 9, value: Int32(streetLineWidth))
             sendSetting(id: 10, value: Int32(positionMarkerScale))
             sendSetting(id: 7, value: Int32(zoomLevel))
         }

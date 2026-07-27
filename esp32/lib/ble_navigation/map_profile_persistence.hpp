@@ -11,16 +11,25 @@ inline void load(Store &store, Profile &mapStyle,
                  Profile &mapNavigationStyle) {
   const bool hasStoredMapStyle =
       store.isKey("minPolySize") || store.isKey("detailLevel") ||
-      store.isKey("routeWidth") || store.isKey("streetBoost") ||
+      store.isKey("routeWidth") || store.isKey("streetWidth") ||
+      store.isKey("streetBoost") ||
       store.isKey("markerScale") || store.isKey("zoomLevel") ||
       store.isKey("visMask");
 
   mapStyle.minPolygonSize = store.getUChar("minPolySize", 0);
-  mapStyle.detailLevel = store.getUChar("detailLevel", 2);
-  mapStyle.routeLineWidth = store.getUChar("routeWidth", 4);
-  mapStyle.streetLineWidthBoost = store.getUChar("streetBoost", 0);
+  mapStyle.detailLevel = store.getUChar(
+      "detailLevel", map_profile_protocol::MAP_DEFAULT_DETAIL_LEVEL);
+  mapStyle.routeLineWidth = store.getUChar(
+      "routeWidth", map_profile_protocol::MAP_DEFAULT_ROUTE_LINE_WIDTH);
+  mapStyle.streetLineWidth = static_cast<uint8_t>(
+      store.isKey("streetWidth")
+          ? map_profile_protocol::clampAbsoluteStreetWidth(store.getUChar(
+                "streetWidth", map_profile_protocol::DEFAULT_STREET_WIDTH))
+          : map_profile_protocol::absoluteStreetWidthFromLegacyBoost(
+                store.getUChar("streetBoost", 0)));
   mapStyle.positionMarkerScale = store.getUChar("markerScale", 2);
-  mapStyle.zoomLevel = store.getUChar("zoomLevel", 4);
+  mapStyle.zoomLevel = store.getUChar(
+      "zoomLevel", map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL);
   const uint32_t storedMapVisibility = store.getUInt("visMask", 0x3FF);
   mapStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(storedMapVisibility);
@@ -34,12 +43,28 @@ inline void load(Store &store, Profile &mapStyle,
               ? mapStyle.detailLevel
               : map_profile_protocol::MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
   mapNavigationStyle.routeLineWidth =
-      store.getUChar("navRouteW", mapStyle.routeLineWidth);
-  mapNavigationStyle.streetLineWidthBoost =
-      store.getUChar("navStreetB", mapStyle.streetLineWidthBoost);
+      store.getUChar("navRouteW",
+                     hasStoredMapStyle
+                         ? mapStyle.routeLineWidth
+                         : map_profile_protocol::
+                               MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH);
+  if (store.isKey("navStreetW")) {
+    mapNavigationStyle.streetLineWidth = static_cast<uint8_t>(
+        map_profile_protocol::clampAbsoluteStreetWidth(store.getUChar(
+            "navStreetW", map_profile_protocol::DEFAULT_STREET_WIDTH)));
+  } else if (store.isKey("navStreetB")) {
+    mapNavigationStyle.streetLineWidth = static_cast<uint8_t>(
+        map_profile_protocol::absoluteStreetWidthFromLegacyBoost(
+            store.getUChar("navStreetB", 0)));
+  } else {
+    mapNavigationStyle.streetLineWidth = mapStyle.streetLineWidth;
+  }
   mapNavigationStyle.positionMarkerScale =
       store.getUChar("navMarkerS", mapStyle.positionMarkerScale);
-  mapNavigationStyle.zoomLevel = store.getUChar("navZoom", mapStyle.zoomLevel);
+  mapNavigationStyle.zoomLevel = store.getUChar(
+      "navZoom", hasStoredMapStyle
+                     ? mapStyle.zoomLevel
+                     : map_profile_protocol::MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL);
   mapNavigationStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(store.getUInt(
           "navVis",
@@ -47,6 +72,11 @@ inline void load(Store &store, Profile &mapStyle,
                ? mapStyle.visibilityMask
                : map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK) |
               map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
+
+  if (!store.isKey("streetWidth"))
+    store.putUChar("streetWidth", mapStyle.streetLineWidth);
+  if (!store.isKey("navStreetW"))
+    store.putUChar("navStreetW", mapNavigationStyle.streetLineWidth);
 }
 
 template <typename Store, typename Profile>
@@ -85,9 +115,25 @@ inline bool persistSetting(Store &store, const Profile &mapStyle,
     }
     return true;
   case 9:
-    store.putUChar("streetBoost", mapStyle.streetLineWidthBoost);
-    if (mirrorLegacySetting)
-      store.putUChar("navStreetB", mapNavigationStyle.streetLineWidthBoost);
+    store.putUChar("streetWidth", mapStyle.streetLineWidth);
+    store.putUChar(
+        "streetBoost",
+        static_cast<uint8_t>(mapStyle.streetLineWidth >
+                                     map_profile_protocol::DEFAULT_STREET_WIDTH
+                                 ? mapStyle.streetLineWidth -
+                                       map_profile_protocol::DEFAULT_STREET_WIDTH
+                                 : 0));
+    if (mirrorLegacySetting) {
+      store.putUChar("navStreetW", mapNavigationStyle.streetLineWidth);
+      store.putUChar(
+          "navStreetB",
+          static_cast<uint8_t>(
+              mapNavigationStyle.streetLineWidth >
+                      map_profile_protocol::DEFAULT_STREET_WIDTH
+                  ? mapNavigationStyle.streetLineWidth -
+                        map_profile_protocol::DEFAULT_STREET_WIDTH
+                  : 0));
+    }
     return true;
   case 10:
     store.putUChar("markerScale", mapStyle.positionMarkerScale);
@@ -111,7 +157,15 @@ inline bool persistSetting(Store &store, const Profile &mapStyle,
                                 map_profile_protocol::VISIBILITY_EXTENDED_MARKER);
     return true;
   case 21:
-    store.putUChar("navStreetB", mapNavigationStyle.streetLineWidthBoost);
+    store.putUChar("navStreetW", mapNavigationStyle.streetLineWidth);
+    store.putUChar(
+        "navStreetB",
+        static_cast<uint8_t>(
+            mapNavigationStyle.streetLineWidth >
+                    map_profile_protocol::DEFAULT_STREET_WIDTH
+                ? mapNavigationStyle.streetLineWidth -
+                      map_profile_protocol::DEFAULT_STREET_WIDTH
+                : 0));
     return true;
   case 22:
     store.putUChar("navMarkerS", mapNavigationStyle.positionMarkerScale);

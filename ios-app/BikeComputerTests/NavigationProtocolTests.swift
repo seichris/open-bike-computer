@@ -8433,6 +8433,11 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
+        assertEqual(DeviceBLEProtocol.defaultStreetWidth, 4, "street width defaults to 4 px")
+        assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 0), 4, "legacy zero boost migrates to the default absolute width")
+        assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 4), 8, "legacy boosts migrate relative to the default width")
+        assertEqual(DeviceBLEProtocol.legacyStreetWidthBoost(fromAbsoluteWidth: 1), -3, "one-pixel streets retain the legacy wire encoding")
+        assertEqual(DeviceBLEProtocol.legacyStreetWidthBoost(fromAbsoluteWidth: 4), 0, "default street width uses a zero wire boost")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
@@ -8442,7 +8447,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID, 18, "Map + Navigation route width uses setting ID 18")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID, 19, "Map + Navigation zoom uses setting ID 19")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID, 20, "Map + Navigation visibility uses setting ID 20")
-        assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthBoostSettingID, 21, "Map + Navigation street width uses setting ID 21")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID, 21, "Map + Navigation street width uses setting ID 21")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID, 22, "Map + Navigation marker scale uses setting ID 22")
         assertEqual(DeviceBLEProtocol.phoneBatteryLevelSettingID, 23, "phone battery level uses firmware setting ID 23")
         assertEqual(DeviceBLEProtocol.phoneBatteryChargingSettingID, 24, "phone charging state uses firmware setting ID 24")
@@ -11589,6 +11594,7 @@ struct NavigationProtocolTests {
             "mapSettings.minPolygonSize",
             "mapSettings.detailLevel",
             "mapSettings.routeLineWidth",
+            "mapSettings.streetLineWidth",
             "mapSettings.streetLineWidthBoost",
             "mapSettings.positionMarkerScale",
             "mapSettings.mapRotationMode",
@@ -11608,6 +11614,7 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.minPolygonSize",
             "mapPlusNavigationSettings.detailLevel",
             "mapPlusNavigationSettings.routeLineWidth",
+            "mapPlusNavigationSettings.streetLineWidth",
             "mapPlusNavigationSettings.streetLineWidthBoost",
             "mapPlusNavigationSettings.positionMarkerScale",
             "mapPlusNavigationSettings.zoomLevel",
@@ -11622,6 +11629,7 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.showRailways",
             "mapPlusNavigationSettings.showOtherAreas",
             "mapPlusNavigationSettings.migrated.v1",
+            "mapSettings.recommendedDefaults.v2",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
@@ -11632,12 +11640,24 @@ struct NavigationProtocolTests {
 
         let freshManager = BLEManager()
         assertEqual(freshManager.defaultDeviceScreen, .mapPlusNavigation, "fresh installs default to Map + Navigation")
+        assertEqual(freshManager.detailLevel, 2, "fresh Map profiles default to high detail")
+        assertEqual(freshManager.zoomLevel, 3, "fresh Map profiles default to zoom level 3")
+        assertEqual(freshManager.routeLineWidth, 4, "fresh Map profiles default to a 4 px route")
+        assertEqual(freshManager.streetLineWidth, 4, "fresh Map profiles default to 4 px streets")
         assertEqual(freshManager.mapPlusNavigationDetailLevel, 0,
                     "fresh Map + Navigation profiles default to low detail")
+        assertEqual(freshManager.mapPlusNavigationZoomLevel, 3,
+                    "fresh Map + Navigation profiles default to zoom level 3")
+        assertEqual(freshManager.mapPlusNavigationRouteLineWidth, 15,
+                    "fresh Map + Navigation profiles default to a 15 px route")
+        assertEqual(freshManager.mapPlusNavigationStreetLineWidth, 4,
+                    "fresh Map + Navigation profiles default to 4 px streets")
+        assertEqual(freshManager.mapPlusNavigationPositionMarkerScale, 2,
+                    "fresh Map + Navigation profiles keep a 2x position marker")
         assert(!freshManager.mapPlusNavigationShowBuildings,
                "fresh Map + Navigation profiles hide buildings")
-        assert(freshManager.mapPlusNavigationShowGreenSpace,
-               "fresh Map + Navigation profiles keep green space visible")
+        assert(!freshManager.mapPlusNavigationShowGreenSpace,
+               "fresh Map + Navigation profiles hide green space")
         assert(!freshManager.mapPlusNavigationShowPaths,
                "fresh Map + Navigation profiles hide paths and footways")
         assert(!freshManager.mapPlusNavigationShowTracks,
@@ -11680,14 +11700,59 @@ struct NavigationProtocolTests {
         let freshDetailPacket = freshProfilePackets.first {
             $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID
         }
+        let freshRoutePacket = freshProfilePackets.first {
+            $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationRouteLineWidthSettingID
+        }
+        let freshStreetPacket = freshProfilePackets.first {
+            $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID
+        }
+        let freshZoomPacket = freshProfilePackets.first {
+            $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID
+        }
         assert(freshVisibilityPacket != nil,
                "fresh Map + Navigation visibility is sent after capability negotiation")
         assert(freshDetailPacket != nil,
                "fresh Map + Navigation detail is sent after capability negotiation")
-        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x103A,
-                    "fresh Map + Navigation sends only green space, major roads, local roads, and water")
+        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x1038,
+                    "fresh Map + Navigation sends only major roads, local roads, and water")
         assertEqual(readInt32LE(freshDetailPacket!, offset: 5), 0,
                     "fresh Map + Navigation sends low detail")
+        assertEqual(readInt32LE(freshRoutePacket!, offset: 5), 15,
+                    "fresh Map + Navigation sends a 15 px route")
+        assertEqual(readInt32LE(freshStreetPacket!, offset: 5), 0,
+                    "fresh Map + Navigation encodes its 4 px street width compatibly")
+        assertEqual(readInt32LE(freshZoomPacket!, offset: 5), 3,
+                    "fresh Map + Navigation sends zoom level 3")
+        freshManager.streetLineWidth = 7
+        freshManager.sendSetting(id: 9, value: 7)
+        let customStreetPacket = freshProfilePackets.last { $0.count == 9 && $0[4] == 9 }
+        assertEqual(readInt32LE(customStreetPacket!, offset: 5), 3,
+                    "a displayed 7 px street width uses the compatible +3 wire value")
+
+        defaults.set(true, forKey: "mapPlusNavigationSettings.migrated.v1")
+        defaults.removeObject(forKey: "mapSettings.recommendedDefaults.v2")
+        defaults.set(0, forKey: "mapPlusNavigationSettings.detailLevel")
+        defaults.set(4.0, forKey: "mapPlusNavigationSettings.routeLineWidth")
+        defaults.set(4.0, forKey: "mapPlusNavigationSettings.streetLineWidth")
+        defaults.set(2.0, forKey: "mapPlusNavigationSettings.positionMarkerScale")
+        defaults.set(2, forKey: "mapPlusNavigationSettings.zoomLevel")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showBuildings")
+        defaults.set(true, forKey: "mapPlusNavigationSettings.showGreenSpace")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showPaths")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showTracks")
+        defaults.set(true, forKey: "mapPlusNavigationSettings.showMajorRoads")
+        defaults.set(true, forKey: "mapPlusNavigationSettings.showLocalStreets")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showServiceRoads")
+        defaults.set(true, forKey: "mapPlusNavigationSettings.showWater")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showRailways")
+        defaults.set(false, forKey: "mapPlusNavigationSettings.showOtherAreas")
+        let recommendedDefaultsMigratedManager = BLEManager()
+        assertEqual(recommendedDefaultsMigratedManager.mapPlusNavigationRouteLineWidth, 15,
+                    "the former Map + Navigation route default migrates to 15 px")
+        assertEqual(recommendedDefaultsMigratedManager.mapPlusNavigationZoomLevel, 3,
+                    "the former Map + Navigation zoom default migrates to level 3")
+        assert(!recommendedDefaultsMigratedManager.mapPlusNavigationShowGreenSpace,
+               "the former Map + Navigation visibility preset drops green space")
 
         defaults.set(DeviceScreen.map.rawValue, forKey: "deviceSettings.defaultScreen")
         defaults.removeObject(forKey: "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1")
@@ -11696,6 +11761,8 @@ struct NavigationProtocolTests {
 
         defaults.set(1, forKey: "mapSettings.detailLevel")
         defaults.set(4, forKey: "mapSettings.zoomLevel")
+        defaults.removeObject(forKey: "mapSettings.streetLineWidth")
+        defaults.set(4, forKey: "mapSettings.streetLineWidthBoost")
         defaults.set(false, forKey: "mapSettings.showBuildings")
         defaults.set(false, forKey: "mapSettings.showPaths")
         defaults.set(false, forKey: "mapSettings.showLocalStreets")
@@ -11705,6 +11772,8 @@ struct NavigationProtocolTests {
         defaults.removeObject(forKey: "mapPlusNavigationSettings.showServiceRoads")
         defaults.removeObject(forKey: "mapPlusNavigationSettings.migrated.v1")
         let migratedProfileManager = BLEManager()
+        assertEqual(migratedProfileManager.streetLineWidth, 8,
+                    "legacy Map street boosts migrate to absolute widths")
         assertEqual(migratedProfileManager.mapPlusNavigationDetailLevel, 1,
                     "existing shared detail migrates into Map + Navigation")
         assertEqual(migratedProfileManager.mapPlusNavigationZoomLevel, 4,

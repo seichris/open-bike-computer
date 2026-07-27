@@ -8,6 +8,12 @@ constexpr uint8_t CAPABILITY_MASK = 1 << 3;
 constexpr uint8_t CLIENT_VERSION = 2;
 constexpr uint8_t EXTENDED_VISIBILITY_CAPABILITY_MASK = 1 << 4;
 constexpr uint8_t EXTENDED_VISIBILITY_CLIENT_VERSION = 3;
+constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
+constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
+constexpr uint8_t MAP_DEFAULT_ROUTE_LINE_WIDTH = 4;
+constexpr uint8_t MAP_DEFAULT_ZOOM_LEVEL = 3;
+constexpr uint8_t MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH = 15;
+constexpr uint8_t MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL = 3;
 
 constexpr uint32_t VISIBILITY_BUILDINGS = 1u << 0;
 constexpr uint32_t VISIBILITY_GREEN_SPACE = 1u << 1;
@@ -30,8 +36,7 @@ constexpr uint32_t VISIBILITY_OVERLAY_MASK =
     VISIBILITY_ROUTE_OVERLAY | VISIBILITY_POSITION_MARKER;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL = 0;
 constexpr uint32_t MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK =
-    VISIBILITY_GREEN_SPACE | VISIBILITY_MAJOR_ROADS |
-    VISIBILITY_LOCAL_STREETS | VISIBILITY_WATER;
+    VISIBILITY_MAJOR_ROADS | VISIBILITY_LOCAL_STREETS | VISIBILITY_WATER;
 
 inline bool clientSupportsIndependentProfiles(uint8_t clientVersion) {
   return clientVersion >= CLIENT_VERSION;
@@ -128,7 +133,8 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     break;
   case 9:
   case 21:
-    maximum = 24;
+    minimum = 1 - DEFAULT_STREET_WIDTH;
+    maximum = 24 - DEFAULT_STREET_WIDTH;
     break;
   case 10:
   case 22:
@@ -139,6 +145,18 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     return value;
   }
   return value < minimum ? minimum : (value > maximum ? maximum : value);
+}
+
+inline int32_t clampAbsoluteStreetWidth(int32_t width) {
+  return width < 1 ? 1 : (width > 24 ? 24 : width);
+}
+
+inline int32_t absoluteStreetWidthFromLegacyBoost(int32_t boost) {
+  return clampAbsoluteStreetWidth(DEFAULT_STREET_WIDTH + boost);
+}
+
+inline int32_t legacyStreetWidthBoostFromAbsolute(int32_t width) {
+  return clampAbsoluteStreetWidth(width) - DEFAULT_STREET_WIDTH;
 }
 
 template <typename Profile>
