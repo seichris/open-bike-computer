@@ -11,6 +11,7 @@
 #include "../../route_overlay/route_overlay.hpp"
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
+#include "mapTileTransition.hpp"
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -63,6 +64,7 @@ static lv_obj_t *mapGuidanceArrow;
 static lv_obj_t *mapGuidanceDistance;
 static lv_obj_t *mapGuidanceDestinationPicker;
 static lv_obj_t *mapGuidanceCycleStrip;
+static map_tile_transition::State mapTileTransition;
 static uint32_t mapGuidanceCatalogRevision = UINT32_MAX;
 static uint32_t mapGuidanceStatusRevision = UINT32_MAX;
 static bool mapGuidancePickerExpanded = true;
@@ -116,6 +118,7 @@ static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
 static void updateMapGuidanceOverlay();
 static void refreshMapGuidanceOverlayAsync(void *userData);
+static void revealPendingMapTileIfReady();
 
 static int16_t mapInteractionAnchorX() {
   return gui_layout::mapScreenAnchorX(TFT_WIDTH, mapView.mapScrWidth);
@@ -875,6 +878,8 @@ void updateMap(lv_event_t *event) {
     mapView.displayMap();
     mapView.redrawMap = false; // Clear after display
   }
+
+  revealPendingMapTileIfReady();
 }
 
 /**
@@ -1347,24 +1352,33 @@ static void showMainTile(tileName tile) {
     return;
   }
 
-  lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
+  const bool mapWasVisible = !lv_obj_has_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
   activeTile = tile;
   canScrollMap = tile == MAP;
   if (isMapBackedTile(activeTile)) {
+    // Keep the currently visible non-map tile in front until the new map
+    // profile has rendered into the back buffer. Revealing mapTile first can
+    // briefly expose its previous full-map frame while Map + Navigation is
+    // still rendering (or while the screen-cycle button remains pressed and
+    // interrupts that first render).
+    if (!mapWasVisible) {
+      lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+    }
+    mapTileTransition.begin();
     zoom = currentMapStyleSettings().zoomLevel;
     mapView.isPosMoved = true;
+  } else {
+    mapTileTransition.cancel();
+    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   }
 
   switch (tile) {
   case MAP_GUIDANCE:
-    lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(mapGuidanceOverlay);
     mapView.followGps = true;
     applyMapRotationForActiveTile();
     mapGuidanceHadNavigationData = hasCurrentNavigationData();
@@ -1391,12 +1405,31 @@ static void showMainTile(tileName tile) {
     break;
   case MAP:
   default:
-    lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map screen");
     break;
   }
+}
+
+static void revealPendingMapTileIfReady() {
+  if (!mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
+    return;
+  }
+
+  lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
+
+  if (activeTile == MAP_GUIDANCE) {
+    lv_obj_clear_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(mapGuidanceOverlay);
+  } else {
+    lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  mapTileTransition.complete();
 }
 
 void showNextMainScreen() {

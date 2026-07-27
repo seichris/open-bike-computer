@@ -172,16 +172,15 @@ inline void formatElapsed(
   }
 }
 
-inline void formatZone(const ViewModel &model, char *buffer,
-                       std::size_t size) {
+inline int8_t fiveZoneIndex(const ViewModel &model) {
   if (!model.currentHeartRateZone.available ||
-      !model.heartRateZoneCount.available) {
-    unavailable(buffer, size);
-    return;
+      !model.heartRateZoneCount.available ||
+      model.heartRateZoneCount.value != 5 ||
+      model.currentHeartRateZone.value < 1 ||
+      model.currentHeartRateZone.value > 5) {
+    return -1;
   }
-  std::snprintf(buffer, size, "Z%u/%u",
-                static_cast<unsigned>(model.currentHeartRateZone.value),
-                static_cast<unsigned>(model.heartRateZoneCount.value));
+  return static_cast<int8_t>(model.currentHeartRateZone.value - 1);
 }
 
 inline void formatEnergy(const ViewModel &model, char *buffer,
