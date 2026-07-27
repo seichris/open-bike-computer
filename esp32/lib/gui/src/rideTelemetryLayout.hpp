@@ -6,6 +6,23 @@
 
 namespace ride_telemetry_layout {
 
+constexpr int32_t kMetricTitleLineHeight = 21;
+constexpr int32_t kMetricTitleValueGap = 1;
+constexpr int32_t kMetricValueOffsetY =
+    kMetricTitleLineHeight + kMetricTitleValueGap;
+constexpr int32_t kMetricRowGap = 8;
+
+constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
+  // The 466 px display fits the compact 64 px values; the 410 px display
+  // needs 42 px values so elapsed times and distances remain unclipped.
+  return screenWidth >= 440;
+}
+
+constexpr int32_t metricValueLineHeight(int32_t screenWidth) {
+  // LVGL line heights for the compact 64 px font and Montserrat 42.
+  return useLargeMetricValueFont(screenWidth) ? 60 : 46;
+}
+
 struct Rect {
   int32_t x = 0;
   int32_t y = 0;
@@ -29,8 +46,9 @@ struct Layout {
 constexpr Layout makeLayout(int32_t width, int32_t height) {
   constexpr int32_t columnGap = 12;
   constexpr int32_t metricFirstY = 136;
-  constexpr int32_t metricRowSpacing = 98;
-  constexpr int32_t metricCellHeight = 70;
+  const int32_t metricCellHeight =
+      kMetricValueOffsetY + metricValueLineHeight(width);
+  const int32_t metricRowSpacing = metricCellHeight + kMetricRowGap;
   const int32_t columnWidth = (width - 36 - columnGap) / 2;
   const int32_t leftX = 12;
   const int32_t rightX = leftX + columnWidth + columnGap;
@@ -40,8 +58,8 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
   layout.screenHeight = height;
   layout.page = {0, 0, width, height};
   layout.status = {16, 8, width - 32, 24};
-  layout.hero = {0, 30, width, 60};
-  layout.heroUnit = {0, 92, width, 24};
+  layout.hero = {0, 45, width, 61};
+  layout.heroUnit = {0, 112, width, 24};
   layout.metrics = {{
       {leftX, metricFirstY, columnWidth, metricCellHeight},
       {rightX, metricFirstY, columnWidth, metricCellHeight},
@@ -81,7 +99,13 @@ constexpr bool isValid(const Layout &layout) {
       return false;
     }
   }
-  return layout.metrics[3].bottom() <= layout.metrics[4].y;
+  for (std::size_t row = 0; row + 1 < 3; ++row) {
+    if (layout.metrics[row * 2].bottom() >
+        layout.metrics[(row + 1) * 2].y) {
+      return false;
+    }
+  }
+  return true;
 }
 
 } // namespace ride_telemetry_layout

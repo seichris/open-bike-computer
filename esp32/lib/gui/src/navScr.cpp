@@ -16,6 +16,14 @@ lv_obj_t *lonNav;
 lv_obj_t *distNav;
 lv_obj_t *arrowNav;
 
+void applyNavigationArrowStyle(lv_obj_t *arrow) {
+  if (!arrow) {
+    return;
+  }
+  lv_obj_set_style_image_recolor(arrow, lv_color_white(), 0);
+  lv_obj_set_style_image_recolor_opa(arrow, LV_OPA_COVER, 0);
+}
+
 void formatNavigationInstruction(const char *instruction, char *buffer,
                                  size_t bufferSize) {
   if (bufferSize == 0) {
@@ -81,6 +89,7 @@ void navigationScr(_lv_obj_t *screen) {
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(arrowNav, &navup);
+  applyNavigationArrowStyle(arrowNav);
   lv_img_set_pivot(arrowNav, 50, 50);
 }
 #endif
@@ -137,6 +146,7 @@ void navigationScr(_lv_obj_t *screen)
 
   LV_IMG_DECLARE(navup);
   lv_img_set_src(arrowNav, &navup);
+  applyNavigationArrowStyle(arrowNav);
   lv_img_set_pivot(arrowNav, 50, 50) ;
 }
 #endif

@@ -9,6 +9,7 @@
 
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
+#include "mapLineStyle.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
@@ -497,7 +498,7 @@ static void drawPositionDotMarker(lv_obj_t *canvas) {
 
   lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
 
-  const lv_color_t color = lv_color_white();
+  const lv_color_t color = lv_color_hex(0x3B82F6);
   constexpr int16_t center = 24;
   constexpr int16_t radius = 8;
 
@@ -1726,6 +1727,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation) {
   Polygon newPolygon;
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
+  const bool mapNavigationActive = isMapGuidanceScreenActive();
   const uint32_t drawStartMs = MAPIO_TIME_MS();
   const uint32_t fillStartMs = MAPIO_TIME_MS();
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
@@ -1929,7 +1931,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         if (!isLineVisible(line.typeId, line.color, line.width, blockStyle))
           continue;
 
-        uint16_t color_swapped = line.color; // Use color directly (RGB565)
+        const uint16_t color_swapped = map_line_style::displayColor(
+            line.typeId, line.color, line.width, mapNavigationActive);
 
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {

@@ -9,6 +9,7 @@
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../route_overlay/route_overlay.hpp"
+#include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
 // #include "../../compass/compass.hpp"
 
@@ -393,6 +394,13 @@ static void updateMapGuidanceOverlay() {
       mapGuidanceCatalogRevision = catalog.revision;
       mapGuidanceStatusRevision = status.revision;
       lv_obj_clean(mapGuidanceDestinationPicker);
+      lv_obj_scroll_to_y(mapGuidanceDestinationPicker, 0, LV_ANIM_OFF);
+      lv_obj_clear_flag(mapGuidanceDestinationPicker, LV_OBJ_FLAG_SCROLLABLE);
+      lv_obj_set_scrollbar_mode(mapGuidanceDestinationPicker,
+                                LV_SCROLLBAR_MODE_OFF);
+      lv_obj_set_style_pad_bottom(
+          mapGuidanceDestinationPicker,
+          destination_picker_layout::kBasePickerPadding, 0);
 
       if (status.code != DestinationPickerStatusCode::Idle) {
         lv_obj_t *statusContent =
@@ -433,15 +441,37 @@ static void updateMapGuidanceOverlay() {
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text_static(label, "Add saved destinations in the app");
       } else {
+        lv_obj_set_style_pad_bottom(
+            mapGuidanceDestinationPicker,
+            destination_picker_layout::bottomPadding(
+                TFT_WIDTH, TFT_HEIGHT, visibleFavoriteCount),
+            0);
+        lv_obj_update_layout(mapGuidanceDestinationPicker);
+        const int32_t rowWidth =
+            lv_obj_get_content_width(mapGuidanceDestinationPicker);
+        // Account for the row's horizontal padding and the label's left/right
+        // padding, which reserves room for the favorite star.
+        const int32_t labelTextWidth = rowWidth > 56 ? rowWidth - 56 : 1;
+        int32_t totalRowHeight = 0;
+        uint8_t createdRowCount = 0;
         for (uint8_t i = 0; i < catalog.count; i++) {
           const DeviceDestination &destination = catalog.items[i];
           if (destination.kind != DestinationKind::Favorite) {
             continue;
           }
 
+          lv_point_t textSize{};
+          lv_text_get_size(&textSize, destination.label,
+                           &lv_font_montserrat_24, 0, 0, labelTextWidth,
+                           LV_TEXT_FLAG_NONE);
+          const int32_t rowHeight =
+              destination_picker_layout::rowHeightForText(textSize.y);
+          totalRowHeight += rowHeight;
+          createdRowCount++;
+
           lv_obj_t *row = lv_btn_create(mapGuidanceDestinationPicker);
           lv_obj_remove_style_all(row);
-          lv_obj_set_size(row, LV_PCT(100), 64);
+          lv_obj_set_size(row, LV_PCT(100), rowHeight);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
           lv_obj_clear_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
           lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -451,7 +481,7 @@ static void updateMapGuidanceOverlay() {
           lv_obj_add_event_cb(
               row,
               [](lv_event_t *event) {
-                if (lv_event_get_code(event) != LV_EVENT_RELEASED) {
+                if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
                   return;
                 }
                 lv_event_stop_bubbling(event);
@@ -467,7 +497,7 @@ static void updateMapGuidanceOverlay() {
                   (void)lv_async_call(refreshMapGuidanceOverlayAsync, nullptr);
                 }
               },
-              LV_EVENT_RELEASED, &mapGuidanceRowContexts[i]);
+              LV_EVENT_CLICKED, &mapGuidanceRowContexts[i]);
           mapGuidanceRowContexts[i].generation = catalog.generation;
           mapGuidanceRowContexts[i].token = destination.token;
 
@@ -488,9 +518,20 @@ static void updateMapGuidanceOverlay() {
           lv_obj_set_style_pad_right(label, 4, 0);
           lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
           lv_obj_set_style_text_color(label, lv_color_white(), 0);
-          lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+          lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
           lv_label_set_text(label, destination.label);
           lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+        }
+
+        if (destination_picker_layout::needsScrolling(
+                totalRowHeight, createdRowCount,
+                lv_obj_get_content_height(mapGuidanceDestinationPicker))) {
+          lv_obj_add_flag(mapGuidanceDestinationPicker,
+                          LV_OBJ_FLAG_SCROLLABLE);
+          lv_obj_set_scroll_dir(mapGuidanceDestinationPicker,
+                                LV_DIR_VER);
+          lv_obj_set_scrollbar_mode(mapGuidanceDestinationPicker,
+                                    LV_SCROLLBAR_MODE_AUTO);
         }
       }
     }
@@ -1276,6 +1317,7 @@ static void createMapGuidanceOverlay() {
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
   LV_IMG_DECLARE(navup);
   lv_img_set_src(mapGuidanceArrow, &navup);
+  applyNavigationArrowStyle(mapGuidanceArrow);
   lv_img_set_zoom(mapGuidanceArrow,
                   TFT_HEIGHT > 320 ? iconScale * 2 : iconScale);
   lv_img_set_pivot(mapGuidanceArrow, 50, 50);

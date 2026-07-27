@@ -6,8 +6,8 @@
 #include "batteryStatusScr.hpp"
 
 #include "battery.hpp"
+#include "batteryStatusLayout.hpp"
 #include "ble_navigation.hpp"
-#include <algorithm>
 
 namespace {
 
@@ -255,25 +255,12 @@ void batteryStatusScr(lv_obj_t *screen) {
   lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-  const uint16_t shortestSide = std::min(TFT_WIDTH, TFT_HEIGHT);
-  const bool squareDisplay =
-      TFT_WIDTH > TFT_HEIGHT ? TFT_WIDTH - TFT_HEIGHT < 24
-                             : TFT_HEIGHT - TFT_WIDTH < 24;
-  lv_coord_t diameter = squareDisplay ? (shortestSide * 36) / 100
-                                      : (shortestSide * 46) / 100;
-  const bool hasLargeDeviceChrome = TFT_HEIGHT >= 400;
-  const lv_coord_t topInset = hasLargeDeviceChrome ? 32 : 6;
-  const lv_coord_t bottomInset = hasLargeDeviceChrome ? 66 : 6;
-  const lv_coord_t minimumGap = hasLargeDeviceChrome ? 16 : 6;
-  diameter = std::min<lv_coord_t>(
-      diameter,
-      (TFT_HEIGHT - topInset - bottomInset - minimumGap) / 2);
-  const lv_coord_t gap =
-      TFT_HEIGHT - topInset - bottomInset - (diameter * 2);
-
-  deviceGauge = createGauge(screen, diameter, topInset, DEVICE_COLOR, false);
-  phoneGauge = createGauge(screen, diameter, topInset + diameter + gap,
-                           PHONE_COLOR, true);
+  const auto layout =
+      battery_status_layout::makeLayout(TFT_WIDTH, TFT_HEIGHT);
+  deviceGauge = createGauge(screen, layout.diameter, layout.deviceY,
+                            DEVICE_COLOR, false);
+  phoneGauge = createGauge(screen, layout.diameter, layout.phoneY, PHONE_COLOR,
+                           true);
 }
 
 void updateBatteryStatusEvent(lv_event_t *event) {
