@@ -497,7 +497,7 @@ static void drawPositionDotMarker(lv_obj_t *canvas) {
 
   lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
 
-  const lv_color_t color = lv_color_white();
+  const lv_color_t color = lv_color_hex(0x3B82F6);
   constexpr int16_t center = 24;
   constexpr int16_t radius = 8;
 

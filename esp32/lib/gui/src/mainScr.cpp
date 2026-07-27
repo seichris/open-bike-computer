@@ -1276,6 +1276,7 @@ static void createMapGuidanceOverlay() {
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
   LV_IMG_DECLARE(navup);
   lv_img_set_src(mapGuidanceArrow, &navup);
+  applyNavigationArrowStyle(mapGuidanceArrow);
   lv_img_set_zoom(mapGuidanceArrow,
                   TFT_HEIGHT > 320 ? iconScale * 2 : iconScale);
   lv_img_set_pivot(mapGuidanceArrow, 50, 50);

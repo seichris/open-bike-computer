@@ -1,3 +1,4 @@
+#include "../../lib/gui/src/batteryStatusLayout.hpp"
 #include "../../lib/gui/src/guiLayout.hpp"
 #include "../../lib/gui/src/rideTelemetryLayout.hpp"
 
@@ -11,6 +12,7 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(502, 430) == 251);
   assert(gui_layout::mapScreenAnchorY(502, 502) == 251);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(410, 502);
+  constexpr auto batteryLayout = battery_status_layout::makeLayout(410, 502);
   static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
 #else
@@ -20,9 +22,16 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(466, 366) == 233);
   assert(gui_layout::mapScreenAnchorY(466, 466) == 233);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(466, 466);
+  constexpr auto batteryLayout = battery_status_layout::makeLayout(466, 466);
   static_assert(ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
 #endif
+  static_assert(batteryLayout.topMargin == batteryLayout.bottomMargin);
+  assert(batteryLayout.deviceY == batteryLayout.topMargin);
+  assert(batteryLayout.phoneY + batteryLayout.diameter +
+             batteryLayout.bottomMargin ==
+         rideLayout.screenHeight);
+  assert(batteryLayout.gap >= 16);
   static_assert(ride_telemetry_layout::isValid(rideLayout));
   assert(rideLayout.metrics.size() == 6);
   assert(rideLayout.heroUnit.bottom() == rideLayout.metrics[0].y);

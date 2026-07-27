@@ -6,6 +6,7 @@
  */
 
 #include "waitingScr.hpp"
+#include "battery.hpp"
 #include "mainScr.hpp"
 
 lv_obj_t *waitingScreen = nullptr;
@@ -13,6 +14,58 @@ volatile bool gpsReceivedFromApp = false;
 volatile bool pendingTransitionToMap = false;
 static lv_obj_t *waitingTitle = nullptr;
 static lv_obj_t *waitingMessage = nullptr;
+static lv_obj_t *waitingBattery = nullptr;
+
+extern Battery battery;
+
+namespace {
+
+const char *batterySymbol(uint8_t percentage) {
+  if (percentage >= 80) {
+    return LV_SYMBOL_BATTERY_FULL;
+  }
+  if (percentage >= 60) {
+    return LV_SYMBOL_BATTERY_3;
+  }
+  if (percentage >= 40) {
+    return LV_SYMBOL_BATTERY_2;
+  }
+  if (percentage >= 20) {
+    return LV_SYMBOL_BATTERY_1;
+  }
+  return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+void refreshWaitingBatteryIndicator() {
+  if (!waitingBattery) {
+    return;
+  }
+
+  uint8_t percentage = 0;
+  bool charging = false;
+  if (!battery.readBatteryStatus(percentage, charging)) {
+    lv_label_set_text_static(waitingBattery,
+                             LV_SYMBOL_BATTERY_EMPTY " --%");
+    return;
+  }
+
+  if (charging) {
+    lv_label_set_text_fmt(waitingBattery, "%s %u%% %s",
+                          batterySymbol(percentage), percentage,
+                          LV_SYMBOL_CHARGE);
+  } else {
+    lv_label_set_text_fmt(waitingBattery, "%s %u%%", batterySymbol(percentage),
+                          percentage);
+  }
+}
+
+void updateWaitingBattery(lv_timer_t *) {
+  if (waitingScreen && lv_scr_act() == waitingScreen) {
+    refreshWaitingBatteryIndicator();
+  }
+}
+
+} // namespace
 
 // Forward declaration
 void loadMainScreen();
@@ -41,6 +94,16 @@ void createWaitingScr() {
 
   waitingScreen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(waitingScreen, lv_color_black(), 0);
+
+  waitingBattery = lv_label_create(waitingScreen);
+  lv_obj_set_style_text_font(waitingBattery, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(waitingBattery, lv_color_white(), 0);
+  lv_obj_set_style_text_align(waitingBattery, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(waitingBattery, 210);
+  lv_obj_align(waitingBattery, LV_ALIGN_TOP_MID, 0, 45);
+  refreshWaitingBatteryIndicator();
+  lv_timer_t *batteryTimer = lv_timer_create(updateWaitingBattery, 1000, NULL);
+  lv_timer_ready(batteryTimer);
 
   // Title: "Bike Computer"
   waitingTitle = lv_label_create(waitingScreen);
