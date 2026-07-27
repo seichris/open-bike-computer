@@ -99,6 +99,14 @@ const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
   return firstFittingFont(fonts, text, textLength, availableWidth);
 }
 
+const lv_font_t *preferredMetricValueFont() {
+  if (ride_telemetry_layout::useLargeMetricValueFont(
+          rideLayout.screenWidth)) {
+    return &ride_value_font_64;
+  }
+  return &lv_font_montserrat_42;
+}
+
 void setLabelIfChanged(lv_obj_t *label, const char *text) {
   if (label == nullptr || text == nullptr) {
     return;
@@ -332,9 +340,14 @@ void updateHeartRateMetric(
       ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) -
       ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
   lv_obj_set_width(rideHeartRateValue, maximumValueWidth);
-  setMetricValueIfChanged(rideHeartRateValue, value);
-  const lv_font_t *font =
-      lv_obj_get_style_text_font(rideHeartRateValue, LV_PART_MAIN);
+  // A heart rate is at most three digits here, so it fits beside the heart at
+  // the regular tile size. Do not re-run adaptive sizing against the tightly
+  // measured label width on each refresh or the font progressively shrinks.
+  const lv_font_t *font = preferredMetricValueFont();
+  if (lv_obj_get_style_text_font(rideHeartRateValue, LV_PART_MAIN) != font) {
+    lv_obj_set_style_text_font(rideHeartRateValue, font, 0);
+  }
+  setLabelIfChanged(rideHeartRateValue, value);
   const int32_t textWidth = lv_text_get_width(
       value, static_cast<uint32_t>(std::strlen(value)), font, 0);
   const ride_telemetry_layout::ValueWithHeartLayout layout =
