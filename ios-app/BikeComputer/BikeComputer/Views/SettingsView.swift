@@ -84,6 +84,9 @@ struct SettingsView: View {
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
                     hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
+                    isServerRecoveryCheckPending: offlineMapManager.isServerRecoveryCheckPending,
+                    hasCurrentJob: offlineMapManager.currentJob != nil,
+                    hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
                     errorMessage: offlineMapManager.errorMessage
                 ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)

@@ -426,9 +426,19 @@ enum OfflineMapDownloadingSectionPresentation {
         isBusy: Bool,
         hasPendingJob: Bool,
         hasPendingActivation: Bool,
+        isServerRecoveryCheckPending: Bool,
+        hasCurrentJob: Bool,
+        hasDownloadedPack: Bool,
         errorMessage: String?
     ) -> Bool {
-        isBusy || hasPendingJob || hasPendingActivation || errorMessage != nil
+        let isOnlyCheckingForServerMaps = isServerRecoveryCheckPending &&
+            !hasCurrentJob &&
+            !hasDownloadedPack &&
+            !hasPendingActivation &&
+            errorMessage == nil
+        guard !isOnlyCheckingForServerMaps else { return false }
+
+        return isBusy || hasPendingJob || hasPendingActivation || errorMessage != nil
     }
 }
 
