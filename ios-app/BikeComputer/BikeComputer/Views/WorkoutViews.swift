@@ -5,7 +5,6 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
     case unsupported
     case activationFailed
     case noPairedWatch
-    case companionAppNotInstalled
 
     var id: String { rawValue }
 
@@ -15,8 +14,6 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
             return "Apple Watch Required"
         case .activationFailed:
             return "Unable to Check Apple Watch"
-        case .companionAppNotInstalled:
-            return "Install BikeComputer on Apple Watch"
         }
     }
 
@@ -28,8 +25,6 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
             return "BikeComputer couldn’t check your Apple Watch. Make sure Bluetooth and Wi-Fi are on, then try again."
         case .noPairedWatch:
             return "You need the BikeComputer app on an Apple Watch to start tracking your workout. Pair an Apple Watch with this iPhone first."
-        case .companionAppNotInstalled:
-            return "Open the Watch app on this iPhone, tap My Watch, then install BikeComputer under Available Apps."
         }
     }
 }
@@ -62,11 +57,11 @@ struct WorkoutStartButton<Label: View>: View {
     }
 
     private func handle(_ availability: WorkoutWatchAvailabilityV1) {
-        switch availability {
-        case .activating:
+        switch WorkoutStartAvailabilityPolicyV1.resolve(availability) {
+        case .waitForActivation:
             pendingStart = true
             watchAvailability.activate()
-        case .ready:
+        case .attemptHealthKitLaunch:
             pendingStart = false
             action()
         case .unsupported:
@@ -78,9 +73,6 @@ struct WorkoutStartButton<Label: View>: View {
         case .noPairedWatch:
             pendingStart = false
             presentedAlert = .noPairedWatch
-        case .companionAppNotInstalled:
-            pendingStart = false
-            presentedAlert = .companionAppNotInstalled
         }
     }
 

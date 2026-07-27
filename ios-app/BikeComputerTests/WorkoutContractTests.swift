@@ -4979,18 +4979,50 @@ private struct WorkoutContractTestSuite {
                 isCompanionAppInstalled: false,
                 isReachable: false
             ) == .companionAppNotInstalled,
-            "a paired Watch without BikeComputer must get install guidance"
+            "WatchConnectivity's reported companion-install state must remain available for non-start uses"
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(.activating)
+                == .waitForActivation,
+            "the start flow must wait for WatchConnectivity activation before deciding"
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(.unsupported)
+                == .unsupported,
+            "unsupported iPhones must remain blocked"
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(.activationFailed)
+                == .activationFailed,
+            "WatchConnectivity activation failures must remain recoverable"
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(.noPairedWatch)
+                == .noPairedWatch,
+            "an iPhone without a paired Watch must remain blocked"
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .companionAppNotInstalled
+            ) == .attemptHealthKitLaunch,
+            "a negative WatchConnectivity install flag must still attempt the authoritative HealthKit launch"
         )
         for isReachable in [false, true] {
+            let availability = WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: true,
+                isActivated: true,
+                isPaired: true,
+                isCompanionAppInstalled: true,
+                isReachable: isReachable
+            )
             expect(
-                WorkoutWatchAvailabilityPolicyV1.resolve(
-                    isSupported: true,
-                    isActivated: true,
-                    isPaired: true,
-                    isCompanionAppInstalled: true,
-                    isReachable: isReachable
-                ) == .ready(isReachable: isReachable),
+                availability == .ready(isReachable: isReachable),
                 "an installed companion must be start-ready regardless of immediate messaging reachability"
+            )
+            expect(
+                WorkoutStartAvailabilityPolicyV1.resolve(availability)
+                    == .attemptHealthKitLaunch,
+                "a ready Watch must attempt the HealthKit launch regardless of reachability"
             )
         }
     }
@@ -5178,7 +5210,7 @@ private struct WorkoutContractTestSuite {
             .count - 1
         expect(
             iPhoneAvailabilityCount == 4,
-            "all four iPhone compact, dashboard, failed, and disconnected start routes must use Watch availability gating"
+            "all four iPhone compact, dashboard, failed, and disconnected start routes must use the Watch availability flow"
         )
         expect(
             !iPhoneSource.contains("WorkoutStartDisclosureV1"),
@@ -5191,24 +5223,24 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             iPhoneConfirmationComponent.contains(
-                "case .ready:\n            pendingStart = false\n            action()"
+                "switch WorkoutStartAvailabilityPolicyV1.resolve(availability)"
             )
                 && iPhoneConfirmationComponent.contains(
-                    "case .companionAppNotInstalled:"
+                    "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action()"
                 ),
-            "the iPhone component must start ready Watches directly and gate missing companion apps"
+            "the iPhone component must let the start policy reach the authoritative HealthKit launch"
         )
         expect(
             compactIPhoneConfirmation.contains(
                 "YouneedtheBikeComputerapponanAppleWatchtostarttrackingyourworkout"
             )
                 && compactIPhoneConfirmation.contains(
-                    "OpentheWatchapponthisiPhone,tapMyWatch,theninstallBikeComputerunderAvailableApps"
-                )
-                && compactIPhoneConfirmation.contains(
                     ".alert(item:$presentedAlert)"
+                )
+                && !iPhoneConfirmationComponent.contains(
+                    "Install BikeComputer on Apple Watch"
                 ),
-            "iPhone unavailable states must provide paired-Watch and companion-install guidance"
+            "iPhone must keep paired-Watch guidance without blocking on a stale companion-install flag"
         )
 
         expect(
