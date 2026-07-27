@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLoopbackTarget, shouldAllowRequest } from "./export-playwright";
+import {
+  isLoopbackTarget,
+  playwrightExecutablePath,
+  shouldAllowRequest,
+} from "./export-playwright";
 
 test("accepts only loopback targets by default", () => {
   assert.equal(isLoopbackTarget(new URL("http://127.0.0.1:3000")), true);
@@ -19,4 +23,12 @@ test("matches request origins exactly", () => {
   assert.equal(shouldAllowRequest("http://127.0.0.1:3000@evil.example/collect", target, false), false);
   assert.equal(shouldAllowRequest("https://example.com/collect", target, false), false);
   assert.equal(shouldAllowRequest("https://example.com/collect", target, true), true);
+});
+
+test("accepts an isolated browser executable override", () => {
+  assert.equal(playwrightExecutablePath({}), undefined);
+  assert.equal(
+    playwrightExecutablePath({ PLAYWRIGHT_EXECUTABLE_PATH: " /Applications/Brave " }),
+    "/Applications/Brave"
+  );
 });

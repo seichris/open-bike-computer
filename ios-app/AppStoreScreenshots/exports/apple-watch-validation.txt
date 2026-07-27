@@ -1,1 +1,2 @@
-PASS 416x496 jpeg opaque watch/watch-live-workout.jpg
+PASS 416x496 png opaque watch/01-live-ride-stats.png
+PASS 416x496 png opaque watch/02-performance-stats.png

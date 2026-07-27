@@ -11,7 +11,7 @@
   "sources": [
     {
       "path": "bun.lock",
-      "sha256": "0e673ca33d3d8557e569806560011064f97ad94f48c0066a3896310b1f322c24"
+      "sha256": "0d46bfa35944fa80a66b2d2656ba4872bc443da559ebe1e94846f38b5f3afa9f"
     },
     {
       "path": "next.config.ts",
@@ -19,7 +19,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "f92e0dbcf525d09557e0ed12b5ac7a3bba63ea52b88a0a9dd797f533359a857d"
+      "sha256": "ef9ade9541c41889aed2fb86a90b144c13f1e403231a203938880b55d5d54648"
     },
     {
       "path": "public/screenshots/appstorepic1.png",
@@ -34,12 +34,16 @@
       "sha256": "4c3baeb642f6338d67f0331eb538821bd10754f3802f634d1d14bbb9464f22b7"
     },
     {
-      "path": "public/screenshots/watch/watch-live-workout.jpg",
-      "sha256": "cde97b96d7b8e057ef00d8c3bbedecb70099a3a9989f1b28784811a7bc799d11"
+      "path": "public/screenshots/watch/01-live-ride-stats.png",
+      "sha256": "b733cded69a9fefb8efed2e8f924bcb1e23940d6215924f04c42b90c507acf5e"
+    },
+    {
+      "path": "public/screenshots/watch/02-performance-stats.png",
+      "sha256": "607ca8823411c65657120db76e260fd8d8e4248ae004fcf58c43947a3f6a36b8"
     },
     {
       "path": "scripts/export-playwright.ts",
-      "sha256": "028a664757a7e608453184efcdd510dc7a622e3145bc4ff2d1905caefb77d62b"
+      "sha256": "9e09be01dea8b736af909ae4e1db72b208bc33b976966a88c3e6b673b0d5d86f"
     },
     {
       "path": "scripts/release-package.ts",
@@ -55,7 +59,7 @@
     },
     {
       "path": "src/app/page.tsx",
-      "sha256": "c5ad8e5578f79485f5207b707d499fe6214f126847dbc25a1add71595a468db2"
+      "sha256": "f7922499f6890aceda0dc64870573529d89c267797371c4a20bc0d5b7a746559"
     },
     {
       "path": "src/app/styles.css",

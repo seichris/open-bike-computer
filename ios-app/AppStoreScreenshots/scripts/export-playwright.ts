@@ -141,6 +141,17 @@ export function shouldAllowRequest(requestUrl: string, targetUrl: URL, allowExte
   return request.protocol === "data:" || request.protocol === "blob:" || request.origin === targetUrl.origin;
 }
 
+export function playwrightExecutablePath(
+  environment: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  const executablePath = environment.PLAYWRIGHT_EXECUTABLE_PATH?.trim();
+  return executablePath || undefined;
+}
+
+async function launchBrowser() {
+  return chromium.launch({ executablePath: playwrightExecutablePath() });
+}
+
 async function waitForImages(page: Page) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -219,7 +230,7 @@ async function makeContactSheet(items: ExportManifestItem[], outPath: string, ro
     </html>
   `;
 
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage({ viewport: { width, height: Math.max(720, Math.ceil(items.length / cols) * cellH + 32) } });
     await page.setContent(html, { waitUntil: "load" });
@@ -274,7 +285,7 @@ async function main() {
   ]);
   await mkdir(screenshotDir, { recursive: true });
 
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   const manifest: ExportManifestItem[] = [];
   const allowedSizes = new Set([`${opts.width}x${opts.height}`]);
   const createdAt = new Date().toISOString();
