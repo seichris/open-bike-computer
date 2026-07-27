@@ -13,14 +13,14 @@ constexpr int32_t kMetricValueOffsetY =
 constexpr int32_t kMetricRowGap = 2;
 
 constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
-  // The 466 px display fits 48 px values; the 410 px display needs 42 px
-  // values so elapsed times and kilometer distances remain unclipped.
+  // The 466 px display fits the compact 64 px values; the 410 px display
+  // needs 42 px values so elapsed times and distances remain unclipped.
   return screenWidth >= 440;
 }
 
 constexpr int32_t metricValueLineHeight(int32_t screenWidth) {
-  // LVGL line heights for Montserrat 48 and Montserrat 42 respectively.
-  return useLargeMetricValueFont(screenWidth) ? 52 : 46;
+  // LVGL line heights for the compact 64 px font and Montserrat 42.
+  return useLargeMetricValueFont(screenWidth) ? 60 : 46;
 }
 
 struct Rect {

@@ -14,6 +14,7 @@
 
 extern Gps gps;
 LV_FONT_DECLARE(ride_value_font_56);
+LV_FONT_DECLARE(ride_value_font_64);
 
 namespace {
 
@@ -33,11 +34,23 @@ MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 ride_telemetry_layout::Layout rideLayout{};
 
-const lv_font_t *metricValueFont() {
-  return ride_telemetry_layout::useLargeMetricValueFont(
-             rideLayout.screenWidth)
-             ? &lv_font_montserrat_48
-             : &lv_font_montserrat_42;
+const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
+  if (!ride_telemetry_layout::useLargeMetricValueFont(
+          rideLayout.screenWidth)) {
+    return &lv_font_montserrat_42;
+  }
+
+  const int32_t availableWidth = lv_obj_get_width(label) - 4;
+  const uint32_t textLength = static_cast<uint32_t>(std::strlen(text));
+  if (lv_text_get_width(text, textLength, &ride_value_font_64, 0) <=
+      availableWidth) {
+    return &ride_value_font_64;
+  }
+  if (lv_text_get_width(text, textLength, &ride_value_font_56, 0) <=
+      availableWidth) {
+    return &ride_value_font_56;
+  }
+  return &lv_font_montserrat_48;
 }
 
 void setLabelIfChanged(lv_obj_t *label, const char *text) {
@@ -48,6 +61,17 @@ void setLabelIfChanged(lv_obj_t *label, const char *text) {
   if (current == nullptr || std::strcmp(current, text) != 0) {
     lv_label_set_text(label, text);
   }
+}
+
+void setMetricValueIfChanged(lv_obj_t *label, const char *text) {
+  if (label == nullptr || text == nullptr) {
+    return;
+  }
+  const lv_font_t *font = metricValueFont(label, text);
+  if (lv_obj_get_style_text_font(label, LV_PART_MAIN) != font) {
+    lv_obj_set_style_text_font(label, font, 0);
+  }
+  setLabelIfChanged(label, text);
 }
 
 lv_obj_t *createPage(lv_obj_t *screen) {
@@ -67,6 +91,8 @@ lv_obj_t *createHeader(lv_obj_t *page) {
   lv_obj_set_pos(status, rideLayout.status.x, rideLayout.status.y);
   lv_obj_set_style_text_font(status, &lv_font_montserrat_18, 0);
   lv_obj_set_style_text_color(status, lv_color_hex(0x66DD88), 0);
+  lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_add_flag(status, LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text_static(status, "LEGACY RIDE");
   return status;
 }
@@ -86,11 +112,11 @@ MetricLabels createMetric(lv_obj_t *page, const char *title,
   lv_obj_set_width(labels.value, rect.width);
   lv_obj_set_pos(labels.value, rect.x,
                  rect.y + ride_telemetry_layout::kMetricValueOffsetY);
-  lv_obj_set_style_text_font(labels.value, metricValueFont(), 0);
+  lv_obj_set_style_text_font(labels.value, &ride_value_font_64, 0);
   lv_obj_set_style_text_color(labels.value, lv_color_white(), 0);
   lv_obj_set_style_text_align(labels.value, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(labels.value, LV_LABEL_LONG_CLIP);
-  lv_label_set_text_static(labels.value, "--");
+  setMetricValueIfChanged(labels.value, "--");
   return labels;
 }
 
@@ -110,7 +136,13 @@ ride_telemetry_presenter::ViewModel currentViewModel() {
 
 void updateStatusLabel(lv_obj_t *label,
                        const ride_telemetry_presenter::ViewModel &model) {
-  setLabelIfChanged(label, ride_telemetry_presenter::statusLabel(model));
+  const char *statusText = ride_telemetry_presenter::statusLabel(model);
+  setLabelIfChanged(label, statusText);
+  if (std::strcmp(statusText, "LEGACY RIDE") == 0) {
+    lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
   lv_color_t color = lv_color_hex(0x66DD88);
   if (model.stale || model.sessionState ==
                          workout_telemetry_protocol::SessionState::Failed) {
@@ -135,7 +167,7 @@ void updateBottomMetric(
   char value[24];
   ride_telemetry_presenter::formatBottomMetric(metric, model, value,
                                                 sizeof(value));
-  setLabelIfChanged(labels.value, value);
+  setMetricValueIfChanged(labels.value, value);
 }
 
 } // namespace
@@ -152,7 +184,7 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   rideSpeedValue = lv_label_create(ridePage);
   lv_obj_set_width(rideSpeedValue, rideLayout.hero.width);
   lv_obj_set_pos(rideSpeedValue, rideLayout.hero.x, rideLayout.hero.y);
-  lv_obj_set_style_text_font(rideSpeedValue, &ride_value_font_56, 0);
+  lv_obj_set_style_text_font(rideSpeedValue, &ride_value_font_64, 0);
   lv_obj_set_style_text_color(rideSpeedValue, lv_color_white(), 0);
   lv_obj_set_style_text_align(rideSpeedValue, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(rideSpeedValue, "0.0");
@@ -190,15 +222,15 @@ void updateRideTelemetryEvent(lv_event_t *) {
   setLabelIfChanged(rideSpeedValue, value);
   ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
                                           sizeof(value));
-  setLabelIfChanged(rideHeartRateValue, value);
+  setMetricValueIfChanged(rideHeartRateValue, value);
   ride_telemetry_presenter::formatZone(model, value, sizeof(value));
-  setLabelIfChanged(rideZoneValue, value);
+  setMetricValueIfChanged(rideZoneValue, value);
   ride_telemetry_presenter::formatDistance(model.distanceMeters, value,
                                            sizeof(value));
-  setLabelIfChanged(rideDistanceValue, value);
+  setMetricValueIfChanged(rideDistanceValue, value);
   ride_telemetry_presenter::formatElapsed(model.elapsedSeconds, value,
                                           sizeof(value));
-  setLabelIfChanged(rideElapsedValue, value);
+  setMetricValueIfChanged(rideElapsedValue, value);
 
   const ride_telemetry_presenter::BottomMetricSelection bottomMetrics =
       ride_telemetry_presenter::selectBottomMetrics(model);
