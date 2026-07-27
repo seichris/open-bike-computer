@@ -3965,6 +3965,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             ),
             currentHeartRateZone: 3,
             heartRateZoneCount: 5,
+            location: WorkoutLocationV1(
+                latitude: 35.6762,
+                longitude: 139.6503,
+                capturedAt: capturedAt,
+                horizontalAccuracy: 4.2,
+                altitude: 42,
+                verticalAccuracy: 2.4,
+                course: 82,
+                speed: 8.3
+            ),
             availability: [
                 .elapsedTime,
                 .currentHeartRate,

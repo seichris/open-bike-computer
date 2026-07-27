@@ -326,7 +326,14 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             / "public"
             / "screenshots"
             / "watch"
-            / "watch-live-workout.jpg",
+            / "01-live-ride-stats.png",
+            REPO_ROOT
+            / "ios-app"
+            / "AppStoreScreenshots"
+            / "public"
+            / "screenshots"
+            / "watch"
+            / "02-performance-stats.png",
         ]
         for path in required_files:
             self.assertTrue(path.is_file(), path)
@@ -363,7 +370,11 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertIn("src/app/page.tsx", source_paths)
         self.assertIn("src/app/styles.css", source_paths)
         self.assertIn(
-            "public/screenshots/watch/watch-live-workout.jpg",
+            "public/screenshots/watch/01-live-ride-stats.png",
+            source_paths,
+        )
+        self.assertIn(
+            "public/screenshots/watch/02-performance-stats.png",
             source_paths,
         )
         self.assertIn("scripts/export-playwright.ts", source_paths)

@@ -16,7 +16,7 @@ const SLIDES = [
   },
   {
     id: "04-watch-workout",
-    src: "/screenshots/watch/watch-live-workout.jpg",
+    src: "/screenshots/watch/01-live-ride-stats.png",
     alt: "Live outdoor cycling workout metrics in the BikeComputer Apple Watch app",
   },
 ] as const;
