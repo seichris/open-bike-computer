@@ -44,6 +44,80 @@ nonisolated struct WorkoutHeartRateZoneProfile: Equatable, Sendable {
     }
 }
 
+/// Accumulates workout elapsed time by heart-rate zone for the iPhone UI.
+/// Using the workout's elapsed metric keeps the value frozen while paused.
+nonisolated struct WorkoutHeartRateZoneDurationAccumulator: Sendable {
+    private var sessionID: UUID?
+    private var previousElapsedTime: TimeInterval?
+    private var previousZone: UInt8?
+    private var secondsByZone = Array(
+        repeating: TimeInterval.zero,
+        count: Int(WorkoutHeartRateZoneProfile.zoneCount)
+    )
+
+    mutating func update(
+        sessionID newSessionID: UUID?,
+        elapsedTime: TimeInterval?,
+        currentZone: UInt8?,
+        authoritativeDurations: WorkoutZoneDurationsV1? = nil
+    ) -> TimeInterval? {
+        guard let newSessionID else {
+            reset()
+            return nil
+        }
+
+        if sessionID != newSessionID {
+            reset()
+            sessionID = newSessionID
+        }
+
+        let validElapsedTime = elapsedTime.flatMap { value in
+            value.isFinite && value >= 0 ? value : nil
+        }
+        let validCurrentZone = Self.validZone(currentZone)
+
+        if let authoritativeDurations,
+           authoritativeDurations.secondsByZone.count
+                == Int(WorkoutHeartRateZoneProfile.zoneCount),
+           authoritativeDurations.secondsByZone.allSatisfy({
+               $0.isFinite && $0 >= 0
+           }) {
+            secondsByZone = authoritativeDurations.secondsByZone
+        } else if let previousElapsedTime,
+                  let validElapsedTime,
+                  validElapsedTime >= previousElapsedTime,
+                  let previousZone {
+            secondsByZone[Int(previousZone - 1)] +=
+                validElapsedTime - previousElapsedTime
+        }
+
+        previousElapsedTime = validElapsedTime ?? previousElapsedTime
+        previousZone = validCurrentZone
+
+        guard let validCurrentZone else { return nil }
+        return secondsByZone[Int(validCurrentZone - 1)]
+    }
+
+    mutating func reset() {
+        sessionID = nil
+        previousElapsedTime = nil
+        previousZone = nil
+        secondsByZone = Array(
+            repeating: .zero,
+            count: Int(WorkoutHeartRateZoneProfile.zoneCount)
+        )
+    }
+
+    private static func validZone(_ zone: UInt8?) -> UInt8? {
+        guard let zone,
+              zone > 0,
+              zone <= WorkoutHeartRateZoneProfile.zoneCount else {
+            return nil
+        }
+        return zone
+    }
+}
+
 nonisolated enum WorkoutHeartRateZoneSettings {
     static let maximumHeartRateBPMKey =
         "BikeComputer.workout.maximumHeartRateBPM"

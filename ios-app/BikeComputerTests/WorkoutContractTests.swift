@@ -72,6 +72,7 @@ private struct WorkoutContractTestSuite {
         testComponentTimestampsStayWithinWorkoutWindow()
         testHeartRateZonePayloadIsCoherent()
         testHeartRateZoneProfileAndPersistence()
+        testHeartRateZoneDurationAccumulator()
         testAltitudeRequiresVerticalAccuracy()
         testUnknownErrorCodesBecomeSafeGenericCodes()
         testSequenceGateRejectsDuplicatesAndOlderSnapshots()
@@ -1111,6 +1112,95 @@ private struct WorkoutContractTestSuite {
             WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(from: [:])
                 == nil,
             "missing Watch sync context leaves the current/default value unchanged"
+        )
+    }
+
+    private mutating func testHeartRateZoneDurationAccumulator() {
+        let firstSession = UUID(
+            uuidString: "72C8E2D9-3EC0-4C9A-A101-111111111111"
+        )!
+        let secondSession = UUID(
+            uuidString: "72C8E2D9-3EC0-4C9A-A101-222222222222"
+        )!
+        var accumulator = WorkoutHeartRateZoneDurationAccumulator()
+
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 10,
+                currentZone: 2
+            ) == 0,
+            "the first observed zone starts at zero without inventing history"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 15,
+                currentZone: 2
+            ) == 5,
+            "workout elapsed time accumulates in the current zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 20,
+                currentZone: 3
+            ) == 0,
+            "moving zones attributes the preceding interval to the old zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 24,
+                currentZone: 3
+            ) == 4,
+            "the new zone begins accumulating on the next elapsed update"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 24,
+                currentZone: 3
+            ) == 4,
+            "a paused workout does not advance time in zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 27,
+                currentZone: 2
+            ) == 10,
+            "returning to a zone shows its cumulative workout time"
+        )
+
+        let authoritative = WorkoutZoneDurationsV1(
+            capturedAt: Date(timeIntervalSinceReferenceDate: 800_000_425),
+            secondsByZone: [1, 2, 3, 4, 5]
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 30,
+                currentZone: 4,
+                authoritativeDurations: authoritative
+            ) == 4,
+            "authoritative Watch zone durations replace the local fallback"
+        )
+        expect(
+            accumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 5,
+                currentZone: 1
+            ) == 0,
+            "a new workout session resets accumulated zone time"
+        )
+        expect(
+            accumulator.update(
+                sessionID: nil,
+                elapsedTime: nil,
+                currentZone: nil
+            ) == nil,
+            "clearing the session clears the displayed zone duration"
         )
     }
 
@@ -5383,6 +5473,12 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent(
                 "BikeComputer/BikeComputer/Views/NavigationDetailsView.swift"
             )
+        let heartRateZoneStripURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputer/Views/HeartRateZoneStrip.swift"
+            )
         let summaryWatchViewURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -5406,6 +5502,10 @@ private struct WorkoutContractTestSuite {
                 contentsOf: navigationDetailsViewURL,
                 encoding: .utf8
               ),
+              let heartRateZoneStripSource = try? String(
+                contentsOf: heartRateZoneStripURL,
+                encoding: .utf8
+              ),
               let summaryWatchViewSource = try? String(
                 contentsOf: summaryWatchViewURL,
                 encoding: .utf8
@@ -5416,7 +5516,6 @@ private struct WorkoutContractTestSuite {
 
         for metricTitle in [
             "Heart Rate",
-            "Heart Zone",
             "Speed",
             "Distance",
             "Energy",
@@ -5468,9 +5567,10 @@ private struct WorkoutContractTestSuite {
             liveWatchViewSource.filter { !$0.isWhitespace }
         let compactNavigationDetailsViewSource =
             navigationDetailsViewSource.filter { !$0.isWhitespace }
+        let compactHeartRateZoneStripSource =
+            heartRateZoneStripSource.filter { !$0.isWhitespace }
         for metricBinding in [
-            "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
-            "metric(\"HeartZone\",zoneValue(snapshot),\"\"",
+            "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"\",\"heart.fill\",.red,valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\")",
             "metric(\"Speed\",WorkoutValueFormatter.speed(snapshot.currentSpeed?.value),\"KM/H\"",
             "metric(\"Distance\",WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),WorkoutValueFormatter.distanceUnit(snapshot.cyclingDistance?.value)",
             "metric(\"Energy\",WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),\"KCAL\"",
@@ -5484,6 +5584,30 @@ private struct WorkoutContractTestSuite {
                 "each workout metric title must remain bound to its matching snapshot value"
             )
         }
+        expect(
+            compactSource.contains(
+                "HeartRateZoneStrip(currentZone:snapshot.currentHeartRateZone)"
+            )
+                && compactHeartRateZoneStripSource.contains(
+                    "ForEach(1...zoneCount,id:\\.self)"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "Text(\"ZONE\\(zone)\")"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "Image(systemName:\"heart.fill\")"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "ifletnormalizedCurrentZone{GeometryReader"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    ".frame(width:isCurrent?activeWidth:inactiveWidth)"
+                )
+                && !compactHeartRateZoneStripSource.contains(
+                    "letequalWidth="
+                ),
+            "dashboard heart zones must stay hidden until a valid zone exists, then expand the active heart-labeled position"
+        )
         expect(
             compactSource.contains(
                 "Button(action:onMarkSegment){HStack(spacing:6){WorkoutSegmentNumberBadge(number:currentSegmentNumber,diameter:22)Text(\"Segment\")}}"
@@ -5502,6 +5626,15 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactSource.contains(
                     "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
+                )
+                && compactSource.contains(
+                    ".background{finishPromptPresenter}"
+                )
+                && compactSource.contains(
+                    "privatevarfinishPromptPresenter:someView{Color.clear.tint(.accentColor).confirmationDialog("
+                )
+                && compactSource.contains(
+                    "Button(WorkoutDiscardDisclosureV1.cancelTitle,role:.cancel)"
                 )
                 && compactSource.contains(
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
@@ -5660,10 +5793,16 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent("BikeComputer/Views/RouteInputView.swift")
         let workoutURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let heartRateZoneStripURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/HeartRateZoneStrip.swift")
         guard let content = try? String(contentsOf: contentURL, encoding: .utf8),
               let navigation = try? String(contentsOf: navigationURL, encoding: .utf8),
               let route = try? String(contentsOf: routeURL, encoding: .utf8),
-              let workout = try? String(contentsOf: workoutURL, encoding: .utf8) else {
+              let workout = try? String(contentsOf: workoutURL, encoding: .utf8),
+              let heartRateZoneStrip = try? String(
+                contentsOf: heartRateZoneStripURL,
+                encoding: .utf8
+              ) else {
             expect(false, "main ride-control source files must be available")
             return
         }
@@ -5671,6 +5810,8 @@ private struct WorkoutContractTestSuite {
         let compactContent = content.filter { !$0.isWhitespace }
         let compactNavigation = navigation.filter { !$0.isWhitespace }
         let compactWorkout = workout.filter { !$0.isWhitespace }
+        let compactHeartRateZoneStrip =
+            heartRateZoneStrip.filter { !$0.isWhitespace }
         expect(
             route.contains("Search destination")
                 && !route.contains("Search for a destination"),
@@ -5772,10 +5913,28 @@ private struct WorkoutContractTestSuite {
                     "metrics.first(where:{$0.id==\"speed\"})"
                 )
                 && compactNavigation.contains(
-                    "isExpanded:true,isHero:true"
+                    "isExpanded:true,isHero:true,showsLabel:false"
                 )
                 && compactNavigation.contains(
-                    "metrics:metrics.filter{$0.id!=\"speed\"},columnCount:2,isExpanded:true"
+                    "metrics:expandedWorkoutMetricValues(from:metrics),columnCount:2,isExpanded:true"
+                )
+                && compactNavigation.contains(
+                    "ifletheartRate=metrics.first(where:{$0.id==\"heartrate\"}){expandedMetrics.append(heartRate)}"
+                )
+                && compactNavigation.contains(
+                    "WorkoutValueFormatter.duration(displayedHeartRateZoneElapsedTime),showsHeartInLabel:true,label:\"timeinzone\""
+                )
+                && compactNavigation.contains(
+                    "ifshowsHeartInLabel{HStack(spacing:4){Text(\"timein\")Image(systemName:\"heart.fill\").accessibilityHidden(true)Text(\"zone\")}}"
+                )
+                && compactNavigation.contains(
+                    "ifshowsLabel{metricLabel"
+                )
+                && compactNavigation.contains(
+                    "label:\"workouttime\""
+                )
+                && !compactNavigation.contains(
+                    "label:\"elapsed\""
                 )
                 && compactNavigation.contains(
                     "expandedNavigationMetrics"
@@ -5795,7 +5954,7 @@ private struct WorkoutContractTestSuite {
                 && compactNavigation.contains(
                     ".padding(.bottom,4)"
                 ),
-            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, use taller controls, and avoid excess space below them"
+            "expanded ride stats must hide the speed caption and place heart rate plus time in zone first below the zone strip"
         )
         expect(
             compactContent.contains(
@@ -5814,7 +5973,6 @@ private struct WorkoutContractTestSuite {
             "WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value)",
             "altitudeValue(suppressInstantaneous?nil:snapshot.location?.altitude)",
             "WorkoutValueFormatter.heartRate(suppressInstantaneous?nil:snapshot.currentHeartRate?.value)",
-            "suppressInstantaneous?\"--\":heartRateZone(snapshot)",
             "WorkoutValueFormatter.energy(snapshot.activeEnergy?.value)",
         ] {
             expect(
@@ -5830,7 +5988,6 @@ private struct WorkoutContractTestSuite {
             "label:\"distance\"",
             "label:\"altitude\"",
             "label:\"heartrate\"",
-            "label:\"heartzone\"",
             "label:\"energy\"",
         ] {
             guard let range = compactNavigation.range(
@@ -5846,8 +6003,22 @@ private struct WorkoutContractTestSuite {
             previousMetricIndex = range.upperBound
         }
         expect(
-            compactNavigation.contains("return\"Zone\\(zone)\""),
-            "the main ride panel must render the zone as Zone N"
+            compactNavigation.contains(
+                "HeartRateZoneStrip(currentZone:displayedHeartRateZone)"
+            )
+                && compactNavigation.contains(
+                    "privatevardisplayedHeartRateZone:UInt8?{suppressInstantaneousMetrics?nil:workoutStore.presentation.snapshot.currentHeartRateZone}"
+                )
+                && compactHeartRateZoneStrip.contains(
+                    "Text(\"ZONE\\(zone)\")"
+                )
+                && compactNavigation.contains(
+                    "valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\",label:\"heartrate\""
+                )
+                && compactWorkout.contains(
+                    "valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\""
+                ),
+            "iPhone ride surfaces must move the active Zone N label between five colored positions and replace BPM with a red heart"
         )
         for control in [
             "\"Segment\"",

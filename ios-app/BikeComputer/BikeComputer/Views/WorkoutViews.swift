@@ -137,57 +137,65 @@ struct WorkoutFinishButton<Label: View>: View {
         } label: {
             label()
         }
-        .confirmationDialog(
-            "Finish this ride?",
-            isPresented: finishOptionsPresented
-        ) {
-            if case .options(let sessionID) = finishPrompt {
-                Button("End and Save") {
-                    finishPrompt = nil
-                    guard store.presentation.sessionID == sessionID else { return }
-                    onEndAndSave()
-                }
-                Button("Discard Workout", role: .destructive) {
-                    requestDiscardConfirmation(for: sessionID)
-                }
-                Button("Keep Riding", role: .cancel) {
-                    finishPrompt = nil
-                }
-            }
-        } message: {
-            Text("Apple Watch performs the save. If it is unreachable, the workout continues there.")
-        }
-        .alert(
-            WorkoutDiscardDisclosureV1.title,
-            isPresented: discardConfirmationPresented
-        ) {
-            if case .discardConfirmation(let sessionID) = finishPrompt {
-                Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .cancel,
-                        expectedSessionID: sessionID,
-                        currentSessionID: store.presentation.sessionID,
-                        discard: onDiscard
-                    )
-                }
-                Button(
-                    WorkoutDiscardDisclosureV1.confirmTitle,
-                    role: .destructive
-                ) {
-                    WorkoutDiscardDisclosureV1.perform(
-                        .confirmDiscard,
-                        expectedSessionID: sessionID,
-                        currentSessionID: store.presentation.sessionID,
-                        discard: onDiscard
-                    )
-                }
-            }
-        } message: {
-            Text(WorkoutDiscardDisclosureV1.message)
+        .background {
+            finishPromptPresenter
         }
         .onChange(of: store.presentation.sessionID) { _ in
             finishPrompt = nil
         }
+    }
+
+    private var finishPromptPresenter: some View {
+        Color.clear
+            .tint(.accentColor)
+            .confirmationDialog(
+                "Finish this ride?",
+                isPresented: finishOptionsPresented
+            ) {
+                if case .options(let sessionID) = finishPrompt {
+                    Button("End and Save") {
+                        finishPrompt = nil
+                        guard store.presentation.sessionID == sessionID else { return }
+                        onEndAndSave()
+                    }
+                    Button("Discard Workout", role: .destructive) {
+                        requestDiscardConfirmation(for: sessionID)
+                    }
+                    Button("Keep Riding", role: .cancel) {
+                        finishPrompt = nil
+                    }
+                }
+            } message: {
+                Text("Apple Watch performs the save. If it is unreachable, the workout continues there.")
+            }
+            .alert(
+                WorkoutDiscardDisclosureV1.title,
+                isPresented: discardConfirmationPresented
+            ) {
+                if case .discardConfirmation(let sessionID) = finishPrompt {
+                    Button(WorkoutDiscardDisclosureV1.cancelTitle, role: .cancel) {
+                        WorkoutDiscardDisclosureV1.perform(
+                            .cancel,
+                            expectedSessionID: sessionID,
+                            currentSessionID: store.presentation.sessionID,
+                            discard: onDiscard
+                        )
+                    }
+                    Button(
+                        WorkoutDiscardDisclosureV1.confirmTitle,
+                        role: .destructive
+                    ) {
+                        WorkoutDiscardDisclosureV1.perform(
+                            .confirmDiscard,
+                            expectedSessionID: sessionID,
+                            currentSessionID: store.presentation.sessionID,
+                            discard: onDiscard
+                        )
+                    }
+                }
+            } message: {
+                Text(WorkoutDiscardDisclosureV1.message)
+            }
     }
 
     private var finishOptionsPresented: Binding<Bool> {
@@ -570,21 +578,33 @@ struct WorkoutDashboardView: View {
                     .foregroundStyle(.secondary)
                 }
 
+                VStack(alignment: .leading, spacing: 6) {
+                    HeartRateZoneStrip(
+                        currentZone: snapshot.currentHeartRateZone
+                    )
+                    Text(
+                        snapshot.currentHeartRateZone == nil
+                            ? "Waiting for heart rate"
+                            : "Configured max HR"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(
+                    .background,
+                    in: RoundedRectangle(cornerRadius: 14)
+                )
+
                 LazyVGrid(columns: columns, spacing: 12) {
                     metric(
                         "Heart Rate",
                         WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),
-                        "BPM",
-                        "heart.fill",
-                        .red
-                    )
-                    metric(
-                        "Heart Zone",
-                        zoneValue(snapshot),
                         "",
-                        "waveform.path.ecg",
-                        .pink,
-                        source: "Configured max HR"
+                        "heart.fill",
+                        .red,
+                        valueSymbol: "heart.fill",
+                        accessibilityUnit: "beats per minute"
                     )
                     metric(
                         "Speed",
@@ -827,7 +847,9 @@ struct WorkoutDashboardView: View {
         _ unit: String,
         _ icon: String,
         _ color: Color,
-        source: String? = nil
+        source: String? = nil,
+        valueSymbol: String? = nil,
+        accessibilityUnit: String? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: icon)
@@ -839,9 +861,16 @@ struct WorkoutDashboardView: View {
                     .monospacedDigit()
                     .minimumScaleFactor(0.7)
                     .lineLimit(1)
-                Text(unit)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
+                if let valueSymbol {
+                    Image(systemName: valueSymbol)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.red)
+                        .accessibilityHidden(true)
+                } else {
+                    Text(unit)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
             }
             if let source {
                 Text(source)
@@ -854,7 +883,9 @@ struct WorkoutDashboardView: View {
         .padding(12)
         .background(.background, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), \(value) \(unit)")
+        .accessibilityLabel(
+            "\(title), \(value) \(accessibilityUnit ?? unit)"
+        )
     }
 
     private func errorBanner(_ code: WorkoutSafeErrorCodeV1) -> some View {
@@ -913,11 +944,6 @@ struct WorkoutDashboardView: View {
     private func captureAgeLabel(_ age: TimeInterval) -> String {
         if age < 1 { return "Captured now" }
         return "Captured \(Int(age.rounded(.down)))s ago"
-    }
-
-    private func zoneValue(_ snapshot: WorkoutSnapshotV1) -> String {
-        guard let zone = snapshot.currentHeartRateZone else { return "--" }
-        return "Zone \(zone)"
     }
 
     private func altitudeValue(_ altitude: Double?) -> String {

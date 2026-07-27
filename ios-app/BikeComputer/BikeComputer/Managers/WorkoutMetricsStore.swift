@@ -35,6 +35,7 @@ nonisolated struct WorkoutServiceActivityTracker: Sendable {
 final class WorkoutMetricsStore: ObservableObject {
     @Published private(set) var presentation: WorkoutMirrorPresentationV1
     @Published private(set) var shouldMaintainWorkoutServices: Bool
+    @Published private(set) var currentHeartRateZoneElapsedTime: TimeInterval?
 
     private var reducer: WorkoutMirrorStateReducer
     private var iPhoneTelemetry: WorkoutIPhoneTelemetryV1 = .empty
@@ -43,6 +44,8 @@ final class WorkoutMetricsStore: ObservableObject {
     private var lastNavigationDistanceMeters: Double?
     private var completedNavigationDistanceMeters: Double = 0
     private var wasNavigationDistanceAdvancing = false
+    private var heartRateZoneDurationAccumulator =
+        WorkoutHeartRateZoneDurationAccumulator()
     private let now: () -> Date
     private var workoutServiceActivityTracker: WorkoutServiceActivityTracker
 
@@ -88,6 +91,7 @@ final class WorkoutMetricsStore: ObservableObject {
         )
         var workoutServiceActivityTracker = WorkoutServiceActivityTracker()
         self.presentation = presentation
+        currentHeartRateZoneElapsedTime = nil
         shouldMaintainWorkoutServices =
             workoutServiceActivityTracker.shouldMaintainServices(
                 for: presentation,
@@ -304,6 +308,19 @@ final class WorkoutMetricsStore: ObservableObject {
                 for: next,
                 at: referenceDate
             )
+        let nextHeartRateZoneElapsedTime =
+            heartRateZoneDurationAccumulator.update(
+                sessionID: next.sessionID,
+                elapsedTime: next.snapshot.elapsedTime?.value,
+                currentZone: next.snapshot.currentHeartRateZone,
+                authoritativeDurations:
+                    next.snapshot.heartRateZoneDurations
+            )
+        if nextHeartRateZoneElapsedTime
+            != currentHeartRateZoneElapsedTime {
+            currentHeartRateZoneElapsedTime =
+                nextHeartRateZoneElapsedTime
+        }
         if nextShouldMaintainWorkoutServices
             != shouldMaintainWorkoutServices {
             shouldMaintainWorkoutServices =
