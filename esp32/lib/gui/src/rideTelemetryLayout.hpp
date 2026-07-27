@@ -10,7 +10,7 @@ constexpr int32_t kMetricTitleLineHeight = 21;
 constexpr int32_t kMetricTitleValueGap = 1;
 constexpr int32_t kMetricValueOffsetY =
     kMetricTitleLineHeight + kMetricTitleValueGap;
-constexpr int32_t kMetricRowGap = 2;
+constexpr int32_t kMetricRowGap = 8;
 
 constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
   // The 466 px display fits the compact 64 px values; the 410 px display
