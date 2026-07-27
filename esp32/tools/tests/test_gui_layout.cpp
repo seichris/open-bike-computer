@@ -11,6 +11,8 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(502, 430) == 251);
   assert(gui_layout::mapScreenAnchorY(502, 502) == 251);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(410, 502);
+  static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
+      rideLayout.screenWidth));
 #else
   // 1.75-inch viewport: 466px screen with 100px reserved UI space.
   assert(gui_layout::mapViewportHeight(466) == 366);
@@ -18,11 +20,17 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(466, 366) == 233);
   assert(gui_layout::mapScreenAnchorY(466, 466) == 233);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(466, 466);
+  static_assert(ride_telemetry_layout::useLargeMetricValueFont(
+      rideLayout.screenWidth));
 #endif
   static_assert(ride_telemetry_layout::isValid(rideLayout));
   assert(rideLayout.metrics.size() == 6);
   assert(rideLayout.metrics[0].right() <= rideLayout.metrics[1].x);
-  assert(rideLayout.metrics[3].bottom() <= rideLayout.metrics[4].y);
+  for (std::size_t row = 0; row + 1 < 3; ++row) {
+    assert(rideLayout.metrics[(row + 1) * 2].y -
+               rideLayout.metrics[row * 2].bottom() ==
+           ride_telemetry_layout::kMetricRowGap);
+  }
   for (const auto &metric : rideLayout.metrics) {
     assert(ride_telemetry_layout::fits(
         metric, rideLayout.screenWidth, rideLayout.screenHeight));

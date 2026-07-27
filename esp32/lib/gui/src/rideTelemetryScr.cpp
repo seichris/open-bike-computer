@@ -17,8 +17,6 @@ LV_FONT_DECLARE(ride_value_font_56);
 
 namespace {
 
-constexpr lv_coord_t kMetricValueOffsetY = 26;
-
 struct MetricLabels {
   lv_obj_t *title = nullptr;
   lv_obj_t *value = nullptr;
@@ -34,6 +32,13 @@ lv_obj_t *rideElapsedValue = nullptr;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 ride_telemetry_layout::Layout rideLayout{};
+
+const lv_font_t *metricValueFont() {
+  return ride_telemetry_layout::useLargeMetricValueFont(
+             rideLayout.screenWidth)
+             ? &lv_font_montserrat_48
+             : &lv_font_montserrat_42;
+}
 
 void setLabelIfChanged(lv_obj_t *label, const char *text) {
   if (label == nullptr || text == nullptr) {
@@ -79,8 +84,9 @@ MetricLabels createMetric(lv_obj_t *page, const char *title,
 
   labels.value = lv_label_create(page);
   lv_obj_set_width(labels.value, rect.width);
-  lv_obj_set_pos(labels.value, rect.x, rect.y + kMetricValueOffsetY);
-  lv_obj_set_style_text_font(labels.value, &lv_font_montserrat_38, 0);
+  lv_obj_set_pos(labels.value, rect.x,
+                 rect.y + ride_telemetry_layout::kMetricValueOffsetY);
+  lv_obj_set_style_text_font(labels.value, metricValueFont(), 0);
   lv_obj_set_style_text_color(labels.value, lv_color_white(), 0);
   lv_obj_set_style_text_align(labels.value, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(labels.value, LV_LABEL_LONG_CLIP);
