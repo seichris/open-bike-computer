@@ -43,18 +43,6 @@ int main() {
   static_assert(destination_picker_layout::bottomPadding(410, 502, 3) == 4);
   static_assert(!destination_picker_layout::needsScrolling(88 * 3, 3, 280));
   static_assert(destination_picker_layout::needsScrolling(116 * 3, 3, 280));
-  // For Z10/255, the compact 64 px candidate is too wide and the 56 px
-  // candidate lacks Z. Selection must skip the seemingly fitting placeholder
-  // width and use the first complete Montserrat fallback.
-  constexpr std::array<ride_metric_font_selection::Candidate, 4>
-      zoneCandidates{{
-          {241, true},
-          {202, false},
-          {190, true},
-          {170, true},
-      }};
-  static_assert(ride_metric_font_selection::firstFittingIndex(zoneCandidates,
-                                                               205) == 2);
   static_assert(map_line_style::displayColor(1, 0xF567, 7, false) ==
                 0xF567);
   static_assert(map_line_style::displayColor(1, 0xF567, 7, true) ==
@@ -79,6 +67,38 @@ int main() {
   for (const auto &metric : rideLayout.metrics) {
     assert(ride_telemetry_layout::fits(
         metric, rideLayout.screenWidth, rideLayout.screenHeight));
+  }
+  for (std::size_t activeIndex = 0;
+       activeIndex < ride_telemetry_layout::kHeartRateZoneCount;
+       ++activeIndex) {
+    const auto zoneStrip = ride_telemetry_layout::makeZoneStripLayout(
+        rideLayout.metrics[1], rideLayout.screenWidth, activeIndex);
+    assert(zoneStrip.bounds.x == rideLayout.metrics[1].x);
+    assert(zoneStrip.bounds.right() == rideLayout.metrics[1].right());
+    assert(zoneStrip.bounds.y >= rideLayout.metrics[1].y +
+                                     ride_telemetry_layout::kMetricValueOffsetY);
+    assert(zoneStrip.bounds.bottom() <= rideLayout.metrics[1].bottom());
+    assert(zoneStrip.segments.front().x == zoneStrip.bounds.x);
+    assert(zoneStrip.segments.back().right() == zoneStrip.bounds.right());
+    for (std::size_t index = 0; index < zoneStrip.segments.size(); ++index) {
+      const auto &segment = zoneStrip.segments[index];
+      assert(segment.y == zoneStrip.bounds.y);
+      assert(segment.height == zoneStrip.bounds.height);
+      assert(segment.width > 0);
+      if (index == activeIndex) {
+        assert(segment.width >
+               zoneStrip.segments[(index + 1) %
+                                  zoneStrip.segments.size()]
+                   .width);
+        assert(zoneStrip.heart.x >= segment.x);
+        assert(zoneStrip.label.right() <= segment.right());
+        assert(zoneStrip.label.width >= 58);
+      }
+      if (index + 1 < zoneStrip.segments.size()) {
+        assert(segment.right() + ride_telemetry_layout::kZoneStripGap ==
+               zoneStrip.segments[index + 1].x);
+      }
+    }
   }
   return 0;
 }

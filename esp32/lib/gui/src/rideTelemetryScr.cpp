@@ -30,9 +30,13 @@ lv_obj_t *ridePage = nullptr;
 lv_obj_t *rideStatus = nullptr;
 lv_obj_t *rideSpeedValue = nullptr;
 lv_obj_t *rideHeartRateValue = nullptr;
-lv_obj_t *rideZoneValue = nullptr;
 lv_obj_t *rideDistanceValue = nullptr;
 lv_obj_t *rideElapsedValue = nullptr;
+std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
+    rideZoneSegments{};
+lv_obj_t *rideZoneHeart = nullptr;
+lv_obj_t *rideZoneLabel = nullptr;
+int8_t displayedZoneIndex = -2;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 ride_telemetry_layout::Layout rideLayout{};
@@ -138,16 +142,22 @@ lv_obj_t *createHeader(lv_obj_t *page) {
   return status;
 }
 
+lv_obj_t *createMetricTitle(lv_obj_t *page, const char *title,
+                            const ride_telemetry_layout::Rect &rect) {
+  lv_obj_t *label = lv_label_create(page);
+  lv_obj_set_width(label, rect.width);
+  lv_obj_set_pos(label, rect.x, rect.y);
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(label, lv_color_hex(0x999999), 0);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text(label, title);
+  return label;
+}
+
 MetricLabels createMetric(lv_obj_t *page, const char *title,
                           const ride_telemetry_layout::Rect &rect) {
   MetricLabels labels{};
-  labels.title = lv_label_create(page);
-  lv_obj_set_width(labels.title, rect.width);
-  lv_obj_set_pos(labels.title, rect.x, rect.y);
-  lv_obj_set_style_text_font(labels.title, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(labels.title, lv_color_hex(0x999999), 0);
-  lv_obj_set_style_text_align(labels.title, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_text(labels.title, title);
+  labels.title = createMetricTitle(page, title, rect);
 
   labels.value = lv_label_create(page);
   lv_obj_set_width(labels.value, rect.width);
@@ -159,6 +169,134 @@ MetricLabels createMetric(lv_obj_t *page, const char *title,
   lv_label_set_long_mode(labels.value, LV_LABEL_LONG_CLIP);
   setMetricValueIfChanged(labels.value, "--");
   return labels;
+}
+
+lv_color_t zoneColor(std::size_t index, bool active) {
+  // Matches HeartRateZonePalette in the iPhone app. Inactive values are the
+  // same colors composited at 62% opacity over the black screen background.
+  constexpr std::array<uint32_t,
+                       ride_telemetry_layout::kHeartRateZoneCount>
+      activeColors = {0x145C99, 0x0D7A70, 0xADF208, 0xE0730F, 0xB80852};
+  constexpr std::array<uint32_t,
+                       ride_telemetry_layout::kHeartRateZoneCount>
+      inactiveColors = {0x0C395F, 0x084C45, 0x6B9605, 0x8B4709, 0x720533};
+  return lv_color_hex(active ? activeColors[index] : inactiveColors[index]);
+}
+
+lv_color_t zoneForegroundColor(std::size_t index) {
+  return index == 2 || index == 3 ? lv_color_black() : lv_color_white();
+}
+
+void drawHeartIcon(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_DRAW_POST_END) {
+    return;
+  }
+
+  lv_obj_t *heart = static_cast<lv_obj_t *>(lv_event_get_target(event));
+  lv_layer_t *layer = lv_event_get_layer(event);
+  lv_area_t coordinates{};
+  lv_obj_get_coords(heart, &coordinates);
+
+  lv_draw_rect_dsc_t circle{};
+  lv_draw_rect_dsc_init(&circle);
+  circle.bg_color = lv_obj_get_style_text_color(heart, LV_PART_MAIN);
+  circle.bg_opa = LV_OPA_COVER;
+  circle.radius = LV_RADIUS_CIRCLE;
+
+  lv_area_t leftCircle = {coordinates.x1, coordinates.y1,
+                          coordinates.x1 + 7, coordinates.y1 + 7};
+  lv_area_t rightCircle = {coordinates.x1 + 6, coordinates.y1,
+                           coordinates.x1 + 13, coordinates.y1 + 7};
+  lv_draw_rect(layer, &circle, &leftCircle);
+  lv_draw_rect(layer, &circle, &rightCircle);
+
+  lv_draw_triangle_dsc_t triangle{};
+  lv_draw_triangle_dsc_init(&triangle);
+  triangle.bg_color = circle.bg_color;
+  triangle.bg_opa = LV_OPA_COVER;
+  triangle.p[0] = {coordinates.x1, coordinates.y1 + 4};
+  triangle.p[1] = {coordinates.x1 + 13, coordinates.y1 + 4};
+  triangle.p[2] = {coordinates.x1 + 6, coordinates.y1 + 13};
+  lv_draw_triangle(layer, &triangle);
+}
+
+void createZoneMetric(lv_obj_t *page,
+                      const ride_telemetry_layout::Rect &rect) {
+  displayedZoneIndex = -2;
+  createMetricTitle(page, "HR zone", rect);
+
+  for (lv_obj_t *&segment : rideZoneSegments) {
+    segment = lv_obj_create(page);
+    lv_obj_remove_style_all(segment);
+    lv_obj_set_style_radius(segment, 10, 0);
+    lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(
+        segment, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE |
+                                            LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  rideZoneHeart = lv_obj_create(page);
+  lv_obj_remove_style_all(rideZoneHeart);
+  lv_obj_add_event_cb(rideZoneHeart, drawHeartIcon,
+                      LV_EVENT_DRAW_POST_END, nullptr);
+  lv_obj_clear_flag(
+      rideZoneHeart, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE |
+                                                LV_OBJ_FLAG_CLICKABLE));
+  lv_obj_add_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+
+  rideZoneLabel = lv_label_create(page);
+  lv_obj_set_style_text_font(rideZoneLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_align(rideZoneLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(rideZoneLabel, LV_LABEL_LONG_CLIP);
+  lv_obj_add_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
+  const int8_t zoneIndex = ride_telemetry_presenter::fiveZoneIndex(model);
+  if (zoneIndex == displayedZoneIndex) {
+    return;
+  }
+  displayedZoneIndex = zoneIndex;
+
+  if (zoneIndex < 0) {
+    for (lv_obj_t *segment : rideZoneSegments) {
+      lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_add_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  const std::size_t activeIndex = static_cast<std::size_t>(zoneIndex);
+  const ride_telemetry_layout::ZoneStripLayout layout =
+      ride_telemetry_layout::makeZoneStripLayout(rideLayout.metrics[1],
+                                                 rideLayout.screenWidth,
+                                                 activeIndex);
+  for (std::size_t index = 0; index < rideZoneSegments.size(); ++index) {
+    const ride_telemetry_layout::Rect &segmentRect = layout.segments[index];
+    lv_obj_set_pos(rideZoneSegments[index], segmentRect.x, segmentRect.y);
+    lv_obj_set_size(rideZoneSegments[index], segmentRect.width,
+                    segmentRect.height);
+    lv_obj_set_style_bg_color(rideZoneSegments[index],
+                              zoneColor(index, index == activeIndex), 0);
+    lv_obj_clear_flag(rideZoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+  }
+
+  const lv_color_t foreground = zoneForegroundColor(activeIndex);
+  lv_obj_set_pos(rideZoneHeart, layout.heart.x, layout.heart.y);
+  lv_obj_set_size(rideZoneHeart, layout.heart.width, layout.heart.height);
+  lv_obj_set_style_text_color(rideZoneHeart, foreground, 0);
+  lv_obj_clear_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_set_pos(rideZoneLabel, layout.label.x, layout.label.y);
+  lv_obj_set_size(rideZoneLabel, layout.label.width, layout.label.height);
+  lv_obj_set_style_text_color(rideZoneLabel, foreground, 0);
+  char label[8];
+  std::snprintf(label, sizeof(label), "ZONE %u",
+                static_cast<unsigned>(activeIndex + 1));
+  setLabelIfChanged(rideZoneLabel, label);
+  lv_obj_clear_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
 }
 
 ride_telemetry_presenter::ViewModel currentViewModel() {
@@ -240,8 +378,7 @@ void rideTelemetryScr(_lv_obj_t *screen) {
 
   rideHeartRateValue =
       createMetric(ridePage, "Heart bpm", rideLayout.metrics[0]).value;
-  rideZoneValue =
-      createMetric(ridePage, "HR zone", rideLayout.metrics[1]).value;
+  createZoneMetric(ridePage, rideLayout.metrics[1]);
   rideDistanceValue =
       createMetric(ridePage, "Distance", rideLayout.metrics[2]).value;
   rideElapsedValue =
@@ -264,8 +401,7 @@ void updateRideTelemetryEvent(lv_event_t *) {
   ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
                                           sizeof(value));
   setMetricValueIfChanged(rideHeartRateValue, value);
-  ride_telemetry_presenter::formatZone(model, value, sizeof(value));
-  setMetricValueIfChanged(rideZoneValue, value);
+  updateZoneMetric(model);
   ride_telemetry_presenter::formatDistance(model.distanceMeters, value,
                                            sizeof(value));
   setMetricValueIfChanged(rideDistanceValue, value);

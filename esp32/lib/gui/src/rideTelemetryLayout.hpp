@@ -23,6 +23,13 @@ constexpr int32_t metricValueLineHeight(int32_t screenWidth) {
   return useLargeMetricValueFont(screenWidth) ? 60 : 46;
 }
 
+constexpr std::size_t kHeartRateZoneCount = 5;
+constexpr int32_t kZoneStripGap = 4;
+
+constexpr int32_t zoneStripHeight(int32_t screenWidth) {
+  return useLargeMetricValueFont(screenWidth) ? 48 : 40;
+}
+
 struct Rect {
   int32_t x = 0;
   int32_t y = 0;
@@ -42,6 +49,61 @@ struct Layout {
   Rect heroUnit{};
   std::array<Rect, 6> metrics{};
 };
+
+struct ZoneStripLayout {
+  Rect bounds{};
+  std::array<Rect, kHeartRateZoneCount> segments{};
+  Rect heart{};
+  Rect label{};
+};
+
+constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
+                                               int32_t screenWidth,
+                                               std::size_t activeIndex) {
+  ZoneStripLayout layout{};
+  const int32_t height = zoneStripHeight(screenWidth);
+  layout.bounds = {
+      metric.x,
+      metric.y + kMetricValueOffsetY +
+          (metricValueLineHeight(screenWidth) - height) / 2,
+      metric.width,
+      height,
+  };
+
+  const int32_t availableWidth =
+      layout.bounds.width -
+      kZoneStripGap * static_cast<int32_t>(kHeartRateZoneCount - 1);
+  const int32_t inactiveWidth = availableWidth / 8;
+  const int32_t activeWidth =
+      availableWidth -
+      inactiveWidth * static_cast<int32_t>(kHeartRateZoneCount - 1);
+  int32_t x = layout.bounds.x;
+  for (std::size_t index = 0; index < kHeartRateZoneCount; ++index) {
+    const int32_t width = index == activeIndex ? activeWidth : inactiveWidth;
+    layout.segments[index] = {x, layout.bounds.y, width, height};
+    x += width + kZoneStripGap;
+  }
+
+  const Rect &active = layout.segments[activeIndex];
+  constexpr int32_t heartSize = 14;
+  constexpr int32_t contentPadding = 5;
+  constexpr int32_t heartLabelGap = 3;
+  constexpr int32_t labelLineHeight = 17;
+  layout.heart = {
+      active.x + contentPadding,
+      active.y + (active.height - heartSize) / 2,
+      heartSize,
+      heartSize,
+  };
+  layout.label = {
+      layout.heart.right() + heartLabelGap,
+      active.y + (active.height - labelLineHeight) / 2,
+      active.right() - contentPadding -
+          (layout.heart.right() + heartLabelGap),
+      labelLineHeight,
+  };
+  return layout;
+}
 
 constexpr Layout makeLayout(int32_t width, int32_t height) {
   constexpr int32_t columnGap = 12;

@@ -245,9 +245,13 @@ int main() {
   ride_telemetry_presenter::formatElapsed(pausedModel.elapsedSeconds,
                                           formatted, sizeof(formatted));
   assertText(formatted, "1:01:01");
-  ride_telemetry_presenter::formatZone(pausedModel, formatted,
-                                       sizeof(formatted));
-  assertText(formatted, "Z4/5");
+  assert(ride_telemetry_presenter::fiveZoneIndex(pausedModel) == 3);
+  auto unavailableZoneModel = pausedModel;
+  unavailableZoneModel.currentHeartRateZone.available = false;
+  assert(ride_telemetry_presenter::fiveZoneIndex(unavailableZoneModel) == -1);
+  auto nonFiveZoneModel = pausedModel;
+  nonFiveZoneModel.heartRateZoneCount.value = 6;
+  assert(ride_telemetry_presenter::fiveZoneIndex(nonFiveZoneModel) == -1);
 
   using ride_telemetry_presenter::BottomMetric;
   assertBottomMetrics(pausedModel, BottomMetric::Power,
