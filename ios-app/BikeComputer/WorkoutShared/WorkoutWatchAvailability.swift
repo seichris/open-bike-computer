@@ -28,3 +28,35 @@ nonisolated enum WorkoutWatchAvailabilityPolicyV1 {
         return .ready(isReachable: isReachable)
     }
 }
+
+nonisolated enum WorkoutStartAvailabilityDecisionV1: Equatable, Sendable {
+    case waitForActivation
+    case attemptHealthKitLaunch
+    case unsupported
+    case activationFailed
+    case noPairedWatch
+}
+
+/// Decides whether an iPhone start request should reach HealthKit.
+///
+/// WatchConnectivity installation state is advisory here. Its companion-app
+/// catalogue can lag the actual Watch installation, while HealthKit's Watch
+/// launch API provides the authoritative success or failure result.
+nonisolated enum WorkoutStartAvailabilityPolicyV1 {
+    static func resolve(
+        _ availability: WorkoutWatchAvailabilityV1
+    ) -> WorkoutStartAvailabilityDecisionV1 {
+        switch availability {
+        case .activating:
+            return .waitForActivation
+        case .ready, .companionAppNotInstalled:
+            return .attemptHealthKitLaunch
+        case .unsupported:
+            return .unsupported
+        case .activationFailed:
+            return .activationFailed
+        case .noPairedWatch:
+            return .noPairedWatch
+        }
+    }
+}
