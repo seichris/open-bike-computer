@@ -63,6 +63,61 @@ struct ValueWithHeartLayout {
   int32_t gap = 0;
 };
 
+enum class MetricValueFontTier : uint8_t {
+  RegularCompact,
+  RegularLarge,
+};
+
+struct HeartRatePresentation {
+  bool showHeart = false;
+  MetricValueFontTier fontTier = MetricValueFontTier::RegularCompact;
+};
+
+constexpr HeartRatePresentation makeHeartRatePresentation(
+    int32_t screenWidth, bool heartRateAvailable) {
+  return {
+      heartRateAvailable,
+      useLargeMetricValueFont(screenWidth)
+          ? MetricValueFontTier::RegularLarge
+          : MetricValueFontTier::RegularCompact,
+  };
+}
+
+enum class ZoneUpdateAction : uint8_t {
+  None,
+  Hide,
+  Show,
+};
+
+struct ZoneUpdate {
+  ZoneUpdateAction action = ZoneUpdateAction::None;
+  int8_t zoneIndex = -1;
+};
+
+constexpr ZoneUpdate makeZoneUpdate(int8_t displayedZoneIndex,
+                                    int8_t nextZoneIndex) {
+  if (displayedZoneIndex == nextZoneIndex) {
+    return {ZoneUpdateAction::None, nextZoneIndex};
+  }
+  return {
+      nextZoneIndex < 0 ? ZoneUpdateAction::Hide : ZoneUpdateAction::Show,
+      nextZoneIndex,
+  };
+}
+
+constexpr uint32_t zoneColorHex(std::size_t index, bool active) {
+  constexpr std::array<uint32_t, kHeartRateZoneCount> activeColors = {
+      0x145C99, 0x0D7A70, 0xADF208, 0xE0730F, 0xB80852};
+  // Active colors composited at 62% opacity over the black background.
+  constexpr std::array<uint32_t, kHeartRateZoneCount> inactiveColors = {
+      0x0C395F, 0x084C45, 0x6B9605, 0x8B4709, 0x720533};
+  return active ? activeColors[index] : inactiveColors[index];
+}
+
+constexpr uint32_t zoneForegroundColorHex(std::size_t index) {
+  return index == 2 || index == 3 ? 0x000000 : 0xFFFFFF;
+}
+
 constexpr int32_t heartRateHeartSize(int32_t screenWidth) {
   return useLargeMetricValueFont(screenWidth) ? 30 : 24;
 }

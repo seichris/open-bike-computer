@@ -73,12 +73,12 @@ const lv_font_t *firstFittingFont(
   return selected < N ? fonts[selected] : fonts[N - 1];
 }
 
-const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
-  const int32_t availableWidth = lv_obj_get_width(label) - 4;
+const lv_font_t *metricValueFontForWidth(const char *text,
+                                         int32_t availableWidth,
+                                         bool useLargeFont) {
   const uint32_t textLength = static_cast<uint32_t>(std::strlen(text));
 
-  if (ride_telemetry_layout::useLargeMetricValueFont(
-          rideLayout.screenWidth)) {
+  if (useLargeFont) {
     constexpr std::size_t fontCount = 7;
     const std::array<const lv_font_t *, fontCount> fonts = {
         &ride_value_font_64,     &ride_value_font_56,
@@ -99,12 +99,11 @@ const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
   return firstFittingFont(fonts, text, textLength, availableWidth);
 }
 
-const lv_font_t *preferredMetricValueFont() {
-  if (ride_telemetry_layout::useLargeMetricValueFont(
-          rideLayout.screenWidth)) {
-    return &ride_value_font_64;
-  }
-  return &lv_font_montserrat_42;
+const lv_font_t *metricValueFont(lv_obj_t *label, const char *text) {
+  return metricValueFontForWidth(
+      text, lv_obj_get_width(label) - 4,
+      ride_telemetry_layout::useLargeMetricValueFont(
+          rideLayout.screenWidth));
 }
 
 void setLabelIfChanged(lv_obj_t *label, const char *text) {
@@ -181,19 +180,12 @@ MetricLabels createMetric(lv_obj_t *page, const char *title,
 }
 
 lv_color_t zoneColor(std::size_t index, bool active) {
-  // Matches HeartRateZonePalette in the iPhone app. Inactive values are the
-  // same colors composited at 62% opacity over the black screen background.
-  constexpr std::array<uint32_t,
-                       ride_telemetry_layout::kHeartRateZoneCount>
-      activeColors = {0x145C99, 0x0D7A70, 0xADF208, 0xE0730F, 0xB80852};
-  constexpr std::array<uint32_t,
-                       ride_telemetry_layout::kHeartRateZoneCount>
-      inactiveColors = {0x0C395F, 0x084C45, 0x6B9605, 0x8B4709, 0x720533};
-  return lv_color_hex(active ? activeColors[index] : inactiveColors[index]);
+  return lv_color_hex(ride_telemetry_layout::zoneColorHex(index, active));
 }
 
 lv_color_t zoneForegroundColor(std::size_t index) {
-  return index == 2 || index == 3 ? lv_color_black() : lv_color_white();
+  return lv_color_hex(
+      ride_telemetry_layout::zoneForegroundColorHex(index));
 }
 
 void drawHeartIcon(lv_event_t *event) {
@@ -272,13 +264,16 @@ void createZoneMetric(lv_obj_t *page,
 }
 
 void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
-  const int8_t zoneIndex = ride_telemetry_presenter::fiveZoneIndex(model);
-  if (zoneIndex == displayedZoneIndex) {
+  const ride_telemetry_layout::ZoneUpdate update =
+      ride_telemetry_layout::makeZoneUpdate(
+          displayedZoneIndex,
+          ride_telemetry_presenter::fiveZoneIndex(model));
+  if (update.action == ride_telemetry_layout::ZoneUpdateAction::None) {
     return;
   }
-  displayedZoneIndex = zoneIndex;
+  displayedZoneIndex = update.zoneIndex;
 
-  if (zoneIndex < 0) {
+  if (update.action == ride_telemetry_layout::ZoneUpdateAction::Hide) {
     for (lv_obj_t *segment : rideZoneSegments) {
       lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
     }
@@ -287,7 +282,8 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
     return;
   }
 
-  const std::size_t activeIndex = static_cast<std::size_t>(zoneIndex);
+  const std::size_t activeIndex =
+      static_cast<std::size_t>(update.zoneIndex);
   const ride_telemetry_layout::ZoneStripLayout layout =
       ride_telemetry_layout::makeZoneStripLayout(rideLayout.metrics[1],
                                                  rideLayout.screenWidth,
@@ -312,8 +308,8 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
   lv_obj_set_size(rideZoneLabel, layout.label.width, layout.label.height);
   lv_obj_set_style_text_color(rideZoneLabel, foreground, 0);
   char label[8];
-  std::snprintf(label, sizeof(label), "ZONE %u",
-                static_cast<unsigned>(activeIndex + 1));
+  ride_telemetry_presenter::formatFiveZoneLabel(
+      static_cast<uint8_t>(activeIndex), label, sizeof(label));
   setLabelIfChanged(rideZoneLabel, label);
   lv_obj_clear_flag(rideZoneLabel, LV_OBJ_FLAG_HIDDEN);
 }
@@ -324,8 +320,11 @@ void updateHeartRateMetric(
   char value[24];
   ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
                                           sizeof(value));
+  const ride_telemetry_layout::HeartRatePresentation presentation =
+      ride_telemetry_layout::makeHeartRatePresentation(
+          rideLayout.screenWidth, model.currentHeartRateBpm.available);
 
-  if (!model.currentHeartRateBpm.available) {
+  if (!presentation.showHeart) {
     lv_obj_set_pos(rideHeartRateValue, metric.x,
                    metric.y + ride_telemetry_layout::kMetricValueOffsetY);
     lv_obj_set_width(rideHeartRateValue, metric.width);
@@ -340,10 +339,14 @@ void updateHeartRateMetric(
       ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) -
       ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
   lv_obj_set_width(rideHeartRateValue, maximumValueWidth);
-  // A heart rate is at most three digits here, so it fits beside the heart at
-  // the regular tile size. Do not re-run adaptive sizing against the tightly
-  // measured label width on each refresh or the font progressively shrinks.
-  const lv_font_t *font = preferredMetricValueFont();
+  // Select against the stable maximum width, not the tightly measured label
+  // width from the previous refresh. Ordinary heart rates therefore keep the
+  // normal metric size, while anomalous protocol-valid values still shrink
+  // enough to remain fully visible beside the heart.
+  const lv_font_t *font = metricValueFontForWidth(
+      value, maximumValueWidth - 4,
+      presentation.fontTier ==
+          ride_telemetry_layout::MetricValueFontTier::RegularLarge);
   if (lv_obj_get_style_text_font(rideHeartRateValue, LV_PART_MAIN) != font) {
     lv_obj_set_style_text_font(rideHeartRateValue, font, 0);
   }

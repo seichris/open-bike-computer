@@ -246,6 +246,12 @@ int main() {
                                           formatted, sizeof(formatted));
   assertText(formatted, "1:01:01");
   assert(ride_telemetry_presenter::fiveZoneIndex(pausedModel) == 3);
+  ride_telemetry_presenter::formatFiveZoneLabel(0, formatted,
+                                                 sizeof(formatted));
+  assertText(formatted, "ZONE 1");
+  ride_telemetry_presenter::formatFiveZoneLabel(4, formatted,
+                                                 sizeof(formatted));
+  assertText(formatted, "ZONE 5");
   auto unavailableZoneModel = pausedModel;
   unavailableZoneModel.currentHeartRateZone.available = false;
   assert(ride_telemetry_presenter::fiveZoneIndex(unavailableZoneModel) == -1);

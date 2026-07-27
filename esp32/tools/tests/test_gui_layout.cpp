@@ -69,6 +69,24 @@ int main() {
         metric, rideLayout.screenWidth, rideLayout.screenHeight));
   }
   constexpr int32_t representativeHeartRateTextWidth = 100;
+  const auto unavailableHeartRate =
+      ride_telemetry_layout::makeHeartRatePresentation(
+          rideLayout.screenWidth, false);
+  assert(!unavailableHeartRate.showHeart);
+#if defined(WAVESHARE_AMOLED_206)
+  assert(unavailableHeartRate.fontTier ==
+         ride_telemetry_layout::MetricValueFontTier::RegularCompact);
+#else
+  assert(unavailableHeartRate.fontTier ==
+         ride_telemetry_layout::MetricValueFontTier::RegularLarge);
+#endif
+  for (bool available : {true, true, true, false, true}) {
+    const auto presentation =
+        ride_telemetry_layout::makeHeartRatePresentation(
+            rideLayout.screenWidth, available);
+    assert(presentation.showHeart == available);
+    assert(presentation.fontTier == unavailableHeartRate.fontTier);
+  }
   const auto heartRate = ride_telemetry_layout::makeHeartRateValueLayout(
       rideLayout.metrics[0], rideLayout.screenWidth,
       representativeHeartRateTextWidth);
@@ -81,11 +99,47 @@ int main() {
   assert(heartRate.heart.width ==
          ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth));
   assert(heartRate.value.width == representativeHeartRateTextWidth);
+  const int32_t maximumHeartRateTextWidth =
+      rideLayout.metrics[0].width -
+      ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) -
+      ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth) - 4;
+  const std::array<ride_metric_font_selection::Candidate, 3>
+      maximumAcceptedHeartRateCandidates = {{
+          {maximumHeartRateTextWidth + 1, true},
+          {maximumHeartRateTextWidth, true},
+          {1, true},
+      }};
+  const std::size_t maximumAcceptedHeartRateFont =
+      ride_metric_font_selection::firstFittingIndex(
+          maximumAcceptedHeartRateCandidates, maximumHeartRateTextWidth);
+  assert(maximumAcceptedHeartRateFont == 1);
+  assert(maximumAcceptedHeartRateCandidates[maximumAcceptedHeartRateFont]
+             .width <= maximumHeartRateTextWidth);
+  using ride_telemetry_layout::ZoneUpdateAction;
+  int8_t displayedZone = -2;
+  auto zoneUpdate =
+      ride_telemetry_layout::makeZoneUpdate(displayedZone, -1);
+  assert(zoneUpdate.action == ZoneUpdateAction::Hide);
+  displayedZone = zoneUpdate.zoneIndex;
+  zoneUpdate = ride_telemetry_layout::makeZoneUpdate(displayedZone, 0);
+  assert(zoneUpdate.action == ZoneUpdateAction::Show);
+  displayedZone = zoneUpdate.zoneIndex;
+  zoneUpdate = ride_telemetry_layout::makeZoneUpdate(displayedZone, 0);
+  assert(zoneUpdate.action == ZoneUpdateAction::None);
+  zoneUpdate = ride_telemetry_layout::makeZoneUpdate(displayedZone, 4);
+  assert(zoneUpdate.action == ZoneUpdateAction::Show);
+  displayedZone = zoneUpdate.zoneIndex;
+  zoneUpdate = ride_telemetry_layout::makeZoneUpdate(displayedZone, -1);
+  assert(zoneUpdate.action == ZoneUpdateAction::Hide);
   for (std::size_t activeIndex = 0;
        activeIndex < ride_telemetry_layout::kHeartRateZoneCount;
        ++activeIndex) {
     const auto zoneStrip = ride_telemetry_layout::makeZoneStripLayout(
         rideLayout.metrics[1], rideLayout.screenWidth, activeIndex);
+    assert(ride_telemetry_layout::zoneColorHex(activeIndex, true) !=
+           ride_telemetry_layout::zoneColorHex(activeIndex, false));
+    assert(ride_telemetry_layout::zoneForegroundColorHex(activeIndex) ==
+           (activeIndex == 2 || activeIndex == 3 ? 0x000000U : 0xFFFFFFU));
     assert(zoneStrip.bounds.x == rideLayout.metrics[1].x);
     assert(zoneStrip.bounds.right() == rideLayout.metrics[1].right());
     assert(zoneStrip.bounds.y >= rideLayout.metrics[1].y +
