@@ -72,6 +72,10 @@ private struct WorkoutContractTestSuite {
         testComponentTimestampsStayWithinWorkoutWindow()
         testHeartRateZonePayloadIsCoherent()
         testHeartRateZoneProfileAndPersistence()
+        testHeartRateZoneDurationAccumulator()
+#if WORKOUT_CONTRACT_HOST
+        testWorkoutMetricsStoreUsesAuthoritativeCoalescedZoneTotals()
+#endif
         testAltitudeRequiresVerticalAccuracy()
         testUnknownErrorCodesBecomeSafeGenericCodes()
         testSequenceGateRejectsDuplicatesAndOlderSnapshots()
@@ -1113,6 +1117,334 @@ private struct WorkoutContractTestSuite {
             "missing Watch sync context leaves the current/default value unchanged"
         )
     }
+
+    private mutating func testHeartRateZoneDurationAccumulator() {
+        let firstSession = UUID(
+            uuidString: "72C8E2D9-3EC0-4C9A-A101-111111111111"
+        )!
+        let secondSession = UUID(
+            uuidString: "72C8E2D9-3EC0-4C9A-A101-222222222222"
+        )!
+        var accumulator = WorkoutHeartRateZoneDurationAccumulator()
+
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 10,
+                currentZone: 2
+            ) == 0,
+            "the first observed zone starts at zero without inventing history"
+        )
+        expect(
+            accumulator.authoritativeDurations(
+                capturedAt: Date(timeIntervalSinceReferenceDate: 800_000_410)
+            )?.secondsByZone == [0, 0, 0, 0, 0],
+            "the workout owner publishes an authoritative five-zone baseline"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 15,
+                currentZone: 2
+            ) == 5,
+            "workout elapsed time accumulates in the current zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 20,
+                currentZone: 3
+            ) == 0,
+            "moving zones attributes the preceding interval to the old zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 24,
+                currentZone: 3
+            ) == 4,
+            "the new zone begins accumulating on the next elapsed update"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 24,
+                currentZone: 3
+            ) == 4,
+            "a paused workout does not advance time in zone"
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 27,
+                currentZone: 2
+            ) == 10,
+            "returning to a zone shows its cumulative workout time"
+        )
+
+        let authoritative = WorkoutZoneDurationsV1(
+            capturedAt: Date(timeIntervalSinceReferenceDate: 800_000_425),
+            secondsByZone: [1, 12, 8, 4, 5]
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 30,
+                currentZone: 4,
+                authoritativeDurations: authoritative
+            ) == 4,
+            "authoritative Watch zone durations replace the local fallback"
+        )
+        expect(
+            accumulator.authoritativeDurations(
+                capturedAt: authoritative.capturedAt
+            ) == authoritative,
+            "authoritative zone totals survive transport coalescing"
+        )
+        let regressingAuthoritative = WorkoutZoneDurationsV1(
+            capturedAt: authoritative.capturedAt.addingTimeInterval(1),
+            secondsByZone: [0, 0, 0, 0, 0]
+        )
+        expect(
+            accumulator.update(
+                sessionID: firstSession,
+                elapsedTime: 30,
+                currentZone: 4,
+                authoritativeDurations: regressingAuthoritative
+            ) == 4,
+            "a recovered authoritative snapshot cannot move zone time backward"
+        )
+
+        var recoveredAccumulator = WorkoutHeartRateZoneDurationAccumulator()
+        var zoneEntryAccumulator = WorkoutHeartRateZoneDurationAccumulator()
+        _ = zoneEntryAccumulator.update(
+            sessionID: secondSession,
+            elapsedTime: 10,
+            currentZone: 2
+        )
+        let zoneEntryCheckpoint = zoneEntryAccumulator.checkpoint
+        _ = zoneEntryAccumulator.update(
+            sessionID: secondSession,
+            elapsedTime: 15,
+            currentZone: 2
+        )
+        recoveredAccumulator.restore(
+            sessionID: secondSession,
+            checkpoint: zoneEntryCheckpoint
+        )
+        expect(
+            recoveredAccumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 30,
+                currentZone: 2
+            ) == 20,
+            "Watch recovery reconstructs the uninterrupted current-zone interval from its entry checkpoint"
+        )
+        expect(
+            recoveredAccumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 0,
+                currentZone: 2
+            ) == 20,
+            "a temporarily regressed recovered clock does not change zone totals"
+        )
+        expect(
+            recoveredAccumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 1,
+                currentZone: 2
+            ) == 20,
+            "successive regressed clock values cannot double-count recovered time"
+        )
+        expect(
+            recoveredAccumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 31,
+                currentZone: 2
+            ) == 21,
+            "zone accumulation resumes only after the recovered clock passes its checkpoint"
+        )
+
+        var persistenceGate =
+            WorkoutHeartRateZoneCheckpointPersistenceGate()
+        let firstCheckpoint = zoneEntryCheckpoint
+        persistenceGate.observeTransition(from: nil, to: firstCheckpoint)
+        let firstAttemptAt = Date(
+            timeIntervalSinceReferenceDate: 800_000_430
+        )
+        expect(
+            persistenceGate.shouldAttempt(at: firstAttemptAt),
+            "the first observed zone checkpoints immediately"
+        )
+        persistenceGate.markSucceeded()
+        let changedZoneCheckpoint =
+            WorkoutHeartRateZoneDurationAccumulator.Checkpoint(
+                previousElapsedTime: 11,
+                previousZone: 3,
+                secondsByZone: [0, 1, 0, 0, 0]
+            )
+        persistenceGate.observeTransition(
+            from: firstCheckpoint,
+            to: changedZoneCheckpoint
+        )
+        expect(
+            !persistenceGate.shouldAttempt(
+                at: firstAttemptAt.addingTimeInterval(1)
+            ),
+            "rapid zone oscillation is coalesced instead of writing every second"
+        )
+        let returnedZoneCheckpoint =
+            WorkoutHeartRateZoneDurationAccumulator.Checkpoint(
+                previousElapsedTime: 12,
+                previousZone: 2,
+                secondsByZone: [0, 1, 1, 0, 0]
+            )
+        persistenceGate.observeTransition(
+            from: changedZoneCheckpoint,
+            to: returnedZoneCheckpoint
+        )
+        expect(
+            persistenceGate.shouldAttempt(
+                at: firstAttemptAt.addingTimeInterval(15)
+            ),
+            "a coalesced transition remains pending until the bounded retry"
+        )
+        expect(
+            persistenceGate.hasPendingTransition,
+            "a persistence attempt alone does not discard an unsaved transition"
+        )
+        persistenceGate.markSucceeded()
+        expect(
+            !persistenceGate.hasPendingTransition,
+            "only a successful durable write clears the pending transition"
+        )
+        expect(
+            accumulator.update(
+                sessionID: secondSession,
+                elapsedTime: 5,
+                currentZone: 1
+            ) == 0,
+            "a new workout session resets accumulated zone time"
+        )
+        expect(
+            accumulator.update(
+                sessionID: nil,
+                elapsedTime: nil,
+                currentZone: nil
+            ) == nil,
+            "clearing the session clears the displayed zone duration"
+        )
+    }
+
+#if WORKOUT_CONTRACT_HOST
+    private mutating func testWorkoutMetricsStoreUsesAuthoritativeCoalescedZoneTotals() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_000_500)
+        let sessionID = UUID(
+            uuidString: "72C8E2D9-3EC0-4C9A-A101-333333333333"
+        )!
+        var currentDate = start.addingTimeInterval(10)
+        let store = WorkoutMetricsStore(now: { currentDate })
+        store.attachMirroredSession(at: currentDate)
+
+        func zoneSnapshot(
+            elapsedTime: TimeInterval,
+            zone: UInt8,
+            secondsByZone: [TimeInterval],
+            capturedAt: Date
+        ) -> WorkoutSnapshotV1 {
+            WorkoutSnapshotV1(
+                state: .running,
+                startDate: start,
+                elapsedTime: WorkoutMetricV1(
+                    value: elapsedTime,
+                    unit: .seconds,
+                    capturedAt: capturedAt
+                ),
+                currentHeartRateZone: zone,
+                heartRateZoneCount: WorkoutHeartRateZoneProfile.zoneCount,
+                heartRateZoneDurations: WorkoutZoneDurationsV1(
+                    capturedAt: capturedAt,
+                    secondsByZone: secondsByZone
+                ),
+                availability: [.elapsedTime, .heartRateZone]
+            )
+        }
+
+        _ = store.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 1,
+                    capturedAt: currentDate,
+                    snapshot: zoneSnapshot(
+                        elapsedTime: 10,
+                        zone: 2,
+                        secondsByZone: [0, 0, 0, 0, 0],
+                        capturedAt: currentDate
+                    )
+                ),
+            ],
+            receivedAt: currentDate
+        )
+
+        let zoneThreeDate = start.addingTimeInterval(20)
+        let zoneFourDate = start.addingTimeInterval(30)
+        currentDate = zoneFourDate
+        _ = store.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 2,
+                    capturedAt: zoneThreeDate,
+                    snapshot: zoneSnapshot(
+                        elapsedTime: 20,
+                        zone: 3,
+                        secondsByZone: [0, 10, 0, 0, 0],
+                        capturedAt: zoneThreeDate
+                    )
+                ),
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 3,
+                    capturedAt: zoneFourDate,
+                    snapshot: zoneSnapshot(
+                        elapsedTime: 30,
+                        zone: 4,
+                        secondsByZone: [0, 10, 10, 0, 0],
+                        capturedAt: zoneFourDate
+                    )
+                ),
+            ],
+            receivedAt: currentDate
+        )
+        expect(
+            store.currentHeartRateZoneElapsedTime == 0,
+            "the store publishes the latest zone from a coalesced Watch batch"
+        )
+
+        currentDate = start.addingTimeInterval(50)
+        _ = store.ingestBatch(
+            [
+                makeEnvelope(
+                    sessionID: sessionID,
+                    sequence: 4,
+                    capturedAt: currentDate,
+                    snapshot: zoneSnapshot(
+                        elapsedTime: 50,
+                        zone: 2,
+                        secondsByZone: [0, 10, 10, 20, 0],
+                        capturedAt: currentDate
+                    )
+                ),
+            ],
+            receivedAt: currentDate
+        )
+        expect(
+            store.currentHeartRateZoneElapsedTime == 10,
+            "authoritative Watch totals prevent a coalesced gap from inflating the stale zone"
+        )
+    }
+#endif
 
     private mutating func testAltitudeRequiresVerticalAccuracy() {
         let now = Date(timeIntervalSinceReferenceDate: 800_000_450)
@@ -2917,6 +3249,14 @@ private struct WorkoutContractTestSuite {
             let identity = try firstStore.begin(startDate: start)
             expect(identity.sessionToken != 0, "persisted workout token must be nonzero")
             expect(firstStore.nextSequence() == 1, "first transport sequence should be one")
+            var zoneAccumulator = WorkoutHeartRateZoneDurationAccumulator()
+            _ = zoneAccumulator.update(
+                sessionID: identity.sessionID,
+                elapsedTime: 10,
+                currentZone: 2
+            )
+            let zoneCheckpoint = zoneAccumulator.checkpoint!
+            try firstStore.persistHeartRateZoneCheckpoint(zoneCheckpoint)
             let finishRequestedAt = start.addingTimeInterval(90)
             try firstStore.markFinishing(
                 disposition: .save,
@@ -2939,6 +3279,11 @@ private struct WorkoutContractTestSuite {
                         requestedAt: finishRequestedAt
                     ),
                 "relaunch must recover the requested save phase and exact stop date"
+            )
+            expect(
+                recoveredStore.recoveredIdentity?.heartRateZoneCheckpoint
+                    == zoneCheckpoint,
+                "relaunch must recover the exact heart-rate zone checkpoint"
             )
             try recoveredStore.markCollectionEnded()
             let collectionEndedStore = WatchWorkoutRecoveryStore(persistence: persistence)
@@ -3148,7 +3493,35 @@ private struct WorkoutContractTestSuite {
         }
         controlled.failsSave = false
         do {
-            _ = try controlledStore.begin(startDate: start)
+            let identity = try controlledStore.begin(startDate: start)
+            var zoneAccumulator = WorkoutHeartRateZoneDurationAccumulator()
+            _ = zoneAccumulator.update(
+                sessionID: identity.sessionID,
+                elapsedTime: 20,
+                currentZone: 3
+            )
+            let zoneCheckpoint = zoneAccumulator.checkpoint!
+            controlled.failsSave = true
+            do {
+                try controlledStore.persistHeartRateZoneCheckpoint(
+                    zoneCheckpoint
+                )
+                expect(false, "a failed zone checkpoint write must throw")
+            } catch {
+                expect(
+                    controlledStore.recoveredIdentity?
+                        .heartRateZoneCheckpoint == nil,
+                    "a failed zone checkpoint write must not publish unsaved state"
+                )
+            }
+            controlled.failsSave = false
+            try controlledStore.persistHeartRateZoneCheckpoint(zoneCheckpoint)
+            expect(
+                WatchWorkoutRecoveryStore(persistence: controlled)
+                    .recoveredIdentity?.heartRateZoneCheckpoint
+                    == zoneCheckpoint,
+                "a retried zone checkpoint write must survive store recreation"
+            )
             controlled.failsSave = true
             do {
                 try controlledStore.markFinishing(
@@ -5383,6 +5756,12 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent(
                 "BikeComputer/BikeComputer/Views/NavigationDetailsView.swift"
             )
+        let heartRateZoneStripURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputer/Views/HeartRateZoneStrip.swift"
+            )
         let summaryWatchViewURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -5406,6 +5785,10 @@ private struct WorkoutContractTestSuite {
                 contentsOf: navigationDetailsViewURL,
                 encoding: .utf8
               ),
+              let heartRateZoneStripSource = try? String(
+                contentsOf: heartRateZoneStripURL,
+                encoding: .utf8
+              ),
               let summaryWatchViewSource = try? String(
                 contentsOf: summaryWatchViewURL,
                 encoding: .utf8
@@ -5416,7 +5799,6 @@ private struct WorkoutContractTestSuite {
 
         for metricTitle in [
             "Heart Rate",
-            "Heart Zone",
             "Speed",
             "Distance",
             "Energy",
@@ -5468,9 +5850,10 @@ private struct WorkoutContractTestSuite {
             liveWatchViewSource.filter { !$0.isWhitespace }
         let compactNavigationDetailsViewSource =
             navigationDetailsViewSource.filter { !$0.isWhitespace }
+        let compactHeartRateZoneStripSource =
+            heartRateZoneStripSource.filter { !$0.isWhitespace }
         for metricBinding in [
-            "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"BPM\"",
-            "metric(\"HeartZone\",zoneValue(snapshot),\"\"",
+            "metric(\"HeartRate\",WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value),\"\",\"heart.fill\",.red,valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\")",
             "metric(\"Speed\",WorkoutValueFormatter.speed(snapshot.currentSpeed?.value),\"KM/H\"",
             "metric(\"Distance\",WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value),WorkoutValueFormatter.distanceUnit(snapshot.cyclingDistance?.value)",
             "metric(\"Energy\",WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),\"KCAL\"",
@@ -5484,6 +5867,30 @@ private struct WorkoutContractTestSuite {
                 "each workout metric title must remain bound to its matching snapshot value"
             )
         }
+        expect(
+            compactSource.contains(
+                "HeartRateZoneStrip(currentZone:snapshot.currentHeartRateZone)"
+            )
+                && compactHeartRateZoneStripSource.contains(
+                    "ForEach(1...zoneCount,id:\\.self)"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "Text(\"ZONE\\(zone)\")"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "Image(systemName:\"heart.fill\")"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    "ifletnormalizedCurrentZone{GeometryReader"
+                )
+                && compactHeartRateZoneStripSource.contains(
+                    ".frame(width:isCurrent?activeWidth:inactiveWidth)"
+                )
+                && !compactHeartRateZoneStripSource.contains(
+                    "letequalWidth="
+                ),
+            "dashboard heart zones must stay hidden until a valid zone exists, then expand the active heart-labeled position"
+        )
         expect(
             compactSource.contains(
                 "Button(action:onMarkSegment){HStack(spacing:6){WorkoutSegmentNumberBadge(number:currentSegmentNumber,diameter:22)Text(\"Segment\")}}"
@@ -5502,6 +5909,15 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactSource.contains(
                     "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
+                )
+                && compactSource.contains(
+                    ".background{finishPromptPresenter}"
+                )
+                && compactSource.contains(
+                    "privatevarfinishPromptPresenter:someView{Color.clear.tint(.accentColor).confirmationDialog("
+                )
+                && compactSource.contains(
+                    "Button(WorkoutDiscardDisclosureV1.cancelTitle,role:.cancel)"
                 )
                 && compactSource.contains(
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
@@ -5660,10 +6076,32 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent("BikeComputer/Views/RouteInputView.swift")
         let workoutURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let heartRateZoneStripURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/HeartRateZoneStrip.swift")
+        let liveActivityURL = iosAppDirectory
+            .appendingPathComponent(
+                "BikeComputerLiveActivity/WorkoutLiveActivityViews.swift"
+            )
+        let watchWorkoutManagerURL = iosAppDirectory
+            .appendingPathComponent(
+                "BikeComputerWatch/Managers/WatchWorkoutManager.swift"
+            )
         guard let content = try? String(contentsOf: contentURL, encoding: .utf8),
               let navigation = try? String(contentsOf: navigationURL, encoding: .utf8),
               let route = try? String(contentsOf: routeURL, encoding: .utf8),
-              let workout = try? String(contentsOf: workoutURL, encoding: .utf8) else {
+              let workout = try? String(contentsOf: workoutURL, encoding: .utf8),
+              let liveActivity = try? String(
+                contentsOf: liveActivityURL,
+                encoding: .utf8
+              ),
+              let watchWorkoutManager = try? String(
+                contentsOf: watchWorkoutManagerURL,
+                encoding: .utf8
+              ),
+              let heartRateZoneStrip = try? String(
+                contentsOf: heartRateZoneStripURL,
+                encoding: .utf8
+              ) else {
             expect(false, "main ride-control source files must be available")
             return
         }
@@ -5671,6 +6109,11 @@ private struct WorkoutContractTestSuite {
         let compactContent = content.filter { !$0.isWhitespace }
         let compactNavigation = navigation.filter { !$0.isWhitespace }
         let compactWorkout = workout.filter { !$0.isWhitespace }
+        let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
+        let compactWatchWorkoutManager =
+            watchWorkoutManager.filter { !$0.isWhitespace }
+        let compactHeartRateZoneStrip =
+            heartRateZoneStrip.filter { !$0.isWhitespace }
         expect(
             route.contains("Search destination")
                 && !route.contains("Search for a destination"),
@@ -5772,10 +6215,28 @@ private struct WorkoutContractTestSuite {
                     "metrics.first(where:{$0.id==\"speed\"})"
                 )
                 && compactNavigation.contains(
-                    "isExpanded:true,isHero:true"
+                    "isExpanded:true,isHero:true,showsLabel:false"
                 )
                 && compactNavigation.contains(
-                    "metrics:metrics.filter{$0.id!=\"speed\"},columnCount:2,isExpanded:true"
+                    "metrics:expandedWorkoutMetricValues(from:metrics),columnCount:2,isExpanded:true"
+                )
+                && compactNavigation.contains(
+                    "ifletheartRate=metrics.first(where:{$0.id==\"heartrate\"}){expandedMetrics.append(heartRate)}"
+                )
+                && compactNavigation.contains(
+                    "WorkoutValueFormatter.duration(displayedHeartRateZoneElapsedTime),showsHeartInLabel:true,label:\"timeinzone\""
+                )
+                && compactNavigation.contains(
+                    "ifshowsHeartInLabel{HStack(spacing:4){Text(\"timein\")Image(systemName:\"heart.fill\").accessibilityHidden(true)Text(\"zone\")}}"
+                )
+                && compactNavigation.contains(
+                    "ifshowsLabel{metricLabel"
+                )
+                && compactNavigation.contains(
+                    "label:\"workouttime\""
+                )
+                && !compactNavigation.contains(
+                    "label:\"elapsed\""
                 )
                 && compactNavigation.contains(
                     "expandedNavigationMetrics"
@@ -5795,7 +6256,7 @@ private struct WorkoutContractTestSuite {
                 && compactNavigation.contains(
                     ".padding(.bottom,4)"
                 ),
-            "expanded ride stats must feature a larger centered speed above a two-column grid, keep measurement units secondary, use taller controls, and avoid excess space below them"
+            "expanded ride stats must hide the speed caption and place heart rate plus time in zone first below the zone strip"
         )
         expect(
             compactContent.contains(
@@ -5814,7 +6275,6 @@ private struct WorkoutContractTestSuite {
             "WorkoutValueFormatter.distance(snapshot.cyclingDistance?.value)",
             "altitudeValue(suppressInstantaneous?nil:snapshot.location?.altitude)",
             "WorkoutValueFormatter.heartRate(suppressInstantaneous?nil:snapshot.currentHeartRate?.value)",
-            "suppressInstantaneous?\"--\":heartRateZone(snapshot)",
             "WorkoutValueFormatter.energy(snapshot.activeEnergy?.value)",
         ] {
             expect(
@@ -5830,7 +6290,6 @@ private struct WorkoutContractTestSuite {
             "label:\"distance\"",
             "label:\"altitude\"",
             "label:\"heartrate\"",
-            "label:\"heartzone\"",
             "label:\"energy\"",
         ] {
             guard let range = compactNavigation.range(
@@ -5846,8 +6305,52 @@ private struct WorkoutContractTestSuite {
             previousMetricIndex = range.upperBound
         }
         expect(
-            compactNavigation.contains("return\"Zone\\(zone)\""),
-            "the main ride panel must render the zone as Zone N"
+            compactNavigation.contains(
+                "HeartRateZoneStrip(currentZone:displayedHeartRateZone)"
+            )
+                && compactNavigation.contains(
+                    "privatevardisplayedHeartRateZone:UInt8?{suppressInstantaneousMetrics?nil:workoutStore.presentation.snapshot.currentHeartRateZone}"
+                )
+                && compactHeartRateZoneStrip.contains(
+                    "Text(\"ZONE\\(zone)\")"
+                )
+                && compactNavigation.contains(
+                    "valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\",label:\"heartrate\""
+                )
+                && compactWorkout.contains(
+                    "valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\""
+                )
+                && compactWorkout.contains(
+                    "Image(systemName:\"heart.fill\").foregroundStyle(.red).accessibilityHidden(true)"
+                )
+                && !compactWorkout.contains(
+                    "return\"\\(elapsed)••\\(heart)BPM"
+                )
+                && compactLiveActivity.contains(
+                    "valueSymbol:\"heart.fill\",accessibilityUnit:\"beatsperminute\",label:\"Heartrate\""
+                )
+                && !compactLiveActivity.contains(
+                    "unit:\"BPM\",label:\"Heartrate\""
+                )
+                && compactWorkout.contains(
+                    ".accessibilityLabel(\"Workouttime\")"
+                ),
+            "every iPhone current-heart-rate surface must use a red heart, and workout time must use the requested accessible label"
+        )
+        expect(
+            compactWatchWorkoutManager.contains(
+                "heartRateZoneDurationAccumulator.update(sessionID:identity?.sessionID,elapsedTime:elapsedTime?.value,currentZone:currentHeartRateZone)"
+            )
+                && compactWatchWorkoutManager.contains(
+                    "heartRateZoneDurations:heartRateZoneDurations"
+                )
+                && compactWatchWorkoutManager.contains(
+                    "heartRateZoneDurationAccumulator.restore(sessionID:recoveredIdentity.sessionID,checkpoint:recoveredIdentity.heartRateZoneCheckpoint)"
+                )
+                && compactWatchWorkoutManager.contains(
+                    "recoveryStore.persistHeartRateZoneCheckpoint(checkpoint)"
+                ),
+            "the Watch workout owner must publish authoritative zone totals before iPhone transport coalescing"
         )
         for control in [
             "\"Segment\"",

@@ -391,11 +391,16 @@ struct RideMetricsPanel: View {
     }
 
     private var workoutMetrics: some View {
-        workoutMetricGrid(
-            metrics: workoutMetricValues,
-            columnCount: 3,
-            isExpanded: false
-        )
+        VStack(spacing: 12) {
+            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
+                .padding(.horizontal, 8)
+
+            workoutMetricGrid(
+                metrics: workoutMetricValues,
+                columnCount: 3,
+                isExpanded: false
+            )
+        }
     }
 
     private var expandedWorkoutMetrics: some View {
@@ -405,19 +410,46 @@ struct RideMetricsPanel: View {
                 RideMetricColumn(
                     value: speed.value,
                     unit: speed.unit,
+                    valueSymbol: speed.valueSymbol,
+                    accessibilityUnit: speed.accessibilityUnit,
                     label: speed.label,
                     isExpanded: true,
-                    isHero: true
+                    isHero: true,
+                    showsLabel: false
                 )
                 .frame(maxWidth: .infinity)
             }
 
+            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
+
             workoutMetricGrid(
-                metrics: metrics.filter { $0.id != "speed" },
+                metrics: expandedWorkoutMetricValues(from: metrics),
                 columnCount: 2,
                 isExpanded: true
             )
         }
+    }
+
+    private func expandedWorkoutMetricValues(
+        from metrics: [RideMetric]
+    ) -> [RideMetric] {
+        var expandedMetrics = [RideMetric]()
+        if let heartRate = metrics.first(where: { $0.id == "heart rate" }) {
+            expandedMetrics.append(heartRate)
+        }
+        expandedMetrics.append(
+            RideMetric(
+                value: WorkoutValueFormatter.duration(
+                    displayedHeartRateZoneElapsedTime
+                ),
+                showsHeartInLabel: true,
+                label: "time in zone"
+            )
+        )
+        expandedMetrics.append(contentsOf: metrics.filter {
+            $0.id != "speed" && $0.id != "heart rate"
+        })
+        return expandedMetrics
     }
 
     private var workoutMetricValues: [RideMetric] {
@@ -429,7 +461,7 @@ struct RideMetricsPanel: View {
         var metrics = [
             RideMetric(
                 value: WorkoutValueFormatter.duration(snapshot.elapsedTime?.value),
-                label: "elapsed"
+                label: "workout time"
             ),
         ]
 
@@ -493,14 +525,9 @@ struct RideMetricsPanel: View {
                         ? nil
                         : snapshot.currentHeartRate?.value
                 ),
-                unit: "bpm",
+                valueSymbol: "heart.fill",
+                accessibilityUnit: "beats per minute",
                 label: "heart rate"
-            ),
-            RideMetric(
-                value: suppressInstantaneous
-                    ? "--"
-                    : heartRateZone(snapshot),
-                label: "heart zone"
             ),
             RideMetric(
                 value: WorkoutValueFormatter.energy(snapshot.activeEnergy?.value),
@@ -532,6 +559,9 @@ struct RideMetricsPanel: View {
                 RideMetricColumn(
                     value: metric.value,
                     unit: metric.unit,
+                    valueSymbol: metric.valueSymbol,
+                    accessibilityUnit: metric.accessibilityUnit,
+                    showsHeartInLabel: metric.showsHeartInLabel,
                     label: metric.label,
                     isExpanded: isExpanded
                 )
@@ -787,9 +817,16 @@ struct RideMetricsPanel: View {
         return "m"
     }
 
-    private func heartRateZone(_ snapshot: WorkoutSnapshotV1) -> String {
-        guard let zone = snapshot.currentHeartRateZone else { return "--" }
-        return "Zone \(zone)"
+    private var displayedHeartRateZone: UInt8? {
+        suppressInstantaneousMetrics
+            ? nil
+            : workoutStore.presentation.snapshot.currentHeartRateZone
+    }
+
+    private var displayedHeartRateZoneElapsedTime: TimeInterval? {
+        suppressInstantaneousMetrics
+            ? nil
+            : workoutStore.currentHeartRateZoneElapsedTime
     }
 
     private func altitudeValue(_ altitude: Double?) -> String {
@@ -834,11 +871,24 @@ private struct RideSegmentControlLabel: View {
 private struct RideMetric: Identifiable {
     let value: String
     let unit: String?
+    let valueSymbol: String?
+    let accessibilityUnit: String?
+    let showsHeartInLabel: Bool
     let label: String
 
-    init(value: String, unit: String? = nil, label: String) {
+    init(
+        value: String,
+        unit: String? = nil,
+        valueSymbol: String? = nil,
+        accessibilityUnit: String? = nil,
+        showsHeartInLabel: Bool = false,
+        label: String
+    ) {
         self.value = value
         self.unit = unit
+        self.valueSymbol = valueSymbol
+        self.accessibilityUnit = accessibilityUnit
+        self.showsHeartInLabel = showsHeartInLabel
         self.label = label
     }
 
@@ -848,9 +898,13 @@ private struct RideMetric: Identifiable {
 private struct RideMetricColumn: View {
     let value: String
     let unit: String?
+    let valueSymbol: String?
+    let accessibilityUnit: String?
+    var showsHeartInLabel = false
     let label: String
     let isExpanded: Bool
     var isHero = false
+    var showsLabel = true
 
     var body: some View {
         VStack(spacing: isExpanded ? 4 : 2) {
@@ -865,18 +919,44 @@ private struct RideMetricColumn: View {
                         .font(unitFont)
                         .foregroundColor(.secondary)
                 }
+
+                if let valueSymbol, value != "--" {
+                    Image(systemName: valueSymbol)
+                        .font(symbolFont)
+                        .foregroundStyle(.red)
+                        .accessibilityHidden(true)
+                }
             }
                 .lineLimit(1)
                 .minimumScaleFactor(0.55)
 
-            Text(label)
-                .font(labelFont)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            if showsLabel {
+                metricLabel
+                    .font(labelFont)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
         }
         .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(label), \(value) \(accessibilityUnit ?? unit ?? "")"
+        )
+    }
+
+    @ViewBuilder
+    private var metricLabel: some View {
+        if showsHeartInLabel {
+            HStack(spacing: 4) {
+                Text("time in")
+                Image(systemName: "heart.fill")
+                    .accessibilityHidden(true)
+                Text("zone")
+            }
+        } else {
+            Text(label)
+        }
     }
 
     private var valueFont: Font {
@@ -892,6 +972,13 @@ private struct RideMetricColumn: View {
             size: isHero ? 28 : isExpanded ? 24 : 16,
             weight: .semibold,
             design: .rounded
+        )
+    }
+
+    private var symbolFont: Font {
+        .system(
+            size: isHero ? 28 : isExpanded ? 24 : 18,
+            weight: .semibold
         )
     }
 

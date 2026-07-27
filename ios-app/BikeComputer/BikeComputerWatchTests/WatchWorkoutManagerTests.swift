@@ -751,7 +751,13 @@ final class WatchWorkoutManagerTests: XCTestCase {
             WorkoutHeartRateZoneProfile.zoneCount
         )
         XCTAssertTrue(manager.snapshot.availability.contains(.heartRateZone))
-        XCTAssertNil(manager.snapshot.heartRateZoneDurations)
+        XCTAssertEqual(
+            manager.snapshot.heartRateZoneDurations?.secondsByZone,
+            Array(
+                repeating: 0,
+                count: Int(WorkoutHeartRateZoneProfile.zoneCount)
+            )
+        )
 
         receiver.session(
             WCSession.default,

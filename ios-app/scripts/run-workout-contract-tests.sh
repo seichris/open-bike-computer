@@ -22,6 +22,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
   ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift \
   ios-app/BikeComputerTests/WorkoutContractTests.swift
 

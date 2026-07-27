@@ -472,6 +472,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var cyclingCadence: WorkoutMetricV1?
     private var terminalRouteDistance: WorkoutMetricCandidate?
     private var segmentAccumulator = WorkoutSegmentAccumulator()
+    private var heartRateZoneDurationAccumulator =
+        WorkoutHeartRateZoneDurationAccumulator()
+    private var heartRateZoneCheckpointPersistenceGate =
+        WorkoutHeartRateZoneCheckpointPersistenceGate()
 
     override convenience init() {
 #if DEBUG
@@ -4086,6 +4090,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         _ recoveredIdentity: WatchWorkoutRecoveryStore.Identity
     ) {
         identity = recoveredIdentity
+        heartRateZoneDurationAccumulator.restore(
+            sessionID: recoveredIdentity.sessionID,
+            checkpoint: recoveredIdentity.heartRateZoneCheckpoint
+        )
+        heartRateZoneCheckpointPersistenceGate.reset()
         remoteControlGate = WorkoutRemoteControlSequenceGate(
             checkpoint: recoveredIdentity.remoteControlCheckpoint
         )
@@ -4699,7 +4708,23 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let currentHeartRateZone = WorkoutHeartRateZoneProfile(
             maximumHeartRateBPM: maximumHeartRateBPM
         ).zone(for: currentHeartRate?.value)
-        if currentHeartRateZone != nil {
+        let previousHeartRateZoneCheckpoint =
+            heartRateZoneDurationAccumulator.checkpoint
+        _ = heartRateZoneDurationAccumulator.update(
+            sessionID: identity?.sessionID,
+            elapsedTime: elapsedTime?.value,
+            currentZone: currentHeartRateZone
+        )
+        heartRateZoneCheckpointPersistenceGate.observeTransition(
+            from: previousHeartRateZoneCheckpoint,
+            to: heartRateZoneDurationAccumulator.checkpoint
+        )
+        persistHeartRateZoneCheckpointIfNeeded(at: capturedAt)
+        let heartRateZoneDurations =
+            heartRateZoneDurationAccumulator.authoritativeDurations(
+                capturedAt: capturedAt
+            )
+        if currentHeartRateZone != nil || heartRateZoneDurations != nil {
             availability.insert(.heartRateZone)
         }
 
@@ -4725,16 +4750,35 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             cyclingPower: cyclingPower,
             cyclingCadence: cyclingCadence,
             currentHeartRateZone: currentHeartRateZone,
-            heartRateZoneCount: currentHeartRateZone == nil
+            heartRateZoneCount:
+                currentHeartRateZone == nil
+                    && heartRateZoneDurations == nil
                 ? nil
                 : WorkoutHeartRateZoneProfile.zoneCount,
-            heartRateZoneDurations: nil,
+            heartRateZoneDurations: heartRateZoneDurations,
             location: location,
             lastCompletedSegment: segmentAccumulator.lastCompletedSegment,
             availability: availability,
             errorCode: lastErrorCode,
             terminalOutcome: terminalOutcome
         )
+    }
+
+    private func persistHeartRateZoneCheckpointIfNeeded(at capturedAt: Date) {
+        guard let checkpoint = heartRateZoneDurationAccumulator.checkpoint,
+              heartRateZoneCheckpointPersistenceGate.shouldAttempt(
+                  at: capturedAt
+              ) else {
+            return
+        }
+        do {
+            try recoveryStore.persistHeartRateZoneCheckpoint(checkpoint)
+            identity = recoveryStore.recoveredIdentity ?? identity
+            heartRateZoneCheckpointPersistenceGate.markSucceeded()
+        } catch {
+            // Zone time remains live in memory. Retry the durable checkpoint
+            // after the bounded attempt interval.
+        }
     }
 
     private func makeLocation(
@@ -4888,6 +4932,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         cyclingPower = nil
         cyclingCadence = nil
         terminalRouteDistance = nil
+        heartRateZoneDurationAccumulator.reset()
+        heartRateZoneCheckpointPersistenceGate.reset()
         lastErrorCode = nil
     }
 

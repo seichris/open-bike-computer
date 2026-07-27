@@ -101,10 +101,12 @@ content is uploaded to a backend.
   are available.
 - **Discard Workout** requires a second confirmation and saves no workout or
   route.
-- The Watch persists only the minimum session identity and finalization state
-  needed to recover an interrupted active workout. A relaunched Watch app asks
-  HealthKit for the active session, reattaches its delegates and builder, and
-  reconciles an interrupted save or discard without creating a duplicate.
+- The Watch persists only the minimum recovery state needed for an interrupted
+  active workout: session identity, finalization state, and a derived five-zone
+  time checkpoint. A relaunched Watch app asks HealthKit for the active session,
+  reattaches its delegates and builder, restores cumulative time in zone, and
+  reconciles an interrupted save or discard without creating a duplicate. It
+  does not persist raw heart-rate samples.
 - Completed Health records can be reviewed or deleted in Apple's Health or
   Fitness apps.
 

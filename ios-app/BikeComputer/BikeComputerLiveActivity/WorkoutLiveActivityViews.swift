@@ -129,7 +129,8 @@ struct WorkoutLiveActivityMetricStrip: View {
                 value: WorkoutLiveActivityFormatting.heartRate(
                     state.currentHeartRateBPM
                 ),
-                unit: "BPM",
+                valueSymbol: "heart.fill",
+                accessibilityUnit: "beats per minute",
                 label: "Heart rate",
                 compact: compact
             )
@@ -140,7 +141,9 @@ struct WorkoutLiveActivityMetricStrip: View {
 
 private struct WorkoutLiveActivityMetric: View {
     let value: String
-    let unit: String
+    var unit: String? = nil
+    var valueSymbol: String? = nil
+    var accessibilityUnit: String? = nil
     let label: String
     let compact: Bool
 
@@ -154,9 +157,16 @@ private struct WorkoutLiveActivityMetric: View {
                             : .title3.bold().monospacedDigit()
                     )
                     .minimumScaleFactor(0.65)
-                Text(unit)
-                    .font(.system(size: compact ? 7 : 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: compact ? 7 : 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                } else if let valueSymbol, value != "—" {
+                    Image(systemName: valueSymbol)
+                        .font(.system(size: compact ? 9 : 13, weight: .semibold))
+                        .foregroundStyle(.red)
+                        .accessibilityHidden(true)
+                }
             }
             if !compact {
                 Text(label.uppercased())
@@ -167,7 +177,9 @@ private struct WorkoutLiveActivityMetric: View {
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label), \(value) \(unit)")
+        .accessibilityLabel(
+            "\(label), \(value) \(accessibilityUnit ?? unit ?? "")"
+        )
     }
 }
 
