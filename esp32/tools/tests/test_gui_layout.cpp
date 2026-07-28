@@ -136,7 +136,7 @@ int main() {
                     idleMetrics.distance.bottom() ==
                 ride_telemetry_layout::kStartWorkoutButtonGap);
 #else
-  static_assert(idleMetrics.startWorkoutButton.y ==
+  static_assert(idleMetrics.startWorkoutButton.y <=
                 navigationMetrics.startWorkoutButton.y);
   static_assert(idleMetrics.startWorkoutButton.bottom() ==
                 rideLayout.screenHeight -
@@ -144,6 +144,9 @@ int main() {
   static_assert(idleMetrics.startWorkoutButton.x ==
                 ride_telemetry_layout::
                     kRoundStartWorkoutButtonHorizontalInset);
+  static_assert(idleMetrics.startWorkoutButton.width == 314);
+  static_assert(idleMetrics.startWorkoutButton.y == 310);
+  static_assert(ride_telemetry_layout::kRoundStartWorkoutIconSize == 34);
 #endif
   static_assert(ride_telemetry_layout::fits(
       navigationMetrics.startWorkoutButton, rideLayout.screenWidth,

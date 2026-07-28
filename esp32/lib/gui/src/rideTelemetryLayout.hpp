@@ -14,8 +14,10 @@ constexpr int32_t kMetricRowGap = 8;
 constexpr int32_t kStartWorkoutButtonGap = 16;
 constexpr int32_t kStartWorkoutButtonHeight = 52;
 constexpr int32_t kStartWorkoutButtonHorizontalInset = 42;
-constexpr int32_t kRoundStartWorkoutButtonHorizontalInset = 58;
-constexpr int32_t kRoundStartWorkoutButtonBottomInset = 88;
+constexpr int32_t kRoundStartWorkoutButtonHorizontalInset = 76;
+constexpr int32_t kRoundStartWorkoutButtonBottomInset = 104;
+constexpr int32_t kStartWorkoutIconSize = 28;
+constexpr int32_t kRoundStartWorkoutIconSize = 34;
 
 constexpr bool usesRoundScreenSafeArea(int32_t screenWidth,
                                        int32_t screenHeight) {

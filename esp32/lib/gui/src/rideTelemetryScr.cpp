@@ -559,15 +559,28 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_bg_opa(rideStartWorkoutButton, LV_OPA_COVER, 0);
   lv_obj_set_style_shadow_width(rideStartWorkoutButton, 0, 0);
   lv_obj_set_style_pad_all(rideStartWorkoutButton, 0, 0);
-  lv_obj_set_style_pad_column(rideStartWorkoutButton, 9, 0);
+  const bool useRoundStartWorkoutContent =
+      ride_telemetry_layout::usesRoundScreenSafeArea(
+          rideLayout.screenWidth, rideLayout.screenHeight);
+  lv_obj_set_style_pad_column(rideStartWorkoutButton,
+                              useRoundStartWorkoutContent ? 12 : 9, 0);
   lv_obj_set_flex_flow(rideStartWorkoutButton, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(rideStartWorkoutButton, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_add_event_cb(rideStartWorkoutButton, startWorkoutEvent,
                       LV_EVENT_CLICKED, nullptr);
-  bike_icon::create(rideStartWorkoutButton, 28, 0x000000);
+  bike_icon::create(
+      rideStartWorkoutButton,
+      useRoundStartWorkoutContent
+          ? ride_telemetry_layout::kRoundStartWorkoutIconSize
+          : ride_telemetry_layout::kStartWorkoutIconSize,
+      0x000000);
   lv_obj_t *startWorkoutLabel = lv_label_create(rideStartWorkoutButton);
-  lv_obj_set_style_text_font(startWorkoutLabel, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_font(
+      startWorkoutLabel,
+      useRoundStartWorkoutContent ? &lv_font_montserrat_24
+                                  : &lv_font_montserrat_18,
+      0);
   lv_obj_set_style_text_color(startWorkoutLabel, lv_color_black(), 0);
   lv_label_set_text_static(startWorkoutLabel, "Start Workout");
 
