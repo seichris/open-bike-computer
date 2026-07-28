@@ -391,6 +391,33 @@ card, and factory firmware.
 | INT | GPIO 21 | Touch interrupt (optional for polling) |
 | RST | **TCA9554 P0** | **DO NOT USE GPIO 20** - see quirks below |
 
+#### CST9217 multi-contact contract
+
+The 15-byte CST9217 point frame can report two contacts. Firmware treats
+contact status `0x06` as active and `0x00` as released, acknowledges every
+successfully read frame through register `0xD000`, and preserves contact IDs so
+record reordering does not reverse pinch scale.
+
+Two-contact ownership is intentionally limited to the standalone **Map** screen
+on the 1.75-inch target. There it drives pinch zoom and suppresses LVGL's
+single-pointer click path until every contact is released. Map + Navigation,
+the destination picker, Navigation, Ride Stats, Battery, and other screens keep
+their ordinary primary pointer; a second CST9217 contact must not synthesize a
+release or click on those screens. The 2.06-inch FT3168 path remains
+single-contact only.
+
+GPIO21 is edge-latched with a monotonic interrupt generation counter so a short
+touch indication cannot disappear while synchronous map cells are rendering.
+The ISR only increments that counter. All CST9217 I2C reads and frame
+acknowledgements remain in normal task context; never move I2C work into the
+interrupt handler or return to rapid ungated polling.
+
+As of 2026-07-28, two-contact parsing and standalone-Map pinch behavior have
+been exercised on the 1.75-inch hardware. The complete ten-minute stability and
+frame-time matrix, plus a post-change 2.06-inch single-contact smoke test, remain
+required before treating the implementation plan's physical performance gates
+as closed.
+
 ### Display (CO5300 QSPI AMOLED)
 
 | Signal | GPIO |

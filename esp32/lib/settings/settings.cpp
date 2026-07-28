@@ -172,7 +172,7 @@ void loadPreferences() {
   defBright = cfg.getUInt(PKEYS::KDEF_BRIGT, 254);
   if (mapSet.vectorMap) {
     minZoom = 1;
-    maxZoom = 4;
+    maxZoom = 5;
     defaultZoom = cfg.getUInt(PKEYS::KDEF_ZOOM, defZoomVector);
   } else {
     minZoom = 6;

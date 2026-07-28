@@ -8,6 +8,7 @@
 #ifdef USE_ARDUINO_GFX
 // Use Arduino_GFX for CO5300 AMOLED (like working esp32 project)
 #include "display.hpp"
+#include "../waveshare_board/cst9217_touch_frame.hpp"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 
@@ -29,6 +30,11 @@ extern volatile uint32_t maxDisplayFlushDurationUs;
 // Touch handling (CST9217)
 extern bool touchPressed;
 extern uint16_t touchX, touchY;
+waveshare_board::touch::TouchFrame getTouchFrameSnapshot();
+bool isPrimaryTouchSuppressed();
+using MultiTouchSuppressionPolicy = bool (*)();
+void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy);
+bool hasUnattemptedTouchInterrupt();
 
 // Function declarations
 void setupDisplay();

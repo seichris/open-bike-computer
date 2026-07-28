@@ -8,6 +8,7 @@
 
 #include "route_overlay.hpp"
 #include "../ble_navigation/ble_navigation.hpp"
+#include "../maps/src/mapTransform.hpp"
 #include "../utils/src/line_rasterizer.hpp"
 #include "../../utils/src/gpsMath.hpp"
 #include <Arduino.h>
@@ -32,6 +33,7 @@ static constexpr double METERS_PER_MICRODEGREE_LON =
 
 void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
   points.clear();
+  revisionCounter++;
 
   if (len < 8) {
     Serial.println(
@@ -65,6 +67,7 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
 
 void RouteOverlay::clear() {
   points.clear();
+  revisionCounter++;
   Serial.println("Route overlay cleared");
 }
 
@@ -123,9 +126,9 @@ bool RouteOverlay::headingNear(double lat, double lon,
 #define DEG2RAD(a) ((a) / (180.0 / M_PI))
 #endif
 
-int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
-                                   uint8_t zoom, int16_t screenWidth,
-                                   int16_t anchorX) {
+double RouteOverlay::geoToScreenX(int32_t lonMicro, double centerMercatorX,
+                                  uint8_t zoom, int16_t screenWidth,
+                                  int16_t anchorX) {
   (void)screenWidth;
 
   // Convert microdegrees to degrees
@@ -134,30 +137,14 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
   // Use the exact same projection as maps.cpp: lon2x(lon) = DEG2RAD(lon) *
   // EARTH_RADIUS
   double worldX = DEG2RAD(lon) * EARTH_RADIUS;
-  double centerWorldX = (double)centerMercatorX;
-
-  // Transform to screen space using the same logic as Maps::toScreenCoord
-  // Transform to screen space using the same logic as Maps::toScreenCoord
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  int16_t screenX;
-  if (zoom == 0) {
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) * 2.0) + anchorX);
-  } else if (zoom == 1) {
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) * 1.5) + anchorX);
-  } else {
-    int divisor = zoom - 1;
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) / divisor) + anchorX);
-  }
-
-  return screenX;
+  return ((worldX - centerMercatorX) *
+          map_transform::worldToScreenScale(zoom)) +
+         anchorX;
 }
 
-int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
-                                   uint8_t zoom, int16_t screenHeight,
-                                   int16_t screenWidth, int16_t anchorY) {
+double RouteOverlay::geoToScreenY(int32_t latMicro, double centerMercatorY,
+                                  uint8_t zoom, int16_t screenHeight,
+                                  int16_t screenWidth, int16_t anchorY) {
   (void)screenHeight;
   (void)screenWidth;
 
@@ -167,23 +154,9 @@ int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
   // Use the exact same projection as maps.cpp: lat2y(lat) =
   // log(tan(DEG2RAD(lat) / 2 + M_PI / 4)) * EARTH_RADIUS
   double worldY = log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
-  double centerWorldY = (double)centerMercatorY;
-
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  int16_t screenY;
-  if (zoom == 0) {
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 2.0) + anchorY);
-  } else if (zoom == 1) {
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 1.5) + anchorY);
-  } else {
-    int divisor = zoom - 1;
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) / divisor) + anchorY);
-  }
-
-  return screenY;
+  return (-(worldY - centerMercatorY) *
+          map_transform::worldToScreenScale(zoom)) +
+         anchorY;
 }
 
 void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
@@ -196,11 +169,12 @@ void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
                                   color, lineWidth);
 }
 
-void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
-                             int32_t centerMercatorY, uint8_t zoom,
+void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
+                             double centerMercatorY, uint8_t zoom,
                              uint16_t mapScrWidth, uint16_t mapScrHeight,
                              double rotationRad, int16_t anchorX,
-                             int16_t anchorY) {
+                             int16_t anchorY, int32_t rasterCellOffsetX,
+                             int32_t rasterCellOffsetY) {
   (void)mapScrWidth;
   (void)mapScrHeight;
 
@@ -242,35 +216,44 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
   // Draw route segments
   for (size_t i = 0; i < points.size() - 1; i++) {
     // Convert geographic coordinates to screen pixels
-    int16_t x1 =
+    double x1 =
         geoToScreenX(points[i].lon, centerMercatorX, zoom, bufW, anchorX);
-    int16_t y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW,
-                              anchorY);
-    int16_t x2 =
+    double y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW,
+                             anchorY);
+    double x2 =
         geoToScreenX(points[i + 1].lon, centerMercatorX, zoom, bufW, anchorX);
-    int16_t y2 = geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH,
-                              bufW, anchorY);
+    double y2 = geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH,
+                             bufW, anchorY);
 
     // Apply rotation transform if rotationRad is non-zero
     if (rotationRad != 0.0) {
       // Transform point 1
       double dx1 = x1 - anchorX;
       double dy1 = y1 - anchorY;
-      x1 = (int16_t)(dx1 * cosA - dy1 * sinA + anchorX);
-      y1 = (int16_t)(dx1 * sinA + dy1 * cosA + anchorY);
+      x1 = dx1 * cosA - dy1 * sinA + anchorX;
+      y1 = dx1 * sinA + dy1 * cosA + anchorY;
 
       // Transform point 2
       double dx2 = x2 - anchorX;
       double dy2 = y2 - anchorY;
-      x2 = (int16_t)(dx2 * cosA - dy2 * sinA + anchorX);
-      y2 = (int16_t)(dx2 * sinA + dy2 * cosA + anchorY);
+      x2 = dx2 * cosA - dy2 * sinA + anchorX;
+      y2 = dx2 * sinA + dy2 * cosA + anchorY;
     }
+
+    // Rolling cells share one raster origin. Translate the already-rotated
+    // common-raster coordinate by the exact integer cell offset so route
+    // segments keep the same pixel phase as vector features at every seam.
+    x1 -= rasterCellOffsetX;
+    y1 -= rasterCellOffsetY;
+    x2 -= rasterCellOffsetX;
+    y2 -= rasterCellOffsetY;
 
     // LOGGING: Debug Center Offset for the first segment
     if (i == 0) {
       ESP_LOGI(
           "RouteOverlay",
-          "DEBUG_OFFSET: Center(%d,%d) StartPixel(%d,%d) Diff(%d,%d) Rot(%.2f)",
+          "DEBUG_OFFSET: Center(%d,%d) StartPixel(%.1f,%.1f) "
+          "Diff(%.1f,%.1f) Rot(%.2f)",
           anchorX, anchorY, x1, y1, x1 - anchorX, y1 - anchorY, rotationRad);
     }
 
@@ -288,7 +271,11 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
         std::max<int16_t>(
             1, (int16_t)currentMapStyleSettings().routeLineWidth),
         48);
-    drawThickLine(buf, bufW, bufH, stride, x1, y1, x2, y2,
+    drawThickLine(buf, bufW, bufH, stride,
+                  static_cast<int16_t>(map_transform::quantizePixel(x1)),
+                  static_cast<int16_t>(map_transform::quantizePixel(y1)),
+                  static_cast<int16_t>(map_transform::quantizePixel(x2)),
+                  static_cast<int16_t>(map_transform::quantizePixel(y2)),
                   navigation_visual_style::ROUTE_BLUE_RGB565,
                   routeLineWidth);
     drawnCount++;

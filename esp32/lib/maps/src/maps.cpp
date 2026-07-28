@@ -10,6 +10,7 @@
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
 #include "mapLineStyle.hpp"
+#include "mapTransform.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
@@ -19,7 +20,8 @@ extern Storage storage;
 extern std::vector<wayPoint> trackData;
 const char *TAG PROGMEM = "Maps";
 
-#ifdef WAVESHARE_MAPIO_TIMING_LOG
+#if defined(WAVESHARE_MAPIO_TIMING_LOG) ||                                  \
+    defined(WAVESHARE_TOUCH_DIAGNOSTICS)
 #define MAPIO_LOG(...) Serial.printf(__VA_ARGS__)
 #define MAPIO_TIME_MS() millis()
 #else
@@ -31,6 +33,7 @@ const char *TAG PROGMEM = "Maps";
 
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
+#include <algorithm>
 #include <esp_heap_caps.h>
 #include <cstdlib>
 #include <cstring>
@@ -283,37 +286,40 @@ static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
 
 static void *bufMapScreen = nullptr;
 static void *bufMapTemp = nullptr;
-static size_t bufMapCanvasSize = 0;
+static size_t bufMapScreenSize = 0;
+static size_t bufMapTempSize = 0;
 static void *bufMapIcon = nullptr;
 
-static bool ensureMapCanvasBuffers(size_t requiredSize) {
-  if (bufMapScreen != nullptr && bufMapTemp != nullptr &&
-      bufMapCanvasSize >= requiredSize) {
+static bool ensureMapBuffer(void *&buffer, size_t &capacity,
+                            size_t requiredSize, const char *name) {
+  if (buffer != nullptr && capacity >= requiredSize)
     return true;
-  }
 
-  void *newScreen = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
-  void *newTemp = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
-  if (newScreen == nullptr || newTemp == nullptr) {
-    if (newScreen != nullptr)
-      heap_caps_free(newScreen);
-    if (newTemp != nullptr)
-      heap_caps_free(newTemp);
-    ESP_LOGE(TAG, "MapBuff: double-buffer allocation failed size=%u",
+  const size_t previousCapacity = capacity;
+  void *replacement = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
+  if (replacement == nullptr) {
+    ESP_LOGE(TAG, "MapBuff: %s allocation failed size=%u", name,
              (unsigned)requiredSize);
     return false;
   }
-
-  if (bufMapScreen != nullptr)
-    heap_caps_free(bufMapScreen);
-  if (bufMapTemp != nullptr)
-    heap_caps_free(bufMapTemp);
-  bufMapScreen = newScreen;
-  bufMapTemp = newTemp;
-  bufMapCanvasSize = requiredSize;
+  if (buffer != nullptr)
+    heap_caps_free(buffer);
+  buffer = replacement;
+  capacity = requiredSize;
+  ESP_LOGI(TAG, "MapBuff: %s capacity %u -> %u freePsram=%u", name,
+           (unsigned)previousCapacity, (unsigned)capacity,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   return true;
 }
 
+static bool ensureMapScreenBuffer(size_t requiredSize) {
+  return ensureMapBuffer(bufMapScreen, bufMapScreenSize, requiredSize,
+                         "screen");
+}
+
+static bool ensureMapTempBuffer(size_t requiredSize) {
+  return ensureMapBuffer(bufMapTemp, bufMapTempSize, requiredSize, "scratch");
+}
 static uint8_t lineClipOutCode(float x, float y, float minX, float minY,
                                float maxX, float maxY) {
   uint8_t code = 0;
@@ -538,6 +544,74 @@ static int16_t mapAnchorYForHeight(uint16_t height) {
   return gui_layout::mapAnchorY(height);
 }
 
+static map_drag_preview::CanvasExtent canvasExtent(
+    lv_obj_t *canvas, uint16_t fallbackWidth, uint16_t fallbackHeight) {
+  const lv_draw_buf_t *drawBuffer =
+      canvas != nullptr ? lv_canvas_get_draw_buf(canvas) : nullptr;
+  if (drawBuffer == nullptr)
+    return {fallbackWidth, fallbackHeight};
+  return {static_cast<uint16_t>(drawBuffer->header.w),
+          static_cast<uint16_t>(drawBuffer->header.h)};
+}
+
+static void setPinchCanvasScale(void *object, int32_t scale) {
+  lv_image_set_scale(static_cast<lv_obj_t *>(object),
+                     static_cast<uint32_t>(scale));
+}
+
+static void completePinchCanvasSettlement(lv_anim_t *animation) {
+  auto *canvas = static_cast<lv_obj_t *>(animation->var);
+  if (canvas != nullptr) {
+    lv_image_set_scale(canvas, LV_SCALE_NONE);
+    lv_image_set_pivot(canvas, 0, 0);
+    lv_obj_invalidate(canvas);
+  }
+}
+
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+static void recordPinchPreviewFrame(bool reset = false) {
+  static uint32_t intervals[64] = {};
+  static uint8_t intervalCount = 0;
+  static uint32_t lastFrameMs = 0;
+  static uint32_t lastReportMs = 0;
+  const uint32_t now = millis();
+  if (reset) {
+    intervalCount = 0;
+    lastFrameMs = 0;
+    lastReportMs = now;
+    return;
+  }
+  if (lastFrameMs != 0) {
+    intervals[intervalCount++] = now - lastFrameMs;
+  }
+  lastFrameMs = now;
+  if (intervalCount < 64 && now - lastReportMs < 1000) {
+    return;
+  }
+  if (intervalCount == 0) {
+    return;
+  }
+  uint32_t sorted[64] = {};
+  memcpy(sorted, intervals, intervalCount * sizeof(uint32_t));
+  std::sort(sorted, sorted + intervalCount);
+  const uint8_t medianIndex = intervalCount / 2;
+  const uint8_t p95Index = static_cast<uint8_t>(
+      std::min<uint16_t>(intervalCount - 1,
+                         (static_cast<uint16_t>(intervalCount) * 95 + 99) /
+                                 100 -
+                             1));
+  Serial.printf(
+      "Pinch diagnostic: frames=%u median_ms=%lu p95_ms=%lu "
+      "free_psram=%u largest_psram=%u\n",
+      intervalCount, static_cast<unsigned long>(sorted[medianIndex]),
+      static_cast<unsigned long>(sorted[p95Index]),
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  intervalCount = 0;
+  lastReportMs = now;
+}
+#endif
+
 extern Point16::Point16(char *coordsPair) {
   char *next;
   x = (int16_t)round(strtod(
@@ -735,7 +809,9 @@ double Maps::mercatorY2lat(double y) {
  * @return int16_t
  */
 int16_t Maps::toScreenCoord(const int32_t pxy, const int32_t screenCenterxy) {
-  int16_t result = round((double)(pxy - screenCenterxy) / zoom) +
+  int16_t result =
+      round((double)(pxy - screenCenterxy) *
+            map_transform::worldToScreenScale(zoom)) +
                    (double)Maps::mapScrWidth / 2;
   return result;
 }
@@ -1703,10 +1779,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
   const uint32_t fillMs = MAPIO_TIME_MS() - fillStartMs;
 
-  // Calculate rotation from passed argument
-  double cosA = cos(rotation);
-  double sinA = sin(rotation);
-
   // Use the actual canvas dimensions, not mapScrHeight which may differ from
   // canvas height in fullscreen mode.
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -1745,11 +1817,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           map_profile_protocol::visibilityMaskForMapVersion(
               style.visibilityMask, mblock->formatVersion);
 
-      // block to draw
-      Point16 screen_center_mc =
-          viewPort.center.toPoint16() -
-          mblock->offset.toPoint16(); // screen center with features coordinates
-
       ESP_LOGI(TAG, "Drawing cached map block");
 
       BBox screen_bbox_mc =
@@ -1777,28 +1844,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
       // Define transform lambda once, outside the loop
       auto transformPoint = [&](Point16 p) -> Point16 {
-        // 1. Convert from map coords to screen-space offset (Y inverted)
-        // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-        double dx, dy;
-        if (zoom == 0) {
-          dx = (double)(p.x - screen_center_mc.x) * 2.0;
-          dy = -(double)(p.y - screen_center_mc.y) * 2.0;
-        } else if (zoom == 1) {
-          dx = (double)(p.x - screen_center_mc.x) * 1.5;
-          dy = -(double)(p.y - screen_center_mc.y) * 1.5;
-        } else {
-          int divisor = zoom - 1;
-          dx = (double)(p.x - screen_center_mc.x) / divisor;
-          dy = -(double)(p.y - screen_center_mc.y) / divisor;
-        }
-
-        // 2. Rotate in screen space (same as route overlay)
-        double rx = dx * cosA - dy * sinA;
-        double ry = dx * sinA + dy * cosA;
-
-        // 3. Translate to screen center
-        int16_t sx = round(rx) + screenAnchorX;
-        int16_t sy = round(ry) + screenAnchorY;
+        const auto screen = map_transform::rasterCellPixel(
+            {static_cast<double>(p.x) + mblock->offset.x,
+             static_cast<double>(p.y) + mblock->offset.y},
+            {viewPort.rasterOriginX, viewPort.rasterOriginY},
+            {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
+            rotation);
+        int16_t sx = screen.x + screenAnchorX;
+        int16_t sy = screen.y + screenAnchorY;
 
         return Point16(sx, sy);
       };
@@ -1906,24 +1959,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {
-          // Convert to screen-space offset (Y inverted), rotate, translate
-          // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-          double dx, dy;
-          if (zoom == 0) {
-            dx = (double)(p.x - screen_center_mc.x) * 2.0;
-            dy = -(double)(p.y - screen_center_mc.y) * 2.0;
-          } else if (zoom == 1) {
-            dx = (double)(p.x - screen_center_mc.x) * 1.5;
-            dy = -(double)(p.y - screen_center_mc.y) * 1.5;
-          } else {
-            int divisor = zoom - 1;
-            dx = (double)(p.x - screen_center_mc.x) / divisor;
-            dy = -(double)(p.y - screen_center_mc.y) / divisor;
-          }
-          double rx = dx * cosA - dy * sinA;
-          double ry = dx * sinA + dy * cosA;
-          int16_t sx = round(rx) + screenAnchorX;
-          int16_t sy = round(ry) + screenAnchorY;
+          const auto screen = map_transform::rasterCellPixel(
+              {static_cast<double>(p.x) + mblock->offset.x,
+               static_cast<double>(p.y) + mblock->offset.y},
+              {viewPort.rasterOriginX, viewPort.rasterOriginY},
+              {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
+              rotation);
+          int16_t sx = screen.x + screenAnchorX;
+          int16_t sy = screen.y + screenAnchorY;
           return Point16(sx, sy);
         };
 
@@ -2276,14 +2319,42 @@ Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
  */
 void Maps::ViewPort::setCenter(Point32 pcenter) {
   center = pcenter; // CRITICAL: Must assign center!
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  double zoomScale = (zoom == 0)   ? 0.5
-                     : (zoom == 1) ? 0.667
-                                   : (double)(zoom - 1);
+  rasterOriginX = pcenter.x;
+  rasterOriginY = pcenter.y;
+  rasterCellOffsetX = 0;
+  rasterCellOffsetY = 0;
+  const double zoomScale = map_transform::screenToWorldScale(zoom);
   bbox.min.x = pcenter.x - Maps::tileWidth * zoomScale / 2;
   bbox.min.y = pcenter.y - Maps::tileHeight * zoomScale / 2;
   bbox.max.x = pcenter.x + Maps::tileWidth * zoomScale / 2;
   bbox.max.y = pcenter.y + Maps::tileHeight * zoomScale / 2;
+}
+
+void Maps::ViewPort::setCenterForCanvas(Point32 pcenter,
+                                        uint16_t canvasWidth,
+                                        uint16_t canvasHeight,
+                                        double rotation) {
+  setCenterForCanvas(static_cast<double>(pcenter.x),
+                     static_cast<double>(pcenter.y), canvasWidth,
+                     canvasHeight, rotation);
+}
+
+void Maps::ViewPort::setCenterForCanvas(double centerX, double centerY,
+                                        uint16_t canvasWidth,
+                                        uint16_t canvasHeight,
+                                        double rotation) {
+  rasterOriginX = centerX;
+  rasterOriginY = centerY;
+  rasterCellOffsetX = 0;
+  rasterCellOffsetY = 0;
+  center = Point32(static_cast<int32_t>(std::round(centerX)),
+                   static_cast<int32_t>(std::round(centerY)));
+  const auto bounds = map_transform::canvasWorldBounds(
+      {centerX, centerY}, canvasWidth, canvasHeight, zoom, rotation);
+  bbox.min = Point32(static_cast<int32_t>(std::floor(bounds.min.x)),
+                     static_cast<int32_t>(std::floor(bounds.min.y)));
+  bbox.max = Point32(static_cast<int32_t>(std::ceil(bounds.max.x)),
+                     static_cast<int32_t>(std::ceil(bounds.max.y)));
 }
 
 // Public section
@@ -2329,6 +2400,7 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
     delete block;
   memCache.blocks.clear();
   vectorMapFolder = normalized;
+  invalidateRollingRasterWindow();
   isMapFound = false;
   isPosMoved = true;
   redrawMap = true;
@@ -2368,6 +2440,10 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
  *
  */
 void Maps::deleteMapScrSprites() {
+  cancelDragPreview();
+  cancelPinchPreview();
+  pinchZoomOutBackdrop = {};
+  invalidateRollingRasterWindow();
   // Maps::arrowSprite.deleteSprite();
   // Maps::mapSprite.deleteSprite();
   if (Maps::canvasArrow)
@@ -2395,19 +2471,55 @@ void Maps::createMapScrSprites() {
   if (mapSet.mapFullScreen)
     h = Maps::mapScrFull;
 
-  // Use LVGL's stride calculation to ensure we match what LVGL expects
-  // internally
-  uint32_t stride_bytes =
-      lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
-  size_t requiredSize = stride_bytes * h;
+  // Zoom 5 uses a 5x5 grid of 192 px cells. Zooms 1...4 use a 7x7 grid of
+  // 128 px cells. The scratch buffer must hold one complete incoming
+  // row/column for either layout so recycling remains atomic.
+  const auto wideLayout = map_raster_window::layoutForZoom(
+      map_transform::kMaximumRuntimeZoom,
+      map_transform::kMaximumRuntimeZoom);
+  const auto compactLayout = map_raster_window::layoutForZoom(
+      map_transform::kMinimumRuntimeZoom,
+      map_transform::kMaximumRuntimeZoom);
+  const auto maximumGrid = map_raster_window::gridExtent(wideLayout);
+  const auto compactGrid = map_raster_window::gridExtent(compactLayout);
+  const uint32_t gridStride = lv_draw_buf_width_to_stride(
+      maximumGrid.width, LV_COLOR_FORMAT_RGB565);
+  const size_t rollingScreenSize = gridStride * maximumGrid.height;
+  const uint32_t wideTileStride = lv_draw_buf_width_to_stride(
+      wideLayout.cellExtent, LV_COLOR_FORMAT_RGB565);
+  const size_t wideTileSize = wideTileStride * wideLayout.cellExtent;
+  const uint32_t compactTileStride = lv_draw_buf_width_to_stride(
+      compactLayout.cellExtent, LV_COLOR_FORMAT_RGB565);
+  const size_t compactTileSize =
+      compactTileStride * compactLayout.cellExtent;
+  const size_t maximumTileSize = std::max(wideTileSize, compactTileSize);
+  const size_t maximumScratchRowSize =
+      std::max(wideTileSize * wideLayout.span,
+               compactTileSize * compactLayout.span);
+  const uint32_t normalStride = lv_draw_buf_width_to_stride(
+      Maps::mapScrWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t maximumNormalFrameSize = normalStride * Maps::mapScrFull;
+  const size_t requiredTempSize = std::max(
+      maximumNormalFrameSize + maximumTileSize,
+      maximumScratchRowSize);
 
-  ESP_LOGI(TAG, "MapBuff: W=%d H=%d Stride=%d Size=%d", w, h, stride_bytes,
-           requiredSize);
-  if (!ensureMapCanvasBuffers(requiredSize)) {
+  ESP_LOGI(TAG,
+           "MapBuff: rollingWide=%ux%u rollingCompact=%ux%u "
+           "rollingScreen=%u initialScreen=%u scratch=%u initial=%ux%u",
+           (unsigned)maximumGrid.width, (unsigned)maximumGrid.height,
+           (unsigned)compactGrid.width, (unsigned)compactGrid.height,
+           (unsigned)rollingScreenSize, (unsigned)maximumNormalFrameSize,
+           (unsigned)requiredTempSize, (unsigned)w, (unsigned)h);
+  // Keep the front buffer viewport-sized until standalone Map first reaches
+  // a runtime zoom. Map + Navigation therefore does not pay the rolling
+  // grid's PSRAM cost merely by creating the shared map canvases.
+  if (!ensureMapScreenBuffer(maximumNormalFrameSize) ||
+      !ensureMapTempBuffer(requiredTempSize)) {
     return;
   }
-  memset(bufMapScreen, 0, requiredSize);
-  memset(bufMapTemp, 0, requiredSize);
+  memset(bufMapScreen, 0, maximumNormalFrameSize);
+  memset(bufMapTemp, 0, requiredTempSize);
+  invalidateRollingRasterWindow();
 
   Maps::canvasMap = lv_canvas_create(mapTile);
   lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_CLICKABLE);
@@ -2447,6 +2559,1320 @@ void Maps::createMapScrSprites() {
   //     LV_EVENT_CLICKED, this);
 
   // Maps::arrowSprite.pushImage(0, 0, 16, 16, (uint16_t *)navigation);
+}
+
+bool Maps::shouldUseRollingRasterWindow(uint8_t requestedZoom) const {
+  return mapSet.vectorMap && isMapScreenActive() &&
+         requestedZoom >= map_transform::kMinimumRuntimeZoom &&
+         requestedZoom <= map_transform::kMaximumRuntimeZoom;
+}
+
+uint64_t Maps::rollingRasterSignature() const {
+  const ScreenMapRenderSettings &style = currentMapStyleSettings();
+  uint64_t signature = 1469598103934665603ULL;
+  auto mix = [&signature](uint64_t value) {
+    signature ^= value;
+    signature *= 1099511628211ULL;
+  };
+  mix(style.minPolygonSize);
+  mix(style.detailLevel);
+  mix(style.routeLineWidth);
+  mix(style.streetLineWidth);
+  mix(style.zoomLevel);
+  mix(style.visibilityMask);
+  mix(mapRenderSettings.navigationOverlayVisibilityMask);
+  mix(routeOverlay.revision());
+  mix(static_cast<uint8_t>(rotationMode));
+  return signature;
+}
+
+bool Maps::rollingRasterCompatible(uint8_t requestedZoom,
+                                   uint16_t viewportWidth,
+                                   uint16_t viewportHeight,
+                                   uint64_t signature) const {
+  const auto layout = map_raster_window::layoutForZoom(
+      requestedZoom, map_transform::kMaximumRuntimeZoom);
+  return rollingRasterWindow.valid &&
+         rollingRasterWindow.zoom == requestedZoom &&
+         rollingRasterWindow.gridRadius == layout.radius &&
+         rollingRasterWindow.gridSpan == layout.span &&
+         rollingRasterWindow.tileWidth == layout.cellExtent &&
+         rollingRasterWindow.tileHeight == layout.cellExtent &&
+         rollingRasterWindow.viewportWidth == viewportWidth &&
+         rollingRasterWindow.viewportHeight == viewportHeight &&
+         rollingRasterWindow.signature == signature &&
+         map_raster_window::rotationIsCompatible(
+             rollingRasterWindow.rotation, Maps::rotationRad);
+}
+
+void Maps::invalidateRollingRasterWindow() { rollingRasterWindow = {}; }
+
+double Maps::visibleMapRotation() const {
+  // Course-up headings can move within the five-degree raster reuse window.
+  // Coordinate interactions must use the rotation of the pixels currently on
+  // screen until a replacement raster has been completed.
+  if (rollingRasterWindow.valid && isMapScreenActive())
+    return rollingRasterWindow.rotation;
+  return Maps::rotationRad;
+}
+
+bool Maps::renderRollingRasterCell(double rasterOriginX,
+                                   double rasterOriginY,
+                                   int32_t cellOffsetX,
+                                   int32_t cellOffsetY,
+                                   uint8_t requestedZoom, double rotation,
+                                   uint8_t scratchIndex,
+                                   size_t scratchBaseOffset,
+                                   bool preserveVisibleState,
+                                   bool *mapFoundOut) {
+  if (Maps::canvasMapTemp == nullptr || bufMapTemp == nullptr ||
+      scratchIndex >= map_raster_window::kScratchTileCount ||
+      scratchIndex >= rollingRasterWindow.gridSpan ||
+      rollingRasterWindow.tileWidth == 0 ||
+      rollingRasterWindow.tileHeight == 0) {
+    return false;
+  }
+
+  const uint16_t tileWidth = rollingRasterWindow.tileWidth;
+  const uint16_t tileHeight = rollingRasterWindow.tileHeight;
+  const uint32_t tileStride =
+      lv_draw_buf_width_to_stride(tileWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t tileSize = tileStride * tileHeight;
+  const size_t scratchOffset =
+      scratchBaseOffset + (tileSize * scratchIndex);
+  if (scratchOffset + tileSize > bufMapTempSize) {
+    ESP_LOGE(TAG, "Rolling raster scratch overflow index=%u need=%u have=%u",
+             (unsigned)scratchIndex, (unsigned)(scratchOffset + tileSize),
+             (unsigned)bufMapTempSize);
+    return false;
+  }
+
+  const bool previousMapFound = Maps::isMapFound;
+  const tileBounds previousBounds = Maps::totalBounds;
+  const uint16_t previousWptX = Maps::wptPosX;
+  const uint16_t previousWptY = Maps::wptPosY;
+  const ViewPort previousViewPort = Maps::viewPort;
+  auto restoreVisibleState = [&]() {
+    if (!preserveVisibleState)
+      return;
+    Maps::isMapFound = previousMapFound;
+    Maps::totalBounds = previousBounds;
+    Maps::wptPosX = previousWptX;
+    Maps::wptPosY = previousWptY;
+    Maps::viewPort = previousViewPort;
+  };
+
+  void *scratch = static_cast<uint8_t *>(bufMapTemp) + scratchOffset;
+  lv_canvas_set_buffer(Maps::canvasMapTemp, scratch, tileWidth, tileHeight,
+                       LV_COLOR_FORMAT_RGB565);
+
+  ViewPort cellViewPort;
+  cellViewPort.zoom = requestedZoom;
+  const auto worldDelta = map_transform::screenToWorld(
+      {static_cast<double>(cellOffsetX), static_cast<double>(cellOffsetY)},
+      requestedZoom, rotation);
+  const double centerX = rasterOriginX + worldDelta.x;
+  const double centerY = rasterOriginY + worldDelta.y;
+  cellViewPort.setCenterForCanvas(centerX, centerY, tileWidth, tileHeight,
+                                  rotation);
+  cellViewPort.rasterOriginX = rasterOriginX;
+  cellViewPort.rasterOriginY = rasterOriginY;
+  cellViewPort.rasterCellOffsetX = cellOffsetX;
+  cellViewPort.rasterCellOffsetY = cellOffsetY;
+  if (!Maps::getMapBlocks(cellViewPort.bbox, Maps::memCache) ||
+      !Maps::readVectorMap(cellViewPort, Maps::memCache,
+                           Maps::canvasMapTemp, requestedZoom, rotation)) {
+    restoreVisibleState();
+    return false;
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleState();
+    return false;
+  }
+
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
+    routeOverlay.drawRoute(
+        Maps::canvasMapTemp, cellViewPort.rasterOriginX,
+        cellViewPort.rasterOriginY,
+        requestedZoom, tileWidth, tileHeight, rotation,
+        mapAnchorXForWidth(tileWidth), mapAnchorYForHeight(tileHeight),
+        cellViewPort.rasterCellOffsetX,
+        cellViewPort.rasterCellOffsetY);
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleState();
+    return false;
+  }
+
+  if (mapFoundOut != nullptr)
+    *mapFoundOut = Maps::isMapFound;
+  restoreVisibleState();
+  return true;
+}
+
+bool Maps::preserveVisibleFrameForRollingBuild(uint16_t viewportWidth,
+                                               uint16_t viewportHeight,
+                                               size_t &scratchBaseOffset) {
+  scratchBaseOffset = 0;
+  if (Maps::canvasMap == nullptr || bufMapTemp == nullptr)
+    return false;
+
+  lv_obj_update_layout(Maps::canvasMap);
+  lv_obj_update_layout(mapTile);
+  const lv_draw_buf_t *source = lv_canvas_get_draw_buf(Maps::canvasMap);
+  if (source == nullptr || source->data == nullptr ||
+      source->header.cf != LV_COLOR_FORMAT_RGB565) {
+    ESP_LOGE(TAG, "Rolling raster could not snapshot the visible map frame");
+    return false;
+  }
+
+  const uint32_t snapshotStride = lv_draw_buf_width_to_stride(
+      viewportWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t snapshotSize = snapshotStride * viewportHeight;
+  const uint32_t tileStride = lv_draw_buf_width_to_stride(
+      rollingRasterWindow.tileWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t tileSize = tileStride * rollingRasterWindow.tileHeight;
+  if (snapshotSize + tileSize > bufMapTempSize) {
+    ESP_LOGE(TAG,
+             "Rolling raster snapshot needs %u bytes plus tile=%u, "
+             "scratch=%u",
+             (unsigned)snapshotSize, (unsigned)tileSize,
+             (unsigned)bufMapTempSize);
+    return false;
+  }
+
+  lv_area_t canvasArea;
+  lv_area_t containerArea;
+  lv_obj_get_coords(Maps::canvasMap, &canvasArea);
+  lv_obj_get_coords(mapTile, &containerArea);
+  const int32_t viewportScreenX =
+      containerArea.x1 + gui_layout::centeredViewportOrigin(
+                             lv_obj_get_width(mapTile), viewportWidth);
+  const int32_t viewportScreenY =
+      containerArea.y1 + gui_layout::centeredViewportOrigin(
+                             lv_obj_get_height(mapTile), viewportHeight);
+  const int32_t sourceOriginX = viewportScreenX - canvasArea.x1;
+  const int32_t sourceOriginY = viewportScreenY - canvasArea.y1;
+  const int32_t sourceWidth = source->header.w;
+  const int32_t sourceHeight = source->header.h;
+
+  auto *snapshot = static_cast<uint8_t *>(bufMapTemp);
+  const auto *sourceBytes = static_cast<const uint8_t *>(source->data);
+  const bool alreadySnapshot =
+      sourceBytes == snapshot && sourceOriginX == 0 && sourceOriginY == 0 &&
+      sourceWidth == viewportWidth && sourceHeight == viewportHeight &&
+      source->header.stride == snapshotStride;
+  if (!alreadySnapshot) {
+    memset(snapshot, 0, snapshotSize);
+    const int32_t destinationX = std::max<int32_t>(0, -sourceOriginX);
+    const int32_t destinationY = std::max<int32_t>(0, -sourceOriginY);
+    const int32_t clippedSourceX = std::max<int32_t>(0, sourceOriginX);
+    const int32_t clippedSourceY = std::max<int32_t>(0, sourceOriginY);
+    const int32_t copyWidth = std::min<int32_t>(
+        viewportWidth - destinationX, sourceWidth - clippedSourceX);
+    const int32_t copyHeight = std::min<int32_t>(
+        viewportHeight - destinationY, sourceHeight - clippedSourceY);
+    if (copyWidth > 0 && copyHeight > 0) {
+      const size_t copyBytes =
+          static_cast<size_t>(copyWidth) * sizeof(uint16_t);
+      for (int32_t y = 0; y < copyHeight; ++y) {
+        memcpy(snapshot +
+                   (static_cast<size_t>(destinationY + y) * snapshotStride) +
+                   (static_cast<size_t>(destinationX) * sizeof(uint16_t)),
+               sourceBytes +
+                   (static_cast<size_t>(clippedSourceY + y) *
+                    source->header.stride) +
+                   (static_cast<size_t>(clippedSourceX) * sizeof(uint16_t)),
+               copyBytes);
+      }
+    }
+  }
+
+  // Keep this complete viewport-sized snapshot on screen while bufMapScreen
+  // is rebuilt cell by cell. A touch can interrupt that work without exposing
+  // a partially populated rolling grid.
+  lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+  lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+  lv_image_set_pivot(Maps::canvasMap, 0, 0);
+  lv_canvas_set_buffer(Maps::canvasMap, snapshot, viewportWidth,
+                       viewportHeight, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_invalidate(Maps::canvasMap);
+  scratchBaseOffset = snapshotSize;
+  return true;
+}
+
+void Maps::restoreVisibleFrameAfterRollingBuildFailure(
+    uint16_t viewportWidth, uint16_t viewportHeight) {
+  if (Maps::canvasMap == nullptr || Maps::canvasMapTemp == nullptr ||
+      bufMapScreen == nullptr || bufMapTemp == nullptr)
+    return;
+  const uint32_t stride = lv_draw_buf_width_to_stride(
+      viewportWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t frameSize = stride * viewportHeight;
+  if (frameSize > bufMapScreenSize || frameSize > bufMapTempSize)
+    return;
+
+  memcpy(bufMapScreen, bufMapTemp, frameSize);
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, viewportWidth,
+                       viewportHeight, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, viewportWidth,
+                       viewportHeight, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMapTemp);
+  lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_invalidate(Maps::canvasMap);
+}
+
+void Maps::copyScratchCellToGrid(uint8_t scratchIndex, uint8_t column,
+                                 uint8_t row, size_t scratchBaseOffset) {
+  const uint16_t tileWidth = rollingRasterWindow.tileWidth;
+  const uint16_t tileHeight = rollingRasterWindow.tileHeight;
+  const auto grid = map_raster_window::gridExtent(
+      tileWidth, tileHeight, rollingRasterWindow.gridSpan);
+  const uint32_t gridStride =
+      lv_draw_buf_width_to_stride(grid.width, LV_COLOR_FORMAT_RGB565);
+  const uint32_t tileStride =
+      lv_draw_buf_width_to_stride(tileWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t tileSize = tileStride * tileHeight;
+  const size_t rowBytes = static_cast<size_t>(tileWidth) * sizeof(uint16_t);
+  auto *gridBytes = static_cast<uint8_t *>(bufMapScreen);
+  const auto *scratch = static_cast<const uint8_t *>(bufMapTemp) +
+                        scratchBaseOffset + (tileSize * scratchIndex);
+  for (uint16_t y = 0; y < tileHeight; ++y) {
+    uint8_t *destination =
+        gridBytes + (static_cast<size_t>(row * tileHeight + y) * gridStride) +
+        (static_cast<size_t>(column) * rowBytes);
+    memcpy(destination, scratch + (static_cast<size_t>(y) * tileStride),
+           rowBytes);
+  }
+}
+
+void Maps::bindRollingRasterCanvas() {
+  if (Maps::canvasMap == nullptr)
+    return;
+  const auto grid = map_raster_window::gridExtent(
+      rollingRasterWindow.tileWidth, rollingRasterWindow.tileHeight,
+      rollingRasterWindow.gridSpan);
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, grid.width, grid.height,
+                       LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Maps::updateVisibleVectorViewport() {
+  if (!rollingRasterWindow.valid)
+    return;
+  Maps::viewPort.zoom = rollingRasterWindow.zoom;
+  Maps::viewPort.setCenterForCanvas(
+      Maps::point, rollingRasterWindow.viewportWidth,
+      rollingRasterWindow.viewportHeight, rollingRasterWindow.rotation);
+  Maps::totalBounds.lat_min = Maps::mercatorY2lat(Maps::viewPort.bbox.min.y);
+  Maps::totalBounds.lat_max = Maps::mercatorY2lat(Maps::viewPort.bbox.max.y);
+  Maps::totalBounds.lon_min = Maps::mercatorX2lon(Maps::viewPort.bbox.min.x);
+  Maps::totalBounds.lon_max = Maps::mercatorX2lon(Maps::viewPort.bbox.max.x);
+}
+
+map_transform::PixelOffset
+Maps::rollingRasterCenterOffset(Point32 center) const {
+  return map_transform::rasterCellPixel(
+      {static_cast<double>(center.x), static_cast<double>(center.y)},
+      {rollingRasterWindow.phaseOriginX,
+       rollingRasterWindow.phaseOriginY},
+      {rollingRasterWindow.originPhaseOffsetX,
+       rollingRasterWindow.originPhaseOffsetY},
+      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+}
+
+void Maps::positionRollingRasterCanvas(Point32 center) {
+  if (!rollingRasterWindow.valid || Maps::canvasMap == nullptr)
+    return;
+  const auto centerOffset = rollingRasterCenterOffset(center);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_set_pos(Maps::canvasMap, -centerOffset.x, -centerOffset.y);
+  lv_obj_invalidate(Maps::canvasMap);
+}
+
+bool Maps::buildRollingRasterWindow(uint8_t requestedZoom,
+                                    uint16_t viewportWidth,
+                                    uint16_t viewportHeight,
+                                    uint64_t signature) {
+  const uint32_t buildStartMs = millis();
+  rollingRasterWindow.valid = false;
+  rollingRasterWindow.zoom = requestedZoom;
+  const auto layout = map_raster_window::layoutForZoom(
+      requestedZoom, map_transform::kMaximumRuntimeZoom);
+  rollingRasterWindow.gridRadius = layout.radius;
+  rollingRasterWindow.gridSpan = layout.span;
+  rollingRasterWindow.tileWidth = layout.cellExtent;
+  rollingRasterWindow.tileHeight = layout.cellExtent;
+  rollingRasterWindow.viewportWidth = viewportWidth;
+  rollingRasterWindow.viewportHeight = viewportHeight;
+  rollingRasterWindow.rotation = Maps::rotationRad;
+  rollingRasterWindow.phaseOriginX = Maps::point.x;
+  rollingRasterWindow.phaseOriginY = Maps::point.y;
+  rollingRasterWindow.originPhaseOffsetX = 0;
+  rollingRasterWindow.originPhaseOffsetY = 0;
+  rollingRasterWindow.signature = signature;
+
+  const uint16_t tileWidth = rollingRasterWindow.tileWidth;
+  const uint16_t tileHeight = rollingRasterWindow.tileHeight;
+  const auto grid = map_raster_window::gridExtent(
+      tileWidth, tileHeight, rollingRasterWindow.gridSpan);
+  const uint32_t gridStride =
+      lv_draw_buf_width_to_stride(grid.width, LV_COLOR_FORMAT_RGB565);
+  const size_t gridSize = gridStride * grid.height;
+  size_t scratchBaseOffset = 0;
+  if (!preserveVisibleFrameForRollingBuild(viewportWidth, viewportHeight,
+                                           scratchBaseOffset)) {
+    return false;
+  }
+  // The previous complete frame now lives in scratch, so growing the front
+  // allocation can safely release its old viewport-sized storage. Drop the
+  // reloadable vector cache first to coalesce PSRAM if this upgrade happens
+  // after the device has spent time on other map screens.
+  if (bufMapScreenSize < gridSize) {
+    for (MapBlock *block : Maps::memCache.blocks)
+      delete block;
+    Maps::memCache.blocks.clear();
+  }
+  if (!ensureMapScreenBuffer(gridSize)) {
+    restoreVisibleFrameAfterRollingBuildFailure(viewportWidth,
+                                                viewportHeight);
+    return false;
+  }
+
+  bool centerMapFound = false;
+  for (uint8_t row = 0; row < rollingRasterWindow.gridSpan; ++row) {
+    for (uint8_t column = 0; column < rollingRasterWindow.gridSpan; ++column) {
+      const int8_t cellX = static_cast<int8_t>(column) -
+                           rollingRasterWindow.gridRadius;
+      const int8_t cellY =
+          static_cast<int8_t>(row) - rollingRasterWindow.gridRadius;
+      const int32_t cellOffsetX = static_cast<int32_t>(cellX) * tileWidth;
+      const int32_t cellOffsetY = static_cast<int32_t>(cellY) * tileHeight;
+      bool cellMapFound = false;
+      if (!renderRollingRasterCell(
+              rollingRasterWindow.phaseOriginX,
+              rollingRasterWindow.phaseOriginY,
+              cellOffsetX, cellOffsetY, requestedZoom, Maps::rotationRad, 0,
+              scratchBaseOffset, true,
+              &cellMapFound)) {
+        ESP_LOGI(TAG, "Rolling raster build interrupted at cell %d,%d", cellX,
+                 cellY);
+        restoreVisibleFrameAfterRollingBuildFailure(viewportWidth,
+                                                    viewportHeight);
+        return false;
+      }
+      if (cellX == 0 && cellY == 0)
+        centerMapFound = cellMapFound;
+      copyScratchCellToGrid(0, column, row, scratchBaseOffset);
+    }
+  }
+
+  rollingRasterWindow.valid = true;
+  Maps::isMapFound = centerMapFound;
+  bindRollingRasterCanvas();
+  updateVisibleVectorViewport();
+  positionRollingRasterCanvas(Maps::point);
+  ESP_LOGI(TAG,
+           "Rolling raster ready: zoom=%u cells=%ux%u cell=%ux%u "
+           "viewport=%ux%u grid=%ux%u center=(%d,%d) elapsedMs=%lu "
+           "freePsram=%u",
+           (unsigned)requestedZoom, (unsigned)rollingRasterWindow.gridSpan,
+           (unsigned)rollingRasterWindow.gridSpan,
+           (unsigned)tileWidth, (unsigned)tileHeight,
+           (unsigned)viewportWidth, (unsigned)viewportHeight,
+           (unsigned)grid.width, (unsigned)grid.height, Maps::point.x,
+           Maps::point.y, (unsigned long)(millis() - buildStartMs),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  return true;
+}
+
+bool Maps::shiftGridPixelsHorizontal(int8_t direction) {
+  const uint16_t tileWidth = rollingRasterWindow.tileWidth;
+  const uint16_t tileHeight = rollingRasterWindow.tileHeight;
+  const auto grid = map_raster_window::gridExtent(
+      tileWidth, tileHeight, rollingRasterWindow.gridSpan);
+  const uint32_t gridStride =
+      lv_draw_buf_width_to_stride(grid.width, LV_COLOR_FORMAT_RGB565);
+  const uint32_t tileStride =
+      lv_draw_buf_width_to_stride(tileWidth, LV_COLOR_FORMAT_RGB565);
+  if (gridStride != static_cast<uint32_t>(grid.width) * sizeof(uint16_t) ||
+      tileStride != static_cast<uint32_t>(tileWidth) * sizeof(uint16_t)) {
+    ESP_LOGE(TAG, "Rolling raster requires packed RGB565 buffers");
+    return false;
+  }
+  map_raster_window::shiftPixelsHorizontal(
+      static_cast<uint16_t *>(bufMapScreen),
+      static_cast<const uint16_t *>(bufMapTemp), tileWidth, tileHeight,
+      direction, rollingRasterWindow.gridSpan);
+  return true;
+}
+
+bool Maps::shiftGridPixelsVertical(int8_t direction) {
+  const uint16_t tileWidth = rollingRasterWindow.tileWidth;
+  const uint16_t tileHeight = rollingRasterWindow.tileHeight;
+  const auto grid = map_raster_window::gridExtent(
+      tileWidth, tileHeight, rollingRasterWindow.gridSpan);
+  const uint32_t gridStride =
+      lv_draw_buf_width_to_stride(grid.width, LV_COLOR_FORMAT_RGB565);
+  const uint32_t tileStride =
+      lv_draw_buf_width_to_stride(tileWidth, LV_COLOR_FORMAT_RGB565);
+  if (gridStride != static_cast<uint32_t>(grid.width) * sizeof(uint16_t) ||
+      tileStride != static_cast<uint32_t>(tileWidth) * sizeof(uint16_t)) {
+    ESP_LOGE(TAG, "Rolling raster requires packed RGB565 buffers");
+    return false;
+  }
+  map_raster_window::shiftPixelsVertical(
+      static_cast<uint16_t *>(bufMapScreen),
+      static_cast<const uint16_t *>(bufMapTemp), tileWidth, tileHeight,
+      direction, rollingRasterWindow.gridSpan);
+  return true;
+}
+
+bool Maps::shiftRollingRasterWindow(int8_t directionX, int8_t directionY) {
+  if (!rollingRasterWindow.valid ||
+      ((directionX == 0) == (directionY == 0))) {
+    return false;
+  }
+  const uint32_t shiftStartMs = millis();
+
+  const int32_t targetOriginPhaseOffsetX =
+      rollingRasterWindow.originPhaseOffsetX +
+      (static_cast<int32_t>(directionX) * rollingRasterWindow.tileWidth);
+  const int32_t targetOriginPhaseOffsetY =
+      rollingRasterWindow.originPhaseOffsetY +
+      (static_cast<int32_t>(directionY) * rollingRasterWindow.tileHeight);
+  const auto targetOriginDelta = map_transform::screenToWorld(
+      {static_cast<double>(targetOriginPhaseOffsetX),
+       static_cast<double>(targetOriginPhaseOffsetY)},
+      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+  const double targetOriginX =
+      rollingRasterWindow.phaseOriginX + targetOriginDelta.x;
+  const double targetOriginY =
+      rollingRasterWindow.phaseOriginY + targetOriginDelta.y;
+
+  for (uint8_t index = 0; index < rollingRasterWindow.gridSpan; ++index) {
+    const int8_t crossCell = static_cast<int8_t>(index) -
+                             rollingRasterWindow.gridRadius;
+    // targetOrigin is already one cell beyond the old origin. The replacement
+    // row/column must therefore be the outermost cell around the *new* origin
+    // (one cell beyond the old edge), not the old edge itself. Re-rendering
+    // that old edge here duplicates map content after the pixel shift.
+    const int8_t cellX =
+        directionX != 0
+            ? map_raster_window::replacementCellOffset(
+                  directionX, rollingRasterWindow.gridRadius)
+            : crossCell;
+    const int8_t cellY =
+        directionY != 0
+            ? map_raster_window::replacementCellOffset(
+                  directionY, rollingRasterWindow.gridRadius)
+            : crossCell;
+    const int32_t cellPhaseOffsetX =
+        targetOriginPhaseOffsetX +
+        (static_cast<int32_t>(cellX) * rollingRasterWindow.tileWidth);
+    const int32_t cellPhaseOffsetY =
+        targetOriginPhaseOffsetY +
+        (static_cast<int32_t>(cellY) * rollingRasterWindow.tileHeight);
+    if (!renderRollingRasterCell(rollingRasterWindow.phaseOriginX,
+                                 rollingRasterWindow.phaseOriginY,
+                                 cellPhaseOffsetX, cellPhaseOffsetY,
+                                 rollingRasterWindow.zoom,
+                                 rollingRasterWindow.rotation, index, 0,
+                                 true)) {
+      ESP_LOGI(TAG, "Rolling raster shift interrupted direction=%d,%d",
+               directionX, directionY);
+      return false;
+    }
+  }
+
+  const bool shifted = directionX != 0
+                           ? shiftGridPixelsHorizontal(directionX)
+                           : shiftGridPixelsVertical(directionY);
+  if (!shifted)
+    return false;
+  rollingRasterWindow.originPhaseOffsetX = targetOriginPhaseOffsetX;
+  rollingRasterWindow.originPhaseOffsetY = targetOriginPhaseOffsetY;
+  // Each completed edge is a consistency checkpoint. A following axis may be
+  // interrupted by a new touch, so the live canvas must already use this origin.
+  updateVisibleVectorViewport();
+  positionRollingRasterCanvas(Maps::point);
+  ESP_LOGI(TAG,
+           "Rolling raster shifted direction=%d,%d elapsedMs=%lu "
+           "origin=(%.0f,%.0f)",
+           directionX, directionY,
+           (unsigned long)(millis() - shiftStartMs), targetOriginX,
+           targetOriginY);
+  return true;
+}
+
+bool Maps::settleRollingRasterWindow() {
+  if (!rollingRasterWindow.valid)
+    return false;
+
+  auto centerOffset = rollingRasterCenterOffset(Maps::point);
+  if (!map_raster_window::centerIsCovered(
+          centerOffset.x, centerOffset.y,
+          rollingRasterWindow.viewportWidth,
+          rollingRasterWindow.viewportHeight,
+          rollingRasterWindow.tileWidth, rollingRasterWindow.tileHeight,
+          rollingRasterWindow.gridSpan)) {
+    return buildRollingRasterWindow(
+        rollingRasterWindow.zoom, rollingRasterWindow.viewportWidth,
+        rollingRasterWindow.viewportHeight, rollingRasterWindow.signature);
+  }
+
+  for (uint8_t step = 0; step < rollingRasterWindow.gridRadius; ++step) {
+    const int8_t directionX = map_raster_window::recycleDirection(
+        centerOffset.x, rollingRasterWindow.tileWidth);
+    if (directionX == 0)
+      break;
+    if (!shiftRollingRasterWindow(directionX, 0))
+      return false;
+    centerOffset = rollingRasterCenterOffset(Maps::point);
+  }
+
+  centerOffset = rollingRasterCenterOffset(Maps::point);
+  for (uint8_t step = 0; step < rollingRasterWindow.gridRadius; ++step) {
+    const int8_t directionY = map_raster_window::recycleDirection(
+        centerOffset.y, rollingRasterWindow.tileHeight);
+    if (directionY == 0)
+      break;
+    if (!shiftRollingRasterWindow(0, directionY))
+      return false;
+    centerOffset = rollingRasterCenterOffset(Maps::point);
+  }
+
+  bindRollingRasterCanvas();
+  updateVisibleVectorViewport();
+  positionRollingRasterCanvas(Maps::point);
+  return true;
+}
+
+bool Maps::hasPinchZoomOutBackdrop(uint8_t baseZoom) const {
+  const uint16_t canvasHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  return pinchZoomOutBackdrop.prepared &&
+         pinchZoomOutBackdrop.baseZoom ==
+             map_transform::clampRuntimeZoom(baseZoom) &&
+         pinchZoomOutBackdrop.center.x == Maps::point.x &&
+         pinchZoomOutBackdrop.center.y == Maps::point.y &&
+         std::fabs(pinchZoomOutBackdrop.rotation - visibleMapRotation()) <
+             0.0001 &&
+         pinchZoomOutBackdrop.canvasHeight == canvasHeight &&
+         Maps::canvasMapTemp != nullptr;
+}
+
+void Maps::invalidatePinchZoomOutBackdrop() {
+  pinchZoomOutBackdrop = {};
+  dragPresentation.hasBackdrop = false;
+  if (Maps::canvasMapTemp == nullptr)
+    return;
+  lv_anim_delete(Maps::canvasMapTemp, setPinchCanvasScale);
+  lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+  lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+  lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_center(Maps::canvasMapTemp);
+}
+
+bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
+  baseZoom = map_transform::clampRuntimeZoom(baseZoom);
+  if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
+      Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
+      pinchPresentation.settlementPending || dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
+    return false;
+  }
+  if (hasPinchZoomOutBackdrop(baseZoom))
+    return true;
+
+  invalidatePinchZoomOutBackdrop();
+  const uint16_t canvasHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const uint32_t backdropStride = lv_draw_buf_width_to_stride(
+      Maps::mapScrWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t backdropSize = backdropStride * canvasHeight;
+  if (backdropSize > bufMapTempSize)
+    return false;
+  // Rolling edge renders leave the hidden canvas bound to a single scratch
+  // cell. Rebind it to a complete viewport before preparing the pinch
+  // backdrop used by zoom levels 1...4.
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
+                       canvasHeight, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMapTemp);
+  const uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
+  const double backdropRotation = visibleMapRotation();
+  ViewPort backdropViewPort;
+  backdropViewPort.zoom = backdropZoom;
+  backdropViewPort.setCenter(Maps::point);
+
+  const bool previousMapFound = Maps::isMapFound;
+  const tileBounds previousBounds = Maps::totalBounds;
+  const uint16_t previousWptX = Maps::wptPosX;
+  const uint16_t previousWptY = Maps::wptPosY;
+  auto restoreVisibleMapState = [&]() {
+    Maps::isMapFound = previousMapFound;
+    Maps::totalBounds = previousBounds;
+    Maps::wptPosX = previousWptX;
+    Maps::wptPosY = previousWptY;
+  };
+
+  ESP_LOGI(TAG, "Preparing pinch backdrop: baseZoom=%u renderZoom=%u",
+           (unsigned)baseZoom, (unsigned)backdropZoom);
+  if (!Maps::getMapBlocks(backdropViewPort.bbox, Maps::memCache) ||
+      !Maps::readVectorMap(backdropViewPort, Maps::memCache,
+                           Maps::canvasMapTemp, backdropZoom,
+                           backdropRotation)) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted");
+    return false;
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted before completion");
+    return false;
+  }
+
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
+    routeOverlay.drawRoute(Maps::canvasMapTemp,
+                           backdropViewPort.rasterOriginX,
+                           backdropViewPort.rasterOriginY, backdropZoom,
+                           Maps::mapScrWidth, canvasHeight,
+                           backdropRotation,
+                           mapAnchorXForWidth(Maps::mapScrWidth),
+                           mapAnchorYForHeight(canvasHeight));
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted after route");
+    return false;
+  }
+
+  restoreVisibleMapState();
+  pinchZoomOutBackdrop.prepared = true;
+  pinchZoomOutBackdrop.baseZoom = baseZoom;
+  pinchZoomOutBackdrop.renderZoom = backdropZoom;
+  pinchZoomOutBackdrop.center = Maps::point;
+  pinchZoomOutBackdrop.rotation = backdropRotation;
+  pinchZoomOutBackdrop.canvasHeight = canvasHeight;
+  ESP_LOGI(TAG, "Pinch backdrop ready");
+  return true;
+}
+
+void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
+  map_drag_preview::Offset presented = offset;
+  if (dragPresentation.waitsForRollingRaster) {
+    // The first preload after a zoom change may have been interrupted by this
+    // touch. Keep the last complete viewport fixed until the rolling window
+    // is ready; moving that exact-size snapshot would expose empty pixels.
+    presented = {};
+  } else if (dragPresentation.usesRollingRaster &&
+             rollingRasterWindow.valid) {
+    presented.x = map_raster_window::clampDragOffset(
+        dragPresentation.baseRasterOffsetX, offset.x,
+        rollingRasterWindow.viewportWidth, rollingRasterWindow.tileWidth,
+        rollingRasterWindow.gridSpan);
+    presented.y = map_raster_window::clampDragOffset(
+        dragPresentation.baseRasterOffsetY, offset.y,
+        rollingRasterWindow.viewportHeight, rollingRasterWindow.tileHeight,
+        rollingRasterWindow.gridSpan);
+  }
+  dragPresentation.presentedOffset = presented;
+  const int32_t visualX = -presented.x;
+  const int32_t visualY = -presented.y;
+  if (Maps::canvasMap != nullptr) {
+    lv_obj_set_pos(Maps::canvasMap,
+                   static_cast<int32_t>(dragPresentation.canvasBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.canvasBaseY) +
+                       visualY);
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
+    lv_obj_set_pos(Maps::canvasMapTemp,
+                   static_cast<int32_t>(dragPresentation.canvasBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.canvasBaseY) +
+                       visualY);
+    lv_obj_clear_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(Maps::canvasMapTemp);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow,
+                   static_cast<int32_t>(dragPresentation.markerBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.markerBaseY) +
+                       visualY);
+    lv_obj_invalidate(Maps::canvasArrow);
+  }
+}
+
+void Maps::syncDragPreviewCenterToPresentedOffset() {
+  const map_transform::WorldPoint center =
+      map_transform::centerAfterScreenDrag(
+          {static_cast<double>(dragPresentation.baseCenter.x),
+           static_cast<double>(dragPresentation.baseCenter.y)},
+          {static_cast<double>(dragPresentation.presentedOffset.x),
+           static_cast<double>(dragPresentation.presentedOffset.y)},
+          dragPresentation.baseZoom, dragPresentation.baseRotation);
+  Maps::point.x = static_cast<int32_t>(std::round(center.x));
+  Maps::point.y = static_cast<int32_t>(std::round(center.y));
+  Maps::isPosMoved = true;
+  Maps::followGps = false;
+}
+
+void Maps::rebaseRollingDragAtVisibleEndpoint() {
+  if (!rollingRasterWindow.valid || Maps::canvasMap == nullptr) {
+    syncDragPreviewCenterToPresentedOffset();
+    return;
+  }
+  const auto rebase = map_transform::rollingDragRebase(
+      {static_cast<double>(dragPresentation.baseCenter.x),
+       static_cast<double>(dragPresentation.baseCenter.y)},
+      {static_cast<double>(dragPresentation.presentedOffset.x),
+       static_cast<double>(dragPresentation.presentedOffset.y)},
+      dragPresentation.baseZoom, dragPresentation.baseRotation,
+      {rollingRasterWindow.phaseOriginX,
+       rollingRasterWindow.phaseOriginY},
+      {rollingRasterWindow.originPhaseOffsetX,
+       rollingRasterWindow.originPhaseOffsetY});
+  Maps::point = {rebase.center.x, rebase.center.y};
+  Maps::isPosMoved = true;
+  Maps::followGps = false;
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_set_pos(Maps::canvasMap, rebase.canvasOffset.x,
+                 rebase.canvasOffset.y);
+  lv_obj_invalidate(Maps::canvasMap);
+  dragPresentation.canvasBaseX = rebase.canvasOffset.x;
+  dragPresentation.canvasBaseY = rebase.canvasOffset.y;
+  dragPresentation.baseRasterOffsetX = rebase.rasterCenterOffset.x;
+  dragPresentation.baseRasterOffsetY = rebase.rasterCenterOffset.y;
+}
+
+bool Maps::beginDragPreview(uint8_t baseZoom) {
+  if (!mapSet.vectorMap || Maps::canvasMap == nullptr ||
+      pinchPresentation.active || pinchPresentation.settlementPending ||
+      dragPreviewController.active()) {
+    return false;
+  }
+
+  const uint8_t normalizedZoom = map_transform::clampRuntimeZoom(baseZoom);
+  const bool continuingSettlement =
+      dragPreviewController.settlementPending();
+  if (continuingSettlement && dragPresentation.baseZoom != normalizedZoom) {
+    cancelDragPreview();
+    return false;
+  }
+
+  // A new finger-down always gets a fresh presentation baseline, even if the
+  // previous release is still waiting for raster recycling. Keeping the old
+  // DragPresentation alive made an interrupted settlement capable of
+  // restoring the first gesture's canvas origin.
+  dragPreviewController.replaceCommittedOffset({});
+  dragPresentation = {};
+  dragPresentation.baseZoom = normalizedZoom;
+  dragPresentation.baseCenter = Maps::point;
+  dragPresentation.baseRotation = visibleMapRotation();
+  // lv_obj_set_pos() updates the offset from the object's configured center
+  // alignment, so preserve that aligned offset rather than its resolved
+  // top-left coordinate. This works for both normal and oversized canvases.
+  dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+  dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr) {
+    dragPresentation.markerBaseX =
+        lv_obj_get_x_aligned(Maps::canvasArrow);
+    dragPresentation.markerBaseY =
+        lv_obj_get_y_aligned(Maps::canvasArrow);
+  }
+  dragPresentation.usesRollingRaster =
+      rollingRasterWindow.valid &&
+      normalizedZoom == rollingRasterWindow.zoom && isMapScreenActive();
+  // The rolling raster already covers drag exposure. Its prepared pinch
+  // backdrop is viewport-sized and has a different aligned origin, so it is
+  // only presented by the pinch path.
+  dragPresentation.hasBackdrop =
+      !dragPresentation.usesRollingRaster &&
+      hasPinchZoomOutBackdrop(normalizedZoom);
+  if (dragPresentation.hasBackdrop) {
+    dragPresentation.backdropZoom = pinchZoomOutBackdrop.renderZoom;
+  }
+  dragPresentation.waitsForRollingRaster =
+      shouldUseRollingRasterWindow(normalizedZoom) &&
+      !rollingRasterWindow.valid;
+  if (dragPresentation.usesRollingRaster) {
+    const auto centerOffset = rollingRasterCenterOffset(Maps::point);
+    dragPresentation.baseRasterOffsetX = centerOffset.x;
+    dragPresentation.baseRasterOffsetY = centerOffset.y;
+  }
+
+  if (!dragPreviewController.begin())
+    return false;
+
+  lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+  if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
+    const uint16_t height =
+        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+    const double backdropRatio = map_transform::backdropPresentationRatio(
+        1.0, dragPresentation.baseZoom, dragPresentation.backdropZoom);
+    const uint32_t backdropLvScale = static_cast<uint32_t>(
+        std::max<double>(1.0, std::round(backdropRatio * LV_SCALE_NONE)));
+    lv_image_set_pivot(Maps::canvasMapTemp,
+                       mapAnchorXForWidth(Maps::mapScrWidth),
+                       mapAnchorYForHeight(height));
+    lv_image_set_scale(Maps::canvasMapTemp, backdropLvScale);
+    lv_obj_move_background(Maps::canvasMapTemp);
+    lv_obj_move_foreground(Maps::canvasMap);
+    if (Maps::canvasArrow != nullptr)
+      lv_obj_move_foreground(Maps::canvasArrow);
+  }
+  applyDragPreviewOffset(dragPreviewController.committedOffset());
+  return true;
+}
+
+void Maps::updateDragPreview(int16_t sessionDx, int16_t sessionDy) {
+  if (!dragPreviewController.active())
+    return;
+  applyDragPreviewOffset(dragPreviewController.preview(sessionDx, sessionDy));
+  if (dragPresentation.usesRollingRaster ||
+      dragPresentation.waitsForRollingRaster) {
+    // Keep the logical map center synchronized with the pixels throughout the
+    // drag. Release is now only a settlement boundary; it is no longer the
+    // single point at which the drag endpoint becomes authoritative.
+    syncDragPreviewCenterToPresentedOffset();
+  }
+}
+
+void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
+                             uint32_t nowMs) {
+  if (!dragPreviewController.active())
+    return;
+  const map_drag_preview::Offset committed =
+      dragPreviewController.commit(sessionDx, sessionDy, nowMs);
+  applyDragPreviewOffset(committed);
+  if (dragPresentation.usesRollingRaster ||
+      dragPresentation.waitsForRollingRaster) {
+    const map_drag_preview::Offset presented =
+        dragPresentation.presentedOffset;
+    dragPreviewController.replaceCommittedOffset(presented);
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      rebaseRollingDragAtVisibleEndpoint();
+    } else {
+      syncDragPreviewCenterToPresentedOffset();
+    }
+    // Maps::point now describes the exact endpoint already shown by the drag
+    // preview. Make that endpoint the baseline immediately instead of keeping
+    // the next gesture relative to the canvas position captured before the
+    // first drag. Raster recycling may still be pending, but a rapid second
+    // touch must start from the pixels that are currently visible.
+    if (Maps::canvasArrow != nullptr) {
+      dragPresentation.markerBaseX =
+          lv_obj_get_x_aligned(Maps::canvasArrow);
+      dragPresentation.markerBaseY =
+          lv_obj_get_y_aligned(Maps::canvasArrow);
+    }
+    dragPresentation.presentedOffset = {};
+    dragPreviewController.replaceCommittedOffset({});
+    // A clamped drag can legitimately apply zero movement. It still needs one
+    // generation pass to recycle/retry the window and clear settlement state.
+    Maps::isPosMoved = true;
+  } else {
+    Maps::scrollMap(sessionDx, sessionDy);
+  }
+  Maps::redrawMap = true;
+}
+
+void Maps::handoffDragPreviewToPinch() {
+  if (!dragPreviewController.active() &&
+      !dragPreviewController.settlementPending()) {
+    return;
+  }
+
+  // A two-finger gesture may arrive in the same LVGL read that releases the
+  // synthetic one-finger pointer. Keep the exact endpoint already visible,
+  // normalize the rolling canvas against it, and drop only the old gesture's
+  // bookkeeping. Restoring dragPresentation.canvasBase* here would jump back
+  // to the first finger-down origin.
+  if (dragPreviewController.active() &&
+      (dragPresentation.usesRollingRaster ||
+       dragPresentation.waitsForRollingRaster)) {
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      rebaseRollingDragAtVisibleEndpoint();
+    } else {
+      syncDragPreviewCenterToPresentedOffset();
+    }
+  }
+  if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+    positionRollingRasterCanvas(Maps::point);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+  dragPreviewController.reset();
+  dragPresentation = {};
+  Maps::isPosMoved = true;
+  Maps::redrawMap = true;
+}
+
+void Maps::resetDragPresentationVisuals() {
+  if (Maps::canvasMap != nullptr) {
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      positionRollingRasterCanvas(Maps::point);
+    } else {
+      lv_obj_set_pos(Maps::canvasMap, dragPresentation.canvasBaseX,
+                     dragPresentation.canvasBaseY);
+    }
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_set_pos(Maps::canvasMapTemp, dragPresentation.canvasBaseX,
+                   dragPresentation.canvasBaseY);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow, dragPresentation.markerBaseX,
+                   dragPresentation.markerBaseY);
+  }
+}
+
+void Maps::cancelDragPreview() {
+  if (dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
+    resetDragPresentationVisuals();
+  }
+  dragPreviewController.reset();
+  dragPresentation = {};
+}
+
+void Maps::finishDragSettlement() {
+  if (!dragPreviewController.settlementPending())
+    return;
+  resetDragPresentationVisuals();
+  dragPreviewController.reset();
+  dragPresentation = {};
+}
+
+bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
+                             uint8_t baseZoom) {
+  if (Maps::canvasMap == nullptr || pinchPresentation.settlementPending ||
+      dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
+    return false;
+  }
+
+  pinchPresentation.active = true;
+  pinchPresentation.capturedFollowGps = Maps::followGps;
+  pinchPresentation.baseZoom = map_transform::clampRuntimeZoom(baseZoom);
+  pinchPresentation.baseCenter = Maps::point;
+  pinchPresentation.baseRotation = visibleMapRotation();
+  pinchPresentation.initialMidpointX = midpointX;
+  pinchPresentation.initialMidpointY = midpointY;
+  pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+  pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr) {
+    pinchPresentation.markerBaseX = lv_obj_get_x_aligned(Maps::canvasArrow);
+    pinchPresentation.markerBaseY = lv_obj_get_y_aligned(Maps::canvasArrow);
+  }
+
+  lv_obj_update_layout(Maps::canvasMap);
+  lv_area_t canvasArea;
+  lv_obj_get_coords(Maps::canvasMap, &canvasArea);
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const auto currentExtent =
+      canvasExtent(Maps::canvasMap, Maps::mapScrWidth, viewportHeight);
+  const bool usesRollingRaster =
+      rollingRasterWindow.valid &&
+      pinchPresentation.baseZoom == rollingRasterWindow.zoom &&
+      isMapScreenActive();
+  int32_t rollingCenterOffsetX = 0;
+  int32_t rollingCenterOffsetY = 0;
+  if (usesRollingRaster) {
+    const auto centerOffset = rollingRasterCenterOffset(Maps::point);
+    rollingCenterOffsetX = centerOffset.x;
+    rollingCenterOffsetY = centerOffset.y;
+  }
+  if (Maps::followGps) {
+    pinchPresentation.pivotLocalX =
+        mapAnchorXForWidth(currentExtent.width) + rollingCenterOffsetX;
+    pinchPresentation.pivotLocalY =
+        mapAnchorYForHeight(currentExtent.height) + rollingCenterOffsetY;
+  } else {
+    pinchPresentation.pivotLocalX = static_cast<int16_t>(
+        std::max<int32_t>(0, std::min<int32_t>(
+                                 currentExtent.width - 1,
+                                 midpointX - canvasArea.x1)));
+    pinchPresentation.pivotLocalY = static_cast<int16_t>(
+        std::max<int32_t>(0, std::min<int32_t>(
+                                 currentExtent.height - 1,
+                                 midpointY - canvasArea.y1)));
+  }
+  if (usesRollingRaster) {
+    const uint16_t containerWidth = lv_obj_get_width(mapTile);
+    const uint16_t containerHeight = lv_obj_get_height(mapTile);
+    pinchPresentation.anchorScreenX =
+        gui_layout::mapScreenAnchorX(containerWidth, Maps::mapScrWidth);
+    pinchPresentation.anchorScreenY =
+        gui_layout::mapScreenAnchorY(containerHeight, viewportHeight);
+  } else {
+    pinchPresentation.anchorScreenX =
+        canvasArea.x1 + mapAnchorXForWidth(currentExtent.width);
+    pinchPresentation.anchorScreenY =
+        canvasArea.y1 + mapAnchorYForHeight(currentExtent.height);
+  }
+  pinchPresentation.hasZoomOutBackdrop =
+      hasPinchZoomOutBackdrop(pinchPresentation.baseZoom);
+  if (pinchPresentation.hasZoomOutBackdrop) {
+    pinchPresentation.zoomOutBackdropZoom = pinchZoomOutBackdrop.renderZoom;
+    pinchPresentation.backdropBaseX =
+        lv_obj_get_x_aligned(Maps::canvasMapTemp);
+    pinchPresentation.backdropBaseY =
+        lv_obj_get_y_aligned(Maps::canvasMapTemp);
+    lv_obj_update_layout(Maps::canvasMapTemp);
+    lv_area_t backdropArea;
+    lv_obj_get_coords(Maps::canvasMapTemp, &backdropArea);
+    if (Maps::followGps) {
+      pinchPresentation.backdropPivotLocalX =
+          mapAnchorXForWidth(Maps::mapScrWidth);
+      pinchPresentation.backdropPivotLocalY =
+          mapAnchorYForHeight(viewportHeight);
+    } else {
+      pinchPresentation.backdropPivotLocalX = static_cast<int16_t>(
+          std::max<int32_t>(0, std::min<int32_t>(
+                                   Maps::mapScrWidth - 1,
+                                   midpointX - backdropArea.x1)));
+      pinchPresentation.backdropPivotLocalY = static_cast<int16_t>(
+          std::max<int32_t>(0, std::min<int32_t>(
+                                   viewportHeight - 1,
+                                   midpointY - backdropArea.y1)));
+    }
+  }
+
+  lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+  lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
+  lv_obj_set_style_bg_opa(mapTile, LV_OPA_COVER, 0);
+  lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
+                     pinchPresentation.pivotLocalY);
+  lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+  if (pinchPresentation.hasZoomOutBackdrop) {
+    lv_obj_set_pos(Maps::canvasMapTemp, pinchPresentation.backdropBaseX,
+                   pinchPresentation.backdropBaseY);
+    lv_image_set_pivot(Maps::canvasMapTemp,
+                       pinchPresentation.backdropPivotLocalX,
+                       pinchPresentation.backdropPivotLocalY);
+    lv_obj_move_background(Maps::canvasMapTemp);
+    lv_obj_move_foreground(Maps::canvasMap);
+    if (Maps::canvasArrow != nullptr)
+      lv_obj_move_foreground(Maps::canvasArrow);
+  }
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  recordPinchPreviewFrame(true);
+#endif
+  return true;
+}
+
+void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
+                              int16_t midpointY) {
+  if (!pinchPresentation.active || Maps::canvasMap == nullptr) {
+    return;
+  }
+  const double ratio = map_transform::clampPreviewRatio(
+      previewRatio, pinchPresentation.baseZoom);
+  const uint32_t lvScale = static_cast<uint32_t>(
+      std::max<double>(1.0, std::round(ratio * LV_SCALE_NONE)));
+  const int16_t translationX = pinchPresentation.capturedFollowGps
+                                   ? 0
+                                   : midpointX -
+                                         pinchPresentation.initialMidpointX;
+  const int16_t translationY = pinchPresentation.capturedFollowGps
+                                   ? 0
+                                   : midpointY -
+                                         pinchPresentation.initialMidpointY;
+
+  lv_obj_set_pos(Maps::canvasMap,
+                 pinchPresentation.canvasBaseX + translationX,
+                 pinchPresentation.canvasBaseY + translationY);
+  lv_image_set_scale(Maps::canvasMap, lvScale);
+  if (pinchPresentation.hasZoomOutBackdrop && Maps::canvasMapTemp != nullptr &&
+      ratio < 0.999) {
+    const double backdropRatio = map_transform::backdropPresentationRatio(
+        ratio, pinchPresentation.baseZoom,
+        pinchPresentation.zoomOutBackdropZoom);
+    const uint32_t backdropLvScale = static_cast<uint32_t>(
+        std::max<double>(1.0, std::round(backdropRatio * LV_SCALE_NONE)));
+    lv_obj_set_pos(Maps::canvasMapTemp,
+                   pinchPresentation.backdropBaseX + translationX,
+                   pinchPresentation.backdropBaseY + translationY);
+    lv_image_set_scale(Maps::canvasMapTemp, backdropLvScale);
+    lv_obj_clear_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(Maps::canvasMapTemp);
+  } else if (Maps::canvasMapTemp != nullptr) {
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  recordPinchPreviewFrame();
+#endif
+
+  if (!pinchPresentation.capturedFollowGps && Maps::canvasArrow != nullptr) {
+    const double pivotX = pinchPresentation.initialMidpointX;
+    const double pivotY = pinchPresentation.initialMidpointY;
+    const double markerCenterX = pinchPresentation.markerBaseX + 24.0;
+    const double markerCenterY = pinchPresentation.markerBaseY + 24.0;
+    const int16_t transformedX = static_cast<int16_t>(std::round(
+        pivotX + ((markerCenterX - pivotX) * ratio) + translationX - 24.0));
+    const int16_t transformedY = static_cast<int16_t>(std::round(
+        pivotY + ((markerCenterY - pivotY) * ratio) + translationY - 24.0));
+    lv_obj_set_pos(Maps::canvasArrow, transformedX, transformedY);
+  }
+  lv_obj_invalidate(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr)
+    lv_obj_invalidate(Maps::canvasArrow);
+}
+
+void Maps::resetPinchPresentationVisuals() {
+  if (Maps::canvasMap != nullptr) {
+    lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+    lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMap, 0, 0);
+    lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
+                   pinchPresentation.canvasBaseY);
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_anim_delete(Maps::canvasMapTemp, setPinchCanvasScale);
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_set_pos(
+        Maps::canvasMapTemp,
+        pinchPresentation.hasZoomOutBackdrop
+            ? pinchPresentation.backdropBaseX
+            : pinchPresentation.canvasBaseX,
+        pinchPresentation.hasZoomOutBackdrop
+            ? pinchPresentation.backdropBaseY
+            : pinchPresentation.canvasBaseY);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow, pinchPresentation.markerBaseX,
+                   pinchPresentation.markerBaseY);
+  }
+}
+
+void Maps::cancelPinchPreview() {
+  if (Maps::canvasMap != nullptr) {
+    lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+  }
+  if (pinchPresentation.active || pinchPresentation.settlementPending) {
+    resetPinchPresentationVisuals();
+  }
+  pinchPresentation = {};
+}
+
+void Maps::commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
+                           int16_t finalMidpointX,
+                           int16_t finalMidpointY) {
+  if (!pinchPresentation.active) {
+    return;
+  }
+  targetZoom = map_transform::clampRuntimeZoom(targetZoom);
+  if (!pinchPresentation.capturedFollowGps) {
+    const double anchorX = pinchPresentation.anchorScreenX;
+    const double anchorY = pinchPresentation.anchorScreenY;
+    const map_transform::WorldPoint adjusted =
+        map_transform::focalPreservingCenter(
+            {static_cast<double>(pinchPresentation.baseCenter.x),
+             static_cast<double>(pinchPresentation.baseCenter.y)},
+            {static_cast<double>(pinchPresentation.initialMidpointX) - anchorX,
+             static_cast<double>(pinchPresentation.initialMidpointY) - anchorY},
+            {static_cast<double>(finalMidpointX) - anchorX,
+             static_cast<double>(finalMidpointY) - anchorY},
+            pinchPresentation.baseZoom, targetZoom,
+            pinchPresentation.baseRotation);
+    Maps::point.x = static_cast<int32_t>(std::round(adjusted.x));
+    Maps::point.y = static_cast<int32_t>(std::round(adjusted.y));
+    Maps::followGps = false;
+  } else {
+    Maps::followGps = true;
+  }
+  // Keep the old complete frame visible while the new discrete zoom frame is
+  // rendered. This also prevents the prepared backdrop from being exposed if
+  // a settlement render is interrupted by a new touch.
+  resetPinchPresentationVisuals();
+  pinchPresentation.finalPreviewRatio = finalPreviewRatio;
+  pinchPresentation.finalMidpointX = finalMidpointX;
+  pinchPresentation.finalMidpointY = finalMidpointY;
+  pinchPresentation.active = false;
+  pinchPresentation.settlementPending = true;
+  Maps::isPosMoved = true;
+  Maps::redrawMap = true;
+}
+
+void Maps::finishPinchSettlement() {
+  if (!pinchPresentation.settlementPending) {
+    return;
+  }
+  if (Maps::canvasMap == nullptr) {
+    pinchPresentation = {};
+    return;
+  }
+
+  const double effectiveScale =
+      map_transform::worldToScreenScale(pinchPresentation.baseZoom) *
+      pinchPresentation.finalPreviewRatio;
+  const double targetScale = map_transform::worldToScreenScale(zoomLevel);
+  const uint32_t initialScale = static_cast<uint32_t>(std::round(
+      (effectiveScale / targetScale) * static_cast<double>(LV_SCALE_NONE)));
+  lv_obj_update_layout(Maps::canvasMap);
+  lv_area_t canvasArea;
+  lv_obj_get_coords(Maps::canvasMap, &canvasArea);
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const auto currentExtent =
+      canvasExtent(Maps::canvasMap, Maps::mapScrWidth, viewportHeight);
+  const int32_t pivotScreenX = pinchPresentation.capturedFollowGps
+                                   ? pinchPresentation.anchorScreenX
+                                   : pinchPresentation.finalMidpointX;
+  const int32_t pivotScreenY = pinchPresentation.capturedFollowGps
+                                   ? pinchPresentation.anchorScreenY
+                                   : pinchPresentation.finalMidpointY;
+  const int16_t settlementPivotX = static_cast<int16_t>(
+      std::max<int32_t>(0, std::min<int32_t>(
+                               currentExtent.width - 1,
+                               pivotScreenX - canvasArea.x1)));
+  const int16_t settlementPivotY = static_cast<int16_t>(
+      std::max<int32_t>(0, std::min<int32_t>(
+                               currentExtent.height - 1,
+                               pivotScreenY - canvasArea.y1)));
+  lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+  lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
+                 pinchPresentation.canvasBaseY);
+  lv_image_set_pivot(Maps::canvasMap, settlementPivotX, settlementPivotY);
+  lv_image_set_scale(Maps::canvasMap, initialScale);
+
+  if (initialScale != LV_SCALE_NONE) {
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, Maps::canvasMap);
+    lv_anim_set_exec_cb(&animation, setPinchCanvasScale);
+    lv_anim_set_values(&animation, static_cast<int32_t>(initialScale),
+                       LV_SCALE_NONE);
+    lv_anim_set_duration(&animation, 120);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&animation, completePinchCanvasSettlement);
+    lv_anim_start(&animation);
+  } else {
+    lv_image_set_pivot(Maps::canvasMap, 0, 0);
+  }
+  pinchPresentation = {};
 }
 
 /**
@@ -2633,32 +4059,14 @@ void Maps::displayMap() {
       int32_t gpsX = lon2x(gps.gpsData.longitude);
       int32_t gpsY = lat2y(gps.gpsData.latitude);
 
-      // Apply rotation to match map rendering
-      // 1. Convert from map coords to screen-space offset (Y inverted)
-      // 1. Convert from map coords to screen-space offset (Y inverted)
-      // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-      double dx, dy;
-      if (zoom == 0) {
-        dx = (double)(gpsX - Maps::viewPort.center.x) * 2.0;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) * 2.0;
-      } else if (zoom == 1) {
-        dx = (double)(gpsX - Maps::viewPort.center.x) * 1.5;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) * 1.5;
-      } else {
-        int divisor = zoom - 1; // zoom 2->1, 3->2, 4->3, 5->4
-        dx = (double)(gpsX - Maps::viewPort.center.x) / divisor;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) / divisor;
-      }
-
-      // 2. Rotate in screen space
-      double cosA = cos(rotationRad);
-      double sinA = sin(rotationRad);
-      double rx = dx * cosA - dy * sinA;
-      double ry = dx * sinA + dy * cosA;
+      const auto markerDelta = map_transform::worldToScreen(
+          {static_cast<double>(gpsX - Maps::viewPort.center.x),
+           static_cast<double>(gpsY - Maps::viewPort.center.y)},
+          zoom, visibleMapRotation());
 
       // 3. Translate to screen center (centered on arrow)
-      x = mapOriginX + round(rx) + anchorX - markerVisualHalf;
-      y = mapOriginY + round(ry) + anchorY - markerVisualHalf;
+      x = mapOriginX + round(markerDelta.x) + anchorX - markerVisualHalf;
+      y = mapOriginY + round(markerDelta.y) + anchorY - markerVisualHalf;
 
       ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
                zoom);
@@ -2698,11 +4106,17 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     return false;
   }
 
+  // The hidden buffer is about to become the render target. Any prepared
+  // zoom-out backdrop in it is no longer reusable.
+  invalidatePinchZoomOutBackdrop();
+
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
 
-  // CRITICAL: Update Rotation ONCE per generation frame to ensure map and route
-  // align
+  // Compute the current course-up request once per generation. A pinch
+  // settlement deliberately renders with the rotation of the pixels the
+  // focal calculation started from; a changed heading is rendered next.
+  double requestedRotation = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
     uint16_t courseUpHeading = gps.gpsData.heading;
     const char *courseUpSource = "gps";
@@ -2715,17 +4129,91 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
     // Use negative heading to rotate map so the selected navigation/course
     // direction points up.
-    rotationRad = -DEG2RAD(courseUpHeading);
+    requestedRotation = -DEG2RAD(courseUpHeading);
     ESP_LOGI(TAG, "Course-Up: heading=%u source=%s gpsHeading=%u",
              (unsigned)courseUpHeading, courseUpSource,
              (unsigned)gps.gpsData.heading);
-  } else {
-    rotationRad = 0;
   }
+  const bool frozenPinchSettlement = isPinchSettlementPending();
+  rotationRad = map_transform::renderRotationForSettlement(
+      frozenPinchSettlement, pinchPresentation.baseRotation,
+      requestedRotation);
+  if (frozenPinchSettlement &&
+      map_transform::rotationNeedsRefresh(rotationRad, requestedRotation)) {
+    deferredVectorRedraw = true;
+  }
+
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  if (shouldUseRollingRasterWindow(zoom)) {
+    const uint64_t signature = rollingRasterSignature();
+    bool completed = false;
+    if (rollingRasterCompatible(zoom, Maps::mapScrWidth, viewportHeight,
+                                signature)) {
+      completed = settleRollingRasterWindow();
+    } else {
+      completed = buildRollingRasterWindow(zoom, Maps::mapScrWidth,
+                                            viewportHeight, signature);
+    }
+    if (!completed)
+      return false;
+
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+    const bool completedPinchSettlement = isPinchSettlementPending();
+#endif
+    if (isPinchSettlementPending()) {
+      // A rolling-window settlement can reposition the oversized canvas as
+      // its origin advances. Animate from that completed position, not the
+      // position captured from the previous raster/zoom.
+      pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+      pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+    }
+    finishDragSettlement();
+    finishPinchSettlement();
+    MAPIO_LOG("MAPIO: rolling-generate zoom=%u totalMs=%lu cache=%u "
+              "hasRoute=%d\n",
+              zoom, (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
+              (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+    if (completedPinchSettlement) {
+      Serial.printf(
+          "Pinch diagnostic: rolling_settlement_ms=%lu free_psram=%u "
+          "largest_psram=%u\n",
+          static_cast<unsigned long>(MAPIO_TIME_MS() - generateStartMs),
+          heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    }
+#endif
+    return true;
+  }
+
+  invalidateRollingRasterWindow();
+  const map_drag_preview::CanvasExtent renderExtent = {Maps::mapScrWidth,
+                                                        viewportHeight};
+  const uint32_t renderStride = lv_draw_buf_width_to_stride(
+      renderExtent.width, LV_COLOR_FORMAT_RGB565);
+  const size_t renderSize = renderStride * renderExtent.height;
+  if (renderSize > bufMapTempSize || renderSize > bufMapScreenSize) {
+    ESP_LOGE(TAG,
+             "Map render skipped: %ux%u frame needs %u bytes, screen=%u "
+             "temp=%u",
+             (unsigned)renderExtent.width, (unsigned)renderExtent.height,
+             (unsigned)renderSize, (unsigned)bufMapScreenSize,
+             (unsigned)bufMapTempSize);
+    return false;
+  }
+
+  // The hidden scratch buffer receives the complete target geometry before it
+  // is copied into the visible allocation. Interrupted renders never touch the
+  // visible frame.
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMapTemp);
 
   // Viewport
   Maps::viewPort.zoom = zoom;
-  Maps::viewPort.setCenter(Maps::point);
+  Maps::viewPort.setCenterForCanvas(Maps::point, renderExtent.width,
+                                    renderExtent.height, rotationRad);
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
@@ -2763,17 +4251,14 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
-    // BUGFIX: Use actual canvas height, not mapScrHeight which differs in
-    // fullscreen mode
-    uint16_t canvasHeight =
-        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-    routeOverlay.drawRoute(Maps::canvasMapTemp, Maps::viewPort.center.x,
-                           Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
-                           canvasHeight, rotationRad,
-                           mapAnchorXForWidth(Maps::mapScrWidth),
-                           mapAnchorYForHeight(canvasHeight));
+    routeOverlay.drawRoute(Maps::canvasMapTemp,
+                           Maps::viewPort.rasterOriginX,
+                           Maps::viewPort.rasterOriginY, zoom, renderExtent.width,
+                           renderExtent.height, rotationRad,
+                           mapAnchorXForWidth(renderExtent.width),
+                           mapAnchorYForHeight(renderExtent.height));
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
-             rotationRad, canvasHeight);
+             rotationRad, renderExtent.height);
   } else if (routeOverlay.hasRoute()) {
     ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
   } else {
@@ -2786,17 +4271,29 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     return false;
   }
 
-  // Atomically present the completed back buffer. The old front buffer becomes
-  // the next render target; interrupted renders never touch the visible frame.
-  void *completedFrame = bufMapTemp;
-  bufMapTemp = bufMapScreen;
-  bufMapScreen = completedFrame;
-  const uint16_t canvasHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, Maps::mapScrWidth,
-                       canvasHeight, LV_COLOR_FORMAT_RGB565);
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
-                       canvasHeight, LV_COLOR_FORMAT_RGB565);
+  const size_t rowBytes =
+      static_cast<size_t>(renderExtent.width) * sizeof(uint16_t);
+  auto *front = static_cast<uint8_t *>(bufMapScreen);
+  const auto *completedFrame = static_cast<const uint8_t *>(bufMapTemp);
+  for (uint16_t y = 0; y < renderExtent.height; ++y) {
+    memcpy(front + (static_cast<size_t>(y) * renderStride),
+           completedFrame + (static_cast<size_t>(y) * renderStride), rowBytes);
+  }
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_center(Maps::canvasMapTemp);
+  if (isPinchSettlementPending()) {
+    pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+    pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  }
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  const bool completedPinchSettlement = isPinchSettlementPending();
+#endif
+  finishDragSettlement();
+  finishPinchSettlement();
 
   MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "
             "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
@@ -2804,6 +4301,16 @@ bool Maps::generateVectorMap(uint8_t zoom) {
             (unsigned long)routeMs,
             (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
             (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  if (completedPinchSettlement) {
+    Serial.printf(
+        "Pinch diagnostic: settlement_ms=%lu free_psram=%u "
+        "largest_psram=%u\n",
+        static_cast<unsigned long>(MAPIO_TIME_MS() - generateStartMs),
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  }
+#endif
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
   return true;
@@ -2877,20 +4384,11 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
   // from previous drags wasn't being reset between touch sessions.
 
   if (mapSet.vectorMap) {
-    // For vector maps, directly update the geographic center point
-    // Scale pixels to coordinates using the current zoom
-    // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-    if (zoom == 0) {
-      Maps::point.x += (int32_t)(dx / 2);
-      Maps::point.y -= (int32_t)(dy / 2);
-    } else if (zoom == 1) {
-      Maps::point.x += (int32_t)(dx / 1.5);
-      Maps::point.y -= (int32_t)(dy / 1.5);
-    } else {
-      int divisor = zoom - 1;
-      Maps::point.x += (int32_t)(dx * divisor);
-      Maps::point.y -= (int32_t)(dy * divisor);
-    }
+    const auto worldDelta = map_transform::screenToWorld(
+        {static_cast<double>(dx), static_cast<double>(dy)}, zoom,
+        visibleMapRotation());
+    Maps::point.x += static_cast<int32_t>(std::round(worldDelta.x));
+    Maps::point.y += static_cast<int32_t>(std::round(worldDelta.y));
     ESP_LOGI(TAG, "scrollMap (Vector): dx=%d dy=%d zoom=%d -> point(%d, %d)",
              dx, dy, zoom, Maps::point.x, Maps::point.y);
     Maps::isPosMoved = true;
