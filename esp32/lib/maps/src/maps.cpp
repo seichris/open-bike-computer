@@ -285,7 +285,6 @@ static void *bufMapScreen = nullptr;
 static void *bufMapTemp = nullptr;
 static size_t bufMapCanvasSize = 0;
 static void *bufMapIcon = nullptr;
-static void *bufArrow = nullptr;
 
 static bool ensureMapCanvasBuffers(size_t requiredSize) {
   if (bufMapScreen != nullptr && bufMapTemp != nullptr &&
@@ -313,65 +312,6 @@ static bool ensureMapCanvasBuffers(size_t requiredSize) {
   bufMapTemp = newTemp;
   bufMapCanvasSize = requiredSize;
   return true;
-}
-
-static void *ensureArrowBuffer() {
-  if (bufArrow != nullptr)
-    return bufArrow;
-
-  const size_t arrowStride =
-      lv_draw_buf_width_to_stride(48, LV_COLOR_FORMAT_ARGB8888);
-  const size_t arrowSize = arrowStride * 48;
-  bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const char *source = "internal";
-  if (bufArrow == nullptr) {
-    bufArrow = heap_caps_malloc(arrowSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    source = "psram";
-  }
-  ESP_LOGI(TAG, "MapBuff: arrow ARGB stride=%u size=%u ptr=%p source=%s",
-           (unsigned)arrowStride, (unsigned)arrowSize, bufArrow, source);
-  return bufArrow;
-}
-
-static void plotMarkerPixel(lv_obj_t *canvas, int16_t x, int16_t y,
-                            lv_color_t color) {
-  if (x < 0 || x >= 48 || y < 0 || y >= 48)
-    return;
-
-  lv_canvas_set_px(canvas, x, y, color, LV_OPA_COVER);
-}
-
-static void drawThickMarkerLine(lv_obj_t *canvas, int16_t x0, int16_t y0,
-                                int16_t x1, int16_t y1, lv_color_t color,
-                                uint8_t thickness) {
-  int16_t dx = abs(x1 - x0);
-  int16_t sx = x0 < x1 ? 1 : -1;
-  int16_t dy = -abs(y1 - y0);
-  int16_t sy = y0 < y1 ? 1 : -1;
-  int16_t err = dx + dy;
-  const int16_t radius = thickness / 2;
-
-  while (true) {
-    for (int16_t oy = -radius; oy <= radius; oy++) {
-      for (int16_t ox = -radius; ox <= radius; ox++) {
-        if (ox * ox + oy * oy <= radius * radius)
-          plotMarkerPixel(canvas, x0 + ox, y0 + oy, color);
-      }
-    }
-
-    if (x0 == x1 && y0 == y1)
-      break;
-
-    int16_t e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x0 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y0 += sy;
-    }
-  }
 }
 
 static uint8_t lineClipOutCode(float x, float y, float minX, float minY,
@@ -448,90 +388,90 @@ static bool clipLineToRect(int16_t &x1, int16_t &y1, int16_t &x2, int16_t &y2,
   }
 }
 
-static bool isInsideNavigationMarker(int16_t x, int16_t y) {
-  constexpr int16_t px[] = {24, 38, 24, 10};
-  constexpr int16_t py[] = {4, 42, 34, 42};
-  bool inside = false;
-
-  for (uint8_t i = 0, j = 3; i < 4; j = i++) {
-    const bool crosses = ((py[i] > y) != (py[j] > y)) &&
-                         (x < (px[j] - px[i]) * (y - py[i]) /
-                                      (py[j] - py[i]) +
-                                  px[i]);
-    if (crosses)
-      inside = !inside;
-  }
-
-  return inside;
-}
-
-static void drawNavigationMarker(lv_obj_t *canvas) {
-  if (!canvas)
-    return;
-
-  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
-
-  const lv_color_t color = lv_color_white();
-
-  // 24x24 lucide-style navigation polygon scaled to this 48x48 marker:
-  // points="12 2 19 21 12 17 5 21 12 2"
-  for (int16_t y = 0; y < 48; y++) {
-    for (int16_t x = 0; x < 48; x++) {
-      if (isInsideNavigationMarker(x, y))
-        plotMarkerPixel(canvas, x, y, color);
-    }
-  }
-
-  // Stroke the edges in the same color so the filled marker stays crisp.
-  constexpr uint8_t strokeWidth = 3;
-  drawThickMarkerLine(canvas, 24, 4, 38, 42, color, strokeWidth);
-  drawThickMarkerLine(canvas, 38, 42, 24, 34, color, strokeWidth);
-  drawThickMarkerLine(canvas, 24, 34, 10, 42, color, strokeWidth);
-  drawThickMarkerLine(canvas, 10, 42, 24, 4, color, strokeWidth);
-
-  lv_obj_invalidate(canvas);
-}
-
-static void drawPositionDotMarker(lv_obj_t *canvas) {
-  if (!canvas)
-    return;
-
-  lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
-
-  const lv_color_t color = lv_color_hex(0x3B82F6);
-  constexpr int16_t center = 24;
-  constexpr int16_t radius = 8;
-
-  for (int16_t y = center - radius; y <= center + radius; y++) {
-    for (int16_t x = center - radius; x <= center + radius; x++) {
-      const int16_t dx = x - center;
-      const int16_t dy = y - center;
-      if (dx * dx + dy * dy <= radius * radius)
-        plotMarkerPixel(canvas, x, y, color);
-    }
-  }
-
-  lv_obj_invalidate(canvas);
-}
-
 static uint8_t currentMarkerScale() {
   return (uint8_t)std::min(
       std::max((int)currentMapStyleSettings().positionMarkerScale, 1), 5);
 }
 
-static void applyNavigationMarkerScale(lv_obj_t *canvas) {
-  if (!canvas)
-    return;
-
-  const int32_t scale = currentMarkerScale() * 256;
-  lv_obj_set_style_transform_pivot_x(canvas, 24, 0);
-  lv_obj_set_style_transform_pivot_y(canvas, 24, 0);
-  lv_obj_set_style_transform_scale_x(canvas, scale, 0);
-  lv_obj_set_style_transform_scale_y(canvas, scale, 0);
+static int16_t currentMarkerSize() {
+  return navigation_visual_style::POSITION_MARKER_BASE_SIZE *
+         currentMarkerScale();
 }
 
-static void updateCurrentPositionMarker(lv_obj_t *canvas, bool force = false) {
-  if (!canvas || bufArrow == nullptr)
+static lv_value_precise_t markerCoord(int32_t origin, int16_t size,
+                                      int16_t baseCoord) {
+  return origin +
+         (static_cast<lv_value_precise_t>(baseCoord) * size /
+          navigation_visual_style::POSITION_MARKER_BASE_SIZE);
+}
+
+static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
+                                 int16_t size, lv_color_t color) {
+  // Lucide-style navigation polygon, split into two triangles at the concave
+  // notch. It is rasterized directly at the configured on-screen size.
+  const lv_point_precise_t top = {
+      markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 4)};
+  const lv_point_precise_t right = {
+      markerCoord(bounds.x1, size, 38), markerCoord(bounds.y1, size, 42)};
+  const lv_point_precise_t notch = {
+      markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 34)};
+  const lv_point_precise_t left = {
+      markerCoord(bounds.x1, size, 10), markerCoord(bounds.y1, size, 42)};
+
+  lv_draw_triangle_dsc_t triangle;
+  lv_draw_triangle_dsc_init(&triangle);
+  triangle.bg_color = color;
+  triangle.bg_opa = LV_OPA_COVER;
+
+  triangle.p[0] = top;
+  triangle.p[1] = right;
+  triangle.p[2] = notch;
+  lv_draw_triangle(layer, &triangle);
+
+  triangle.p[0] = top;
+  triangle.p[1] = notch;
+  triangle.p[2] = left;
+  lv_draw_triangle(layer, &triangle);
+}
+
+static void drawPositionDotMarker(lv_layer_t *layer, const lv_area_t &bounds,
+                                  int16_t size, lv_color_t color) {
+  const int32_t diameter = size / 3;
+  const int32_t centerX = bounds.x1 + size / 2;
+  const int32_t centerY = bounds.y1 + size / 2;
+  lv_area_t dotBounds = {centerX - diameter / 2, centerY - diameter / 2,
+                         centerX + diameter / 2 - 1,
+                         centerY + diameter / 2 - 1};
+
+  lv_draw_rect_dsc_t dot;
+  lv_draw_rect_dsc_init(&dot);
+  dot.bg_color = color;
+  dot.bg_opa = LV_OPA_COVER;
+  dot.radius = LV_RADIUS_CIRCLE;
+  lv_draw_rect(layer, &dot, &dotBounds);
+}
+
+static void drawCurrentPositionMarker(lv_event_t *event) {
+  lv_obj_t *marker = static_cast<lv_obj_t *>(lv_event_get_target(event));
+  lv_layer_t *layer = lv_event_get_layer(event);
+  if (!marker || !layer)
+    return;
+
+  lv_area_t bounds;
+  lv_obj_get_coords(marker, &bounds);
+  const int16_t size = lv_obj_get_width(marker);
+  const lv_color_t color =
+      lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
+
+  if (routeOverlay.hasRoute()) {
+    drawNavigationMarker(layer, bounds, size, color);
+  } else {
+    drawPositionDotMarker(layer, bounds, size, color);
+  }
+}
+
+static void updateCurrentPositionMarker(lv_obj_t *marker, bool force = false) {
+  if (!marker)
     return;
 
   static bool hasLastShape = false;
@@ -542,17 +482,12 @@ static void updateCurrentPositionMarker(lv_obj_t *canvas, bool force = false) {
   const uint8_t scale = currentMarkerScale();
   if (!force && hasLastShape && lastWasNavigating == isNavigating &&
       lastScale == scale) {
-    applyNavigationMarkerScale(canvas);
     return;
   }
 
-  if (isNavigating) {
-    drawNavigationMarker(canvas);
-  } else {
-    drawPositionDotMarker(canvas);
-  }
-
-  applyNavigationMarkerScale(canvas);
+  const int16_t size = currentMarkerSize();
+  lv_obj_set_size(marker, size, size);
+  lv_obj_invalidate(marker);
   hasLastShape = true;
   lastWasNavigating = isNavigating;
   lastScale = scale;
@@ -2334,10 +2269,6 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   // Maps::mapTempSprite.deleteSprite();
   // Maps::mapTempSprite.createSprite(tileHeight, tileWidth);
 
-  if (bufArrow == nullptr) {
-    ensureArrowBuffer();
-  }
-
   Maps::oldMapTile = {};           // Old Map tile coordinates and zoom
   Maps::currentMapTile = {};       // Current Map tile coordinates and zoom
   Maps::roundMapTile = {};         // Boundaries Map tiles
@@ -2458,20 +2389,16 @@ void Maps::createMapScrSprites() {
                        LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMapTemp);
 
-  // Arrow Sprite (Canvas) - 48x48 for better visibility
-  if (ensureArrowBuffer() != nullptr) {
-    Maps::canvasArrow =
-        lv_canvas_create(mapTile); // Create on mapTile instead of active screen
-    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-    lv_canvas_set_buffer(Maps::canvasArrow, bufArrow, 48, 48,
-                         LV_COLOR_FORMAT_ARGB8888);
-    updateCurrentPositionMarker(Maps::canvasArrow, true);
-  } else {
-    ESP_LOGE(TAG, "MapBuff: arrow buffer unavailable; marker disabled");
-    Maps::canvasArrow = nullptr;
-  }
+  // Draw the current-position marker as native LVGL geometry at its final
+  // on-screen size. This avoids magnifying a fixed 48x48 bitmap.
+  Maps::canvasArrow = lv_obj_create(mapTile);
+  lv_obj_remove_style_all(Maps::canvasArrow);
+  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(Maps::canvasArrow, drawCurrentPositionMarker,
+                      LV_EVENT_DRAW_MAIN, nullptr);
+  updateCurrentPositionMarker(Maps::canvasArrow, true);
   ESP_LOGI(TAG, "createMapScrSprites done");
 
   // Make arrow clickable to toggle rotation mode
@@ -2513,7 +2440,7 @@ void Maps::toggleRotationMode() {
  * @brief Update GPS indicator arrow color based on rotation mode
  */
 void Maps::updateArrowColor() {
-  if (!Maps::canvasArrow || bufArrow == nullptr)
+  if (!Maps::canvasArrow)
     return;
 
   updateCurrentPositionMarker(Maps::canvasArrow, true);
@@ -2652,15 +2579,15 @@ void Maps::displayMap() {
     const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = mapAnchorYForHeight(h);
     updateCurrentPositionMarker(Maps::canvasArrow);
-    const int16_t markerVisualHalf = 24 * currentMarkerScale();
+    const int16_t markerVisualHalf = currentMarkerSize() / 2;
     int16_t x, y;
 
     if (Maps::followGps) {
       // The marker is a sibling of the centered map canvas, so translate the
       // canvas-local anchor into map-tile coordinates before applying the
-      // 48x48 icon's center offset.
-      x = mapOriginX + anchorX - 24;
-      y = mapOriginY + anchorY - 24;
+      // marker's center offset.
+      x = mapOriginX + anchorX - markerVisualHalf;
+      y = mapOriginY + anchorY - markerVisualHalf;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
       ESP_LOGI(TAG, "GPS indicator: followGps mode, anchor screen pos(%d,%d)",
@@ -2695,9 +2622,8 @@ void Maps::displayMap() {
       double ry = dx * sinA + dy * cosA;
 
       // 3. Translate to screen center (centered on arrow)
-      // 48x48 icon, so offset by -24
-      x = mapOriginX + round(rx) + anchorX - 24;
-      y = mapOriginY + round(ry) + anchorY - 24;
+      x = mapOriginX + round(rx) + anchorX - markerVisualHalf;
+      y = mapOriginY + round(ry) + anchorY - markerVisualHalf;
 
       ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
                zoom);
@@ -2705,8 +2631,8 @@ void Maps::displayMap() {
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
       // Simple bounds check to hide if too far off screen
-      const int16_t centerX = x + 24;
-      const int16_t centerY = y + 24;
+      const int16_t centerX = x + markerVisualHalf;
+      const int16_t centerY = y + markerVisualHalf;
       if (centerX < mapOriginX - markerVisualHalf ||
           centerX > mapOriginX + (int16_t)Maps::mapScrWidth +
                         markerVisualHalf ||
