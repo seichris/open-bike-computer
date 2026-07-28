@@ -1,4 +1,4 @@
-# control-plane-source-commit: 5e16568f5a91076abd34bab9ca6d4d516bfc25c1
+# control-plane-source-commit: 9e9b2bc1bf1e1b37be8335ef7dcb74ec8c3f7bbd
 # worker-source-commit: 1e2070ef98be94d00a441ad4a7a8b5f7a696687b
 
 # These digest-pinned images are the production deployment manifest. The API
@@ -6,7 +6,7 @@
 # the hardware-tested worker remains pinned. Keep each source commit and digest
 # in sync through update_image.py; never replace a digest with a mutable tag.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:62ff779915cbbdabba712f82732c01c029c57a5e3effcb89fdc7db5db6a7743e
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:e706c8792d1067688b3d080e1b3bff17082c4a5d7021215cc702984a507f91b7
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:a24b2ed3c3c2ff762381227b005a199a5fbdfa7b991bb56bd5a06849222cb1f5
 
 services:
