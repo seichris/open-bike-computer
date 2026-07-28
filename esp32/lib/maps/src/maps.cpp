@@ -2839,11 +2839,19 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!continuingSettlement) {
     dragPresentation = {};
     dragPresentation.baseZoom = normalizedZoom;
-    dragPresentation.canvasBaseX = lv_obj_get_x(Maps::canvasMap);
-    dragPresentation.canvasBaseY = lv_obj_get_y(Maps::canvasMap);
+    // lv_obj_set_pos() updates the offset from the object's configured
+    // alignment. The map canvases are centered, so preserve their aligned
+    // offsets (normally 0,0), not their resolved top-left coordinates. Using
+    // the resolved coordinate as a centered offset applies the centering
+    // margin twice; the oversized canvas was consequently shifted by another
+    // 96 px and exposed duplicated-looking map content during a drag.
+    dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+    dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
     if (Maps::canvasArrow != nullptr) {
-      dragPresentation.markerBaseX = lv_obj_get_x(Maps::canvasArrow);
-      dragPresentation.markerBaseY = lv_obj_get_y(Maps::canvasArrow);
+      dragPresentation.markerBaseX =
+          lv_obj_get_x_aligned(Maps::canvasArrow);
+      dragPresentation.markerBaseY =
+          lv_obj_get_y_aligned(Maps::canvasArrow);
     }
     dragPresentation.hasBackdrop =
         hasPinchZoomOutBackdrop(normalizedZoom);
@@ -2854,9 +2862,9 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
         hasDragOverscanBackdrop(normalizedZoom);
     if (dragPresentation.hasOverscan) {
       dragPresentation.overscanBaseX =
-          lv_obj_get_x(Maps::canvasMapDragOverscan);
+          lv_obj_get_x_aligned(Maps::canvasMapDragOverscan);
       dragPresentation.overscanBaseY =
-          lv_obj_get_y(Maps::canvasMapDragOverscan);
+          lv_obj_get_y_aligned(Maps::canvasMapDragOverscan);
     }
   }
 
@@ -2884,7 +2892,10 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
       Maps::canvasMapDragOverscan != nullptr) {
     lv_obj_move_background(Maps::canvasMapDragOverscan);
     lv_obj_clear_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(Maps::canvasMap);
+    // The overscan canvas contains the entire visible map plus its gutter.
+    // Present it as the sole map image so independently rasterized copies
+    // cannot form an overlap seam while moving.
+    lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_HIDDEN);
     if (Maps::canvasArrow != nullptr)
       lv_obj_move_foreground(Maps::canvasArrow);
   }
@@ -2913,6 +2924,8 @@ void Maps::resetDragPresentationVisuals() {
   if (Maps::canvasMap != nullptr) {
     lv_obj_set_pos(Maps::canvasMap, dragPresentation.canvasBaseX,
                    dragPresentation.canvasBaseY);
+    if (dragPresentation.hasOverscan)
+      lv_obj_clear_flag(Maps::canvasMap, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(Maps::canvasMap);
   }
   if (Maps::canvasMapTemp != nullptr) {

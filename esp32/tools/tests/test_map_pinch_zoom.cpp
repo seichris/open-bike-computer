@@ -1,4 +1,5 @@
 #include "../../lib/maps/src/mapTransform.hpp"
+#include "../../lib/gui/src/guiLayout.hpp"
 #include "../../lib/utils/src/mapPinchZoom.hpp"
 #include "../../lib/utils/src/mapTapArbiter.hpp"
 #include "../../lib/utils/src/mapDragPreview.hpp"
@@ -209,6 +210,19 @@ int main() {
   assert(map_drag_preview::kOverscanMarginPx == 96);
   assert(map_drag_preview::overscanExtent(466) == 658);
   assert(map_drag_preview::overscanExtent(366) == 558);
+
+  // A centered oversized canvas must put the same map center at the same
+  // parent coordinate as the normal viewport. Drag presentation therefore
+  // moves both from their aligned (0,0) offsets, rather than reusing these
+  // resolved negative/top coordinates as new centered offsets.
+  assert(gui_layout::centeredViewportOrigin(466, 466) +
+             gui_layout::mapAnchorX(466) ==
+         gui_layout::centeredViewportOrigin(466, 658) +
+             gui_layout::mapAnchorX(658));
+  assert(gui_layout::centeredViewportOrigin(466, 366) +
+             gui_layout::mapAnchorY(366) ==
+         gui_layout::centeredViewportOrigin(466, 558) +
+             gui_layout::mapAnchorY(558));
 
   const auto northUpOverscan = map_transform::canvasWorldBounds(
       {1000.0, 2000.0}, 658.0, 558.0, 5, 0.0);
