@@ -590,7 +590,7 @@ four-target matrix. The new host tests must be added to the `esp32-host` job.
 - Replacing the current map renderer or full-screen/back-buffer strategy.
 - Adding the complete Waveshare SensorLib dependency.
 
-## Post-implementation max-zoom drag hardening
+## Post-implementation drag hardening
 
 Physical testing exposed a separate limitation after pinch zoom itself was
 working: a fixed 128 px overscan gutter could still be exhausted by a long or
@@ -601,16 +601,21 @@ visible repetition and quality transitions, so it is not an acceptable
 fallback.
 
 The long-term fix is a rolling, full-resolution raster window used only by the
-standalone Map at runtime zoom 5:
+standalone Map at every runtime zoom:
 
-- The visible raster is a 5 by 5 grid of 192 px RGB565 cells, or 960 by 960
-  px in total.
+- Runtime zoom 5 uses a 5 by 5 grid of 192 px RGB565 cells, or 960 by 960 px
+  in total. Runtime zooms 1 through 4 use a lighter 3 by 3 grid of 256 px
+  cells, or 768 by 768 px in total.
 - A 466 px square viewport therefore has 247 px of prepared map on every side.
   The 366 px non-fullscreen height has 297 px vertically. The 2.06-inch
-  viewport remains covered by at least 229 px in either dimension.
+  viewport remains covered by at least 229 px in either dimension. At zooms
+  1 through 4, the corresponding margins are 151 px around a 466 px square,
+  201 px vertically in non-fullscreen mode, and at least 133 px on the
+  2.06-inch viewport.
 - Each cell is rendered independently through the existing vector renderer.
   A rotated 192 px cell remains below one 4096-unit map-block span at zoom 5,
-  preserving the current four-block cache ceiling.
+  and a rotated 256 px cell remains below it at zoom 4, preserving the current
+  four-block cache ceiling for both layouts.
 - Once the viewport center moves more than half a cell from the raster origin,
   firmware renders the complete replacement row or column into scratch
   storage, shifts the prepared pixels by one cell, and advances the origin.
@@ -623,9 +628,9 @@ standalone Map at runtime zoom 5:
   full-resolution edge instead of revealing black, stale, repeated, or scaled
   pixels. The bounded logical drag state is also rebased so reversing direction
   works immediately.
-- A full 25-cell rebuild keeps a viewport-sized snapshot of the last complete
-  map visible. The live grid is not rebound until every cell succeeds, so an
-  input-triggered interruption cannot expose a partially populated raster.
+- A full 25-cell or 9-cell rebuild keeps a viewport-sized snapshot of the last
+  complete map visible. The live grid is not rebound until every cell succeeds,
+  so an input-triggered interruption cannot expose a partially populated raster.
   A drag that interrupts the first preload owns the gesture but holds this
   exact-size snapshot still, then retries the preload after release.
 - Route content revision, style, viewport, zoom, map root, rotation mode, and
@@ -636,31 +641,33 @@ standalone Map at runtime zoom 5:
   touch behavior, and viewport-sized canvas remain unchanged.
 
 The two PSRAM allocations used by the map renderer are intentionally
-asymmetric. The large front allocation is grown lazily when standalone Map
-first reaches zoom 5, so a navigation-only session keeps a normal
-viewport-sized front buffer:
+asymmetric. The front allocation is grown lazily when standalone Map first
+activates a rolling layout, so a navigation-only session keeps a normal
+viewport-sized front buffer. It first grows to 768 px square at zooms 1 through
+4 and only grows to 960 px square if zoom 5 is used:
 
 | Allocation | Capacity |
 | --- | ---: |
-| Rolling visible grid | `960 * 960 * 2 = 1,843,200` bytes |
-| Five replacement cells / viewport snapshot plus one cell | `508,040` bytes |
-| Total after rolling-window activation | `2,351,240` bytes |
+| Compact rolling visible grid | `768 * 768 * 2 = 1,179,648` bytes |
+| Wide rolling visible grid | `960 * 960 * 2 = 1,843,200` bytes |
+| Scratch / maximum viewport snapshot plus one 256 px cell | `598,936` bytes |
+| Total at zooms 1 through 4 | `1,778,584` bytes |
+| Total at zoom 5 | `2,442,136` bytes |
 
-This is smaller than a 3 by 3 grid made from full 466 px viewport cells while
-providing more than half a display-width of prepared movement. Lower zooms and
-Map + Navigation bind only their normal viewport-sized prefixes. Before the
-first rolling-window activation, the 1.75-inch front plus scratch capacity is
-about 0.94 MB rather than 2.35 MB. The 192 px cell size is deliberate: it
-retains roughly 1.5 MB more PSRAM headroom than the previous 256 px design for
-the dense vector block being rasterized.
+Both layouts are smaller than a 3 by 3 grid made from full 466 px viewport
+cells. Map + Navigation binds only its normal viewport-sized prefixes. Before
+the first rolling-window activation, the 1.75-inch front plus scratch capacity
+is about 1.02 MB. The compact layout rasterizes 36% fewer pixels than the wide
+layout, while the 192 px zoom-5 cell size preserves headroom for the denser
+world span being rasterized there.
 
 Additional acceptance checks for this follow-up are:
 
-1. Repeated drags in all four directions at zoom 5 never reveal black,
+1. Repeated drags in all four directions at every runtime zoom never reveal black,
    low-resolution, repeated, or uninitialized pixels.
-2. Dragging across more than one 192 px boundary recycles the correct new
-   outer row/column and leaves the next gesture centered on the previous
-   settlement.
+2. The 3 by 3 layout at zooms 1 through 4 and the 5 by 5 layout at zoom 5 both
+   recycle the correct new outer row/column across repeated same-direction
+   movements.
 3. Rapid reverse-direction and diagonal drags do not pay back hidden clamped
    movement and do not expose seams caused by a stale edge cell.
 4. Touch interruption during a full rebuild or edge preparation leaves the

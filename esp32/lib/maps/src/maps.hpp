@@ -227,6 +227,10 @@ private:
     int16_t canvasBaseY = 0;
     int16_t pivotLocalX = 0;
     int16_t pivotLocalY = 0;
+    int16_t backdropBaseX = 0;
+    int16_t backdropBaseY = 0;
+    int16_t backdropPivotLocalX = 0;
+    int16_t backdropPivotLocalY = 0;
     int16_t anchorScreenX = 0;
     int16_t anchorScreenY = 0;
     int16_t markerBaseX = 0;
@@ -241,6 +245,8 @@ private:
   struct RollingRasterWindow {
     bool valid = false;
     uint8_t zoom = map_transform::kMaximumRuntimeZoom;
+    uint8_t gridRadius = map_raster_window::kGridRadius;
+    uint8_t gridSpan = map_raster_window::kGridSpan;
     uint16_t tileWidth = map_raster_window::kCellExtentPx;
     uint16_t tileHeight = map_raster_window::kCellExtentPx;
     uint16_t viewportWidth = 0;

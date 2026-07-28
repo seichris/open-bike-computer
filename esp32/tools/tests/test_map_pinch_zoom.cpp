@@ -219,6 +219,22 @@ int main() {
   const auto rollingFullscreen = map_raster_window::gridExtent();
   assert(rollingFullscreen.width == 960);
   assert(rollingFullscreen.height == 960);
+  for (uint8_t zoom = 1; zoom < map_transform::kMaximumRuntimeZoom; ++zoom) {
+    const auto compact = map_raster_window::layoutForZoom(
+        zoom, map_transform::kMaximumRuntimeZoom);
+    assert(compact.radius == 1);
+    assert(compact.span == 3);
+    assert(compact.cellExtent == 256);
+    const auto compactGrid = map_raster_window::gridExtent(compact);
+    assert(compactGrid.width == 768);
+    assert(compactGrid.height == 768);
+  }
+  const auto wide = map_raster_window::layoutForZoom(
+      map_transform::kMaximumRuntimeZoom,
+      map_transform::kMaximumRuntimeZoom);
+  assert(wide.radius == 2);
+  assert(wide.span == 5);
+  assert(wide.cellExtent == 192);
   assert(map_raster_window::centerLimit(466) == 247);
   assert(map_raster_window::centerLimit(366) == 297);
   assert(map_raster_window::centerLimit(410) == 275);
@@ -245,6 +261,26 @@ int main() {
   assert(-1 + map_raster_window::replacementCellOffset(-1) == -3);
   assert(map_raster_window::centerIsCovered(247, -297, 466, 366));
   assert(!map_raster_window::centerIsCovered(248, 0, 466, 366));
+  assert(map_raster_window::centerLimit(466, 256, 3) == 151);
+  assert(map_raster_window::centerLimit(366, 256, 3) == 201);
+  assert(map_raster_window::centerLimit(410, 256, 3) == 179);
+  assert(map_raster_window::centerLimit(502, 256, 3) == 133);
+  assert(map_raster_window::clampDragOffset(0, 300, 466, 256, 3) ==
+         151);
+  assert(map_raster_window::clampDragOffset(100, 100, 466, 256, 3) ==
+         51);
+  assert(map_raster_window::recycleDirection(127.9, 256) == 0);
+  assert(map_raster_window::recycleDirection(128.1, 256) == 1);
+  assert(map_raster_window::replacementCellOffset(1, 1) == 1);
+  assert(map_raster_window::replacementCellOffset(-1, 1) == -1);
+  // After the compact origin advances, its replacement is one cell beyond
+  // the old 3-cell edge rather than a repeated copy of that edge.
+  assert(1 + map_raster_window::replacementCellOffset(1, 1) == 2);
+  assert(-1 + map_raster_window::replacementCellOffset(-1, 1) == -2);
+  assert(map_raster_window::centerIsCovered(151, -201, 466, 366, 256,
+                                            256, 3));
+  assert(!map_raster_window::centerIsCovered(152, 0, 466, 366, 256, 256,
+                                             3));
 
   // Recycling must move completed cells without repeating the discarded edge.
   constexpr uint16_t testCellExtent = 2;
@@ -317,6 +353,74 @@ int main() {
   assert(cellValue(0, 1) == 300);
   assert(cellValue(1, 1) == 11);
 
+  // The compact 3x3 layout must also support repeated recycling in the same
+  // direction without wrapping the discarded edge back into view.
+  constexpr uint8_t compactSpan = map_raster_window::kCompactGridSpan;
+  constexpr uint16_t compactTestGridExtent =
+      testCellExtent * compactSpan;
+  std::vector<uint16_t> compactRaster(compactTestGridExtent *
+                                      compactTestGridExtent);
+  auto fillCompactCell = [&](uint8_t column, uint8_t row, uint16_t value) {
+    for (uint16_t y = 0; y < testCellExtent; ++y) {
+      for (uint16_t x = 0; x < testCellExtent; ++x) {
+        compactRaster[(row * testCellExtent + y) * compactTestGridExtent +
+                      (column * testCellExtent + x)] = value;
+      }
+    }
+  };
+  auto compactCellValue = [&](uint8_t column, uint8_t row) {
+    return compactRaster[(row * testCellExtent) * compactTestGridExtent +
+                         (column * testCellExtent)];
+  };
+  for (uint8_t row = 0; row < compactSpan; ++row) {
+    for (uint8_t column = 0; column < compactSpan; ++column)
+      fillCompactCell(column, row, (row * 10) + column);
+  }
+  std::vector<uint16_t> compactScratch(compactSpan * testCellExtent *
+                                       testCellExtent);
+  for (uint8_t cell = 0; cell < compactSpan; ++cell) {
+    std::fill(compactScratch.begin() +
+                  (cell * testCellExtent * testCellExtent),
+              compactScratch.begin() +
+                  ((cell + 1) * testCellExtent * testCellExtent),
+              100 + cell);
+  }
+  map_raster_window::shiftPixelsHorizontal(
+      compactRaster.data(), compactScratch.data(), testCellExtent,
+      testCellExtent, 1, compactSpan);
+  for (uint8_t row = 0; row < compactSpan; ++row) {
+    assert(compactCellValue(0, row) == (row * 10) + 1);
+    assert(compactCellValue(1, row) == (row * 10) + 2);
+    assert(compactCellValue(2, row) == 100 + row);
+  }
+  for (uint8_t cell = 0; cell < compactSpan; ++cell) {
+    std::fill(compactScratch.begin() +
+                  (cell * testCellExtent * testCellExtent),
+              compactScratch.begin() +
+                  ((cell + 1) * testCellExtent * testCellExtent),
+              200 + cell);
+  }
+  map_raster_window::shiftPixelsHorizontal(
+      compactRaster.data(), compactScratch.data(), testCellExtent,
+      testCellExtent, 1, compactSpan);
+  for (uint8_t row = 0; row < compactSpan; ++row) {
+    assert(compactCellValue(0, row) == (row * 10) + 2);
+    assert(compactCellValue(1, row) == 100 + row);
+    assert(compactCellValue(2, row) == 200 + row);
+  }
+  for (uint8_t cell = 0; cell < compactSpan; ++cell) {
+    std::fill(compactScratch.begin() +
+                  (cell * testCellExtent * testCellExtent),
+              compactScratch.begin() +
+                  ((cell + 1) * testCellExtent * testCellExtent),
+              300 + cell);
+  }
+  map_raster_window::shiftPixelsVertical(
+      compactRaster.data(), compactScratch.data(), testCellExtent,
+      testCellExtent, 1, compactSpan);
+  for (uint8_t column = 0; column < compactSpan; ++column)
+    assert(compactCellValue(column, 2) == 300 + column);
+
   // A centered oversized canvas must put the same map center at the same
   // parent coordinate as the normal viewport. Drag presentation therefore
   // moves both from their aligned (0,0) offsets, rather than reusing these
@@ -329,6 +433,14 @@ int main() {
              gui_layout::mapAnchorY(366) ==
          gui_layout::centeredViewportOrigin(466, 960) +
              gui_layout::mapAnchorY(960));
+  assert(gui_layout::centeredViewportOrigin(466, 466) +
+             gui_layout::mapAnchorX(466) ==
+         gui_layout::centeredViewportOrigin(466, 768) +
+             gui_layout::mapAnchorX(768));
+  assert(gui_layout::centeredViewportOrigin(466, 366) +
+             gui_layout::mapAnchorY(366) ==
+         gui_layout::centeredViewportOrigin(466, 768) +
+             gui_layout::mapAnchorY(768));
 
   const auto northUpCell = map_transform::canvasWorldBounds(
       {1000.0, 2000.0}, 192.0, 192.0, 5, 0.0);
@@ -342,6 +454,7 @@ int main() {
   // four-vector-block working-set ceiling even though its prepared pixels span
   // three screens in each direction.
   assert(std::hypot(192.0, 192.0) * screenToWorldScale(5) < 4096.0);
+  assert(std::hypot(256.0, 256.0) * screenToWorldScale(4) < 4096.0);
 
   std::cout << "Map pinch-zoom tests passed\n";
   return 0;
