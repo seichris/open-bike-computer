@@ -563,7 +563,7 @@ static void logPowerMetricsReport() {
       "blocksUs=%llu/%lu drawUs=%llu/%lu routeUs=%llu/%lu "
       "reasons=gps:%lu,route:%lu,settings:%lu,heading:%lu,retry:%lu,other:%lu] "
       "ble[connected=%d authenticated=%d "
-      "received=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
+      "logical=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
       "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
       "appQueue=ios-diagnostic] "
       "system[wifiMode=%d transfer=%d transferMode=%s audio=%d cpuMHz=%u "

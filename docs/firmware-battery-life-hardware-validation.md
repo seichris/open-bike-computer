@@ -23,8 +23,9 @@ The report contains:
 - LVGL call count plus total/maximum handler time;
 - display flush count plus rotation, QSPI, and total time;
 - completed/interrupted map renders, stage timing, and render-reason counts;
-- received BLE packets by logical class, including packets later rejected by
-  authentication or payload validation;
+- logically classified BLE packets after authenticated transport framing is
+  unwrapped, including packets later rejected by session authentication or
+  application-payload validation;
 - Wi-Fi mode, transfer state/mode, audio activity, CPU frequency, and the
   number of active power-management locks; and
 - `appQueue=ios-diagnostic`, which identifies the separate
