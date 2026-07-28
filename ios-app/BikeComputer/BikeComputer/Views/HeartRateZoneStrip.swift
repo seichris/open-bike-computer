@@ -68,7 +68,7 @@ struct HeartRateZoneStrip: View {
 
 }
 
-private enum HeartRateZonePalette {
+enum HeartRateZonePalette {
     static func color(for zone: Int) -> Color {
         switch zone {
         case 1:
@@ -94,6 +94,93 @@ private enum HeartRateZonePalette {
     }
 }
 
+struct HeartRateZoneBreakdown: View {
+    let durations: WorkoutZoneDurationsV1?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Heart Rate Zones", systemImage: "heart.fill")
+                .font(.headline)
+                .foregroundStyle(.red)
+
+            if let presentation {
+                VStack(spacing: 13) {
+                    ForEach(presentation.rows, id: \.zone) { row in
+                        zoneRow(row)
+                    }
+                }
+
+                if let maximumHeartRateBPM =
+                    presentation.maximumHeartRateBPM {
+                    Text(
+                        "Based on the maximum heart rate used for this workout: \(maximumHeartRateBPM) BPM."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(
+                        "Heart-rate ranges are unavailable because this workout did not record its maximum-heart-rate profile."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Heart rate zone data was not available for this workout.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func zoneRow(
+        _ row: WorkoutHeartRateZoneBreakdownRowV1
+    ) -> some View {
+        let color = HeartRateZonePalette.color(for: row.zone)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Zone \(row.zone)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text(row.durationLabel)
+                    .font(.subheadline.monospacedDigit())
+
+                Spacer(minLength: 8)
+
+                Text(row.bpmRangeLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(color.opacity(0.16))
+                    Capsule()
+                        .fill(color)
+                        .frame(
+                            width: proxy.size.width
+                                * row.fractionOfLongestDuration
+                        )
+                }
+            }
+            .frame(height: 8)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    private var presentation:
+        WorkoutHeartRateZoneBreakdownPresentationV1? {
+        WorkoutHeartRateZoneBreakdownPresentationV1.make(durations: durations)
+    }
+}
+
 struct HeartRateZoneStrip_Previews: PreviewProvider {
     static var previews: some View {
         VStack(spacing: 16) {
@@ -101,6 +188,13 @@ struct HeartRateZoneStrip_Previews: PreviewProvider {
             HeartRateZoneStrip(currentZone: 3)
             HeartRateZoneStrip(currentZone: 5)
             HeartRateZoneStrip(currentZone: nil)
+            HeartRateZoneBreakdown(
+                durations: WorkoutZoneDurationsV1(
+                    capturedAt: Date(),
+                    secondsByZone: [109, 42, 55, 149, 704],
+                    maximumHeartRateBPM: 190
+                )
+            )
         }
         .padding()
         .previewLayout(.sizeThatFits)

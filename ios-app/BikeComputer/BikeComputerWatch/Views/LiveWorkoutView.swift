@@ -126,6 +126,26 @@ struct LiveWorkoutView: View {
 
                 LazyVGrid(columns: columns, spacing: 8) {
                     metric(
+                        title: "Speed",
+                        value: WorkoutValueFormatter.speed(
+                            manager.snapshot.currentSpeed?.value
+                        ),
+                        unit: "KM/H",
+                        icon: "speedometer",
+                        color: .cyan
+                    )
+                    metric(
+                        title: "Distance",
+                        value: WorkoutValueFormatter.distance(
+                            manager.snapshot.cyclingDistance?.value
+                        ),
+                        unit: WorkoutValueFormatter.distanceUnit(
+                            manager.snapshot.cyclingDistance?.value
+                        ),
+                        icon: "point.topleft.down.to.point.bottomright.curvepath",
+                        color: .green
+                    )
+                    metric(
                         title: "Heart",
                         value: WorkoutValueFormatter.heartRate(
                             manager.snapshot.currentHeartRate?.value
@@ -142,23 +162,22 @@ struct LiveWorkoutView: View {
                         color: .pink
                     )
                     metric(
-                        title: "Distance",
-                        value: WorkoutValueFormatter.distance(
-                            manager.snapshot.cyclingDistance?.value
+                        title: "Avg Heart",
+                        value: WorkoutValueFormatter.heartRate(
+                            manager.snapshot.averageHeartRate?.value
                         ),
-                        unit: WorkoutValueFormatter.distanceUnit(
-                            manager.snapshot.cyclingDistance?.value
-                        ),
-                        icon: "point.topleft.down.to.point.bottomright.curvepath",
-                        color: .green
+                        unit: "BPM",
+                        icon: "heart.text.square.fill",
+                        color: .red
                     )
                     metric(
-                        title: "Speed",
-                        value: WorkoutValueFormatter.speed(
-                            manager.snapshot.currentSpeed?.value
+                        title: "Avg Speed",
+                        value: WorkoutValueFormatter.averageSpeed(
+                            distanceMeters: manager.snapshot.cyclingDistance?.value,
+                            elapsedSeconds: manager.snapshot.elapsedTime?.value
                         ),
                         unit: "KM/H",
-                        icon: "speedometer",
+                        icon: "gauge.with.dots.needle.50percent",
                         color: .cyan
                     )
                     metric(

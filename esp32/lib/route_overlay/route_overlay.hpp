@@ -9,6 +9,7 @@
  */
 
 #include "../utils/src/psram_allocator.hpp"
+#include "navigation_visual_style.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
 #include <cstdint>
@@ -93,9 +94,6 @@ public:
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
   uint32_t revisionCounter = 0;
-
-  static constexpr uint16_t ROUTE_COLOR =
-      0x1F9F; // Bright blue (RGB565, byte-swapped for LVGL)
 
   /**
    * @brief Convert longitude to screen X coordinate

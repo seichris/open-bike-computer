@@ -276,7 +276,7 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
                   static_cast<int16_t>(map_transform::quantizePixel(y1)),
                   static_cast<int16_t>(map_transform::quantizePixel(x2)),
                   static_cast<int16_t>(map_transform::quantizePixel(y2)),
-                  ROUTE_COLOR,
+                  navigation_visual_style::ROUTE_BLUE_RGB565,
                   routeLineWidth);
     drawnCount++;
   }

@@ -476,6 +476,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         WorkoutHeartRateZoneDurationAccumulator()
     private var heartRateZoneCheckpointPersistenceGate =
         WorkoutHeartRateZoneCheckpointPersistenceGate()
+    private var heartRateZoneRuntimeSessionID: UUID?
+    private var heartRateZoneRuntimeMaximumHeartRateBPM: Int?
 
     override convenience init() {
 #if DEBUG
@@ -1184,7 +1186,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
 
         do {
-            identity = try recoveryStore.begin(startDate: startDate)
+            let workoutIdentity = try recoveryStore.begin(
+                startDate: startDate,
+                heartRateZoneMaximumHeartRateBPM: maximumHeartRateBPM
+            )
+            adoptRecoveredIdentityForRuntime(workoutIdentity)
             let session = try HKWorkoutSession(
                 healthStore: healthStore,
                 configuration: configuration
@@ -1883,11 +1889,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
 
         switch request.phase {
-        case .workoutSaved:
-            completeDetachedFinalization(
-                summary: makeDetachedSavedSummary(identity: recoveredIdentity)
-            )
-        case .finishAttempted:
+        case .workoutSaved, .finishAttempted:
             await reconcileDetachedSave()
         case .requested, .collectionEnded:
             finishRequestError = .reconciliationFailed
@@ -1905,7 +1907,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             guard lifecycle.finishDisposition == request.disposition else {
                 return false
             }
-            identity = recoveredIdentity
+            adoptRecoveredIdentityForRuntime(recoveredIdentity)
             return true
         }
         guard lifecycle.apply(.requestStart),
@@ -1913,7 +1915,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
               lifecycle.apply(.requestEnd(request.disposition)) else {
             return false
         }
-        identity = recoveredIdentity
+        adoptRecoveredIdentityForRuntime(recoveredIdentity)
         return true
     }
 
@@ -1926,13 +1928,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             finishRequestError = .reconciliationFailed
             return
         }
-        if request.phase == .workoutSaved {
-            completeDetachedFinalization(
-                summary: makeDetachedSavedSummary(identity: identity)
-            )
-            return
-        }
-        guard request.phase == .finishAttempted else {
+        let expectedPhase = request.phase
+        guard expectedPhase == .workoutSaved
+                || expectedPhase == .finishAttempted else {
             finishRequestError = .reconciliationFailed
             publishSnapshotImmediately()
             return
@@ -1954,11 +1952,17 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                       currentIdentity.startDate.timeIntervalSince(expectedStartDate)
                   ) <= 2,
                   currentIdentity.finishRequest?.disposition == .save,
-                  currentIdentity.finishRequest?.phase == .finishAttempted else {
+                  currentIdentity.finishRequest?.phase == expectedPhase else {
                 finishRequestError = .reconciliationFailed
                 return
             }
             guard let workout else {
+                if expectedPhase == .workoutSaved {
+                    completeDetachedFinalization(
+                        summary: makeDetachedSavedSummary(identity: identity)
+                    )
+                    return
+                }
                 // Query visibility is not authoritative evidence that a prior
                 // finishWorkout call failed. Keep commit-unknown recovery
                 // reconciliation-only to prevent a duplicate HealthKit save.
@@ -1967,7 +1971,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 return
             }
             reconciledSavedWorkout = workout
-            try? recoveryStore.markWorkoutSaved()
+            if expectedPhase == .finishAttempted {
+                try? recoveryStore.markWorkoutSaved()
+            }
             if let durableIdentity = recoveryStore.recoveredIdentity {
                 self.identity = durableIdentity
             }
@@ -1978,6 +1984,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 )
             )
         } catch {
+            if expectedPhase == .workoutSaved {
+                completeDetachedFinalization(
+                    summary: makeDetachedSavedSummary(identity: identity)
+                )
+                return
+            }
             finishRequestError = .reconciliationFailed
             publishSnapshotImmediately()
         }
@@ -2795,7 +2807,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )?.sessionID
         self.summary = terminalSummary
         _ = lifecycle.apply(.sessionEnded)
-        let terminalSnapshot = makeSnapshot(capturedAt: Date())
+        let terminalSnapshot = makeTerminalSnapshot(
+            summary: terminalSummary,
+            capturedAt: Date()
+        )
         confirmedTerminalSnapshot = terminalSnapshot
         guard publishSnapshotImmediately(snapshotOverride: terminalSnapshot) else {
             // Keep the durable identity until a transportable terminal
@@ -2808,6 +2823,91 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         isTerminalPublicationPending = false
         return true
+    }
+
+    private func makeTerminalSnapshot(
+        summary: WatchWorkoutSummary,
+        capturedAt: Date
+    ) -> WorkoutSnapshotV1 {
+        if session == nil,
+           !heartRateZoneDurationAccumulator.hasCompleteTerminalDurations(
+             elapsedTime: summary.duration
+           ) {
+            // A detached checkpoint can lag the final workout or predate an
+            // unpersisted zone transition. Do not present partial bins as an
+            // exact ended-workout breakdown.
+            heartRateZoneDurationAccumulator.reset()
+        }
+        let base = makeSnapshot(capturedAt: capturedAt)
+        var availability = base.availability
+
+        let elapsedTime = summary.duration.flatMap { value in
+            guard value.isFinite, value >= 0 else { return nil }
+            availability.insert(.elapsedTime)
+            return WorkoutMetricV1(
+                value: value,
+                unit: .seconds,
+                capturedAt: capturedAt,
+                source: .healthKit
+            )
+        } ?? base.elapsedTime
+        let summaryAverageHeartRate = summary.averageHeartRate.flatMap {
+            positiveMetric(
+                $0,
+                unit: .beatsPerMinute,
+                capturedAt: capturedAt
+            )
+        }
+        if summaryAverageHeartRate != nil {
+            availability.insert(.averageHeartRate)
+        }
+        let averageHeartRate = summaryAverageHeartRate
+            ?? base.averageHeartRate
+        let summaryActiveEnergy = summary.activeEnergyKilocalories.flatMap {
+            nonnegativeMetric(
+                $0,
+                unit: .kilocalories,
+                capturedAt: capturedAt
+            )
+        }
+        if summaryActiveEnergy != nil {
+            availability.insert(.activeEnergy)
+        }
+        let activeEnergy = summaryActiveEnergy ?? base.activeEnergy
+        let summaryCyclingDistance = summary.distanceMeters.flatMap {
+            nonnegativeMetric(
+                $0,
+                unit: .meters,
+                capturedAt: capturedAt
+            )
+        }
+        if summaryCyclingDistance != nil {
+            availability.insert(.cyclingDistance)
+        }
+        let cyclingDistance = reconciledSavedWorkout == nil
+            ? base.cyclingDistance ?? summaryCyclingDistance
+            : summaryCyclingDistance ?? base.cyclingDistance
+
+        return WorkoutSnapshotV1(
+            state: base.state,
+            startDate: base.startDate,
+            elapsedTime: elapsedTime,
+            currentHeartRate: base.currentHeartRate,
+            averageHeartRate: averageHeartRate,
+            activeEnergy: activeEnergy,
+            cyclingDistance: cyclingDistance,
+            currentSpeed: base.currentSpeed,
+            cyclingPower: base.cyclingPower,
+            cyclingCadence: base.cyclingCadence,
+            currentHeartRateZone: base.currentHeartRateZone,
+            heartRateZoneCount: base.heartRateZoneCount,
+            heartRateZoneDurations: base.heartRateZoneDurations,
+            location: base.location,
+            lastCompletedSegment: base.lastCompletedSegment,
+            availability: availability,
+            errorCode: base.errorCode,
+            terminalOutcome: base.terminalOutcome
+        )
     }
 
     private func finishTerminalRuntimeAfterPublication(_ didPublish: Bool) {
@@ -4043,6 +4143,29 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
+    func setCumulativeMetricsForTesting(
+        averageHeartRateBPM: Double,
+        activeEnergyKilocalories: Double,
+        distanceMeters: Double,
+        capturedAt: Date
+    ) {
+        averageHeartRate = positiveMetric(
+            averageHeartRateBPM,
+            unit: .beatsPerMinute,
+            capturedAt: capturedAt
+        )
+        activeEnergy = nonnegativeMetric(
+            activeEnergyKilocalories,
+            unit: .kilocalories,
+            capturedAt: capturedAt
+        )
+        healthKitDistance = WorkoutMetricCandidate(
+            value: distanceMeters,
+            capturedAt: capturedAt,
+            source: .healthKit
+        )
+    }
+
     func closeFinalSegmentForTesting(at endDate: Date) async -> Bool {
         await closeFinalSegmentIfNeeded(in: builder, at: endDate)
     }
@@ -4090,6 +4213,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         _ recoveredIdentity: WatchWorkoutRecoveryStore.Identity
     ) {
         identity = recoveredIdentity
+        if heartRateZoneRuntimeSessionID != recoveredIdentity.sessionID {
+            heartRateZoneRuntimeSessionID = recoveredIdentity.sessionID
+            heartRateZoneRuntimeMaximumHeartRateBPM =
+                recoveredIdentity.heartRateZoneMaximumHeartRateBPM
+                    ?? maximumHeartRateBPM
+        }
         heartRateZoneDurationAccumulator.restore(
             sessionID: recoveredIdentity.sessionID,
             checkpoint: recoveredIdentity.heartRateZoneCheckpoint
@@ -4705,8 +4834,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         if location != nil { availability.insert(.location) }
         if location?.altitude != nil { availability.insert(.altitude) }
 
+        let heartRateZoneMaximumHeartRateBPM =
+            heartRateZoneRuntimeMaximumHeartRateBPM
+                ?? identity?.heartRateZoneMaximumHeartRateBPM
+                ?? maximumHeartRateBPM
         let currentHeartRateZone = WorkoutHeartRateZoneProfile(
-            maximumHeartRateBPM: maximumHeartRateBPM
+            maximumHeartRateBPM: heartRateZoneMaximumHeartRateBPM
         ).zone(for: currentHeartRate?.value)
         let previousHeartRateZoneCheckpoint =
             heartRateZoneDurationAccumulator.checkpoint
@@ -4722,7 +4855,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         persistHeartRateZoneCheckpointIfNeeded(at: capturedAt)
         let heartRateZoneDurations =
             heartRateZoneDurationAccumulator.authoritativeDurations(
-                capturedAt: capturedAt
+                capturedAt: capturedAt,
+                maximumHeartRateBPM:
+                    identity?.heartRateZoneMaximumHeartRateBPM
             )
         if currentHeartRateZone != nil || heartRateZoneDurations != nil {
             availability.insert(.heartRateZone)
@@ -4934,6 +5069,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         terminalRouteDistance = nil
         heartRateZoneDurationAccumulator.reset()
         heartRateZoneCheckpointPersistenceGate.reset()
+        heartRateZoneRuntimeSessionID = nil
+        heartRateZoneRuntimeMaximumHeartRateBPM = nil
         lastErrorCode = nil
     }
 

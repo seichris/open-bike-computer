@@ -446,6 +446,26 @@ struct RideMetricsPanel: View {
                 label: "time in zone"
             )
         )
+        let snapshot = workoutStore.presentation.snapshot
+        expandedMetrics.append(
+            RideMetric(
+                value: WorkoutValueFormatter.heartRate(
+                    snapshot.averageHeartRate?.value
+                ),
+                unit: "BPM",
+                label: "average heart rate"
+            )
+        )
+        expandedMetrics.append(
+            RideMetric(
+                value: WorkoutValueFormatter.averageSpeed(
+                    distanceMeters: snapshot.cyclingDistance?.value,
+                    elapsedSeconds: snapshot.elapsedTime?.value
+                ),
+                unit: "km/h",
+                label: "average speed"
+            )
+        )
         expandedMetrics.append(contentsOf: metrics.filter {
             $0.id != "speed" && $0.id != "heart rate"
         })
