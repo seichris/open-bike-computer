@@ -288,7 +288,8 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
         std::max<int16_t>(
             1, (int16_t)currentMapStyleSettings().routeLineWidth),
         48);
-    drawThickLine(buf, bufW, bufH, stride, x1, y1, x2, y2, ROUTE_COLOR,
+    drawThickLine(buf, bufW, bufH, stride, x1, y1, x2, y2,
+                  navigation_visual_style::ROUTE_BLUE_RGB565,
                   routeLineWidth);
     drawnCount++;
   }

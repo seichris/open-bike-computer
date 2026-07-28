@@ -457,7 +457,7 @@ Current setting IDs:
 | `7` | Map zoom level | `0...5` |
 | `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
-| `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a white dot when no route is loaded and a white arrow while navigating. |
+| `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
 | `12` | Device brightness | `5...100` percent on supported hardware |
 | `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
