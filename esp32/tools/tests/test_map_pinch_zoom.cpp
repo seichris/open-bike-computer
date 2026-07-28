@@ -209,6 +209,17 @@ int main() {
   drag.replaceCommittedOffset({12, -8});
   assert(drag.committedOffset().x == 12);
   assert(drag.committedOffset().y == -8);
+
+  // The rolling Map presentation rebases its canvas at every committed world
+  // center. Settlement remains pending, but the next gesture is measured from
+  // that visible endpoint rather than from the first gesture's canvas origin.
+  drag.replaceCommittedOffset({});
+  assert(drag.settlementPending());
+  assert(drag.begin());
+  dragOffset = drag.preview(-9, 6);
+  assert(dragOffset.x == -9 && dragOffset.y == 6);
+  dragOffset = drag.commit(-9, 6, 5200);
+  assert(dragOffset.x == -9 && dragOffset.y == 6);
   drag.reset();
   assert(!drag.active());
   assert(!drag.settlementPending());

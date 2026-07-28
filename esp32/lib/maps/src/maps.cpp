@@ -3418,7 +3418,33 @@ void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
       Maps::scrollMap(static_cast<int16_t>(appliedX),
                       static_cast<int16_t>(appliedY));
     }
-    dragPresentation.appliedOffset = presented;
+    // Maps::point now describes the exact endpoint already shown by the drag
+    // preview. Make that endpoint the baseline immediately instead of keeping
+    // the next gesture relative to the canvas position captured before the
+    // first drag. Raster recycling may still be pending, but a rapid second
+    // touch must start from the pixels that are currently visible.
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      positionRollingRasterCanvas(Maps::point);
+      dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+      dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+      const auto centerOffset = map_transform::worldToScreen(
+          {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
+           static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
+          rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+      dragPresentation.baseRasterOffsetX =
+          static_cast<int32_t>(std::round(centerOffset.x));
+      dragPresentation.baseRasterOffsetY =
+          static_cast<int32_t>(std::round(centerOffset.y));
+    }
+    if (Maps::canvasArrow != nullptr) {
+      dragPresentation.markerBaseX =
+          lv_obj_get_x_aligned(Maps::canvasArrow);
+      dragPresentation.markerBaseY =
+          lv_obj_get_y_aligned(Maps::canvasArrow);
+    }
+    dragPresentation.appliedOffset = {};
+    dragPresentation.presentedOffset = {};
+    dragPreviewController.replaceCommittedOffset({});
     // A clamped drag can legitimately apply zero movement. It still needs one
     // generation pass to recycle/retry the window and clear settlement state.
     Maps::isPosMoved = true;

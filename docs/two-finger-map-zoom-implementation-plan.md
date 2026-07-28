@@ -633,10 +633,14 @@ standalone Map at every runtime zoom:
   so an input-triggered interruption cannot expose a partially populated raster.
   A drag that interrupts the first preload owns the gesture but holds this
   exact-size snapshot still, then retries the preload after release.
+- Every completed rolling-raster drag immediately rebases the visible canvas,
+  marker, controller offset, and raster-center offset at its committed world
+  endpoint. A rapid follow-up drag therefore starts from the pixels already on
+  screen even when edge recycling is still pending.
 - Route content revision, style, viewport, zoom, map root, rotation mode, and
   course-up changes beyond five degrees invalidate the prepared window.
   GPS/pan movement within a compatible window recycles cells rather than
-  rebuilding all 25.
+  rebuilding the full 9-cell or 25-cell grid.
 - Map + Navigation never binds or presents the rolling raster. Its renderer,
   touch behavior, and viewport-sized canvas remain unchanged.
 
