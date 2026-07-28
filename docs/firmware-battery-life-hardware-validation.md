@@ -68,6 +68,52 @@ Capture `PWRMET` over an electrically appropriate, battery-isolated UART when
 available, or run a separate instrumented correlation pass. Never merge a
 USB-powered trace into the battery-terminal energy results.
 
+## Trace analysis
+
+Use `esp32/tools/power_trace_summary.py` to derive campaign statistics from
+the saved raw source-monitor CSV files. The analyzer requires at least three
+runs by default, records each raw file's SHA-256, integrates average current
+and energy against time, calculates the exact sample p95 and peak, and reports
+run-to-run standard deviation, coefficient of variation, and range. It fails
+closed on missing columns, non-finite samples, duplicate timestamps, ambiguous
+voltage input, duplicate raw trace content, or a window with fewer than two
+samples.
+
+The default normalized CSV header is `time_s,current_mA`. Units are never
+guessed from a column name. Supply either a measured voltage column or the
+fixed source-monitor voltage explicitly. For example:
+
+```sh
+cd esp32
+python3 tools/power_trace_summary.py \
+  traces/static-nav-175-run-1.csv \
+  traces/static-nav-175-run-2.csv \
+  traces/static-nav-175-run-3.csv \
+  --scenario "BLE connected, static navigation" \
+  --target 1.75 \
+  --firmware-sha "$(git rev-parse HEAD)" \
+  --supply-voltage 4.0 \
+  --window-start-s 60 \
+  --window-end-s 660 \
+  --output traces/static-nav-175-summary.json
+```
+
+For an export containing, for example, `Timestamp` in milliseconds,
+`Current` in amperes, and `Voltage` in millivolts, replace the fixed-voltage
+argument with:
+
+```text
+--time-column Timestamp --time-unit ms \
+--current-column Current --current-unit A \
+--voltage-column Voltage --voltage-unit mV
+```
+
+The start and end window are seconds relative to the first trace sample. The
+p95 is a sample percentile, which is appropriate only for the required fixed,
+high-rate capture. Do not compare traces sampled at materially different
+rates. Keep the raw CSV and generated JSON together; the JSON is a derived
+artifact and never replaces the raw trace.
+
 ## Artifact identity
 
 Record this block before each measurement campaign.
