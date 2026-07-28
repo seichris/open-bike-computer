@@ -102,6 +102,11 @@ struct ContentView: View {
             destinationStore: SavedDestinationStore(),
             workoutMetricsStore: workoutMirrorManager.store
         )
+        coordinator.bleManager.onWorkoutStartRequest = {
+            Task { @MainActor [weak workoutMirrorManager] in
+                workoutMirrorManager?.startOutdoorCyclingOnWatch()
+            }
+        }
         self.workoutMirrorManager = workoutMirrorManager
         self.onApplicationActiveChange = onApplicationActiveChange
         cyclingSensorDetectionCoordinator.bind(

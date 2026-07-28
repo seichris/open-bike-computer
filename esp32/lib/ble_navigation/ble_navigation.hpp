@@ -225,6 +225,10 @@ public:
   bool hasOwnershipPairingCode();
   bool confirmOwnershipPairing();
 
+  /** Notify the authenticated iPhone app that the device requested a workout. */
+  bool requestWorkoutStart();
+  bool canRequestWorkoutStart() const;
+
   BLEDebugStats getDebugStats() const;
 
 private:

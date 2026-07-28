@@ -21,6 +21,7 @@ struct LegacyRideTelemetry {
 
 struct ViewModel {
   bool usesWorkout = false;
+  bool hasActiveNavigation = false;
   bool stale = false;
   SessionState sessionState = SessionState::Idle;
   uint8_t sourceFlags = 0;
@@ -56,6 +57,7 @@ inline ViewModel makeViewModel(
     const workout_telemetry::Snapshot &workout,
     const LegacyRideTelemetry &legacy) {
   ViewModel model{};
+  model.hasActiveNavigation = legacy.hasRouteRemaining;
   model.routeRemainingMeters = legacy.hasRouteRemaining
                                    ? workout_telemetry::OptionalMetric<uint32_t>{
                                          true, legacy.routeRemainingMeters}

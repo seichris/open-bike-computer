@@ -4,6 +4,7 @@
  */
 
 #include "rideTelemetryScr.hpp"
+#include "../../ble_navigation/ble_navigation.hpp"
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "gps.hpp"
 #include "rideMetricFontSelection.hpp"
@@ -41,9 +42,10 @@ lv_obj_t *rideZoneLabel = nullptr;
 int8_t displayedZoneIndex = -2;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
+lv_obj_t *rideStartWorkoutButton = nullptr;
 ride_telemetry_layout::Layout rideLayout{};
 ride_telemetry_layout::MetricPlacement rideMetricPlacement{};
-int8_t displayedWorkoutLayout = -1;
+int8_t displayedMetricLayout = -1;
 
 bool fontSupportsText(const lv_font_t *font, const char *text) {
   for (std::size_t index = 0; text[index] != '\0'; ++index) {
@@ -389,14 +391,31 @@ void hideZonePresentation() {
   displayedZoneIndex = -2;
 }
 
-void updateMetricLayout(bool usesWorkout) {
-  const int8_t nextLayout = usesWorkout ? 1 : 0;
-  if (displayedWorkoutLayout == nextLayout) {
+void startWorkoutEvent(lv_event_t *event) {
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    bleNavServer.requestWorkoutStart();
+  }
+}
+
+ride_telemetry_layout::MetricLayoutMode metricLayoutMode(
+    const ride_telemetry_presenter::ViewModel &model) {
+  if (model.usesWorkout) {
+    return ride_telemetry_layout::MetricLayoutMode::Workout;
+  }
+  return model.hasActiveNavigation
+             ? ride_telemetry_layout::MetricLayoutMode::NavigationOnly
+             : ride_telemetry_layout::MetricLayoutMode::Idle;
+}
+
+void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
+  const ride_telemetry_layout::MetricLayoutMode mode = metricLayoutMode(model);
+  const int8_t nextLayout = static_cast<int8_t>(mode);
+  if (displayedMetricLayout == nextLayout) {
     return;
   }
-  displayedWorkoutLayout = nextLayout;
+  displayedMetricLayout = nextLayout;
   rideMetricPlacement =
-      ride_telemetry_layout::makeMetricPlacement(rideLayout, usesWorkout);
+      ride_telemetry_layout::makeMetricPlacement(rideLayout, mode);
 
   positionMetric(rideHeartRate, rideMetricPlacement.heartRate);
   positionMetric({rideZoneTitle, rideZoneLabel},
@@ -405,11 +424,22 @@ void updateMetricLayout(bool usesWorkout) {
   positionMetric({nullptr, rideElapsedValue}, rideMetricPlacement.elapsed);
   positionMetric(rideBottomLeft, rideMetricPlacement.bottomLeft);
   positionMetric(rideBottomRight, rideMetricPlacement.bottomRight);
+  lv_obj_set_pos(rideStartWorkoutButton,
+                 rideMetricPlacement.startWorkoutButton.x,
+                 rideMetricPlacement.startWorkoutButton.y);
+  lv_obj_set_size(rideStartWorkoutButton,
+                  rideMetricPlacement.startWorkoutButton.width,
+                  rideMetricPlacement.startWorkoutButton.height);
 
-  if (usesWorkout) {
+  if (rideMetricPlacement.showWorkoutOnlyMetrics) {
     lv_obj_clear_flag(rideHeartRate.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(rideHeartRate.value, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(rideZoneTitle, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomLeft.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomLeft.value, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
     return;
   }
 
@@ -418,6 +448,18 @@ void updateMetricLayout(bool usesWorkout) {
   lv_obj_add_flag(rideHeartRateHeart, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideZoneTitle, LV_OBJ_FLAG_HIDDEN);
   hideZonePresentation();
+  if (rideMetricPlacement.showBottomMetrics) {
+    lv_obj_clear_flag(rideBottomLeft.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomLeft.value, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rideBottomLeft.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideBottomLeft.value, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_clear_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
 }
 
 ride_telemetry_presenter::ViewModel currentViewModel() {
@@ -510,13 +552,33 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   rideBottomRight =
       createMetric(ridePage, "Route left", rideLayout.metrics[5]);
 
-  displayedWorkoutLayout = -1;
+  rideStartWorkoutButton = lv_btn_create(ridePage);
+  lv_obj_set_style_radius(rideStartWorkoutButton, 16, 0);
+  lv_obj_set_style_bg_color(rideStartWorkoutButton, lv_color_hex(0x66DD88), 0);
+  lv_obj_set_style_bg_opa(rideStartWorkoutButton, LV_OPA_COVER, 0);
+  lv_obj_set_style_shadow_width(rideStartWorkoutButton, 0, 0);
+  lv_obj_add_event_cb(rideStartWorkoutButton, startWorkoutEvent,
+                      LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *startWorkoutLabel = lv_label_create(rideStartWorkoutButton);
+  lv_obj_set_style_text_font(startWorkoutLabel, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(startWorkoutLabel, lv_color_black(), 0);
+  lv_label_set_text_static(startWorkoutLabel, "Start Workout");
+  lv_obj_center(startWorkoutLabel);
+
+  displayedMetricLayout = -1;
   updateRideTelemetryEvent(nullptr);
 }
 
 void updateRideTelemetryEvent(lv_event_t *) {
   const ride_telemetry_presenter::ViewModel model = currentViewModel();
-  updateMetricLayout(model.usesWorkout);
+  updateMetricLayout(model);
+  if (rideMetricPlacement.showStartWorkoutButton) {
+    if (bleNavServer.canRequestWorkoutStart()) {
+      lv_obj_clear_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+    } else {
+      lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+    }
+  }
   updateStatusLabel(rideStatus, model);
 
   char value[24];

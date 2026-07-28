@@ -3938,6 +3938,14 @@ struct NavigationProtocolTests {
         assert(DeviceDestinationRequest.parse(requestData.dropLast()) == nil,
                "truncated DREQ packets are rejected")
 
+        let workoutStartRequest = Data(
+            DeviceBLEProtocol.workoutStartRequestPrefix.utf8
+        )
+        assert(DeviceWorkoutStartRequest.matches(workoutStartRequest),
+               "WREQ matches the exact workout start request")
+        assert(!DeviceWorkoutStartRequest.matches(workoutStartRequest + Data([0])),
+               "extended WREQ packets are rejected")
+
         let status = DeviceDestinationStatusPacketBuilder.data(
             generation: 17,
             token: 3,
@@ -3988,6 +3996,13 @@ struct NavigationProtocolTests {
         assertEqual(receivedRequest,
                     DeviceDestinationRequest(generation: 17, token: 3),
                     "BLE manager forwards the exact authenticated device selection")
+
+        var workoutStartRequestCount = 0
+        manager.onWorkoutStartRequest = { workoutStartRequestCount += 1 }
+        assert(manager.handleNavigationCharacteristicNotification(workoutStartRequest),
+               "authenticated WREQ notification is consumed")
+        assertEqual(workoutStartRequestCount, 1,
+                    "BLE manager forwards the authenticated workout start request")
 
         var writes: [Data] = []
         let managerFrames = DeviceDestinationCatalogChunker.frames(
@@ -8477,6 +8492,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.destinationCatalogChunkPrefix, "DLST", "destination catalogs use DLST chunks")
         assertEqual(DeviceBLEProtocol.destinationRequestPrefix, "DREQ", "device destination requests use DREQ")
         assertEqual(DeviceBLEProtocol.destinationStatusPrefix, "DNST", "destination route statuses use DNST")
+        assertEqual(DeviceBLEProtocol.workoutStartRequestPrefix, "WREQ", "device workout starts use WREQ")
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")

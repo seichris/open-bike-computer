@@ -229,6 +229,7 @@ int main() {
   auto pausedModel = ride_telemetry_presenter::makeViewModel(
       workout_telemetry::makeSnapshot(reducer.state(), 9001), legacy);
   assert(pausedModel.usesWorkout);
+  assert(pausedModel.hasActiveNavigation);
   assertText(ride_telemetry_presenter::statusLabel(pausedModel), "PAUSED");
   assert(ride_telemetry_presenter::shouldShowStatus(pausedModel));
   auto runningModel = pausedModel;
@@ -1010,12 +1011,20 @@ int main() {
   const auto legacyModel = ride_telemetry_presenter::makeViewModel(
       workout_telemetry::makeSnapshot(wrapReducer.state(), 6700), legacy);
   assert(!legacyModel.usesWorkout);
+  assert(legacyModel.hasActiveNavigation);
   assertText(ride_telemetry_presenter::statusLabel(legacyModel),
              "LEGACY RIDE");
   assert(!ride_telemetry_presenter::shouldShowStatus(legacyModel));
   ride_telemetry_presenter::formatSpeed(legacyModel, formatted,
                                         sizeof(formatted));
   assertText(formatted, "27.0");
+  const ride_telemetry_presenter::LegacyRideTelemetry idleLegacy{
+      0, 88, 0, 0, false, 0};
+  const auto idleLegacyModel = ride_telemetry_presenter::makeViewModel(
+      workout_telemetry::makeSnapshot(wrapReducer.state(), 6700), idleLegacy);
+  assert(!idleLegacyModel.usesWorkout);
+  assert(!idleLegacyModel.hasActiveNavigation);
+  assert(!idleLegacyModel.routeRemainingMeters.available);
 
   uint8_t gpsPacket[30]{};
   writeUInt32LE(gpsPacket, 0, static_cast<uint32_t>(12345678));
