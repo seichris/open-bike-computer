@@ -405,12 +405,22 @@ static lv_value_precise_t markerCoord(int32_t origin, int16_t size,
           navigation_visual_style::POSITION_MARKER_BASE_SIZE);
 }
 
+static lv_value_precise_t markerEdgeXAtY(const lv_point_precise_t &start,
+                                         const lv_point_precise_t &end,
+                                         lv_value_precise_t y) {
+  if (start.y == end.y)
+    return start.x;
+
+  return start.x +
+         (end.x - start.x) * (y - start.y) / (end.y - start.y);
+}
+
 static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
                                  int16_t size, lv_color_t color) {
-  // Match the original Lucide-style marker silhouette, but rasterize it
-  // directly at the configured on-screen size. The fill is split at the
-  // concave notch and the scaled, rounded outline restores the visual weight
-  // of the previous 48x48 marker without magnifying a bitmap.
+  // Filled Lucide navigation-2 polygon. Render horizontal spans at the final
+  // on-screen size because this target's software renderer does not reliably
+  // fill LVGL triangle draw tasks. The rounded outline softens the three outer
+  // points without magnifying a bitmap.
   const lv_point_precise_t top = {
       markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 4)};
   const lv_point_precise_t right = {
@@ -420,20 +430,27 @@ static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
   const lv_point_precise_t left = {
       markerCoord(bounds.x1, size, 10), markerCoord(bounds.y1, size, 42)};
 
-  lv_draw_triangle_dsc_t triangle;
-  lv_draw_triangle_dsc_init(&triangle);
-  triangle.bg_color = color;
-  triangle.bg_opa = LV_OPA_COVER;
+  lv_draw_line_dsc_t fill;
+  lv_draw_line_dsc_init(&fill);
+  fill.color = color;
+  fill.opa = LV_OPA_COVER;
+  fill.width = 1;
 
-  triangle.p[0] = top;
-  triangle.p[1] = right;
-  triangle.p[2] = notch;
-  lv_draw_triangle(layer, &triangle);
+  for (lv_value_precise_t y = top.y; y <= notch.y; ++y) {
+    fill.p1 = {markerEdgeXAtY(top, left, y), y};
+    fill.p2 = {markerEdgeXAtY(top, right, y), y};
+    lv_draw_line(layer, &fill);
+  }
 
-  triangle.p[0] = top;
-  triangle.p[1] = notch;
-  triangle.p[2] = left;
-  lv_draw_triangle(layer, &triangle);
+  for (lv_value_precise_t y = notch.y + 1; y <= left.y; ++y) {
+    fill.p1 = {markerEdgeXAtY(top, left, y), y};
+    fill.p2 = {markerEdgeXAtY(notch, left, y), y};
+    lv_draw_line(layer, &fill);
+
+    fill.p1 = {markerEdgeXAtY(notch, right, y), y};
+    fill.p2 = {markerEdgeXAtY(top, right, y), y};
+    lv_draw_line(layer, &fill);
+  }
 
   lv_draw_line_dsc_t outline;
   lv_draw_line_dsc_init(&outline);
