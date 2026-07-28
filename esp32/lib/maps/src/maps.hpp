@@ -14,6 +14,7 @@
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
+#include "../../utils/src/mapDragPreview.hpp"
 #include "lvgl.h"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -206,6 +207,20 @@ private:
     int16_t finalMidpointY = 0;
   } pinchPresentation;
 
+  map_drag_preview::Controller dragPreviewController;
+  struct DragPresentation {
+    uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
+    int16_t canvasBaseX = 0;
+    int16_t canvasBaseY = 0;
+    int16_t markerBaseX = 0;
+    int16_t markerBaseY = 0;
+    bool hasBackdrop = false;
+    uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
+  } dragPresentation;
+
+  void applyDragPreviewOffset(map_drag_preview::Offset offset);
+  void resetDragPresentationVisuals();
+
 public:
   uint16_t mapScrHeight;  // Screen map size height
   uint16_t mapScrWidth;   // Screen map size width
@@ -245,6 +260,19 @@ public:
   bool preparePinchZoomOutBackdrop(uint8_t baseZoom);
   bool hasPinchZoomOutBackdrop(uint8_t baseZoom) const;
   void invalidatePinchZoomOutBackdrop();
+  bool beginDragPreview(uint8_t baseZoom);
+  void updateDragPreview(int16_t sessionDx, int16_t sessionDy);
+  void commitDragPreview(int16_t sessionDx, int16_t sessionDy,
+                         uint32_t nowMs);
+  void cancelDragPreview();
+  void finishDragSettlement();
+  bool dragPreviewBlocksMapRender(uint32_t nowMs) const {
+    return dragPreviewController.blocksRender(nowMs);
+  }
+  bool isDragPreviewActive() const { return dragPreviewController.active(); }
+  bool isDragSettlementPending() const {
+    return dragPreviewController.settlementPending();
+  }
   bool beginPinchPreview(int16_t midpointX, int16_t midpointY,
                          uint8_t baseZoom);
   void updatePinchPreview(double previewRatio, int16_t midpointX,

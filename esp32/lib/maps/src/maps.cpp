@@ -2430,6 +2430,7 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
  *
  */
 void Maps::deleteMapScrSprites() {
+  cancelDragPreview();
   cancelPinchPreview();
   pinchZoomOutBackdrop = {};
   // Maps::arrowSprite.deleteSprite();
@@ -2532,6 +2533,7 @@ bool Maps::hasPinchZoomOutBackdrop(uint8_t baseZoom) const {
 
 void Maps::invalidatePinchZoomOutBackdrop() {
   pinchZoomOutBackdrop = {};
+  dragPresentation.hasBackdrop = false;
   if (Maps::canvasMapTemp == nullptr)
     return;
   lv_anim_delete(Maps::canvasMapTemp, setPinchCanvasScale);
@@ -2545,7 +2547,8 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   baseZoom = map_transform::clampRuntimeZoom(baseZoom);
   if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
       Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
-      pinchPresentation.settlementPending) {
+      pinchPresentation.settlementPending || dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
     return false;
   }
   if (hasPinchZoomOutBackdrop(baseZoom))
@@ -2612,9 +2615,149 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   return true;
 }
 
+void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
+  const int32_t visualX = -offset.x;
+  const int32_t visualY = -offset.y;
+  if (Maps::canvasMap != nullptr) {
+    lv_obj_set_pos(Maps::canvasMap,
+                   static_cast<int32_t>(dragPresentation.canvasBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.canvasBaseY) +
+                       visualY);
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
+    lv_obj_set_pos(Maps::canvasMapTemp,
+                   static_cast<int32_t>(dragPresentation.canvasBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.canvasBaseY) +
+                       visualY);
+    lv_obj_clear_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(Maps::canvasMapTemp);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow,
+                   static_cast<int32_t>(dragPresentation.markerBaseX) +
+                       visualX,
+                   static_cast<int32_t>(dragPresentation.markerBaseY) +
+                       visualY);
+    lv_obj_invalidate(Maps::canvasArrow);
+  }
+}
+
+bool Maps::beginDragPreview(uint8_t baseZoom) {
+  if (!mapSet.vectorMap || Maps::canvasMap == nullptr ||
+      pinchPresentation.active || pinchPresentation.settlementPending ||
+      dragPreviewController.active()) {
+    return false;
+  }
+
+  const uint8_t normalizedZoom = map_transform::clampRuntimeZoom(baseZoom);
+  const bool continuingSettlement =
+      dragPreviewController.settlementPending();
+  if (continuingSettlement && dragPresentation.baseZoom != normalizedZoom) {
+    cancelDragPreview();
+    return false;
+  }
+
+  if (!continuingSettlement) {
+    dragPresentation = {};
+    dragPresentation.baseZoom = normalizedZoom;
+    dragPresentation.canvasBaseX = lv_obj_get_x(Maps::canvasMap);
+    dragPresentation.canvasBaseY = lv_obj_get_y(Maps::canvasMap);
+    if (Maps::canvasArrow != nullptr) {
+      dragPresentation.markerBaseX = lv_obj_get_x(Maps::canvasArrow);
+      dragPresentation.markerBaseY = lv_obj_get_y(Maps::canvasArrow);
+    }
+    dragPresentation.hasBackdrop =
+        hasPinchZoomOutBackdrop(normalizedZoom);
+    if (dragPresentation.hasBackdrop) {
+      dragPresentation.backdropZoom = pinchZoomOutBackdrop.renderZoom;
+    }
+  }
+
+  if (!dragPreviewController.begin())
+    return false;
+
+  lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+  if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
+    const uint16_t height =
+        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+    const double backdropRatio = map_transform::backdropPresentationRatio(
+        1.0, dragPresentation.baseZoom, dragPresentation.backdropZoom);
+    const uint32_t backdropLvScale = static_cast<uint32_t>(
+        std::max<double>(1.0, std::round(backdropRatio * LV_SCALE_NONE)));
+    lv_image_set_pivot(Maps::canvasMapTemp,
+                       mapAnchorXForWidth(Maps::mapScrWidth),
+                       mapAnchorYForHeight(height));
+    lv_image_set_scale(Maps::canvasMapTemp, backdropLvScale);
+    lv_obj_move_background(Maps::canvasMapTemp);
+    lv_obj_move_foreground(Maps::canvasMap);
+    if (Maps::canvasArrow != nullptr)
+      lv_obj_move_foreground(Maps::canvasArrow);
+  }
+  applyDragPreviewOffset(dragPreviewController.committedOffset());
+  return true;
+}
+
+void Maps::updateDragPreview(int16_t sessionDx, int16_t sessionDy) {
+  if (!dragPreviewController.active())
+    return;
+  applyDragPreviewOffset(dragPreviewController.preview(sessionDx, sessionDy));
+}
+
+void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
+                             uint32_t nowMs) {
+  if (!dragPreviewController.active())
+    return;
+  const map_drag_preview::Offset committed =
+      dragPreviewController.commit(sessionDx, sessionDy, nowMs);
+  applyDragPreviewOffset(committed);
+  Maps::scrollMap(sessionDx, sessionDy);
+  Maps::redrawMap = true;
+}
+
+void Maps::resetDragPresentationVisuals() {
+  if (Maps::canvasMap != nullptr) {
+    lv_obj_set_pos(Maps::canvasMap, dragPresentation.canvasBaseX,
+                   dragPresentation.canvasBaseY);
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_set_pos(Maps::canvasMapTemp, dragPresentation.canvasBaseX,
+                   dragPresentation.canvasBaseY);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow, dragPresentation.markerBaseX,
+                   dragPresentation.markerBaseY);
+  }
+}
+
+void Maps::cancelDragPreview() {
+  if (dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
+    resetDragPresentationVisuals();
+  }
+  dragPreviewController.reset();
+  dragPresentation = {};
+}
+
+void Maps::finishDragSettlement() {
+  if (!dragPreviewController.settlementPending())
+    return;
+  resetDragPresentationVisuals();
+  dragPreviewController.reset();
+  dragPresentation = {};
+}
+
 bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
                              uint8_t baseZoom) {
-  if (Maps::canvasMap == nullptr || pinchPresentation.settlementPending) {
+  if (Maps::canvasMap == nullptr || pinchPresentation.settlementPending ||
+      dragPreviewController.active() ||
+      dragPreviewController.settlementPending()) {
     return false;
   }
 
@@ -3197,6 +3340,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 #ifdef WAVESHARE_TOUCH_DIAGNOSTICS
   const bool completedPinchSettlement = isPinchSettlementPending();
 #endif
+  finishDragSettlement();
   finishPinchSettlement();
 
   MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "

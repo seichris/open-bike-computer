@@ -1,6 +1,7 @@
 #include "../../lib/maps/src/mapTransform.hpp"
 #include "../../lib/utils/src/mapPinchZoom.hpp"
 #include "../../lib/utils/src/mapTapArbiter.hpp"
+#include "../../lib/utils/src/mapDragPreview.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -181,6 +182,29 @@ int main() {
   tap.arm(4000);
   assert(!tap.consumeIfReady(4200, false, 0, false));
   assert(!tap.pending());
+
+  map_drag_preview::Controller drag;
+  assert(drag.begin());
+  auto dragOffset = drag.preview(20, 5);
+  assert(dragOffset.x == 20 && dragOffset.y == 5);
+  dragOffset = drag.commit(20, 5, 5000);
+  assert(dragOffset.x == 20 && dragOffset.y == 5);
+  assert(drag.settlementPending());
+  assert(drag.blocksRender(5179));
+  assert(!drag.blocksRender(5180));
+
+  // A second drag before settlement continues from the first committed visual
+  // offset instead of snapping back to the original rendered frame.
+  assert(drag.begin());
+  dragOffset = drag.preview(7, -3);
+  assert(dragOffset.x == 27 && dragOffset.y == 2);
+  dragOffset = drag.commit(7, -3, 5100);
+  assert(dragOffset.x == 27 && dragOffset.y == 2);
+  assert(drag.blocksRender(5279));
+  assert(!drag.blocksRender(5280));
+  drag.reset();
+  assert(!drag.active());
+  assert(!drag.settlementPending());
 
   std::cout << "Map pinch-zoom tests passed\n";
   return 0;

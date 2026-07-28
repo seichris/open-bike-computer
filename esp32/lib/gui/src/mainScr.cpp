@@ -108,7 +108,9 @@ pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
 static void processMapPinchZoom() {
   const auto touchFrame = getTouchFrameSnapshot();
   map_pinch_zoom::Decision decision;
-  if (!isMainScreen || activeTile != MAP || !mapSet.vectorMap) {
+  if (!isMainScreen || activeTile != MAP || !mapSet.vectorMap ||
+      mapView.isDragPreviewActive() ||
+      mapView.isDragSettlementPending()) {
     decision = mapPinchController.cancelForContext(touchFrame.count);
   } else {
     decision =
@@ -996,7 +998,8 @@ void gestureEvent(lv_event_t *event) {
  * @param event
  */
 void updateMap(lv_event_t *event) {
-  if (mapPinchBlocksMapRender()) {
+  if (mapPinchBlocksMapRender() || isScrollingMap ||
+      mapView.dragPreviewBlocksMapRender(millis())) {
     return;
   }
 
@@ -1114,6 +1117,7 @@ void scrollMapEvent(lv_event_t *event) {
     static int last_x = 0, last_y = 0;
     static bool isDragging = false;
     static bool dragStarted = false;
+    static bool dragPreviewStarted = false;
     static uint32_t pressStartTime = 0;
     static bool longPressTriggered = false;
     static int pressStartX = 0, pressStartY = 0;
@@ -1121,7 +1125,7 @@ void scrollMapEvent(lv_event_t *event) {
     static uint32_t lastDragRedrawTime = 0;
     lv_point_t p;
 
-    auto flushDragMovement = [](bool force) {
+    auto flushLegacyDragMovement = [](bool force) {
       if (pendingDx == 0 && pendingDy == 0)
         return;
 
@@ -1142,7 +1146,7 @@ void scrollMapEvent(lv_event_t *event) {
       pendingDy = 0;
       lastDragRedrawTime = now;
 
-      log_i("DRAG FLUSH: dx=%d dy=%d force=%d", dx, dy, force);
+      log_i("LEGACY DRAG FLUSH: dx=%d dy=%d force=%d", dx, dy, force);
       mapView.scrollMap(dx, dy);
       mapView.redrawMap = true;
       lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1171,6 +1175,7 @@ void scrollMapEvent(lv_event_t *event) {
       lastDragRedrawTime = 0;
       isScrollingMap = true;
       dragStarted = false;
+      dragPreviewStarted = false;
       log_i("PRESSED: x=%d y=%d", p.x, p.y);
       break;
     }
@@ -1195,8 +1200,9 @@ void scrollMapEvent(lv_event_t *event) {
         break; // Don't update last_x/y - treat this as invalid data
       }
 
-      const int SCROLL_THRESHOLD = 5;
-      const int DRAG_START_THRESHOLD = 32;
+      const int SCROLL_THRESHOLD = map_drag_preview::kSampleThresholdPx;
+      const int DRAG_START_THRESHOLD =
+          map_drag_preview::kDragStartThresholdPx;
       int totalMoveX = abs(p.x - pressStartX);
       int totalMoveY = abs(p.y - pressStartY);
       int totalMove = totalMoveX + totalMoveY;
@@ -1228,6 +1234,18 @@ void scrollMapEvent(lv_event_t *event) {
 
         dragStarted = true;
         mapTapController.cancel();
+        if (mapSet.vectorMap) {
+          pendingDx = gui_layout::mapDragDelta(p.x - pressStartX);
+          pendingDy = gui_layout::mapDragDelta(p.y - pressStartY);
+          dragPreviewStarted = mapView.beginDragPreview(zoom);
+          if (dragPreviewStarted) {
+            mapView.updateDragPreview(static_cast<int16_t>(pendingDx),
+                                      static_cast<int16_t>(pendingDy));
+          } else {
+            pendingDx = 0;
+            pendingDy = 0;
+          }
+        }
         last_x = p.x;
         last_y = p.y;
         pressStartTime = 0;
@@ -1244,7 +1262,12 @@ void scrollMapEvent(lv_event_t *event) {
         last_x = p.x;
         last_y = p.y;
         pressStartTime = 0;
-        flushDragMovement(false);
+        if (dragPreviewStarted) {
+          mapView.updateDragPreview(static_cast<int16_t>(pendingDx),
+                                    static_cast<int16_t>(pendingDy));
+        } else {
+          flushLegacyDragMovement(false);
+        }
       }
       break;
     }
@@ -1257,13 +1280,20 @@ void scrollMapEvent(lv_event_t *event) {
         int dx = p.x - last_x;
         int dy = p.y - last_y;
         const int MAX_JUMP = 400;
-        const int SCROLL_THRESHOLD = 5;
+        const int SCROLL_THRESHOLD = map_drag_preview::kSampleThresholdPx;
         if (abs(dx) <= MAX_JUMP && abs(dy) <= MAX_JUMP &&
             (abs(dx) > SCROLL_THRESHOLD || abs(dy) > SCROLL_THRESHOLD)) {
           pendingDx += gui_layout::mapDragDelta(dx);
           pendingDy += gui_layout::mapDragDelta(dy);
         }
-        flushDragMovement(true);
+        if (dragPreviewStarted) {
+          mapView.updateDragPreview(static_cast<int16_t>(pendingDx),
+                                    static_cast<int16_t>(pendingDy));
+          mapView.commitDragPreview(static_cast<int16_t>(pendingDx),
+                                    static_cast<int16_t>(pendingDy), millis());
+        } else {
+          flushLegacyDragMovement(true);
+        }
       }
 
       // Detect short-tap on GPS indicator dot to toggle rotation mode
@@ -1303,6 +1333,7 @@ void scrollMapEvent(lv_event_t *event) {
 
       isDragging = false;
       dragStarted = false;
+      dragPreviewStarted = false;
       isScrollingMap = false;
       pressStartTime = 0;
       log_i("RELEASED/LOST: drag ended%s",
@@ -1520,6 +1551,9 @@ static void showMainTile(tileName tile) {
 
   activeTile = tile;
   canScrollMap = tile == MAP;
+  if (tile != MAP) {
+    mapView.cancelDragPreview();
+  }
   if (isMapBackedTile(activeTile)) {
     // Keep the currently visible non-map tile in front until the new map
     // profile has rendered into the back buffer. Revealing mapTile first can
