@@ -2,6 +2,7 @@
 #include "../../lib/gui/src/destinationPickerLayout.hpp"
 #include "../../lib/gui/src/guiLayout.hpp"
 #include "../../lib/gui/src/mapTileTransition.hpp"
+#include "../../lib/gui/src/navigationContentMode.hpp"
 #include "../../lib/gui/src/rideMetricFontSelection.hpp"
 #include "../../lib/gui/src/rideTelemetryLayout.hpp"
 #include "../../lib/maps/src/mapLineStyle.hpp"
@@ -9,6 +10,11 @@
 #include <cassert>
 
 int main() {
+  static_assert(navigation_content_mode::forNavigationState(false) ==
+                navigation_content_mode::Mode::FavoriteDestinations);
+  static_assert(navigation_content_mode::forNavigationState(true) ==
+                navigation_content_mode::Mode::ActiveGuidance);
+
   map_tile_transition::State mapTransition;
   assert(!mapTransition.canReveal(false, false));
   mapTransition.begin();
