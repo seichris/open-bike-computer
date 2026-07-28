@@ -407,8 +407,10 @@ static lv_value_precise_t markerCoord(int32_t origin, int16_t size,
 
 static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
                                  int16_t size, lv_color_t color) {
-  // Lucide-style navigation polygon, split into two triangles at the concave
-  // notch. It is rasterized directly at the configured on-screen size.
+  // Match the original Lucide-style marker silhouette, but rasterize it
+  // directly at the configured on-screen size. The fill is split at the
+  // concave notch and the scaled, rounded outline restores the visual weight
+  // of the previous 48x48 marker without magnifying a bitmap.
   const lv_point_precise_t top = {
       markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 4)};
   const lv_point_precise_t right = {
@@ -432,6 +434,22 @@ static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
   triangle.p[1] = notch;
   triangle.p[2] = left;
   lv_draw_triangle(layer, &triangle);
+
+  lv_draw_line_dsc_t outline;
+  lv_draw_line_dsc_init(&outline);
+  outline.color = color;
+  outline.opa = LV_OPA_COVER;
+  outline.width = std::max<int16_t>(
+      1, 3 * size / navigation_visual_style::POSITION_MARKER_BASE_SIZE);
+  outline.round_start = 1;
+  outline.round_end = 1;
+
+  const lv_point_precise_t outlinePoints[] = {top, right, notch, left, top};
+  for (uint8_t i = 1; i < 5; ++i) {
+    outline.p1 = outlinePoints[i - 1];
+    outline.p2 = outlinePoints[i];
+    lv_draw_line(layer, &outline);
+  }
 }
 
 static void drawPositionDotMarker(lv_layer_t *layer, const lv_area_t &bounds,
