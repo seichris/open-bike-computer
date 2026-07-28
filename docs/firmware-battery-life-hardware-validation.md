@@ -77,9 +77,10 @@ and energy against time, calculates the exact sample p95 and peak, and reports
 run-to-run standard deviation, coefficient of variation, and range. The hash
 is calculated from the same byte stream that is parsed, and the analyzer fails
 if a raw file changes during the read. It fails closed on missing or aliased
-columns, non-finite input or derived values, duplicate timestamps, ambiguous
-voltage input, duplicate raw trace content, insufficient sample cadence, an
-uncovered window boundary, or a window with fewer than two samples.
+columns, malformed CSV, non-finite input or derived values, duplicate
+timestamps, ambiguous voltage input, duplicate raw trace content, insufficient
+sample cadence, an uncovered window boundary, or a window with fewer than two
+samples.
 
 The default normalized CSV header is `time_s,current_mA`. Units are never
 guessed from a column name. Supply either a measured voltage column or the

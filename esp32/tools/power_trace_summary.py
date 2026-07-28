@@ -383,7 +383,10 @@ def analyze_trace(path: Path, configuration: TraceConfiguration) -> TraceSummary
     try:
         with path.open("rb") as handle:
             initial_identity = _stat_identity(os.fstat(handle.fileno()))
-            reader = csv.DictReader(_hashed_text_lines(handle, digest))
+            reader = csv.DictReader(
+                _hashed_text_lines(handle, digest),
+                strict=True,
+            )
             if reader.fieldnames is None:
                 raise TraceFormatError("trace is missing a CSV header")
             if len(reader.fieldnames) != len(set(reader.fieldnames)):

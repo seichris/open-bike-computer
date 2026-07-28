@@ -170,6 +170,23 @@ class PowerTraceSummaryTests(unittest.TestCase):
                     TraceConfiguration(supply_voltage_v=4.0),
                 )
 
+    def test_unterminated_quoted_field_cannot_swallow_later_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "unterminated.csv",
+                "time_s,current_mA,note\n"
+                "0,1,ok\n"
+                "1,2,ok\n"
+                '2,3,"unterminated\n'
+                "3,100,swallowed\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "invalid CSV"):
+                analyze_trace(
+                    trace,
+                    TraceConfiguration(supply_voltage_v=4.0),
+                )
+
     def test_percentile_handles_duplicates_and_linear_interpolation(self):
         self.assertEqual(sample_percentile(array("d", [2.0] * 100), 95), 2.0)
         values = array("d", [5.0, 1.0, 4.0, 2.0, 3.0])
