@@ -8,6 +8,10 @@
 
 #include "tft.hpp"
 
+#ifdef USE_ARDUINO_GFX
+#include <Arduino_GFX_Library.h>
+#endif
+
 #ifndef USE_ARDUINO_GFX
 TFT_eSPI tft = TFT_eSPI();
 #endif

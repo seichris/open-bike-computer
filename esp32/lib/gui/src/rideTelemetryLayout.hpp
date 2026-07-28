@@ -11,6 +11,9 @@ constexpr int32_t kMetricTitleValueGap = 1;
 constexpr int32_t kMetricValueOffsetY =
     kMetricTitleLineHeight + kMetricTitleValueGap;
 constexpr int32_t kMetricRowGap = 8;
+constexpr int32_t kStartWorkoutButtonGap = 16;
+constexpr int32_t kStartWorkoutButtonHeight = 52;
+constexpr int32_t kStartWorkoutButtonHorizontalInset = 42;
 
 constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
   // The 466 px display fits the compact 64 px values; the 410 px display
@@ -48,6 +51,25 @@ struct Layout {
   Rect hero{};
   Rect heroUnit{};
   std::array<Rect, 6> metrics{};
+};
+
+struct MetricPlacement {
+  bool showWorkoutOnlyMetrics = true;
+  bool showBottomMetrics = true;
+  bool showStartWorkoutButton = false;
+  Rect heartRate{};
+  Rect heartRateZone{};
+  Rect distance{};
+  Rect elapsed{};
+  Rect bottomLeft{};
+  Rect bottomRight{};
+  Rect startWorkoutButton{};
+};
+
+enum class MetricLayoutMode : uint8_t {
+  Workout,
+  NavigationOnly,
+  Idle,
 };
 
 struct ZoneStripLayout {
@@ -289,6 +311,31 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
        metricCellHeight},
   }};
   return layout;
+}
+
+constexpr MetricPlacement makeMetricPlacement(const Layout &layout,
+                                               MetricLayoutMode mode) {
+  MetricPlacement placement{};
+  const bool usesWorkout = mode == MetricLayoutMode::Workout;
+  const bool hasNavigation = mode == MetricLayoutMode::NavigationOnly;
+  placement.showWorkoutOnlyMetrics = usesWorkout;
+  placement.showBottomMetrics = usesWorkout || hasNavigation;
+  placement.showStartWorkoutButton = !usesWorkout;
+  placement.heartRate = layout.metrics[0];
+  placement.heartRateZone = layout.metrics[1];
+  placement.distance = usesWorkout ? layout.metrics[2] : layout.metrics[0];
+  placement.elapsed = usesWorkout ? layout.metrics[3] : layout.metrics[1];
+  placement.bottomLeft = usesWorkout ? layout.metrics[4] : layout.metrics[2];
+  placement.bottomRight = usesWorkout ? layout.metrics[5] : layout.metrics[3];
+  const Rect &buttonPredecessor =
+      hasNavigation ? placement.bottomLeft : placement.distance;
+  placement.startWorkoutButton = {
+      kStartWorkoutButtonHorizontalInset,
+      buttonPredecessor.bottom() + kStartWorkoutButtonGap,
+      layout.screenWidth - 2 * kStartWorkoutButtonHorizontalInset,
+      kStartWorkoutButtonHeight,
+  };
+  return placement;
 }
 
 constexpr bool fits(const Rect &rect, int32_t width, int32_t height) {

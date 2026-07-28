@@ -5,6 +5,10 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#ifdef USE_ARDUINO_GFX
+#include <Arduino_GFX_Library.h>
+#include <lvgl.h>
+#endif
 #include "../../utils/src/touchInterruptGate.hpp"
 
 #ifdef USE_ARDUINO_GFX

@@ -217,6 +217,14 @@ struct DeviceDestinationRequest: Equatable {
     }
 }
 
+enum DeviceWorkoutStartRequest {
+    static func matches(_ data: Data) -> Bool {
+        data.count == 4 &&
+            String(data: data, encoding: .utf8) ==
+                DeviceBLEProtocol.workoutStartRequestPrefix
+    }
+}
+
 enum DeviceDestinationStatusCode: UInt8, Equatable {
     case calculating = 1
     case started = 2

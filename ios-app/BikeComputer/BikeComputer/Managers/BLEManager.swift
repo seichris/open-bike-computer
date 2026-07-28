@@ -107,6 +107,7 @@ enum DeviceBLEProtocol {
     static let destinationCatalogChunkPrefix = "DLST"
     static let destinationRequestPrefix = "DREQ"
     static let destinationStatusPrefix = "DNST"
+    static let workoutStartRequestPrefix = "WREQ"
     static let deviceSoundsCapabilityMask: UInt8 = 1 << 0
     static let powerButtonHonkCapabilityMask: UInt8 = 1 << 1
     static let powerButtonHonkAcknowledgementCapabilityMask: UInt8 = 1 << 2
@@ -704,6 +705,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
+    var onWorkoutStartRequest: (() -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
     
     // MARK: - UserDefaults Keys
@@ -4782,6 +4784,15 @@ extension BLEManager: CBPeripheralDelegate {
 
     @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if DeviceWorkoutStartRequest.matches(data) {
+            guard isConnected, isNavigationReady else {
+                log("Ignored workout start request before authentication completed")
+                return true
+            }
+            log("Received workout start request")
+            onWorkoutStartRequest?()
+            return true
+        }
         if let request = DeviceDestinationRequest.parse(data) {
             guard isConnected, isNavigationReady else {
                 log("Ignored destination request before authentication completed")

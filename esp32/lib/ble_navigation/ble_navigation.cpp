@@ -342,6 +342,27 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
   return true;
 }
 
+bool BLENavigationServer::canRequestWorkoutStart() const {
+  return connected && bleSessionAuthenticated &&
+         mapTransferStatusCharacteristic != nullptr;
+}
+
+bool BLENavigationServer::requestWorkoutStart() {
+  if (!canRequestWorkoutStart()) {
+    Serial.println("BLE Workout: open the authenticated app to start");
+    return false;
+  }
+
+  static constexpr uint8_t request[] = {'W', 'R', 'E', 'Q'};
+  if (!notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, request,
+                                     sizeof(request))) {
+    Serial.println("BLE Workout: secure start request failed");
+    return false;
+  }
+  Serial.println("BLE Workout: start requested from Ride Stats");
+  return true;
+}
+
 static uint8_t deviceScreenBit(uint8_t screen) {
   return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
 }
