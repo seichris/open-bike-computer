@@ -2490,8 +2490,8 @@ void Maps::createMapScrSprites() {
   if (mapSet.mapFullScreen)
     h = Maps::mapScrFull;
 
-  // Zoom 5 uses a 5x5 grid of 192 px cells. Zooms 1...4 use a lighter 3x3
-  // grid of 256 px cells. The scratch buffer must hold one complete incoming
+  // Zoom 5 uses a 5x5 grid of 192 px cells. Zooms 1...4 use a 7x7 grid of
+  // 128 px cells. The scratch buffer must hold one complete incoming
   // row/column for either layout so recycling remains atomic.
   const auto wideLayout = map_raster_window::layoutForZoom(
       map_transform::kMaximumRuntimeZoom,

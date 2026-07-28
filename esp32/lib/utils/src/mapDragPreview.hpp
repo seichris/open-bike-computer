@@ -58,11 +58,12 @@ public:
     sessionBase_ = offset;
   }
 
-  bool blocksRender(uint32_t nowMs) const {
+  bool blocksRender(uint32_t nowMs,
+                    uint32_t settlementDelayMs = kSettlementDelayMs) const {
     return active_ ||
            (settlementPending_ &&
             static_cast<uint32_t>(nowMs - committedAtMs_) <
-                kSettlementDelayMs);
+                settlementDelayMs);
   }
 
   void reset() {

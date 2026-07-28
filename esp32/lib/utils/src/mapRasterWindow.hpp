@@ -14,22 +14,25 @@ namespace map_raster_window {
 
 constexpr uint8_t kWideGridRadius = 2;
 constexpr uint8_t kWideGridSpan = (2 * kWideGridRadius) + 1;
-constexpr uint8_t kCompactGridRadius = 1;
+constexpr uint8_t kCompactGridRadius = 3;
 constexpr uint8_t kCompactGridSpan = (2 * kCompactGridRadius) + 1;
 // Keep the original names as aliases for the maximum-zoom layout. They also
-// describe the largest allocation and scratch-row requirement.
+// describe the largest individual cell. Scratch storage must cover either
+// layout's complete incoming edge.
 constexpr uint8_t kGridRadius = kWideGridRadius;
 constexpr uint8_t kGridSpan = kWideGridSpan;
-constexpr uint8_t kScratchTileCount = kWideGridSpan;
+constexpr uint8_t kScratchTileCount = kCompactGridSpan;
 // A 192 px cell keeps a full screen of prepared pixels around both supported
 // viewports while leaving enough PSRAM for the vector block currently being
 // rasterized. Larger cells made the front buffer compete with dense map
 // blocks during the first zoom-5 build.
 constexpr uint16_t kCellExtentPx = 192;
-// Zooms 1...4 use fewer, slightly larger cells. Their 768 px square raster
-// still prepares at least 151 px outside a 466 px viewport while rasterizing
-// 36% fewer pixels than the maximum-zoom 960 px square.
-constexpr uint16_t kCompactCellExtentPx = 256;
+// Zooms 1...4 use a 7x7 grid of smaller cells. Its 896 px square raster keeps
+// 215 px prepared around a 466 px viewport. More importantly, recycling starts
+// at 64 px, leaving another 151 px before the hard edge, and an incoming edge
+// contains 42% fewer pixels than the old 3x3-of-256 layout. That gives rapid
+// consecutive drags time to recycle without trading the gap for black pixels.
+constexpr uint16_t kCompactCellExtentPx = 128;
 constexpr double kRotationReuseToleranceRad = 0.08726646259971647; // 5 deg
 
 struct Layout {

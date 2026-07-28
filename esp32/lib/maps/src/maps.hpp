@@ -323,7 +323,15 @@ public:
   void cancelDragPreview();
   void finishDragSettlement();
   bool dragPreviewBlocksMapRender(uint32_t nowMs) const {
-    return dragPreviewController.blocksRender(nowMs);
+    // A prepared standalone-Map raster should start replenishing its edge on
+    // the first update after release. The generic delay is useful for legacy
+    // viewport rerenders, but here it only lets a rapid second drag consume
+    // the remaining prepared margin before recycling begins.
+    const uint32_t settlementDelay =
+        dragPresentation.usesRollingRaster
+            ? 0
+            : map_drag_preview::kSettlementDelayMs;
+    return dragPreviewController.blocksRender(nowMs, settlementDelay);
   }
   bool isDragPreviewActive() const { return dragPreviewController.active(); }
   bool isDragSettlementPending() const {
