@@ -5,6 +5,7 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "../../utils/src/touchInterruptGate.hpp"
 
 #ifdef USE_ARDUINO_GFX
 
@@ -219,6 +220,13 @@ uint16_t touchX = 0, touchY = 0;
 static waveshare_board::touch::TouchFrame latestTouchFrame;
 static uint32_t touchFrameSequence = 0;
 static bool suppressPrimaryTouchUntilRelease = false;
+static MultiTouchSuppressionPolicy multiTouchSuppressionPolicy = nullptr;
+static volatile uint32_t touchInterruptGeneration = 0;
+static uint32_t attemptedTouchInterruptGeneration = 0;
+
+static void IRAM_ATTR latchTouchInterrupt() {
+  touchInterruptGeneration = touchInterruptGeneration + 1;
+}
 
 waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {
   return latestTouchFrame;
@@ -226,6 +234,15 @@ waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {
 
 bool isPrimaryTouchSuppressed() {
   return suppressPrimaryTouchUntilRelease;
+}
+
+void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy) {
+  multiTouchSuppressionPolicy = policy;
+}
+
+bool hasUnattemptedTouchInterrupt() {
+  return touch_interrupt_gate::hasUnattemptedGeneration(
+      touchInterruptGeneration, attemptedTouchInterruptGeneration);
 }
 
 static void publishTouchFrame(
@@ -239,7 +256,8 @@ static void publishTouchFrame(
             rawFrame.contacts[index], displayRotation,
             waveshare_board::touch::MAX_X, waveshare_board::touch::MAX_Y);
   }
-  if (latestTouchFrame.count >= 2) {
+  if (latestTouchFrame.count >= 2 && multiTouchSuppressionPolicy != nullptr &&
+      multiTouchSuppressionPolicy()) {
     suppressPrimaryTouchUntilRelease = true;
   } else if (latestTouchFrame.count == 0) {
     suppressPrimaryTouchUntilRelease = false;
@@ -282,6 +300,11 @@ static void configureTouchHintPin() {
     return;
   }
   pinMode(waveshare_board::touch::FT3168_INT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(waveshare_board::touch::FT3168_INT_PIN),
+                  latchTouchInterrupt, FALLING);
+  if (digitalRead(waveshare_board::touch::FT3168_INT_PIN) == LOW) {
+    latchTouchInterrupt();
+  }
   touchHintConfigured = true;
 }
 
@@ -387,9 +410,20 @@ void initTouchController() {
 void readTouch() {
   uint32_t now = millis();
   bool touchHintActive = isTouchHintActive();
+  const uint32_t interruptGenerationBeforeAttempt = touchInterruptGeneration;
+  const bool interruptPending =
+      touch_interrupt_gate::hasUnattemptedGeneration(
+          interruptGenerationBeforeAttempt,
+          attemptedTouchInterruptGeneration);
+  if (interruptPending) {
+    // A new edge receives exactly one throttle-bypassing attempt, including
+    // controller initialization. If initialization or the read fails, normal
+    // retry cadence applies until a newer edge arrives.
+    attemptedTouchInterruptGeneration = interruptGenerationBeforeAttempt;
+  }
   updateTouchHintState(touchHintActive, now);
 
-  if (now < touchBackoffUntilMs) {
+  if (now < touchBackoffUntilMs && !interruptPending) {
     if (touchPressed && now - lastValidTouchMs <
                             waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
       return;
@@ -406,12 +440,14 @@ void readTouch() {
     }
   }
 
-  if (!touchHintActive && !touchPressed && now >= touchFastPollUntilMs) {
+  if (!touchHintActive && !touchPressed && !interruptPending &&
+      now >= touchFastPollUntilMs) {
     setTouchPressed(false);
     return;
   }
 
-  if (now - lastTouchReadMs < touchReadInterval(touchHintActive, now)) {
+  if (!interruptPending &&
+      now - lastTouchReadMs < touchReadInterval(touchHintActive, now)) {
     return;
   }
   lastTouchReadMs = now;
@@ -590,6 +626,11 @@ static void configureTouchHintPin() {
   }
 
   pinMode(waveshare_board::touch::CST9217_INT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(waveshare_board::touch::CST9217_INT_PIN),
+                  latchTouchInterrupt, FALLING);
+  if (digitalRead(waveshare_board::touch::CST9217_INT_PIN) == LOW) {
+    latchTouchInterrupt();
+  }
   touchHintConfigured = true;
 }
 
@@ -750,9 +791,20 @@ void initTouchController() {
 void readTouch() {
   uint32_t now = millis();
   bool touchHintActive = isTouchHintActive();
+  const uint32_t interruptGenerationBeforeAttempt = touchInterruptGeneration;
+  const bool interruptPending =
+      touch_interrupt_gate::hasUnattemptedGeneration(
+          interruptGenerationBeforeAttempt,
+          attemptedTouchInterruptGeneration);
+  if (interruptPending) {
+    // Consume the one immediate attempt before initialization so an init
+    // failure cannot leave the map renderer permanently interrupted.
+    attemptedTouchInterruptGeneration = interruptGenerationBeforeAttempt;
+  }
   bool touchHintChanged = updateTouchHintState(touchHintActive, now);
 
-  if (now < touchBackoffUntilMs && !(touchHintChanged && touchHintActive)) {
+  if (now < touchBackoffUntilMs && !interruptPending &&
+      !(touchHintChanged && touchHintActive)) {
     if (touchPressed && now - lastValidTouchMs <
                             waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
       return;
@@ -772,7 +824,7 @@ void readTouch() {
 
   uint32_t readInterval =
       touchReadInterval(touchHintActive, touchHintChanged, now);
-  if (now - lastTouchReadMs < readInterval) {
+  if (!interruptPending && now - lastTouchReadMs < readInterval) {
     return;
   }
   lastTouchReadMs = now;

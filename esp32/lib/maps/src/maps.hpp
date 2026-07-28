@@ -96,7 +96,14 @@ private:
     void setCenter(Point32 pcenter);
     void setCenterForCanvas(Point32 pcenter, uint16_t canvasWidth,
                             uint16_t canvasHeight, double rotation);
+    void setCenterForCanvas(double centerX, double centerY,
+                            uint16_t canvasWidth, uint16_t canvasHeight,
+                            double rotation);
     Point32 center;
+    double rasterOriginX = 0.0;
+    double rasterOriginY = 0.0;
+    int32_t rasterCellOffsetX = 0;
+    int32_t rasterCellOffsetY = 0;
     BBox bbox;
     uint8_t zoom;
   };
@@ -135,8 +142,10 @@ private:
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation);
-  bool renderRollingRasterCell(double centerX, double centerY, uint8_t zoom,
-                               double rotation, uint8_t scratchIndex,
+  bool renderRollingRasterCell(double rasterOriginX, double rasterOriginY,
+                               int32_t cellOffsetX, int32_t cellOffsetY,
+                               uint8_t zoom, double rotation,
+                               uint8_t scratchIndex,
                                size_t scratchBaseOffset,
                                bool preserveVisibleState,
                                bool *mapFoundOut = nullptr);
@@ -144,6 +153,7 @@ private:
                                 uint16_t viewportHeight, uint64_t signature);
   bool shiftRollingRasterWindow(int8_t directionX, int8_t directionY);
   bool settleRollingRasterWindow();
+  map_transform::PixelOffset rollingRasterCenterOffset(Point32 center) const;
   bool preserveVisibleFrameForRollingBuild(uint16_t viewportWidth,
                                            uint16_t viewportHeight,
                                            size_t &scratchBaseOffset);
@@ -221,6 +231,7 @@ private:
     bool capturedFollowGps = true;
     uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
     Point32 baseCenter = {0, 0};
+    double baseRotation = 0.0;
     int16_t initialMidpointX = 0;
     int16_t initialMidpointY = 0;
     int16_t canvasBaseX = 0;
@@ -252,12 +263,15 @@ private:
     uint16_t viewportWidth = 0;
     uint16_t viewportHeight = 0;
     double rotation = 0.0;
-    double originX = 0.0;
-    double originY = 0.0;
+    double phaseOriginX = 0.0;
+    double phaseOriginY = 0.0;
+    int32_t originPhaseOffsetX = 0;
+    int32_t originPhaseOffsetY = 0;
     uint64_t signature = 0;
   } rollingRasterWindow;
 
   map_drag_preview::Controller dragPreviewController;
+  bool deferredVectorRedraw = false;
   struct DragPresentation {
     uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
     int16_t canvasBaseX = 0;
@@ -277,6 +291,7 @@ private:
 
   void applyDragPreviewOffset(map_drag_preview::Offset offset);
   void syncDragPreviewCenterToPresentedOffset();
+  void rebaseRollingDragAtVisibleEndpoint();
   void resetDragPresentationVisuals();
 
 public:
@@ -322,6 +337,7 @@ public:
   void updateDragPreview(int16_t sessionDx, int16_t sessionDy);
   void commitDragPreview(int16_t sessionDx, int16_t sessionDy,
                          uint32_t nowMs);
+  void handoffDragPreviewToPinch();
   void cancelDragPreview();
   void finishDragSettlement();
   bool dragPreviewBlocksMapRender(uint32_t nowMs) const {
@@ -350,6 +366,11 @@ public:
   bool isPinchPreviewActive() const { return pinchPresentation.active; }
   bool isPinchSettlementPending() const {
     return pinchPresentation.settlementPending;
+  }
+  bool takeDeferredVectorRedraw() {
+    const bool pending = deferredVectorRedraw;
+    deferredVectorRedraw = false;
+    return pending;
   }
 
   // Map rotation

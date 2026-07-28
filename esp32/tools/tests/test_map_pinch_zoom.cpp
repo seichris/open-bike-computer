@@ -65,6 +65,81 @@ int main() {
     }
   }
 
+  // Every rolling cell retains one global subpixel phase. A world point must
+  // land on the same assembled pixel whether rendered by the center cell or a
+  // neighboring cell, including rotated and half-pixel cases.
+  const WorldPoint rasterOrigin = {1234.25, -987.5};
+  for (uint8_t zoom = 1; zoom <= 5; ++zoom) {
+    const int32_t cellExtent = zoom == 5 ? 192 : 128;
+    for (double rasterRotation : {0.0, 0.5, -1.2}) {
+      for (const PixelOffset cellOffset :
+           {PixelOffset{cellExtent, 0}, PixelOffset{-cellExtent, 0},
+            PixelOffset{0, cellExtent}, PixelOffset{0, -cellExtent}}) {
+        for (const WorldPoint sample :
+             {WorldPoint{274.0, -91.5}, WorldPoint{-0.5, 0.5},
+              WorldPoint{4096.25, -2048.75}}) {
+          const PixelOffset fromOrigin = rasterCellPixel(
+              sample, rasterOrigin, {0, 0}, zoom, rasterRotation);
+          const PixelOffset fromCell = rasterCellPixel(
+              sample, rasterOrigin, cellOffset, zoom, rasterRotation);
+          assert(fromOrigin.x == cellOffset.x + fromCell.x);
+          assert(fromOrigin.y == cellOffset.y + fromCell.y);
+        }
+      }
+    }
+  }
+
+  // Regression: at zoom 1, deriving the left cell's world-space center and
+  // projecting it back turns the shared -382.5 tie into
+  // -254.50000000000003. Common-origin quantization must still assemble the
+  // feature at exactly the center cell's pixel.
+  const PixelOffset zoomOneCenter =
+      rasterCellPixel({-255.0, 0.0}, {0.0, 0.0}, {0, 0}, 1, 0.0);
+  const PixelOffset zoomOneLeft =
+      rasterCellPixel({-255.0, 0.0}, {0.0, 0.0}, {-128, 0}, 1, 0.0);
+  assert(zoomOneCenter.x == -382);
+  assert(-128 + zoomOneLeft.x == zoomOneCenter.x);
+
+  // Regression across a recycle generation: retained pixels are shifted by
+  // an exact cell width, while the replacement edge must keep quantizing
+  // against the original phase origin. Re-quantizing against the derived
+  // logical origin crosses this same half tie.
+  const PixelOffset zoomOneAfterLeftRecycle =
+      rasterCellPixel({-255.0, 0.0}, {0.0, 0.0}, {-128, 0}, 1, 0.0);
+  assert(zoomOneCenter.x + 128 == zoomOneAfterLeftRecycle.x);
+  const WorldPoint derivedRecycledOrigin =
+      screenToWorld({-128.0, 0.0}, 1, 0.0);
+  const ScreenDelta legacyRecycledProjection = worldToScreen(
+      {-255.0 - derivedRecycledOrigin.x,
+       -derivedRecycledOrigin.y},
+      1, 0.0);
+  assert(quantizePixel(legacyRecycledProjection.x) == -255);
+  assert(quantizePixel(legacyRecycledProjection.x) !=
+         zoomOneAfterLeftRecycle.x);
+
+  // Regression: std::round() chooses opposite directions for the +68.5 and
+  // -123.5 views of this same zoom-5 point, producing a one-pixel seam.
+  assert(quantizePixel(274.0 * 0.25) ==
+         192 + quantizePixel((274.0 - 768.0) * 0.25));
+
+  // A completed X recycle is an authoritative checkpoint even if the Y edge
+  // is interrupted. Recomputing the canvas offset from the new origin keeps
+  // the same logical center-to-screen mapping for the immediate next drag.
+  const WorldPoint checkpointCenter = {1800.0, -700.0};
+  const WorldPoint checkpointOrigin = {1600.0, -900.0};
+  const uint8_t checkpointZoom = 4;
+  const double checkpointRotation = 0.5;
+  const auto oldPlacement = rasterCenterOffset(
+      checkpointCenter, checkpointOrigin, checkpointZoom, checkpointRotation);
+  const WorldPoint checkpointShift = screenToWorld(
+      {128.0, 0.0}, checkpointZoom, checkpointRotation);
+  const WorldPoint shiftedOrigin = {checkpointOrigin.x + checkpointShift.x,
+                                    checkpointOrigin.y + checkpointShift.y};
+  const auto shiftedPlacement = rasterCenterOffset(
+      checkpointCenter, shiftedOrigin, checkpointZoom, checkpointRotation);
+  assert(oldPlacement.x - shiftedPlacement.x == 128);
+  assert(oldPlacement.y == shiftedPlacement.y);
+
   const WorldPoint initialCenter = {1000.0, 2000.0};
   const ScreenDelta initialFocal = {50.0, -25.0};
   const ScreenDelta finalFocal = {70.0, 15.0};
@@ -78,6 +153,17 @@ int main() {
              adjusted.x + focalAfterOffset.x);
   assertNear(initialCenter.y + focalBeforeOffset.y,
              adjusted.y + focalAfterOffset.y);
+
+  // A course-up heading update during pinch settlement must not change the
+  // rotation used by focal anchoring. It is explicitly scheduled afterward.
+  const double frozenRotation = -0.4;
+  const double newerRotation = -1.1;
+  assertNear(renderRotationForSettlement(true, frozenRotation, newerRotation),
+             frozenRotation);
+  assertNear(renderRotationForSettlement(false, frozenRotation, newerRotation),
+             newerRotation);
+  assert(rotationNeedsRefresh(frozenRotation, newerRotation));
+  assert(!rotationNeedsRefresh(frozenRotation, frozenRotation));
 
   // Drag presentation updates the authoritative center on every frame. A
   // second session therefore starts from the first session's live endpoint,
@@ -94,6 +180,59 @@ int main() {
       4, rotation);
   assertNear(secondDragCenter.x, combinedDragCenter.x);
   assertNear(secondDragCenter.y, combinedDragCenter.y);
+
+  // Exercise the production rolling-drag rebase used by commit/re-touch.
+  // Starting a second session with zero movement must preserve the exact
+  // first endpoint and its canvas/raster relationship, even before recycle.
+  const WorldPoint dragRasterOrigin = {900.25, 1700.5};
+  const auto firstRebase = rollingDragRebase(
+      initialCenter, firstDrag, 4, rotation, dragRasterOrigin);
+  const auto immediateRestart = rollingDragRebase(
+      {static_cast<double>(firstRebase.center.x),
+       static_cast<double>(firstRebase.center.y)},
+      {0.0, 0.0}, 4, rotation, dragRasterOrigin);
+  assert(immediateRestart.center.x == firstRebase.center.x);
+  assert(immediateRestart.center.y == firstRebase.center.y);
+  assert(immediateRestart.canvasOffset.x == firstRebase.canvasOffset.x);
+  assert(immediateRestart.canvasOffset.y == firstRebase.canvasOffset.y);
+
+  const auto immediateSecond = rollingDragRebase(
+      {static_cast<double>(firstRebase.center.x),
+       static_cast<double>(firstRebase.center.y)},
+      secondDrag, 4, rotation, dragRasterOrigin);
+  assert(immediateSecond.center.x != firstRebase.center.x ||
+         immediateSecond.center.y != firstRebase.center.y);
+
+  // Edge-clamped movement rebases at the visible limit, so reversing on the
+  // next session moves immediately instead of paying back hidden overshoot.
+  const int32_t clampedOut =
+      map_raster_window::clampDragOffset(200, 400, 466, 192, 5);
+  const auto clampedFirst = rollingDragRebase(
+      initialCenter, {static_cast<double>(clampedOut), 0.0}, 5, 0.0,
+      dragRasterOrigin);
+  const auto clampedReverse = rollingDragRebase(
+      {static_cast<double>(clampedFirst.center.x),
+       static_cast<double>(clampedFirst.center.y)},
+      {-20.0, 0.0}, 5, 0.0, dragRasterOrigin);
+  assert(clampedReverse.center.x != clampedFirst.center.x);
+
+  // A recycle may advance the raster origin between sessions; the endpoint
+  // remains authoritative and only its canvas placement changes by one cell.
+  const auto afterRecycle = rollingDragRebase(
+      {static_cast<double>(clampedFirst.center.x),
+       static_cast<double>(clampedFirst.center.y)},
+      {0.0, 0.0}, 5, 0.0, dragRasterOrigin, {192, 0});
+  assert(afterRecycle.center.x == clampedFirst.center.x);
+  assert(afterRecycle.canvasOffset.x - clampedFirst.canvasOffset.x == 192);
+
+  // A zoom change establishes a new scale but still starts at the previous
+  // visible endpoint rather than the first gesture's original center.
+  const auto afterZoom = rollingDragRebase(
+      {static_cast<double>(firstRebase.center.x),
+       static_cast<double>(firstRebase.center.y)},
+      {0.0, 0.0}, 3, rotation, dragRasterOrigin);
+  assert(afterZoom.center.x == firstRebase.center.x);
+  assert(afterZoom.center.y == firstRebase.center.y);
 
   Controller outward;
   assert(outward.update(frame(1, 2), 3).action == Action::Begin);

@@ -153,6 +153,9 @@ void hideShowAnim(void *var, int32_t v) {
  * @param event
  */
 void hideShowEvent(lv_event_t *e) {
+  if (mapPinchOwnsInput() || mapMultiTouchSuppressesPrimary()) {
+    return;
+  }
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
     lv_obj_t *buttonBar = (lv_obj_t *)lv_event_get_user_data(e);
     if (lv_obj_get_width(buttonBar) < LV_HOR_RES / 2) {

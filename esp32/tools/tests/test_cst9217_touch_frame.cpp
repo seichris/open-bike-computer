@@ -1,4 +1,5 @@
 #include "../../lib/waveshare_board/cst9217_touch_frame.hpp"
+#include "../../lib/utils/src/touchInterruptGate.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -20,6 +21,20 @@ void encodeContact(uint8_t *data, std::size_t offset, uint8_t id,
 } // namespace
 
 int main() {
+  // Both CST9217 and FT3168 use the same generation gate. A new edge bypasses
+  // throttling once, failure on that attempt does not create a busy retry
+  // loop, and a later edge can preempt the existing backoff once.
+  for (int controllerPath = 0; controllerPath < 2; ++controllerPath) {
+    (void)controllerPath;
+    uint32_t generated = 10;
+    uint32_t attempted = 9;
+    assert(touch_interrupt_gate::shouldBypassThrottle(generated, attempted));
+    attempted = generated; // init/read attempt begins, then fails before I2C
+    assert(!touch_interrupt_gate::shouldBypassThrottle(generated, attempted));
+    ++generated;
+    assert(touch_interrupt_gate::shouldBypassThrottle(generated, attempted));
+  }
+
   uint8_t packet[CST9217_FRAME_LENGTH] = {};
   packet[6] = CST9217_FRAME_ACK;
   TouchFrame frame;

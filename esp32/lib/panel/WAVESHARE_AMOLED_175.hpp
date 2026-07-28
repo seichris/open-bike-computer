@@ -32,6 +32,9 @@ extern bool touchPressed;
 extern uint16_t touchX, touchY;
 waveshare_board::touch::TouchFrame getTouchFrameSnapshot();
 bool isPrimaryTouchSuppressed();
+using MultiTouchSuppressionPolicy = bool (*)();
+void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy);
+bool hasUnattemptedTouchInterrupt();
 
 // Function declarations
 void setupDisplay();

@@ -1848,11 +1848,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           map_profile_protocol::visibilityMaskForMapVersion(
               style.visibilityMask, mblock->formatVersion);
 
-      // block to draw
-      Point16 screen_center_mc =
-          viewPort.center.toPoint16() -
-          mblock->offset.toPoint16(); // screen center with features coordinates
-
       ESP_LOGI(TAG, "Drawing cached map block");
 
       BBox screen_bbox_mc =
@@ -1880,12 +1875,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
       // Define transform lambda once, outside the loop
       auto transformPoint = [&](Point16 p) -> Point16 {
-        const auto screen = map_transform::worldToScreen(
-            {static_cast<double>(p.x - screen_center_mc.x),
-             static_cast<double>(p.y - screen_center_mc.y)},
-            zoom, rotation);
-        int16_t sx = round(screen.x) + screenAnchorX;
-        int16_t sy = round(screen.y) + screenAnchorY;
+        const auto screen = map_transform::rasterCellPixel(
+            {static_cast<double>(p.x) + mblock->offset.x,
+             static_cast<double>(p.y) + mblock->offset.y},
+            {viewPort.rasterOriginX, viewPort.rasterOriginY},
+            {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
+            rotation);
+        int16_t sx = screen.x + screenAnchorX;
+        int16_t sy = screen.y + screenAnchorY;
 
         return Point16(sx, sy);
       };
@@ -1993,12 +1990,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {
-          const auto screen = map_transform::worldToScreen(
-              {static_cast<double>(p.x - screen_center_mc.x),
-               static_cast<double>(p.y - screen_center_mc.y)},
-              zoom, rotation);
-          int16_t sx = round(screen.x) + screenAnchorX;
-          int16_t sy = round(screen.y) + screenAnchorY;
+          const auto screen = map_transform::rasterCellPixel(
+              {static_cast<double>(p.x) + mblock->offset.x,
+               static_cast<double>(p.y) + mblock->offset.y},
+              {viewPort.rasterOriginX, viewPort.rasterOriginY},
+              {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
+              rotation);
+          int16_t sx = screen.x + screenAnchorX;
+          int16_t sy = screen.y + screenAnchorY;
           return Point16(sx, sy);
         };
 
@@ -2351,6 +2350,10 @@ Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
  */
 void Maps::ViewPort::setCenter(Point32 pcenter) {
   center = pcenter; // CRITICAL: Must assign center!
+  rasterOriginX = pcenter.x;
+  rasterOriginY = pcenter.y;
+  rasterCellOffsetX = 0;
+  rasterCellOffsetY = 0;
   const double zoomScale = map_transform::screenToWorldScale(zoom);
   bbox.min.x = pcenter.x - Maps::tileWidth * zoomScale / 2;
   bbox.min.y = pcenter.y - Maps::tileHeight * zoomScale / 2;
@@ -2362,10 +2365,23 @@ void Maps::ViewPort::setCenterForCanvas(Point32 pcenter,
                                         uint16_t canvasWidth,
                                         uint16_t canvasHeight,
                                         double rotation) {
-  center = pcenter;
+  setCenterForCanvas(static_cast<double>(pcenter.x),
+                     static_cast<double>(pcenter.y), canvasWidth,
+                     canvasHeight, rotation);
+}
+
+void Maps::ViewPort::setCenterForCanvas(double centerX, double centerY,
+                                        uint16_t canvasWidth,
+                                        uint16_t canvasHeight,
+                                        double rotation) {
+  rasterOriginX = centerX;
+  rasterOriginY = centerY;
+  rasterCellOffsetX = 0;
+  rasterCellOffsetY = 0;
+  center = Point32(static_cast<int32_t>(std::round(centerX)),
+                   static_cast<int32_t>(std::round(centerY)));
   const auto bounds = map_transform::canvasWorldBounds(
-      {static_cast<double>(pcenter.x), static_cast<double>(pcenter.y)},
-      canvasWidth, canvasHeight, zoom, rotation);
+      {centerX, centerY}, canvasWidth, canvasHeight, zoom, rotation);
   bbox.min = Point32(static_cast<int32_t>(std::floor(bounds.min.x)),
                      static_cast<int32_t>(std::floor(bounds.min.y)));
   bbox.max = Point32(static_cast<int32_t>(std::ceil(bounds.max.x)),
@@ -2639,7 +2655,10 @@ double Maps::visibleMapRotation() const {
   return Maps::rotationRad;
 }
 
-bool Maps::renderRollingRasterCell(double centerX, double centerY,
+bool Maps::renderRollingRasterCell(double rasterOriginX,
+                                   double rasterOriginY,
+                                   int32_t cellOffsetX,
+                                   int32_t cellOffsetY,
                                    uint8_t requestedZoom, double rotation,
                                    uint8_t scratchIndex,
                                    size_t scratchBaseOffset,
@@ -2688,9 +2707,17 @@ bool Maps::renderRollingRasterCell(double centerX, double centerY,
 
   ViewPort cellViewPort;
   cellViewPort.zoom = requestedZoom;
-  const Point32 cellCenter(static_cast<int32_t>(std::round(centerX)),
-                           static_cast<int32_t>(std::round(centerY)));
-  cellViewPort.setCenterForCanvas(cellCenter, tileWidth, tileHeight, rotation);
+  const auto worldDelta = map_transform::screenToWorld(
+      {static_cast<double>(cellOffsetX), static_cast<double>(cellOffsetY)},
+      requestedZoom, rotation);
+  const double centerX = rasterOriginX + worldDelta.x;
+  const double centerY = rasterOriginY + worldDelta.y;
+  cellViewPort.setCenterForCanvas(centerX, centerY, tileWidth, tileHeight,
+                                  rotation);
+  cellViewPort.rasterOriginX = rasterOriginX;
+  cellViewPort.rasterOriginY = rasterOriginY;
+  cellViewPort.rasterCellOffsetX = cellOffsetX;
+  cellViewPort.rasterCellOffsetY = cellOffsetY;
   if (!Maps::getMapBlocks(cellViewPort.bbox, Maps::memCache) ||
       !Maps::readVectorMap(cellViewPort, Maps::memCache,
                            Maps::canvasMapTemp, requestedZoom, rotation)) {
@@ -2705,9 +2732,12 @@ bool Maps::renderRollingRasterCell(double centerX, double centerY,
 
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
     routeOverlay.drawRoute(
-        Maps::canvasMapTemp, cellViewPort.center.x, cellViewPort.center.y,
+        Maps::canvasMapTemp, cellViewPort.rasterOriginX,
+        cellViewPort.rasterOriginY,
         requestedZoom, tileWidth, tileHeight, rotation,
-        mapAnchorXForWidth(tileWidth), mapAnchorYForHeight(tileHeight));
+        mapAnchorXForWidth(tileWidth), mapAnchorYForHeight(tileHeight),
+        cellViewPort.rasterCellOffsetX,
+        cellViewPort.rasterCellOffsetY);
   }
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -2884,17 +2914,23 @@ void Maps::updateVisibleVectorViewport() {
   Maps::totalBounds.lon_max = Maps::mercatorX2lon(Maps::viewPort.bbox.max.x);
 }
 
+map_transform::PixelOffset
+Maps::rollingRasterCenterOffset(Point32 center) const {
+  return map_transform::rasterCellPixel(
+      {static_cast<double>(center.x), static_cast<double>(center.y)},
+      {rollingRasterWindow.phaseOriginX,
+       rollingRasterWindow.phaseOriginY},
+      {rollingRasterWindow.originPhaseOffsetX,
+       rollingRasterWindow.originPhaseOffsetY},
+      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+}
+
 void Maps::positionRollingRasterCanvas(Point32 center) {
   if (!rollingRasterWindow.valid || Maps::canvasMap == nullptr)
     return;
-  const auto centerOffset = map_transform::worldToScreen(
-      {static_cast<double>(center.x) - rollingRasterWindow.originX,
-       static_cast<double>(center.y) - rollingRasterWindow.originY},
-      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+  const auto centerOffset = rollingRasterCenterOffset(center);
   lv_obj_center(Maps::canvasMap);
-  lv_obj_set_pos(Maps::canvasMap,
-                 -static_cast<int32_t>(std::round(centerOffset.x)),
-                 -static_cast<int32_t>(std::round(centerOffset.y)));
+  lv_obj_set_pos(Maps::canvasMap, -centerOffset.x, -centerOffset.y);
   lv_obj_invalidate(Maps::canvasMap);
 }
 
@@ -2914,8 +2950,10 @@ bool Maps::buildRollingRasterWindow(uint8_t requestedZoom,
   rollingRasterWindow.viewportWidth = viewportWidth;
   rollingRasterWindow.viewportHeight = viewportHeight;
   rollingRasterWindow.rotation = Maps::rotationRad;
-  rollingRasterWindow.originX = Maps::point.x;
-  rollingRasterWindow.originY = Maps::point.y;
+  rollingRasterWindow.phaseOriginX = Maps::point.x;
+  rollingRasterWindow.phaseOriginY = Maps::point.y;
+  rollingRasterWindow.originPhaseOffsetX = 0;
+  rollingRasterWindow.originPhaseOffsetY = 0;
   rollingRasterWindow.signature = signature;
 
   const uint16_t tileWidth = rollingRasterWindow.tileWidth;
@@ -2952,15 +2990,14 @@ bool Maps::buildRollingRasterWindow(uint8_t requestedZoom,
                            rollingRasterWindow.gridRadius;
       const int8_t cellY =
           static_cast<int8_t>(row) - rollingRasterWindow.gridRadius;
-      const auto worldDelta = map_transform::screenToWorld(
-          {static_cast<double>(cellX) * tileWidth,
-           static_cast<double>(cellY) * tileHeight},
-          requestedZoom, Maps::rotationRad);
+      const int32_t cellOffsetX = static_cast<int32_t>(cellX) * tileWidth;
+      const int32_t cellOffsetY = static_cast<int32_t>(cellY) * tileHeight;
       bool cellMapFound = false;
       if (!renderRollingRasterCell(
-              rollingRasterWindow.originX + worldDelta.x,
-              rollingRasterWindow.originY + worldDelta.y, requestedZoom,
-              Maps::rotationRad, 0, scratchBaseOffset, true,
+              rollingRasterWindow.phaseOriginX,
+              rollingRasterWindow.phaseOriginY,
+              cellOffsetX, cellOffsetY, requestedZoom, Maps::rotationRad, 0,
+              scratchBaseOffset, true,
               &cellMapFound)) {
         ESP_LOGI(TAG, "Rolling raster build interrupted at cell %d,%d", cellX,
                  cellY);
@@ -3042,12 +3079,20 @@ bool Maps::shiftRollingRasterWindow(int8_t directionX, int8_t directionY) {
   }
   const uint32_t shiftStartMs = millis();
 
-  const auto originDelta = map_transform::screenToWorld(
-      {static_cast<double>(directionX) * rollingRasterWindow.tileWidth,
-       static_cast<double>(directionY) * rollingRasterWindow.tileHeight},
+  const int32_t targetOriginPhaseOffsetX =
+      rollingRasterWindow.originPhaseOffsetX +
+      (static_cast<int32_t>(directionX) * rollingRasterWindow.tileWidth);
+  const int32_t targetOriginPhaseOffsetY =
+      rollingRasterWindow.originPhaseOffsetY +
+      (static_cast<int32_t>(directionY) * rollingRasterWindow.tileHeight);
+  const auto targetOriginDelta = map_transform::screenToWorld(
+      {static_cast<double>(targetOriginPhaseOffsetX),
+       static_cast<double>(targetOriginPhaseOffsetY)},
       rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-  const double targetOriginX = rollingRasterWindow.originX + originDelta.x;
-  const double targetOriginY = rollingRasterWindow.originY + originDelta.y;
+  const double targetOriginX =
+      rollingRasterWindow.phaseOriginX + targetOriginDelta.x;
+  const double targetOriginY =
+      rollingRasterWindow.phaseOriginY + targetOriginDelta.y;
 
   for (uint8_t index = 0; index < rollingRasterWindow.gridSpan; ++index) {
     const int8_t crossCell = static_cast<int8_t>(index) -
@@ -3066,12 +3111,15 @@ bool Maps::shiftRollingRasterWindow(int8_t directionX, int8_t directionY) {
             ? map_raster_window::replacementCellOffset(
                   directionY, rollingRasterWindow.gridRadius)
             : crossCell;
-    const auto cellDelta = map_transform::screenToWorld(
-        {static_cast<double>(cellX) * rollingRasterWindow.tileWidth,
-         static_cast<double>(cellY) * rollingRasterWindow.tileHeight},
-        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-    if (!renderRollingRasterCell(targetOriginX + cellDelta.x,
-                                 targetOriginY + cellDelta.y,
+    const int32_t cellPhaseOffsetX =
+        targetOriginPhaseOffsetX +
+        (static_cast<int32_t>(cellX) * rollingRasterWindow.tileWidth);
+    const int32_t cellPhaseOffsetY =
+        targetOriginPhaseOffsetY +
+        (static_cast<int32_t>(cellY) * rollingRasterWindow.tileHeight);
+    if (!renderRollingRasterCell(rollingRasterWindow.phaseOriginX,
+                                 rollingRasterWindow.phaseOriginY,
+                                 cellPhaseOffsetX, cellPhaseOffsetY,
                                  rollingRasterWindow.zoom,
                                  rollingRasterWindow.rotation, index, 0,
                                  true)) {
@@ -3086,8 +3134,12 @@ bool Maps::shiftRollingRasterWindow(int8_t directionX, int8_t directionY) {
                            : shiftGridPixelsVertical(directionY);
   if (!shifted)
     return false;
-  rollingRasterWindow.originX = targetOriginX;
-  rollingRasterWindow.originY = targetOriginY;
+  rollingRasterWindow.originPhaseOffsetX = targetOriginPhaseOffsetX;
+  rollingRasterWindow.originPhaseOffsetY = targetOriginPhaseOffsetY;
+  // Each completed edge is a consistency checkpoint. A following axis may be
+  // interrupted by a new touch, so the live canvas must already use this origin.
+  updateVisibleVectorViewport();
+  positionRollingRasterCanvas(Maps::point);
   ESP_LOGI(TAG,
            "Rolling raster shifted direction=%d,%d elapsedMs=%lu "
            "origin=(%.0f,%.0f)",
@@ -3101,13 +3153,9 @@ bool Maps::settleRollingRasterWindow() {
   if (!rollingRasterWindow.valid)
     return false;
 
-  auto centerOffset = map_transform::worldToScreen(
-      {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-       static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+  auto centerOffset = rollingRasterCenterOffset(Maps::point);
   if (!map_raster_window::centerIsCovered(
-          static_cast<int32_t>(std::round(centerOffset.x)),
-          static_cast<int32_t>(std::round(centerOffset.y)),
+          centerOffset.x, centerOffset.y,
           rollingRasterWindow.viewportWidth,
           rollingRasterWindow.viewportHeight,
           rollingRasterWindow.tileWidth, rollingRasterWindow.tileHeight,
@@ -3124,16 +3172,10 @@ bool Maps::settleRollingRasterWindow() {
       break;
     if (!shiftRollingRasterWindow(directionX, 0))
       return false;
-    centerOffset = map_transform::worldToScreen(
-        {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-         static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+    centerOffset = rollingRasterCenterOffset(Maps::point);
   }
 
-  centerOffset = map_transform::worldToScreen(
-      {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-       static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-      rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+  centerOffset = rollingRasterCenterOffset(Maps::point);
   for (uint8_t step = 0; step < rollingRasterWindow.gridRadius; ++step) {
     const int8_t directionY = map_raster_window::recycleDirection(
         centerOffset.y, rollingRasterWindow.tileHeight);
@@ -3141,10 +3183,7 @@ bool Maps::settleRollingRasterWindow() {
       break;
     if (!shiftRollingRasterWindow(0, directionY))
       return false;
-    centerOffset = map_transform::worldToScreen(
-        {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-         static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+    centerOffset = rollingRasterCenterOffset(Maps::point);
   }
 
   bindRollingRasterCanvas();
@@ -3239,8 +3278,9 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   }
 
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(Maps::canvasMapTemp, backdropViewPort.center.x,
-                           backdropViewPort.center.y, backdropZoom,
+    routeOverlay.drawRoute(Maps::canvasMapTemp,
+                           backdropViewPort.rasterOriginX,
+                           backdropViewPort.rasterOriginY, backdropZoom,
                            Maps::mapScrWidth, canvasHeight,
                            backdropRotation,
                            mapAnchorXForWidth(Maps::mapScrWidth),
@@ -3326,6 +3366,34 @@ void Maps::syncDragPreviewCenterToPresentedOffset() {
   Maps::followGps = false;
 }
 
+void Maps::rebaseRollingDragAtVisibleEndpoint() {
+  if (!rollingRasterWindow.valid || Maps::canvasMap == nullptr) {
+    syncDragPreviewCenterToPresentedOffset();
+    return;
+  }
+  const auto rebase = map_transform::rollingDragRebase(
+      {static_cast<double>(dragPresentation.baseCenter.x),
+       static_cast<double>(dragPresentation.baseCenter.y)},
+      {static_cast<double>(dragPresentation.presentedOffset.x),
+       static_cast<double>(dragPresentation.presentedOffset.y)},
+      dragPresentation.baseZoom, dragPresentation.baseRotation,
+      {rollingRasterWindow.phaseOriginX,
+       rollingRasterWindow.phaseOriginY},
+      {rollingRasterWindow.originPhaseOffsetX,
+       rollingRasterWindow.originPhaseOffsetY});
+  Maps::point = {rebase.center.x, rebase.center.y};
+  Maps::isPosMoved = true;
+  Maps::followGps = false;
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_set_pos(Maps::canvasMap, rebase.canvasOffset.x,
+                 rebase.canvasOffset.y);
+  lv_obj_invalidate(Maps::canvasMap);
+  dragPresentation.canvasBaseX = rebase.canvasOffset.x;
+  dragPresentation.canvasBaseY = rebase.canvasOffset.y;
+  dragPresentation.baseRasterOffsetX = rebase.rasterCenterOffset.x;
+  dragPresentation.baseRasterOffsetY = rebase.rasterCenterOffset.y;
+}
+
 bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!mapSet.vectorMap || Maps::canvasMap == nullptr ||
       pinchPresentation.active || pinchPresentation.settlementPending ||
@@ -3377,14 +3445,9 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
       shouldUseRollingRasterWindow(normalizedZoom) &&
       !rollingRasterWindow.valid;
   if (dragPresentation.usesRollingRaster) {
-    const auto centerOffset = map_transform::worldToScreen(
-        {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-         static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-    dragPresentation.baseRasterOffsetX =
-        static_cast<int32_t>(std::round(centerOffset.x));
-    dragPresentation.baseRasterOffsetY =
-        static_cast<int32_t>(std::round(centerOffset.y));
+    const auto centerOffset = rollingRasterCenterOffset(Maps::point);
+    dragPresentation.baseRasterOffsetX = centerOffset.x;
+    dragPresentation.baseRasterOffsetY = centerOffset.y;
   }
 
   if (!dragPreviewController.begin())
@@ -3436,25 +3499,16 @@ void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
     const map_drag_preview::Offset presented =
         dragPresentation.presentedOffset;
     dragPreviewController.replaceCommittedOffset(presented);
-    syncDragPreviewCenterToPresentedOffset();
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      rebaseRollingDragAtVisibleEndpoint();
+    } else {
+      syncDragPreviewCenterToPresentedOffset();
+    }
     // Maps::point now describes the exact endpoint already shown by the drag
     // preview. Make that endpoint the baseline immediately instead of keeping
     // the next gesture relative to the canvas position captured before the
     // first drag. Raster recycling may still be pending, but a rapid second
     // touch must start from the pixels that are currently visible.
-    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
-      positionRollingRasterCanvas(Maps::point);
-      dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
-      dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
-      const auto centerOffset = map_transform::worldToScreen(
-          {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-           static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-          rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-      dragPresentation.baseRasterOffsetX =
-          static_cast<int32_t>(std::round(centerOffset.x));
-      dragPresentation.baseRasterOffsetY =
-          static_cast<int32_t>(std::round(centerOffset.y));
-    }
     if (Maps::canvasArrow != nullptr) {
       dragPresentation.markerBaseX =
           lv_obj_get_x_aligned(Maps::canvasArrow);
@@ -3469,6 +3523,40 @@ void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
   } else {
     Maps::scrollMap(sessionDx, sessionDy);
   }
+  Maps::redrawMap = true;
+}
+
+void Maps::handoffDragPreviewToPinch() {
+  if (!dragPreviewController.active() &&
+      !dragPreviewController.settlementPending()) {
+    return;
+  }
+
+  // A two-finger gesture may arrive in the same LVGL read that releases the
+  // synthetic one-finger pointer. Keep the exact endpoint already visible,
+  // normalize the rolling canvas against it, and drop only the old gesture's
+  // bookkeeping. Restoring dragPresentation.canvasBase* here would jump back
+  // to the first finger-down origin.
+  if (dragPreviewController.active() &&
+      (dragPresentation.usesRollingRaster ||
+       dragPresentation.waitsForRollingRaster)) {
+    if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+      rebaseRollingDragAtVisibleEndpoint();
+    } else {
+      syncDragPreviewCenterToPresentedOffset();
+    }
+  }
+  if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
+    positionRollingRasterCanvas(Maps::point);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
+  dragPreviewController.reset();
+  dragPresentation = {};
+  Maps::isPosMoved = true;
   Maps::redrawMap = true;
 }
 
@@ -3524,6 +3612,7 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   pinchPresentation.capturedFollowGps = Maps::followGps;
   pinchPresentation.baseZoom = map_transform::clampRuntimeZoom(baseZoom);
   pinchPresentation.baseCenter = Maps::point;
+  pinchPresentation.baseRotation = visibleMapRotation();
   pinchPresentation.initialMidpointX = midpointX;
   pinchPresentation.initialMidpointY = midpointY;
   pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
@@ -3547,12 +3636,9 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   int32_t rollingCenterOffsetX = 0;
   int32_t rollingCenterOffsetY = 0;
   if (usesRollingRaster) {
-    const auto centerOffset = map_transform::worldToScreen(
-        {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-         static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-    rollingCenterOffsetX = static_cast<int32_t>(std::round(centerOffset.x));
-    rollingCenterOffsetY = static_cast<int32_t>(std::round(centerOffset.y));
+    const auto centerOffset = rollingRasterCenterOffset(Maps::point);
+    rollingCenterOffsetX = centerOffset.x;
+    rollingCenterOffsetY = centerOffset.y;
   }
   if (Maps::followGps) {
     pinchPresentation.pivotLocalX =
@@ -3748,7 +3834,8 @@ void Maps::commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
              static_cast<double>(pinchPresentation.initialMidpointY) - anchorY},
             {static_cast<double>(finalMidpointX) - anchorX,
              static_cast<double>(finalMidpointY) - anchorY},
-            pinchPresentation.baseZoom, targetZoom, visibleMapRotation());
+            pinchPresentation.baseZoom, targetZoom,
+            pinchPresentation.baseRotation);
     Maps::point.x = static_cast<int32_t>(std::round(adjusted.x));
     Maps::point.y = static_cast<int32_t>(std::round(adjusted.y));
     Maps::followGps = false;
@@ -4066,8 +4153,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
 
-  // CRITICAL: Update Rotation ONCE per generation frame to ensure map and route
-  // align
+  // Compute the current course-up request once per generation. A pinch
+  // settlement deliberately renders with the rotation of the pixels the
+  // focal calculation started from; a changed heading is rendered next.
+  double requestedRotation = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
     uint16_t courseUpHeading = gps.gpsData.heading;
     const char *courseUpSource = "gps";
@@ -4080,12 +4169,18 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
     // Use negative heading to rotate map so the selected navigation/course
     // direction points up.
-    rotationRad = -DEG2RAD(courseUpHeading);
+    requestedRotation = -DEG2RAD(courseUpHeading);
     ESP_LOGI(TAG, "Course-Up: heading=%u source=%s gpsHeading=%u",
              (unsigned)courseUpHeading, courseUpSource,
              (unsigned)gps.gpsData.heading);
-  } else {
-    rotationRad = 0;
+  }
+  const bool frozenPinchSettlement = isPinchSettlementPending();
+  rotationRad = map_transform::renderRotationForSettlement(
+      frozenPinchSettlement, pinchPresentation.baseRotation,
+      requestedRotation);
+  if (frozenPinchSettlement &&
+      map_transform::rotationNeedsRefresh(rotationRad, requestedRotation)) {
+    deferredVectorRedraw = true;
   }
 
   const uint16_t viewportHeight =
@@ -4196,8 +4291,9 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
-    routeOverlay.drawRoute(Maps::canvasMapTemp, Maps::viewPort.center.x,
-                           Maps::viewPort.center.y, zoom, renderExtent.width,
+    routeOverlay.drawRoute(Maps::canvasMapTemp,
+                           Maps::viewPort.rasterOriginX,
+                           Maps::viewPort.rasterOriginY, zoom, renderExtent.width,
                            renderExtent.height, rotationRad,
                            mapAnchorXForWidth(renderExtent.width),
                            mapAnchorYForHeight(renderExtent.height));

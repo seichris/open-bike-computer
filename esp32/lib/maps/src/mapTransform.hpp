@@ -29,6 +29,24 @@ struct WorldBounds {
   WorldPoint max;
 };
 
+struct PixelOffset {
+  int32_t x = 0;
+  int32_t y = 0;
+};
+
+struct RollingDragRebase {
+  PixelOffset center;
+  PixelOffset rasterCenterOffset;
+  PixelOffset canvasOffset;
+};
+
+inline int32_t quantizePixel(double value) {
+  // floor(x + 0.5) is invariant under integer translations, including at
+  // half-pixel ties. std::round() changes tie direction across zero, which
+  // makes neighboring independently rendered raster cells disagree.
+  return static_cast<int32_t>(std::floor(value + 0.5));
+}
+
 inline uint8_t clampRuntimeZoom(uint8_t zoom) {
   if (zoom < kMinimumRuntimeZoom)
     return kMinimumRuntimeZoom;
@@ -118,6 +136,60 @@ inline WorldPoint centerAfterScreenDrag(WorldPoint baseCenter,
   const WorldPoint worldDelta =
       screenToWorld(dragOffset, zoom, rotationRad);
   return {baseCenter.x + worldDelta.x, baseCenter.y + worldDelta.y};
+}
+
+inline PixelOffset rasterCenterOffset(WorldPoint center, WorldPoint origin,
+                                      uint8_t zoom, double rotationRad) {
+  const ScreenDelta offset = worldToScreen(
+      {center.x - origin.x, center.y - origin.y}, zoom, rotationRad);
+  return {quantizePixel(offset.x), quantizePixel(offset.y)};
+}
+
+inline PixelOffset rasterCellPixel(WorldPoint feature, WorldPoint rasterOrigin,
+                                   PixelOffset cellOffset, uint8_t zoom,
+                                   double rotationRad) {
+  // Quantize once in the shared raster coordinate system, then translate into
+  // a cell by its exact integer offset. Deriving a cell center with
+  // screenToWorld() and projecting it back can cross a half-pixel tie because
+  // of floating-point error, even with an otherwise invariant quantizer.
+  const ScreenDelta common = worldToScreen(
+      {feature.x - rasterOrigin.x, feature.y - rasterOrigin.y}, zoom,
+      rotationRad);
+  return {quantizePixel(common.x) - cellOffset.x,
+          quantizePixel(common.y) - cellOffset.y};
+}
+
+inline RollingDragRebase rollingDragRebase(WorldPoint baseCenter,
+                                           ScreenDelta presentedOffset,
+                                           uint8_t zoom, double rotationRad,
+                                           WorldPoint rasterPhaseOrigin,
+                                           PixelOffset rasterOriginOffset =
+                                               {0, 0}) {
+  const WorldPoint endpoint = centerAfterScreenDrag(
+      baseCenter, presentedOffset, zoom, rotationRad);
+  RollingDragRebase result;
+  result.center = {static_cast<int32_t>(std::round(endpoint.x)),
+                   static_cast<int32_t>(std::round(endpoint.y))};
+  result.rasterCenterOffset = rasterCellPixel(
+      {static_cast<double>(result.center.x),
+       static_cast<double>(result.center.y)},
+      rasterPhaseOrigin, rasterOriginOffset, zoom, rotationRad);
+  result.canvasOffset = {-result.rasterCenterOffset.x,
+                         -result.rasterCenterOffset.y};
+  return result;
+}
+
+inline double renderRotationForSettlement(bool settlementPending,
+                                          double frozenRotation,
+                                          double currentRotation) {
+  return settlementPending ? frozenRotation : currentRotation;
+}
+
+inline bool rotationNeedsRefresh(double renderedRotation,
+                                 double currentRotation) {
+  return std::fabs(std::atan2(std::sin(renderedRotation - currentRotation),
+                             std::cos(renderedRotation - currentRotation))) >
+         1e-9;
 }
 
 inline WorldBounds canvasWorldBounds(WorldPoint center, double canvasWidth,

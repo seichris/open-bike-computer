@@ -14,8 +14,10 @@
 #include "mapTileTransition.hpp"
 #include "../../utils/src/mapTapArbiter.hpp"
 #include <algorithm>
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../../panel/WAVESHARE_AMOLED_175.hpp"
+#endif
+#if defined(WAVESHARE_AMOLED_175)
 #include "../../utils/src/mapPinchZoom.hpp"
 #endif
 // #include "../../compass/compass.hpp"
@@ -91,6 +93,10 @@ static map_tap_arbiter::Controller mapTapController;
 #if defined(WAVESHARE_AMOLED_175)
 static map_pinch_zoom::Controller mapPinchController;
 
+static bool standaloneMapAcceptsMultiTouch() {
+  return isMainScreen && activeTile == MAP && mapSet.vectorMap;
+}
+
 static map_pinch_zoom::Frame
 pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
   map_pinch_zoom::Frame frame;
@@ -108,11 +114,14 @@ pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
 static void processMapPinchZoom() {
   const auto touchFrame = getTouchFrameSnapshot();
   map_pinch_zoom::Decision decision;
-  if (!isMainScreen || activeTile != MAP || !mapSet.vectorMap ||
-      mapView.isDragPreviewActive() ||
-      mapView.isDragSettlementPending()) {
+  if (!standaloneMapAcceptsMultiTouch()) {
     decision = mapPinchController.cancelForContext(touchFrame.count);
   } else {
+    if (touchFrame.count >= 2 &&
+        (mapView.isDragPreviewActive() ||
+         mapView.isDragSettlementPending())) {
+      mapView.handoffDragPreviewToPinch();
+    }
     decision =
         mapPinchController.update(pinchFrameFromTouch(touchFrame), zoom);
   }
@@ -148,10 +157,15 @@ bool mapPinchOwnsInput() { return mapPinchController.ownsInput(); }
 bool mapPinchBlocksMapRender() {
   return mapPinchController.blocksMapRender();
 }
+
+bool mapMultiTouchSuppressesPrimary() {
+  return isPrimaryTouchSuppressed();
+}
 #else
 static void processMapPinchZoom() {}
 bool mapPinchOwnsInput() { return false; }
 bool mapPinchBlocksMapRender() { return false; }
+bool mapMultiTouchSuppressesPrimary() { return false; }
 #endif
 
 static uint8_t currentMapTouchContactCount() {
@@ -219,12 +233,7 @@ bool shouldInterruptMapRenderForScreenCycle() {
   }
 
   if (activeTile == MAP) {
-#if defined(WAVESHARE_AMOLED_175)
-    return mapPinchBlocksMapRender() ||
-           digitalRead(TCH_I2C_INT) == LOW;
-#else
-    return false;
-#endif
+    return mapPinchBlocksMapRender() || hasUnattemptedTouchInterrupt();
   }
   if (activeTile != MAP_GUIDANCE) {
     return false;
@@ -1021,6 +1030,13 @@ void updateMap(lv_event_t *event) {
     // Clear flag AFTER generation complete (not inside generateVectorMap)
     // This ensures BLE updates during generation will queue another cycle
     mapView.isPosMoved = false;
+    if (mapView.takeDeferredVectorRedraw()) {
+      // Course-up heading changed while a pinch was in flight. First present
+      // the focal-stable settlement frame, then render the latest heading on
+      // the following LVGL cycle.
+      mapView.isPosMoved = true;
+      mapView.redrawMap = true;
+    }
   }
 
   if (mapView.redrawMap) {
@@ -1056,6 +1072,9 @@ void updateSatTrack(lv_event_t *event) {
  * @param event
  */
 void mapToolBarEvent(lv_event_t *event) {
+  if (mapPinchOwnsInput() || mapMultiTouchSuppressesPrimary()) {
+    return;
+  }
   lv_event_code_t code = lv_event_get_code(event);
 
   showMapToolBar = !showMapToolBar;
@@ -1299,7 +1318,8 @@ void scrollMapEvent(lv_event_t *event) {
 
       // Detect short-tap on GPS indicator dot to toggle rotation mode
       // Short tap = released within 300ms with minimal movement
-      if (!longPressTriggered && pressStartTime > 0 &&
+      if (!mapMultiTouchSuppressesPrimary() && !longPressTriggered &&
+          pressStartTime > 0 &&
           millis() - pressStartTime < 300) {
         int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
         if (totalMove < 30) {
@@ -1351,7 +1371,7 @@ void scrollMapEvent(lv_event_t *event) {
  * @param event
  */
 void fullScreenEvent(lv_event_t *event) {
-  if (mapPinchOwnsInput()) {
+  if (mapPinchOwnsInput() || mapMultiTouchSuppressesPrimary()) {
     return;
   }
   mapSet.mapFullScreen = !mapSet.mapFullScreen;
@@ -1404,7 +1424,7 @@ static bool requestVectorRuntimeZoom(int8_t levelDelta) {
 }
 
 void zoomInEvent(lv_event_t *event) {
-  if (mapPinchOwnsInput()) {
+  if (mapPinchOwnsInput() || mapMultiTouchSuppressesPrimary()) {
     return;
   }
   if (!mapSet.vectorMap) {
@@ -1423,7 +1443,7 @@ void zoomInEvent(lv_event_t *event) {
  * @param event
  */
 void zoomOutEvent(lv_event_t *event) {
-  if (mapPinchOwnsInput()) {
+  if (mapPinchOwnsInput() || mapMultiTouchSuppressesPrimary()) {
     return;
   }
   if (!mapSet.vectorMap) {
@@ -1685,6 +1705,12 @@ void toggleNavigationScreen() {
  */
 void createMainScr() {
   mainScreen = lv_obj_create(NULL);
+
+#if defined(WAVESHARE_AMOLED_175)
+  // The CST9217's second contact belongs exclusively to the standalone Map.
+  // Other screens continue receiving their primary LVGL pointer unchanged.
+  setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
+#endif
 
   // SIMPLIFIED: No tileview, just map directly on screen
   // Create a simple container for the map that takes the full screen
