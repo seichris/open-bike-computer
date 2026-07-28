@@ -698,9 +698,7 @@ struct WorkoutDashboardView: View {
 
                 if store.presentation.connectionState == .ended {
                     HeartRateZoneBreakdown(
-                        durations: snapshot.heartRateZoneDurations,
-                        maximumHeartRateBPM:
-                            WorkoutHeartRateZoneSettings.maximumHeartRateBPM()
+                        durations: snapshot.heartRateZoneDurations
                     )
                 }
 

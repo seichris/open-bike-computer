@@ -72,6 +72,7 @@ private struct WorkoutContractTestSuite {
         testComponentTimestampsStayWithinWorkoutWindow()
         testHeartRateZonePayloadIsCoherent()
         testHeartRateZoneProfileAndPersistence()
+        testHeartRateZoneBreakdownPresentation()
         testHeartRateZoneDurationAccumulator()
 #if WORKOUT_CONTRACT_HOST
         testWorkoutMetricsStoreUsesAuthoritativeCoalescedZoneTotals()
@@ -1046,6 +1047,25 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "coherent zone payload should be accepted: \(error)")
         }
+
+        let invalidProfile = makeEnvelope(
+            sequence: 1,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: now.addingTimeInterval(-60),
+                heartRateZoneCount: 2,
+                heartRateZoneDurations: WorkoutZoneDurationsV1(
+                    capturedAt: now,
+                    secondsByZone: [20, 40],
+                    maximumHeartRateBPM: 999
+                ),
+                availability: [.heartRateZone]
+            )
+        )
+        expectThrows(.invalidZone, "zone profile must stay in supported bounds") {
+            try WorkoutContractCodec.validate(invalidProfile)
+        }
     }
 
     private mutating func testHeartRateZoneProfileAndPersistence() {
@@ -1147,6 +1167,95 @@ private struct WorkoutContractTestSuite {
         )
     }
 
+    private mutating func testHeartRateZoneBreakdownPresentation() {
+        let capturedAt = Date(
+            timeIntervalSinceReferenceDate: 800_000_605
+        )
+        let presentation = WorkoutHeartRateZoneBreakdownPresentationV1.make(
+            durations: WorkoutZoneDurationsV1(
+                capturedAt: capturedAt,
+                secondsByZone: [109, 42, 55, 149, 704],
+                maximumHeartRateBPM: 200
+            )
+        )
+        expect(
+            presentation?.maximumHeartRateBPM == 200,
+            "zone breakdown must use the Watch profile carried with its bins"
+        )
+        expect(
+            presentation?.rows.map(\.zone) == [1, 2, 3, 4, 5],
+            "zone breakdown must present exactly five ordered rows"
+        )
+        expect(
+            presentation?.rows[0].durationLabel == "01:49"
+                && presentation?.rows[0].bpmRangeLabel == "<120 BPM",
+            "zone breakdown must format duration and lower open range"
+        )
+        expect(
+            presentation?.rows[2].bpmRangeLabel == "140–159 BPM"
+                && presentation?.rows[4].bpmRangeLabel == "180+ BPM",
+            "zone breakdown must match middle and upper live-zone boundaries"
+        )
+        expect(
+            presentation?.rows[4].fractionOfLongestDuration == 1
+                && abs(
+                    (presentation?.rows[3].fractionOfLongestDuration ?? 0)
+                        - 149.0 / 704.0
+                ) < 0.000_001,
+            "zone bars must scale against the longest recorded duration"
+        )
+        expect(
+            presentation?.rows[2].accessibilityLabel
+                == "Zone 3, 00:55, 140–159 BPM",
+            "zone rows must expose the same values to accessibility"
+        )
+
+        let zeroPresentation =
+            WorkoutHeartRateZoneBreakdownPresentationV1.make(
+                durations: WorkoutZoneDurationsV1(
+                    capturedAt: capturedAt,
+                    secondsByZone: [0, 0, 0, 0, 0]
+                )
+            )
+        expect(
+            zeroPresentation?.rows.allSatisfy {
+                $0.fractionOfLongestDuration == 0
+            } == true,
+            "all-zero zone durations must render zero-width progress bars"
+        )
+        expect(
+            zeroPresentation?.maximumHeartRateBPM == nil
+                && zeroPresentation?.rows.allSatisfy {
+                    $0.bpmRangeLabel == "Range unavailable"
+                } == true,
+            "legacy zone payloads must not invent historical BPM ranges from current settings"
+        )
+        expect(
+            WorkoutHeartRateZoneBreakdownPresentationV1.make(
+                durations: nil
+            ) == nil,
+            "missing zone durations must use the unavailable state"
+        )
+        expect(
+            WorkoutHeartRateZoneBreakdownPresentationV1.make(
+                durations: WorkoutZoneDurationsV1(
+                    capturedAt: capturedAt,
+                    secondsByZone: [1, 2]
+                )
+            ) == nil,
+            "malformed zone arrays must use the unavailable state"
+        )
+        expect(
+            WorkoutHeartRateZoneBreakdownPresentationV1.make(
+                durations: WorkoutZoneDurationsV1(
+                    capturedAt: capturedAt,
+                    secondsByZone: [0, 0, .nan, 0, 0]
+                )
+            ) == nil,
+            "non-finite zone durations must use the unavailable state"
+        )
+    }
+
     private mutating func testHeartRateZoneDurationAccumulator() {
         let firstSession = UUID(
             uuidString: "72C8E2D9-3EC0-4C9A-A101-111111111111"
@@ -1226,9 +1335,14 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             accumulator.authoritativeDurations(
-                capturedAt: authoritative.capturedAt
-            ) == authoritative,
-            "authoritative zone totals survive transport coalescing"
+                capturedAt: authoritative.capturedAt,
+                maximumHeartRateBPM: 200
+            ) == WorkoutZoneDurationsV1(
+                capturedAt: authoritative.capturedAt,
+                secondsByZone: authoritative.secondsByZone,
+                maximumHeartRateBPM: 200
+            ),
+            "authoritative zone totals and their profile survive transport coalescing"
         )
         let regressingAuthoritative = WorkoutZoneDurationsV1(
             capturedAt: authoritative.capturedAt.addingTimeInterval(1),
@@ -1294,6 +1408,38 @@ private struct WorkoutContractTestSuite {
             "zone accumulation resumes only after the recovered clock passes its checkpoint"
         )
 
+        var terminalCheckpointAccumulator =
+            WorkoutHeartRateZoneDurationAccumulator()
+        _ = terminalCheckpointAccumulator.update(
+            sessionID: secondSession,
+            elapsedTime: 0,
+            currentZone: 3
+        )
+        _ = terminalCheckpointAccumulator.update(
+            sessionID: secondSession,
+            elapsedTime: 585,
+            currentZone: 3
+        )
+        _ = terminalCheckpointAccumulator.update(
+            sessionID: secondSession,
+            elapsedTime: nil,
+            currentZone: nil
+        )
+        expect(
+            terminalCheckpointAccumulator.hasCompleteTerminalDurations(
+                elapsedTime: 585
+            ),
+            "a detached checkpoint is complete only at its exact authoritative elapsed time"
+        )
+        expect(
+            !terminalCheckpointAccumulator.hasCompleteTerminalDurations(
+                elapsedTime: 600
+            )
+                && !terminalCheckpointAccumulator
+                    .hasCompleteTerminalDurations(elapsedTime: nil),
+            "a stale or duration-less detached checkpoint must not claim exact final zone totals"
+        )
+
         var persistenceGate =
             WorkoutHeartRateZoneCheckpointPersistenceGate()
         let firstCheckpoint = zoneEntryCheckpoint
@@ -1347,6 +1493,23 @@ private struct WorkoutContractTestSuite {
             !persistenceGate.hasPendingTransition,
             "only a successful durable write clears the pending transition"
         )
+        let advancedSameZoneCheckpoint =
+            WorkoutHeartRateZoneDurationAccumulator.Checkpoint(
+                previousElapsedTime: 27,
+                previousZone: 2,
+                secondsByZone: [0, 16, 1, 0, 0]
+            )
+        persistenceGate.observeTransition(
+            from: returnedZoneCheckpoint,
+            to: advancedSameZoneCheckpoint
+        )
+        expect(
+            persistenceGate.shouldAttempt(
+                at: firstAttemptAt.addingTimeInterval(30)
+            ),
+            "time accumulated within one zone must checkpoint at the bounded interval"
+        )
+        persistenceGate.markSucceeded()
         expect(
             accumulator.update(
                 sessionID: secondSession,
@@ -5322,6 +5485,10 @@ private struct WorkoutContractTestSuite {
         expect(WorkoutValueFormatter.speed(nil) == "--", "missing speed should be unavailable")
         expect(WorkoutValueFormatter.speed(0) == "0.0", "available stopped speed should remain zero")
         expect(
+            WorkoutValueFormatter.speed(.greatestFiniteMagnitude) == "--",
+            "speed conversion overflow should remain unavailable"
+        )
+        expect(
             WorkoutValueFormatter.averageSpeed(
                 distanceMeters: 1_000,
                 elapsedSeconds: 200
@@ -5341,6 +5508,13 @@ private struct WorkoutContractTestSuite {
                 elapsedSeconds: 0
             ) == "--",
             "average speed requires positive elapsed time"
+        )
+        expect(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: .greatestFiniteMagnitude,
+                elapsedSeconds: .leastNonzeroMagnitude
+            ) == "--",
+            "average speed division overflow should remain unavailable"
         )
         expect(WorkoutValueFormatter.distance(nil) == "--", "missing distance should be unavailable")
         expect(WorkoutValueFormatter.distance(0) == "0", "available zero distance should remain zero")
@@ -6126,35 +6300,54 @@ private struct WorkoutContractTestSuite {
                 ),
             "Watch live workout must omit LIVE, expose heart-rate zone and altitude, and retain the elapsed timer"
         )
-        let orderedWatchMetrics = [
-            "metric(title:\"Speed\"",
-            "metric(title:\"Distance\"",
-            "metric(title:\"Heart\"",
-            "metric(title:\"HRZone\"",
-            "metric(title:\"AvgHeart\"",
-            "metric(title:\"AvgSpeed\""
+        let expectedWatchMetricTitles = [
+            "Speed",
+            "Distance",
+            "Heart",
+            "HRZone",
+            "AvgHeart",
+            "AvgSpeed",
+            "Energy",
+            "Power",
+            "Cadence",
+            "Altitude",
         ]
-        var watchMetricSearchStart = compactLiveWatchView.startIndex
-        var watchMetricsAreOrdered = true
-        for metricBinding in orderedWatchMetrics {
-            guard let metricRange = compactLiveWatchView.range(
-                of: metricBinding,
-                range: watchMetricSearchStart..<compactLiveWatchView.endIndex
-            ) else {
-                watchMetricsAreOrdered = false
-                break
+        var actualWatchMetricTitles: [String]?
+        if let gridStart = compactLiveWatchView.range(
+            of: "LazyVGrid(columns:columns,spacing:8)"
+        )?.upperBound,
+           let gridEnd = compactLiveWatchView.range(
+            of: "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+           )?.lowerBound,
+           gridStart < gridEnd {
+            let grid = String(compactLiveWatchView[gridStart..<gridEnd])
+            var titles = [String]()
+            var searchStart = grid.startIndex
+            let marker = "metric(title:\""
+            while let markerRange = grid.range(
+                of: marker,
+                range: searchStart..<grid.endIndex
+            ) {
+                let titleStart = markerRange.upperBound
+                guard let titleEnd = grid[titleStart...].firstIndex(
+                    of: "\""
+                ) else {
+                    break
+                }
+                titles.append(String(grid[titleStart..<titleEnd]))
+                searchStart = grid.index(after: titleEnd)
             }
-            watchMetricSearchStart = metricRange.upperBound
+            actualWatchMetricTitles = titles
         }
         expect(
-            watchMetricsAreOrdered
+            actualWatchMetricTitles == expectedWatchMetricTitles
                 && compactLiveWatchView.contains(
                     "WorkoutValueFormatter.heartRate(manager.snapshot.averageHeartRate?.value)"
                 )
                 && compactLiveWatchView.contains(
                     "WorkoutValueFormatter.averageSpeed(distanceMeters:manager.snapshot.cyclingDistance?.value,elapsedSeconds:manager.snapshot.elapsedTime?.value)"
                 ),
-            "Watch live workout must lead with Speed/Distance, then Heart/Zone, then Avg Heart/Avg Speed using live snapshot values"
+            "Watch live workout must keep exact consecutive Speed/Distance, Heart/Zone, and Avg Heart/Avg Speed rows"
         )
         expect(
             compactSummaryWatchView.contains(
@@ -6338,6 +6531,45 @@ private struct WorkoutContractTestSuite {
                     "case.sensorSettings:NavigationView{BikeComputersSettingsView("
                 ),
             "sensor enrollment must gate cadence and power tiles and route detected sensors to My Bike Computer"
+        )
+        var expandedIPhoneLeadingMetricsAreExact = false
+        if let methodStart = compactNavigation.range(
+            of: "privatefuncexpandedWorkoutMetricValues(frommetrics:[RideMetric])->[RideMetric]{"
+        )?.upperBound,
+           let leadingEnd = compactNavigation.range(
+            of: "expandedMetrics.append(contentsOf:",
+            range: methodStart..<compactNavigation.endIndex
+           )?.lowerBound {
+            let leading = String(
+                compactNavigation[methodStart..<leadingEnd]
+            )
+            let expectedBindings = [
+                "expandedMetrics.append(heartRate)",
+                "WorkoutValueFormatter.duration(displayedHeartRateZoneElapsedTime),showsHeartInLabel:true,label:\"timeinzone\"",
+                "WorkoutValueFormatter.heartRate(snapshot.averageHeartRate?.value),unit:\"BPM\",label:\"averageheartrate\"",
+                "WorkoutValueFormatter.averageSpeed(distanceMeters:snapshot.cyclingDistance?.value,elapsedSeconds:snapshot.elapsedTime?.value),unit:\"km/h\",label:\"averagespeed\"",
+            ]
+            var searchStart = leading.startIndex
+            var bindingsAreOrdered = true
+            for binding in expectedBindings {
+                guard let range = leading.range(
+                    of: binding,
+                    range: searchStart..<leading.endIndex
+                ) else {
+                    bindingsAreOrdered = false
+                    break
+                }
+                searchStart = range.upperBound
+            }
+            let appendCount = leading.components(
+                separatedBy: "expandedMetrics.append("
+            ).count - 1
+            expandedIPhoneLeadingMetricsAreExact =
+                bindingsAreOrdered && appendCount == expectedBindings.count
+        }
+        expect(
+            expandedIPhoneLeadingMetricsAreExact,
+            "expanded iPhone metrics must keep exact consecutive Heart/Time in Zone and Average Heart/Average Speed rows"
         )
         expect(
             compactNavigation.contains(

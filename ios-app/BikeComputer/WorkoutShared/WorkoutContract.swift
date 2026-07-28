@@ -88,6 +88,17 @@ nonisolated struct WorkoutMetricV1: Codable, Equatable, Sendable {
 nonisolated struct WorkoutZoneDurationsV1: Codable, Equatable, Sendable {
     let capturedAt: Date
     let secondsByZone: [Double]
+    let maximumHeartRateBPM: Int?
+
+    init(
+        capturedAt: Date,
+        secondsByZone: [Double],
+        maximumHeartRateBPM: Int? = nil
+    ) {
+        self.capturedAt = capturedAt
+        self.secondsByZone = secondsByZone
+        self.maximumHeartRateBPM = maximumHeartRateBPM
+    }
 }
 
 nonisolated struct WorkoutLocationV1: Codable, Equatable, Sendable {
@@ -522,6 +533,11 @@ nonisolated enum WorkoutContractCodec {
                   !durations.secondsByZone.isEmpty,
                   durations.secondsByZone.allSatisfy({ $0.isFinite && $0 >= 0 }),
                   Int(zoneCount) == durations.secondsByZone.count else {
+                throw WorkoutContractError.invalidZone
+            }
+            if let maximumHeartRateBPM = durations.maximumHeartRateBPM,
+               !WorkoutHeartRateZoneProfile.supportedMaximumHeartRateBPM
+                    .contains(maximumHeartRateBPM) {
                 throw WorkoutContractError.invalidZone
             }
         }

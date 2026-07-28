@@ -94,6 +94,84 @@ nonisolated struct WorkoutHeartRateZoneProfile: Equatable, Sendable {
     }
 }
 
+nonisolated struct WorkoutHeartRateZoneBreakdownRowV1: Equatable, Sendable {
+    let zone: Int
+    let duration: TimeInterval
+    let durationLabel: String
+    let bpmRangeLabel: String
+    let fractionOfLongestDuration: Double
+
+    var accessibilityLabel: String {
+        "Zone \(zone), \(durationLabel), \(bpmRangeLabel)"
+    }
+}
+
+nonisolated struct WorkoutHeartRateZoneBreakdownPresentationV1:
+    Equatable,
+    Sendable {
+    let maximumHeartRateBPM: Int?
+    let rows: [WorkoutHeartRateZoneBreakdownRowV1]
+
+    static func make(durations: WorkoutZoneDurationsV1?) -> Self? {
+        guard let durations,
+              durations.secondsByZone.count
+                == Int(WorkoutHeartRateZoneProfile.zoneCount),
+              durations.secondsByZone.allSatisfy({
+                  $0.isFinite && $0 >= 0
+              }) else {
+            return nil
+        }
+
+        let maximumHeartRateBPM = durations.maximumHeartRateBPM
+        guard maximumHeartRateBPM.map({
+            WorkoutHeartRateZoneProfile.supportedMaximumHeartRateBPM
+                .contains($0)
+        }) ?? true else {
+            return nil
+        }
+
+        let profile = maximumHeartRateBPM.map {
+            WorkoutHeartRateZoneProfile(maximumHeartRateBPM: $0)
+        }
+        let longestDuration = durations.secondsByZone.max() ?? 0
+        let rows = durations.secondsByZone.enumerated().map { index, duration in
+            let zone = index + 1
+            let fraction = longestDuration > 0
+                ? min(max(duration / longestDuration, 0), 1)
+                : 0
+            return WorkoutHeartRateZoneBreakdownRowV1(
+                zone: zone,
+                duration: duration,
+                durationLabel: WorkoutValueFormatter.duration(duration),
+                bpmRangeLabel: profile.map {
+                    rangeLabel($0.bpmRange(for: UInt8(zone)))
+                } ?? "Range unavailable",
+                fractionOfLongestDuration: fraction
+            )
+        }
+        return Self(
+            maximumHeartRateBPM: maximumHeartRateBPM,
+            rows: rows
+        )
+    }
+
+    private static func rangeLabel(
+        _ range: WorkoutHeartRateZoneBPMRange?
+    ) -> String {
+        guard let range else { return "-- BPM" }
+        switch (range.lowerBound, range.upperBound) {
+        case (nil, let upper?):
+            return "<\(upper + 1) BPM"
+        case (let lower?, nil):
+            return "\(lower)+ BPM"
+        case (let lower?, let upper?):
+            return "\(lower)–\(upper) BPM"
+        default:
+            return "-- BPM"
+        }
+    }
+}
+
 /// Accumulates workout elapsed time by heart-rate zone for the iPhone UI.
 /// Using the workout's elapsed metric keeps the value frozen while paused.
 nonisolated struct WorkoutHeartRateZoneDurationAccumulator: Sendable {
@@ -173,20 +251,37 @@ nonisolated struct WorkoutHeartRateZoneDurationAccumulator: Sendable {
         } ?? true
         if canAdvanceCursor {
             previousElapsedTime = validElapsedTime ?? previousElapsedTime
-            previousZone = validCurrentZone
+            if validElapsedTime != nil || validCurrentZone != nil {
+                previousZone = validCurrentZone
+            }
         }
 
         guard let validCurrentZone else { return nil }
         return secondsByZone[Int(validCurrentZone - 1)]
     }
 
+    func hasCompleteTerminalDurations(
+        elapsedTime: TimeInterval?
+    ) -> Bool {
+        guard sessionID != nil,
+              let elapsedTime,
+              elapsedTime.isFinite,
+              elapsedTime >= 0,
+              let previousElapsedTime else {
+            return false
+        }
+        return abs(previousElapsedTime - elapsedTime) <= 0.001
+    }
+
     func authoritativeDurations(
-        capturedAt: Date
+        capturedAt: Date,
+        maximumHeartRateBPM: Int? = nil
     ) -> WorkoutZoneDurationsV1? {
         guard sessionID != nil, hasObservedZone else { return nil }
         return WorkoutZoneDurationsV1(
             capturedAt: capturedAt,
-            secondsByZone: secondsByZone
+            secondsByZone: secondsByZone,
+            maximumHeartRateBPM: maximumHeartRateBPM
         )
     }
 
@@ -233,8 +328,8 @@ nonisolated struct WorkoutHeartRateZoneDurationAccumulator: Sendable {
     }
 }
 
-/// Coalesces recovery writes when heart rate oscillates around a zone boundary.
-/// A pending transition is retained until a durable write succeeds.
+/// Coalesces recovery writes while zone totals advance or heart rate crosses a
+/// boundary. A pending checkpoint is retained until a durable write succeeds.
 nonisolated struct WorkoutHeartRateZoneCheckpointPersistenceGate: Sendable {
     static let minimumAttemptInterval: TimeInterval = 15
 
@@ -245,7 +340,7 @@ nonisolated struct WorkoutHeartRateZoneCheckpointPersistenceGate: Sendable {
         from previous: WorkoutHeartRateZoneDurationAccumulator.Checkpoint?,
         to current: WorkoutHeartRateZoneDurationAccumulator.Checkpoint?
     ) {
-        if previous?.previousZone != current?.previousZone {
+        if previous != current {
             hasPendingTransition = true
         }
     }

@@ -32,6 +32,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
@@ -48,6 +49,7 @@ xcrun swiftc \
   -o "${CYCLING_SENSOR_OUT}" \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \

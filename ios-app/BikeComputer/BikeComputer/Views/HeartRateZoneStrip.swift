@@ -96,9 +96,6 @@ enum HeartRateZonePalette {
 
 struct HeartRateZoneBreakdown: View {
     let durations: WorkoutZoneDurationsV1?
-    let maximumHeartRateBPM: Int
-
-    private let zoneCount = Int(WorkoutHeartRateZoneProfile.zoneCount)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -106,22 +103,27 @@ struct HeartRateZoneBreakdown: View {
                 .font(.headline)
                 .foregroundStyle(.red)
 
-            if let secondsByZone {
+            if let presentation {
                 VStack(spacing: 13) {
-                    ForEach(1...zoneCount, id: \.self) { zone in
-                        zoneRow(
-                            zone: zone,
-                            duration: secondsByZone[zone - 1],
-                            longestDuration: secondsByZone.max() ?? 0
-                        )
+                    ForEach(presentation.rows, id: \.zone) { row in
+                        zoneRow(row)
                     }
                 }
 
-                Text(
-                    "Based on your configured maximum heart rate of \(maximumHeartRateBPM) BPM."
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                if let maximumHeartRateBPM =
+                    presentation.maximumHeartRateBPM {
+                    Text(
+                        "Based on the maximum heart rate used for this workout: \(maximumHeartRateBPM) BPM."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(
+                        "Heart-rate ranges are unavailable because this workout did not record its maximum-heart-rate profile."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
             } else {
                 Text("Heart rate zone data was not available for this workout.")
                     .font(.subheadline)
@@ -135,27 +137,22 @@ struct HeartRateZoneBreakdown: View {
     }
 
     private func zoneRow(
-        zone: Int,
-        duration: TimeInterval,
-        longestDuration: TimeInterval
+        _ row: WorkoutHeartRateZoneBreakdownRowV1
     ) -> some View {
-        let color = HeartRateZonePalette.color(for: zone)
-        let fraction = longestDuration > 0
-            ? min(max(duration / longestDuration, 0), 1)
-            : 0
+        let color = HeartRateZonePalette.color(for: row.zone)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("Zone \(zone)")
+                Text("Zone \(row.zone)")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(color)
+                    .foregroundStyle(.primary)
 
-                Text(WorkoutValueFormatter.duration(duration))
+                Text(row.durationLabel)
                     .font(.subheadline.monospacedDigit())
 
                 Spacer(minLength: 8)
 
-                Text(rangeLabel(for: zone))
+                Text(row.bpmRangeLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -166,43 +163,21 @@ struct HeartRateZoneBreakdown: View {
                         .fill(color.opacity(0.16))
                     Capsule()
                         .fill(color)
-                        .frame(width: proxy.size.width * fraction)
+                        .frame(
+                            width: proxy.size.width
+                                * row.fractionOfLongestDuration
+                        )
                 }
             }
             .frame(height: 8)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-            "Zone \(zone), \(WorkoutValueFormatter.duration(duration)), \(rangeLabel(for: zone))"
-        )
+        .accessibilityLabel(row.accessibilityLabel)
     }
 
-    private var secondsByZone: [TimeInterval]? {
-        guard let values = durations?.secondsByZone,
-              values.count == zoneCount,
-              values.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
-            return nil
-        }
-        return values
-    }
-
-    private func rangeLabel(for zone: Int) -> String {
-        let profile = WorkoutHeartRateZoneProfile(
-            maximumHeartRateBPM: maximumHeartRateBPM
-        )
-        guard let range = profile.bpmRange(for: UInt8(zone)) else {
-            return "-- BPM"
-        }
-        switch (range.lowerBound, range.upperBound) {
-        case (nil, let upper?):
-            return "<\(upper + 1) BPM"
-        case (let lower?, nil):
-            return "\(lower)+ BPM"
-        case (let lower?, let upper?):
-            return "\(lower)–\(upper) BPM"
-        default:
-            return "-- BPM"
-        }
+    private var presentation:
+        WorkoutHeartRateZoneBreakdownPresentationV1? {
+        WorkoutHeartRateZoneBreakdownPresentationV1.make(durations: durations)
     }
 }
 
@@ -216,9 +191,9 @@ struct HeartRateZoneStrip_Previews: PreviewProvider {
             HeartRateZoneBreakdown(
                 durations: WorkoutZoneDurationsV1(
                     capturedAt: Date(),
-                    secondsByZone: [109, 42, 55, 149, 704]
-                ),
-                maximumHeartRateBPM: 190
+                    secondsByZone: [109, 42, 55, 149, 704],
+                    maximumHeartRateBPM: 190
+                )
             )
         }
         .padding()

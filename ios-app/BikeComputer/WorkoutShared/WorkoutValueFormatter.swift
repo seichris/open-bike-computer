@@ -31,7 +31,9 @@ nonisolated enum WorkoutValueFormatter {
               metersPerSecond >= 0 else {
             return "--"
         }
-        return String(format: "%.1f", metersPerSecond * 3.6)
+        let kilometersPerHour = metersPerSecond * 3.6
+        guard kilometersPerHour.isFinite else { return "--" }
+        return String(format: "%.1f", kilometersPerHour)
     }
 
     static func averageSpeed(
@@ -46,7 +48,9 @@ nonisolated enum WorkoutValueFormatter {
               elapsedSeconds > 0 else {
             return "--"
         }
-        return speed(distanceMeters / elapsedSeconds)
+        let metersPerSecond = distanceMeters / elapsedSeconds
+        guard metersPerSecond.isFinite else { return "--" }
+        return speed(metersPerSecond)
     }
 
     static func energy(_ kilocalories: Double?) -> String {
