@@ -82,6 +82,22 @@ int main() {
     assert(ride_telemetry_layout::fits(
         metric, rideLayout.screenWidth, rideLayout.screenHeight));
   }
+  constexpr auto workoutMetrics =
+      ride_telemetry_layout::makeMetricPlacement(rideLayout, true);
+  static_assert(workoutMetrics.showWorkoutOnlyMetrics);
+  static_assert(workoutMetrics.heartRate.x == rideLayout.metrics[0].x);
+  static_assert(workoutMetrics.heartRateZone.x == rideLayout.metrics[1].x);
+  static_assert(workoutMetrics.distance.y == rideLayout.metrics[2].y);
+  static_assert(workoutMetrics.elapsed.y == rideLayout.metrics[3].y);
+  constexpr auto navigationMetrics =
+      ride_telemetry_layout::makeMetricPlacement(rideLayout, false);
+  static_assert(!navigationMetrics.showWorkoutOnlyMetrics);
+  static_assert(navigationMetrics.distance.x == rideLayout.metrics[0].x);
+  static_assert(navigationMetrics.distance.y == rideLayout.metrics[0].y);
+  static_assert(navigationMetrics.elapsed.x == rideLayout.metrics[1].x);
+  static_assert(navigationMetrics.elapsed.y == rideLayout.metrics[1].y);
+  static_assert(navigationMetrics.bottomLeft.y == rideLayout.metrics[4].y);
+  static_assert(navigationMetrics.bottomRight.y == rideLayout.metrics[5].y);
   constexpr int32_t representativeHeartRateTextWidth = 100;
   const auto unavailableHeartRate =
       ride_telemetry_layout::makeHeartRatePresentation(

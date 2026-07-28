@@ -50,6 +50,16 @@ struct Layout {
   std::array<Rect, 6> metrics{};
 };
 
+struct MetricPlacement {
+  bool showWorkoutOnlyMetrics = true;
+  Rect heartRate{};
+  Rect heartRateZone{};
+  Rect distance{};
+  Rect elapsed{};
+  Rect bottomLeft{};
+  Rect bottomRight{};
+};
+
 struct ZoneStripLayout {
   Rect bounds{};
   std::array<Rect, kHeartRateZoneCount> segments{};
@@ -289,6 +299,19 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
        metricCellHeight},
   }};
   return layout;
+}
+
+constexpr MetricPlacement makeMetricPlacement(const Layout &layout,
+                                               bool usesWorkout) {
+  MetricPlacement placement{};
+  placement.showWorkoutOnlyMetrics = usesWorkout;
+  placement.heartRate = layout.metrics[0];
+  placement.heartRateZone = layout.metrics[1];
+  placement.distance = usesWorkout ? layout.metrics[2] : layout.metrics[0];
+  placement.elapsed = usesWorkout ? layout.metrics[3] : layout.metrics[1];
+  placement.bottomLeft = layout.metrics[4];
+  placement.bottomRight = layout.metrics[5];
+  return placement;
 }
 
 constexpr bool fits(const Rect &rect, int32_t width, int32_t height) {
