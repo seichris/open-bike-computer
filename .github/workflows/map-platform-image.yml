@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/map-platform-image.yml"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/map-platform-ci.yml"
       - "backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
@@ -411,7 +411,8 @@ jobs:
           fi
 
           # GITHUB_TOKEN-authored pushes and pull requests do not trigger new
-          # workflow runs. Dispatch CI explicitly for the promotion commit.
-          gh workflow run ci.yml \
+          # workflow runs. Dispatch map-platform CI explicitly for the
+          # promotion commit.
+          gh workflow run map-platform-ci.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$PROMOTION_BRANCH"

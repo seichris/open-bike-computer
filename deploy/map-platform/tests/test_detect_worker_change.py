@@ -62,7 +62,11 @@ class DetectWorkerChangeTests(unittest.TestCase):
                 )
         self.assertFalse(
             detect_worker_change.promotion_inputs_changed(
-                ["docs/readme.md", "deploy/map-platform/compose.yaml"]
+                [
+                    ".github/workflows/ci.yml",
+                    "docs/readme.md",
+                    "deploy/map-platform/compose.yaml",
+                ]
             )
         )
 
