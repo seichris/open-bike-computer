@@ -2,6 +2,7 @@
 #include "../../lib/gui/src/destinationPickerLayout.hpp"
 #include "../../lib/gui/src/guiLayout.hpp"
 #include "../../lib/gui/src/mapTileTransition.hpp"
+#include "../../lib/gui/src/navigationContentMode.hpp"
 #include "../../lib/gui/src/rideMetricFontSelection.hpp"
 #include "../../lib/gui/src/rideTelemetryLayout.hpp"
 #include "../../lib/maps/src/mapLineStyle.hpp"
@@ -9,6 +10,11 @@
 #include <cassert>
 
 int main() {
+  static_assert(navigation_content_mode::forNavigationState(false) ==
+                navigation_content_mode::Mode::FavoriteDestinations);
+  static_assert(navigation_content_mode::forNavigationState(true) ==
+                navigation_content_mode::Mode::ActiveGuidance);
+
   map_tile_transition::State mapTransition;
   assert(!mapTransition.canReveal(false, false));
   mapTransition.begin();
@@ -55,6 +61,8 @@ int main() {
   static_assert(destination_picker_layout::bottomPadding(466, 466, 3) ==
                 186);
   static_assert(destination_picker_layout::bottomPadding(410, 502, 3) == 4);
+  static_assert(destination_picker_layout::fullScreenInset(466, 466) == 52);
+  static_assert(destination_picker_layout::fullScreenInset(410, 502) == 16);
   static_assert(!destination_picker_layout::needsScrolling(88 * 3, 3, 280));
   static_assert(destination_picker_layout::needsScrolling(116 * 3, 3, 280));
   static_assert(map_line_style::displayColor(1, 0xF567, 7, false) ==
@@ -110,7 +118,7 @@ int main() {
                     navigationMetrics.distance.bottom() ==
                 ride_telemetry_layout::kMetricRowGap);
   static_assert(navigationMetrics.startWorkoutButton.y -
-                    navigationMetrics.bottomLeft.bottom() ==
+                    navigationMetrics.bottomLeft.bottom() >=
                 ride_telemetry_layout::kStartWorkoutButtonGap);
   constexpr auto idleMetrics =
       ride_telemetry_layout::makeMetricPlacement(
@@ -121,8 +129,25 @@ int main() {
   static_assert(idleMetrics.distance.y == rideLayout.metrics[0].y);
   static_assert(idleMetrics.elapsed.y == rideLayout.metrics[1].y);
   static_assert(idleMetrics.startWorkoutButton.y -
+                    idleMetrics.distance.bottom() >=
+                ride_telemetry_layout::kStartWorkoutButtonGap);
+#if defined(WAVESHARE_AMOLED_206)
+  static_assert(idleMetrics.startWorkoutButton.y -
                     idleMetrics.distance.bottom() ==
                 ride_telemetry_layout::kStartWorkoutButtonGap);
+#else
+  static_assert(idleMetrics.startWorkoutButton.y <=
+                navigationMetrics.startWorkoutButton.y);
+  static_assert(idleMetrics.startWorkoutButton.bottom() ==
+                rideLayout.screenHeight -
+                    ride_telemetry_layout::kRoundStartWorkoutButtonBottomInset);
+  static_assert(idleMetrics.startWorkoutButton.x ==
+                ride_telemetry_layout::
+                    kRoundStartWorkoutButtonHorizontalInset);
+  static_assert(idleMetrics.startWorkoutButton.width == 314);
+  static_assert(idleMetrics.startWorkoutButton.y == 310);
+  static_assert(ride_telemetry_layout::kRoundStartWorkoutIconSize == 34);
+#endif
   static_assert(ride_telemetry_layout::fits(
       navigationMetrics.startWorkoutButton, rideLayout.screenWidth,
       rideLayout.screenHeight));

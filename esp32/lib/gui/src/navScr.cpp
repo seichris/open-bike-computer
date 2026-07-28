@@ -61,7 +61,7 @@ void navigationScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_align(nameNav, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(nameNav, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(nameNav, TFT_WIDTH - 24);
-  lv_label_set_text_static(nameNav, "Waiting for instruction");
+  lv_label_set_text_static(nameNav, "");
   lv_obj_align(nameNav, LV_ALIGN_TOP_MID, 0, 72);
 
   latNav = lv_label_create(screen);
