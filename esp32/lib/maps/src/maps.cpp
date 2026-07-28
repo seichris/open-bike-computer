@@ -3312,6 +3312,20 @@ void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
   }
 }
 
+void Maps::syncDragPreviewCenterToPresentedOffset() {
+  const map_transform::WorldPoint center =
+      map_transform::centerAfterScreenDrag(
+          {static_cast<double>(dragPresentation.baseCenter.x),
+           static_cast<double>(dragPresentation.baseCenter.y)},
+          {static_cast<double>(dragPresentation.presentedOffset.x),
+           static_cast<double>(dragPresentation.presentedOffset.y)},
+          dragPresentation.baseZoom, dragPresentation.baseRotation);
+  Maps::point.x = static_cast<int32_t>(std::round(center.x));
+  Maps::point.y = static_cast<int32_t>(std::round(center.y));
+  Maps::isPosMoved = true;
+  Maps::followGps = false;
+}
+
 bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!mapSet.vectorMap || Maps::canvasMap == nullptr ||
       pinchPresentation.active || pinchPresentation.settlementPending ||
@@ -3327,45 +3341,50 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
     return false;
   }
 
-  if (!continuingSettlement) {
-    dragPresentation = {};
-    dragPresentation.baseZoom = normalizedZoom;
-    // lv_obj_set_pos() updates the offset from the object's configured center
-    // alignment, so preserve that aligned offset rather than its resolved
-    // top-left coordinate. This works for both normal and oversized canvases.
-    dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
-    dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
-    if (Maps::canvasArrow != nullptr) {
-      dragPresentation.markerBaseX =
-          lv_obj_get_x_aligned(Maps::canvasArrow);
-      dragPresentation.markerBaseY =
-          lv_obj_get_y_aligned(Maps::canvasArrow);
-    }
-    dragPresentation.usesRollingRaster =
-        rollingRasterWindow.valid &&
-        normalizedZoom == rollingRasterWindow.zoom && isMapScreenActive();
-    // The rolling raster already covers drag exposure. Its prepared pinch
-    // backdrop is viewport-sized and has a different aligned origin, so it is
-    // only presented by the pinch path.
-    dragPresentation.hasBackdrop =
-        !dragPresentation.usesRollingRaster &&
-        hasPinchZoomOutBackdrop(normalizedZoom);
-    if (dragPresentation.hasBackdrop) {
-      dragPresentation.backdropZoom = pinchZoomOutBackdrop.renderZoom;
-    }
-    dragPresentation.waitsForRollingRaster =
-        shouldUseRollingRasterWindow(normalizedZoom) &&
-        !rollingRasterWindow.valid;
-    if (dragPresentation.usesRollingRaster) {
-      const auto centerOffset = map_transform::worldToScreen(
-          {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
-           static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
-          rollingRasterWindow.zoom, rollingRasterWindow.rotation);
-      dragPresentation.baseRasterOffsetX =
-          static_cast<int32_t>(std::round(centerOffset.x));
-      dragPresentation.baseRasterOffsetY =
-          static_cast<int32_t>(std::round(centerOffset.y));
-    }
+  // A new finger-down always gets a fresh presentation baseline, even if the
+  // previous release is still waiting for raster recycling. Keeping the old
+  // DragPresentation alive made an interrupted settlement capable of
+  // restoring the first gesture's canvas origin.
+  dragPreviewController.replaceCommittedOffset({});
+  dragPresentation = {};
+  dragPresentation.baseZoom = normalizedZoom;
+  dragPresentation.baseCenter = Maps::point;
+  dragPresentation.baseRotation = visibleMapRotation();
+  // lv_obj_set_pos() updates the offset from the object's configured center
+  // alignment, so preserve that aligned offset rather than its resolved
+  // top-left coordinate. This works for both normal and oversized canvases.
+  dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+  dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr) {
+    dragPresentation.markerBaseX =
+        lv_obj_get_x_aligned(Maps::canvasArrow);
+    dragPresentation.markerBaseY =
+        lv_obj_get_y_aligned(Maps::canvasArrow);
+  }
+  dragPresentation.usesRollingRaster =
+      rollingRasterWindow.valid &&
+      normalizedZoom == rollingRasterWindow.zoom && isMapScreenActive();
+  // The rolling raster already covers drag exposure. Its prepared pinch
+  // backdrop is viewport-sized and has a different aligned origin, so it is
+  // only presented by the pinch path.
+  dragPresentation.hasBackdrop =
+      !dragPresentation.usesRollingRaster &&
+      hasPinchZoomOutBackdrop(normalizedZoom);
+  if (dragPresentation.hasBackdrop) {
+    dragPresentation.backdropZoom = pinchZoomOutBackdrop.renderZoom;
+  }
+  dragPresentation.waitsForRollingRaster =
+      shouldUseRollingRasterWindow(normalizedZoom) &&
+      !rollingRasterWindow.valid;
+  if (dragPresentation.usesRollingRaster) {
+    const auto centerOffset = map_transform::worldToScreen(
+        {static_cast<double>(Maps::point.x) - rollingRasterWindow.originX,
+         static_cast<double>(Maps::point.y) - rollingRasterWindow.originY},
+        rollingRasterWindow.zoom, rollingRasterWindow.rotation);
+    dragPresentation.baseRasterOffsetX =
+        static_cast<int32_t>(std::round(centerOffset.x));
+    dragPresentation.baseRasterOffsetY =
+        static_cast<int32_t>(std::round(centerOffset.y));
   }
 
   if (!dragPreviewController.begin())
@@ -3396,6 +3415,13 @@ void Maps::updateDragPreview(int16_t sessionDx, int16_t sessionDy) {
   if (!dragPreviewController.active())
     return;
   applyDragPreviewOffset(dragPreviewController.preview(sessionDx, sessionDy));
+  if (dragPresentation.usesRollingRaster ||
+      dragPresentation.waitsForRollingRaster) {
+    // Keep the logical map center synchronized with the pixels throughout the
+    // drag. Release is now only a settlement boundary; it is no longer the
+    // single point at which the drag endpoint becomes authoritative.
+    syncDragPreviewCenterToPresentedOffset();
+  }
 }
 
 void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
@@ -3409,15 +3435,8 @@ void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
       dragPresentation.waitsForRollingRaster) {
     const map_drag_preview::Offset presented =
         dragPresentation.presentedOffset;
-    const int32_t appliedX =
-        presented.x - dragPresentation.appliedOffset.x;
-    const int32_t appliedY =
-        presented.y - dragPresentation.appliedOffset.y;
     dragPreviewController.replaceCommittedOffset(presented);
-    if (appliedX != 0 || appliedY != 0) {
-      Maps::scrollMap(static_cast<int16_t>(appliedX),
-                      static_cast<int16_t>(appliedY));
-    }
+    syncDragPreviewCenterToPresentedOffset();
     // Maps::point now describes the exact endpoint already shown by the drag
     // preview. Make that endpoint the baseline immediately instead of keeping
     // the next gesture relative to the canvas position captured before the
@@ -3442,7 +3461,6 @@ void Maps::commitDragPreview(int16_t sessionDx, int16_t sessionDy,
       dragPresentation.markerBaseY =
           lv_obj_get_y_aligned(Maps::canvasArrow);
     }
-    dragPresentation.appliedOffset = {};
     dragPresentation.presentedOffset = {};
     dragPreviewController.replaceCommittedOffset({});
     // A clamped drag can legitimately apply zero movement. It still needs one

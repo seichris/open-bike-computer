@@ -537,15 +537,6 @@ static void releaseAllTouches(uint32_t now) {
   setTouchPressed(false);
 }
 
-static const waveshare_board::touch::TouchContact *
-previousContact(uint8_t id) {
-  for (uint8_t index = 0; index < previousRawTouchFrame.count; ++index) {
-    if (previousRawTouchFrame.contacts[index].id == id)
-      return &previousRawTouchFrame.contacts[index];
-  }
-  return nullptr;
-}
-
 static void updatePrimaryTouch(
     const waveshare_board::touch::TouchFrame &rawFrame) {
   const waveshare_board::touch::TouchContact *primary = nullptr;
@@ -820,41 +811,24 @@ void readTouch() {
     return;
   }
 
-  bool anyPressed = false;
-  bool anyMoved = false;
-  for (uint8_t index = 0; index < decodedFrame.count; ++index) {
-    const auto &contact = decodedFrame.contacts[index];
-    const auto *previous = previousContact(contact.id);
-    if (contact.status == waveshare_board::touch::CST9217_STATUS_CONTINUING &&
-        previous == nullptr) {
-      logTouchPacket("ignored-stale-start", data, sizeof(data), contact.x,
-                     contact.y, touchHintActive, now);
-      releaseAllTouches(now);
-      return;
-    }
-    anyPressed =
-        anyPressed ||
-        contact.status == waveshare_board::touch::CST9217_STATUS_PRESSED;
-    anyMoved = anyMoved || previous == nullptr || previous->x != contact.x ||
-               previous->y != contact.y;
-  }
-  if (!anyPressed && !anyMoved &&
-      now - lastValidTouchMs >=
-          waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+  // CST9217 status 0x00 is a release event, not continued movement. Keeping
+  // it pressed lets a fast lift/re-touch collapse into one LVGL gesture and
+  // makes the next Map drag reuse the previous finger-down origin.
+  const auto activeFrame =
+      waveshare_board::touch::activeCst9217Contacts(decodedFrame);
+  if (activeFrame.count == 0) {
     releaseAllTouches(now);
     return;
   }
 
-  if (anyPressed || anyMoved) {
-    lastValidTouchMs = now;
-  }
+  lastValidTouchMs = now;
   touchFastPollUntilMs =
       now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
-  updatePrimaryTouch(decodedFrame);
-  previousRawTouchFrame = decodedFrame;
-  publishTouchFrame(decodedFrame, now);
-  logTouchPacket(anyPressed ? "point" : "point-status0", data, sizeof(data),
-                 touchX, touchY, touchHintActive, now);
+  updatePrimaryTouch(activeFrame);
+  previousRawTouchFrame = activeFrame;
+  publishTouchFrame(activeFrame, now);
+  logTouchPacket("point", data, sizeof(data), touchX, touchY,
+                 touchHintActive, now);
 #ifdef WAVESHARE_TOUCH_DIAGNOSTICS
   logTouchDiagnostics(now);
 #endif

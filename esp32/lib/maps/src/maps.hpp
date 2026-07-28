@@ -268,13 +268,15 @@ private:
     uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
     bool usesRollingRaster = false;
     bool waitsForRollingRaster = false;
+    Point32 baseCenter = {};
+    double baseRotation = 0.0;
     int32_t baseRasterOffsetX = 0;
     int32_t baseRasterOffsetY = 0;
-    map_drag_preview::Offset appliedOffset = {};
     map_drag_preview::Offset presentedOffset = {};
   } dragPresentation;
 
   void applyDragPreviewOffset(map_drag_preview::Offset offset);
+  void syncDragPreviewCenterToPresentedOffset();
   void resetDragPresentationVisuals();
 
 public:

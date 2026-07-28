@@ -79,6 +79,22 @@ int main() {
   assertNear(initialCenter.y + focalBeforeOffset.y,
              adjusted.y + focalAfterOffset.y);
 
+  // Drag presentation updates the authoritative center on every frame. A
+  // second session therefore starts from the first session's live endpoint,
+  // even if raster settlement has not run between the two sessions.
+  const ScreenDelta firstDrag = {63.0, -27.0};
+  const ScreenDelta secondDrag = {-14.0, 31.0};
+  const WorldPoint firstDragCenter =
+      centerAfterScreenDrag(initialCenter, firstDrag, 4, rotation);
+  const WorldPoint secondDragCenter =
+      centerAfterScreenDrag(firstDragCenter, secondDrag, 4, rotation);
+  const WorldPoint combinedDragCenter = centerAfterScreenDrag(
+      initialCenter, {firstDrag.x + secondDrag.x,
+                      firstDrag.y + secondDrag.y},
+      4, rotation);
+  assertNear(secondDragCenter.x, combinedDragCenter.x);
+  assertNear(secondDragCenter.y, combinedDragCenter.y);
+
   Controller outward;
   assert(outward.update(frame(1, 2), 3).action == Action::Begin);
   auto decision = outward.update(frame(2, 2, 70, 230), 3);

@@ -207,8 +207,9 @@ For the 1.75-inch target:
    publishing a new frame.
 5. Decode the first record from byte 0 and the second record from the vendor's
    second-record offset.
-6. Preserve the current tolerance for continuing `status == 0x00` reports, but
-   require a valid press status before introducing a new finger ID.
+6. Interpret the vendor-defined `status == 0x00` as an immediate contact
+   release and publish only `status == 0x06` contacts as active. This keeps a
+   rapid lift/re-touch from being merged into one LVGL gesture.
 7. If the read or acknowledgement fails, use the existing active-touch grace
    period and recovery policy; never publish a partially decoded frame.
 8. Clear both contacts when the controller reports zero points or the existing
@@ -445,8 +446,8 @@ I/O, pure gesture logic, coordinate math, and LVGL presentation must remain.
 - invalid status;
 - out-of-range coordinate;
 - truncated frame;
-- continuing `status == 0x00` for a known finger; and
-- invalid new finger with `status == 0x00`.
+- `status == 0x00` removes a known finger from the active frame; and
+- a release-only frame publishes no active contacts.
 
 ### Pinch state machine
 
@@ -643,6 +644,15 @@ standalone Map at every runtime zoom:
   marker, controller offset, and raster-center offset at its committed world
   endpoint. A rapid follow-up drag therefore starts from the pixels already on
   screen even when edge recycling is still pending.
+- Every accepted drag frame also updates the authoritative world center from
+  the session's fixed center plus its presented screen offset. Release only
+  schedules raster settlement; it is not the sole point where movement becomes
+  authoritative. Each new finger-down captures a fresh presentation baseline,
+  so an interrupted settlement cannot restore an older gesture origin.
+- The 1.75-inch CST9217 path follows the vendor event semantics and emits an
+  immediate release for contact status `0x00`. A fast lift and re-touch now
+  reaches Map dragging as two sessions instead of one continuous displacement
+  measured from the first finger-down.
 - Route content revision, style, viewport, zoom, map root, rotation mode, and
   course-up changes beyond five degrees invalidate the prepared window.
   GPS/pan movement within a compatible window recycles cells rather than

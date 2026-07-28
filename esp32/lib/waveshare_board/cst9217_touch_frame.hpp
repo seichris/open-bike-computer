@@ -19,7 +19,7 @@ constexpr std::size_t CST9217_MAX_CONTACTS = 2;
 constexpr std::size_t CST9217_FRAME_LENGTH =
     (CST9217_MAX_CONTACTS * 5) + 5;
 constexpr uint8_t CST9217_FRAME_ACK = 0xAB;
-constexpr uint8_t CST9217_STATUS_CONTINUING = 0x00;
+constexpr uint8_t CST9217_STATUS_RELEASED = 0x00;
 constexpr uint8_t CST9217_STATUS_PRESSED = 0x06;
 
 struct TouchContact {
@@ -48,8 +48,18 @@ enum class Cst9217DecodeStatus : uint8_t {
 };
 
 inline bool isCst9217ContactStatus(uint8_t status) {
-  return status == CST9217_STATUS_CONTINUING ||
+  return status == CST9217_STATUS_RELEASED ||
          status == CST9217_STATUS_PRESSED;
+}
+
+inline TouchFrame activeCst9217Contacts(const TouchFrame &decoded) {
+  TouchFrame active;
+  for (uint8_t index = 0; index < decoded.count; ++index) {
+    if (decoded.contacts[index].status != CST9217_STATUS_PRESSED)
+      continue;
+    active.contacts[active.count++] = decoded.contacts[index];
+  }
+  return active;
 }
 
 inline Cst9217DecodeStatus

@@ -112,6 +112,14 @@ inline WorldPoint screenToWorld(ScreenDelta screenDelta, uint8_t zoom,
   return {unrotatedX * inverseScale, -unrotatedY * inverseScale};
 }
 
+inline WorldPoint centerAfterScreenDrag(WorldPoint baseCenter,
+                                        ScreenDelta dragOffset, uint8_t zoom,
+                                        double rotationRad) {
+  const WorldPoint worldDelta =
+      screenToWorld(dragOffset, zoom, rotationRad);
+  return {baseCenter.x + worldDelta.x, baseCenter.y + worldDelta.y};
+}
+
 inline WorldBounds canvasWorldBounds(WorldPoint center, double canvasWidth,
                                      double canvasHeight, uint8_t zoom,
                                      double rotationRad) {

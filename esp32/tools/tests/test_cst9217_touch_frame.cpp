@@ -38,7 +38,7 @@ int main() {
   assert(frame.contacts[0].y == 456);
 
   packet[5] = 2;
-  encodeContact(packet, 0, 1, CST9217_STATUS_CONTINUING, 400, 20);
+  encodeContact(packet, 0, 1, CST9217_STATUS_RELEASED, 400, 20);
   encodeContact(packet, 7, 0, CST9217_STATUS_PRESSED, 30, 440);
   assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==
          Cst9217DecodeStatus::Ok);
@@ -48,8 +48,18 @@ int main() {
   assert(frame.contacts[1].id == 1);
   assert(frame.contacts[1].x == 400);
 
-  TouchContact rotated =
-      rotateTouchContact(frame.contacts[0], 1, 465, 465);
+  TouchFrame active = activeCst9217Contacts(frame);
+  assert(active.count == 1);
+  assert(active.contacts[0].id == 0);
+  assert(active.contacts[0].x == 30);
+
+  packet[5] = 1;
+  encodeContact(packet, 0, 0, CST9217_STATUS_RELEASED, 30, 440);
+  assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==
+         Cst9217DecodeStatus::Ok);
+  assert(activeCst9217Contacts(frame).count == 0);
+
+  TouchContact rotated = rotateTouchContact(active.contacts[0], 1, 465, 465);
   assert(rotated.x == 440);
   assert(rotated.y == 435);
 
