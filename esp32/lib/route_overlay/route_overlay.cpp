@@ -33,6 +33,7 @@ static constexpr double METERS_PER_MICRODEGREE_LON =
 
 void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
   points.clear();
+  revisionCounter++;
 
   if (len < 8) {
     Serial.println(
@@ -66,6 +67,7 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
 
 void RouteOverlay::clear() {
   points.clear();
+  revisionCounter++;
   Serial.println("Route overlay cleared");
 }
 

@@ -12,28 +12,11 @@ namespace map_drag_preview {
 constexpr int16_t kDragStartThresholdPx = 14;
 constexpr int16_t kSampleThresholdPx = 2;
 constexpr uint32_t kSettlementDelayMs = 180;
-// 128 px is the largest round margin that keeps a rotated 722x722 fullscreen
-// zoom-5 canvas below one 4096-unit map-block span. The existing four-block
-// cache can therefore cover every north-up/course-up viewport orientation.
-constexpr uint16_t kOverscanMarginPx = 128;
-
-constexpr uint16_t overscanExtent(uint16_t viewportExtent) {
-  return viewportExtent + (2 * kOverscanMarginPx);
-}
 
 struct CanvasExtent {
   uint16_t width;
   uint16_t height;
 };
-
-constexpr CanvasExtent renderCanvasExtent(uint16_t viewportWidth,
-                                          uint16_t viewportHeight,
-                                          bool useOverscan) {
-  return useOverscan
-             ? CanvasExtent{overscanExtent(viewportWidth),
-                            overscanExtent(viewportHeight)}
-             : CanvasExtent{viewportWidth, viewportHeight};
-}
 
 struct Offset {
   int32_t x = 0;
@@ -64,6 +47,15 @@ public:
     settlementPending_ = true;
     committedAtMs_ = nowMs;
     return committed_;
+  }
+
+  // Keep the accumulated controller state aligned with a bounded visual
+  // presentation. This is used when the rolling raster window clamps a drag at
+  // its prepared edge so a following drag can reverse immediately instead of
+  // first paying back an invisible overshoot.
+  void replaceCommittedOffset(Offset offset) {
+    committed_ = offset;
+    sessionBase_ = offset;
   }
 
   bool blocksRender(uint32_t nowMs) const {

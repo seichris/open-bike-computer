@@ -75,6 +75,9 @@ public:
    */
   size_t getPointCount() const { return points.size(); }
 
+  /** Monotonic content revision for invalidating prepared raster map cells. */
+  uint32_t revision() const { return revisionCounter; }
+
   /**
    * @brief Estimate route bearing near a current GPS position.
    *
@@ -87,6 +90,7 @@ public:
 
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
+  uint32_t revisionCounter = 0;
 
   static constexpr uint16_t ROUTE_COLOR =
       0x1F9F; // Bright blue (RGB565, byte-swapped for LVGL)

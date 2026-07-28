@@ -590,6 +590,87 @@ four-target matrix. The new host tests must be added to the `esp32-host` job.
 - Replacing the current map renderer or full-screen/back-buffer strategy.
 - Adding the complete Waveshare SensorLib dependency.
 
+## Post-implementation max-zoom drag hardening
+
+Physical testing exposed a separate limitation after pinch zoom itself was
+working: a fixed 128 px overscan gutter could still be exhausted by a long or
+repeated drag at runtime zoom 5. Increasing that one-shot canvas further would
+either consume too much PSRAM or exceed the renderer's existing four-map-block
+working-set assumption. A second low-resolution backing layer also produced
+visible repetition and quality transitions, so it is not an acceptable
+fallback.
+
+The long-term fix is a rolling, full-resolution raster window used only by the
+standalone Map at runtime zoom 5:
+
+- The visible raster is a 5 by 5 grid of 192 px RGB565 cells, or 960 by 960
+  px in total.
+- A 466 px square viewport therefore has 247 px of prepared map on every side.
+  The 366 px non-fullscreen height has 297 px vertically. The 2.06-inch
+  viewport remains covered by at least 229 px in either dimension.
+- Each cell is rendered independently through the existing vector renderer.
+  A rotated 192 px cell remains below one 4096-unit map-block span at zoom 5,
+  preserving the current four-block cache ceiling.
+- Once the viewport center moves more than half a cell from the raster origin,
+  firmware renders the complete replacement row or column into scratch
+  storage, shifts the prepared pixels by one cell, and advances the origin.
+  The replacement is the new outermost cell around the advanced origin; it
+  must never reuse the old edge cell.
+- Large settled movements may advance two cells so the next drag begins with a
+  balanced prepared margin again.
+- While a finger is down, the canvas moves immediately without vector work.
+  If input outruns the prepared raster, presentation is bounded at its
+  full-resolution edge instead of revealing black, stale, repeated, or scaled
+  pixels. The bounded logical drag state is also rebased so reversing direction
+  works immediately.
+- A full 25-cell rebuild keeps a viewport-sized snapshot of the last complete
+  map visible. The live grid is not rebound until every cell succeeds, so an
+  input-triggered interruption cannot expose a partially populated raster.
+  A drag that interrupts the first preload owns the gesture but holds this
+  exact-size snapshot still, then retries the preload after release.
+- Route content revision, style, viewport, zoom, map root, rotation mode, and
+  course-up changes beyond five degrees invalidate the prepared window.
+  GPS/pan movement within a compatible window recycles cells rather than
+  rebuilding all 25.
+- Map + Navigation never binds or presents the rolling raster. Its renderer,
+  touch behavior, and viewport-sized canvas remain unchanged.
+
+The two PSRAM allocations used by the map renderer are intentionally
+asymmetric. The large front allocation is grown lazily when standalone Map
+first reaches zoom 5, so a navigation-only session keeps a normal
+viewport-sized front buffer:
+
+| Allocation | Capacity |
+| --- | ---: |
+| Rolling visible grid | `960 * 960 * 2 = 1,843,200` bytes |
+| Five replacement cells / viewport snapshot plus one cell | `508,040` bytes |
+| Total after rolling-window activation | `2,351,240` bytes |
+
+This is smaller than a 3 by 3 grid made from full 466 px viewport cells while
+providing more than half a display-width of prepared movement. Lower zooms and
+Map + Navigation bind only their normal viewport-sized prefixes. Before the
+first rolling-window activation, the 1.75-inch front plus scratch capacity is
+about 0.94 MB rather than 2.35 MB. The 192 px cell size is deliberate: it
+retains roughly 1.5 MB more PSRAM headroom than the previous 256 px design for
+the dense vector block being rasterized.
+
+Additional acceptance checks for this follow-up are:
+
+1. Repeated drags in all four directions at zoom 5 never reveal black,
+   low-resolution, repeated, or uninitialized pixels.
+2. Dragging across more than one 192 px boundary recycles the correct new
+   outer row/column and leaves the next gesture centered on the previous
+   settlement.
+3. Rapid reverse-direction and diagonal drags do not pay back hidden clamped
+   movement and do not expose seams caused by a stale edge cell.
+4. Touch interruption during a full rebuild or edge preparation leaves the
+   last complete frame visible and retries cleanly.
+5. North-up and course-up rasters preserve route/map alignment.
+6. The 1.75-inch device retains safe PSRAM headroom and records initial-window
+   and one-edge recycle latency in the pull request.
+7. Map + Navigation continues to use its normal viewport dimensions and
+   existing one-finger behavior.
+
 ## Definition of done
 
 Implementation is complete only when:

@@ -15,6 +15,7 @@
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
+#include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -134,6 +135,34 @@ private:
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation);
+  bool renderRollingRasterCell(double centerX, double centerY, uint8_t zoom,
+                               double rotation, uint8_t scratchIndex,
+                               size_t scratchBaseOffset,
+                               bool preserveVisibleState,
+                               bool *mapFoundOut = nullptr);
+  bool buildRollingRasterWindow(uint8_t zoom, uint16_t viewportWidth,
+                                uint16_t viewportHeight, uint64_t signature);
+  bool shiftRollingRasterWindow(int8_t directionX, int8_t directionY);
+  bool settleRollingRasterWindow();
+  bool preserveVisibleFrameForRollingBuild(uint16_t viewportWidth,
+                                           uint16_t viewportHeight,
+                                           size_t &scratchBaseOffset);
+  void restoreVisibleFrameAfterRollingBuildFailure(uint16_t viewportWidth,
+                                                   uint16_t viewportHeight);
+  void copyScratchCellToGrid(uint8_t scratchIndex, uint8_t column,
+                             uint8_t row, size_t scratchBaseOffset = 0);
+  bool shiftGridPixelsHorizontal(int8_t direction);
+  bool shiftGridPixelsVertical(int8_t direction);
+  void bindRollingRasterCanvas();
+  void positionRollingRasterCanvas(Point32 center);
+  void updateVisibleVectorViewport();
+  void invalidateRollingRasterWindow();
+  bool rollingRasterCompatible(uint8_t zoom, uint16_t viewportWidth,
+                               uint16_t viewportHeight,
+                               uint64_t signature) const;
+  bool shouldUseRollingRasterWindow(uint8_t zoom) const;
+  uint64_t rollingRasterSignature() const;
+  double visibleMapRotation() const;
   void getPosition(double lat, double lon);
 
   // Common
@@ -209,6 +238,19 @@ private:
     int16_t finalMidpointY = 0;
   } pinchPresentation;
 
+  struct RollingRasterWindow {
+    bool valid = false;
+    uint8_t zoom = map_transform::kMaximumRuntimeZoom;
+    uint16_t tileWidth = map_raster_window::kCellExtentPx;
+    uint16_t tileHeight = map_raster_window::kCellExtentPx;
+    uint16_t viewportWidth = 0;
+    uint16_t viewportHeight = 0;
+    double rotation = 0.0;
+    double originX = 0.0;
+    double originY = 0.0;
+    uint64_t signature = 0;
+  } rollingRasterWindow;
+
   map_drag_preview::Controller dragPreviewController;
   struct DragPresentation {
     uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
@@ -218,6 +260,12 @@ private:
     int16_t markerBaseY = 0;
     bool hasBackdrop = false;
     uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
+    bool usesRollingRaster = false;
+    bool waitsForRollingRaster = false;
+    int32_t baseRasterOffsetX = 0;
+    int32_t baseRasterOffsetY = 0;
+    map_drag_preview::Offset appliedOffset = {};
+    map_drag_preview::Offset presentedOffset = {};
   } dragPresentation;
 
   void applyDragPreviewOffset(map_drag_preview::Offset offset);
