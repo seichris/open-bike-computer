@@ -8,6 +8,7 @@
 
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../power_metrics/power_metrics.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
@@ -276,6 +277,7 @@ static void applyMapRotationForActiveTile() {
       }
       mapView.updateArrowColor();
       mapView.isPosMoved = true;
+      power_metrics::noteMapRequest(power_metrics::MapRenderReason::Heading);
       log_i("Map guidance: rotation switched to %s",
             desiredMode == Maps::ROT_COURSE_UP ? "Course Up" : "North Up");
     }
@@ -291,6 +293,7 @@ static void applyMapRotationForActiveTile() {
     mapView.rotationMode = Maps::ROT_COURSE_UP;
     mapView.updateArrowColor();
     mapView.isPosMoved = true;
+    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
     log_i("Creating Map: Syncing rotation to Course Up (from settings)");
   } else if (mapRenderSettings.mapRotationMode == 0 &&
              mapView.rotationMode != Maps::ROT_NORTH_UP) {
@@ -298,6 +301,7 @@ static void applyMapRotationForActiveTile() {
     mapView.rotationRad = 0;
     mapView.updateArrowColor();
     mapView.isPosMoved = true;
+    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
     log_i("Creating Map: Syncing rotation to North Up (from settings)");
   }
 }
@@ -759,6 +763,8 @@ void updateMainScreen(lv_timer_t *t) {
                 "triggering redraw",
                 lastHeading, currentHeading, headingDiff);
           mapView.isPosMoved = true; // Force map regeneration with new rotation
+          power_metrics::noteMapRequest(
+              power_metrics::MapRenderReason::Heading);
           lastHeading = currentHeading;
         }
       } else {
@@ -784,6 +790,7 @@ void updateMainScreen(lv_timer_t *t) {
       // Also handle hardware GPS location changes (when in follow mode)
       if (gps.hasLocationChange() &&
           (mapView.followGps || activeTile == MAP_GUIDANCE)) {
+        power_metrics::noteMapRequest(power_metrics::MapRenderReason::Gps);
         mapView.followGps = true;
         mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
         mapView.redrawMap = true;
@@ -861,12 +868,15 @@ void updateMap(lv_event_t *event) {
     if (mapSet.vectorMap) {
       renderCompleted = mapView.generateVectorMap(zoom);
     } else {
+      power_metrics::MapRenderMeasurement powerMeasurement;
       mapView.generateRenderMap(zoom);
+      powerMeasurement.finish(true);
     }
     if (!renderCompleted) {
       // Keep both flags set so the map is regenerated cleanly if the user
       // remains on this screen. Do not display the partially rendered canvas.
       mapView.redrawMap = true;
+      power_metrics::noteMapRequest(power_metrics::MapRenderReason::Retry);
       return;
     }
     // Clear flag AFTER generation complete (not inside generateVectorMap)

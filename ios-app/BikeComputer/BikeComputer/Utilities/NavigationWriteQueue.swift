@@ -1,5 +1,20 @@
 import Foundation
 
+struct NavigationWriteQueueMetrics: Equatable {
+    static let schemaVersion = 1
+
+    var enqueuedFrames = 0
+    var flushedFrames = 0
+    var droppedFrames = 0
+    var rejectedFrames = 0
+    var coalescedFrames = 0
+    var clearedFrames = 0
+    var retrySchedules = 0
+    var backpressureStops = 0
+    var currentDepth = 0
+    var maxDepth = 0
+}
+
 struct NavigationWrite {
     let data: Data
     let label: String
@@ -66,6 +81,7 @@ struct NavigationWriteQueue {
     let priorityMaxCount: Int
     private var pendingWrites: [NavigationWrite] = []
     private var pendingPriorityWrites: [NavigationWrite] = []
+    private var diagnosticMetrics = NavigationWriteQueueMetrics()
 
     var count: Int {
         pendingPriorityWrites.count + pendingWrites.count
@@ -73,6 +89,12 @@ struct NavigationWriteQueue {
 
     var remainingCapacity: Int {
         max(maxCount - pendingWrites.count, 0)
+    }
+
+    var metrics: NavigationWriteQueueMetrics {
+        var snapshot = diagnosticMetrics
+        snapshot.currentDepth = count
+        return snapshot
     }
 
     init(maxCount: Int, priorityMaxCount: Int = 1) {
@@ -83,7 +105,11 @@ struct NavigationWriteQueue {
     @discardableResult
     mutating func enqueue(_ write: NavigationWrite) -> Bool {
         pendingWrites.append(write)
-        guard pendingWrites.count > maxCount else { return false }
+        recordEnqueuedFrames(1)
+        guard pendingWrites.count > maxCount else {
+            recordDepth()
+            return false
+        }
 
         // Never split a logical message that was accepted atomically. If the
         // queue consists only of protected chunks, the newly appended regular
@@ -92,6 +118,8 @@ struct NavigationWriteQueue {
             ?? pendingWrites.startIndex
         let droppedWrite = pendingWrites.remove(at: droppedIndex)
         droppedWrite.onDrop?()
+        recordDroppedFrames(1)
+        recordDepth()
         return true
     }
 
@@ -99,8 +127,13 @@ struct NavigationWriteQueue {
     /// or exposing only a prefix of the message to the transport.
     @discardableResult
     mutating func enqueueAtomically(_ writes: [NavigationWrite]) -> Bool {
-        guard writes.count <= remainingCapacity else { return false }
+        guard writes.count <= remainingCapacity else {
+            recordRejectedFrames(writes.count)
+            return false
+        }
         pendingWrites.append(contentsOf: writes.map { $0.protectingAtomicBatch() })
+        recordEnqueuedFrames(writes.count)
+        recordDepth()
         return true
     }
 
@@ -110,16 +143,20 @@ struct NavigationWriteQueue {
     @discardableResult
     mutating func enqueuePrioritizedAtomically(_ writes: [NavigationWrite]) -> Bool {
         guard !writes.isEmpty, writes.count <= priorityMaxCount else {
+            recordRejectedFrames(writes.count)
             return false
         }
 
         if pendingPriorityWrites.count + writes.count > priorityMaxCount {
+            recordDroppedFrames(pendingPriorityWrites.count)
             pendingPriorityWrites.forEach { $0.onDrop?() }
             pendingPriorityWrites.removeAll()
         }
         pendingPriorityWrites.append(contentsOf: writes.map {
             $0.protectingAtomicBatch()
         })
+        recordEnqueuedFrames(writes.count)
+        recordDepth()
         return true
     }
 
@@ -142,14 +179,21 @@ struct NavigationWriteQueue {
         removePendingWrites(withCoalescingKey: key)
         if prioritized {
             guard pendingPriorityWrites.count < priorityMaxCount else {
+                recordRejectedFrames(1)
                 return false
             }
             pendingPriorityWrites.append(write.protectingAtomicBatch())
+            recordEnqueuedFrames(1)
+            recordDepth()
             return true
         }
 
         pendingWrites.append(write)
-        guard pendingWrites.count > maxCount else { return true }
+        guard pendingWrites.count > maxCount else {
+            recordEnqueuedFrames(1)
+            recordDepth()
+            return true
+        }
         let droppedIndex = pendingWrites.firstIndex { !$0.protectedFromEviction }
             ?? pendingWrites.startIndex
         let rejectedNewWrite = droppedIndex == pendingWrites.index(before: pendingWrites.endIndex)
@@ -158,21 +202,29 @@ struct NavigationWriteQueue {
             // The caller receives `false` and owns retry scheduling. Invoking
             // onDrop here would schedule a second immediate retry and can spin
             // while a protected atomic batch keeps the queue full.
+            recordRejectedFrames(1)
+            recordDepth()
             return false
         }
         droppedWrite.onDrop?()
+        recordEnqueuedFrames(1)
+        recordDroppedFrames(1)
+        recordDepth()
         return true
     }
 
     mutating func removeAll() {
+        recordClearedFrames(count)
         pendingPriorityWrites.removeAll()
         pendingWrites.removeAll()
+        recordDepth()
     }
 
     mutating func removePendingWrites(withCoalescingKey key: String) {
         let priorityMatches = pendingPriorityWrites.indices.reversed().filter {
             pendingPriorityWrites[$0].coalescingKey == key
         }
+        recordCoalescedFrames(priorityMatches.count)
         for index in priorityMatches {
             pendingPriorityWrites.remove(at: index).onDrop?()
         }
@@ -180,9 +232,11 @@ struct NavigationWriteQueue {
         let regularMatches = pendingWrites.indices.reversed().filter {
             pendingWrites[$0].coalescingKey == key
         }
+        recordCoalescedFrames(regularMatches.count)
         for index in regularMatches {
             pendingWrites.remove(at: index).onDrop?()
         }
+        recordDepth()
     }
 
     mutating func flush(
@@ -205,12 +259,72 @@ struct NavigationWriteQueue {
         var writesRemaining = max(0, maxWrites)
         while writesRemaining > 0 && count > 0 {
             let nextWrite = pendingPriorityWrites.first ?? pendingWrites.first!
-            guard canSend(nextWrite) else { break }
+            guard canSend(nextWrite) else {
+                recordBackpressureStop()
+                break
+            }
             let dequeued = pendingPriorityWrites.isEmpty
                 ? pendingWrites.removeFirst()
                 : pendingPriorityWrites.removeFirst()
+            recordFlushedFrames(1)
+            recordDepth()
             write(dequeued)
             writesRemaining -= 1
         }
+    }
+
+    mutating func noteRetryScheduled() {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.retrySchedules += 1
+#endif
+    }
+
+    private mutating func recordEnqueuedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.enqueuedFrames += count
+#endif
+    }
+
+    private mutating func recordFlushedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.flushedFrames += count
+#endif
+    }
+
+    private mutating func recordDroppedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.droppedFrames += count
+#endif
+    }
+
+    private mutating func recordRejectedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.rejectedFrames += count
+#endif
+    }
+
+    private mutating func recordCoalescedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.coalescedFrames += count
+#endif
+    }
+
+    private mutating func recordClearedFrames(_ count: Int) {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.clearedFrames += count
+#endif
+    }
+
+    private mutating func recordBackpressureStop() {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.backpressureStops += 1
+#endif
+    }
+
+    private mutating func recordDepth() {
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics.currentDepth = count
+        diagnosticMetrics.maxDepth = max(diagnosticMetrics.maxDepth, count)
+#endif
     }
 }

@@ -25,6 +25,7 @@
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../power_metrics/power_metrics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -1693,8 +1694,10 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                   source == nullptr ? "unknown" : source);
     bleDebugStats.routePacketCount++;
     bleDebugStats.lastRoutePacketMs = millis();
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
     routeOverlay.clear();
     clearCurrentNavigationData();
+    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
     triggerMapRedraw();
     return;
   }
@@ -1721,6 +1724,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source, (unsigned)len);
   bleDebugStats.routePacketCount++;
   bleDebugStats.lastRoutePacketMs = millis();
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
 
   if (!gpsReceivedFromApp && len >= 8) {
     int32_t routeStartLat = 0;
@@ -1736,6 +1740,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
   }
 
   routeOverlay.parseRouteData(data, len);
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
   triggerMapRedraw();
 }
 
@@ -1777,6 +1782,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   );
   bleDebugStats.gpsPacketCount++;
   bleDebugStats.lastGpsPacketMs = millis();
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
 
   if (!gpsReceivedFromApp) {
     gpsReceivedFromApp = true;
@@ -1784,6 +1790,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     Serial.println("BLE GPS: First position received, transitioning to map...");
   }
 
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Gps);
   triggerMapRedraw();
 }
 
@@ -1797,6 +1804,7 @@ static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   switch (result) {
   case workout_telemetry::ApplyResult::Applied:
   case workout_telemetry::ApplyResult::Cleared:
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Workout);
     // Health metrics remain RAM-only and are intentionally absent from logs.
     return;
   default:
@@ -1811,6 +1819,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
   bleDebugStats.settingsPacketCount++;
   bleDebugStats.lastSettingsPacketMs = millis();
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
   if (map_profile_protocol::isIndependentSetting(settingId)) {
     bleSessionUsesIndependentMapProfiles = true;
   }
@@ -2051,6 +2060,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   }
 
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
   triggerMapRedraw();
 }
 
@@ -2313,6 +2323,7 @@ public:
     Serial.printf("BLE Nav received: %u bytes\n", (unsigned)value.length());
     bleDebugStats.navPacketCount++;
     bleDebugStats.lastNavPacketMs = millis();
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Navigation);
     parseNavigationData(value);
   }
 };

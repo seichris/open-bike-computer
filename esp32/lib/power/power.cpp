@@ -7,6 +7,7 @@
  */
 
 #include "power.hpp"
+#include "power_metrics.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "axp2101.hpp"
@@ -90,6 +91,7 @@ void Power::powerOffPeripherals() {
   if (gfx) {
     gfx->displayOff();
     gfx->fillScreen(0x0000);
+    power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 0, 0);
   }
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -117,6 +119,7 @@ void Power::deviceSuspend() {
   lv_refr_now(display);
   if (gfx)
     gfx->displayOff();
+  power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 255, 0);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::axp2101::setDisplayPower(false);
 #endif
@@ -128,6 +131,7 @@ void Power::deviceSuspend() {
   if (gfx) {
     gfx->displayOn();
     gfx->setBrightness(255);
+    power_metrics::noteDisplayState(power_metrics::DisplayState::On, 255, 255);
   }
 #endif
   while (digitalRead(BOARD_BOOT_PIN) != 1) {

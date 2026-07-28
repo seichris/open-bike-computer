@@ -12,6 +12,7 @@
 #include "mapLineStyle.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
+#include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 // #include "../../compass/compass.hpp"
 extern Gps gps;
@@ -2731,6 +2732,12 @@ void Maps::displayMap() {
  * @param zoom -> Zoom Level
  */
 bool Maps::generateVectorMap(uint8_t zoom) {
+  power_metrics::MapRenderMeasurement powerMeasurement;
+#if POWER_METRICS
+  uint32_t powerBlocksUs = 0;
+  uint32_t powerDrawUs = 0;
+  uint32_t powerRouteUs = 0;
+#endif
   const uint32_t generateStartMs = MAPIO_TIME_MS();
   if (Maps::canvasMap == nullptr || Maps::canvasMapTemp == nullptr) {
     ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
@@ -2768,10 +2775,23 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerBlocksStartUs = micros();
+#endif
   if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache)) {
+#if POWER_METRICS
+    powerBlocksUs = micros() - powerBlocksStartUs;
+    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                       powerRouteUs);
+#endif
     log_i("Map block loading interrupted to service a screen-cycle input");
     return false;
   }
+#if POWER_METRICS
+  powerBlocksUs = micros() - powerBlocksStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t blocksMs = MAPIO_TIME_MS() - blocksStartMs;
 
   ESP_LOGI(TAG,
@@ -2782,11 +2802,24 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Read Vector Map to Canvas (Pass calculated rotation)
   const uint32_t drawStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerDrawStartUs = micros();
+#endif
   if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
                            zoom, rotationRad)) {
+#if POWER_METRICS
+    powerDrawUs = micros() - powerDrawStartUs;
+    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                       powerRouteUs);
+#endif
     log_i("Map render interrupted to service a screen-cycle input");
     return false;
   }
+#if POWER_METRICS
+  powerDrawUs = micros() - powerDrawStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -2796,6 +2829,9 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Draw route overlay from iOS navigation (if available)
   const uint32_t routeStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerRouteStartUs = micros();
+#endif
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
@@ -2818,6 +2854,11 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
+#if POWER_METRICS
+  powerRouteUs = micros() - powerRouteStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t routeMs = MAPIO_TIME_MS() - routeStartMs;
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -2845,6 +2886,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
             (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
+  powerMeasurement.finish(true);
   return true;
 }
 

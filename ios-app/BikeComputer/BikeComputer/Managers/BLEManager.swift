@@ -629,6 +629,7 @@ class BLEManager: NSObject, ObservableObject {
         priorityMaxCount: 3
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
+    private var lastNavigationQueueMetricsLogAt = Date.distantPast
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -3909,6 +3910,27 @@ class BLEManager: NSObject, ObservableObject {
             log("Navigation write queue pending: \(navigationWriteQueue.count)")
             lastNavigationQueuePendingLogAt = Date()
         }
+        logNavigationQueueMetricsIfNeeded()
+    }
+
+    private func logNavigationQueueMetricsIfNeeded() {
+#if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(lastNavigationQueueMetricsLogAt) >= 10 else {
+            return
+        }
+        lastNavigationQueueMetricsLogAt = now
+        let metrics = navigationWriteQueue.metrics
+        log(
+            "PWRMET_IOS v=\(NavigationWriteQueueMetrics.schemaVersion) " +
+            "queue[depth=\(metrics.currentDepth) maxDepth=\(metrics.maxDepth) " +
+            "enqueued=\(metrics.enqueuedFrames) flushed=\(metrics.flushedFrames) " +
+            "dropped=\(metrics.droppedFrames) rejected=\(metrics.rejectedFrames) " +
+            "coalesced=\(metrics.coalescedFrames) cleared=\(metrics.clearedFrames) " +
+            "retries=\(metrics.retrySchedules) " +
+            "backpressure=\(metrics.backpressureStops)]"
+        )
+#endif
     }
 
     private func completeNavigationWrite(error: Error?) {
@@ -4001,6 +4023,8 @@ class BLEManager: NSObject, ObservableObject {
             self.flushPendingNavigationWrites(endpoint: endpoint)
             self.scheduleNavigationFlushRetryIfNeeded()
         }
+        navigationWriteQueue.noteRetryScheduled()
+        logNavigationQueueMetricsIfNeeded()
     }
 }
 

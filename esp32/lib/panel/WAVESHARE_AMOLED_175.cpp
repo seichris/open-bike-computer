@@ -14,6 +14,7 @@
 #include "../../include/hal.hpp"
 #include "display.hpp"
 #include "i2c_bus.hpp"
+#include "power_metrics.hpp"
 #include "touch.hpp"
 #include "waveshare_board.hpp"
 
@@ -152,6 +153,12 @@ static void drawDisplayTestPatterns(uint8_t appliedRotation) {
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   uint32_t startUs = micros();
+#if POWER_METRICS
+  power_metrics::pulseBegin(power_metrics::Pulse::DisplayFlush);
+  const uint32_t rotationStartUs = startUs;
+  uint32_t rotationUs = 0;
+  uint32_t qspiStartUs = 0;
+#endif
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
   uint16_t *pixels = reinterpret_cast<uint16_t *>(px_map);
@@ -163,6 +170,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   if (displayRotation == waveshare_board::display::ROTATION_90) {
     if (disp_rotation_buf == NULL) {
       Serial.println("ERROR: missing LVGL software-rotation buffer");
+#if POWER_METRICS
+      power_metrics::pulseEnd(power_metrics::Pulse::DisplayFlush);
+#endif
       lv_display_flush_ready(disp);
       return;
     }
@@ -180,6 +190,11 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     pixels = reinterpret_cast<uint16_t *>(disp_rotation_buf);
   }
 
+#if POWER_METRICS
+  rotationUs = micros() - rotationStartUs;
+  qspiStartUs = micros();
+#endif
+
   gfx->startWrite();
   gfx->writeAddrWindow(targetX, targetY, targetW, targetH);
   gfx->writePixels(pixels, targetW * targetH);
@@ -192,6 +207,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx->fillRect(area->x1, area->y1, 1, 1,
                 reinterpret_cast<uint16_t *>(px_map)[0]);
 #endif
+#if POWER_METRICS
+  const uint32_t qspiUs = micros() - qspiStartUs;
+#endif
 
   // Notify application policy only after the physical panel write (including
   // the 2.06-inch commit write) has completed.
@@ -200,6 +218,10 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);
   uint32_t durationUs = micros() - startUs;
+#if POWER_METRICS
+  power_metrics::noteDisplayFlush(rotationUs, qspiUs, durationUs);
+  power_metrics::pulseEnd(power_metrics::Pulse::DisplayFlush);
+#endif
   displayFlushCount++;
   lastDisplayFlushMs = millis();
   lastDisplayFlushDurationUs = durationUs;
@@ -832,6 +854,7 @@ void setupDisplay() {
   gfx->displayOn();
   delay(50);
   gfx->setBrightness(255); // Maximum brightness 0-255
+  power_metrics::noteDisplayState(power_metrics::DisplayState::On, 255, 255);
   delay(50);
 
 #ifdef WAVESHARE_DISPLAY_TEST
