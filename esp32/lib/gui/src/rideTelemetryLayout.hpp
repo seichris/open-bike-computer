@@ -14,6 +14,13 @@ constexpr int32_t kMetricRowGap = 8;
 constexpr int32_t kStartWorkoutButtonGap = 16;
 constexpr int32_t kStartWorkoutButtonHeight = 52;
 constexpr int32_t kStartWorkoutButtonHorizontalInset = 42;
+constexpr int32_t kRoundStartWorkoutButtonHorizontalInset = 58;
+constexpr int32_t kRoundStartWorkoutButtonBottomInset = 88;
+
+constexpr bool usesRoundScreenSafeArea(int32_t screenWidth,
+                                       int32_t screenHeight) {
+  return screenWidth == screenHeight;
+}
 
 constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
   // The 466 px display fits the compact 64 px values; the 410 px display
@@ -329,10 +336,24 @@ constexpr MetricPlacement makeMetricPlacement(const Layout &layout,
   placement.bottomRight = usesWorkout ? layout.metrics[5] : layout.metrics[3];
   const Rect &buttonPredecessor =
       hasNavigation ? placement.bottomLeft : placement.distance;
+  const int32_t minimumButtonY =
+      buttonPredecessor.bottom() + kStartWorkoutButtonGap;
+  const bool useRoundSafeArea =
+      usesRoundScreenSafeArea(layout.screenWidth, layout.screenHeight);
+  const int32_t roundSafeButtonY =
+      layout.screenHeight - kRoundStartWorkoutButtonBottomInset -
+      kStartWorkoutButtonHeight;
+  const int32_t buttonY =
+      useRoundSafeArea && roundSafeButtonY > minimumButtonY
+          ? roundSafeButtonY
+          : minimumButtonY;
+  const int32_t horizontalInset =
+      useRoundSafeArea ? kRoundStartWorkoutButtonHorizontalInset
+                       : kStartWorkoutButtonHorizontalInset;
   placement.startWorkoutButton = {
-      kStartWorkoutButtonHorizontalInset,
-      buttonPredecessor.bottom() + kStartWorkoutButtonGap,
-      layout.screenWidth - 2 * kStartWorkoutButtonHorizontalInset,
+      horizontalInset,
+      buttonY,
+      layout.screenWidth - 2 * horizontalInset,
       kStartWorkoutButtonHeight,
   };
   return placement;

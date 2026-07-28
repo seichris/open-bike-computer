@@ -6,6 +6,7 @@
 #include "batteryStatusScr.hpp"
 
 #include "battery.hpp"
+#include "bikeIcon.hpp"
 #include "batteryStatusLayout.hpp"
 #include "ble_navigation.hpp"
 
@@ -30,10 +31,6 @@ struct BatteryGauge {
 BatteryGauge deviceGauge;
 BatteryGauge phoneGauge;
 
-// Lucide Bike's 24x24 geometry, scaled 3x. Source and license:
-// https://lucide.dev/icons/bike, LICENSES/Lucide-ISC.txt
-constexpr lv_point_precise_t LUCIDE_BIKE_PATH[] = {
-    {36, 53}, {36, 42}, {27, 33}, {39, 24}, {45, 33}, {51, 33}};
 constexpr lv_point_precise_t CHARGING_BOLT_PATH[] = {
     {14, 5}, {6, 16}, {13, 16}, {7, 31}};
 
@@ -79,43 +76,6 @@ void createIconLine(lv_obj_t *parent, const lv_point_precise_t *points,
   lv_obj_set_style_line_color(line, lv_color_hex(color), 0);
   lv_obj_set_style_line_rounded(line, true, 0);
   makePassive(line);
-}
-
-void createBikeWheel(lv_obj_t *parent, lv_coord_t x) {
-  lv_obj_t *wheel = lv_obj_create(parent);
-  lv_obj_remove_style_all(wheel);
-  lv_obj_set_size(wheel, 27, 27);
-  lv_obj_set_pos(wheel, x, 39);
-  lv_obj_set_style_bg_opa(wheel, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(wheel, 6, 0);
-  lv_obj_set_style_border_color(wheel, lv_color_white(), 0);
-  lv_obj_set_style_radius(wheel, LV_RADIUS_CIRCLE, 0);
-  makePassive(wheel);
-}
-
-lv_obj_t *createBikeIcon(lv_obj_t *parent, lv_coord_t topOffset) {
-  lv_obj_t *bike = lv_obj_create(parent);
-  lv_obj_remove_style_all(bike);
-  lv_obj_set_size(bike, 72, 72);
-  lv_obj_align(bike, LV_ALIGN_TOP_MID, 0, topOffset);
-  makePassive(bike);
-
-  // Lucide circles: rear wheel (5.5,17.5,r3.5), front wheel
-  // (18.5,17.5,r3.5), and rider head (15,5,r1).
-  createBikeWheel(bike, 3);
-  createBikeWheel(bike, 42);
-  lv_obj_t *head = lv_obj_create(bike);
-  lv_obj_remove_style_all(head);
-  lv_obj_set_size(head, 12, 12);
-  lv_obj_set_pos(head, 39, 9);
-  lv_obj_set_style_bg_color(head, lv_color_white(), 0);
-  lv_obj_set_style_bg_opa(head, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
-  makePassive(head);
-  createIconLine(bike, LUCIDE_BIKE_PATH,
-                 sizeof(LUCIDE_BIKE_PATH) / sizeof(LUCIDE_BIKE_PATH[0]), 6,
-                 0xFFFFFF);
-  return bike;
 }
 
 lv_obj_t *createPhoneIcon(lv_obj_t *parent, lv_coord_t topOffset) {
@@ -199,7 +159,8 @@ BatteryGauge createGauge(lv_obj_t *parent, lv_coord_t diameter, lv_coord_t y,
   if (phoneIcon) {
     icon = createPhoneIcon(container, iconCenterY - 30);
   } else {
-    icon = createBikeIcon(container, iconCenterY - 36);
+    icon = bike_icon::create(container, 72, 0xFFFFFF);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, iconCenterY - 36);
   }
   gauge.chargingBolt = createChargingBolt(icon, phoneIcon ? 0 : 3);
 

@@ -81,6 +81,7 @@ struct DestinationPickerView {
   lv_obj_t *container = nullptr;
   uint32_t catalogRevision = UINT32_MAX;
   uint32_t statusRevision = UINT32_MAX;
+  bool showsHeading = false;
   DestinationRowContext
       rowContexts[destination_picker_protocol::MAX_ITEMS]{};
 };
@@ -564,6 +565,18 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
     return;
   }
 
+  int32_t headingHeight = 0;
+  if (picker.showsHeading) {
+    lv_obj_t *heading = lv_label_create(picker.container);
+    lv_obj_set_width(heading, LV_PCT(100));
+    lv_obj_set_height(heading, 34);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(heading, lv_color_white(), 0);
+    lv_obj_set_style_text_align(heading, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_static(heading, "Choose Destination");
+    headingHeight = 34 + destination_picker_layout::kRowGap;
+  }
+
   lv_obj_set_style_pad_bottom(
       picker.container,
       destination_picker_layout::bottomPadding(TFT_WIDTH, TFT_HEIGHT,
@@ -643,7 +656,7 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
   }
 
   if (destination_picker_layout::needsScrolling(
-          totalRowHeight, createdRowCount,
+          totalRowHeight + headingHeight, createdRowCount,
           lv_obj_get_content_height(picker.container))) {
     lv_obj_add_flag(picker.container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(picker.container, LV_DIR_VER);
@@ -1739,16 +1752,20 @@ void createMainScr() {
   navigationScr(navTile);
   navigationDestinationPicker.container =
       createDestinationPickerContainer(navTile);
-  lv_obj_set_size(navigationDestinationPicker.container, TFT_WIDTH,
-                  TFT_HEIGHT);
+  const int32_t navigationPickerInset =
+      destination_picker_layout::fullScreenInset(TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_size(navigationDestinationPicker.container,
+                  TFT_WIDTH - 2 * navigationPickerInset,
+                  TFT_HEIGHT - 2 * navigationPickerInset);
   lv_obj_align(navigationDestinationPicker.container, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_bg_color(navigationDestinationPicker.container,
                             lv_color_black(), 0);
   lv_obj_set_style_bg_opa(navigationDestinationPicker.container, LV_OPA_COVER,
                           0);
-  lv_obj_set_style_pad_all(navigationDestinationPicker.container, 8, 0);
+  lv_obj_set_style_pad_all(navigationDestinationPicker.container, 4, 0);
   navigationDestinationPicker.catalogRevision = UINT32_MAX;
   navigationDestinationPicker.statusRevision = UINT32_MAX;
+  navigationDestinationPicker.showsHeading = true;
   lv_obj_add_event_cb(navTile, updateNavEvent, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(navTile, tapCycleScreenEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
