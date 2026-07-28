@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import math
+import os
 import random
 import tempfile
+import time
 import unittest
 from array import array
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
+
+import power_trace_summary
 
 from power_trace_summary import (
     TraceConfiguration,
@@ -23,6 +31,30 @@ class PowerTraceSummaryTests(unittest.TestCase):
         path = root / name
         path.write_text(contents, encoding="utf-8")
         return path
+
+    def cli_arguments(self, traces: list[Path]) -> list[str]:
+        return [
+            *(str(trace) for trace in traces),
+            "--scenario",
+            "test scenario",
+            "--target",
+            "1.75",
+            "--firmware-sha",
+            "a" * 40,
+            "--supply-voltage",
+            "4.0",
+            "--minimum-sample-rate-hz",
+            "1",
+            "--minimum-runs",
+            str(len(traces)),
+        ]
+
+    def assert_cli_error(self, arguments: list[str], message: str) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(arguments)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertRegex(stderr.getvalue(), message)
 
     def test_constant_voltage_trace_uses_time_weighted_integration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -240,6 +272,8 @@ class PowerTraceSummaryTests(unittest.TestCase):
                     "b" * 40,
                     "--supply-voltage",
                     "4.0",
+                    "--minimum-sample-rate-hz",
+                    "1",
                     "--output",
                     str(output),
                 ]
@@ -251,6 +285,263 @@ class PowerTraceSummaryTests(unittest.TestCase):
             self.assertEqual(rendered["run_count"], 3)
             self.assertEqual(rendered["target"], "2.06")
             self.assertEqual(rendered["firmware_sha"], "b" * 40)
+            self.assertEqual(
+                list(root.glob(f".{output.name}.*.tmp")),
+                [],
+            )
+
+    def test_missing_required_column_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "missing.csv",
+                "time_s,amps\n0,1\n1,2\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "missing required column"):
+                analyze_trace(trace, TraceConfiguration(supply_voltage_v=4.0))
+
+    def test_nonfinite_samples_fail_closed(self):
+        for raw_value in ("nan", "inf", "-inf"):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as directory:
+                trace = self.write_trace(
+                    Path(directory),
+                    "nonfinite.csv",
+                    "time_s,current_mA\n"
+                    "0,1\n"
+                    f"1,{raw_value}\n",
+                )
+                with self.assertRaisesRegex(TraceFormatError, "non-finite"):
+                    analyze_trace(
+                        trace,
+                        TraceConfiguration(supply_voltage_v=4.0),
+                    )
+
+    def test_voltage_source_must_be_unambiguous(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            TraceConfiguration().validate()
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            TraceConfiguration(
+                voltage_column="voltage_v",
+                supply_voltage_v=4.0,
+            ).validate()
+
+    def test_configured_column_names_must_be_distinct(self):
+        with self.assertRaisesRegex(ValueError, "must be distinct"):
+            TraceConfiguration(
+                time_column="value",
+                current_column="value",
+                supply_voltage_v=4.0,
+            ).validate()
+
+    def test_nonfinite_configuration_fails_closed_in_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "valid.csv",
+                "time_s,current_mA\n0,1\n1,2\n",
+            )
+            base_arguments = self.cli_arguments([trace])
+            cases = (
+                ("--supply-voltage", "nan"),
+                ("--window-start-s", "inf"),
+                ("--minimum-sample-rate-hz", "nan"),
+                ("--maximum-gap-factor", "inf"),
+            )
+            for option, value in cases:
+                with self.subTest(option=option):
+                    self.assert_cli_error(
+                        [*base_arguments, option, value],
+                        "finite",
+                    )
+
+    def test_window_with_only_one_sample_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "one.csv",
+                "time_s,current_mA\n0,1\n1,2\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "at least two samples"):
+                analyze_trace(
+                    trace,
+                    TraceConfiguration(
+                        supply_voltage_v=4.0,
+                        window_start_s=1.0,
+                    ),
+                )
+
+    def test_explicit_window_end_must_be_covered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "short.csv",
+                "time_s,current_mA\n0,1\n1,2\n2,3\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "requested window end"):
+                analyze_trace(
+                    trace,
+                    TraceConfiguration(
+                        supply_voltage_v=4.0,
+                        window_start_s=0.5,
+                        window_end_s=3.0,
+                    ),
+                )
+
+    def test_window_boundaries_are_interpolated_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "interpolate.csv",
+                "time_s,current_mA\n0,0\n1,10\n2,20\n3,30\n",
+            )
+            result = analyze_trace(
+                trace,
+                TraceConfiguration(
+                    supply_voltage_v=4.0,
+                    window_start_s=0.5,
+                    window_end_s=2.5,
+                ),
+            )
+
+            self.assertEqual(result.selected_samples, 2)
+            self.assertEqual(result.interpolated_boundary_samples, 2)
+            self.assertAlmostEqual(result.first_sample_elapsed_s, 0.5)
+            self.assertAlmostEqual(result.last_sample_elapsed_s, 2.5)
+            self.assertAlmostEqual(result.duration_s, 2.0)
+            self.assertAlmostEqual(result.average_current_mA, 15.0)
+            self.assertAlmostEqual(result.average_power_mW, 60.0)
+
+    def test_capture_rate_and_large_sample_gaps_are_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            slow_trace = self.write_trace(
+                root,
+                "slow.csv",
+                "time_s,current_mA\n0,1\n1,1\n2,1\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "below required"):
+                analyze_trace(
+                    slow_trace,
+                    TraceConfiguration(
+                        supply_voltage_v=4.0,
+                        minimum_sample_rate_hz=10.0,
+                    ),
+                )
+
+            dense_prefix = "".join(
+                f"{index / 10_000:.4f},1\n" for index in range(101)
+            )
+            gap_trace = self.write_trace(
+                root,
+                "gap.csv",
+                "time_s,current_mA\n" + dense_prefix + "0.1000,1\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "sample gap"):
+                analyze_trace(
+                    gap_trace,
+                    TraceConfiguration(
+                        supply_voltage_v=4.0,
+                        minimum_sample_rate_hz=1_000.0,
+                        maximum_gap_factor=2.0,
+                    ),
+                )
+
+    def test_raw_sha_is_for_the_exact_parsed_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "bom.csv"
+            raw_bytes = (
+                b"\xef\xbb\xbftime_s,current_mA\r\n"
+                b"0,1\r\n"
+                b"1,2\r\n"
+            )
+            trace.write_bytes(raw_bytes)
+            result = analyze_trace(
+                trace,
+                TraceConfiguration(supply_voltage_v=4.0),
+            )
+            self.assertEqual(
+                result.raw_sha256,
+                hashlib.sha256(raw_bytes).hexdigest(),
+            )
+
+    def test_trace_mutation_during_analysis_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "mutated.csv",
+                "time_s,current_mA\n0,1\n1,2\n",
+            )
+            initial_identity = (1, 2, 3, 4, 5)
+            changed_identity = (1, 2, 4, 4, 5)
+            with mock.patch.object(
+                power_trace_summary,
+                "_stat_identity",
+                side_effect=(
+                    initial_identity,
+                    changed_identity,
+                    initial_identity,
+                ),
+            ):
+                with self.assertRaisesRegex(TraceFormatError, "trace changed"):
+                    analyze_trace(
+                        trace,
+                        TraceConfiguration(supply_voltage_v=4.0),
+                    )
+
+    def test_output_cannot_alias_raw_evidence(self):
+        for alias_kind in ("same-path", "symlink", "hardlink"):
+            with self.subTest(alias_kind=alias_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                trace = self.write_trace(
+                    root,
+                    "raw.csv",
+                    "time_s,current_mA\n0,1\n1,2\n",
+                )
+                original_bytes = trace.read_bytes()
+                if alias_kind == "same-path":
+                    output = trace
+                elif alias_kind == "symlink":
+                    output = root / "summary.json"
+                    output.symlink_to(trace)
+                else:
+                    output = root / "summary.json"
+                    os.link(trace, output)
+
+                self.assert_cli_error(
+                    [*self.cli_arguments([trace]), "--output", str(output)],
+                    "aliases raw trace input",
+                )
+                self.assertEqual(trace.read_bytes(), original_bytes)
+
+    def test_nonfinite_derived_results_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.write_trace(
+                Path(directory),
+                "overflow.csv",
+                "time_s,current_A\n0,1e300\n1,1e300\n",
+            )
+            with self.assertRaisesRegex(TraceFormatError, "derived result"):
+                analyze_trace(
+                    trace,
+                    TraceConfiguration(
+                        current_column="current_A",
+                        current_unit="A",
+                        supply_voltage_v=1e300,
+                    ),
+                )
+
+    def test_percentile_stays_fast_for_large_monotonic_inputs(self):
+        sample_count = 200_000
+        started_at = time.monotonic()
+        for values in (
+            array("d", range(sample_count)),
+            array("d", reversed(range(sample_count))),
+        ):
+            self.assertAlmostEqual(
+                sample_percentile(values, 95.0),
+                (sample_count - 1) * 0.95,
+            )
+        self.assertLess(time.monotonic() - started_at, 8.0)
 
 
 if __name__ == "__main__":

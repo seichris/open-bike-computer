@@ -74,10 +74,12 @@ Use `esp32/tools/power_trace_summary.py` to derive campaign statistics from
 the saved raw source-monitor CSV files. The analyzer requires at least three
 runs by default, records each raw file's SHA-256, integrates average current
 and energy against time, calculates the exact sample p95 and peak, and reports
-run-to-run standard deviation, coefficient of variation, and range. It fails
-closed on missing columns, non-finite samples, duplicate timestamps, ambiguous
-voltage input, duplicate raw trace content, or a window with fewer than two
-samples.
+run-to-run standard deviation, coefficient of variation, and range. The hash
+is calculated from the same byte stream that is parsed, and the analyzer fails
+if a raw file changes during the read. It fails closed on missing or aliased
+columns, non-finite input or derived values, duplicate timestamps, ambiguous
+voltage input, duplicate raw trace content, insufficient sample cadence, an
+uncovered window boundary, or a window with fewer than two samples.
 
 The default normalized CSV header is `time_s,current_mA`. Units are never
 guessed from a column name. Supply either a measured voltage column or the
@@ -109,10 +111,22 @@ argument with:
 ```
 
 The start and end window are seconds relative to the first trace sample. The
-p95 is a sample percentile, which is appropriate only for the required fixed,
-high-rate capture. Do not compare traces sampled at materially different
-rates. Keep the raw CSV and generated JSON together; the JSON is a derived
-artifact and never replaces the raw trace.
+analyzer linearly interpolates current and voltage at boundaries that fall
+between source samples, so an explicit end is never silently truncated. The
+reported selected-sample count and sample-percentile distribution exclude
+those synthetic boundaries, while the JSON records their count separately.
+By default, the CLI requires an effective
+sample rate of at least 10 kS/s and rejects any interval longer than two
+nominal sample periods; use `--minimum-sample-rate-hz` and
+`--maximum-gap-factor` only when a documented measurement protocol calls for
+different limits. The p95 is a sample percentile, which is appropriate only
+for a fixed, high-rate capture. Do not compare traces sampled at materially
+different rates.
+
+Keep each complete, immutable raw CSV with its generated JSON. Output is
+written atomically, and the analyzer refuses a same-path, symlink, or hard-link
+output that aliases any raw input. The JSON is a derived artifact and never
+replaces the raw trace.
 
 ## Artifact identity
 
