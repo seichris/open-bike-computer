@@ -2431,6 +2431,7 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
  */
 void Maps::deleteMapScrSprites() {
   cancelPinchPreview();
+  pinchZoomOutBackdrop = {};
   // Maps::arrowSprite.deleteSprite();
   // Maps::mapSprite.deleteSprite();
   if (Maps::canvasArrow)
@@ -2516,6 +2517,101 @@ void Maps::createMapScrSprites() {
   // Maps::arrowSprite.pushImage(0, 0, 16, 16, (uint16_t *)navigation);
 }
 
+bool Maps::hasPinchZoomOutBackdrop(uint8_t baseZoom) const {
+  const uint16_t canvasHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  return pinchZoomOutBackdrop.prepared &&
+         pinchZoomOutBackdrop.baseZoom ==
+             map_transform::clampRuntimeZoom(baseZoom) &&
+         pinchZoomOutBackdrop.center.x == Maps::point.x &&
+         pinchZoomOutBackdrop.center.y == Maps::point.y &&
+         std::fabs(pinchZoomOutBackdrop.rotation - Maps::rotationRad) < 0.0001 &&
+         pinchZoomOutBackdrop.canvasHeight == canvasHeight &&
+         Maps::canvasMapTemp != nullptr;
+}
+
+void Maps::invalidatePinchZoomOutBackdrop() {
+  pinchZoomOutBackdrop = {};
+  if (Maps::canvasMapTemp == nullptr)
+    return;
+  lv_anim_delete(Maps::canvasMapTemp, setPinchCanvasScale);
+  lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+  lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+  lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_center(Maps::canvasMapTemp);
+}
+
+bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
+  baseZoom = map_transform::clampRuntimeZoom(baseZoom);
+  if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
+      Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
+      pinchPresentation.settlementPending) {
+    return false;
+  }
+  if (hasPinchZoomOutBackdrop(baseZoom))
+    return true;
+
+  invalidatePinchZoomOutBackdrop();
+  const uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
+  ViewPort backdropViewPort;
+  backdropViewPort.zoom = backdropZoom;
+  backdropViewPort.setCenter(Maps::point);
+
+  const bool previousMapFound = Maps::isMapFound;
+  const tileBounds previousBounds = Maps::totalBounds;
+  const uint16_t previousWptX = Maps::wptPosX;
+  const uint16_t previousWptY = Maps::wptPosY;
+  auto restoreVisibleMapState = [&]() {
+    Maps::isMapFound = previousMapFound;
+    Maps::totalBounds = previousBounds;
+    Maps::wptPosX = previousWptX;
+    Maps::wptPosY = previousWptY;
+  };
+
+  ESP_LOGI(TAG, "Preparing pinch backdrop: baseZoom=%u renderZoom=%u",
+           (unsigned)baseZoom, (unsigned)backdropZoom);
+  if (!Maps::getMapBlocks(backdropViewPort.bbox, Maps::memCache) ||
+      !Maps::readVectorMap(backdropViewPort, Maps::memCache,
+                           Maps::canvasMapTemp, backdropZoom, rotationRad)) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted");
+    return false;
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted before completion");
+    return false;
+  }
+
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
+    const uint16_t canvasHeight =
+        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+    routeOverlay.drawRoute(Maps::canvasMapTemp, backdropViewPort.center.x,
+                           backdropViewPort.center.y, backdropZoom,
+                           Maps::mapScrWidth, canvasHeight, rotationRad,
+                           mapAnchorXForWidth(Maps::mapScrWidth),
+                           mapAnchorYForHeight(canvasHeight));
+  }
+
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    restoreVisibleMapState();
+    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted after route");
+    return false;
+  }
+
+  restoreVisibleMapState();
+  pinchZoomOutBackdrop.prepared = true;
+  pinchZoomOutBackdrop.baseZoom = baseZoom;
+  pinchZoomOutBackdrop.renderZoom = backdropZoom;
+  pinchZoomOutBackdrop.center = Maps::point;
+  pinchZoomOutBackdrop.rotation = Maps::rotationRad;
+  pinchZoomOutBackdrop.canvasHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  ESP_LOGI(TAG, "Pinch backdrop ready");
+  return true;
+}
+
 bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
                              uint8_t baseZoom) {
   if (Maps::canvasMap == nullptr || pinchPresentation.settlementPending) {
@@ -2555,6 +2651,11 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
       canvasArea.x1 + mapAnchorXForWidth(Maps::mapScrWidth);
   pinchPresentation.anchorScreenY =
       canvasArea.y1 + mapAnchorYForHeight(height);
+  pinchPresentation.hasZoomOutBackdrop =
+      hasPinchZoomOutBackdrop(pinchPresentation.baseZoom);
+  if (pinchPresentation.hasZoomOutBackdrop) {
+    pinchPresentation.zoomOutBackdropZoom = pinchZoomOutBackdrop.renderZoom;
+  }
 
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
   lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
@@ -2562,6 +2663,17 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
                      pinchPresentation.pivotLocalY);
   lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+  if (pinchPresentation.hasZoomOutBackdrop) {
+    lv_obj_set_pos(Maps::canvasMapTemp, pinchPresentation.canvasBaseX,
+                   pinchPresentation.canvasBaseY);
+    lv_image_set_pivot(Maps::canvasMapTemp,
+                       pinchPresentation.pivotLocalX,
+                       pinchPresentation.pivotLocalY);
+    lv_obj_move_background(Maps::canvasMapTemp);
+    lv_obj_move_foreground(Maps::canvasMap);
+    if (Maps::canvasArrow != nullptr)
+      lv_obj_move_foreground(Maps::canvasArrow);
+  }
 #ifdef WAVESHARE_TOUCH_DIAGNOSTICS
   recordPinchPreviewFrame(true);
 #endif
@@ -2590,6 +2702,22 @@ void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
                  pinchPresentation.canvasBaseX + translationX,
                  pinchPresentation.canvasBaseY + translationY);
   lv_image_set_scale(Maps::canvasMap, lvScale);
+  if (pinchPresentation.hasZoomOutBackdrop && Maps::canvasMapTemp != nullptr &&
+      ratio < 0.999) {
+    const double backdropRatio = map_transform::backdropPresentationRatio(
+        ratio, pinchPresentation.baseZoom,
+        pinchPresentation.zoomOutBackdropZoom);
+    const uint32_t backdropLvScale = static_cast<uint32_t>(
+        std::max<double>(1.0, std::round(backdropRatio * LV_SCALE_NONE)));
+    lv_obj_set_pos(Maps::canvasMapTemp,
+                   pinchPresentation.canvasBaseX + translationX,
+                   pinchPresentation.canvasBaseY + translationY);
+    lv_image_set_scale(Maps::canvasMapTemp, backdropLvScale);
+    lv_obj_clear_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(Maps::canvasMapTemp);
+  } else if (Maps::canvasMapTemp != nullptr) {
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  }
 #ifdef WAVESHARE_TOUCH_DIAGNOSTICS
   recordPinchPreviewFrame();
 #endif
@@ -2620,6 +2748,14 @@ void Maps::resetPinchPresentationVisuals() {
     lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
                    pinchPresentation.canvasBaseY);
     lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (Maps::canvasMapTemp != nullptr) {
+    lv_anim_delete(Maps::canvasMapTemp, setPinchCanvasScale);
+    lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
+    lv_obj_set_pos(Maps::canvasMapTemp, pinchPresentation.canvasBaseX,
+                   pinchPresentation.canvasBaseY);
+    lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
   }
   if (Maps::canvasArrow != nullptr) {
     lv_obj_set_pos(Maps::canvasArrow, pinchPresentation.markerBaseX,
@@ -2662,6 +2798,10 @@ void Maps::commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
   } else {
     Maps::followGps = true;
   }
+  // Keep the old complete frame visible while the new discrete zoom frame is
+  // rendered. This also prevents the prepared backdrop from being exposed if
+  // a settlement render is interrupted by a new touch.
+  resetPinchPresentationVisuals();
   pinchPresentation.finalPreviewRatio = finalPreviewRatio;
   pinchPresentation.finalMidpointX = finalMidpointX;
   pinchPresentation.finalMidpointY = finalMidpointY;
@@ -2950,6 +3090,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
     return false;
   }
+
+  // The hidden buffer is about to become the render target. Any prepared
+  // zoom-out backdrop in it is no longer reusable.
+  invalidatePinchZoomOutBackdrop();
 
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;

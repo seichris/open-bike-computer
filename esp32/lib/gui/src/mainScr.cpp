@@ -12,6 +12,7 @@
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
 #include "mapTileTransition.hpp"
+#include "../../utils/src/mapTapArbiter.hpp"
 #include <algorithm>
 #if defined(WAVESHARE_AMOLED_175)
 #include "../../panel/WAVESHARE_AMOLED_175.hpp"
@@ -85,6 +86,7 @@ static DestinationRowContext
     mapGuidanceRowContexts[destination_picker_protocol::MAX_ITEMS];
 
 Maps mapView;
+static map_tap_arbiter::Controller mapTapController;
 
 #if defined(WAVESHARE_AMOLED_175)
 static map_pinch_zoom::Controller mapPinchController;
@@ -115,6 +117,7 @@ static void processMapPinchZoom() {
 
   switch (decision.action) {
   case map_pinch_zoom::Action::Begin:
+    mapTapController.cancel();
     if (!mapView.beginPinchPreview(decision.midpointX, decision.midpointY,
                                    zoom)) {
       (void)mapPinchController.cancelForContext(touchFrame.count);
@@ -147,6 +150,59 @@ bool mapPinchBlocksMapRender() {
 static void processMapPinchZoom() {}
 bool mapPinchOwnsInput() { return false; }
 bool mapPinchBlocksMapRender() { return false; }
+#endif
+
+static uint8_t currentMapTouchContactCount() {
+#if defined(WAVESHARE_AMOLED_175)
+  return getTouchFrameSnapshot().count;
+#elif defined(WAVESHARE_AMOLED_206)
+  return touchPressed ? 1 : 0;
+#else
+  return 0;
+#endif
+}
+
+static void processDeferredMapTap() {
+  const bool standaloneMapActive =
+      isMainScreen && activeTile == MAP && canScrollMap &&
+      mapRenderSettings.tapToSwitchScreens;
+  if (mapTapController.consumeIfReady(
+          millis(), standaloneMapActive, currentMapTouchContactCount(),
+          mapPinchOwnsInput())) {
+    log_i("MAP SHORT TAP: grace period complete, cycling main screen");
+    showNextMainScreen();
+  }
+}
+
+#if defined(WAVESHARE_AMOLED_175)
+static void serviceMapPinchZoomOutBackdrop() {
+  static uint32_t idleSinceMs = 0;
+  const bool canPrepare =
+      isMainScreen && activeTile == MAP && mapSet.vectorMap &&
+      zoom < map_transform::kMaximumRuntimeZoom && !mapPinchOwnsInput() &&
+      !isScrollingMap && !mapView.isPosMoved && !mapView.redrawMap &&
+      currentMapTouchContactCount() == 0;
+  if (!canPrepare || mapView.hasPinchZoomOutBackdrop(zoom)) {
+    idleSinceMs = 0;
+    return;
+  }
+
+  const uint32_t now = millis();
+  constexpr uint32_t kBackdropIdleDelayMs = 240;
+  if (idleSinceMs == 0) {
+    idleSinceMs = now;
+    return;
+  }
+  if (static_cast<uint32_t>(now - idleSinceMs) < kBackdropIdleDelayMs)
+    return;
+
+  (void)mapView.preparePinchZoomOutBackdrop(zoom);
+  // A touch can interrupt preparation. Require another quiet interval before
+  // retrying so map input remains responsive.
+  idleSinceMs = millis();
+}
+#else
+static void serviceMapPinchZoomOutBackdrop() {}
 #endif
 
 bool isMapScreenActive() { return activeTile == MAP; }
@@ -752,6 +808,7 @@ void scrollTile(lv_event_t *event) {
  */
 void updateMainScreen(lv_timer_t *t) {
   processMapPinchZoom();
+  processDeferredMapTap();
 
   // The Map + Navigation renderer can take long enough to mask a complete
   // button press or touch. Let the input timer run before starting more map
@@ -895,6 +952,8 @@ void updateMainScreen(lv_timer_t *t) {
       break;
     }
   }
+
+  serviceMapPinchZoomOutBackdrop();
 }
 
 /**
@@ -1091,6 +1150,7 @@ void scrollMapEvent(lv_event_t *event) {
 
     switch (code) {
     case LV_EVENT_PRESSED: {
+      mapTapController.cancel();
       lv_indev_get_point(indev, &p);
 
       // Filter out phantom touches at corner (touch driver error value)
@@ -1167,6 +1227,7 @@ void scrollMapEvent(lv_event_t *event) {
         }
 
         dragStarted = true;
+        mapTapController.cancel();
         last_x = p.x;
         last_y = p.y;
         pressStartTime = 0;
@@ -1212,8 +1273,8 @@ void scrollMapEvent(lv_event_t *event) {
         int totalMove = abs(p.x - pressStartX) + abs(p.y - pressStartY);
         if (totalMove < 30) {
           if (mapRenderSettings.tapToSwitchScreens) {
-            log_i("MAP SHORT TAP: cycling main screen");
-            showNextMainScreen();
+            log_i("MAP SHORT TAP: waiting for second touch or drag");
+            mapTapController.arm(millis());
           } else {
             // GPS indicator is centered in the rendered map viewport when
             // followGps is true. When followGps is false, use that center area

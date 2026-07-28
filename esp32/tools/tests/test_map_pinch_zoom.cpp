@@ -1,5 +1,6 @@
 #include "../../lib/maps/src/mapTransform.hpp"
 #include "../../lib/utils/src/mapPinchZoom.hpp"
+#include "../../lib/utils/src/mapTapArbiter.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -45,6 +46,9 @@ int main() {
   assert(nearestRuntimeZoom(0.51) == 3);
   assert(nearestRuntimeZoom(0.34) == 4);
   assert(nearestRuntimeZoom(0.24) == 5);
+  assertNear(backdropPresentationRatio(1.0, 1, 5), 6.0);
+  assertNear(backdropPresentationRatio(0.5, 2, 5), 2.0);
+  assertNear(backdropPresentationRatio(0.25, 2, 5), 1.0);
 
   const WorldPoint world = {30.0, -40.0};
   for (uint8_t zoom = 1; zoom <= 5; ++zoom) {
@@ -155,6 +159,28 @@ int main() {
   assert(context.ownsInput());
   context.cancelForContext(0);
   assert(!context.ownsInput());
+
+  map_tap_arbiter::Controller tap;
+  tap.arm(1000);
+  assert(tap.pending());
+  assert(!tap.consumeIfReady(1159, true, 0, false));
+  assert(tap.consumeIfReady(1160, true, 0, false));
+  assert(!tap.pending());
+
+  tap.arm(2000);
+  assert(!tap.consumeIfReady(2010, true, 2, false));
+  assert(!tap.pending());
+
+  tap.arm(3000);
+  assert(!tap.consumeIfReady(3010, true, 0, true));
+  assert(!tap.pending());
+
+  tap.arm(UINT32_MAX - 50);
+  assert(tap.consumeIfReady(109, true, 0, false));
+
+  tap.arm(4000);
+  assert(!tap.consumeIfReady(4200, false, 0, false));
+  assert(!tap.pending());
 
   std::cout << "Map pinch-zoom tests passed\n";
   return 0;

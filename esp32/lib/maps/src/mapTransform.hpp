@@ -58,6 +58,15 @@ inline double clampPreviewRatio(double ratio, uint8_t baseZoom) {
   return ratio;
 }
 
+inline double backdropPresentationRatio(double previewRatio, uint8_t baseZoom,
+                                        uint8_t backdropZoom) {
+  const double baseScale = worldToScreenScale(clampRuntimeZoom(baseZoom));
+  const double backdropScale =
+      worldToScreenScale(clampRuntimeZoom(backdropZoom));
+  return clampPreviewRatio(previewRatio, baseZoom) /
+         (backdropScale / baseScale);
+}
+
 inline uint8_t nearestRuntimeZoom(double effectiveWorldScale) {
   if (!(effectiveWorldScale > 0.0))
     return kMaximumRuntimeZoom;

@@ -174,6 +174,15 @@ private:
   void drawMapWidgets(const MapSettings &mapSettings);
   void resetPinchPresentationVisuals();
 
+  struct PinchZoomOutBackdrop {
+    bool prepared = false;
+    uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
+    uint8_t renderZoom = map_transform::kMaximumRuntimeZoom;
+    Point32 center = {0, 0};
+    double rotation = 0.0;
+    uint16_t canvasHeight = 0;
+  } pinchZoomOutBackdrop;
+
   struct PinchPresentation {
     bool active = false;
     bool settlementPending = false;
@@ -190,6 +199,8 @@ private:
     int16_t anchorScreenY = 0;
     int16_t markerBaseX = 0;
     int16_t markerBaseY = 0;
+    bool hasZoomOutBackdrop = false;
+    uint8_t zoomOutBackdropZoom = map_transform::kMaximumRuntimeZoom;
     double finalPreviewRatio = 1.0;
     int16_t finalMidpointX = 0;
     int16_t finalMidpointY = 0;
@@ -231,6 +242,9 @@ public:
   void centerOnGps(double lat, double lon);
   void scrollMap(int16_t dx, int16_t dy);
   void preloadTiles(int8_t dirX, int8_t dirY);
+  bool preparePinchZoomOutBackdrop(uint8_t baseZoom);
+  bool hasPinchZoomOutBackdrop(uint8_t baseZoom) const;
+  void invalidatePinchZoomOutBackdrop();
   bool beginPinchPreview(int16_t midpointX, int16_t midpointY,
                          uint8_t baseZoom);
   void updatePinchPreview(double previewRatio, int16_t midpointX,
