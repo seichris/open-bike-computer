@@ -11,7 +11,7 @@
 #ifndef DISABLE_OTA_UPGRADE
 
 #include <Update.h>
-#include "tft.hpp"
+#include "../../tft/tft.hpp"
 #include "lvgl.h"
 #include "upgradeScr.hpp"
 #include "storage.hpp"

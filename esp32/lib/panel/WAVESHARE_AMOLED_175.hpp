@@ -7,10 +7,12 @@
 
 #ifdef USE_ARDUINO_GFX
 // Use Arduino_GFX for CO5300 AMOLED (like working esp32 project)
-#include "display.hpp"
+#include "../waveshare_board/display.hpp"
 #include "../waveshare_board/cst9217_touch_frame.hpp"
-#include <Arduino_GFX_Library.h>
-#include <lvgl.h>
+
+class Arduino_ESP32QSPI;
+class Arduino_CO5300;
+struct lv_display_t;
 
 // Display dimensions
 #define SCREEN_WIDTH waveshare_board::display::ACTIVE_WIDTH

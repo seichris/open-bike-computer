@@ -18,9 +18,9 @@
 #include <esp_bt_main.h>
 #endif
 #endif
-#include "globalGuiDef.h"
+#include "../gui/src/globalGuiDef.h"
 #include "lvgl.h"
-#include "tft.hpp"
+#include "../tft/tft.hpp"
 #include <esp_wifi.h>
 
 class Power {

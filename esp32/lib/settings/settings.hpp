@@ -121,7 +121,7 @@ extern EasyPreferencesDummy cfg;
 #endif
 #include "battery.hpp"
 #include "gps.hpp"
-#include "tft.hpp"
+#include "../tft/tft.hpp"
 #include <NMEAGPS.h>
 #ifndef DISABLE_COMPASS
 #include "compass.hpp"

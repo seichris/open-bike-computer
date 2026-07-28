@@ -8,7 +8,7 @@
 #pragma once
 
 #include <lvgl.h>
-#include "tft.hpp"
+#include "../../tft/tft.hpp"
 #include "storage.hpp"
 
 /**
@@ -100,5 +100,4 @@ static bool getPngSize(const char* filename, uint16_t *width, uint16_t *height)
 
   return true;
 }
-
 
