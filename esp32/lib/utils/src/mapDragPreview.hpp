@@ -12,10 +12,27 @@ namespace map_drag_preview {
 constexpr int16_t kDragStartThresholdPx = 14;
 constexpr int16_t kSampleThresholdPx = 2;
 constexpr uint32_t kSettlementDelayMs = 180;
-constexpr uint16_t kOverscanMarginPx = 96;
+// 128 px is the largest round margin that keeps a rotated 722x722 fullscreen
+// zoom-5 canvas below one 4096-unit map-block span. The existing four-block
+// cache can therefore cover every north-up/course-up viewport orientation.
+constexpr uint16_t kOverscanMarginPx = 128;
 
 constexpr uint16_t overscanExtent(uint16_t viewportExtent) {
   return viewportExtent + (2 * kOverscanMarginPx);
+}
+
+struct CanvasExtent {
+  uint16_t width;
+  uint16_t height;
+};
+
+constexpr CanvasExtent renderCanvasExtent(uint16_t viewportWidth,
+                                          uint16_t viewportHeight,
+                                          bool useOverscan) {
+  return useOverscan
+             ? CanvasExtent{overscanExtent(viewportWidth),
+                            overscanExtent(viewportHeight)}
+             : CanvasExtent{viewportWidth, viewportHeight};
 }
 
 struct Offset {

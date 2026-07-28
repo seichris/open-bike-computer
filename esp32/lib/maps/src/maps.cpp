@@ -287,8 +287,6 @@ static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
 static void *bufMapScreen = nullptr;
 static void *bufMapTemp = nullptr;
 static size_t bufMapCanvasSize = 0;
-static void *bufMapDragOverscan = nullptr;
-static size_t bufMapDragOverscanSize = 0;
 static void *bufMapIcon = nullptr;
 static void *bufArrow = nullptr;
 
@@ -317,25 +315,6 @@ static bool ensureMapCanvasBuffers(size_t requiredSize) {
   bufMapScreen = newScreen;
   bufMapTemp = newTemp;
   bufMapCanvasSize = requiredSize;
-  return true;
-}
-
-static bool ensureMapDragOverscanBuffer(size_t requiredSize) {
-  if (bufMapDragOverscan != nullptr &&
-      bufMapDragOverscanSize >= requiredSize) {
-    return true;
-  }
-
-  void *newBuffer = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
-  if (newBuffer == nullptr) {
-    ESP_LOGE(TAG, "MapBuff: drag overscan allocation failed size=%u",
-             (unsigned)requiredSize);
-    return false;
-  }
-  if (bufMapDragOverscan != nullptr)
-    heap_caps_free(bufMapDragOverscan);
-  bufMapDragOverscan = newBuffer;
-  bufMapDragOverscanSize = requiredSize;
   return true;
 }
 
@@ -590,6 +569,16 @@ static int16_t mapAnchorXForWidth(uint16_t width) {
 
 static int16_t mapAnchorYForHeight(uint16_t height) {
   return gui_layout::mapAnchorY(height);
+}
+
+static map_drag_preview::CanvasExtent canvasExtent(
+    lv_obj_t *canvas, uint16_t fallbackWidth, uint16_t fallbackHeight) {
+  const lv_draw_buf_t *drawBuffer =
+      canvas != nullptr ? lv_canvas_get_draw_buf(canvas) : nullptr;
+  if (drawBuffer == nullptr)
+    return {fallbackWidth, fallbackHeight};
+  return {static_cast<uint16_t>(drawBuffer->header.w),
+          static_cast<uint16_t>(drawBuffer->header.h)};
 }
 
 static void setPinchCanvasScale(void *object, int32_t scale) {
@@ -2468,7 +2457,6 @@ void Maps::deleteMapScrSprites() {
   cancelDragPreview();
   cancelPinchPreview();
   pinchZoomOutBackdrop = {};
-  dragOverscanBackdrop = {};
   // Maps::arrowSprite.deleteSprite();
   // Maps::mapSprite.deleteSprite();
   if (Maps::canvasArrow)
@@ -2477,13 +2465,10 @@ void Maps::deleteMapScrSprites() {
     lv_obj_delete(Maps::canvasMap);
   if (Maps::canvasMapTemp)
     lv_obj_delete(Maps::canvasMapTemp);
-  if (Maps::canvasMapDragOverscan)
-    lv_obj_delete(Maps::canvasMapDragOverscan);
 
   Maps::canvasArrow = nullptr;
   Maps::canvasMap = nullptr;
   Maps::canvasMapTemp = nullptr;
-  Maps::canvasMapDragOverscan = nullptr;
 }
 
 /**
@@ -2499,14 +2484,20 @@ void Maps::createMapScrSprites() {
   if (mapSet.mapFullScreen)
     h = Maps::mapScrFull;
 
-  // Use LVGL's stride calculation to ensure we match what LVGL expects
-  // internally
-  uint32_t stride_bytes =
-      lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
-  size_t requiredSize = stride_bytes * h;
+  // Both render buffers permanently have enough capacity for the standalone
+  // Map's maximum-zoom gutter. At other zooms (and on Map + Navigation) LVGL
+  // binds only the normal viewport-sized prefix of each allocation.
+  const auto maximumExtent = map_drag_preview::renderCanvasExtent(
+      Maps::mapScrWidth, Maps::mapScrFull, true);
+  const uint32_t strideBytes = lv_draw_buf_width_to_stride(
+      maximumExtent.width, LV_COLOR_FORMAT_RGB565);
+  const size_t requiredSize = strideBytes * maximumExtent.height;
 
-  ESP_LOGI(TAG, "MapBuff: W=%d H=%d Stride=%d Size=%d", w, h, stride_bytes,
-           requiredSize);
+  ESP_LOGI(TAG,
+           "MapBuff: capacity=%ux%u stride=%u size=%u initial=%ux%u",
+           (unsigned)maximumExtent.width, (unsigned)maximumExtent.height,
+           (unsigned)strideBytes, (unsigned)requiredSize, (unsigned)w,
+           (unsigned)h);
   if (!ensureMapCanvasBuffers(requiredSize)) {
     return;
   }
@@ -2654,133 +2645,6 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   return true;
 }
 
-bool Maps::hasDragOverscanBackdrop(uint8_t baseZoom) const {
-  const uint16_t viewportHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  const uint16_t canvasWidth =
-      map_drag_preview::overscanExtent(Maps::mapScrWidth);
-  const uint16_t canvasHeight =
-      map_drag_preview::overscanExtent(viewportHeight);
-  return baseZoom == map_transform::kMaximumRuntimeZoom &&
-         dragOverscanBackdrop.prepared &&
-         dragOverscanBackdrop.zoom == baseZoom &&
-         dragOverscanBackdrop.center.x == Maps::point.x &&
-         dragOverscanBackdrop.center.y == Maps::point.y &&
-         std::fabs(dragOverscanBackdrop.rotation - Maps::rotationRad) <
-             0.0001 &&
-         dragOverscanBackdrop.canvasWidth == canvasWidth &&
-         dragOverscanBackdrop.canvasHeight == canvasHeight &&
-         Maps::canvasMapDragOverscan != nullptr;
-}
-
-void Maps::invalidateDragOverscanBackdrop() {
-  dragOverscanBackdrop = {};
-  if (Maps::canvasMapDragOverscan == nullptr)
-    return;
-  lv_obj_add_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_center(Maps::canvasMapDragOverscan);
-}
-
-bool Maps::prepareDragOverscanBackdrop(uint8_t baseZoom) {
-  baseZoom = map_transform::clampRuntimeZoom(baseZoom);
-  if (baseZoom != map_transform::kMaximumRuntimeZoom ||
-      Maps::canvasMap == nullptr || pinchPresentation.active ||
-      pinchPresentation.settlementPending || dragPreviewController.active() ||
-      dragPreviewController.settlementPending()) {
-    return false;
-  }
-  if (hasDragOverscanBackdrop(baseZoom))
-    return true;
-
-  invalidateDragOverscanBackdrop();
-  const uint16_t viewportHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  const uint16_t canvasWidth =
-      map_drag_preview::overscanExtent(Maps::mapScrWidth);
-  const uint16_t canvasHeight =
-      map_drag_preview::overscanExtent(viewportHeight);
-  const uint32_t strideBytes =
-      lv_draw_buf_width_to_stride(canvasWidth, LV_COLOR_FORMAT_RGB565);
-  const size_t requiredSize = strideBytes * canvasHeight;
-  if (!ensureMapDragOverscanBuffer(requiredSize))
-    return false;
-  memset(bufMapDragOverscan, 0, requiredSize);
-
-  if (Maps::canvasMapDragOverscan == nullptr) {
-    Maps::canvasMapDragOverscan = lv_canvas_create(mapTile);
-    lv_obj_add_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-  }
-  lv_canvas_set_buffer(Maps::canvasMapDragOverscan, bufMapDragOverscan,
-                       canvasWidth, canvasHeight, LV_COLOR_FORMAT_RGB565);
-  lv_obj_center(Maps::canvasMapDragOverscan);
-
-  ViewPort overscanViewPort;
-  overscanViewPort.zoom = baseZoom;
-  overscanViewPort.setCenterForCanvas(Maps::point, canvasWidth, canvasHeight,
-                                      Maps::rotationRad);
-
-  const bool previousMapFound = Maps::isMapFound;
-  const tileBounds previousBounds = Maps::totalBounds;
-  const uint16_t previousWptX = Maps::wptPosX;
-  const uint16_t previousWptY = Maps::wptPosY;
-  auto restoreVisibleMapState = [&]() {
-    Maps::isMapFound = previousMapFound;
-    Maps::totalBounds = previousBounds;
-    Maps::wptPosX = previousWptX;
-    Maps::wptPosY = previousWptY;
-  };
-
-  const uint32_t prepareStartMs = millis();
-  ESP_LOGI(TAG,
-           "Preparing drag overscan: zoom=%u canvas=%ux%u bytes=%u",
-           (unsigned)baseZoom, (unsigned)canvasWidth,
-           (unsigned)canvasHeight, (unsigned)requiredSize);
-  if (!Maps::getMapBlocks(overscanViewPort.bbox, Maps::memCache) ||
-      !Maps::readVectorMap(overscanViewPort, Maps::memCache,
-                           Maps::canvasMapDragOverscan, baseZoom,
-                           Maps::rotationRad)) {
-    restoreVisibleMapState();
-    invalidateDragOverscanBackdrop();
-    ESP_LOGI(TAG, "Drag overscan preparation interrupted");
-    return false;
-  }
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    restoreVisibleMapState();
-    invalidateDragOverscanBackdrop();
-    ESP_LOGI(TAG, "Drag overscan preparation interrupted before completion");
-    return false;
-  }
-
-  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(
-        Maps::canvasMapDragOverscan, overscanViewPort.center.x,
-        overscanViewPort.center.y, baseZoom, canvasWidth, canvasHeight,
-        Maps::rotationRad, mapAnchorXForWidth(canvasWidth),
-        mapAnchorYForHeight(canvasHeight));
-  }
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    restoreVisibleMapState();
-    invalidateDragOverscanBackdrop();
-    ESP_LOGI(TAG, "Drag overscan preparation interrupted after route");
-    return false;
-  }
-
-  restoreVisibleMapState();
-  dragOverscanBackdrop.prepared = true;
-  dragOverscanBackdrop.zoom = baseZoom;
-  dragOverscanBackdrop.center = Maps::point;
-  dragOverscanBackdrop.rotation = Maps::rotationRad;
-  dragOverscanBackdrop.canvasWidth = canvasWidth;
-  dragOverscanBackdrop.canvasHeight = canvasHeight;
-  lv_obj_add_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-  ESP_LOGI(TAG,
-           "Drag overscan ready elapsedMs=%lu freePsram=%u largestPsram=%u",
-           (unsigned long)(millis() - prepareStartMs),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-  return true;
-}
-
 void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
   const int32_t visualX = -offset.x;
   const int32_t visualY = -offset.y;
@@ -2800,16 +2664,6 @@ void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
                        visualY);
     lv_obj_clear_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(Maps::canvasMapTemp);
-  }
-  if (dragPresentation.hasOverscan &&
-      Maps::canvasMapDragOverscan != nullptr) {
-    lv_obj_set_pos(Maps::canvasMapDragOverscan,
-                   static_cast<int32_t>(dragPresentation.overscanBaseX) +
-                       visualX,
-                   static_cast<int32_t>(dragPresentation.overscanBaseY) +
-                       visualY);
-    lv_obj_clear_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_invalidate(Maps::canvasMapDragOverscan);
   }
   if (Maps::canvasArrow != nullptr) {
     lv_obj_set_pos(Maps::canvasArrow,
@@ -2839,12 +2693,9 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!continuingSettlement) {
     dragPresentation = {};
     dragPresentation.baseZoom = normalizedZoom;
-    // lv_obj_set_pos() updates the offset from the object's configured
-    // alignment. The map canvases are centered, so preserve their aligned
-    // offsets (normally 0,0), not their resolved top-left coordinates. Using
-    // the resolved coordinate as a centered offset applies the centering
-    // margin twice; the oversized canvas was consequently shifted by another
-    // 96 px and exposed duplicated-looking map content during a drag.
+    // lv_obj_set_pos() updates the offset from the object's configured center
+    // alignment, so preserve that aligned offset rather than its resolved
+    // top-left coordinate. This works for both normal and oversized canvases.
     dragPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
     dragPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
     if (Maps::canvasArrow != nullptr) {
@@ -2857,14 +2708,6 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
         hasPinchZoomOutBackdrop(normalizedZoom);
     if (dragPresentation.hasBackdrop) {
       dragPresentation.backdropZoom = pinchZoomOutBackdrop.renderZoom;
-    }
-    dragPresentation.hasOverscan =
-        hasDragOverscanBackdrop(normalizedZoom);
-    if (dragPresentation.hasOverscan) {
-      dragPresentation.overscanBaseX =
-          lv_obj_get_x_aligned(Maps::canvasMapDragOverscan);
-      dragPresentation.overscanBaseY =
-          lv_obj_get_y_aligned(Maps::canvasMapDragOverscan);
     }
   }
 
@@ -2885,17 +2728,6 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
     lv_image_set_scale(Maps::canvasMapTemp, backdropLvScale);
     lv_obj_move_background(Maps::canvasMapTemp);
     lv_obj_move_foreground(Maps::canvasMap);
-    if (Maps::canvasArrow != nullptr)
-      lv_obj_move_foreground(Maps::canvasArrow);
-  }
-  if (dragPresentation.hasOverscan &&
-      Maps::canvasMapDragOverscan != nullptr) {
-    lv_obj_move_background(Maps::canvasMapDragOverscan);
-    lv_obj_clear_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
-    // The overscan canvas contains the entire visible map plus its gutter.
-    // Present it as the sole map image so independently rasterized copies
-    // cannot form an overlap seam while moving.
-    lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_HIDDEN);
     if (Maps::canvasArrow != nullptr)
       lv_obj_move_foreground(Maps::canvasArrow);
   }
@@ -2924,8 +2756,6 @@ void Maps::resetDragPresentationVisuals() {
   if (Maps::canvasMap != nullptr) {
     lv_obj_set_pos(Maps::canvasMap, dragPresentation.canvasBaseX,
                    dragPresentation.canvasBaseY);
-    if (dragPresentation.hasOverscan)
-      lv_obj_clear_flag(Maps::canvasMap, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(Maps::canvasMap);
   }
   if (Maps::canvasMapTemp != nullptr) {
@@ -2934,12 +2764,6 @@ void Maps::resetDragPresentationVisuals() {
     lv_obj_set_pos(Maps::canvasMapTemp, dragPresentation.canvasBaseX,
                    dragPresentation.canvasBaseY);
     lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (Maps::canvasMapDragOverscan != nullptr) {
-    lv_obj_set_pos(Maps::canvasMapDragOverscan,
-                   dragPresentation.overscanBaseX,
-                   dragPresentation.overscanBaseY);
-    lv_obj_add_flag(Maps::canvasMapDragOverscan, LV_OBJ_FLAG_HIDDEN);
   }
   if (Maps::canvasArrow != nullptr) {
     lv_obj_set_pos(Maps::canvasArrow, dragPresentation.markerBaseX,
@@ -2960,7 +2784,6 @@ void Maps::finishDragSettlement() {
   if (!dragPreviewController.settlementPending())
     return;
   resetDragPresentationVisuals();
-  invalidateDragOverscanBackdrop();
   dragPreviewController.reset();
   dragPresentation = {};
 }
@@ -2979,33 +2802,37 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   pinchPresentation.baseCenter = Maps::point;
   pinchPresentation.initialMidpointX = midpointX;
   pinchPresentation.initialMidpointY = midpointY;
-  pinchPresentation.canvasBaseX = lv_obj_get_x(Maps::canvasMap);
-  pinchPresentation.canvasBaseY = lv_obj_get_y(Maps::canvasMap);
+  pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
+  pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
   if (Maps::canvasArrow != nullptr) {
-    pinchPresentation.markerBaseX = lv_obj_get_x(Maps::canvasArrow);
-    pinchPresentation.markerBaseY = lv_obj_get_y(Maps::canvasArrow);
+    pinchPresentation.markerBaseX = lv_obj_get_x_aligned(Maps::canvasArrow);
+    pinchPresentation.markerBaseY = lv_obj_get_y_aligned(Maps::canvasArrow);
   }
 
+  lv_obj_update_layout(Maps::canvasMap);
   lv_area_t canvasArea;
   lv_obj_get_coords(Maps::canvasMap, &canvasArea);
-  const int16_t height =
+  const uint16_t viewportHeight =
       mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const auto currentExtent =
+      canvasExtent(Maps::canvasMap, Maps::mapScrWidth, viewportHeight);
   if (Maps::followGps) {
-    pinchPresentation.pivotLocalX = mapAnchorXForWidth(Maps::mapScrWidth);
-    pinchPresentation.pivotLocalY = mapAnchorYForHeight(height);
+    pinchPresentation.pivotLocalX = mapAnchorXForWidth(currentExtent.width);
+    pinchPresentation.pivotLocalY = mapAnchorYForHeight(currentExtent.height);
   } else {
     pinchPresentation.pivotLocalX = static_cast<int16_t>(
         std::max<int32_t>(0, std::min<int32_t>(
-                                 Maps::mapScrWidth - 1,
+                                 currentExtent.width - 1,
                                  midpointX - canvasArea.x1)));
     pinchPresentation.pivotLocalY = static_cast<int16_t>(
-        std::max<int32_t>(
-            0, std::min<int32_t>(height - 1, midpointY - canvasArea.y1)));
+        std::max<int32_t>(0, std::min<int32_t>(
+                                 currentExtent.height - 1,
+                                 midpointY - canvasArea.y1)));
   }
   pinchPresentation.anchorScreenX =
-      canvasArea.x1 + mapAnchorXForWidth(Maps::mapScrWidth);
+      canvasArea.x1 + mapAnchorXForWidth(currentExtent.width);
   pinchPresentation.anchorScreenY =
-      canvasArea.y1 + mapAnchorYForHeight(height);
+      canvasArea.y1 + mapAnchorYForHeight(currentExtent.height);
   pinchPresentation.hasZoomOutBackdrop =
       hasPinchZoomOutBackdrop(pinchPresentation.baseZoom);
   if (pinchPresentation.hasZoomOutBackdrop) {
@@ -3078,10 +2905,8 @@ void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
 #endif
 
   if (!pinchPresentation.capturedFollowGps && Maps::canvasArrow != nullptr) {
-    const double pivotX = pinchPresentation.canvasBaseX +
-                          pinchPresentation.pivotLocalX;
-    const double pivotY = pinchPresentation.canvasBaseY +
-                          pinchPresentation.pivotLocalY;
+    const double pivotX = pinchPresentation.initialMidpointX;
+    const double pivotY = pinchPresentation.initialMidpointY;
     const double markerCenterX = pinchPresentation.markerBaseX + 24.0;
     const double markerCenterY = pinchPresentation.markerBaseY + 24.0;
     const int16_t transformedX = static_cast<int16_t>(std::round(
@@ -3181,16 +3006,27 @@ void Maps::finishPinchSettlement() {
   const double targetScale = map_transform::worldToScreenScale(zoomLevel);
   const uint32_t initialScale = static_cast<uint32_t>(std::round(
       (effectiveScale / targetScale) * static_cast<double>(LV_SCALE_NONE)));
-  const int16_t settlementPivotX = pinchPresentation.capturedFollowGps
-                                       ? pinchPresentation.pivotLocalX
-                                       : pinchPresentation.pivotLocalX +
-                                             pinchPresentation.finalMidpointX -
-                                             pinchPresentation.initialMidpointX;
-  const int16_t settlementPivotY = pinchPresentation.capturedFollowGps
-                                       ? pinchPresentation.pivotLocalY
-                                       : pinchPresentation.pivotLocalY +
-                                             pinchPresentation.finalMidpointY -
-                                             pinchPresentation.initialMidpointY;
+  lv_obj_update_layout(Maps::canvasMap);
+  lv_area_t canvasArea;
+  lv_obj_get_coords(Maps::canvasMap, &canvasArea);
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const auto currentExtent =
+      canvasExtent(Maps::canvasMap, Maps::mapScrWidth, viewportHeight);
+  const int32_t pivotScreenX = pinchPresentation.capturedFollowGps
+                                   ? pinchPresentation.anchorScreenX
+                                   : pinchPresentation.finalMidpointX;
+  const int32_t pivotScreenY = pinchPresentation.capturedFollowGps
+                                   ? pinchPresentation.anchorScreenY
+                                   : pinchPresentation.finalMidpointY;
+  const int16_t settlementPivotX = static_cast<int16_t>(
+      std::max<int32_t>(0, std::min<int32_t>(
+                               currentExtent.width - 1,
+                               pivotScreenX - canvasArea.x1)));
+  const int16_t settlementPivotY = static_cast<int16_t>(
+      std::max<int32_t>(0, std::min<int32_t>(
+                               currentExtent.height - 1,
+                               pivotScreenY - canvasArea.y1)));
   lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
   lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
                  pinchPresentation.canvasBaseY);
@@ -3449,10 +3285,6 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   // The hidden buffer is about to become the render target. Any prepared
   // zoom-out backdrop in it is no longer reusable.
   invalidatePinchZoomOutBackdrop();
-  // A drag settlement continues presenting its old overscan until the new
-  // complete frame is ready. All other renders invalidate stale idle backing.
-  if (!isDragSettlementPending())
-    invalidateDragOverscanBackdrop();
 
   Maps::mapTileSize = Maps::vectorMapTileSize;
   Maps::zoomLevel = zoom;
@@ -3479,9 +3311,36 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     rotationRad = 0;
   }
 
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const bool useDragOverscan =
+      isMapScreenActive() &&
+      zoom == map_transform::kMaximumRuntimeZoom;
+  const auto renderExtent = map_drag_preview::renderCanvasExtent(
+      Maps::mapScrWidth, viewportHeight, useDragOverscan);
+  const uint32_t renderStride = lv_draw_buf_width_to_stride(
+      renderExtent.width, LV_COLOR_FORMAT_RGB565);
+  const size_t renderSize = renderStride * renderExtent.height;
+  if (renderSize > bufMapCanvasSize) {
+    ESP_LOGE(TAG,
+             "Map render skipped: %ux%u frame needs %u bytes, capacity=%u",
+             (unsigned)renderExtent.width, (unsigned)renderExtent.height,
+             (unsigned)renderSize, (unsigned)bufMapCanvasSize);
+    return false;
+  }
+
+  // The hidden buffer always receives the complete target geometry before
+  // drawing. At maximum zoom on standalone Map, this makes the next visible
+  // frame itself oversized instead of waiting for a separately rendered
+  // backing layer.
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMapTemp);
+
   // Viewport
   Maps::viewPort.zoom = zoom;
-  Maps::viewPort.setCenter(Maps::point);
+  Maps::viewPort.setCenterForCanvas(Maps::point, renderExtent.width,
+                                    renderExtent.height, rotationRad);
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
@@ -3519,17 +3378,13 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
-    // BUGFIX: Use actual canvas height, not mapScrHeight which differs in
-    // fullscreen mode
-    uint16_t canvasHeight =
-        mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
     routeOverlay.drawRoute(Maps::canvasMapTemp, Maps::viewPort.center.x,
-                           Maps::viewPort.center.y, zoom, Maps::mapScrWidth,
-                           canvasHeight, rotationRad,
-                           mapAnchorXForWidth(Maps::mapScrWidth),
-                           mapAnchorYForHeight(canvasHeight));
+                           Maps::viewPort.center.y, zoom, renderExtent.width,
+                           renderExtent.height, rotationRad,
+                           mapAnchorXForWidth(renderExtent.width),
+                           mapAnchorYForHeight(renderExtent.height));
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
-             rotationRad, canvasHeight);
+             rotationRad, renderExtent.height);
   } else if (routeOverlay.hasRoute()) {
     ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
   } else {
@@ -3547,12 +3402,12 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   void *completedFrame = bufMapTemp;
   bufMapTemp = bufMapScreen;
   bufMapScreen = completedFrame;
-  const uint16_t canvasHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, Maps::mapScrWidth,
-                       canvasHeight, LV_COLOR_FORMAT_RGB565);
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
-                       canvasHeight, LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
+                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_center(Maps::canvasMapTemp);
 #ifdef WAVESHARE_TOUCH_DIAGNOSTICS
   const bool completedPinchSettlement = isPinchSettlementPending();
 #endif

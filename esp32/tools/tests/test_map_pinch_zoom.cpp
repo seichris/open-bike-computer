@@ -207,9 +207,19 @@ int main() {
   assert(!drag.active());
   assert(!drag.settlementPending());
 
-  assert(map_drag_preview::kOverscanMarginPx == 96);
-  assert(map_drag_preview::overscanExtent(466) == 658);
-  assert(map_drag_preview::overscanExtent(366) == 558);
+  assert(map_drag_preview::kOverscanMarginPx == 128);
+  assert(map_drag_preview::overscanExtent(466) == 722);
+  assert(map_drag_preview::overscanExtent(366) == 622);
+  const auto normalExtent =
+      map_drag_preview::renderCanvasExtent(466, 366, false);
+  assert(normalExtent.width == 466 && normalExtent.height == 366);
+  const auto overscanExtent =
+      map_drag_preview::renderCanvasExtent(466, 366, true);
+  assert(overscanExtent.width == 722 && overscanExtent.height == 622);
+  const auto fullscreenOverscanExtent =
+      map_drag_preview::renderCanvasExtent(466, 466, true);
+  assert(fullscreenOverscanExtent.width == 722 &&
+         fullscreenOverscanExtent.height == 722);
 
   // A centered oversized canvas must put the same map center at the same
   // parent coordinate as the normal viewport. Drag presentation therefore
@@ -217,26 +227,32 @@ int main() {
   // resolved negative/top coordinates as new centered offsets.
   assert(gui_layout::centeredViewportOrigin(466, 466) +
              gui_layout::mapAnchorX(466) ==
-         gui_layout::centeredViewportOrigin(466, 658) +
-             gui_layout::mapAnchorX(658));
+         gui_layout::centeredViewportOrigin(466, 722) +
+             gui_layout::mapAnchorX(722));
   assert(gui_layout::centeredViewportOrigin(466, 366) +
              gui_layout::mapAnchorY(366) ==
-         gui_layout::centeredViewportOrigin(466, 558) +
-             gui_layout::mapAnchorY(558));
+         gui_layout::centeredViewportOrigin(466, 622) +
+             gui_layout::mapAnchorY(622));
 
   const auto northUpOverscan = map_transform::canvasWorldBounds(
-      {1000.0, 2000.0}, 658.0, 558.0, 5, 0.0);
-  assertNear(northUpOverscan.min.x, -316.0);
-  assertNear(northUpOverscan.max.x, 2316.0);
-  assertNear(northUpOverscan.min.y, 884.0);
-  assertNear(northUpOverscan.max.y, 3116.0);
+      {1000.0, 2000.0}, 722.0, 622.0, 5, 0.0);
+  assertNear(northUpOverscan.min.x, -444.0);
+  assertNear(northUpOverscan.max.x, 2444.0);
+  assertNear(northUpOverscan.min.y, 756.0);
+  assertNear(northUpOverscan.max.y, 3244.0);
 
   const auto quarterTurnOverscan = map_transform::canvasWorldBounds(
-      {1000.0, 2000.0}, 658.0, 558.0, 5, std::acos(-1.0) / 2.0);
-  assertNear(quarterTurnOverscan.min.x, -116.0);
-  assertNear(quarterTurnOverscan.max.x, 2116.0);
-  assertNear(quarterTurnOverscan.min.y, 684.0);
-  assertNear(quarterTurnOverscan.max.y, 3316.0);
+      {1000.0, 2000.0}, 722.0, 622.0, 5, std::acos(-1.0) / 2.0);
+  assertNear(quarterTurnOverscan.min.x, -244.0);
+  assertNear(quarterTurnOverscan.max.x, 2244.0);
+  assertNear(quarterTurnOverscan.min.y, 556.0);
+  assertNear(quarterTurnOverscan.max.y, 3444.0);
+
+  // The largest supported standalone viewport remains narrower than one map
+  // block in every rotation, preserving the existing 2x2/four-block cache
+  // ceiling at zoom 5.
+  assert(std::hypot(722.0, 722.0) * screenToWorldScale(5) < 4096.0);
+  assert(std::hypot(666.0, 758.0) * screenToWorldScale(5) < 4096.0);
 
   std::cout << "Map pinch-zoom tests passed\n";
   return 0;
