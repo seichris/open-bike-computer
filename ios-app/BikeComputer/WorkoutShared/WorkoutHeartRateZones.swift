@@ -1,5 +1,10 @@
 import Foundation
 
+nonisolated struct WorkoutHeartRateZoneBPMRange: Equatable, Sendable {
+    let lowerBound: Int?
+    let upperBound: Int?
+}
+
 /// BikeComputer's watchOS 10-compatible heart-rate zone model.
 ///
 /// These zones are intentionally app-defined rather than presented as Apple's
@@ -40,6 +45,51 @@ nonisolated struct WorkoutHeartRateZoneProfile: Equatable, Sendable {
         case ..<0.80: return 3
         case ..<0.90: return 4
         default: return 5
+        }
+    }
+
+    func bpmRange(for zone: UInt8) -> WorkoutHeartRateZoneBPMRange? {
+        guard zone > 0, zone <= Self.zoneCount else { return nil }
+
+        let zone2LowerBound = Int(
+            ceil(Double(maximumHeartRateBPM) * 0.60)
+        )
+        let zone3LowerBound = Int(
+            ceil(Double(maximumHeartRateBPM) * 0.70)
+        )
+        let zone4LowerBound = Int(
+            ceil(Double(maximumHeartRateBPM) * 0.80)
+        )
+        let zone5LowerBound = Int(
+            ceil(Double(maximumHeartRateBPM) * 0.90)
+        )
+
+        switch zone {
+        case 1:
+            return WorkoutHeartRateZoneBPMRange(
+                lowerBound: nil,
+                upperBound: zone2LowerBound - 1
+            )
+        case 2:
+            return WorkoutHeartRateZoneBPMRange(
+                lowerBound: zone2LowerBound,
+                upperBound: zone3LowerBound - 1
+            )
+        case 3:
+            return WorkoutHeartRateZoneBPMRange(
+                lowerBound: zone3LowerBound,
+                upperBound: zone4LowerBound - 1
+            )
+        case 4:
+            return WorkoutHeartRateZoneBPMRange(
+                lowerBound: zone4LowerBound,
+                upperBound: zone5LowerBound - 1
+            )
+        default:
+            return WorkoutHeartRateZoneBPMRange(
+                lowerBound: zone5LowerBound,
+                upperBound: nil
+            )
         }
     }
 }

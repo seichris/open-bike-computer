@@ -1060,6 +1060,35 @@ private struct WorkoutContractTestSuite {
         expect(profile.zone(for: 180) == 5, "90 percent starts zone 5")
         expect(profile.zone(for: 220) == 5, "above max remains zone 5")
         expect(
+            profile.bpmRange(for: 1)
+                == WorkoutHeartRateZoneBPMRange(
+                    lowerBound: nil,
+                    upperBound: 119
+                ),
+            "zone 1 summary range should end below 60 percent"
+        )
+        expect(
+            profile.bpmRange(for: 3)
+                == WorkoutHeartRateZoneBPMRange(
+                    lowerBound: 140,
+                    upperBound: 159
+                ),
+            "middle summary ranges should match the live zone boundaries"
+        )
+        expect(
+            profile.bpmRange(for: 5)
+                == WorkoutHeartRateZoneBPMRange(
+                    lowerBound: 180,
+                    upperBound: nil
+                ),
+            "zone 5 summary range should remain open ended"
+        )
+        expect(
+            profile.bpmRange(for: 0) == nil
+                && profile.bpmRange(for: 6) == nil,
+            "unsupported zone numbers should not produce summary ranges"
+        )
+        expect(
             WorkoutHeartRateZoneProfile(maximumHeartRateBPM: 20)
                 .maximumHeartRateBPM == 100,
             "maximum heart rate clamps to the supported lower bound"
@@ -5292,6 +5321,27 @@ private struct WorkoutContractTestSuite {
         expect(WorkoutValueFormatter.whole(0) == "0", "available zero power should remain zero")
         expect(WorkoutValueFormatter.speed(nil) == "--", "missing speed should be unavailable")
         expect(WorkoutValueFormatter.speed(0) == "0.0", "available stopped speed should remain zero")
+        expect(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: 1_000,
+                elapsedSeconds: 200
+            ) == "18.0",
+            "average speed should derive kilometers per hour from distance and active time"
+        )
+        expect(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: 0,
+                elapsedSeconds: 200
+            ) == "0.0",
+            "an available zero-distance average should remain zero"
+        )
+        expect(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: 1_000,
+                elapsedSeconds: 0
+            ) == "--",
+            "average speed requires positive elapsed time"
+        )
         expect(WorkoutValueFormatter.distance(nil) == "--", "missing distance should be unavailable")
         expect(WorkoutValueFormatter.distance(0) == "0", "available zero distance should remain zero")
         expect(WorkoutValueFormatter.duration(nil) == "--:--", "missing elapsed time should be unavailable")
@@ -5837,6 +5887,7 @@ private struct WorkoutContractTestSuite {
             "Power",
             "Cadence",
             "Average HR",
+            "Average Speed",
             "Altitude",
         ] {
             expect(
@@ -5848,6 +5899,16 @@ private struct WorkoutContractTestSuite {
             source.contains("TimelineView(.periodic(from: Date(), by: 1))")
                 && source.contains("captureAgeLabel(age)"),
             "dashboard must render live capture age"
+        )
+        expect(
+            source.contains(
+                "if store.presentation.connectionState == .ended {"
+            )
+                && source.contains("HeartRateZoneBreakdown(")
+                && source.contains(
+                    "durations: snapshot.heartRateZoneDurations"
+                ),
+            "ended workout summaries must render the authoritative heart-rate zone breakdown"
         )
         for controlRoute in [
             "Button(action: onMarkSegment)",
@@ -6259,6 +6320,12 @@ private struct WorkoutContractTestSuite {
                     "WorkoutValueFormatter.duration(displayedHeartRateZoneElapsedTime),showsHeartInLabel:true,label:\"timeinzone\""
                 )
                 && compactNavigation.contains(
+                    "WorkoutValueFormatter.heartRate(snapshot.averageHeartRate?.value),unit:\"BPM\",label:\"averageheartrate\""
+                )
+                && compactNavigation.contains(
+                    "WorkoutValueFormatter.averageSpeed(distanceMeters:snapshot.cyclingDistance?.value,elapsedSeconds:snapshot.elapsedTime?.value),unit:\"km/h\",label:\"averagespeed\""
+                )
+                && compactNavigation.contains(
                     "ifshowsHeartInLabel{HStack(spacing:4){Text(\"timein\")Image(systemName:\"heart.fill\").accessibilityHidden(true)Text(\"zone\")}}"
                 )
                 && compactNavigation.contains(
@@ -6288,7 +6355,7 @@ private struct WorkoutContractTestSuite {
                 && compactNavigation.contains(
                     ".padding(.bottom,4)"
                 ),
-            "expanded ride stats must hide the speed caption and place heart rate plus time in zone first below the zone strip"
+            "expanded ride stats must place current and average heart-rate/speed rows below the zone strip"
         )
         expect(
             compactContent.contains(
