@@ -36,6 +36,10 @@ struct WorkoutSummaryView: View {
                     )
                     summaryRow("Energy", "\(WorkoutValueFormatter.energy(summary.activeEnergyKilocalories)) KCAL")
                     summaryRow("Avg Heart", "\(WorkoutValueFormatter.heartRate(summary.averageHeartRate)) BPM")
+                    summaryRow(
+                        "Avg Speed",
+                        "\(WorkoutValueFormatter.averageSpeed(distanceMeters: summary.distanceMeters, elapsedSeconds: summary.duration)) KM/H"
+                    )
                     summaryRow("Route", routeStatusLabel)
                 } else {
                     Text("No workout or route was saved to Health.")

@@ -6126,6 +6126,45 @@ private struct WorkoutContractTestSuite {
                 ),
             "Watch live workout must omit LIVE, expose heart-rate zone and altitude, and retain the elapsed timer"
         )
+        let orderedWatchMetrics = [
+            "metric(title:\"Speed\"",
+            "metric(title:\"Distance\"",
+            "metric(title:\"Heart\"",
+            "metric(title:\"HRZone\"",
+            "metric(title:\"AvgHeart\"",
+            "metric(title:\"AvgSpeed\""
+        ]
+        var watchMetricSearchStart = compactLiveWatchView.startIndex
+        var watchMetricsAreOrdered = true
+        for metricBinding in orderedWatchMetrics {
+            guard let metricRange = compactLiveWatchView.range(
+                of: metricBinding,
+                range: watchMetricSearchStart..<compactLiveWatchView.endIndex
+            ) else {
+                watchMetricsAreOrdered = false
+                break
+            }
+            watchMetricSearchStart = metricRange.upperBound
+        }
+        expect(
+            watchMetricsAreOrdered
+                && compactLiveWatchView.contains(
+                    "WorkoutValueFormatter.heartRate(manager.snapshot.averageHeartRate?.value)"
+                )
+                && compactLiveWatchView.contains(
+                    "WorkoutValueFormatter.averageSpeed(distanceMeters:manager.snapshot.cyclingDistance?.value,elapsedSeconds:manager.snapshot.elapsedTime?.value)"
+                ),
+            "Watch live workout must lead with Speed/Distance, then Heart/Zone, then Avg Heart/Avg Speed using live snapshot values"
+        )
+        expect(
+            compactSummaryWatchView.contains(
+                "summaryRow(\"AvgHeart\",\"\\(WorkoutValueFormatter.heartRate(summary.averageHeartRate))BPM\")"
+            )
+                && compactSummaryWatchView.contains(
+                    "summaryRow(\"AvgSpeed\",\"\\(WorkoutValueFormatter.averageSpeed(distanceMeters:summary.distanceMeters,elapsedSeconds:summary.duration))KM/H\")"
+                ),
+            "Watch saved-workout summary must show average heart rate and average speed"
+        )
         if let gridIndex = compactLiveWatchView.range(
             of: "LazyVGrid(columns:columns,spacing:8)"
         )?.lowerBound,
