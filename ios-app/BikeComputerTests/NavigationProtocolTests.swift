@@ -8487,7 +8487,7 @@ struct NavigationProtocolTests {
         metricsQueue.enqueue(NavigationWrite(data: Data([5]), label: "clear"))
         metricsQueue.removeAll()
 
-        let queueMetrics = metricsQueue.metrics
+        let queueMetrics = metricsQueue.snapshotMetricsAndReset()
         assertEqual(NavigationWriteQueueMetrics.schemaVersion, 1,
                     "queue metrics schema is explicitly versioned")
         assertEqual(queueMetrics.enqueuedFrames, 3,
@@ -8506,6 +8506,10 @@ struct NavigationProtocolTests {
                     "queue metrics count transport backpressure")
         assertEqual(queueMetrics.currentDepth, 0,
                     "queue metrics depth returns to zero")
+        assertEqual(metricsQueue.metrics.enqueuedFrames, 0,
+                    "queue interval metrics reset after a snapshot")
+        assertEqual(metricsQueue.metrics.maxDepth, 0,
+                    "an empty queue starts the next interval at zero depth")
     }
 
     static func testDeviceBLEProtocolConstants() {

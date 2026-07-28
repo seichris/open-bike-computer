@@ -24,6 +24,7 @@ int main() {
   accumulator.noteBlePacket(BlePacketClass::Gps);
   accumulator.noteBlePacket(BlePacketClass::Gps);
   accumulator.noteBlePacket(BlePacketClass::Navigation);
+  accumulator.noteBlePacket(BlePacketClass::Transfer);
 
   const IntervalData first = accumulator.snapshotAndReset();
   assert(first.loopWakeCount == 3);
@@ -46,7 +47,8 @@ int main() {
              BlePacketClass::Gps)] == 2);
   assert(first.blePacketCounts[static_cast<std::size_t>(
              BlePacketClass::Navigation)] == 1);
-
+  assert(first.blePacketCounts[static_cast<std::size_t>(
+             BlePacketClass::Transfer)] == 1);
   // An interval reset preserves the prior loop timestamp so the boundary gap
   // remains visible in the following report.
   accumulator.noteLoop(125);

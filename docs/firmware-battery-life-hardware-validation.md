@@ -23,11 +23,12 @@ The report contains:
 - LVGL call count plus total/maximum handler time;
 - display flush count plus rotation, QSPI, and total time;
 - completed/interrupted map renders, stage timing, and render-reason counts;
-- accepted BLE packets by class;
+- received BLE packets by logical class, including packets later rejected by
+  authentication or payload validation;
 - Wi-Fi mode, transfer state/mode, audio activity, CPU frequency, and the
   number of active power-management locks; and
 - `appQueue=ios-diagnostic`, which identifies the separate
-  `PWRMET_IOS v=1` queue report produced by a Debug iOS build.
+  `PWRMET_IOS v=1` ten-second interval report produced by a Debug iOS build.
 
 The accumulator schema is defined in
 `esp32/lib/power_metrics/power_metrics_schema.hpp` and has a host test in

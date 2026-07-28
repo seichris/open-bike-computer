@@ -33,7 +33,10 @@ enum class BlePacketClass : uint8_t {
   Gps,
   Settings,
   Workout,
-  Other,
+  Transfer,
+  Audio,
+  Control,
+  Auth,
   Count,
 };
 

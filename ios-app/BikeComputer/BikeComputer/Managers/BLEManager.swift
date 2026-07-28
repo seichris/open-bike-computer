@@ -629,7 +629,9 @@ class BLEManager: NSObject, ObservableObject {
         priorityMaxCount: 3
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
-    private var lastNavigationQueueMetricsLogAt = Date.distantPast
+#if DEBUG
+    private var navigationQueueMetricsTimer: Timer?
+#endif
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -801,9 +803,22 @@ class BLEManager: NSObject, ObservableObject {
         )
 #endif
         log("BLE debug session started")
+#if DEBUG
+        let metricsTimer = Timer(
+            timeInterval: 10,
+            repeats: true
+        ) { [weak self] _ in
+            self?.logNavigationQueueMetricsInterval()
+        }
+        RunLoop.main.add(metricsTimer, forMode: .common)
+        navigationQueueMetricsTimer = metricsTimer
+#endif
     }
 
     deinit {
+#if DEBUG
+        navigationQueueMetricsTimer?.invalidate()
+#endif
 #if canImport(UIKit) && !HOST_TESTING
         NotificationCenter.default.removeObserver(
             self,
@@ -3910,19 +3925,14 @@ class BLEManager: NSObject, ObservableObject {
             log("Navigation write queue pending: \(navigationWriteQueue.count)")
             lastNavigationQueuePendingLogAt = Date()
         }
-        logNavigationQueueMetricsIfNeeded()
     }
 
-    private func logNavigationQueueMetricsIfNeeded() {
+    private func logNavigationQueueMetricsInterval() {
 #if DEBUG
-        let now = Date()
-        guard now.timeIntervalSince(lastNavigationQueueMetricsLogAt) >= 10 else {
-            return
-        }
-        lastNavigationQueueMetricsLogAt = now
-        let metrics = navigationWriteQueue.metrics
+        let metrics = navigationWriteQueue.snapshotMetricsAndReset()
         log(
             "PWRMET_IOS v=\(NavigationWriteQueueMetrics.schemaVersion) " +
+            "intervalMs=10000 " +
             "queue[depth=\(metrics.currentDepth) maxDepth=\(metrics.maxDepth) " +
             "enqueued=\(metrics.enqueuedFrames) flushed=\(metrics.flushedFrames) " +
             "dropped=\(metrics.droppedFrames) rejected=\(metrics.rejectedFrames) " +
@@ -4024,7 +4034,6 @@ class BLEManager: NSObject, ObservableObject {
             self.scheduleNavigationFlushRetryIfNeeded()
         }
         navigationWriteQueue.noteRetryScheduled()
-        logNavigationQueueMetricsIfNeeded()
     }
 }
 

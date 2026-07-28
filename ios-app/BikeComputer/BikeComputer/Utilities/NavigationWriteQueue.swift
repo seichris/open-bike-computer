@@ -97,6 +97,16 @@ struct NavigationWriteQueue {
         return snapshot
     }
 
+    mutating func snapshotMetricsAndReset() -> NavigationWriteQueueMetrics {
+        let snapshot = metrics
+#if DEBUG || HOST_TESTING
+        diagnosticMetrics = NavigationWriteQueueMetrics()
+        diagnosticMetrics.currentDepth = count
+        diagnosticMetrics.maxDepth = count
+#endif
+        return snapshot
+    }
+
     init(maxCount: Int, priorityMaxCount: Int = 1) {
         self.maxCount = max(1, maxCount)
         self.priorityMaxCount = max(1, priorityMaxCount)
