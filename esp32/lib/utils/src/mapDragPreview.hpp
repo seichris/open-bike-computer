@@ -12,6 +12,11 @@ namespace map_drag_preview {
 constexpr int16_t kDragStartThresholdPx = 14;
 constexpr int16_t kSampleThresholdPx = 2;
 constexpr uint32_t kSettlementDelayMs = 180;
+constexpr uint16_t kOverscanMarginPx = 96;
+
+constexpr uint16_t overscanExtent(uint16_t viewportExtent) {
+  return viewportExtent + (2 * kOverscanMarginPx);
+}
 
 struct Offset {
   int32_t x = 0;

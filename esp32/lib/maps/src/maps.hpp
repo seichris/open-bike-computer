@@ -93,6 +93,8 @@ private:
   struct ViewPort // Vector map viewport structure
   {
     void setCenter(Point32 pcenter);
+    void setCenterForCanvas(Point32 pcenter, uint16_t canvasWidth,
+                            uint16_t canvasHeight, double rotation);
     Point32 center;
     BBox bbox;
     uint8_t zoom;
@@ -147,6 +149,7 @@ private:
   lv_obj_t *canvasArrow;     // Canvas for Navigation Arrow in map
   lv_obj_t *canvasMapTemp;   // Full map canvas (not showed)
   lv_obj_t *canvasMap;       // Screen map canvas (showed)
+  lv_obj_t *canvasMapDragOverscan = nullptr; // Idle-prepared drag backing
   double prevLat, prevLon;   // Previous Latitude and Longitude
   double destLat, destLon;   // Waypoint destination latitude and longitude
   uint8_t zoomLevel;         // Zoom level for map display
@@ -216,7 +219,19 @@ private:
     int16_t markerBaseY = 0;
     bool hasBackdrop = false;
     uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
+    bool hasOverscan = false;
+    int16_t overscanBaseX = 0;
+    int16_t overscanBaseY = 0;
   } dragPresentation;
+
+  struct DragOverscanBackdrop {
+    bool prepared = false;
+    uint8_t zoom = map_transform::kMaximumRuntimeZoom;
+    Point32 center = {0, 0};
+    double rotation = 0.0;
+    uint16_t canvasWidth = 0;
+    uint16_t canvasHeight = 0;
+  } dragOverscanBackdrop;
 
   void applyDragPreviewOffset(map_drag_preview::Offset offset);
   void resetDragPresentationVisuals();
@@ -260,6 +275,9 @@ public:
   bool preparePinchZoomOutBackdrop(uint8_t baseZoom);
   bool hasPinchZoomOutBackdrop(uint8_t baseZoom) const;
   void invalidatePinchZoomOutBackdrop();
+  bool prepareDragOverscanBackdrop(uint8_t baseZoom);
+  bool hasDragOverscanBackdrop(uint8_t baseZoom) const;
+  void invalidateDragOverscanBackdrop();
   bool beginDragPreview(uint8_t baseZoom);
   void updateDragPreview(int16_t sessionDx, int16_t sessionDy);
   void commitDragPreview(int16_t sessionDx, int16_t sessionDy,

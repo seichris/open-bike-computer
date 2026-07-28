@@ -177,14 +177,17 @@ static void processDeferredMapTap() {
 }
 
 #if defined(WAVESHARE_AMOLED_175)
-static void serviceMapPinchZoomOutBackdrop() {
+static void serviceMapInteractionBackdrop() {
   static uint32_t idleSinceMs = 0;
   const bool canPrepare =
       isMainScreen && activeTile == MAP && mapSet.vectorMap &&
-      zoom < map_transform::kMaximumRuntimeZoom && !mapPinchOwnsInput() &&
-      !isScrollingMap && !mapView.isPosMoved && !mapView.redrawMap &&
-      currentMapTouchContactCount() == 0;
-  if (!canPrepare || mapView.hasPinchZoomOutBackdrop(zoom)) {
+      !mapPinchOwnsInput() && !isScrollingMap && !mapView.isPosMoved &&
+      !mapView.redrawMap && currentMapTouchContactCount() == 0;
+  const bool hasPreparedBackdrop =
+      zoom < map_transform::kMaximumRuntimeZoom
+          ? mapView.hasPinchZoomOutBackdrop(zoom)
+          : mapView.hasDragOverscanBackdrop(zoom);
+  if (!canPrepare || hasPreparedBackdrop) {
     idleSinceMs = 0;
     return;
   }
@@ -198,13 +201,17 @@ static void serviceMapPinchZoomOutBackdrop() {
   if (static_cast<uint32_t>(now - idleSinceMs) < kBackdropIdleDelayMs)
     return;
 
-  (void)mapView.preparePinchZoomOutBackdrop(zoom);
+  if (zoom < map_transform::kMaximumRuntimeZoom) {
+    (void)mapView.preparePinchZoomOutBackdrop(zoom);
+  } else {
+    (void)mapView.prepareDragOverscanBackdrop(zoom);
+  }
   // A touch can interrupt preparation. Require another quiet interval before
   // retrying so map input remains responsive.
   idleSinceMs = millis();
 }
 #else
-static void serviceMapPinchZoomOutBackdrop() {}
+static void serviceMapInteractionBackdrop() {}
 #endif
 
 bool isMapScreenActive() { return activeTile == MAP; }
@@ -955,7 +962,7 @@ void updateMainScreen(lv_timer_t *t) {
     }
   }
 
-  serviceMapPinchZoomOutBackdrop();
+  serviceMapInteractionBackdrop();
 }
 
 /**

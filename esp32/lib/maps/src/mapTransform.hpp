@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -21,6 +22,11 @@ struct ScreenDelta {
 struct WorldPoint {
   double x = 0.0;
   double y = 0.0;
+};
+
+struct WorldBounds {
+  WorldPoint min;
+  WorldPoint max;
 };
 
 inline uint8_t clampRuntimeZoom(uint8_t zoom) {
@@ -104,6 +110,33 @@ inline WorldPoint screenToWorld(ScreenDelta screenDelta, uint8_t zoom,
   const double unrotatedY = -screenDelta.x * sinA + screenDelta.y * cosA;
   const double inverseScale = screenToWorldScale(zoom);
   return {unrotatedX * inverseScale, -unrotatedY * inverseScale};
+}
+
+inline WorldBounds canvasWorldBounds(WorldPoint center, double canvasWidth,
+                                     double canvasHeight, uint8_t zoom,
+                                     double rotationRad) {
+  const double halfWidth = canvasWidth / 2.0;
+  const double halfHeight = canvasHeight / 2.0;
+  WorldBounds bounds;
+  bool first = true;
+  for (const double screenX : {-halfWidth, halfWidth}) {
+    for (const double screenY : {-halfHeight, halfHeight}) {
+      const WorldPoint delta =
+          screenToWorld({screenX, screenY}, zoom, rotationRad);
+      const WorldPoint corner = {center.x + delta.x, center.y + delta.y};
+      if (first) {
+        bounds.min = corner;
+        bounds.max = corner;
+        first = false;
+      } else {
+        bounds.min.x = std::min(bounds.min.x, corner.x);
+        bounds.min.y = std::min(bounds.min.y, corner.y);
+        bounds.max.x = std::max(bounds.max.x, corner.x);
+        bounds.max.y = std::max(bounds.max.y, corner.y);
+      }
+    }
+  }
+  return bounds;
 }
 
 inline WorldPoint focalPreservingCenter(

@@ -206,6 +206,24 @@ int main() {
   assert(!drag.active());
   assert(!drag.settlementPending());
 
+  assert(map_drag_preview::kOverscanMarginPx == 96);
+  assert(map_drag_preview::overscanExtent(466) == 658);
+  assert(map_drag_preview::overscanExtent(366) == 558);
+
+  const auto northUpOverscan = map_transform::canvasWorldBounds(
+      {1000.0, 2000.0}, 658.0, 558.0, 5, 0.0);
+  assertNear(northUpOverscan.min.x, -316.0);
+  assertNear(northUpOverscan.max.x, 2316.0);
+  assertNear(northUpOverscan.min.y, 884.0);
+  assertNear(northUpOverscan.max.y, 3116.0);
+
+  const auto quarterTurnOverscan = map_transform::canvasWorldBounds(
+      {1000.0, 2000.0}, 658.0, 558.0, 5, std::acos(-1.0) / 2.0);
+  assertNear(quarterTurnOverscan.min.x, -116.0);
+  assertNear(quarterTurnOverscan.max.x, 2116.0);
+  assertNear(quarterTurnOverscan.min.y, 684.0);
+  assertNear(quarterTurnOverscan.max.y, 3316.0);
+
   std::cout << "Map pinch-zoom tests passed\n";
   return 0;
 }
