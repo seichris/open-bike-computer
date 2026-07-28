@@ -631,6 +631,7 @@ class BLEManager: NSObject, ObservableObject {
     private var lastNavigationQueuePendingLogAt = Date.distantPast
 #if DEBUG
     private var navigationQueueMetricsTimer: Timer?
+    private var lastNavigationQueueMetricsUptime: TimeInterval = 0
 #endif
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
@@ -804,6 +805,7 @@ class BLEManager: NSObject, ObservableObject {
 #endif
         log("BLE debug session started")
 #if DEBUG
+        lastNavigationQueueMetricsUptime = ProcessInfo.processInfo.systemUptime
         let metricsTimer = Timer(
             timeInterval: 10,
             repeats: true
@@ -3929,10 +3931,15 @@ class BLEManager: NSObject, ObservableObject {
 
     private func logNavigationQueueMetricsInterval() {
 #if DEBUG
+        let now = ProcessInfo.processInfo.systemUptime
+        let intervalMs = Int(
+            max(0, (now - lastNavigationQueueMetricsUptime) * 1_000).rounded()
+        )
+        lastNavigationQueueMetricsUptime = now
         let metrics = navigationWriteQueue.snapshotMetricsAndReset()
         log(
             "PWRMET_IOS v=\(NavigationWriteQueueMetrics.schemaVersion) " +
-            "intervalMs=10000 " +
+            "intervalMs=\(intervalMs) " +
             "queue[depth=\(metrics.currentDepth) maxDepth=\(metrics.maxDepth) " +
             "enqueued=\(metrics.enqueuedFrames) flushed=\(metrics.flushedFrames) " +
             "dropped=\(metrics.droppedFrames) rejected=\(metrics.rejectedFrames) " +

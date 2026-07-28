@@ -8510,6 +8510,30 @@ struct NavigationProtocolTests {
                     "queue interval metrics reset after a snapshot")
         assertEqual(metricsQueue.metrics.maxDepth, 0,
                     "an empty queue starts the next interval at zero depth")
+
+        var boundaryQueue = NavigationWriteQueue(maxCount: 3)
+        boundaryQueue.enqueue(NavigationWrite(data: Data([6]), label: "pending-1"))
+        boundaryQueue.enqueue(NavigationWrite(data: Data([7]), label: "pending-2"))
+        let boundarySnapshot = boundaryQueue.snapshotMetricsAndReset()
+        assertEqual(boundarySnapshot.enqueuedFrames, 2,
+                    "the completed interval retains pre-boundary events")
+        assertEqual(boundarySnapshot.currentDepth, 2,
+                    "the completed interval reports pending queue depth")
+
+        let nextBoundarySnapshot = boundaryQueue.snapshotMetricsAndReset()
+        assertEqual(nextBoundarySnapshot.enqueuedFrames, 0,
+                    "the next interval starts with cleared event counters")
+        assertEqual(nextBoundarySnapshot.currentDepth, 2,
+                    "the next interval retains pending queue depth")
+        assertEqual(nextBoundarySnapshot.maxDepth, 2,
+                    "the next interval starts at the existing queue depth")
+
+        var boundaryWrites: [Data] = []
+        boundaryQueue.flush(canSend: { _ in true }) { write in
+            boundaryWrites.append(write.data)
+        }
+        assertEqual(boundaryWrites, [Data([6]), Data([7])],
+                    "metrics snapshots do not mutate pending writes")
     }
 
     static func testDeviceBLEProtocolConstants() {
