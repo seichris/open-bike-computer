@@ -10,6 +10,7 @@
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
 #include "mapLineStyle.hpp"
+#include "mapTransform.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
@@ -19,7 +20,8 @@ extern Storage storage;
 extern std::vector<wayPoint> trackData;
 const char *TAG PROGMEM = "Maps";
 
-#ifdef WAVESHARE_MAPIO_TIMING_LOG
+#if defined(WAVESHARE_MAPIO_TIMING_LOG) ||                                  \
+    defined(WAVESHARE_TOUCH_DIAGNOSTICS)
 #define MAPIO_LOG(...) Serial.printf(__VA_ARGS__)
 #define MAPIO_TIME_MS() millis()
 #else
@@ -31,6 +33,7 @@ const char *TAG PROGMEM = "Maps";
 
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
+#include <algorithm>
 #include <esp_heap_caps.h>
 #include <cstdlib>
 #include <cstring>
@@ -568,6 +571,64 @@ static int16_t mapAnchorYForHeight(uint16_t height) {
   return gui_layout::mapAnchorY(height);
 }
 
+static void setPinchCanvasScale(void *object, int32_t scale) {
+  lv_image_set_scale(static_cast<lv_obj_t *>(object),
+                     static_cast<uint32_t>(scale));
+}
+
+static void completePinchCanvasSettlement(lv_anim_t *animation) {
+  auto *canvas = static_cast<lv_obj_t *>(animation->var);
+  if (canvas != nullptr) {
+    lv_image_set_scale(canvas, LV_SCALE_NONE);
+    lv_image_set_pivot(canvas, 0, 0);
+    lv_obj_invalidate(canvas);
+  }
+}
+
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+static void recordPinchPreviewFrame(bool reset = false) {
+  static uint32_t intervals[64] = {};
+  static uint8_t intervalCount = 0;
+  static uint32_t lastFrameMs = 0;
+  static uint32_t lastReportMs = 0;
+  const uint32_t now = millis();
+  if (reset) {
+    intervalCount = 0;
+    lastFrameMs = 0;
+    lastReportMs = now;
+    return;
+  }
+  if (lastFrameMs != 0) {
+    intervals[intervalCount++] = now - lastFrameMs;
+  }
+  lastFrameMs = now;
+  if (intervalCount < 64 && now - lastReportMs < 1000) {
+    return;
+  }
+  if (intervalCount == 0) {
+    return;
+  }
+  uint32_t sorted[64] = {};
+  memcpy(sorted, intervals, intervalCount * sizeof(uint32_t));
+  std::sort(sorted, sorted + intervalCount);
+  const uint8_t medianIndex = intervalCount / 2;
+  const uint8_t p95Index = static_cast<uint8_t>(
+      std::min<uint16_t>(intervalCount - 1,
+                         (static_cast<uint16_t>(intervalCount) * 95 + 99) /
+                                 100 -
+                             1));
+  Serial.printf(
+      "Pinch diagnostic: frames=%u median_ms=%lu p95_ms=%lu "
+      "free_psram=%u largest_psram=%u\n",
+      intervalCount, static_cast<unsigned long>(sorted[medianIndex]),
+      static_cast<unsigned long>(sorted[p95Index]),
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  intervalCount = 0;
+  lastReportMs = now;
+}
+#endif
+
 extern Point16::Point16(char *coordsPair) {
   char *next;
   x = (int16_t)round(strtod(
@@ -765,7 +826,9 @@ double Maps::mercatorY2lat(double y) {
  * @return int16_t
  */
 int16_t Maps::toScreenCoord(const int32_t pxy, const int32_t screenCenterxy) {
-  int16_t result = round((double)(pxy - screenCenterxy) / zoom) +
+  int16_t result =
+      round((double)(pxy - screenCenterxy) *
+            map_transform::worldToScreenScale(zoom)) +
                    (double)Maps::mapScrWidth / 2;
   return result;
 }
@@ -1733,10 +1796,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
   const uint32_t fillMs = MAPIO_TIME_MS() - fillStartMs;
 
-  // Calculate rotation from passed argument
-  double cosA = cos(rotation);
-  double sinA = sin(rotation);
-
   // Use the actual canvas dimensions, not mapScrHeight which may differ from
   // canvas height in fullscreen mode.
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -1807,28 +1866,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
       // Define transform lambda once, outside the loop
       auto transformPoint = [&](Point16 p) -> Point16 {
-        // 1. Convert from map coords to screen-space offset (Y inverted)
-        // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-        double dx, dy;
-        if (zoom == 0) {
-          dx = (double)(p.x - screen_center_mc.x) * 2.0;
-          dy = -(double)(p.y - screen_center_mc.y) * 2.0;
-        } else if (zoom == 1) {
-          dx = (double)(p.x - screen_center_mc.x) * 1.5;
-          dy = -(double)(p.y - screen_center_mc.y) * 1.5;
-        } else {
-          int divisor = zoom - 1;
-          dx = (double)(p.x - screen_center_mc.x) / divisor;
-          dy = -(double)(p.y - screen_center_mc.y) / divisor;
-        }
-
-        // 2. Rotate in screen space (same as route overlay)
-        double rx = dx * cosA - dy * sinA;
-        double ry = dx * sinA + dy * cosA;
-
-        // 3. Translate to screen center
-        int16_t sx = round(rx) + screenAnchorX;
-        int16_t sy = round(ry) + screenAnchorY;
+        const auto screen = map_transform::worldToScreen(
+            {static_cast<double>(p.x - screen_center_mc.x),
+             static_cast<double>(p.y - screen_center_mc.y)},
+            zoom, rotation);
+        int16_t sx = round(screen.x) + screenAnchorX;
+        int16_t sy = round(screen.y) + screenAnchorY;
 
         return Point16(sx, sy);
       };
@@ -1936,24 +1979,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
         // Transform first point
         auto transformPoint = [&](Point16 p) -> Point16 {
-          // Convert to screen-space offset (Y inverted), rotate, translate
-          // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-          double dx, dy;
-          if (zoom == 0) {
-            dx = (double)(p.x - screen_center_mc.x) * 2.0;
-            dy = -(double)(p.y - screen_center_mc.y) * 2.0;
-          } else if (zoom == 1) {
-            dx = (double)(p.x - screen_center_mc.x) * 1.5;
-            dy = -(double)(p.y - screen_center_mc.y) * 1.5;
-          } else {
-            int divisor = zoom - 1;
-            dx = (double)(p.x - screen_center_mc.x) / divisor;
-            dy = -(double)(p.y - screen_center_mc.y) / divisor;
-          }
-          double rx = dx * cosA - dy * sinA;
-          double ry = dx * sinA + dy * cosA;
-          int16_t sx = round(rx) + screenAnchorX;
-          int16_t sy = round(ry) + screenAnchorY;
+          const auto screen = map_transform::worldToScreen(
+              {static_cast<double>(p.x - screen_center_mc.x),
+               static_cast<double>(p.y - screen_center_mc.y)},
+              zoom, rotation);
+          int16_t sx = round(screen.x) + screenAnchorX;
+          int16_t sy = round(screen.y) + screenAnchorY;
           return Point16(sx, sy);
         };
 
@@ -2306,10 +2337,7 @@ Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
  */
 void Maps::ViewPort::setCenter(Point32 pcenter) {
   center = pcenter; // CRITICAL: Must assign center!
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  double zoomScale = (zoom == 0)   ? 0.5
-                     : (zoom == 1) ? 0.667
-                                   : (double)(zoom - 1);
+  const double zoomScale = map_transform::screenToWorldScale(zoom);
   bbox.min.x = pcenter.x - Maps::tileWidth * zoomScale / 2;
   bbox.min.y = pcenter.y - Maps::tileHeight * zoomScale / 2;
   bbox.max.x = pcenter.x + Maps::tileWidth * zoomScale / 2;
@@ -2402,6 +2430,7 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
  *
  */
 void Maps::deleteMapScrSprites() {
+  cancelPinchPreview();
   // Maps::arrowSprite.deleteSprite();
   // Maps::mapSprite.deleteSprite();
   if (Maps::canvasArrow)
@@ -2485,6 +2514,209 @@ void Maps::createMapScrSprites() {
   //     LV_EVENT_CLICKED, this);
 
   // Maps::arrowSprite.pushImage(0, 0, 16, 16, (uint16_t *)navigation);
+}
+
+bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
+                             uint8_t baseZoom) {
+  if (Maps::canvasMap == nullptr || pinchPresentation.settlementPending) {
+    return false;
+  }
+
+  pinchPresentation.active = true;
+  pinchPresentation.capturedFollowGps = Maps::followGps;
+  pinchPresentation.baseZoom = map_transform::clampRuntimeZoom(baseZoom);
+  pinchPresentation.baseCenter = Maps::point;
+  pinchPresentation.initialMidpointX = midpointX;
+  pinchPresentation.initialMidpointY = midpointY;
+  pinchPresentation.canvasBaseX = lv_obj_get_x(Maps::canvasMap);
+  pinchPresentation.canvasBaseY = lv_obj_get_y(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr) {
+    pinchPresentation.markerBaseX = lv_obj_get_x(Maps::canvasArrow);
+    pinchPresentation.markerBaseY = lv_obj_get_y(Maps::canvasArrow);
+  }
+
+  lv_area_t canvasArea;
+  lv_obj_get_coords(Maps::canvasMap, &canvasArea);
+  const int16_t height =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  if (Maps::followGps) {
+    pinchPresentation.pivotLocalX = mapAnchorXForWidth(Maps::mapScrWidth);
+    pinchPresentation.pivotLocalY = mapAnchorYForHeight(height);
+  } else {
+    pinchPresentation.pivotLocalX = static_cast<int16_t>(
+        std::max<int32_t>(0, std::min<int32_t>(
+                                 Maps::mapScrWidth - 1,
+                                 midpointX - canvasArea.x1)));
+    pinchPresentation.pivotLocalY = static_cast<int16_t>(
+        std::max<int32_t>(
+            0, std::min<int32_t>(height - 1, midpointY - canvasArea.y1)));
+  }
+  pinchPresentation.anchorScreenX =
+      canvasArea.x1 + mapAnchorXForWidth(Maps::mapScrWidth);
+  pinchPresentation.anchorScreenY =
+      canvasArea.y1 + mapAnchorYForHeight(height);
+
+  lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+  lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
+  lv_obj_set_style_bg_opa(mapTile, LV_OPA_COVER, 0);
+  lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
+                     pinchPresentation.pivotLocalY);
+  lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  recordPinchPreviewFrame(true);
+#endif
+  return true;
+}
+
+void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
+                              int16_t midpointY) {
+  if (!pinchPresentation.active || Maps::canvasMap == nullptr) {
+    return;
+  }
+  const double ratio = map_transform::clampPreviewRatio(
+      previewRatio, pinchPresentation.baseZoom);
+  const uint32_t lvScale = static_cast<uint32_t>(
+      std::max<double>(1.0, std::round(ratio * LV_SCALE_NONE)));
+  const int16_t translationX = pinchPresentation.capturedFollowGps
+                                   ? 0
+                                   : midpointX -
+                                         pinchPresentation.initialMidpointX;
+  const int16_t translationY = pinchPresentation.capturedFollowGps
+                                   ? 0
+                                   : midpointY -
+                                         pinchPresentation.initialMidpointY;
+
+  lv_obj_set_pos(Maps::canvasMap,
+                 pinchPresentation.canvasBaseX + translationX,
+                 pinchPresentation.canvasBaseY + translationY);
+  lv_image_set_scale(Maps::canvasMap, lvScale);
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  recordPinchPreviewFrame();
+#endif
+
+  if (!pinchPresentation.capturedFollowGps && Maps::canvasArrow != nullptr) {
+    const double pivotX = pinchPresentation.canvasBaseX +
+                          pinchPresentation.pivotLocalX;
+    const double pivotY = pinchPresentation.canvasBaseY +
+                          pinchPresentation.pivotLocalY;
+    const double markerCenterX = pinchPresentation.markerBaseX + 24.0;
+    const double markerCenterY = pinchPresentation.markerBaseY + 24.0;
+    const int16_t transformedX = static_cast<int16_t>(std::round(
+        pivotX + ((markerCenterX - pivotX) * ratio) + translationX - 24.0));
+    const int16_t transformedY = static_cast<int16_t>(std::round(
+        pivotY + ((markerCenterY - pivotY) * ratio) + translationY - 24.0));
+    lv_obj_set_pos(Maps::canvasArrow, transformedX, transformedY);
+  }
+  lv_obj_invalidate(Maps::canvasMap);
+  if (Maps::canvasArrow != nullptr)
+    lv_obj_invalidate(Maps::canvasArrow);
+}
+
+void Maps::resetPinchPresentationVisuals() {
+  if (Maps::canvasMap != nullptr) {
+    lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+    lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
+    lv_image_set_pivot(Maps::canvasMap, 0, 0);
+    lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
+                   pinchPresentation.canvasBaseY);
+    lv_obj_invalidate(Maps::canvasMap);
+  }
+  if (Maps::canvasArrow != nullptr) {
+    lv_obj_set_pos(Maps::canvasArrow, pinchPresentation.markerBaseX,
+                   pinchPresentation.markerBaseY);
+  }
+}
+
+void Maps::cancelPinchPreview() {
+  if (Maps::canvasMap != nullptr) {
+    lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+  }
+  if (pinchPresentation.active || pinchPresentation.settlementPending) {
+    resetPinchPresentationVisuals();
+  }
+  pinchPresentation = {};
+}
+
+void Maps::commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
+                           int16_t finalMidpointX,
+                           int16_t finalMidpointY) {
+  if (!pinchPresentation.active) {
+    return;
+  }
+  targetZoom = map_transform::clampRuntimeZoom(targetZoom);
+  if (!pinchPresentation.capturedFollowGps) {
+    const double anchorX = pinchPresentation.anchorScreenX;
+    const double anchorY = pinchPresentation.anchorScreenY;
+    const map_transform::WorldPoint adjusted =
+        map_transform::focalPreservingCenter(
+            {static_cast<double>(pinchPresentation.baseCenter.x),
+             static_cast<double>(pinchPresentation.baseCenter.y)},
+            {static_cast<double>(pinchPresentation.initialMidpointX) - anchorX,
+             static_cast<double>(pinchPresentation.initialMidpointY) - anchorY},
+            {static_cast<double>(finalMidpointX) - anchorX,
+             static_cast<double>(finalMidpointY) - anchorY},
+            pinchPresentation.baseZoom, targetZoom, Maps::rotationRad);
+    Maps::point.x = static_cast<int32_t>(std::round(adjusted.x));
+    Maps::point.y = static_cast<int32_t>(std::round(adjusted.y));
+    Maps::followGps = false;
+  } else {
+    Maps::followGps = true;
+  }
+  pinchPresentation.finalPreviewRatio = finalPreviewRatio;
+  pinchPresentation.finalMidpointX = finalMidpointX;
+  pinchPresentation.finalMidpointY = finalMidpointY;
+  pinchPresentation.active = false;
+  pinchPresentation.settlementPending = true;
+  Maps::isPosMoved = true;
+  Maps::redrawMap = true;
+}
+
+void Maps::finishPinchSettlement() {
+  if (!pinchPresentation.settlementPending) {
+    return;
+  }
+  if (Maps::canvasMap == nullptr) {
+    pinchPresentation = {};
+    return;
+  }
+
+  const double effectiveScale =
+      map_transform::worldToScreenScale(pinchPresentation.baseZoom) *
+      pinchPresentation.finalPreviewRatio;
+  const double targetScale = map_transform::worldToScreenScale(zoomLevel);
+  const uint32_t initialScale = static_cast<uint32_t>(std::round(
+      (effectiveScale / targetScale) * static_cast<double>(LV_SCALE_NONE)));
+  const int16_t settlementPivotX = pinchPresentation.capturedFollowGps
+                                       ? pinchPresentation.pivotLocalX
+                                       : pinchPresentation.pivotLocalX +
+                                             pinchPresentation.finalMidpointX -
+                                             pinchPresentation.initialMidpointX;
+  const int16_t settlementPivotY = pinchPresentation.capturedFollowGps
+                                       ? pinchPresentation.pivotLocalY
+                                       : pinchPresentation.pivotLocalY +
+                                             pinchPresentation.finalMidpointY -
+                                             pinchPresentation.initialMidpointY;
+  lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
+  lv_obj_set_pos(Maps::canvasMap, pinchPresentation.canvasBaseX,
+                 pinchPresentation.canvasBaseY);
+  lv_image_set_pivot(Maps::canvasMap, settlementPivotX, settlementPivotY);
+  lv_image_set_scale(Maps::canvasMap, initialScale);
+
+  if (initialScale != LV_SCALE_NONE) {
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, Maps::canvasMap);
+    lv_anim_set_exec_cb(&animation, setPinchCanvasScale);
+    lv_anim_set_values(&animation, static_cast<int32_t>(initialScale),
+                       LV_SCALE_NONE);
+    lv_anim_set_duration(&animation, 120);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&animation, completePinchCanvasSettlement);
+    lv_anim_start(&animation);
+  } else {
+    lv_image_set_pivot(Maps::canvasMap, 0, 0);
+  }
+  pinchPresentation = {};
 }
 
 /**
@@ -2671,33 +2903,15 @@ void Maps::displayMap() {
       int32_t gpsX = lon2x(gps.gpsData.longitude);
       int32_t gpsY = lat2y(gps.gpsData.latitude);
 
-      // Apply rotation to match map rendering
-      // 1. Convert from map coords to screen-space offset (Y inverted)
-      // 1. Convert from map coords to screen-space offset (Y inverted)
-      // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-      double dx, dy;
-      if (zoom == 0) {
-        dx = (double)(gpsX - Maps::viewPort.center.x) * 2.0;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) * 2.0;
-      } else if (zoom == 1) {
-        dx = (double)(gpsX - Maps::viewPort.center.x) * 1.5;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) * 1.5;
-      } else {
-        int divisor = zoom - 1; // zoom 2->1, 3->2, 4->3, 5->4
-        dx = (double)(gpsX - Maps::viewPort.center.x) / divisor;
-        dy = -(double)(gpsY - Maps::viewPort.center.y) / divisor;
-      }
-
-      // 2. Rotate in screen space
-      double cosA = cos(rotationRad);
-      double sinA = sin(rotationRad);
-      double rx = dx * cosA - dy * sinA;
-      double ry = dx * sinA + dy * cosA;
+      const auto markerDelta = map_transform::worldToScreen(
+          {static_cast<double>(gpsX - Maps::viewPort.center.x),
+           static_cast<double>(gpsY - Maps::viewPort.center.y)},
+          zoom, rotationRad);
 
       // 3. Translate to screen center (centered on arrow)
       // 48x48 icon, so offset by -24
-      x = mapOriginX + round(rx) + anchorX - 24;
-      y = mapOriginY + round(ry) + anchorY - 24;
+      x = mapOriginX + round(markerDelta.x) + anchorX - 24;
+      y = mapOriginY + round(markerDelta.y) + anchorY - 24;
 
       ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
                zoom);
@@ -2836,6 +3050,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
                        canvasHeight, LV_COLOR_FORMAT_RGB565);
   lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
                        canvasHeight, LV_COLOR_FORMAT_RGB565);
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  const bool completedPinchSettlement = isPinchSettlementPending();
+#endif
+  finishPinchSettlement();
 
   MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "
             "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
@@ -2843,6 +3061,16 @@ bool Maps::generateVectorMap(uint8_t zoom) {
             (unsigned long)routeMs,
             (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
             (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  if (completedPinchSettlement) {
+    Serial.printf(
+        "Pinch diagnostic: settlement_ms=%lu free_psram=%u "
+        "largest_psram=%u\n",
+        static_cast<unsigned long>(MAPIO_TIME_MS() - generateStartMs),
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  }
+#endif
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
   return true;
@@ -2916,20 +3144,11 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
   // from previous drags wasn't being reset between touch sessions.
 
   if (mapSet.vectorMap) {
-    // For vector maps, directly update the geographic center point
-    // Scale pixels to coordinates using the current zoom
-    // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-    if (zoom == 0) {
-      Maps::point.x += (int32_t)(dx / 2);
-      Maps::point.y -= (int32_t)(dy / 2);
-    } else if (zoom == 1) {
-      Maps::point.x += (int32_t)(dx / 1.5);
-      Maps::point.y -= (int32_t)(dy / 1.5);
-    } else {
-      int divisor = zoom - 1;
-      Maps::point.x += (int32_t)(dx * divisor);
-      Maps::point.y -= (int32_t)(dy * divisor);
-    }
+    const auto worldDelta = map_transform::screenToWorld(
+        {static_cast<double>(dx), static_cast<double>(dy)}, zoom,
+        Maps::rotationRad);
+    Maps::point.x += static_cast<int32_t>(std::round(worldDelta.x));
+    Maps::point.y += static_cast<int32_t>(std::round(worldDelta.y));
     ESP_LOGI(TAG, "scrollMap (Vector): dx=%d dy=%d zoom=%d -> point(%d, %d)",
              dx, dy, zoom, Maps::point.x, Maps::point.y);
     Maps::isPosMoved = true;

@@ -13,6 +13,7 @@
 #include "../../storage/storage.hpp"
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
+#include "mapTransform.hpp"
 #include "lvgl.h"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -171,6 +172,28 @@ private:
                   uint16_t *pixelY);
   void showNoMap(lv_obj_t *canvas, bool sdPresent);
   void drawMapWidgets(const MapSettings &mapSettings);
+  void resetPinchPresentationVisuals();
+
+  struct PinchPresentation {
+    bool active = false;
+    bool settlementPending = false;
+    bool capturedFollowGps = true;
+    uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;
+    Point32 baseCenter = {0, 0};
+    int16_t initialMidpointX = 0;
+    int16_t initialMidpointY = 0;
+    int16_t canvasBaseX = 0;
+    int16_t canvasBaseY = 0;
+    int16_t pivotLocalX = 0;
+    int16_t pivotLocalY = 0;
+    int16_t anchorScreenX = 0;
+    int16_t anchorScreenY = 0;
+    int16_t markerBaseX = 0;
+    int16_t markerBaseY = 0;
+    double finalPreviewRatio = 1.0;
+    int16_t finalMidpointX = 0;
+    int16_t finalMidpointY = 0;
+  } pinchPresentation;
 
 public:
   uint16_t mapScrHeight;  // Screen map size height
@@ -208,6 +231,18 @@ public:
   void centerOnGps(double lat, double lon);
   void scrollMap(int16_t dx, int16_t dy);
   void preloadTiles(int8_t dirX, int8_t dirY);
+  bool beginPinchPreview(int16_t midpointX, int16_t midpointY,
+                         uint8_t baseZoom);
+  void updatePinchPreview(double previewRatio, int16_t midpointX,
+                          int16_t midpointY);
+  void cancelPinchPreview();
+  void commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
+                       int16_t finalMidpointX, int16_t finalMidpointY);
+  void finishPinchSettlement();
+  bool isPinchPreviewActive() const { return pinchPresentation.active; }
+  bool isPinchSettlementPending() const {
+    return pinchPresentation.settlementPending;
+  }
 
   // Map rotation
   enum RotationMode { ROT_NORTH_UP = 0, ROT_COURSE_UP = 1 };

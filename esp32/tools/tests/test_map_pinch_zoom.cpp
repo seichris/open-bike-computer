@@ -1,0 +1,161 @@
+#include "../../lib/maps/src/mapTransform.hpp"
+#include "../../lib/utils/src/mapPinchZoom.hpp"
+
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+
+using map_pinch_zoom::Action;
+using map_pinch_zoom::Controller;
+using map_pinch_zoom::Frame;
+
+namespace {
+
+constexpr double kTolerance = 0.0001;
+
+Frame frame(uint32_t sequence, uint8_t count, int16_t firstX = 100,
+            int16_t secondX = 200, uint8_t firstId = 1,
+            uint8_t secondId = 2) {
+  Frame value;
+  value.sequence = sequence;
+  value.count = count;
+  value.contacts[0] = {firstId, firstX, 150};
+  value.contacts[1] = {secondId, secondX, 150};
+  return value;
+}
+
+void assertNear(double actual, double expected) {
+  assert(std::fabs(actual - expected) < kTolerance);
+}
+
+} // namespace
+
+int main() {
+  using namespace map_transform;
+  assertNear(worldToScreenScale(1), 1.5);
+  assertNear(worldToScreenScale(2), 1.0);
+  assertNear(worldToScreenScale(3), 0.5);
+  assertNear(worldToScreenScale(4), 1.0 / 3.0);
+  assertNear(worldToScreenScale(5), 0.25);
+  assert(clampRuntimeZoom(0) == 1);
+  assert(clampRuntimeZoom(6) == 5);
+  assert(nearestRuntimeZoom(1.49) == 1);
+  assert(nearestRuntimeZoom(1.01) == 2);
+  assert(nearestRuntimeZoom(0.51) == 3);
+  assert(nearestRuntimeZoom(0.34) == 4);
+  assert(nearestRuntimeZoom(0.24) == 5);
+
+  const WorldPoint world = {30.0, -40.0};
+  for (uint8_t zoom = 1; zoom <= 5; ++zoom) {
+    for (double rotation : {0.0, 0.5, -1.2}) {
+      const ScreenDelta screen = worldToScreen(world, zoom, rotation);
+      const WorldPoint roundTrip = screenToWorld(screen, zoom, rotation);
+      assertNear(roundTrip.x, world.x);
+      assertNear(roundTrip.y, world.y);
+    }
+  }
+
+  const WorldPoint initialCenter = {1000.0, 2000.0};
+  const ScreenDelta initialFocal = {50.0, -25.0};
+  const ScreenDelta finalFocal = {70.0, 15.0};
+  const double rotation = -0.7;
+  const WorldPoint adjusted = focalPreservingCenter(
+      initialCenter, initialFocal, finalFocal, 3, 2, rotation);
+  const WorldPoint focalBeforeOffset =
+      screenToWorld(initialFocal, 3, rotation);
+  const WorldPoint focalAfterOffset = screenToWorld(finalFocal, 2, rotation);
+  assertNear(initialCenter.x + focalBeforeOffset.x,
+             adjusted.x + focalAfterOffset.x);
+  assertNear(initialCenter.y + focalBeforeOffset.y,
+             adjusted.y + focalAfterOffset.y);
+
+  Controller outward;
+  assert(outward.update(frame(1, 2), 3).action == Action::Begin);
+  auto decision = outward.update(frame(2, 2, 70, 230), 3);
+  assert(decision.action == Action::Update);
+  assert(decision.previewRatio > 1.0);
+  decision = outward.update(frame(3, 0), 3);
+  assert(decision.action == Action::Commit);
+  assert(decision.targetZoom == 2);
+  assert(!outward.ownsInput());
+  outward.update(frame(4, 0), 3);
+  assert(!outward.ownsInput());
+
+  Controller inward;
+  assert(inward.update(frame(10, 2, 50, 250), 2).action == Action::Begin);
+  decision = inward.update(frame(11, 2, 100, 200), 2);
+  assert(decision.action == Action::Update);
+  decision = inward.update(frame(12, 1), 2);
+  assert(decision.action == Action::None);
+  decision = inward.update(frame(13, 1), 2);
+  assert(decision.action == Action::Commit);
+  assert(decision.targetZoom == 3);
+  assert(inward.ownsInput());
+  inward.update(frame(14, 0), 2);
+  assert(!inward.ownsInput());
+
+  Controller jitter;
+  assert(jitter.update(frame(20, 2), 3).action == Action::Begin);
+  assert(jitter.update(frame(21, 2, 96, 204), 3).action == Action::None);
+  assert(jitter.update(frame(21, 2, 70, 230), 3).action == Action::None);
+  decision = jitter.update(frame(22, 0), 3);
+  assert(decision.action == Action::Cancel);
+
+  Controller tooClose;
+  assert(tooClose.update(frame(23, 2, 100, 125), 3).action == Action::None);
+  assert(!tooClose.ownsInput());
+
+  Controller liftedBeforeActivation;
+  liftedBeforeActivation.update(frame(24, 2), 3);
+  assert(liftedBeforeActivation.update(frame(25, 1), 3).action ==
+         Action::None);
+  assert(liftedBeforeActivation.update(frame(26, 1), 3).action ==
+         Action::Cancel);
+  assert(liftedBeforeActivation.ownsInput());
+  liftedBeforeActivation.update(frame(27, 0), 3);
+  assert(!liftedBeforeActivation.ownsInput());
+
+  Controller reordered;
+  assert(reordered.update(frame(30, 2), 3).action == Action::Begin);
+  Frame swapped = frame(31, 2, 220, 80, 2, 1);
+  decision = reordered.update(swapped, 3);
+  assert(decision.action == Action::Update);
+  assert(decision.previewRatio > 1.0);
+  Frame jump = frame(32, 2, -250, 450, 1, 2);
+  assert(reordered.update(jump, 3).action == Action::None);
+
+  Controller multipleLevels;
+  multipleLevels.update(frame(33, 2, 100, 300), 5);
+  decision = multipleLevels.update(frame(34, 2, 0, 460), 5);
+  assert(decision.action == Action::Update);
+  decision = multipleLevels.update(frame(35, 0), 5);
+  assert(decision.action == Action::Commit);
+  assert(decision.targetZoom == 3);
+
+  Controller boundedIn;
+  boundedIn.update(frame(40, 2), 1);
+  decision = boundedIn.update(frame(41, 2, 0, 300), 1);
+  assert(decision.action == Action::Update);
+  assertNear(decision.previewRatio, 1.0);
+  decision = boundedIn.update(frame(42, 0), 1);
+  assert(decision.action == Action::Cancel);
+
+  Controller boundedOut;
+  boundedOut.update(frame(50, 2, 50, 250), 5);
+  decision = boundedOut.update(frame(51, 2, 100, 200), 5);
+  assert(decision.action == Action::Update);
+  assertNear(decision.previewRatio, 1.0);
+  decision = boundedOut.update(frame(52, 0), 5);
+  assert(decision.action == Action::Cancel);
+
+  Controller context;
+  context.update(frame(60, 2), 3);
+  assert(context.cancelForContext(2).action == Action::Cancel);
+  assert(context.ownsInput());
+  context.cancelForContext(0);
+  assert(!context.ownsInput());
+
+  std::cout << "Map pinch-zoom tests passed\n";
+  return 0;
+}

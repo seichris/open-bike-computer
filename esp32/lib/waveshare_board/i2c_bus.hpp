@@ -33,6 +33,8 @@ bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
 bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t len, const char *label = nullptr,
                          uint8_t attempts = 2);
+bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
+                     const char *label = nullptr, uint8_t attempts = 2);
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label = nullptr, uint8_t attempts = 3);
 bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,

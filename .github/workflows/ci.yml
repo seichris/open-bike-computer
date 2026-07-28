@@ -218,6 +218,16 @@ jobs:
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_206
           /tmp/test_gui_layout_206
+      - name: Two-finger Map zoom host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_cst9217_touch_frame.cpp \
+            -o /tmp/test_cst9217_touch_frame
+          /tmp/test_cst9217_touch_frame
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_pinch_zoom.cpp \
+            -o /tmp/test_map_pinch_zoom
+          /tmp/test_map_pinch_zoom
       - name: Map profile protocol host tests
         run: |
           g++ -std=c++17 \

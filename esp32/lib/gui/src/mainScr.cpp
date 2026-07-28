@@ -12,6 +12,11 @@
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
 #include "mapTileTransition.hpp"
+#include <algorithm>
+#if defined(WAVESHARE_AMOLED_175)
+#include "../../panel/WAVESHARE_AMOLED_175.hpp"
+#include "../../utils/src/mapPinchZoom.hpp"
+#endif
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -81,13 +86,88 @@ static DestinationRowContext
 
 Maps mapView;
 
+#if defined(WAVESHARE_AMOLED_175)
+static map_pinch_zoom::Controller mapPinchController;
+
+static map_pinch_zoom::Frame
+pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
+  map_pinch_zoom::Frame frame;
+  frame.sequence = touchFrame.sequence;
+  frame.count = touchFrame.count;
+  for (uint8_t index = 0; index < frame.count && index < 2; ++index) {
+    frame.contacts[index] = {
+        touchFrame.contacts[index].id,
+        static_cast<int16_t>(touchFrame.contacts[index].x),
+        static_cast<int16_t>(touchFrame.contacts[index].y)};
+  }
+  return frame;
+}
+
+static void processMapPinchZoom() {
+  const auto touchFrame = getTouchFrameSnapshot();
+  map_pinch_zoom::Decision decision;
+  if (!isMainScreen || activeTile != MAP || !mapSet.vectorMap) {
+    decision = mapPinchController.cancelForContext(touchFrame.count);
+  } else {
+    decision =
+        mapPinchController.update(pinchFrameFromTouch(touchFrame), zoom);
+  }
+
+  switch (decision.action) {
+  case map_pinch_zoom::Action::Begin:
+    if (!mapView.beginPinchPreview(decision.midpointX, decision.midpointY,
+                                   zoom)) {
+      (void)mapPinchController.cancelForContext(touchFrame.count);
+      mapView.cancelPinchPreview();
+    }
+    break;
+  case map_pinch_zoom::Action::Update:
+    mapView.updatePinchPreview(decision.previewRatio, decision.midpointX,
+                               decision.midpointY);
+    break;
+  case map_pinch_zoom::Action::Commit:
+    zoom = decision.targetZoom;
+    mapView.commitPinchZoom(zoom, decision.previewRatio, decision.midpointX,
+                            decision.midpointY);
+    break;
+  case map_pinch_zoom::Action::Cancel:
+    mapView.cancelPinchPreview();
+    break;
+  case map_pinch_zoom::Action::None:
+    break;
+  }
+}
+
+bool mapPinchOwnsInput() { return mapPinchController.ownsInput(); }
+
+bool mapPinchBlocksMapRender() {
+  return mapPinchController.blocksMapRender();
+}
+#else
+static void processMapPinchZoom() {}
+bool mapPinchOwnsInput() { return false; }
+bool mapPinchBlocksMapRender() { return false; }
+#endif
+
 bool isMapScreenActive() { return activeTile == MAP; }
 
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
 bool shouldInterruptMapRenderForScreenCycle() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (!isMainScreen || activeTile != MAP_GUIDANCE) {
+  if (!isMainScreen) {
+    return false;
+  }
+
+  if (activeTile == MAP) {
+#if defined(WAVESHARE_AMOLED_175)
+    return mapPinchBlocksMapRender() ||
+           digitalRead(TCH_I2C_INT) == LOW;
+#else
+    return false;
+#endif
+  }
+  if (activeTile != MAP_GUIDANCE) {
     return false;
   }
 
@@ -671,6 +751,8 @@ void scrollTile(lv_event_t *event) {
  *
  */
 void updateMainScreen(lv_timer_t *t) {
+  processMapPinchZoom();
+
   // The Map + Navigation renderer can take long enough to mask a complete
   // button press or touch. Let the input timer run before starting more map
   // work whenever either physical input is already active.
@@ -855,6 +937,10 @@ void gestureEvent(lv_event_t *event) {
  * @param event
  */
 void updateMap(lv_event_t *event) {
+  if (mapPinchBlocksMapRender()) {
+    return;
+  }
+
   // Only regenerate map if position changed to avoid blocking the main loop
   if (mapView.isPosMoved) {
     bool renderCompleted = true;
@@ -939,6 +1025,10 @@ void mapToolBarEvent(lv_event_t *event) {
  * @param event
  */
 void scrollMapEvent(lv_event_t *event) {
+  if (mapPinchOwnsInput()) {
+    return;
+  }
+
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
         lv_event_get_code(event) == LV_EVENT_CLICKED) {
@@ -1168,6 +1258,9 @@ void scrollMapEvent(lv_event_t *event) {
  * @param event
  */
 void fullScreenEvent(lv_event_t *event) {
+  if (mapPinchOwnsInput()) {
+    return;
+  }
   mapSet.mapFullScreen = !mapSet.mapFullScreen;
 
   if (!mapSet.mapFullScreen) {
@@ -1204,17 +1297,28 @@ void fullScreenEvent(lv_event_t *event) {
  *
  * @param event
  */
+static bool requestVectorRuntimeZoom(int8_t levelDelta) {
+  const int16_t requested = static_cast<int16_t>(zoom) + levelDelta;
+  const uint8_t target = map_transform::clampRuntimeZoom(
+      static_cast<uint8_t>(std::max<int16_t>(0, requested)));
+  if (target == zoom) {
+    return false;
+  }
+  zoom = target;
+  mapView.isPosMoved = true;
+  mapView.redrawMap = true;
+  return true;
+}
+
 void zoomInEvent(lv_event_t *event) {
+  if (mapPinchOwnsInput()) {
+    return;
+  }
   if (!mapSet.vectorMap) {
     if (zoom >= minZoom && zoom < maxZoom)
       zoom++;
   } else {
-    zoom--;
-    mapView.isPosMoved = true;
-    if (zoom < 1) {
-      zoom = 1;
-      mapView.isPosMoved = false;
-    }
+    (void)requestVectorRuntimeZoom(-1);
   }
 
   lv_obj_send_event(mapTile, LV_EVENT_REFRESH, NULL);
@@ -1226,16 +1330,14 @@ void zoomInEvent(lv_event_t *event) {
  * @param event
  */
 void zoomOutEvent(lv_event_t *event) {
+  if (mapPinchOwnsInput()) {
+    return;
+  }
   if (!mapSet.vectorMap) {
     if (zoom <= maxZoom && zoom > minZoom)
       zoom--;
   } else {
-    zoom++;
-    mapView.isPosMoved = true;
-    if (zoom > MAX_ZOOM) {
-      zoom = MAX_ZOOM;
-      mapView.isPosMoved = false;
-    }
+    (void)requestVectorRuntimeZoom(1);
   }
 
   lv_obj_send_event(mapTile, LV_EVENT_REFRESH, NULL);

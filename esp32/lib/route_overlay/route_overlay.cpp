@@ -8,6 +8,7 @@
 
 #include "route_overlay.hpp"
 #include "../ble_navigation/ble_navigation.hpp"
+#include "../maps/src/mapTransform.hpp"
 #include "../utils/src/line_rasterizer.hpp"
 #include "../../utils/src/gpsMath.hpp"
 #include <Arduino.h>
@@ -136,23 +137,10 @@ int16_t RouteOverlay::geoToScreenX(int32_t lonMicro, int32_t centerMercatorX,
   double worldX = DEG2RAD(lon) * EARTH_RADIUS;
   double centerWorldX = (double)centerMercatorX;
 
-  // Transform to screen space using the same logic as Maps::toScreenCoord
-  // Transform to screen space using the same logic as Maps::toScreenCoord
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  int16_t screenX;
-  if (zoom == 0) {
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) * 2.0) + anchorX);
-  } else if (zoom == 1) {
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) * 1.5) + anchorX);
-  } else {
-    int divisor = zoom - 1;
-    screenX =
-        (int16_t)(round((worldX - centerWorldX) / divisor) + anchorX);
-  }
-
-  return screenX;
+  return static_cast<int16_t>(
+      round((worldX - centerWorldX) *
+            map_transform::worldToScreenScale(zoom)) +
+      anchorX);
 }
 
 int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
@@ -169,21 +157,10 @@ int16_t RouteOverlay::geoToScreenY(int32_t latMicro, int32_t centerMercatorY,
   double worldY = log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
   double centerWorldY = (double)centerMercatorY;
 
-  // Zoom scale: 0=2x, 1=1.5x, 2=1x, 3=/2, 4=/3, 5=/4
-  int16_t screenY;
-  if (zoom == 0) {
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 2.0) + anchorY);
-  } else if (zoom == 1) {
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) * 1.5) + anchorY);
-  } else {
-    int divisor = zoom - 1;
-    screenY =
-        (int16_t)(round(-(worldY - centerWorldY) / divisor) + anchorY);
-  }
-
-  return screenY;
+  return static_cast<int16_t>(
+      round(-(worldY - centerWorldY) *
+            map_transform::worldToScreenScale(zoom)) +
+      anchorY);
 }
 
 void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,

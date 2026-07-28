@@ -228,6 +228,18 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                      });
 }
 
+bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
+                     const char *label, uint8_t attempts) {
+  return withRetries(address, label, "write16", attempts,
+                     [address, reg, value]() {
+                       Wire.beginTransmission(address);
+                       Wire.write(static_cast<uint8_t>(reg >> 8));
+                       Wire.write(static_cast<uint8_t>(reg & 0xFF));
+                       Wire.write(value);
+                       return Wire.endTransmission() == 0;
+                     });
+}
+
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {
   return withRetries(address, label, "read8", attempts, [address, reg, &value]() {

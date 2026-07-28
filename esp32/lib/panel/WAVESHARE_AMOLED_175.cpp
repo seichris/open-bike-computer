@@ -14,6 +14,7 @@
 #include "../../include/hal.hpp"
 #include "display.hpp"
 #include "i2c_bus.hpp"
+#include "cst9217_touch_frame.hpp"
 #include "touch.hpp"
 #include "waveshare_board.hpp"
 
@@ -215,6 +216,35 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 
 bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
+static waveshare_board::touch::TouchFrame latestTouchFrame;
+static uint32_t touchFrameSequence = 0;
+static bool suppressPrimaryTouchUntilRelease = false;
+
+waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {
+  return latestTouchFrame;
+}
+
+bool isPrimaryTouchSuppressed() {
+  return suppressPrimaryTouchUntilRelease;
+}
+
+static void publishTouchFrame(
+    const waveshare_board::touch::TouchFrame &rawFrame, uint32_t now) {
+  latestTouchFrame = rawFrame;
+  latestTouchFrame.sequence = ++touchFrameSequence;
+  latestTouchFrame.sampledAtMs = now;
+  for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
+    latestTouchFrame.contacts[index] =
+        waveshare_board::touch::rotateTouchContact(
+            rawFrame.contacts[index], displayRotation,
+            waveshare_board::touch::MAX_X, waveshare_board::touch::MAX_Y);
+  }
+  if (latestTouchFrame.count >= 2) {
+    suppressPrimaryTouchUntilRelease = true;
+  } else if (latestTouchFrame.count == 0) {
+    suppressPrimaryTouchUntilRelease = false;
+  }
+}
 
 #ifdef WAVESHARE_AMOLED_206
 
@@ -445,15 +475,23 @@ static uint8_t tca9554OutputShadow = 0xFF;
 static uint8_t tca9554ConfigShadow = 0xFF;
 static bool lastTouchHintActive = false;
 static bool touchHintStateKnown = false;
-
-static bool isValidTouchCoordinate(uint16_t x, uint16_t y) {
-  return x < waveshare_board::touch::ACTIVE_WIDTH &&
-         y < waveshare_board::touch::ACTIVE_HEIGHT;
-}
+static waveshare_board::touch::TouchFrame previousRawTouchFrame;
+static uint8_t primaryTouchId = UINT8_MAX;
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+static uint32_t lastTouchDiagnosticLogMs = 0;
+static uint32_t previousDiagnosticSampleMs = 0;
+#endif
 
 static bool readCst9217Register(uint16_t reg, uint8_t *data, uint8_t len) {
   return waveshare_board::i2c::readRegister16(
       waveshare_board::touch::CST9217_ADDR, reg, data, len, "CST9217");
+}
+
+static bool acknowledgeCst9217Frame() {
+  return waveshare_board::i2c::writeRegister16(
+      waveshare_board::touch::CST9217_ADDR,
+      waveshare_board::touch::CST9217_DATA_REG,
+      waveshare_board::touch::CST9217_ACK, "CST9217");
 }
 
 static void logTouchPacket(const char *label, const uint8_t *data,
@@ -487,6 +525,73 @@ static void setTouchPressed(bool pressed) {
   }
   touchPressed = pressed;
 }
+
+static void releaseAllTouches(uint32_t now) {
+  if (previousRawTouchFrame.count != 0 || latestTouchFrame.count != 0 ||
+      touchPressed) {
+    waveshare_board::touch::TouchFrame released;
+    publishTouchFrame(released, now);
+  }
+  previousRawTouchFrame = {};
+  primaryTouchId = UINT8_MAX;
+  setTouchPressed(false);
+}
+
+static const waveshare_board::touch::TouchContact *
+previousContact(uint8_t id) {
+  for (uint8_t index = 0; index < previousRawTouchFrame.count; ++index) {
+    if (previousRawTouchFrame.contacts[index].id == id)
+      return &previousRawTouchFrame.contacts[index];
+  }
+  return nullptr;
+}
+
+static void updatePrimaryTouch(
+    const waveshare_board::touch::TouchFrame &rawFrame) {
+  const waveshare_board::touch::TouchContact *primary = nullptr;
+  for (uint8_t index = 0; index < rawFrame.count; ++index) {
+    if (rawFrame.contacts[index].id == primaryTouchId) {
+      primary = &rawFrame.contacts[index];
+      break;
+    }
+  }
+  if (primary == nullptr && rawFrame.count != 0) {
+    primary = &rawFrame.contacts[0];
+    primaryTouchId = primary->id;
+  }
+  if (primary != nullptr) {
+    touchX = primary->x;
+    touchY = primary->y;
+  }
+}
+
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+static void logTouchDiagnostics(uint32_t now) {
+  const uint32_t sampleInterval = previousDiagnosticSampleMs == 0
+                                      ? 0
+                                      : now - previousDiagnosticSampleMs;
+  previousDiagnosticSampleMs = now;
+  if (now - lastTouchDiagnosticLogMs <
+      waveshare_board::touch::DIAGNOSTIC_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastTouchDiagnosticLogMs = now;
+  const auto &stats = waveshare_board::i2c::stats();
+  Serial.printf("Touch diagnostic: seq=%lu count=%u sample_ms=%lu",
+                static_cast<unsigned long>(latestTouchFrame.sequence),
+                latestTouchFrame.count,
+                static_cast<unsigned long>(sampleInterval));
+  for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
+    const auto &contact = latestTouchFrame.contacts[index];
+    Serial.printf(" p%u[id=%u x=%u y=%u status=0x%02X]", index,
+                  contact.id, contact.x, contact.y, contact.status);
+  }
+  Serial.printf(" i2c_failed=%lu recovered=%lu recovery_attempts=%lu\n",
+                static_cast<unsigned long>(stats.failedTransactions),
+                static_cast<unsigned long>(stats.recoveredTransactions),
+                static_cast<unsigned long>(stats.recoveryAttempts));
+}
+#endif
 
 static void configureTouchHintPin() {
   if (touchHintConfigured) {
@@ -588,7 +693,7 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
     return;
   }
 
-  setTouchPressed(false);
+  releaseAllTouches(now);
   touchBackoffUntilMs = now + 250;
   if (consecutiveTouchReadFailures >= 5) {
     touchInitialized = false;
@@ -661,7 +766,7 @@ void readTouch() {
                             waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
       return;
     }
-    setTouchPressed(false);
+    releaseAllTouches(now);
     return;
   }
 
@@ -669,7 +774,7 @@ void readTouch() {
   if (!touchInitialized) {
     initTouchController();
     if (!touchInitialized) {
-      setTouchPressed(false);
+      releaseAllTouches(now);
       return;
     }
   }
@@ -687,9 +792,17 @@ void readTouch() {
     noteTouchReadFailure("data read", now);
     return;
   }
+  if (!acknowledgeCst9217Frame()) {
+    noteTouchReadFailure("frame acknowledgement", now);
+    return;
+  }
   consecutiveTouchReadFailures = 0;
 
-  if (data[6] != waveshare_board::touch::CST9217_ACK) {
+  waveshare_board::touch::TouchFrame decodedFrame;
+  const auto decodeStatus = waveshare_board::touch::decodeCst9217Frame(
+      data, sizeof(data), waveshare_board::touch::ACTIVE_WIDTH,
+      waveshare_board::touch::ACTIVE_HEIGHT, decodedFrame);
+  if (decodeStatus != waveshare_board::touch::Cst9217DecodeStatus::Ok) {
     logTouchPacket("ignored-no-ack", data, sizeof(data), 0, 0,
                    touchHintActive, now);
     if (touchPressed && now - lastValidTouchMs <
@@ -698,72 +811,53 @@ void readTouch() {
           now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
       return;
     }
-    setTouchPressed(false);
+    releaseAllTouches(now);
     return;
   }
 
-  uint8_t points = data[5] & 0x7F;
-  if (points == 0) {
-    if (touchPressed && now - lastValidTouchMs <
-                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
-      touchBackoffUntilMs =
-          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+  if (decodedFrame.count == 0) {
+    releaseAllTouches(now);
+    return;
+  }
+
+  bool anyPressed = false;
+  bool anyMoved = false;
+  for (uint8_t index = 0; index < decodedFrame.count; ++index) {
+    const auto &contact = decodedFrame.contacts[index];
+    const auto *previous = previousContact(contact.id);
+    if (contact.status == waveshare_board::touch::CST9217_STATUS_CONTINUING &&
+        previous == nullptr) {
+      logTouchPacket("ignored-stale-start", data, sizeof(data), contact.x,
+                     contact.y, touchHintActive, now);
+      releaseAllTouches(now);
       return;
     }
-    setTouchPressed(false);
+    anyPressed =
+        anyPressed ||
+        contact.status == waveshare_board::touch::CST9217_STATUS_PRESSED;
+    anyMoved = anyMoved || previous == nullptr || previous->x != contact.x ||
+               previous->y != contact.y;
+  }
+  if (!anyPressed && !anyMoved &&
+      now - lastValidTouchMs >=
+          waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+    releaseAllTouches(now);
     return;
   }
 
-  uint8_t status = data[0] & 0x0F;
-  uint16_t rawX = (data[1] << 4) | (data[3] >> 4);
-  uint16_t rawY = (data[2] << 4) | (data[3] & 0x0F);
-  if (status != 0x00 && status != 0x06) {
-    logTouchPacket("ignored-status", data, sizeof(data), rawX, rawY,
-                   touchHintActive, now);
-    if (touchPressed && now - lastValidTouchMs <
-                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
-      touchBackoffUntilMs =
-          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
-      return;
-    }
-    setTouchPressed(false);
-    return;
-  }
-  if (!isValidTouchCoordinate(rawX, rawY)) {
-    logTouchPacket("ignored-invalid", data, sizeof(data), rawX, rawY,
-                   touchHintActive, now);
-    setTouchPressed(false);
-    return;
-  }
-
-  bool moved = rawX != touchX || rawY != touchY;
-  if (status == 0x00 && !touchPressed) {
-    logTouchPacket("ignored-stale-start", data, sizeof(data), rawX, rawY,
-                   touchHintActive, now);
-    setTouchPressed(false);
-    return;
-  }
-  if (status == 0x00 && !moved &&
-      now - lastValidTouchMs >= waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
-    setTouchPressed(false);
-    return;
-  }
-
-  touchX = rawX;
-  touchY = rawY;
-  if (status == 0x06 || moved) {
+  if (anyPressed || anyMoved) {
     lastValidTouchMs = now;
   }
   touchFastPollUntilMs =
       now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
-  logTouchPacket(status == 0x06 ? "point" : "point-status0", data,
-                 sizeof(data), touchX, touchY, touchHintActive, now);
-
-  // Clamp to screen bounds
-  if (touchX >= waveshare_board::touch::ACTIVE_WIDTH)
-    touchX = waveshare_board::touch::MAX_X;
-  if (touchY >= waveshare_board::touch::ACTIVE_HEIGHT)
-    touchY = waveshare_board::touch::MAX_Y;
+  updatePrimaryTouch(decodedFrame);
+  previousRawTouchFrame = decodedFrame;
+  publishTouchFrame(decodedFrame, now);
+  logTouchPacket(anyPressed ? "point" : "point-status0", data, sizeof(data),
+                 touchX, touchY, touchHintActive, now);
+#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
+  logTouchDiagnostics(now);
+#endif
 
   setTouchPressed(true);
 }
@@ -773,7 +867,17 @@ void readTouch() {
 void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
   readTouch();
 
+#ifdef WAVESHARE_AMOLED_206
+  waveshare_board::touch::TouchFrame singleContactFrame;
   if (touchPressed) {
+    singleContactFrame.count = 1;
+    singleContactFrame.contacts[0] = {
+        0, touchX, touchY, waveshare_board::touch::CST9217_STATUS_PRESSED};
+  }
+  publishTouchFrame(singleContactFrame, millis());
+#endif
+
+  if (touchPressed && !isPrimaryTouchSuppressed()) {
     data->state = LV_INDEV_STATE_PRESSED;
     // Rotate touch coordinates to match display rotation
     uint16_t rotatedX = touchX;

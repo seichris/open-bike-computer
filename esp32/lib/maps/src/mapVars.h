@@ -134,4 +134,4 @@ static const uint16_t BACKGROUND_COLOR = 0xEF5D;
   4 // max blocks in memory (increased with VFS config in sdkconfig)
 #define MAPBLOCK_SIZE_BITS 12 // 4096 x 4096 coords (~meters) per block
 #define MAPFOLDER_SIZE_BITS 4 // 16 x 16 map blocks per folder
-#define MAX_ZOOM 4            // Vector max MAX_ZOOM
+#define MAX_ZOOM 5            // Vector max runtime zoom level
