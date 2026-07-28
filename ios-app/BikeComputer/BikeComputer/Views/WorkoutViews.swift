@@ -678,11 +678,27 @@ struct WorkoutDashboardView: View {
                         .red.opacity(0.8)
                     )
                     metric(
+                        "Average Speed",
+                        WorkoutValueFormatter.averageSpeed(
+                            distanceMeters: snapshot.cyclingDistance?.value,
+                            elapsedSeconds: snapshot.elapsedTime?.value
+                        ),
+                        "KM/H",
+                        "speedometer",
+                        .cyan.opacity(0.8)
+                    )
+                    metric(
                         "Altitude",
                         altitudeValue(snapshot.location?.altitude),
                         "M",
                         "mountain.2.fill",
                         .indigo
+                    )
+                }
+
+                if store.presentation.connectionState == .ended {
+                    HeartRateZoneBreakdown(
+                        durations: snapshot.heartRateZoneDurations
                     )
                 }
 

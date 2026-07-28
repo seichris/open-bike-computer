@@ -187,6 +187,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
             RemoteTerminalAcknowledgement? = nil
         var heartRateZoneCheckpoint:
             WorkoutHeartRateZoneDurationAccumulator.Checkpoint? = nil
+        var heartRateZoneMaximumHeartRateBPM: Int? = nil
         var finishRequest: FinishRequest?
         /// A rider-confirmed corrupt-state reset cannot recover the lost
         /// Save/Discard choice. Keep that provenance durable until the rider
@@ -415,7 +416,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
         identity?.corruptResetPendingFinishChoice == true
     }
 
-    func begin(startDate: Date) throws -> Identity {
+    func begin(
+        startDate: Date,
+        heartRateZoneMaximumHeartRateBPM: Int? = nil
+    ) throws -> Identity {
         guard [.missing, .valid].contains(loadState), identity == nil else {
             throw RecoveryStoreError.unreadableOrOccupiedState
         }
@@ -426,6 +430,11 @@ nonisolated final class WatchWorkoutRecoveryStore {
             transportGenerationID: UUID(),
             startDate: startDate,
             sequenceHighWatermark: 0,
+            heartRateZoneMaximumHeartRateBPM:
+                heartRateZoneMaximumHeartRateBPM.map {
+                    WorkoutHeartRateZoneProfile
+                        .clampedMaximumHeartRateBPM($0)
+                },
             finishRequest: nil,
             corruptResetPendingFinishChoice: nil,
             corruptResetSyntheticCleanupIdentity: nil
@@ -1180,6 +1189,11 @@ nonisolated final class WatchWorkoutRecoveryStore {
     }
 
     private static func validatedIdentity(_ identity: Identity) -> Identity? {
+        let heartRateZoneMaximumIsValid =
+            identity.heartRateZoneMaximumHeartRateBPM.map {
+                WorkoutHeartRateZoneProfile.supportedMaximumHeartRateBPM
+                    .contains($0)
+            } ?? true
         guard identity.sessionID != zeroUUID,
               identity.healthKitSessionID.map({ $0 != zeroUUID }) ?? true,
               identity.sessionToken != 0,
@@ -1187,6 +1201,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
               identity.remoteControlCheckpoint?.isValid ?? true,
               identity.remoteSegmentIntent?.isValid ?? true,
+              heartRateZoneMaximumIsValid,
               identity.finishRequest?.requestedAt.timeIntervalSinceReferenceDate.isFinite
                 ?? true else {
             return nil

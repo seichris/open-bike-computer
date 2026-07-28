@@ -696,7 +696,10 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         let capturedAt = Date()
         let startDate = capturedAt.addingTimeInterval(-30)
-        let identity = try recoveryStore.begin(startDate: startDate)
+        let identity = try recoveryStore.begin(
+            startDate: startDate,
+            heartRateZoneMaximumHeartRateBPM: 200
+        )
         let healthStore = HKHealthStore()
         let configuration = HKWorkoutConfiguration()
         configuration.activityType = .cycling
@@ -758,6 +761,10 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 count: Int(WorkoutHeartRateZoneProfile.zoneCount)
             )
         )
+        XCTAssertEqual(
+            manager.snapshot.heartRateZoneDurations?.maximumHeartRateBPM,
+            200
+        )
 
         receiver.session(
             WCSession.default,
@@ -768,7 +775,15 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         try await waitUntil { manager.maximumHeartRateBPM == 240 }
         XCTAssertEqual(manager.maximumHeartRateBPM, 240)
-        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 2)
+        XCTAssertEqual(
+            manager.snapshot.currentHeartRateZone,
+            4,
+            "an active workout must retain the profile that owns its accumulated bins"
+        )
+        XCTAssertEqual(
+            manager.snapshot.heartRateZoneDurations?.maximumHeartRateBPM,
+            200
+        )
         XCTAssertEqual(
             WorkoutHeartRateZoneSettings.maximumHeartRateBPM(from: defaults),
             240
@@ -784,6 +799,63 @@ final class WatchWorkoutManagerTests: XCTestCase {
             heartRateZoneDefaults: defaults
         )
         XCTAssertEqual(reloadedManager.maximumHeartRateBPM, 240)
+    }
+
+    func testLegacyRecoveredZoneProfileStaysFrozenAndUnattributed() throws {
+        let defaultsSuiteName = "WatchWorkoutManagerLegacyHeartRateZoneTests"
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: defaultsSuiteName)
+        )
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        WorkoutHeartRateZoneSettings.saveMaximumHeartRateBPM(
+            200,
+            to: defaults
+        )
+
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let capturedAt = Date()
+        let identity = try recoveryStore.begin(
+            startDate: capturedAt.addingTimeInterval(-30)
+        )
+        XCTAssertNil(identity.heartRateZoneMaximumHeartRateBPM)
+
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            initializeOnLaunch: false,
+            heartRateZoneDefaults: defaults
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        manager.setCurrentHeartRateForTesting(160, capturedAt: capturedAt)
+
+        XCTAssertTrue(manager.publishMirrorSnapshotForTesting())
+        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 4)
+        XCTAssertNil(
+            manager.snapshot.heartRateZoneDurations?.maximumHeartRateBPM,
+            "a legacy workout must not claim the current setting as historical provenance"
+        )
+
+        manager.setMaximumHeartRateBPM(240)
+        XCTAssertEqual(manager.snapshot.currentHeartRateZone, 4)
+        XCTAssertNil(
+            manager.snapshot.heartRateZoneDurations?.maximumHeartRateBPM
+        )
     }
 
     func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
@@ -3778,7 +3850,6 @@ final class WatchWorkoutManagerTests: XCTestCase {
             refreshAuthorization: { await authorizationRefresh.run() },
             initializeOnLaunch: false
         )
-
         manager.retrySetup()
         try await waitUntil { recovery.callCount == 1 }
         recovery.completeWithoutSession()
@@ -7224,7 +7295,6 @@ final class WatchWorkoutManagerTests: XCTestCase {
             },
             initializeOnLaunch: false
         )
-
         manager.retrySetup()
         try await waitUntil { recovery.callCount == 1 }
         manager.handleActiveWorkoutRecovery()
@@ -7494,6 +7564,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
 
     func testDetachedSavedIdentityArchivesTombstoneAndReleasesUI() async throws {
         let recovery = RecoveryProbe()
+        let startDate = Date().addingTimeInterval(-600)
+        let endDate = startDate.addingTimeInterval(600)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "BikeComputer.WatchManagerTests.\(UUID().uuidString)",
@@ -7505,26 +7577,90 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 fileURL: directory.appendingPathComponent("active.plist")
             )
         )
-        let originalIdentity = try recoveryStore.begin(startDate: Date())
-        try recoveryStore.markFinishing(disposition: .save, requestedAt: Date())
+        let originalIdentity = try recoveryStore.begin(
+            startDate: startDate,
+            heartRateZoneMaximumHeartRateBPM: 200
+        )
+        var zoneAccumulator = WorkoutHeartRateZoneDurationAccumulator()
+        _ = zoneAccumulator.update(
+            sessionID: originalIdentity.sessionID,
+            elapsedTime: 0,
+            currentZone: 3
+        )
+        _ = zoneAccumulator.update(
+            sessionID: originalIdentity.sessionID,
+            elapsedTime: 585,
+            currentZone: 3
+        )
+        try recoveryStore.persistHeartRateZoneCheckpoint(
+            try XCTUnwrap(zoneAccumulator.checkpoint)
+        )
+        try recoveryStore.markFinishing(
+            disposition: .save,
+            requestedAt: endDate
+        )
         try recoveryStore.markCollectionEnded()
         try recoveryStore.markFinishAttempted()
         try recoveryStore.markWorkoutSaved()
+        let savedWorkout = HKWorkout(
+            activityType: .cycling,
+            start: startDate,
+            end: endDate,
+            duration: 600,
+            totalEnergyBurned: HKQuantity(
+                unit: .kilocalorie(),
+                doubleValue: 350
+            ),
+            totalDistance: HKQuantity(unit: .meter(), doubleValue: 5_000),
+            metadata: [
+                HKMetadataKeyExternalUUID:
+                    originalIdentity.sessionID.uuidString,
+            ]
+        )
+        var savedWorkoutLookupCount = 0
         let manager = WatchWorkoutManager(
             healthStore: HKHealthStore(),
             routeRecorder: WatchRouteRecorder(),
             recoveryStore: recoveryStore,
             recoverActiveWorkoutSession: { await recovery.run() },
+            savedWorkoutLookup: { _, _ in
+                savedWorkoutLookupCount += 1
+                return savedWorkout
+            },
             initializeOnLaunch: false
+        )
+        manager.setCumulativeMetricsForTesting(
+            averageHeartRateBPM: 99,
+            activeEnergyKilocalories: 10,
+            distanceMeters: 100,
+            capturedAt: endDate
         )
 
         manager.retrySetup()
         try await waitUntil { recovery.callCount == 1 }
         recovery.completeWithoutSession()
         try await waitUntil { !manager.isRecovering && manager.state == .ended }
+        XCTAssertEqual(savedWorkoutLookupCount, 1)
         XCTAssertFalse(manager.isAwaitingDetachedSessionCleanup)
-        XCTAssertNotNil(manager.summary)
+        let summary = try XCTUnwrap(manager.summary)
+        XCTAssertEqual(summary.duration, 600)
+        XCTAssertEqual(summary.distanceMeters, 5_000)
+        XCTAssertEqual(summary.activeEnergyKilocalories, 350)
+        XCTAssertEqual(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: summary.distanceMeters,
+                elapsedSeconds: summary.duration
+            ),
+            "30.0"
+        )
         XCTAssertEqual(manager.snapshot.state, .ended)
+        XCTAssertEqual(manager.snapshot.elapsedTime?.value, 600)
+        XCTAssertEqual(manager.snapshot.cyclingDistance?.value, 5_000)
+        XCTAssertEqual(manager.snapshot.activeEnergy?.value, 350)
+        XCTAssertNil(
+            manager.snapshot.heartRateZoneDurations,
+            "an incomplete detached checkpoint must not be presented as exact final zone totals"
+        )
         XCTAssertEqual(manager.latestEnvelope?.snapshot?.state, .ended)
         XCTAssertNil(recoveryStore.recoveredIdentity)
         XCTAssertEqual(
