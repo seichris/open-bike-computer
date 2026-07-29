@@ -1,8 +1,9 @@
 # Offline Map Platform Backend
 
 This backend creates ESP32-compatible offline map packs from OpenStreetMap PBF
-sources. It implements the production contract described in
-`docs/offline-map-platform-implementation-plan.md`.
+sources. See the [map-stream format](../docs/map-stream-format-v1.md) and
+[rollout runbook](../docs/map-stream-rollout-runbook.md) for the production
+contract and operating procedure.
 
 ## What is implemented
 
