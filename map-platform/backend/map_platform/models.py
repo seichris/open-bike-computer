@@ -330,6 +330,17 @@ class MapJob:
                 if duration is not None:
                     timing["durationSeconds"] = duration
             timings.append(timing)
+        label_timings = (
+            self.artifact_metrics.get("labelPhaseTimings")
+            if isinstance(self.artifact_metrics, dict)
+            else None
+        )
+        if isinstance(label_timings, dict):
+            for phase, duration in label_timings.items():
+                if isinstance(phase, str) and isinstance(duration, (int, float)) and duration >= 0:
+                    timings.append(
+                        {"status": phase, "durationSeconds": round(float(duration), 6)}
+                    )
         return timings
 
 

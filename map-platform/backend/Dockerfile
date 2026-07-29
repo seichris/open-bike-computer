@@ -8,6 +8,8 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    fonts-noto-cjk \
+    fonts-noto-core \
     gdal-bin \
     git \
     mapnik-utils \

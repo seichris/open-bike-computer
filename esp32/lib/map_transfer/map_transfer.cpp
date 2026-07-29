@@ -1,5 +1,7 @@
 #include "map_transfer.hpp"
-#include "../maps/src/mapBlockFormat.hpp"
+#include "../maps/src/mapRendererFileValidator.hpp"
+#include "../maps/src/mapFontAsset.hpp"
+#include "../maps/src/mapLabelBlock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -40,6 +43,12 @@ constexpr size_t kMaxManifestBytes = 2 * 1024 * 1024;
 constexpr uint32_t kZipLocalHeaderSignature = 0x04034b50;
 constexpr uint32_t kZipCentralHeaderSignature = 0x02014b50;
 constexpr uint32_t kZipEndSignature = 0x06054b50;
+
+static bool isFontAssetPath(const std::string &path,
+                            const std::string &mapId) {
+  return path == std::string(kVectMapPrefix) + mapId +
+                     "/assets/street-labels.fma";
+}
 
 static uint16_t readLe16(const uint8_t *data) {
   return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
@@ -145,6 +154,98 @@ static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
     pos++;
   }
   return value;
+}
+
+static std::vector<std::string>
+jsonStringArrayValue(const std::string &json, const std::string &key,
+                     bool *valid = nullptr) {
+  if (valid != nullptr)
+    *valid = false;
+  std::vector<std::string> values;
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return values;
+  cursor = json.find('[', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return values;
+  cursor++;
+  bool requireValue = false;
+  while (cursor < json.size()) {
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    if (cursor < json.size() && json[cursor] == ']') {
+      if (requireValue)
+        return {};
+      if (valid != nullptr)
+        *valid = true;
+      return values;
+    }
+    if (cursor >= json.size())
+      return {};
+    if (json[cursor++] != '"')
+      return {};
+    std::string value;
+    bool complete = false;
+    while (cursor < json.size()) {
+      const char character = json[cursor++];
+      if (character == '"') {
+        complete = true;
+        break;
+      }
+      if (character == '\\' ||
+          static_cast<unsigned char>(character) < 0x20)
+        return {};
+      value.push_back(character);
+    }
+    if (!complete)
+      return {};
+    values.push_back(value);
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    if (cursor < json.size() && json[cursor] == ',') {
+      cursor++;
+      requireValue = true;
+      continue;
+    }
+    requireValue = false;
+    if (cursor >= json.size() || json[cursor] != ']')
+      return {};
+  }
+  return {};
+}
+
+static bool safeLanguageTag(const std::string &value) {
+  if (value.size() < 2 || value.size() > 35)
+    return false;
+  size_t subtagStart = 0;
+  size_t subtagIndex = 0;
+  while (subtagStart < value.size()) {
+    const size_t separator = value.find('-', subtagStart);
+    const size_t subtagEnd =
+        separator == std::string::npos ? value.size() : separator;
+    const size_t subtagLength = subtagEnd - subtagStart;
+    if (subtagLength == 0 || subtagLength > 8)
+      return false;
+    for (size_t index = subtagStart; index < subtagEnd; ++index) {
+      const unsigned char character = value[index];
+      if ((subtagIndex == 0 && !std::islower(character)) ||
+          (subtagIndex == 0 && !std::isalpha(character)) ||
+          (subtagIndex != 0 && !std::isalnum(character)))
+        return false;
+    }
+    if (subtagIndex == 0 && subtagLength < 2)
+      return false;
+    if (separator == std::string::npos)
+      return true;
+    subtagStart = separator + 1;
+    subtagIndex++;
+    if (subtagIndex >= 4)
+      return false;
+  }
+  return false;
 }
 
 static std::vector<std::string> fileObjects(const std::string &json) {
@@ -434,11 +535,29 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   manifest.schemaVersion =
       static_cast<uint32_t>(jsonUintValue(manifestText, "schemaVersion"));
   manifest.mapId = jsonStringValue(manifestText, "mapId");
+  manifest.renderer = jsonStringValue(manifestText, "renderer");
+  manifest.formatVersion =
+      static_cast<uint32_t>(jsonUintValue(manifestText, "formatVersion"));
+  manifest.labelProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "labelProfileVersion"));
+  bool labelLanguagesValid = false;
+  manifest.labelLanguages =
+      jsonStringArrayValue(manifestText, "labelLanguages", &labelLanguagesValid);
+  manifest.internationalFallback =
+      jsonStringValue(manifestText, "internationalFallback");
+  manifest.minimumFirmwareVersion =
+      jsonStringValue(manifestText, "minFirmwareVersion");
+  if (manifest.renderer.empty() && manifest.formatVersion == 0) {
+    manifest.renderer = "esp32-fmb";
+    manifest.formatVersion = 1;
+  }
   if (manifest.schemaVersion != 1)
     return fail("manifest_schema", "unsupported manifest schema version");
   if (!safeMapId(manifest.mapId))
     return fail("manifest_map_id", "mapId contains unsafe characters");
 
+  uint32_t fontAssetCount = 0;
+  uint32_t legacyTextBlockCount = 0;
   for (const std::string &object : fileObjects(manifestText)) {
     ManifestFile file;
     file.path = jsonStringValue(object, "path");
@@ -456,19 +575,53 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       return fail("manifest_path", "map files may not use hidden folders");
     if (file.publishPath == std::string(kActiveMapFile).substr(1))
       return fail("manifest_path", "manifest may not overwrite active map");
-    if (!(file.path.size() >= 4 &&
-          (file.path.rfind(".fmb") == file.path.size() - 4 ||
-           file.path.rfind(".fmp") == file.path.size() - 4)))
-      return fail("manifest_path", "map files must be .fmb or .fmp");
+    const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
+    const bool isBlock = file.path.size() >= 4 &&
+                         (file.path.rfind(".fmb") == file.path.size() - 4 ||
+                          file.path.rfind(".fmp") == file.path.size() - 4);
+    if (!isBlock && !isFontAsset)
+      return fail("manifest_path", "manifest contains an unsupported map file");
     if (file.bytes == 0 ||
-        file.bytes > map_block_format::kMaximumBlockBytes)
+        file.bytes > (isFontAsset
+                          ? map_font_asset_format::kMaximumFontAssetBytes
+                          : map_block_format::kMaximumBlockBytes))
       return fail("manifest_bytes", "map file byte count is invalid");
     if (!isHexSha256(file.sha256))
       return fail("manifest_sha256", "map file sha256 is invalid");
     manifest.files.push_back(file);
+    if (isFontAsset)
+      fontAssetCount++;
+    if (file.path.rfind(".fmp") == file.path.size() - 4)
+      legacyTextBlockCount++;
   }
   if (manifest.files.empty())
     return fail("manifest_files", "manifest contains no map files");
+  if (manifest.renderer != "esp32-fmb" ||
+      (manifest.formatVersion != 1 && manifest.formatVersion != 2))
+    return fail("manifest_target", "manifest renderer target is unsupported");
+  if ((manifest.formatVersion == 2 &&
+       (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
+      (manifest.formatVersion == 1 && fontAssetCount != 0))
+    return fail("manifest_target", "manifest files do not match renderer target");
+  if (manifest.formatVersion == 2) {
+    bool uniqueLanguages = true;
+    for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
+      for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
+        if (manifest.labelLanguages[index] == manifest.labelLanguages[other])
+          uniqueLanguages = false;
+    if (manifest.labelProfileVersion != 1 ||
+        !labelLanguagesValid ||
+        manifest.labelLanguages.size() > 3 ||
+        !uniqueLanguages ||
+        !std::all_of(manifest.labelLanguages.begin(),
+                     manifest.labelLanguages.end(), safeLanguageTag) ||
+        !safeLanguageTag(manifest.internationalFallback))
+      return fail("manifest_labels", "manifest label profile is invalid");
+  } else if (manifest.labelProfileVersion != 0 ||
+             !manifest.labelLanguages.empty() ||
+             !manifest.internationalFallback.empty()) {
+    return fail("manifest_labels", "legacy manifest contains label metadata");
+  }
   return {true, "ok", ""};
 }
 
@@ -513,7 +666,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
         return fail("file_sha256", "could not read staged map file: " +
                                        file.path);
       Sha256Hasher hasher;
-      map_block_format::StreamValidator rendererValidator(file.path);
+      map_renderer_format::StreamValidator rendererValidator(file.path);
       std::array<uint8_t, 4096> buffer = {};
       while (input) {
         input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
@@ -548,6 +701,10 @@ InstallStatus MapTransferInstaller::validateStagedMap(
     if (onProgress)
       onProgress({3, 5, completed, total});
   }
+  const InstallStatus labels =
+      validateLabelContracts(stagingRoot(sessionId), manifest, true);
+  if (!labels.ok)
+    return labels;
   return {true, "ok", ""};
 }
 
@@ -644,8 +801,9 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isManifest = path == "manifest.json";
     const bool isMapFile =
         startsWith(path, kVectMapPrefix) && safeRelativePath(path) &&
-        (path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
-                              path.rfind(".fmp") == path.size() - 4));
+        ((path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
+                               path.rfind(".fmp") == path.size() - 4)) ||
+         map_renderer_format::isFontAssetPath(path));
     const bool isMetadata =
         path == "ATTRIBUTION.txt" || startsWith(path, "LICENSES/");
     if (!isManifest && !isMapFile && !isMetadata && path.back() != '/') {
@@ -764,7 +922,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
                            safeRelativePath(path) && path.size() >= 4 &&
                            (path.rfind(".fmb") == path.size() - 4 ||
-                            path.rfind(".fmp") == path.size() - 4);
+                            path.rfind(".fmp") == path.size() - 4 ||
+                            isFontAssetPath(path, manifest.mapId));
     if (isMapFile) {
       if (manifestFileIndex >= manifest.files.size() ||
           manifest.files[manifestFileIndex].path != path)
@@ -792,7 +951,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         return fail("archive_write", "could not create extracted map file");
       input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
       Sha256Hasher hasher;
-      map_block_format::StreamValidator rendererValidator(path);
+      map_renderer_format::StreamValidator rendererValidator(path);
       remaining = compressedSize;
       while (remaining > 0) {
         const size_t count =
@@ -985,6 +1144,12 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("publish_metadata",
                 "could not publish map verification metadata");
   }
+  const InstallStatus labelStatus =
+      validateLabelContracts(destinationRoot, manifest, false);
+  if (!labelStatus.ok) {
+    abandonNewRoot();
+    return labelStatus;
+  }
   if (!writeTextFileAtomic(transactionPath, transactionJson("ready"))) {
     abandonNewRoot();
     return fail("transaction", "could not prepare map activation switch");
@@ -1176,6 +1341,15 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
   if (!readyStatus.ok)
     return readyStatus;
+  MapManifest readyManifest;
+  const InstallStatus manifestStatus =
+      readInstalledManifest(ready.root, readyManifest);
+  if (!manifestStatus.ok)
+    return manifestStatus;
+  const InstallStatus labelStatus = validateLabelContracts(
+      joinPath(storageRoot_, ready.root), readyManifest, false);
+  if (!labelStatus.ok)
+    return labelStatus;
   ActiveMapSelection previous;
   InstallStatus previousStatus = readActiveMap(previous);
   if (!previousStatus.ok && previousStatus.code != "active_missing")
@@ -1898,6 +2072,15 @@ InstallStatus MapTransferInstaller::readActiveMapId(std::string &mapId) const {
   return status;
 }
 
+InstallStatus
+MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
+  ActiveMapSelection selection;
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  return readInstalledManifest(selection.root, manifest);
+}
+
 bool MapTransferInstaller::pruneStagingSessions(
     const std::string &keepSessionId) const {
   if (!safeId(keepSessionId))
@@ -2259,7 +2442,13 @@ bool MapTransferInstaller::publishInstalledMetadata(
 std::string
 MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
   std::string value =
-      std::to_string(manifest.schemaVersion) + "\n" + manifest.mapId + "\n";
+      std::to_string(manifest.schemaVersion) + "\n" + manifest.mapId + "\n" +
+      manifest.renderer + "\n" + std::to_string(manifest.formatVersion) + "\n" +
+      std::to_string(manifest.labelProfileVersion) + "\n";
+  for (const std::string &language : manifest.labelLanguages)
+    value += language + "\n";
+  value += manifest.internationalFallback + "\n" +
+           manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
     value += file.path + "\n" + file.publishPath + "\n" +
              std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
@@ -2280,6 +2469,71 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
     return fail("installed_manifest", "installed map manifest is missing");
   }
   return validateManifestText(text, manifest);
+}
+
+InstallStatus MapTransferInstaller::validateLabelContracts(
+    const std::string &root, const MapManifest &manifest,
+    bool useManifestPaths) const {
+  if (manifest.formatVersion != 2)
+    return {true, "ok", ""};
+  const auto resolvedPath = [&](const ManifestFile &file) {
+    if (useManifestPaths)
+      return joinPath(root, file.path);
+    const std::string prefix = kVectMapPrefix;
+    if (!startsWith(file.publishPath, prefix))
+      return std::string();
+    return joinPath(root, file.publishPath.substr(prefix.size()));
+  };
+
+  const ManifestFile *fontFile = nullptr;
+  for (const ManifestFile &file : manifest.files) {
+    if (isFontAssetPath(file.path, manifest.mapId)) {
+      fontFile = &file;
+      break;
+    }
+  }
+  if (fontFile == nullptr)
+    return fail("label_font_missing", "target-2 map has no FMA1 asset");
+  map_font_asset::Asset font;
+  if (!font.open(resolvedPath(*fontFile)))
+    return fail("label_font_invalid", "target-2 FMA1 asset is invalid");
+  if (font.languageCount() != manifest.labelLanguages.size())
+    return fail("label_languages", "FMA1 languages do not match manifest");
+  for (uint8_t index = 0; index < font.languageCount(); ++index)
+    if (font.language(index) != manifest.labelLanguages[index])
+      return fail("label_languages", "FMA1 languages do not match manifest");
+
+  for (const ManifestFile &file : manifest.files) {
+    if (file.path.size() < 4 ||
+        file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
+      continue;
+    const std::string path = resolvedPath(file);
+    if (path.empty())
+      return fail("label_block_path", "target-2 block path is invalid");
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() <= 0 ||
+        static_cast<uint64_t>(input.tellg()) >
+            map_block_format::kMaximumBlockBytes)
+      return fail("label_block_open", "could not read target-2 FMB block");
+    const size_t size = static_cast<size_t>(input.tellg());
+    input.seekg(0, std::ios::beg);
+    std::vector<uint8_t> bytes(size);
+    input.read(reinterpret_cast<char *>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (!input || bytes.size() < 4 || bytes[3] != 3)
+      return fail("label_block_version", "target-2 map contains a non-v3 block");
+    map_label_block::Block labels;
+    std::string error;
+    if (!map_label_block::decode(bytes.data(), bytes.size(),
+                                 std::numeric_limits<uint16_t>::max(), labels,
+                                 &error) ||
+        labels.profileFingerprint != font.profileFingerprint() ||
+        !labels.referencesResolve(font.glyphCount(), font.languageCount())) {
+      return fail("label_block_contract",
+                  "FMB v3 label references do not match FMA1");
+    }
+  }
+  return {true, "ok", ""};
 }
 
 bool MapTransferInstaller::installedMapReceiptMatches(

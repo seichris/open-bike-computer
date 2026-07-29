@@ -486,6 +486,14 @@ Current setting IDs:
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
 | `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
 | `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong, `3` Very Strong, `4` Maximum; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. At extreme zoom/viewport combinations, firmware eases the requested strength only as much as needed to stay within the four-block renderer budget. |
+| `27` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads |
+| `28` | Map street-label language | `0` local, `1` preferred, `2` local + preferred |
+| `29` | Map street-label size | `0` small, `1` standard, `2` large |
+| `30` | Map street-label orientation | `0` follow roads, `1` keep upright |
+| `31` | Map + Navigation street-label density | Same values as ID `27` |
+| `32` | Map + Navigation street-label language | Same values as ID `28` |
+| `33` | Map + Navigation street-label size | Same values as ID `29` |
+| `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
@@ -639,8 +647,8 @@ support for the Very Strong and Maximum values. iOS hides the perspective
 picker when bit `1` is absent and limits it to the first three presets when bit
 `2` is absent. Values `3` and `4` are clamped to Strong before being sent to
 older perspective-capable firmware. Version `7` clients receive only bit `0`;
-firmware only appends the extended byte for version `7` or newer requests, so
-older clients continue receiving the exact legacy five- or eight-byte response.
+firmware appends the extended byte for versions `7...9`, while older clients
+continue receiving the exact legacy five- or eight-byte response.
 
 Receiving a `CAPS` request alone does not switch the firmware's
 setting semantics: a session switches to independent profiles only after the
@@ -683,6 +691,39 @@ Ride Stats presentation must all be available before firmware sets this bit.
 iOS sends no workout health metrics when the bit is absent. A reconnect or a
 later valid capability response that enables bit `7` triggers one full
 core-plus-extended resynchronization.
+
+Client version `10` switches the response envelope to the extensible `CAP2`
+frame:
+
+```text
+"CAP2" | Schema: UInt8 | FeatureFlags: UInt32LE | TLVs...
+TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
+```
+
+Schema `1` assigns feature bit `8` to street-label profiles, bit `9` to the
+bird's-eye projection, bit `10` to its first three perspective presets, and bit
+`11` to the Very Strong and Maximum presets. Bits `0...7` retain their legacy
+meanings above. TLV type `1` carries the persisted PWR honk configuration as
+exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
+malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
+well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
+version `10`, preserving the version `7...9` extended-byte contract, and current
+clients accept either envelope.
+
+Golden vectors:
+
+```text
+CAP2 schema 1, flags 0x00000fff, PWR enabled/sound 4/volume 80:
+43 41 50 32 01 ff 0f 00 00 01 03 01 04 50
+
+CAP2 schema 1, flags 0, no TLVs:
+43 41 50 32 01 00 00 00 00
+```
+
+IDs `27...34` are sent only after a valid `CAP2` response advertises bit `8`.
+Older sessions therefore never receive label-only setting IDs. Missing NVS
+values migrate to balanced density, local language, standard text, and Follow
+roads independently for Map and Map + Navigation.
 
 ## Destination Picker
 
@@ -844,6 +885,18 @@ Status responses should include:
 - `activeSessionId`: durable content-derived session selected by
   `active-map.json`, when installed by transfer-capable firmware. This
   distinguishes regenerated packs that intentionally reuse a stable map ID.
+- `activeManifestReceipt`: SHA-256 identity of the exact installed manifest;
+  the app binds the following label-health fields to this receipt.
+- `activeRendererFormat`: the installed renderer target format (`1` legacy,
+  `2` FMB v3 + FMA1 street labels).
+- `labelProfileVersion`: `1` for the current target-2 label profile, otherwise
+  `0`.
+- `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
+  active pack.
+- `fontAssetHealthy`: `true` only when the target-2 FMA1 asset passed activation
+  validation and the active renderer can open it. The app uses these fields to
+  distinguish unsupported firmware, a legacy map that needs regeneration, and
+  an unhealthy label asset.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
@@ -878,7 +931,8 @@ The ESP32 map installer validates staged packs before activation:
   preserving the current content-derived session for resume.
 - manifest schema version must be `1`.
 - `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
-- files must live under `VECTMAP/` and end in `.fmb` or `.fmp`.
+- files must live under `VECTMAP/` and be `.fmb`/legacy `.fmp` blocks, or the
+  exact target-2 asset path `VECTMAP/<mapId>/assets/street-labels.fma`.
 - path traversal and absolute paths are rejected.
 - declared byte size and SHA-256 must match the staged file. New uploads are
   hashed while streaming to SD and receive a verification receipt, avoiding a

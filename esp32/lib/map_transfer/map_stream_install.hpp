@@ -8,7 +8,7 @@
 #include <string>
 #include <string_view>
 
-namespace map_block_format {
+namespace map_renderer_format {
 class StreamValidator;
 }
 
@@ -141,7 +141,7 @@ private:
   size_t nextFileIndex_ = 0;
   std::string currentPartPath_;
   bool currentSkipped_ = false;
-  std::unique_ptr<map_block_format::StreamValidator> currentMapValidator_;
+  std::unique_ptr<map_renderer_format::StreamValidator> currentMapValidator_;
   uint64_t bytesAtCheckpoint_ = 0;
   uint64_t checkpointAtMilliseconds_ = 0;
   uint32_t checkpointSequence_ = 0;

@@ -7,12 +7,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .map_labels import renderer_format_version
 from .models import Bounds, GeometryMode, MapJob
 
 
 MAP_BLOCK_SIZE_METERS = 1 << 12
 MAP_FOLDER_BLOCKS = 1 << 4
-MAP_REUSE_SCHEMA_VERSION = 1
+MAP_REUSE_SCHEMA_VERSION = 2
 EARTH_RADIUS_METERS = 6_378_137
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -95,7 +96,7 @@ def reuse_keys(
         },
         "renderer": {
             "name": "esp32-fmb",
-            "formatVersion": 1,
+            "formatVersion": renderer_format_version(job.request),
             "blockSizeMeters": MAP_BLOCK_SIZE_METERS,
         },
         "source": {
@@ -107,6 +108,7 @@ def reuse_keys(
             "snapshotSha256": snapshot_sha256,
         },
         "target": job.request.get("target") or {},
+        "labels": job.request.get("labels"),
     }
     compatibility = _document_sha256(compatibility_document)
     exact_document = {

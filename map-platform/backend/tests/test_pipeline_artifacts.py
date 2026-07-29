@@ -44,7 +44,7 @@ class FixtureMapBuildPipeline(MapBuildPipeline):
         del job, geojson_prefix, bounds
         directory = raw_output_dir / "+0000+0000"
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "1.fmb").write_bytes(b"first-map-block")
+        (directory / "1.fmb").write_bytes(b"FMB\x02" + b"x" * 11)
         (directory / "1.fmp").write_bytes(b"redundant-text-fallback")
         (directory / "2.fmp").write_bytes(b"second-map-block")
         if on_progress:

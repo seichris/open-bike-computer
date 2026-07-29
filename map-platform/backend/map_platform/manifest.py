@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .map_artifact_validation import validate_renderer_artifacts
+from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 from .models import MapJob
 from .preview import (
     DEFAULT_PREVIEW_HEIGHT,
@@ -18,7 +20,11 @@ from .preview import (
     render_boundary_preview,
 )
 
-ALLOWED_PACK_FILE_RE = re.compile(r"VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]")
+ALLOWED_PACK_FILE_RE = re.compile(
+    r"VECTMAP/[A-Za-z0-9._-]+/(?:"
+    r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]|"
+    r"assets/street-labels\.fma)"
+)
 MAX_PACK_MAP_ID_BYTES = 64
 MAX_PACK_PATH_COMPONENT_BYTES = 64
 MAX_PACK_RELATIVE_PATH_BYTES = 202
@@ -111,7 +117,18 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
     preview_path = map_root / DEFAULT_PREVIEW_PATH
     preview_path.parent.mkdir(parents=True, exist_ok=True)
     preview_path.write_bytes(preview_bytes)
-    return {
+    format_version = renderer_format_version(job.request)
+    font_asset_path = f"VECTMAP/{map_id}/assets/street-labels.fma"
+    file_paths = {entry["path"] for entry in files}
+    if format_version == LABEL_RENDERER_FORMAT_VERSION:
+        if font_asset_path not in file_paths:
+            raise ValueError("renderer target 2 map pack is missing street-labels.fma")
+        if any(entry["path"].endswith(".fmp") for entry in files):
+            raise ValueError("renderer target 2 map pack contains legacy text blocks")
+    elif font_asset_path in file_paths:
+        raise ValueError("renderer target 1 map pack contains a label font asset")
+    validate_renderer_artifacts(map_root, map_id, files, format_version)
+    manifest = {
         "schemaVersion": 1,
         "mapId": map_id,
         "displayName": job.artifact_display_name,
@@ -120,7 +137,7 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
         "createdAt": job.created_at,
         "target": {
             "renderer": "esp32-fmb",
-            "formatVersion": 1,
+            "formatVersion": format_version,
             "minFirmwareVersion": str(job.request.get("target", {}).get("firmwareVersion", "0.0.0")),
         },
         "source": {
@@ -148,6 +165,12 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
         },
         "files": files,
     }
+    if format_version == LABEL_RENDERER_FORMAT_VERSION:
+        labels = job.request["labels"]
+        manifest["target"]["labelProfileVersion"] = labels["profileVersion"]
+        manifest["target"]["labelLanguages"] = labels["preferredLanguages"]
+        manifest["target"]["internationalFallback"] = labels["internationalFallback"]
+    return manifest
 
 
 def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: Path) -> Path:

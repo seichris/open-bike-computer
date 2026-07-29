@@ -13,6 +13,13 @@ constexpr uint32_t kMaximumPoints = 262144;
 // that decoded index separately from encoded feature/point counts so a small
 // block cannot amplify into all available PSRAM.
 constexpr uint32_t kMaximumPolygonGridEntries = 262144;
+constexpr uint32_t kMaximumLabelStrings = 4096;
+constexpr uint32_t kMaximumLabelStringBytes = 256U * 1024U;
+constexpr uint32_t kMaximumLabelRuns = 12288;
+constexpr uint32_t kMaximumRoadLabels = 8192;
+constexpr uint32_t kMaximumLabelCandidates = 16384;
+constexpr uint8_t kMaximumLabelVariants = 8;
+constexpr uint8_t kMaximumGlyphsPerRun = 192;
 
 // Performs the same structural walk as the renderer without allocating or
 // dereferencing beyond the supplied bytes. Only renderer-supported binary map
@@ -38,6 +45,23 @@ private:
     PolylineFixed,
     PolylinePointCount,
     PolylinePoints,
+    V3DirectoryHeader,
+    V3DirectoryEntries,
+    V3Sections,
+    Complete,
+  };
+  enum class V3ParseState {
+    None,
+    StringCount,
+    StringLength,
+    StringBytes,
+    RunCount,
+    RunHeader,
+    RunGlyph,
+    LabelHeader,
+    LabelFixed,
+    LabelVariant,
+    LabelCandidate,
     Complete,
   };
   enum class AsciiState {
@@ -72,6 +96,38 @@ private:
   uint32_t featuresSeen_ = 0;
   uint32_t pointsSeen_ = 0;
   uint32_t polygonGridEntries_ = 0;
+  uint16_t binaryPolylineCount_ = 0;
+  size_t binaryBytesProcessed_ = 0;
+  struct V3Section {
+    uint8_t type = 0;
+    uint8_t flags = 0;
+    uint32_t offset = 0;
+    uint32_t length = 0;
+    uint32_t crc32 = 0;
+  };
+  V3Section v3Sections_[3] = {};
+  uint8_t v3Directory_[16] = {};
+  size_t v3DirectorySize_ = 0;
+  uint8_t v3SectionCount_ = 0;
+  uint8_t v3DirectoryEntriesSeen_ = 0;
+  size_t v3DirectoryStart_ = 0;
+  uint8_t v3CurrentSection_ = 0;
+  uint32_t v3SectionBytesSeen_ = 0;
+  uint32_t v3SectionCrc_ = 0xFFFFFFFFU;
+  V3ParseState v3ParseState_ = V3ParseState::None;
+  uint8_t v3Record_[10] = {};
+  size_t v3RecordSize_ = 0;
+  uint32_t v3RecordsRemaining_ = 0;
+  uint32_t v3ItemsRemaining_ = 0;
+  uint32_t v3LabelCandidatesSeen_ = 0;
+  uint32_t v3StringBytesSeen_ = 0;
+  uint16_t v3StringCount_ = 0;
+  uint16_t v3RunCount_ = 0;
+  uint8_t v3VariantsRemaining_ = 0;
+  uint8_t v3CandidatesRemaining_ = 0;
+  uint8_t v3Utf8Remaining_ = 0;
+  uint32_t v3Utf8Codepoint_ = 0;
+  uint32_t v3Utf8Minimum_ = 0;
   AsciiState asciiState_ = AsciiState::PolygonHeader;
   std::string line_;
   CoordinateState coordinateState_ = CoordinateState::Prefix;
@@ -82,6 +138,13 @@ private:
   bool coordinateLineHasPair_ = false;
 
   bool feedBinary(uint8_t byte);
+  bool beginV3Extensions();
+  bool feedV3Directory(uint8_t byte);
+  bool feedV3Sections(uint8_t byte, size_t byteOffset);
+  bool beginV3Section(uint8_t sectionIndex);
+  bool feedV3SectionRecord(uint8_t byte);
+  bool finishV3Section();
+  bool feedV3Utf8(uint8_t byte);
   bool feedAscii(uint8_t byte);
   bool finishAsciiLine();
   bool feedCoordinate(uint8_t byte);

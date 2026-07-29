@@ -4,6 +4,8 @@ import PIL.ImageDraw as ImageDraw
 import PIL.Image as Image
 import math
 
+from label_pipeline import extract_join_metadata, extract_label_tags
+
 IMG_WIDTH, IMG_HEIGHT = pow( 2, 12), pow( 2, 12) # 4096 x 4096
 BACKGROUND_COLOR = 0xDDDDDD
 
@@ -53,7 +55,7 @@ def get_geoms( osm_geom ):
     # else: print("ERROR: unknow geometry type:", geom_type)
     return geoms
 
-def process_features( features, conf ):
+def process_features( features, conf, label_diagnostics=None ):
     """ Extract the features based in the definitions in conf: which features to extract and which tags
     """
     extracted = []
@@ -62,8 +64,11 @@ def process_features( features, conf ):
     for feature in features:
         properties = feature['properties']
         if 'other_tags' in feature['properties']:
-            tags = parse_tags( feature['properties']['other_tags'] )  
+            tags = parse_tags( feature['properties']['other_tags'] )
         else: tags = dict()
+
+        label_tags = extract_label_tags(properties, tags, diagnostics=label_diagnostics)
+        label_join = extract_join_metadata(properties, tags)
         
         # some features are defined just by a tag in "other_Tags", like railway
         # we add them to the properties
@@ -97,11 +102,17 @@ def process_features( features, conf ):
             properties['osm_id'] if 'osm_id' in properties else ''
         for geom in geoms:
             if not geom.is_valid or geom.is_empty: continue
+            if (label_diagnostics is not None and label_tags and
+                    feature['geometry']['type'] in ('LineString', 'MultiLineString')):
+                label_diagnostics['namedRoadsPreserved'] = \
+                    label_diagnostics.get('namedRoadsPreserved', 0) + 1
             extracted.append({
                 'id': id, # for testing/debugging
                 'type': feature_type,
                 'geom_type': 'line' if feature['geometry']['type'] in ('LineString','MultiLineString') else 'polygon',
                 'tags':  feature_type_tags,
+                'label_tags': label_tags,
+                'label_join': label_join,
                 'z_order': z_order,
                 'geom': geom
                 })
@@ -139,20 +150,18 @@ def style_features( features, styles):
                 break # keep first match
         if not found: 
             print("Not mapped: ", feature_type, feature_type_group)
-        styled_features.append({
-            'id': feat['id'],  # for debugging
-            'type': feature_type, # remove
-            'geom_type': feat['geom_type'],
-            'color': feature_color, 
+        styled = dict(feat)
+        styled.update({
+            'type': feature_type,
+            'color': feature_color,
             'width': feature_width,
             'maxzoom': feature_maxzoom,
-            'z_order': feat['z_order'],
-            'geom': feat['geom'],
-            })
+        })
+        styled_features.append(styled)
     return styled_features
 
 
-def clip_lines( features, bbox: Polygon): #TODO remove feats that are fully contained, return remaining
+def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove feats that are fully contained, return remaining
     """ Clip lines to the box area. Each line can be splitted into one or several lines.
         Returns a list of LineStrings
     """
@@ -170,6 +179,20 @@ def clip_lines( features, bbox: Polygon): #TODO remove feats that are fully cont
                 new_feat = dict( feat)
                 new_feat['geom'] = p
                 new_feat['bbox'] = p.bounds
+                candidates = []
+                for candidate in feat.get('label_candidates', []):
+                    midpoint = Point(candidate['midpoint'])
+                    if bbox.covers(midpoint) and p.distance(midpoint) <= 1.5:
+                        candidates.append(candidate)
+                new_feat['label_candidates'] = candidates
+                if label_diagnostics is not None and new_feat.get('label_tags'):
+                    label_diagnostics['namedRoadsClipped'] = \
+                        label_diagnostics.get('namedRoadsClipped', 0) + 1
+                    label_diagnostics['clippedCandidates'] = \
+                        label_diagnostics.get('clippedCandidates', 0) + len(candidates)
+                    dropped = len(feat.get('label_candidates', [])) - len(candidates)
+                    label_diagnostics['candidatesRejectedByBlockOwnership'] = \
+                        label_diagnostics.get('candidatesRejectedByBlockOwnership', 0) + max(0, dropped)
                 clipped.append( new_feat)            
     return clipped 
 

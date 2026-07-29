@@ -14,6 +14,10 @@ struct TestProfile {
   uint8_t positionMarkerScale = 0;
   uint8_t zoomLevel = 0;
   uint32_t visibilityMask = 0;
+  uint8_t labelDensity = 0;
+  uint8_t labelLanguageMode = 0;
+  uint8_t labelTextSize = 0;
+  uint8_t labelOrientation = 0;
 };
 
 class FakeStore {
@@ -41,16 +45,33 @@ private:
 };
 
 static TestProfile profile(uint8_t base, uint32_t visibilityMask) {
-  return TestProfile{base, static_cast<uint8_t>(base + 1),
-                     static_cast<uint8_t>(base + 2),
-                     static_cast<uint8_t>(base + 3),
-                     static_cast<uint8_t>(base + 4),
-                     static_cast<uint8_t>(base + 5), visibilityMask};
+  TestProfile value;
+  value.minPolygonSize = base;
+  value.detailLevel = static_cast<uint8_t>(base + 1);
+  value.routeLineWidth = static_cast<uint8_t>(base + 2);
+  value.streetLineWidth = static_cast<uint8_t>(base + 3);
+  value.positionMarkerScale = static_cast<uint8_t>(base + 4);
+  value.zoomLevel = static_cast<uint8_t>(base + 5);
+  value.visibilityMask = visibilityMask;
+  value.labelDensity = base % 4;
+  value.labelLanguageMode = base % 3;
+  value.labelTextSize = base % 3;
+  value.labelOrientation = base % 2;
+  return value;
 }
 
 static void persistProfile(FakeStore &store, const TestProfile &map,
                            const TestProfile &navigation, bool mirror) {
   for (uint8_t settingId : {1, 2, 3, 7, 8, 9, 10}) {
+    assert(map_profile_persistence::persistSetting(
+        store, map, navigation,
+        map_profile_protocol::VISIBILITY_OVERLAY_MASK, settingId, mirror));
+  }
+  for (uint8_t settingId :
+       {map_profile_protocol::MAP_LABEL_DENSITY_SETTING_ID,
+        map_profile_protocol::MAP_LABEL_LANGUAGE_MODE_SETTING_ID,
+        map_profile_protocol::MAP_LABEL_TEXT_SIZE_SETTING_ID,
+        map_profile_protocol::MAP_LABEL_ORIENTATION_SETTING_ID}) {
     assert(map_profile_persistence::persistSetting(
         store, map, navigation,
         map_profile_protocol::VISIBILITY_OVERLAY_MASK, settingId, mirror));
@@ -81,6 +102,10 @@ int main() {
   assert(loadedNavigation.zoomLevel == MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL);
   assert(loadedNavigation.visibilityMask ==
          MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK);
+  assert(loadedMap.labelDensity == DEFAULT_LABEL_DENSITY);
+  assert(loadedMap.labelLanguageMode == DEFAULT_LABEL_LANGUAGE_MODE);
+  assert(loadedMap.labelTextSize == DEFAULT_LABEL_TEXT_SIZE);
+  assert(loadedMap.labelOrientation == DEFAULT_LABEL_ORIENTATION);
 
   FakeStore legacyStore;
   const TestProfile legacyMap = profile(1, VISIBILITY_LEGACY_FEATURE_MASK);
@@ -121,12 +146,26 @@ int main() {
         independentStore, map, navigation, VISIBILITY_POSITION_MARKER,
         settingId, false));
   }
+  for (uint8_t settingId :
+       {MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID,
+        MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID,
+        MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID,
+        MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID}) {
+    assert(map_profile_persistence::persistSetting(
+        independentStore, map, navigation, VISIBILITY_POSITION_MARKER,
+        settingId, false));
+  }
   map_profile_persistence::load(independentStore, loadedMap,
                                 loadedNavigation);
   assert(loadedMap.minPolygonSize == map.minPolygonSize);
   assert(loadedMap.visibilityMask == map.visibilityMask);
   assert(loadedNavigation.minPolygonSize == navigation.minPolygonSize);
   assert(loadedNavigation.visibilityMask == navigation.visibilityMask);
+  assert(loadedMap.labelDensity == map.labelDensity);
+  assert(loadedNavigation.labelDensity == navigation.labelDensity);
+  assert(loadedNavigation.labelLanguageMode == navigation.labelLanguageMode);
+  assert(loadedNavigation.labelTextSize == navigation.labelTextSize);
+  assert(loadedNavigation.labelOrientation == navigation.labelOrientation);
   assert(independentStore.getUInt("visMask", 0) ==
          (map.visibilityMask | VISIBILITY_OVERLAY_MASK |
           VISIBILITY_EXTENDED_MARKER));

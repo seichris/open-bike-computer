@@ -107,6 +107,11 @@ int main() {
   assert(!shouldMirrorLegacySetting(16, false));
   assert(isIndependentSetting(16));
   assert(isIndependentSetting(22));
+  assert(isIndependentSetting(MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID));
+  assert(isIndependentSetting(MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID));
+  assert(isLabelSetting(MAP_LABEL_DENSITY_SETTING_ID));
+  assert(isLabelSetting(MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID));
+  assert(!isLabelSetting(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID));
   assert(!isIndependentSetting(15));
   assert(!shouldApplyMirroredZoomToMapNavigation(false, true));
   assert(!shouldApplyMirroredZoomToMapNavigation(true, false));
@@ -132,6 +137,12 @@ int main() {
          1);
   assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, 3) ==
          3);
+  assert(clampValue(MAP_LABEL_DENSITY_SETTING_ID, 4) == 3);
+  assert(clampValue(MAP_LABEL_LANGUAGE_MODE_SETTING_ID, 3) == 2);
+  assert(clampValue(MAP_LABEL_TEXT_SIZE_SETTING_ID, -1) == 0);
+  assert(clampValue(MAP_LABEL_ORIENTATION_SETTING_ID, 2) == 1);
+  assert(clampValue(MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID, -1) == 0);
+  assert(clampValue(MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID, 2) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(-3) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(0) == 4);
   assert(absoluteStreetWidthFromLegacyBoost(4) == 8);
