@@ -35,6 +35,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <esp_system.h>
@@ -342,6 +343,27 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
   return true;
 }
 
+bool BLENavigationServer::canRequestWorkoutStart() const {
+  return connected && bleSessionAuthenticated &&
+         mapTransferStatusCharacteristic != nullptr;
+}
+
+bool BLENavigationServer::requestWorkoutStart() {
+  if (!canRequestWorkoutStart()) {
+    Serial.println("BLE Workout: open the authenticated app to start");
+    return false;
+  }
+
+  static constexpr uint8_t request[] = {'W', 'R', 'E', 'Q'};
+  if (!notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, request,
+                                     sizeof(request))) {
+    Serial.println("BLE Workout: secure start request failed");
+    return false;
+  }
+  Serial.println("BLE Workout: start requested from Ride Stats");
+  return true;
+}
+
 static uint8_t deviceScreenBit(uint8_t screen) {
   return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
 }
@@ -393,6 +415,84 @@ static void clearCurrentNavigationData() {
 // Route geometry debouncing - skip redundant parses
 static uint32_t lastRouteHash = 0;
 static size_t lastRouteLen = 0;
+enum class PendingMapInputType : uint8_t { Route, Gps, Setting };
+static constexpr size_t MAX_PENDING_MAP_INPUT_BYTES = 512;
+struct PendingMapInput {
+  PendingMapInputType type = PendingMapInputType::Route;
+  uint16_t length = 0;
+  bool fallback = false;
+  bool pending = false;
+  uint8_t *data = nullptr;
+};
+static SemaphoreHandle_t pendingMapInputMutex = nullptr;
+static PendingMapInput pendingRouteInput;
+static PendingMapInput pendingGpsInput;
+static constexpr size_t MAP_SETTING_SLOT_COUNT = 256;
+static constexpr size_t MAP_SETTING_MASK_BYTES = MAP_SETTING_SLOT_COUNT / 8;
+static PendingMapInput pendingSettingInputs[MAP_SETTING_SLOT_COUNT];
+static uint8_t pendingSettingMask[MAP_SETTING_MASK_BYTES] = {0};
+static std::atomic<uint16_t> pendingMapInputCount{0};
+
+static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
+                          size_t len, const char *source) {
+  if (pendingMapInputMutex == nullptr || len > MAX_PENDING_MAP_INPUT_BYTES ||
+      (len > 0 && data == nullptr)) {
+    Serial.printf("BLE: rejected queued map input type=%u len=%u\n",
+                  static_cast<unsigned>(type), static_cast<unsigned>(len));
+    return false;
+  }
+  PendingMapInput input;
+  input.type = type;
+  input.length = static_cast<uint16_t>(len);
+  input.fallback = source != nullptr && strcmp(source, "fallback") == 0;
+  input.pending = true;
+  if (len > 0) {
+    input.data = static_cast<uint8_t *>(malloc(len));
+    if (input.data == nullptr) {
+      Serial.printf("BLE: map input allocation failed type=%u len=%u\n",
+                    static_cast<unsigned>(type), static_cast<unsigned>(len));
+      return false;
+    }
+    memcpy(input.data, data, len);
+  }
+  PendingMapInput *slot = nullptr;
+  switch (type) {
+  case PendingMapInputType::Route:
+    slot = &pendingRouteInput;
+    break;
+  case PendingMapInputType::Gps:
+    slot = &pendingGpsInput;
+    break;
+  case PendingMapInputType::Setting:
+    if (len == 0) {
+      Serial.println("BLE: rejected queued map setting without an ID");
+      free(input.data);
+      return false;
+    }
+    slot = &pendingSettingInputs[data[0]];
+    break;
+  }
+
+  if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+    free(input.data);
+    return false;
+  }
+  PendingMapInput replaced = *slot;
+  *slot = input;
+  if (!replaced.pending) {
+    pendingMapInputCount.fetch_add(1, std::memory_order_release);
+  }
+  if (type == PendingMapInputType::Setting) {
+    const uint8_t settingId = data[0];
+    pendingSettingMask[settingId / 8] |=
+        static_cast<uint8_t>(1U << (settingId % 8));
+  }
+  xSemaphoreGive(pendingMapInputMutex);
+  // Latest-state mailboxes make periodic GPS and repeated route/settings
+  // updates bounded without ever dropping the newest authoritative value.
+  free(replaced.data);
+  return true;
+}
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static uint32_t lastBleRtcSyncMs = 0;
 constexpr uint32_t BLE_RTC_SYNC_INTERVAL_MS = 10UL * 60UL * 1000UL;
@@ -2077,6 +2177,87 @@ static void handleMapSettingPayload(const uint8_t *data, size_t len,
   handleMapSetting(settingId, settingValue, source);
 }
 
+static void processPendingMapInputs() {
+  if (pendingMapInputMutex == nullptr ||
+      pendingMapInputCount.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+
+  auto takeSlot = [](PendingMapInput &slot) {
+    PendingMapInput input{};
+    if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+      return input;
+    }
+    if (slot.pending) {
+      input = slot;
+      slot = {};
+      pendingMapInputCount.fetch_sub(1, std::memory_order_release);
+    }
+    xSemaphoreGive(pendingMapInputMutex);
+    return input;
+  };
+
+  auto processInput = [](PendingMapInput input) {
+    if (!input.pending) {
+      return;
+    }
+
+    const char *source = input.fallback ? "fallback" : "native";
+    switch (input.type) {
+    case PendingMapInputType::Route:
+      handleRouteGeometryPayload(input.data, input.length, source);
+      break;
+    case PendingMapInputType::Gps:
+      handleGpsPayload(input.data, input.length, source);
+      break;
+    case PendingMapInputType::Setting:
+      handleMapSettingPayload(input.data, input.length, source);
+      break;
+    }
+    free(input.data);
+  };
+
+  processInput(takeSlot(pendingRouteInput));
+  processInput(takeSlot(pendingGpsInput));
+  while (true) {
+    PendingMapInput input{};
+    if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+      break;
+    }
+    int16_t pendingSettingId = -1;
+    for (size_t byteIndex = 0; byteIndex < MAP_SETTING_MASK_BYTES;
+         ++byteIndex) {
+      const uint8_t bits = pendingSettingMask[byteIndex];
+      if (bits == 0) {
+        continue;
+      }
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        if ((bits & static_cast<uint8_t>(1U << bit)) != 0) {
+          pendingSettingId =
+              static_cast<int16_t>(byteIndex * 8 + bit);
+          pendingSettingMask[byteIndex] &=
+              static_cast<uint8_t>(~(1U << bit));
+          break;
+        }
+      }
+      if (pendingSettingId >= 0) {
+        break;
+      }
+    }
+    if (pendingSettingId >= 0) {
+      PendingMapInput &slot = pendingSettingInputs[pendingSettingId];
+      input = slot;
+      slot = {};
+      pendingMapInputCount.fetch_sub(1, std::memory_order_release);
+    }
+    xSemaphoreGive(pendingMapInputMutex);
+    if (pendingSettingId < 0) {
+      break;
+    }
+    processInput(input);
+  }
+}
+
 // ============================================================================
 // NimBLE Callbacks
 // ============================================================================
@@ -2244,8 +2425,9 @@ public:
         power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
         return;
       }
-      handleRouteGeometryPayload((const uint8_t *)value.data() + 4,
-                                 value.length() - 4, "fallback");
+      queueMapInput(PendingMapInputType::Route,
+                    (const uint8_t *)value.data() + 4, value.length() - 4,
+                    "fallback");
       return;
     }
 
@@ -2254,8 +2436,9 @@ public:
         power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
         return;
       }
-      handleGpsPayload((const uint8_t *)value.data() + 4, value.length() - 4,
-                       "fallback");
+      queueMapInput(PendingMapInputType::Gps,
+                    (const uint8_t *)value.data() + 4, value.length() - 4,
+                    "fallback");
       return;
     }
 
@@ -2264,8 +2447,9 @@ public:
         power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
         return;
       }
-      handleMapSettingPayload((const uint8_t *)value.data() + 4,
-                              value.length() - 4, "fallback");
+      queueMapInput(PendingMapInputType::Setting,
+                    (const uint8_t *)value.data() + 4, value.length() - 4,
+                    "fallback");
       return;
     }
 
@@ -2353,8 +2537,8 @@ public:
       return;
     }
 
-    handleRouteGeometryPayload((const uint8_t *)value.data(), value.length(),
-                               "native");
+    queueMapInput(PendingMapInputType::Route,
+                  (const uint8_t *)value.data(), value.length(), "native");
   }
 };
 
@@ -2373,7 +2557,8 @@ public:
       return;
     }
 
-    handleGpsPayload((const uint8_t *)value.data(), value.length(), "native");
+    queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
+                  value.length(), "native");
   }
 };
 
@@ -2483,8 +2668,8 @@ public:
       return;
     }
 
-    handleMapSettingPayload((const uint8_t *)value.data(), value.length(),
-                            "native");
+    queueMapInput(PendingMapInputType::Setting,
+                  (const uint8_t *)value.data(), value.length(), "native");
   }
 };
 
@@ -2559,6 +2744,13 @@ void BLENavigationServer::init(const char *deviceName) {
 
   // Load persisted settings from NVS
   loadSettingsFromNVS();
+
+  if (pendingMapInputMutex == nullptr) {
+    pendingMapInputMutex = xSemaphoreCreateMutex();
+    if (pendingMapInputMutex == nullptr) {
+      Serial.println("BLE: failed to create serialized map input mailbox");
+    }
+  }
 
   Serial.println("BLE: Initializing NimBLE server...");
 
@@ -2686,6 +2878,10 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
+  // NimBLE callbacks run on the host task. Apply the latest renderer-visible
+  // route, GPS, and per-setting state here on the UI task so a synchronous
+  // rolling build sees one stable generation from first cell through last.
+  processPendingMapInputs();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&

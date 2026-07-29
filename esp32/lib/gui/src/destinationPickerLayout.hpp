@@ -8,6 +8,22 @@ constexpr int32_t kMinimumRowHeight = 88;
 constexpr int32_t kRowGap = 4;
 constexpr int32_t kTextVerticalPadding = 8;
 constexpr int32_t kBasePickerPadding = 4;
+constexpr int32_t kRectangularScreenInset = 16;
+
+constexpr bool usesRoundScreenSafeArea(int32_t screenWidth,
+                                       int32_t screenHeight) {
+  return screenWidth == screenHeight;
+}
+
+constexpr int32_t fullScreenInset(int32_t screenWidth,
+                                  int32_t screenHeight) {
+  // Move interactive content away from the clipped corners of the round
+  // 1.75-inch panel. The first row starts below the heading, where this inset
+  // keeps both its favorite star and wrapped address text visible.
+  return usesRoundScreenSafeArea(screenWidth, screenHeight)
+             ? (screenWidth + 8) / 9
+             : kRectangularScreenInset;
+}
 
 constexpr int32_t bottomPadding(int32_t screenWidth, int32_t screenHeight,
                                 uint8_t rowCount) {

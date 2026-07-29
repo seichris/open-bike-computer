@@ -15,10 +15,8 @@ jobs:
         target:
           - WAVESHARE_AMOLED_175
           - WAVESHARE_AMOLED_175_POWER_METRICS
-          - WAVESHARE_AMOLED_175_SPEAKER_HONK
           - WAVESHARE_AMOLED_206
           - WAVESHARE_AMOLED_206_POWER_METRICS
-          - WAVESHARE_AMOLED_206_SPEAKER_HONK
     defaults:
       run:
         working-directory: esp32
@@ -84,120 +82,6 @@ jobs:
           "$RUNNER_TEMP/bike-computer-release/Build/Products/Release-iphoneos/BikeComputer.app"
         working-directory: ios-app
 
-  osm:
-    name: OSM Pipeline
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: tools/OSM_Extract
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install validation dependencies
-        run: python -m pip install --upgrade pyyaml
-      - name: Python syntax
-        run: |
-          python -m py_compile \
-            scripts/extract_features.py \
-            scripts/block_progress.py \
-            scripts/feature_types.py \
-            scripts/funcs.py \
-            scripts/map_format.py \
-            tests/test_config.py \
-            tests/test_feature_types.py \
-            tests/test_map_format.py
-      - name: YAML/config tests
-        run: python -m unittest discover -s tests
-      - name: Shell syntax
-        run: bash -n scripts/pbf_to_geojson.sh
-      - name: Shellcheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          scandir: ./tools/OSM_Extract/scripts
-      - name: Compose config
-        run: docker compose config
-      - name: Build tools image
-        run: docker compose build tools
-      - name: Smoke test tools image
-        run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import shapely; import yaml; from osgeo import ogr"
-
-  backend:
-    name: Map Backend
-    runs-on: ubuntu-latest
-    permissions:
-      attestations: read
-      contents: read
-      packages: read
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: docker/setup-buildx-action@v3
-      - name: Install backend test dependencies
-        run: python -m pip install -e '.[test,object-storage]'
-      - name: Python syntax
-        run: >-
-          python -m py_compile
-          map_platform/*.py
-          tests/*.py
-          ../deploy/map-platform/*.py
-          ../deploy/map-platform/tests/*.py
-      - name: Generated map stream trust registry
-        run: |
-          python tools/generate_map_stream_trust.py --check
-          python tools/check_map_stream_hardware_gate.py --validate-requirements
-      - name: Unit tests
-        run: |
-          python -m unittest discover -s tests
-          python -m unittest discover -s ../deploy/map-platform/tests
-      - name: Production Compose config
-        env:
-          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
-          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
-          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
-          MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
-        run: docker compose config
-      - name: GitOps production Compose config
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
-          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
-          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
-          MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
-        run: |
-          docker compose -f ../deploy/map-platform/compose.yaml config
-          python ../deploy/map-platform/verify_registry_images.py \
-            ../deploy/map-platform/compose.yaml
-      - name: Build backend production image
-        run: >-
-          docker build
-          --file Dockerfile
-          --tag open-bike-map-platform-ci
-          ..
-      - name: Smoke-start backend production image
-        run: >-
-          docker run --rm
-          -e MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret
-          -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
-          -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
-          open-bike-map-platform-ci
-          python -c "from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
-      - name: Smoke worker heartbeat
-        run: >-
-          docker run --rm
-          -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
-          -e MAP_PLATFORM_WORKER_HEARTBEAT_PATH=/tmp/map-platform-data/health/worker
-          open-bike-map-platform-ci
-          bash -ec 'map-platform worker-loop --idle-sleep-seconds 0.1 & worker=$!;
-          for attempt in {1..50}; do test -s /tmp/map-platform-data/health/worker && break; sleep 0.1; done;
-          test -s /tmp/map-platform-data/health/worker; kill "$worker"; wait "$worker" || true'
-
   esp32-host:
     name: ESP32 Host Tests
     runs-on: ubuntu-latest
@@ -228,6 +112,16 @@ jobs:
             tools/tests/test_power_metrics_schema.cpp \
             -o /tmp/test_power_metrics_schema
           /tmp/test_power_metrics_schema
+      - name: Two-finger Map zoom host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_cst9217_touch_frame.cpp \
+            -o /tmp/test_cst9217_touch_frame
+          /tmp/test_cst9217_touch_frame
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_pinch_zoom.cpp \
+            -o /tmp/test_map_pinch_zoom
+          /tmp/test_map_pinch_zoom
       - name: Map profile protocol host tests
         run: |
           g++ -std=c++17 \

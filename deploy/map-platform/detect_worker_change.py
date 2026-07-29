@@ -28,7 +28,7 @@ IMAGE_INPUT_ROOTS = (
     "config/map-stream-trust.json",
 )
 PROMOTION_INPUT_ROOTS = IMAGE_INPUT_ROOTS + (
-    ".github/workflows/ci.yml",
+    ".github/workflows/map-platform-ci.yml",
     "deploy/map-platform/detect_worker_change.py",
     "deploy/map-platform/select_worker_promotion.py",
     "deploy/map-platform/update_image.py",

@@ -8,6 +8,9 @@
 
 #include "power.hpp"
 #include "power_metrics.hpp"
+#ifdef USE_ARDUINO_GFX
+#include <Arduino_GFX_Library.h>
+#endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "axp2101.hpp"

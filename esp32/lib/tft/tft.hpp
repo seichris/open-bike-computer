@@ -9,12 +9,12 @@
 #pragma once
 
 #include <Arduino.h>
-#include "storage.hpp"
-#include "panelSelect.hpp"
+#include "../storage/storage.hpp"
+#include "../panel/panelSelect.hpp"
 
 #ifdef USE_ARDUINO_GFX
 // Use Arduino_GFX for CO5300 AMOLED
-#include "WAVESHARE_AMOLED_175.hpp"
+#include "../panel/WAVESHARE_AMOLED_175.hpp"
 #else
 // Use LovyanGFX for other displays
 #include <LGFX_TFT_eSPI.hpp>

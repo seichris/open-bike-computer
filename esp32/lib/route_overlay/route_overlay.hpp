@@ -9,6 +9,7 @@
  */
 
 #include "../utils/src/psram_allocator.hpp"
+#include "navigation_visual_style.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
 #include <cstdint>
@@ -54,10 +55,12 @@ public:
    * @param mapScrWidth Map screen width (for coordinate centering)
    * @param mapScrHeight Map screen height (for Y-axis flip)
    */
-  void drawRoute(lv_obj_t *canvas, int32_t centerMercatorX,
-                 int32_t centerMercatorY, uint8_t zoom, uint16_t mapScrWidth,
+  void drawRoute(lv_obj_t *canvas, double centerMercatorX,
+                 double centerMercatorY, uint8_t zoom, uint16_t mapScrWidth,
                  uint16_t mapScrHeight, double rotationRad = 0.0,
-                 int16_t anchorX = -1, int16_t anchorY = -1);
+                 int16_t anchorX = -1, int16_t anchorY = -1,
+                 int32_t rasterCellOffsetX = 0,
+                 int32_t rasterCellOffsetY = 0);
 
   /**
    * @brief Clear all route points
@@ -75,6 +78,9 @@ public:
    */
   size_t getPointCount() const { return points.size(); }
 
+  /** Monotonic content revision for invalidating prepared raster map cells. */
+  uint32_t revision() const { return revisionCounter; }
+
   /**
    * @brief Estimate route bearing near a current GPS position.
    *
@@ -87,22 +93,20 @@ public:
 
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
-
-  static constexpr uint16_t ROUTE_COLOR =
-      0x1F9F; // Bright blue (RGB565, byte-swapped for LVGL)
+  uint32_t revisionCounter = 0;
 
   /**
    * @brief Convert longitude to screen X coordinate
    */
-  int16_t geoToScreenX(int32_t lon, int32_t centerLon, uint8_t zoom,
-                       int16_t screenWidth, int16_t anchorX);
+  double geoToScreenX(int32_t lon, double centerLon, uint8_t zoom,
+                      int16_t screenWidth, int16_t anchorX);
 
   /**
    * @brief Convert latitude to screen Y coordinate
    */
-  int16_t geoToScreenY(int32_t lat, int32_t centerLat, uint8_t zoom,
-                       int16_t screenHeight, int16_t screenWidth,
-                       int16_t anchorY);
+  double geoToScreenY(int32_t lat, double centerLat, uint8_t zoom,
+                      int16_t screenHeight, int16_t screenWidth,
+                      int16_t anchorY);
 
   /**
    * @brief Draw a single line segment with thickness

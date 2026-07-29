@@ -8,6 +8,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "waveshare_board.hpp"
+#include "cst9217_touch_frame.hpp"
 #include <Arduino.h>
 #include <hal.hpp>
 
@@ -22,7 +23,8 @@ constexpr uint8_t FT3168_ADDR = waveshare_board::FT3168_ADDR;
 constexpr uint8_t CST9217_INT_PIN = TCH_I2C_INT;
 constexpr uint16_t CST9217_DATA_REG = 0xD000;
 constexpr uint8_t CST9217_ACK = 0xAB;
-constexpr uint8_t CST9217_DATA_LENGTH = 10;
+constexpr uint8_t CST9217_DATA_LENGTH =
+    static_cast<uint8_t>(CST9217_FRAME_LENGTH);
 
 #ifdef WAVESHARE_AMOLED_206
 constexpr uint8_t FT3168_INT_PIN = TCH_I2C_INT;
@@ -52,6 +54,7 @@ constexpr uint32_t ACTIVE_FAILURE_GRACE_MS = 600;
 constexpr uint32_t IDLE_FAILURE_BASE_RETRY_MS = 100;
 constexpr uint32_t IDLE_FAILURE_MAX_RETRY_MS = 700;
 constexpr uint32_t REINIT_BACKOFF_MS = 1200;
+constexpr uint32_t DIAGNOSTIC_LOG_INTERVAL_MS = 1000;
 
 } // namespace waveshare_board::touch
 

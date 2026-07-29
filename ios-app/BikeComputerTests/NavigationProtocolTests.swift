@@ -622,6 +622,8 @@ struct NavigationProtocolTests {
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
+        testNavigationEngineRefreshesElapsedWithoutLocationChange()
+        testNavigationEngineClearsRideTelemetryOnStop()
         testNavigationEngineRestoresPhysicalGPSAfterSimulation()
         testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
@@ -3936,6 +3938,14 @@ struct NavigationProtocolTests {
         assert(DeviceDestinationRequest.parse(requestData.dropLast()) == nil,
                "truncated DREQ packets are rejected")
 
+        let workoutStartRequest = Data(
+            DeviceBLEProtocol.workoutStartRequestPrefix.utf8
+        )
+        assert(DeviceWorkoutStartRequest.matches(workoutStartRequest),
+               "WREQ matches the exact workout start request")
+        assert(!DeviceWorkoutStartRequest.matches(workoutStartRequest + Data([0])),
+               "extended WREQ packets are rejected")
+
         let status = DeviceDestinationStatusPacketBuilder.data(
             generation: 17,
             token: 3,
@@ -3986,6 +3996,13 @@ struct NavigationProtocolTests {
         assertEqual(receivedRequest,
                     DeviceDestinationRequest(generation: 17, token: 3),
                     "BLE manager forwards the exact authenticated device selection")
+
+        var workoutStartRequestCount = 0
+        manager.onWorkoutStartRequest = { workoutStartRequestCount += 1 }
+        assert(manager.handleNavigationCharacteristicNotification(workoutStartRequest),
+               "authenticated WREQ notification is consumed")
+        assertEqual(workoutStartRequestCount, 1,
+                    "BLE manager forwards the authenticated workout start request")
 
         var writes: [Data] = []
         let managerFrames = DeviceDestinationCatalogChunker.frames(
@@ -8556,6 +8573,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.destinationCatalogChunkPrefix, "DLST", "destination catalogs use DLST chunks")
         assertEqual(DeviceBLEProtocol.destinationRequestPrefix, "DREQ", "device destination requests use DREQ")
         assertEqual(DeviceBLEProtocol.destinationStatusPrefix, "DNST", "destination route statuses use DNST")
+        assertEqual(DeviceBLEProtocol.workoutStartRequestPrefix, "WREQ", "device workout starts use WREQ")
         assertEqual(DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask, 4, "PWR honk acknowledgement uses capability bit 2")
         assertEqual(DeviceBLEProtocol.independentMapProfilesCapabilityMask, 8, "independent map profiles use capability bit 3")
         assertEqual(DeviceBLEProtocol.extendedMapVisibilityCapabilityMask, 16, "extended map visibility uses capability bit 4")
@@ -12392,6 +12410,79 @@ struct NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
+    }
+
+    static func testNavigationEngineRefreshesElapsedWithoutLocationChange() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let clock = TestClock()
+        let engine = NavigationEngine(now: clock.now)
+        engine.setBLEManager(manager)
+
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        let initialLocation = testLocation(
+            latitude: coordinates[0].latitude,
+            longitude: coordinates[0].longitude
+        )
+
+        engine.startNavigation(with: route, initialLocation: initialLocation)
+        manager.sentGPSPositions.removeAll()
+        clock.advance(by: 7)
+        engine.refreshRideTelemetryForTesting()
+
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "navigation heartbeat should refresh telemetry without movement")
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readUInt32LE(packet, offset: 18), 0,
+                    "stationary heartbeat should preserve ride distance")
+        assertEqual(readUInt32LE(packet, offset: 22), 7,
+                    "stationary heartbeat should advance elapsed time")
+        engine.stopNavigation()
+    }
+
+    static func testNavigationEngineClearsRideTelemetryOnStop() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: coordinates)
+        let initialLocation = testLocation(
+            latitude: coordinates[0].latitude,
+            longitude: coordinates[0].longitude
+        )
+        engine.startNavigation(with: route, initialLocation: initialLocation)
+        manager.sentGPSPositions.removeAll()
+
+        engine.stopNavigation()
+
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "stopping navigation should immediately send idle telemetry")
+        guard let packet = manager.sentGPSPositions.first else { return }
+        assertEqual(readUInt16LE(packet, offset: 14),
+                    DeviceGPSPacketBuilder.invalidSpeedCmps,
+                    "stopped navigation should clear ride speed")
+        assertEqual(readInt16LE(packet, offset: 16), 0,
+                    "stopped navigation should clear ride altitude")
+        assertEqual(readUInt32LE(packet, offset: 18), 0,
+                    "stopped navigation should clear ride distance")
+        assertEqual(readUInt32LE(packet, offset: 22), 0,
+                    "stopped navigation should clear elapsed time")
+        assertEqual(readUInt32LE(packet, offset: 26),
+                    DeviceGPSPacketBuilder.invalidRouteRemainingMeters,
+                    "stopped navigation should clear route remaining")
     }
 
     static func testNavigationEngineRestoresPhysicalGPSAfterSimulation() {

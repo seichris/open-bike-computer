@@ -38,7 +38,7 @@ zoom_dir pinchZoom(const touch_point_t prev[TOUCH_MAX_POINTS],const touch_point_
 #else
 // LovyanGFX version
 #include <LovyanGFX.hpp>
-#include "tft.hpp"
+#include "../../tft/tft.hpp"
 
 #define TOUCH_MAX_POINTS 2
 #define TOUCH_DOUBLE_TOUCH_INTERVAL 150

@@ -8,8 +8,8 @@
 
 #pragma once
 
-#include "tft.hpp"
-#include "globalGuiDef.h"
+#include "../../tft/tft.hpp"
+#include "../../gui/src/globalGuiDef.h"
 
 void objHideCursor(_lv_obj_t *obj);
 void objSelect(_lv_obj_t *obj);

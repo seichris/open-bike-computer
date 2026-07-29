@@ -27,6 +27,10 @@ This is the repository-side deployment admission control: without it, a direct
 push could change the watched production Compose without passing pull-request
 CI.
 
+`Map Platform CI` owns the `Map Backend` and `OSM Pipeline` checks. It runs on
+every pull request so the required `Map Backend` status is always reported;
+push runs are limited to map-platform paths.
+
 ## One-time Coolify configuration
 
 Update the existing `open-bike-computer-map-platform` resource rather than
@@ -93,9 +97,11 @@ the exact pinned image. A promotion-only merge does not start another image
 build, so the workflow cannot loop.
 
 GitHub suppresses workflow events caused by `GITHUB_TOKEN`, so the promotion
-job explicitly dispatches `ci.yml` for the promotion commit after opening or
-refreshing the pull request. This keeps the automation on the least-privileged
-repository token without requiring a personal access token.
+job explicitly dispatches `map-platform-ci.yml` for the promotion commit after
+opening or refreshing the pull request. The dedicated workflow runs only the
+map backend and OSM checks, keeping unrelated firmware and iOS CI changes out
+of the image-promotion path while retaining the least-privileged repository
+token.
 
 Validate the lock locally with:
 

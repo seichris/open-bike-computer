@@ -43,6 +43,8 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
+    private var rideTelemetryTimer: Timer?
+    private let rideTelemetryRefreshInterval: TimeInterval = 1.0
     private let now: () -> Date
     
     // Simulation state
@@ -60,6 +62,11 @@ class NavigationEngine: NSObject, ObservableObject {
     init(now: @escaping () -> Date = Date.init) {
         self.now = now
         super.init()
+    }
+
+    deinit {
+        rideTelemetryTimer?.invalidate()
+        simulationTimer?.invalidate()
     }
     
     // MARK: - Public Methods
@@ -130,11 +137,14 @@ class NavigationEngine: NSObject, ObservableObject {
         
         if isTestMode {
             startSimulation()
-        } else if let initialLocation {
-            sendRouteGeometryIfNeeded(currentLocation: initialLocation)
-            processLocation(initialLocation)
-            updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
-            sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+        } else {
+            startRideTelemetryTimer()
+            if let initialLocation {
+                sendRouteGeometryIfNeeded(currentLocation: initialLocation)
+                processLocation(initialLocation)
+                updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
+                sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+            }
         }
     }
 
@@ -179,7 +189,13 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Stop navigation
     func stopNavigation() {
-        let externalLocationToRestore = isSimulationMode ? latestExternalGpsLocation : nil
+        let deviceLocationToRestore: (location: CLLocation, convertFromMapKitRoute: Bool)? = {
+            if isSimulationMode, let latestExternalGpsLocation {
+                return (latestExternalGpsLocation, false)
+            }
+            return lastDeviceGpsLocation
+        }()
+        stopRideTelemetryTimer()
         bleManager?.clearRouteGeometry()
         isNavigating = false
         currentRoute = nil
@@ -198,9 +214,9 @@ class NavigationEngine: NSObject, ObservableObject {
         expectedArrivalDate = nil
         resetRideTelemetry(startingAt: nil)
         stopSimulation()
-        if let externalLocationToRestore {
-            sendDeviceGpsPosition(externalLocationToRestore,
-                                  convertFromMapKitRoute: false,
+        if let deviceLocationToRestore {
+            sendDeviceGpsPosition(deviceLocationToRestore.location,
+                                  convertFromMapKitRoute: deviceLocationToRestore.convertFromMapKitRoute,
                                   includeRideTelemetry: false)
         }
         print("Navigation stopped")
@@ -516,6 +532,37 @@ class NavigationEngine: NSObject, ObservableObject {
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute,
                               includeRideTelemetry: isNavigating)
     }
+
+    private func startRideTelemetryTimer() {
+        stopRideTelemetryTimer()
+        let timer = Timer(timeInterval: rideTelemetryRefreshInterval,
+                          repeats: true) { [weak self] _ in
+            self?.refreshRideTelemetry()
+        }
+        rideTelemetryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopRideTelemetryTimer() {
+        rideTelemetryTimer?.invalidate()
+        rideTelemetryTimer = nil
+    }
+
+    private func refreshRideTelemetry() {
+        guard isNavigating,
+              !isSimulationMode,
+              let lastDeviceGpsLocation else { return }
+        sendDeviceGpsPosition(
+            lastDeviceGpsLocation.location,
+            convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute
+        )
+    }
+
+    #if HOST_TESTING
+    func refreshRideTelemetryForTesting() {
+        refreshRideTelemetry()
+    }
+    #endif
 
     private func resetRideTelemetry(startingAt location: CLLocation?) {
         rideStartDate = location == nil ? nil : now()
