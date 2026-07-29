@@ -1,6 +1,7 @@
 # Firmware battery-life hardware validation
 
-Status: **baseline measurements pending on both hardware targets**.
+Status: **source-monitor baseline measurements pending**. Physical bring-up has
+passed on the available 1.75-inch target; 2.06-inch hardware is unavailable.
 
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
@@ -74,6 +75,29 @@ USB serial can change power behavior and USB power invalidates the baseline.
 Capture `PWRMET` over an electrically appropriate, battery-isolated UART when
 available, or run a separate instrumented correlation pass. Never merge a
 USB-powered trace into the battery-terminal energy results.
+
+## Physical bring-up observations (not an electrical baseline)
+
+These observations prove firmware identity and basic functional behavior only.
+They must not be entered into the raw scenario results or used for battery-life
+projections.
+
+| Field | AMOLED 1.75 observation |
+| --- | --- |
+| Date/time zone | 2026-07-29, Asia/Singapore |
+| Git commit SHA | `f3f703ea582725c9f5e4920eacea82a4276d65fb` |
+| Firmware binary SHA-256 | `805dc163ce6caca067f207b6777e32337a2b31ff265241c638ad928a91d04cb9` |
+| Physical target | Waveshare AMOLED 1.75; USB serial `28:84:85:3B:68:60` |
+| Flash/boot | Exact metrics build flashed and healthy boot observed |
+| Metrics transport | Four complete `PWRMET` records; zero `PWRMET_ERROR` records |
+| Touch and map interaction | Operator confirmed tap, map drag, and pinch-to-zoom work |
+| Inline USB meter | Operator reported `5.1 W`, unchanged from the previous firmware |
+| Interpretation | Coarse USB-path observation only; includes unknown USB/charging losses and has no saved high-rate trace |
+| AMOLED 2.06 | Physical hardware unavailable; build validation only |
+
+The unchanged inline-meter reading is consistent with Phase 0 being
+instrumentation-only, but its resolution and connection point cannot establish
+equivalence or savings. It is retained solely as a bring-up observation.
 
 ## Trace analysis
 
