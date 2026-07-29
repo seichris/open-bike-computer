@@ -76,6 +76,11 @@ int main() {
   assert(!shouldMirrorLegacySetting(16, false));
   assert(isIndependentSetting(16));
   assert(isIndependentSetting(22));
+  assert(isIndependentSetting(29));
+  assert(isIndependentSetting(32));
+  assert(isLabelSetting(25));
+  assert(isLabelSetting(32));
+  assert(!isLabelSetting(24));
   assert(!isIndependentSetting(15));
   assert(!shouldApplyMirroredZoomToMapNavigation(false, true));
   assert(!shouldApplyMirroredZoomToMapNavigation(true, false));
@@ -93,6 +98,12 @@ int main() {
   assert(clampValue(21, -4) == -3);
   assert(clampValue(10, 0) == 1);
   assert(clampValue(22, 6) == 5);
+  assert(clampValue(25, 4) == 3);
+  assert(clampValue(26, 3) == 2);
+  assert(clampValue(27, -1) == 0);
+  assert(clampValue(28, 2) == 1);
+  assert(clampValue(29, -1) == 0);
+  assert(clampValue(32, 2) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(-3) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(0) == 4);
   assert(absoluteStreetWidthFromLegacyBoost(4) == 8);

@@ -207,6 +207,12 @@ jobs:
             tools/tests/test_map_profile_protocol.cpp \
             -o /tmp/test_map_profile_protocol
           /tmp/test_map_profile_protocol
+      - name: Device capabilities protocol host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_capabilities_protocol.cpp \
+            -o /tmp/test_device_capabilities_protocol
+          /tmp/test_device_capabilities_protocol
       - name: Filled line rasterizer host tests
         run: |
           g++ -std=c++17 -Wall -Wextra \
@@ -270,11 +276,44 @@ jobs:
             tools/tests/test_map_block_format.cpp \
             -o /tmp/test_map_block_format
           /tmp/test_map_block_format
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapFontAssetFormat.cpp \
+            tools/tests/test_map_font_asset_format.cpp \
+            -o /tmp/test_map_font_asset_format
+          /tmp/test_map_font_asset_format
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            tools/tests/test_map_label_block.cpp \
+            -o /tmp/test_map_label_block
+          /tmp/test_map_label_block
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapFontAssetFormat.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            tools/tests/test_map_font_asset.cpp \
+            -o /tmp/test_map_font_asset
+          /tmp/test_map_font_asset
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapLabelLayout.cpp \
+            tools/tests/test_map_label_layout.cpp \
+            -o /tmp/test_map_label_layout
+          /tmp/test_map_label_layout
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_label_rasterizer.cpp \
+            -o /tmp/test_map_label_rasterizer
+          /tmp/test_map_label_rasterizer
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_label_selection.cpp \
+            -o /tmp/test_map_label_selection
+          /tmp/test_map_label_selection
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            lib/maps/src/mapFontAssetFormat.cpp \
             tools/tests/test_map_transfer.cpp \
             -o /tmp/test_map_transfer
           /tmp/test_map_transfer
@@ -283,6 +322,9 @@ jobs:
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            lib/maps/src/mapFontAssetFormat.cpp \
             lib/map_transfer/map_stream_format.cpp \
             lib/map_transfer/map_stream_crypto.cpp \
             lib/map_transfer/map_stream_sha.cpp \
@@ -303,6 +345,9 @@ jobs:
             lib/map_transfer/map_stream_receiver.cpp \
             lib/map_transfer/map_stream_compiled_trust.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            lib/maps/src/mapFontAssetFormat.cpp \
             tools/tests/test_map_stream_install.cpp \
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_install

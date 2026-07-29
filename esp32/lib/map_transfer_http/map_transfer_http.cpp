@@ -873,6 +873,10 @@ InstallStatus MapTransferHttpServer::supersedeRecoverableStreamForArchive() {
 void MapTransferHttpServer::handleStatus(WiFiClient &client) {
   ActiveMapSelection activeMap;
   InstallStatus active = installer_.readActiveMap(activeMap);
+  MapManifest activeManifest;
+  const InstallStatus manifestStatus =
+      active.ok ? installer_.readActiveManifest(activeManifest)
+                : InstallStatus{};
   HttpTransferStatus transferStatus = status();
   const bool streamSupported = streamInstallSupported();
 
@@ -904,6 +908,25 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
               jsonEscape(activeMap.sessionId) + "\"";
+    }
+    if (!activeMap.manifestReceipt.empty()) {
+      body += ",\"activeManifestReceipt\":\"" +
+              jsonEscape(activeMap.manifestReceipt) + "\"";
+    }
+    if (manifestStatus.ok) {
+      body += ",\"activeRendererFormat\":" +
+              std::to_string(activeManifest.formatVersion) +
+              ",\"labelProfileVersion\":" +
+              std::to_string(activeManifest.labelProfileVersion) +
+              ",\"labelLanguages\":[";
+      for (size_t index = 0; index < activeManifest.labelLanguages.size();
+           ++index) {
+        if (index != 0)
+          body += ",";
+        body += "\"" + jsonEscape(activeManifest.labelLanguages[index]) + "\"";
+      }
+      body += "],\"fontAssetHealthy\":";
+      body += activeManifest.formatVersion == 2 ? "true" : "false";
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +

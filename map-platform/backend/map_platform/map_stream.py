@@ -37,6 +37,7 @@ MAX_RELATIVE_PATH_BYTES = MAX_PACK_RELATIVE_PATH_BYTES
 MAX_FILE_COUNT = 100_000
 MAX_PAYLOAD_BYTES = 512 * 1024 * 1024
 MAX_BLOCK_BYTES = 2 * 1024 * 1024
+MAX_FONT_ASSET_BYTES = 16 * 1024 * 1024
 COORDINATE_E7_SCALE = Decimal("10000000")
 
 _HEADER = struct.Struct("<8sHHIHHIQ")
@@ -294,7 +295,13 @@ def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
         if (
             isinstance(byte_count, bool)
             or not isinstance(byte_count, int)
-            or not 0 < byte_count <= MAX_BLOCK_BYTES
+            or not 0
+            < byte_count
+            <= (
+                MAX_FONT_ASSET_BYTES
+                if path.endswith("/assets/street-labels.fma")
+                else MAX_BLOCK_BYTES
+            )
         ):
             raise MapStreamFormatError("map stream manifest file size is invalid")
         payload_bytes += byte_count

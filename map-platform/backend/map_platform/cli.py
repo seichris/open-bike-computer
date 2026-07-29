@@ -9,6 +9,7 @@ from pathlib import Path
 from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
+from .map_labels import label_target2_generation_enabled
 from .map_signing import load_map_artifact_signer_from_environment
 from .map_stream_build_identity import (
     image_digest_from_reference,
@@ -337,7 +338,11 @@ def main() -> int:
         source_index_path,
         fallback_provider=source_provider,
     )
-    service = MapJobService(source_index, store)
+    service = MapJobService(
+        source_index,
+        store,
+        label_target2_enabled=label_target2_generation_enabled(),
+    )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
     def create_pipeline() -> MapBuildPipeline:

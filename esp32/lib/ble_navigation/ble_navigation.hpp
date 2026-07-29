@@ -96,6 +96,12 @@ struct ScreenMapRenderSettings {
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
   uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+  uint8_t labelDensity = map_profile_protocol::DEFAULT_LABEL_DENSITY;
+  uint8_t labelLanguageMode =
+      map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE;
+  uint8_t labelTextSize = map_profile_protocol::DEFAULT_LABEL_TEXT_SIZE;
+  uint8_t labelOrientation =
+      map_profile_protocol::DEFAULT_LABEL_ORIENTATION;
 };
 
 struct MapRenderSettings {

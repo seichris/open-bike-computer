@@ -111,7 +111,9 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
-                        UICustomizationSettingsView()
+                        UICustomizationSettingsView(
+                            offlineMapManager: offlineMapManager
+                        )
                     } label: {
                         Label("UI Customization", systemImage: "slider.horizontal.3")
                     }
@@ -812,6 +814,7 @@ private struct DeviceScreensSettingsSection: View {
 
 private struct UICustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var offlineMapManager: OfflineMapManager
 
     private var screenStylesFooter: String {
         if !bleManager.hasReceivedDeviceCapabilities {
@@ -827,7 +830,10 @@ private struct UICustomizationSettingsView: View {
         Form {
             Section(header: Text("Screen Styles"), footer: Text(screenStylesFooter)) {
                 NavigationLink {
-                    MapStyleSettingsView(screen: .map)
+                    MapStyleSettingsView(
+                        screen: .map,
+                        offlineMapManager: offlineMapManager
+                    )
                 } label: {
                     Label(bleManager.supportsIndependentMapProfiles ? "Map" : "Map Screens",
                           systemImage: "map")
@@ -835,7 +841,10 @@ private struct UICustomizationSettingsView: View {
 
                 if bleManager.supportsIndependentMapProfiles {
                     NavigationLink {
-                        MapStyleSettingsView(screen: .mapPlusNavigation)
+                        MapStyleSettingsView(
+                            screen: .mapPlusNavigation,
+                            offlineMapManager: offlineMapManager
+                        )
                     } label: {
                         Label("Map + Navigation", systemImage: "location.north.line")
                     }
@@ -883,6 +892,39 @@ private enum MapStyleScreen {
 private struct MapStyleSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     let screen: MapStyleScreen
+    @ObservedObject var offlineMapManager: OfflineMapManager
+
+    private var labelsAvailable: Bool {
+        bleManager.activeMapRendererFormat == 2 &&
+            bleManager.activeMapLabelProfileVersion == 1 &&
+            bleManager.activeMapFontAssetHealthy
+    }
+
+    private var preferredLanguageName: String {
+        guard let tag = bleManager.activeMapLabelLanguages.first else {
+            return "map language"
+        }
+        return Locale.current.localizedString(forIdentifier: tag) ?? tag
+    }
+
+    private var labelLanguagesNeedUpdate: Bool {
+        labelsAvailable &&
+            bleManager.activeMapLabelLanguages !=
+                OfflineMapJobRequest.preferredLabelLanguages
+    }
+
+    private var streetLabelsFooter: String {
+        if bleManager.activeMapRendererFormat != 2 {
+            return "Download this map again to add street names."
+        }
+        if !bleManager.activeMapFontAssetHealthy {
+            return "This map's street-name font asset is unavailable. Download the map again to repair it."
+        }
+        if labelLanguagesNeedUpdate {
+            return "Your iPhone language preferences changed after this map was built. Update the map to use the current language list."
+        }
+        return "Follow Roads and Keep Upright are rendered on the device and apply immediately. Changing the iPhone language list may require updating map languages."
+    }
 
     private var navigationTitle: String {
         screen == .map && !bleManager.supportsIndependentMapProfiles
@@ -923,6 +965,26 @@ private struct MapStyleSettingsView: View {
 
     private var zoomLevel: Binding<Int> {
         binding(map: \.zoomLevel, mapPlusNavigation: \.mapPlusNavigationZoomLevel)
+    }
+
+    private var labelDensity: Binding<Int> {
+        binding(map: \.mapLabelDensity,
+                mapPlusNavigation: \.mapPlusNavigationLabelDensity)
+    }
+
+    private var labelLanguageMode: Binding<Int> {
+        binding(map: \.mapLabelLanguageMode,
+                mapPlusNavigation: \.mapPlusNavigationLabelLanguageMode)
+    }
+
+    private var labelTextSize: Binding<Int> {
+        binding(map: \.mapLabelTextSize,
+                mapPlusNavigation: \.mapPlusNavigationLabelTextSize)
+    }
+
+    private var labelOrientation: Binding<Int> {
+        binding(map: \.mapLabelOrientation,
+                mapPlusNavigation: \.mapPlusNavigationLabelOrientation)
     }
 
     private var showMajorRoads: Binding<Bool> {
@@ -1066,6 +1128,81 @@ private struct MapStyleSettingsView: View {
                 .pickerStyle(.segmented)
                 .onChange(of: detailLevel.wrappedValue) { newValue in
                     sendSetting(mapID: 2, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationDetailLevelSettingID, value: Int32(newValue))
+                }
+            }
+
+            if bleManager.supportsStreetLabels {
+                Section(
+                    header: Text("Street Labels"),
+                    footer: Text(streetLabelsFooter)
+                ) {
+                    Group {
+                        Picker("Density", selection: labelDensity) {
+                            Text("Off").tag(0)
+                            Text("Major Roads").tag(1)
+                            Text("Balanced").tag(2)
+                            Text("All Roads").tag(3)
+                        }
+                        .onChange(of: labelDensity.wrappedValue) { newValue in
+                            sendSetting(
+                                mapID: DeviceBLEProtocol.mapLabelDensitySettingID,
+                                mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID,
+                                value: Int32(newValue)
+                            )
+                        }
+
+                        Picker("Language", selection: labelLanguageMode) {
+                            Text("Local").tag(0)
+                            Text("Preferred — \(preferredLanguageName)").tag(1)
+                            Text("Local + Preferred").tag(2)
+                        }
+                        .onChange(of: labelLanguageMode.wrappedValue) { newValue in
+                            sendSetting(
+                                mapID: DeviceBLEProtocol.mapLabelLanguageModeSettingID,
+                                mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID,
+                                value: Int32(newValue)
+                            )
+                        }
+
+                        Picker("Text Size", selection: labelTextSize) {
+                            Text("Small").tag(0)
+                            Text("Standard").tag(1)
+                            Text("Large").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: labelTextSize.wrappedValue) { newValue in
+                            sendSetting(
+                                mapID: DeviceBLEProtocol.mapLabelTextSizeSettingID,
+                                mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID,
+                                value: Int32(newValue)
+                            )
+                        }
+
+                        Picker("Orientation", selection: labelOrientation) {
+                            Text("Follow Roads").tag(0)
+                            Text("Keep Upright").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: labelOrientation.wrappedValue) { newValue in
+                            sendSetting(
+                                mapID: DeviceBLEProtocol.mapLabelOrientationSettingID,
+                                mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID,
+                                value: Int32(newValue)
+                            )
+                        }
+                    }
+                    .disabled(!labelsAvailable)
+                    if !labelsAvailable || labelLanguagesNeedUpdate {
+                        Button(labelLanguagesNeedUpdate
+                               ? "Update Map Languages"
+                               : "Download Active Map Again") {
+                        offlineMapManager.regenerateActiveMap(
+                            bleManager: bleManager
+                        )
+                        }
+                        .disabled(offlineMapManager.isBusy ||
+                                  bleManager.mapTransferActiveMapId.isEmpty)
+                    }
                 }
             }
 

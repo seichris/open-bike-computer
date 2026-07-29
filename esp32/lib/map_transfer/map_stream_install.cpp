@@ -1,5 +1,5 @@
 #include "map_stream_install.hpp"
-#include "../maps/src/mapBlockFormat.hpp"
+#include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -660,7 +660,7 @@ MapStreamInstallSession::onFileBegin(const MapStreamFileView &file,
   if (currentSkipped_)
     return MapStreamFileAction::ConsumeCheckpointed;
   currentMapValidator_.reset(
-      new (std::nothrow) map_block_format::StreamValidator(
+      new (std::nothrow) map_renderer_format::StreamValidator(
           std::string(file.path)));
   if (!currentMapValidator_ || currentMapValidator_->failed()) {
     fail("stream_renderer_validator",

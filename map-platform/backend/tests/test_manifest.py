@@ -46,7 +46,7 @@ class ManifestTests(unittest.TestCase):
             job.map_id = map_id
             folder = root / "VECTMAP" / map_id / "+0032+0008"
             folder.mkdir(parents=True)
-            (folder / "123_456.fmb").write_bytes(b"map-block")
+            (folder / "123_456.fmb").write_bytes(b"FMB\x02")
             (folder / "123_456.fmp").write_text("map-preview")
             test_image_folder = root / "VECTMAP" / map_id / "test_imgs"
             test_image_folder.mkdir()
@@ -96,7 +96,7 @@ class ManifestTests(unittest.TestCase):
             job.map_id = map_id
             folder = root / "VECTMAP" / map_id / "+0032+0008"
             folder.mkdir(parents=True)
-            (folder / "123_456.fmb").write_bytes(b"map-block")
+            (folder / "123_456.fmb").write_bytes(b"FMB\x02")
 
             manifest = build_manifest(job, root, PipelineMetadata())
 
@@ -120,7 +120,7 @@ class ManifestTests(unittest.TestCase):
             job.map_id = map_id
             folder = root / "VECTMAP" / map_id / "+0032+0008"
             folder.mkdir(parents=True)
-            (folder / "123_456.fmb").write_bytes(b"map-block")
+            (folder / "123_456.fmb").write_bytes(b"FMB\x02")
 
             manifest = build_manifest(job, root, PipelineMetadata())
             manifest.pop("preview")
@@ -137,7 +137,7 @@ class ManifestTests(unittest.TestCase):
             job.map_id = map_id
             folder = root / "VECTMAP" / map_id / "+0032+0008"
             folder.mkdir(parents=True)
-            (folder / "123_456.fmb").write_bytes(b"map-block")
+            (folder / "123_456.fmb").write_bytes(b"FMB\x02")
             requested_geometry = {
                 "type": "Polygon",
                 "coordinates": [[

@@ -14,6 +14,10 @@ constexpr uint8_t MAP_DEFAULT_ROUTE_LINE_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_ZOOM_LEVEL = 3;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH = 15;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL = 3;
+constexpr uint8_t DEFAULT_LABEL_DENSITY = 2;
+constexpr uint8_t DEFAULT_LABEL_LANGUAGE_MODE = 0;
+constexpr uint8_t DEFAULT_LABEL_TEXT_SIZE = 1;
+constexpr uint8_t DEFAULT_LABEL_ORIENTATION = 0;
 
 constexpr uint32_t VISIBILITY_BUILDINGS = 1u << 0;
 constexpr uint32_t VISIBILITY_GREEN_SPACE = 1u << 1;
@@ -91,7 +95,12 @@ inline bool isLocalStreetTypeId(uint8_t typeId) {
 }
 
 inline bool isIndependentSetting(uint8_t settingId) {
-  return settingId >= 16 && settingId <= 22;
+  return (settingId >= 16 && settingId <= 22) ||
+         (settingId >= 29 && settingId <= 32);
+}
+
+inline bool isLabelSetting(uint8_t settingId) {
+  return settingId >= 25 && settingId <= 32;
 }
 
 inline bool isLegacySetting(uint8_t settingId) {
@@ -140,6 +149,20 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
   case 22:
     minimum = 1;
     maximum = 5;
+    break;
+  case 25:
+  case 29:
+    maximum = 3;
+    break;
+  case 26:
+  case 30:
+  case 27:
+  case 31:
+    maximum = 2;
+    break;
+  case 28:
+  case 32:
+    maximum = 1;
     break;
   default:
     return value;

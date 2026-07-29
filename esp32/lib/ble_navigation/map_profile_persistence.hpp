@@ -33,6 +33,22 @@ inline void load(Store &store, Profile &mapStyle,
   const uint32_t storedMapVisibility = store.getUInt("visMask", 0x3FF);
   mapStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(storedMapVisibility);
+  mapStyle.labelDensity = static_cast<uint8_t>(map_profile_protocol::clampValue(
+      25, store.getUChar("labelDensity",
+                         map_profile_protocol::DEFAULT_LABEL_DENSITY)));
+  mapStyle.labelLanguageMode = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          26, store.getUChar(
+                  "labelLang",
+                  map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE)));
+  mapStyle.labelTextSize = static_cast<uint8_t>(map_profile_protocol::clampValue(
+      27, store.getUChar("labelSize",
+                         map_profile_protocol::DEFAULT_LABEL_TEXT_SIZE)));
+  mapStyle.labelOrientation = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          28, store.getUChar(
+                  "labelOrient",
+                  map_profile_protocol::DEFAULT_LABEL_ORIENTATION)));
 
   mapNavigationStyle.minPolygonSize =
       store.getUChar("navMinPoly", mapStyle.minPolygonSize);
@@ -72,6 +88,18 @@ inline void load(Store &store, Profile &mapStyle,
                ? mapStyle.visibilityMask
                : map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK) |
               map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
+  mapNavigationStyle.labelDensity = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          29, store.getUChar("navLabelDen", mapStyle.labelDensity)));
+  mapNavigationStyle.labelLanguageMode = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          30, store.getUChar("navLabelLng", mapStyle.labelLanguageMode)));
+  mapNavigationStyle.labelTextSize = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          31, store.getUChar("navLabelSiz", mapStyle.labelTextSize)));
+  mapNavigationStyle.labelOrientation = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          32, store.getUChar("navLabelOri", mapStyle.labelOrientation)));
 
   if (!store.isKey("streetWidth"))
     store.putUChar("streetWidth", mapStyle.streetLineWidth);
@@ -169,6 +197,30 @@ inline bool persistSetting(Store &store, const Profile &mapStyle,
     return true;
   case 22:
     store.putUChar("navMarkerS", mapNavigationStyle.positionMarkerScale);
+    return true;
+  case 25:
+    store.putUChar("labelDensity", mapStyle.labelDensity);
+    return true;
+  case 26:
+    store.putUChar("labelLang", mapStyle.labelLanguageMode);
+    return true;
+  case 27:
+    store.putUChar("labelSize", mapStyle.labelTextSize);
+    return true;
+  case 28:
+    store.putUChar("labelOrient", mapStyle.labelOrientation);
+    return true;
+  case 29:
+    store.putUChar("navLabelDen", mapNavigationStyle.labelDensity);
+    return true;
+  case 30:
+    store.putUChar("navLabelLng", mapNavigationStyle.labelLanguageMode);
+    return true;
+  case 31:
+    store.putUChar("navLabelSiz", mapNavigationStyle.labelTextSize);
+    return true;
+  case 32:
+    store.putUChar("navLabelOri", mapNavigationStyle.labelOrientation);
     return true;
   default:
     return false;

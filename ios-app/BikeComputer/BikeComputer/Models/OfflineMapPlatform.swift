@@ -87,6 +87,18 @@ struct OfflineMapBounds: Codable, Equatable {
 }
 
 struct OfflineMapJobRequest: Encodable, Equatable {
+    struct RendererTarget: Encodable, Equatable {
+        let renderer: String
+        let rendererFormatVersion: Int
+        let firmwareVersion: String?
+    }
+
+    struct LabelProfile: Encodable, Equatable {
+        let profileVersion: Int
+        let preferredLanguages: [String]
+        let internationalFallback: String
+    }
+
     let mode: String
     let bbox: [Double]?
     let geometry: GeoJSONGeometry?
@@ -95,6 +107,45 @@ struct OfflineMapJobRequest: Encodable, Equatable {
     let clientInstallationId: String?
     let clientRequestId: String?
     let installOnDevice: Bool?
+    let target: RendererTarget?
+    let labels: LabelProfile?
+
+    static var preferredLabelLanguages: [String] {
+        var languages: [String] = []
+        for raw in Locale.preferredLanguages {
+            let tag = raw.replacingOccurrences(of: "_", with: "-")
+            let parts = tag.split(separator: "-").prefix(4)
+            guard let first = parts.first, (2...8).contains(first.count) else { continue }
+            let normalized = parts.enumerated().map { index, part -> String in
+                if index == 0 { return part.lowercased() }
+                if part.count == 4 { return part.prefix(1).uppercased() + part.dropFirst().lowercased() }
+                if part.count == 2 { return part.uppercased() }
+                return part.lowercased()
+            }.joined(separator: "-")
+            guard normalized.utf8.count <= 35,
+                  normalized.utf8.allSatisfy({ $0 < 0x80 }) else { continue }
+            if !languages.contains(normalized) { languages.append(normalized) }
+            if languages.count == 3 { break }
+        }
+        if languages.isEmpty { languages = ["en"] }
+        return languages
+    }
+
+    private static var defaultLabelProfile: LabelProfile {
+        return LabelProfile(
+            profileVersion: 1,
+            preferredLanguages: preferredLabelLanguages,
+            internationalFallback: "en"
+        )
+    }
+
+    private static var targetTwo: RendererTarget {
+        RendererTarget(
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 2,
+            firmwareVersion: nil
+        )
+    }
 
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -105,7 +156,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: nil,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -118,7 +171,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: nil,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -131,7 +186,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: widthMeters,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -148,7 +205,37 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: corridorWidthM,
             clientInstallationId: clientInstallationId,
             clientRequestId: clientRequestId,
-            installOnDevice: installOnDevice
+            installOnDevice: installOnDevice,
+            target: target,
+            labels: labels
+        )
+    }
+
+    func forDevice(
+        supportsStreetLabels: Bool,
+        firmwareVersion: String
+    ) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: supportsStreetLabels
+                ? RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 2,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                )
+                : RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                ),
+            labels: supportsStreetLabels ? labels ?? Self.defaultLabelProfile : nil
         )
     }
 }

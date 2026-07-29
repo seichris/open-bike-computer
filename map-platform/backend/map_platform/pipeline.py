@@ -33,6 +33,7 @@ from .manifest import (
     write_pack_archive,
 )
 from .map_stream import write_map_stream_artifact
+from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 from .models import JobStatus, MapJob, SourceRegion
 from .reuse import (
     MapReuseKeys,
@@ -110,6 +111,7 @@ class CommandRunner:
 
 
 _MAP_PROGRESS_PATTERN = re.compile(r"MAP_PROGRESS:(\d+):(\d+)")
+_LABEL_STATS_PREFIX = "LABEL_STATS:"
 
 
 def parse_map_progress(line: str) -> tuple[int, int] | None:
@@ -120,6 +122,20 @@ def parse_map_progress(line: str) -> tuple[int, int] | None:
     if total <= 0 or completed < 0 or completed > total:
         return None
     return completed, total
+
+
+def parse_label_stats(line: str) -> dict[str, Any] | None:
+    marker = line.find(_LABEL_STATS_PREFIX)
+    if marker < 0:
+        return None
+    payload = line[marker + len(_LABEL_STATS_PREFIX):].strip()
+    if not payload or len(payload) > 256 * 1024:
+        return None
+    try:
+        value = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class ProgressCoalescer:
@@ -213,7 +229,7 @@ class MapBuildPipeline:
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
         self._convert_to_geojson(job, clipped_pbf, geojson_prefix, bounds=processing_bounds)
-        self._extract_features(
+        label_metrics = self._extract_features(
             job,
             geojson_prefix,
             raw_output_dir,
@@ -230,6 +246,7 @@ class MapBuildPipeline:
             archive_path,
             artifact_publication_lease=artifact_publication_lease,
             on_artifact_pending=on_artifact_pending,
+            build_metrics=label_metrics,
         )
 
     def reuse_keys(self, job: MapJob) -> MapReuseKeys | None:
@@ -296,15 +313,22 @@ class MapBuildPipeline:
         *,
         artifact_publication_lease=None,
         on_artifact_pending=None,
+        build_metrics: dict[str, Any] | None = None,
     ) -> MapBuildResult:
         map_id = job.map_id or stable_map_id(job)
         job.map_id = map_id
         job_dir = archive_path.parent
+        packaging_started = time.perf_counter()
         self._resolve_source_preview_geometry(job)
         manifest = build_manifest(job, pack_root, self._pipeline_metadata())
         write_pack_archive(pack_root, manifest, archive_path)
         artifacts: list[ArtifactRecord] = []
-        metrics: dict[str, Any] = {}
+        metrics: dict[str, Any] = dict(build_metrics or {})
+        packaging_seconds = time.perf_counter() - packaging_started
+        if renderer_format_version(job.request) == LABEL_RENDERER_FORMAT_VERSION:
+            label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
+            if isinstance(label_phase_timings, dict):
+                label_phase_timings["labelPackaging"] = packaging_seconds
         if self.artifact_store is not None:
             hashing_started = time.perf_counter()
             zip_sha256 = sha256_file(archive_path)
@@ -377,6 +401,12 @@ class MapBuildPipeline:
             metrics.update(
                 {f"stream{name[0].upper()}{name[1:]}": value for name, value in stream_build.timings.items()}
             )
+            if renderer_format_version(job.request) == LABEL_RENDERER_FORMAT_VERSION:
+                label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
+                if isinstance(label_phase_timings, dict):
+                    label_phase_timings["labelSigning"] = stream_build.timings[
+                        "signingSeconds"
+                    ]
             metrics.update(
                 {
                     "streamFileCount": stream_build.file_count,
@@ -497,7 +527,7 @@ class MapBuildPipeline:
         *,
         bounds=None,
         on_progress=None,
-    ) -> None:
+    ) -> dict[str, Any]:
         bounds = bounds or job.geometry.bounds
         script = self.paths.osm_extract_root / "scripts" / "extract_features.py"
         args = [
@@ -510,12 +540,26 @@ class MapBuildPipeline:
             str(geojson_prefix),
             str(raw_output_dir),
         ]
+        format_version = renderer_format_version(job.request)
+        args.extend(["--renderer-format", str(format_version)])
+        if format_version == LABEL_RENDERER_FORMAT_VERSION:
+            labels = job.request["labels"]
+            for language in labels["preferredLanguages"]:
+                args.extend(["--preferred-language", language])
+            args.extend(
+                ["--international-fallback", labels["internationalFallback"]]
+            )
         progress_coalescer = ProgressCoalescer()
+        label_stats: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
+            nonlocal label_stats
             progress = parse_map_progress(line)
             if progress is not None and on_progress and progress_coalescer.should_emit(*progress):
                 on_progress(*progress)
+            parsed_label_stats = parse_label_stats(line)
+            if parsed_label_stats is not None:
+                label_stats = parsed_label_stats
 
         if on_progress and hasattr(self.runner, "run_streaming"):
             self.runner.run_streaming(
@@ -523,12 +567,38 @@ class MapBuildPipeline:
                 cwd=self.paths.osm_extract_root / "scripts",
                 on_output=handle_output,
             )
-            return
+            return self._label_build_metrics(format_version, label_stats)
 
         output = self.runner.run(args, cwd=self.paths.osm_extract_root / "scripts")
         if on_progress:
             for line in output.splitlines():
                 handle_output(line)
+        else:
+            for line in output.splitlines():
+                parsed_label_stats = parse_label_stats(line)
+                if parsed_label_stats is not None:
+                    label_stats = parsed_label_stats
+        return self._label_build_metrics(format_version, label_stats)
+
+    @staticmethod
+    def _label_build_metrics(
+        format_version: int,
+        stats: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if format_version != LABEL_RENDERER_FORMAT_VERSION:
+            return {}
+        if stats is None:
+            raise RuntimeError("label-aware extraction did not emit LABEL_STATS")
+        phase_timings = stats.pop("phaseTimings", {})
+        if not isinstance(phase_timings, dict) or not all(
+            isinstance(key, str) and isinstance(value, (int, float)) and value >= 0
+            for key, value in phase_timings.items()
+        ):
+            raise RuntimeError("label-aware extraction emitted invalid phase timings")
+        return {
+            "labelBuild": stats,
+            "labelPhaseTimings": phase_timings,
+        }
 
     def _stage_subset_pack(
         self,
@@ -587,6 +657,7 @@ class MapBuildPipeline:
                     raise SubsetReuseUnavailable("parent map manifest has no files")
 
                 manifest_paths: set[str] = set()
+                copied_font_asset = False
                 for entry in files:
                     if not isinstance(entry, dict):
                         raise SubsetReuseUnavailable("parent map manifest file is invalid")
@@ -613,7 +684,8 @@ class MapBuildPipeline:
                     if len(parts) != 4 or parts[1] != parent.map_id:
                         raise SubsetReuseUnavailable("parent map file identity is invalid")
                     block = block_from_pack_path(path)
-                    if block not in required:
+                    is_font_asset = parts[2:] == ["assets", "street-labels.fma"]
+                    if block not in required and not is_font_asset:
                         continue
                     try:
                         info = archive.getinfo(path)
@@ -627,7 +699,11 @@ class MapBuildPipeline:
                     ):
                         raise SubsetReuseUnavailable("parent map file metadata is invalid")
                     extension = Path(path).suffix.removeprefix(".")
-                    destination_relative = child_pack_path(child_map_id, block, extension)
+                    destination_relative = (
+                        f"VECTMAP/{child_map_id}/assets/street-labels.fma"
+                        if is_font_asset
+                        else child_pack_path(child_map_id, block, extension)
+                    )
                     if destination_relative in copied_paths:
                         raise SubsetReuseUnavailable("parent block selection is ambiguous")
                     copied_paths.add(destination_relative)
@@ -645,6 +721,8 @@ class MapBuildPipeline:
                         raise SubsetReuseUnavailable("parent map block hash is invalid")
                     if extension == "fmb":
                         copied_fmb += 1
+                    if is_font_asset:
+                        copied_font_asset = True
         except SubsetReuseUnavailable:
             raise
         except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
@@ -652,6 +730,11 @@ class MapBuildPipeline:
 
         if copied_fmb == 0:
             raise SubsetReuseUnavailable("parent map contains no required binary blocks")
+        if (
+            renderer_format_version(child.request) == LABEL_RENDERER_FORMAT_VERSION
+            and not copied_font_asset
+        ):
+            raise SubsetReuseUnavailable("parent target-2 map has no label font asset")
 
     def _stage_vectmap(self, raw_output_dir: Path, vectmap_output: Path) -> None:
         if not raw_output_dir.exists():
@@ -661,7 +744,7 @@ class MapBuildPipeline:
             destination = vectmap_output / child.name
             if child.is_dir():
                 shutil.copytree(child, destination)
-            elif child.suffix in {".fmb", ".fmp"}:
+            elif child.suffix in {".fmb", ".fmp", ".fma"}:
                 shutil.copy2(child, destination)
 
     def _pipeline_metadata(self) -> PipelineMetadata:

@@ -1,5 +1,6 @@
 #include "map_stream_parser.hpp"
 #include "../maps/src/mapBlockFormat.hpp"
+#include "../maps/src/mapFontAssetFormat.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,6 +14,11 @@
 
 namespace map_transfer {
 namespace {
+
+bool endsWith(std::string_view value, std::string_view suffix) {
+  return value.size() >= suffix.size() &&
+         value.substr(value.size() - suffix.size()) == suffix;
+}
 
 void *allocateStreamMemory(size_t bytes) {
   if (bytes == 0)
@@ -88,7 +94,8 @@ public:
     skipWhitespace();
     if (position_ != text_.size() || !canonical_ || !haveSchema || !haveMapId ||
         !haveFiles || !haveTarget || schema != 1 ||
-        manifest.renderer != "esp32-fmb" || manifest.formatVersion != 1) {
+        manifest.renderer != "esp32-fmb" ||
+        (manifest.formatVersion != 1 && manifest.formatVersion != 2)) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);
@@ -541,9 +548,11 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
       !safePathComponent(filename)) {
     return false;
   }
-  if (filename.size() < 5 ||
-      !(filename.substr(filename.size() - 4) == ".fmb" ||
-        filename.substr(filename.size() - 4) == ".fmp")) {
+  const bool fontAsset = tile == "assets" && filename == "street-labels.fma";
+  if (!fontAsset &&
+      (filename.size() < 5 ||
+       !(filename.substr(filename.size() - 4) == ".fmb" ||
+         filename.substr(filename.size() - 4) == ".fmp"))) {
     return false;
   }
   tileOffset = secondSlash + 1;
@@ -808,6 +817,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     return false;
   }
   uint64_t payloadBytes = 0;
+  uint32_t fontAssetCount = 0;
+  uint32_t legacyTextBlockCount = 0;
   std::string_view previousPath;
   for (size_t fileIndex = 0; fileIndex < parsed.files.size(); fileIndex++) {
     MapStreamFileDescriptor &file = parsed.files[fileIndex];
@@ -824,7 +835,10 @@ bool parseMapStreamManifest(std::string_view manifestText,
     if (!safeMapPath(path, parsed.metadata.mapId, tileOffset, tileBytes,
                      filenameOffset, filenameBytes) ||
         file.bytes == 0 ||
-        file.bytes > map_block_format::kMaximumBlockBytes ||
+        file.bytes >
+            (endsWith(path, "/assets/street-labels.fma")
+                 ? map_font_asset_format::kMaximumFontAssetBytes
+                 : map_block_format::kMaximumBlockBytes) ||
         (!previousPath.empty() && path <= previousPath) ||
         payloadBytes > MAP_STREAM_MAX_PAYLOAD_BYTES - file.bytes) {
       return false;
@@ -835,7 +849,16 @@ bool parseMapStreamManifest(std::string_view manifestText,
         file.pathOffset + static_cast<uint32_t>(filenameOffset);
     file.filenameBytes = static_cast<uint16_t>(filenameBytes);
     payloadBytes += file.bytes;
+    if (endsWith(path, "/assets/street-labels.fma"))
+      fontAssetCount++;
+    if (endsWith(path, ".fmp"))
+      legacyTextBlockCount++;
     previousPath = path;
+  }
+  if ((parsed.metadata.formatVersion == 2 &&
+       (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
+      (parsed.metadata.formatVersion == 1 && fontAssetCount != 0)) {
+    return false;
   }
   parsed.payloadBytes = payloadBytes;
   return payloadBytes == header.payloadBytes;

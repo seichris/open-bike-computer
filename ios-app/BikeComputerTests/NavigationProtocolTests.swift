@@ -632,6 +632,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
+        testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
@@ -4145,6 +4146,126 @@ struct NavigationProtocolTests {
         assertEqual(identified.clientInstallationId, "installation-test", "request includes installation identity")
         assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
         assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
+
+        let targetTwo = request.forDevice(
+            supportsStreetLabels: true,
+            firmwareVersion: "0.4.0"
+        )
+        let targetTwoJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(targetTwo)
+        ) as! [String: Any]
+        let target = targetTwoJSON["target"] as! [String: Any]
+        let labels = targetTwoJSON["labels"] as! [String: Any]
+        assertEqual(target["renderer"] as? String, "esp32-fmb",
+                    "label-aware requests name the renderer explicitly")
+        assertEqual(target["rendererFormatVersion"] as? Int, 2,
+                    "label-aware requests select renderer target 2")
+        assertEqual(labels["profileVersion"] as? Int, 1,
+                    "label-aware requests carry label profile 1")
+        assert((labels["preferredLanguages"] as? [String])?.count ?? 0 <= 3,
+               "label-aware requests cap preferred languages")
+
+        let legacy = request.forDevice(
+            supportsStreetLabels: false,
+            firmwareVersion: "0.3.0"
+        )
+        let legacyJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(legacy)
+        ) as! [String: Any]
+        assertEqual((legacyJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
+                    1, "legacy devices request renderer target 1")
+        assert(legacyJSON["labels"] == nil,
+               "legacy requests omit unsupported label metadata")
+    }
+
+    static func testStreetLabelMapContract() {
+        let sha = String(repeating: "1", count: 64)
+        let manifest = Data((
+            "{\"files\":[" +
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
+            "\"mapId\":\"label-map\"," +
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
+            "\"schemaVersion\":1," +
+            "\"target\":{\"formatVersion\":2,\"internationalFallback\":\"en\"," +
+            "\"labelLanguages\":[\"zh-Hant\",\"en\"],\"labelProfileVersion\":1," +
+            "\"renderer\":\"esp32-fmb\"}}"
+        ).utf8)
+        let header = BikeMapStreamFormat.Header(
+            formatVersion: 1,
+            flags: 0,
+            manifestBytes: UInt32(manifest.count),
+            signatureEnvelopeBytes: 80,
+            fileCount: 2,
+            payloadBytes: 8
+        )
+        do {
+            let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                manifest,
+                expectedMapID: "label-map",
+                header: header
+            )
+            assertEqual(decoded.target.formatVersion, 2,
+                        "target-2 manifest with exact FMA path is accepted")
+        } catch {
+            assert(false, "valid target-2 manifest is accepted: \(error)")
+        }
+
+        let nonCanonicalLanguage = Data(
+            String(data: manifest, encoding: .utf8)!
+                .replacingOccurrences(of: "zh-Hant", with: "ZH-hant").utf8
+        )
+        do {
+            _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                nonCanonicalLanguage,
+                expectedMapID: "label-map",
+                header: BikeMapStreamFormat.Header(
+                    formatVersion: 1,
+                    flags: 0,
+                    manifestBytes: UInt32(nonCanonicalLanguage.count),
+                    signatureEnvelopeBytes: 80,
+                    fileCount: 2,
+                    payloadBytes: 8
+                )
+            )
+            assert(false, "non-canonical label languages are rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "invalid label language reports a manifest failure")
+                return
+            }
+        }
+
+        for (prefix, target, accepted, message) in [
+            (Data([0x46, 0x4d, 0x42, 3]), 2, true, "target 2 accepts FMB v3"),
+            (Data([0x46, 0x4d, 0x42, 2]), 2, false, "target 2 rejects FMB v2"),
+            (Data([0x46, 0x4d, 0x42, 3]), 1, false, "target 1 rejects FMB v3"),
+            (Data([0x46, 0x4d, 0x42, 2]), 1, true, "target 1 accepts FMB v2"),
+        ] {
+            do {
+                try BikeMapStreamArtifactValidator.validateFileHeader(
+                    prefix,
+                    path: "VECTMAP/label-map/+0000+0000/0_0.fmb",
+                    rendererFormatVersion: target
+                )
+                assert(accepted, message)
+            } catch {
+                assert(!accepted, message)
+            }
+        }
+        do {
+            try BikeMapStreamArtifactValidator.validateFileHeader(
+                Data("BAD1".utf8),
+                path: "VECTMAP/label-map/assets/street-labels.fma",
+                rendererFormatVersion: 2
+            )
+            assert(false, "invalid FMA1 header is rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "invalid FMA1 header reports a manifest failure")
+                return
+            }
+        }
     }
 
     static func testOfflineMapOnboardingPolicy() {
@@ -8827,7 +8948,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.batteryStatusScreenCapabilityMask, 32, "Battery Status support uses capability bit 5")
         assertEqual(DeviceBLEProtocol.destinationPickerCapabilityMask, 64, "destination picker support uses capability bit 6")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCapabilityMask, 128, "workout telemetry uses capability bit 7")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 6, "capability version advertises workout telemetry support")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 7, "capability version advertises CAP2 street-label support")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -10349,6 +10470,29 @@ struct NavigationProtocolTests {
         assert(!manager.supportsIndependentMapProfiles,
                "malformed CAPS clears independent map profile support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+
+        let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 1, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2),
+               "CAP2 notification should be consumed")
+        assert(manager.supportsStreetLabels,
+               "CAP2 bit 8 enables street-label map controls")
+        assert(manager.hasReceivedDeviceCapabilities,
+               "valid CAP2 completes capability negotiation")
+
+        let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, acknowledgedFlags, 1, 0, 0, 1, 3, 1,
+                  DeviceSound.rotatingBicycleBell.rawValue, 65])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithConfig),
+               "CAP2 power configuration TLV is consumed")
+        assert(manager.supportsStreetLabels,
+               "CAP2 preserves the extended street-label capability")
+
+        let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
+        assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
+               "malformed CAP2 is consumed for retry")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "duplicate CAP2 TLVs are rejected")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -11886,7 +12030,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -11895,6 +12039,17 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
         assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
         assertEqual(manager.mapTransferActiveSessionId, "kyoto-v1-session", "status parser exposes active session id")
+        assertEqual(manager.activeMapManifestReceipt,
+                    String(repeating: "a", count: 64),
+                    "status parser associates label health with the active receipt")
+        assertEqual(manager.activeMapRendererFormat, 2,
+                    "status parser exposes active renderer target")
+        assertEqual(manager.activeMapLabelProfileVersion, 1,
+                    "status parser exposes active label profile")
+        assertEqual(manager.activeMapLabelLanguages, ["ja", "en"],
+                    "status parser exposes active label languages")
+        assert(manager.activeMapFontAssetHealthy,
+               "status parser exposes live FMA1 health")
         assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")

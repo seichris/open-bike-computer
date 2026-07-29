@@ -4,6 +4,8 @@ LABEL maintainer="arestabrucs"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update -qq && apt install -y --no-install-recommends \
     curl \
+    fonts-noto-cjk \
+    fonts-noto-core \
     git \
     wget \
     zip unzip \
@@ -20,5 +22,5 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     software-properties-common \
     build-essential \
     gdal-bin \
-  && pip install pillow shapely "matplotlib<3.6" pyyaml \
+  && pip install pillow shapely "matplotlib<3.6" pyyaml uharfbuzz freetype-py \
   && rm -rf /var/lib/apt/lists/*

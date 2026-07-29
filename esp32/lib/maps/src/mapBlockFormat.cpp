@@ -13,6 +13,20 @@ uint16_t littleEndian16(const uint8_t bytes[2]) {
          (static_cast<uint16_t>(bytes[1]) << 8U);
 }
 
+uint32_t littleEndian32(const uint8_t *bytes) {
+  return static_cast<uint32_t>(bytes[0]) |
+         (static_cast<uint32_t>(bytes[1]) << 8U) |
+         (static_cast<uint32_t>(bytes[2]) << 16U) |
+         (static_cast<uint32_t>(bytes[3]) << 24U);
+}
+
+uint32_t crc32Byte(uint32_t crc, uint8_t byte) {
+  crc ^= byte;
+  for (uint8_t bit = 0; bit < 8; ++bit)
+    crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+  return crc;
+}
+
 bool unsignedValue(const std::string &text, uint32_t maximum,
                    uint32_t &value) {
   if (text.empty())
@@ -163,14 +177,20 @@ bool StreamValidator::addPolygonGridEntries(int16_t minX, int16_t minY,
 }
 
 bool StreamValidator::feedBinary(uint8_t byte) {
+  const size_t byteOffset = binaryBytesProcessed_++;
   if (binaryState_ == BinaryState::Complete)
     return false;
+  if (binaryState_ == BinaryState::V3DirectoryHeader ||
+      binaryState_ == BinaryState::V3DirectoryEntries)
+    return feedV3Directory(byte);
+  if (binaryState_ == BinaryState::V3Sections)
+    return feedV3Sections(byte, byteOffset);
   if (binaryState_ == BinaryState::Header) {
     small_[smallSize_++] = byte;
     if (smallSize_ != 4)
       return true;
     if (std::memcmp(small_, "FMB", 3) != 0 ||
-        (small_[3] != 1 && small_[3] != 2))
+        (small_[3] != 1 && small_[3] != 2 && small_[3] != 3))
       return false;
     binaryVersion_ = small_[3];
     smallSize_ = 0;
@@ -195,7 +215,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
         binaryState_ = BinaryState::PolylineCount;
       else
         beginBinaryFixed(BinaryState::PolygonFixed,
-                         11U + (binaryVersion_ == 2 ? 1U : 0U));
+                         11U + (binaryVersion_ >= 2 ? 1U : 0U));
     } else if (binaryState_ == BinaryState::PolygonPointCount) {
       if (value == 0)
         return false;
@@ -206,14 +226,18 @@ bool StreamValidator::feedBinary(uint8_t byte) {
                        static_cast<size_t>(value) * 4U);
     } else if (binaryState_ == BinaryState::PolylineCount) {
       recordsRemaining_ = value;
+      binaryPolylineCount_ = value;
       if (value > kMaximumFeatures - featuresSeen_)
         return false;
       featuresSeen_ += value;
-      if (recordsRemaining_ == 0)
+      if (recordsRemaining_ == 0) {
+        if (binaryVersion_ == 3)
+          return beginV3Extensions();
         binaryState_ = BinaryState::Complete;
+      }
       else
         beginBinaryFixed(BinaryState::PolylineFixed,
-                         12U + (binaryVersion_ == 2 ? 1U : 0U));
+                         12U + (binaryVersion_ >= 2 ? 1U : 0U));
     } else {
       if (value == 0)
         return false;
@@ -237,7 +261,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
   if (binaryRemaining_ != 0)
     return true;
   if (binaryState_ == BinaryState::PolygonFixed) {
-    const size_t bboxOffset = binaryVersion_ == 2 ? 4U : 3U;
+    const size_t bboxOffset = binaryVersion_ >= 2 ? 4U : 3U;
     if (!addPolygonGridEntries(
             littleEndianSigned16(binaryFixed_ + bboxOffset),
             littleEndianSigned16(binaryFixed_ + bboxOffset + 2U),
@@ -250,17 +274,308 @@ bool StreamValidator::feedBinary(uint8_t byte) {
       binaryState_ = BinaryState::PolylineCount;
     else
       beginBinaryFixed(BinaryState::PolygonFixed,
-                       11U + (binaryVersion_ == 2 ? 1U : 0U));
+                       11U + (binaryVersion_ >= 2 ? 1U : 0U));
   } else if (binaryState_ == BinaryState::PolylineFixed) {
     binaryState_ = BinaryState::PolylinePointCount;
   } else if (binaryState_ == BinaryState::PolylinePoints) {
-    if (--recordsRemaining_ == 0)
+    if (--recordsRemaining_ == 0) {
+      if (binaryVersion_ == 3)
+        return beginV3Extensions();
       binaryState_ = BinaryState::Complete;
+    }
     else
       beginBinaryFixed(BinaryState::PolylineFixed,
-                       12U + (binaryVersion_ == 2 ? 1U : 0U));
+                       12U + (binaryVersion_ >= 2 ? 1U : 0U));
   }
   return true;
+}
+
+bool StreamValidator::beginV3Extensions() {
+  binaryState_ = BinaryState::V3DirectoryHeader;
+  v3DirectoryStart_ = binaryBytesProcessed_;
+  v3DirectorySize_ = 0;
+  return true;
+}
+
+bool StreamValidator::feedV3Directory(uint8_t byte) {
+  if (v3DirectorySize_ >= sizeof(v3Directory_))
+    return false;
+  v3Directory_[v3DirectorySize_++] = byte;
+  if (binaryState_ == BinaryState::V3DirectoryHeader) {
+    if (v3DirectorySize_ != 8)
+      return true;
+    if (std::memcmp(v3Directory_, "EXT3", 4) != 0 ||
+        v3Directory_[4] != 3 || v3Directory_[5] != 0 ||
+        v3Directory_[6] != 0 || v3Directory_[7] != 0)
+      return false;
+    v3SectionCount_ = v3Directory_[4];
+    v3DirectorySize_ = 0;
+    binaryState_ = BinaryState::V3DirectoryEntries;
+    return true;
+  }
+  if (v3DirectorySize_ != 16)
+    return true;
+
+  if (v3DirectoryEntriesSeen_ >= v3SectionCount_)
+    return false;
+  V3Section &section = v3Sections_[v3DirectoryEntriesSeen_];
+  section.type = v3Directory_[0];
+  section.flags = v3Directory_[1];
+  if (v3Directory_[2] != 0 || v3Directory_[3] != 0 ||
+      section.type != static_cast<uint8_t>(v3DirectoryEntriesSeen_ + 1U) ||
+      section.flags != 1)
+    return false;
+  section.offset = littleEndian32(v3Directory_ + 4);
+  section.length = littleEndian32(v3Directory_ + 8);
+  section.crc32 = littleEndian32(v3Directory_ + 12);
+  if (section.length == 0)
+    return false;
+  v3DirectoryEntriesSeen_++;
+  v3DirectorySize_ = 0;
+  if (v3DirectoryEntriesSeen_ != v3SectionCount_)
+    return true;
+
+  uint32_t expectedOffset = static_cast<uint32_t>(
+      v3DirectoryStart_ + 8U + static_cast<size_t>(v3SectionCount_) * 16U);
+  for (uint8_t index = 0; index < v3SectionCount_; ++index) {
+    const V3Section &candidate = v3Sections_[index];
+    if (candidate.offset != expectedOffset ||
+        candidate.length > kMaximumBlockBytes - expectedOffset)
+      return false;
+    expectedOffset += candidate.length;
+  }
+  binaryState_ = BinaryState::V3Sections;
+  return beginV3Section(0);
+}
+
+bool StreamValidator::beginV3Section(uint8_t sectionIndex) {
+  if (sectionIndex >= v3SectionCount_)
+    return false;
+  v3CurrentSection_ = sectionIndex;
+  v3SectionBytesSeen_ = 0;
+  v3SectionCrc_ = 0xFFFFFFFFU;
+  v3RecordSize_ = 0;
+  v3RecordsRemaining_ = 0;
+  v3ItemsRemaining_ = 0;
+  switch (v3Sections_[sectionIndex].type) {
+  case 1:
+    v3ParseState_ = V3ParseState::StringCount;
+    break;
+  case 2:
+    v3ParseState_ = V3ParseState::RunCount;
+    break;
+  case 3:
+    v3ParseState_ = V3ParseState::LabelHeader;
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+
+bool StreamValidator::feedV3Sections(uint8_t byte, size_t byteOffset) {
+  if (v3CurrentSection_ >= v3SectionCount_)
+    return false;
+  const V3Section &section = v3Sections_[v3CurrentSection_];
+  if (byteOffset != static_cast<size_t>(section.offset) + v3SectionBytesSeen_ ||
+      v3SectionBytesSeen_ >= section.length)
+    return false;
+  v3SectionCrc_ = crc32Byte(v3SectionCrc_, byte);
+  v3SectionBytesSeen_++;
+  if (!feedV3SectionRecord(byte))
+    return false;
+  if (v3SectionBytesSeen_ != section.length)
+    return true;
+  if (!finishV3Section() || (v3SectionCrc_ ^ 0xFFFFFFFFU) != section.crc32)
+    return false;
+  if (++v3CurrentSection_ == v3SectionCount_) {
+    binaryState_ = BinaryState::Complete;
+    return true;
+  }
+  return beginV3Section(v3CurrentSection_);
+}
+
+bool StreamValidator::feedV3Utf8(uint8_t byte) {
+  if (v3Utf8Remaining_ == 0) {
+    if (byte <= 0x7FU) {
+      return byte != 0 && byte >= 0x20U && byte != 0x7FU;
+    }
+    if (byte >= 0xC2U && byte <= 0xDFU) {
+      v3Utf8Remaining_ = 1;
+      v3Utf8Codepoint_ = byte & 0x1FU;
+      v3Utf8Minimum_ = 0x80U;
+      return true;
+    }
+    if (byte >= 0xE0U && byte <= 0xEFU) {
+      v3Utf8Remaining_ = 2;
+      v3Utf8Codepoint_ = byte & 0x0FU;
+      v3Utf8Minimum_ = 0x800U;
+      return true;
+    }
+    if (byte >= 0xF0U && byte <= 0xF4U) {
+      v3Utf8Remaining_ = 3;
+      v3Utf8Codepoint_ = byte & 0x07U;
+      v3Utf8Minimum_ = 0x10000U;
+      return true;
+    }
+    return false;
+  }
+  if ((byte & 0xC0U) != 0x80U)
+    return false;
+  v3Utf8Codepoint_ = (v3Utf8Codepoint_ << 6U) | (byte & 0x3FU);
+  if (--v3Utf8Remaining_ != 0)
+    return true;
+  const uint32_t value = v3Utf8Codepoint_;
+  return value >= v3Utf8Minimum_ && value <= 0x10FFFFU &&
+         !(value >= 0xD800U && value <= 0xDFFFU) &&
+         !(value >= 0x80U && value <= 0x9FU) &&
+         !(value >= 0x202AU && value <= 0x202EU);
+}
+
+bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
+  const auto collect = [&](size_t size) {
+    if (size > sizeof(v3Record_) || v3RecordSize_ >= size)
+      return false;
+    v3Record_[v3RecordSize_++] = byte;
+    return true;
+  };
+  switch (v3ParseState_) {
+  case V3ParseState::StringCount:
+    if (!collect(2) || v3RecordSize_ != 2)
+      return true;
+    v3StringCount_ = littleEndian16(v3Record_);
+    if (v3StringCount_ > kMaximumLabelStrings)
+      return false;
+    v3RecordsRemaining_ = v3StringCount_;
+    v3RecordSize_ = 0;
+    v3ParseState_ = v3RecordsRemaining_ == 0 ? V3ParseState::Complete
+                                              : V3ParseState::StringLength;
+    return true;
+  case V3ParseState::StringLength:
+    if (!collect(2) || v3RecordSize_ != 2)
+      return true;
+    v3ItemsRemaining_ = littleEndian16(v3Record_);
+    if (v3ItemsRemaining_ == 0 || v3ItemsRemaining_ > 255 ||
+        v3ItemsRemaining_ > kMaximumLabelStringBytes - v3StringBytesSeen_)
+      return false;
+    v3StringBytesSeen_ += v3ItemsRemaining_;
+    v3Utf8Remaining_ = 0;
+    v3RecordSize_ = 0;
+    v3ParseState_ = V3ParseState::StringBytes;
+    return true;
+  case V3ParseState::StringBytes:
+    if (!feedV3Utf8(byte) || v3ItemsRemaining_ == 0)
+      return false;
+    if (--v3ItemsRemaining_ != 0)
+      return true;
+    if (v3Utf8Remaining_ != 0)
+      return false;
+    v3ParseState_ = --v3RecordsRemaining_ == 0
+                        ? V3ParseState::Complete
+                        : V3ParseState::StringLength;
+    return true;
+  case V3ParseState::RunCount:
+    if (!collect(2) || v3RecordSize_ != 2)
+      return true;
+    v3RunCount_ = littleEndian16(v3Record_);
+    if (v3RunCount_ > kMaximumLabelRuns)
+      return false;
+    v3RecordsRemaining_ = v3RunCount_;
+    v3RecordSize_ = 0;
+    v3ParseState_ = v3RecordsRemaining_ == 0 ? V3ParseState::Complete
+                                              : V3ParseState::RunHeader;
+    return true;
+  case V3ParseState::RunHeader:
+    if (!collect(4) || v3RecordSize_ != 4)
+      return true;
+    v3ItemsRemaining_ = v3Record_[3];
+    if (littleEndian16(v3Record_) == 0 ||
+        littleEndian16(v3Record_) > v3StringCount_ || v3Record_[2] > 2 ||
+        v3ItemsRemaining_ == 0 ||
+        v3ItemsRemaining_ > kMaximumGlyphsPerRun)
+      return false;
+    v3RecordSize_ = 0;
+    v3ParseState_ = V3ParseState::RunGlyph;
+    return true;
+  case V3ParseState::RunGlyph:
+    if (!collect(8) || v3RecordSize_ != 8)
+      return true;
+    if (littleEndian16(v3Record_) == 0)
+      return false;
+    v3RecordSize_ = 0;
+    if (--v3ItemsRemaining_ == 0) {
+      v3ParseState_ = --v3RecordsRemaining_ == 0
+                          ? V3ParseState::Complete
+                          : V3ParseState::RunHeader;
+    }
+    return true;
+  case V3ParseState::LabelHeader:
+    if (!collect(6) || v3RecordSize_ != 6)
+      return true;
+    v3RecordsRemaining_ = littleEndian16(v3Record_ + 4);
+    if (v3RecordsRemaining_ > kMaximumRoadLabels)
+      return false;
+    v3RecordSize_ = 0;
+    v3ParseState_ = v3RecordsRemaining_ == 0 ? V3ParseState::Complete
+                                              : V3ParseState::LabelFixed;
+    return true;
+  case V3ParseState::LabelFixed:
+    if (!collect(9) || v3RecordSize_ != 9)
+      return true;
+    v3VariantsRemaining_ = v3Record_[7];
+    v3CandidatesRemaining_ = v3Record_[8];
+    if (littleEndian16(v3Record_) >= binaryPolylineCount_ ||
+        v3Record_[2] > 6 || v3Record_[3] > v3Record_[4] ||
+        littleEndian16(v3Record_ + 5) == 0 ||
+        v3VariantsRemaining_ == 0 ||
+        v3VariantsRemaining_ > kMaximumLabelVariants ||
+        v3CandidatesRemaining_ == 0 ||
+        v3CandidatesRemaining_ >
+            kMaximumLabelCandidates - v3LabelCandidatesSeen_)
+      return false;
+    v3LabelCandidatesSeen_ += v3CandidatesRemaining_;
+    v3RecordSize_ = 0;
+    v3ParseState_ = V3ParseState::LabelVariant;
+    return true;
+  case V3ParseState::LabelVariant:
+    if (!collect(10) || v3RecordSize_ != 10)
+      return true;
+    if (v3Record_[0] > 3 ||
+        (v3Record_[1] != 0 && v3Record_[1] != 255 && v3Record_[1] > 3) ||
+        littleEndian16(v3Record_ + 2) == 0 ||
+        littleEndian16(v3Record_ + 2) > v3StringCount_)
+      return false;
+    for (size_t offset : {4U, 6U, 8U}) {
+      if (littleEndian16(v3Record_ + offset) == 0 ||
+          littleEndian16(v3Record_ + offset) > v3RunCount_)
+        return false;
+    }
+    v3RecordSize_ = 0;
+    if (--v3VariantsRemaining_ == 0)
+      v3ParseState_ = V3ParseState::LabelCandidate;
+    return true;
+  case V3ParseState::LabelCandidate:
+    if (!collect(10) || v3RecordSize_ != 10)
+      return true;
+    if (v3Record_[9] != 0)
+      return false;
+    v3RecordSize_ = 0;
+    if (--v3CandidatesRemaining_ == 0) {
+      v3ParseState_ = --v3RecordsRemaining_ == 0
+                          ? V3ParseState::Complete
+                          : V3ParseState::LabelFixed;
+    }
+    return true;
+  case V3ParseState::None:
+  case V3ParseState::Complete:
+    return false;
+  }
+  return false;
+}
+
+bool StreamValidator::finishV3Section() {
+  return v3ParseState_ == V3ParseState::Complete && v3RecordSize_ == 0 &&
+         v3Utf8Remaining_ == 0;
 }
 
 void StreamValidator::beginCoordinateLine() {

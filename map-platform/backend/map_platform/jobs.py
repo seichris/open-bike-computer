@@ -1117,10 +1117,18 @@ class JobStore:
 
 
 class MapJobService:
-    def __init__(self, source_index: SourceIndex, store: JobStore, limits: JobLimits | None = None):
+    def __init__(
+        self,
+        source_index: SourceIndex,
+        store: JobStore,
+        limits: JobLimits | None = None,
+        *,
+        label_target2_enabled: bool = False,
+    ):
         self.source_index = source_index
         self.store = store
         self.limits = limits or JobLimits()
+        self.label_target2_enabled = label_target2_enabled
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1184,6 +1192,13 @@ class MapJobService:
     ) -> tuple[str | None, str | None, MapJob | None]:
         """Validate idempotency fields and return an existing matching request."""
         _validate_map_job_fields(request)
+        from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
+
+        if (
+            renderer_format_version(request) == LABEL_RENDERER_FORMAT_VERSION
+            and not self.label_target2_enabled
+        ):
+            raise ValueError("renderer format 2 generation is not enabled")
         client_installation_id = _client_identifier(request, "clientInstallationId")
         client_request_id = _client_identifier(request, "clientRequestId")
         if bool(client_installation_id) != bool(client_request_id):
@@ -1346,6 +1361,7 @@ _MAP_JOB_REQUEST_FIELDS = {
     "clientRequestId",
     "installOnDevice",
     "target",
+    "labels",
 }
 
 
@@ -1359,6 +1375,13 @@ def _client_identifier(request: dict[str, Any], key: str) -> str | None:
 
 
 def _validate_map_job_fields(request: dict[str, Any]) -> None:
+    from .map_labels import (
+        LABEL_PROFILE_VERSION,
+        LABEL_RENDERER_FORMAT_VERSION,
+        MAX_PREFERRED_LANGUAGES,
+        normalize_language_tag,
+    )
+
     unexpected = sorted(set(request) - _MAP_JOB_REQUEST_FIELDS)
     if unexpected:
         raise ValueError(f"map request has invalid fields: {', '.join(unexpected)}")
@@ -1368,16 +1391,26 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         target = request["target"]
         if not isinstance(target, dict):
             raise ValueError("target must be an object")
-        unexpected_target = sorted(set(target) - {"renderer", "firmwareVersion"})
+        unexpected_target = sorted(
+            set(target) - {"renderer", "rendererFormatVersion", "firmwareVersion"}
+        )
         if unexpected_target:
             raise ValueError(
                 f"target has invalid fields: {', '.join(unexpected_target)}"
             )
-        normalized_target: dict[str, str] = {}
+        normalized_target: dict[str, Any] = {}
         if "renderer" in target:
             if target["renderer"] != "esp32-fmb":
                 raise ValueError("target renderer must be esp32-fmb")
             normalized_target["renderer"] = "esp32-fmb"
+        if "rendererFormatVersion" in target:
+            renderer_format_version = target["rendererFormatVersion"]
+            if (
+                isinstance(renderer_format_version, bool)
+                or renderer_format_version not in {1, LABEL_RENDERER_FORMAT_VERSION}
+            ):
+                raise ValueError("target rendererFormatVersion must be 1 or 2")
+            normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
             if not isinstance(firmware_version, str):
@@ -1387,6 +1420,45 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
                 raise ValueError("target firmwareVersion is invalid")
             normalized_target["firmwareVersion"] = firmware_version
         request["target"] = normalized_target
+    renderer_format_version = request.get("target", {}).get("rendererFormatVersion", 1)
+    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION and request.get(
+        "target", {}
+    ).get("renderer") != "esp32-fmb":
+        raise ValueError("renderer format 2 requires explicit esp32-fmb target")
+    if "labels" in request:
+        labels = request["labels"]
+        if not isinstance(labels, dict):
+            raise ValueError("labels must be an object")
+        unexpected_labels = sorted(
+            set(labels) - {"profileVersion", "preferredLanguages", "internationalFallback"}
+        )
+        if unexpected_labels:
+            raise ValueError(
+                f"labels has invalid fields: {', '.join(unexpected_labels)}"
+            )
+        if labels.get("profileVersion") != LABEL_PROFILE_VERSION:
+            raise ValueError("labels profileVersion must be 1")
+        preferred = labels.get("preferredLanguages")
+        if not isinstance(preferred, list):
+            raise ValueError("labels preferredLanguages must be an array")
+        normalized_languages: list[str] = []
+        for value in preferred:
+            language = normalize_language_tag(value)
+            if language not in normalized_languages:
+                normalized_languages.append(language)
+        if len(normalized_languages) > MAX_PREFERRED_LANGUAGES:
+            raise ValueError("labels preferredLanguages supports at most three tags")
+        fallback = normalize_language_tag(labels.get("internationalFallback"))
+        request["labels"] = {
+            "profileVersion": LABEL_PROFILE_VERSION,
+            "preferredLanguages": normalized_languages,
+            "internationalFallback": fallback,
+        }
+    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION:
+        if "labels" not in request:
+            raise ValueError("renderer format 2 requires labels")
+    elif "labels" in request:
+        raise ValueError("labels require renderer format 2")
 
 
 def _validate_identifier(value: str, key: str) -> str:

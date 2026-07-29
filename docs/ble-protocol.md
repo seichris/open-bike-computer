@@ -484,6 +484,14 @@ Current setting IDs:
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
+| `25` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads |
+| `26` | Map street-label language | `0` local, `1` preferred, `2` local + preferred |
+| `27` | Map street-label size | `0` small, `1` standard, `2` large |
+| `28` | Map street-label orientation | `0` follow roads, `1` keep upright |
+| `29` | Map + Navigation street-label density | Same values as ID `25` |
+| `30` | Map + Navigation street-label language | Same values as ID `26` |
+| `31` | Map + Navigation street-label size | Same values as ID `27` |
+| `32` | Map + Navigation street-label orientation | Same values as ID `28` |
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
@@ -656,6 +664,36 @@ iOS sends no workout health metrics when the bit is absent. A reconnect or a
 later valid capability response that enables bit `7` triggers one full
 core-plus-extended resynchronization.
 
+Client version `7` switches the response envelope to the extensible `CAP2`
+frame:
+
+```text
+"CAP2" | Schema: UInt8 | FeatureFlags: UInt32LE | TLVs...
+TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
+```
+
+Schema `1` assigns feature bit `8` to street-label profiles. Bits `0...7`
+retain their legacy meanings above. TLV type `1` carries the persisted PWR honk
+configuration as exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`).
+Types are unique; malformed, duplicate, or overrun TLVs invalidate the complete
+response. Unknown well-formed types are skipped. Firmware sends legacy `CAPS`
+to clients below version `7`, and current clients accept either envelope.
+
+Golden vectors:
+
+```text
+CAP2 schema 1, flags 0x000001ff, PWR enabled/sound 4/volume 80:
+43 41 50 32 01 ff 01 00 00 01 03 01 04 50
+
+CAP2 schema 1, flags 0, no TLVs:
+43 41 50 32 01 00 00 00 00
+```
+
+IDs `25...32` are sent only after a valid `CAP2` response advertises bit `8`.
+Older sessions therefore never receive label-only setting IDs. Missing NVS
+values migrate to balanced density, local language, standard text, and Follow
+roads independently for Map and Map + Navigation.
+
 ## Destination Picker
 
 The idle Map + Navigation overlay mirrors up to three favorites from the
@@ -816,6 +854,18 @@ Status responses should include:
 - `activeSessionId`: durable content-derived session selected by
   `active-map.json`, when installed by transfer-capable firmware. This
   distinguishes regenerated packs that intentionally reuse a stable map ID.
+- `activeManifestReceipt`: SHA-256 identity of the exact installed manifest;
+  the app binds the following label-health fields to this receipt.
+- `activeRendererFormat`: the installed renderer target format (`1` legacy,
+  `2` FMB v3 + FMA1 street labels).
+- `labelProfileVersion`: `1` for the current target-2 label profile, otherwise
+  `0`.
+- `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
+  active pack.
+- `fontAssetHealthy`: `true` only when the target-2 FMA1 asset passed activation
+  validation and the active renderer can open it. The app uses these fields to
+  distinguish unsupported firmware, a legacy map that needs regeneration, and
+  an unhealthy label asset.
 - `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
@@ -850,7 +900,8 @@ The ESP32 map installer validates staged packs before activation:
   preserving the current content-derived session for resume.
 - manifest schema version must be `1`.
 - `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
-- files must live under `VECTMAP/` and end in `.fmb` or `.fmp`.
+- files must live under `VECTMAP/` and be `.fmb`/legacy `.fmp` blocks, or the
+  exact target-2 asset path `VECTMAP/<mapId>/assets/street-labels.fma`.
 - path traversal and absolute paths are rejected.
 - declared byte size and SHA-256 must match the staged file. New uploads are
   hashed while streaming to SD and receive a verification receipt, avoiding a

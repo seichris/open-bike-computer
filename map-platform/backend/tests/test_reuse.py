@@ -21,6 +21,7 @@ from map_platform.reuse import (
 )
 from map_platform.sources import SourceIndex
 from map_platform.worker import MapWorker
+from tests.map_label_fixtures import empty_fma1, empty_fmb3
 
 
 PRODUCER_BUILD = "1" * 64
@@ -366,6 +367,60 @@ class MapReuseTests(unittest.TestCase):
             with self.assertRaises(SubsetReuseUnavailable):
                 pipeline.build_subset(child, parent)
 
+    def test_target_two_subset_copies_the_exact_font_asset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = MapJobService(
+                SourceIndex([self.source]),
+                JobStore(root / "jobs"),
+                label_target2_enabled=True,
+            )
+            label_target = {
+                "target": {
+                    "renderer": "esp32-fmb",
+                    "rendererFormatVersion": 2,
+                    "firmwareVersion": "1.2.3",
+                },
+                "labels": {
+                    "profileVersion": 1,
+                    "preferredLanguages": ["zh-Hant", "en"],
+                    "internationalFallback": "en",
+                },
+            }
+            parent = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.70, 1.20, 104.00, 1.50],
+                    **label_target,
+                }
+            )
+            child = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.80, 1.30, 103.90, 1.40],
+                    **label_target,
+                }
+            )
+            self._make_parent_archive(root, parent, child)
+            pack_root = root / "child-pack"
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=VersionRunner(),
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+
+            pipeline._stage_subset_pack(child, parent, pack_root)
+
+            asset = (
+                pack_root
+                / "VECTMAP"
+                / stable_map_id(child)
+                / "assets"
+                / "street-labels.fma"
+            )
+            self.assertEqual(asset.read_bytes(), empty_fma1())
+
     def test_corrupt_subset_candidate_falls_back_to_full_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -413,11 +468,32 @@ class MapReuseTests(unittest.TestCase):
         parent.map_id = "parent-map"
         pack_root = root / f"pack-{parent.job_id}"
         child_blocks = required_blocks(child.geometry.bounds)
+        extensions = (
+            ("fmb",)
+            if parent.request.get("target", {}).get("rendererFormatVersion") == 2
+            else ("fmb", "fmp")
+        )
         for block in child_blocks:
-            for extension in ("fmb", "fmp"):
+            for extension in extensions:
                 path = pack_root / child_pack_path(parent.map_id, block, extension)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(f"{block.x}:{block.y}:{extension}".encode())
+                if extensions == ("fmb",):
+                    data = empty_fmb3()
+                elif extension == "fmb":
+                    data = b"FMB\x02"
+                else:
+                    data = f"{block.x}:{block.y}:{extension}".encode()
+                path.write_bytes(data)
+        if parent.request.get("target", {}).get("rendererFormatVersion") == 2:
+            asset = (
+                pack_root
+                / "VECTMAP"
+                / parent.map_id
+                / "assets"
+                / "street-labels.fma"
+            )
+            asset.parent.mkdir(parents=True, exist_ok=True)
+            asset.write_bytes(empty_fma1())
         manifest = build_manifest(
             parent,
             pack_root,

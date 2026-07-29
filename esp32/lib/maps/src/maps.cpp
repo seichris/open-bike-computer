@@ -9,6 +9,9 @@
 
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
+#include "mapLabelLayout.hpp"
+#include "mapLabelRasterizer.hpp"
+#include "mapLabelSelection.hpp"
 #include "mapLineStyle.hpp"
 #include "mapTransform.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
@@ -48,6 +51,7 @@ const char *TAG PROGMEM = "Maps";
 #include <limits>
 #include <new>
 #include <sys/stat.h>
+#include <unordered_map>
 
 namespace {
 
@@ -116,6 +120,19 @@ bool validateMapBlockCooperatively(const std::string &path,
 }
 
 } // namespace
+
+bool Maps::LabelLayoutCacheKey::operator==(
+    const LabelLayoutCacheKey &other) const {
+  return centerX == other.centerX && centerY == other.centerY &&
+         rotationBucket == other.rotationBucket &&
+         screenWidth == other.screenWidth && screenHeight == other.screenHeight &&
+         fontFingerprint == other.fontFingerprint &&
+         visibilityMask == other.visibilityMask &&
+         blockSignature == other.blockSignature && zoom == other.zoom &&
+         density == other.density && languageMode == other.languageMode &&
+         textSize == other.textSize && orientation == other.orientation &&
+         markerScale == other.markerScale && guidance == other.guidance;
+}
 
 enum class VisibilityClass : uint8_t {
   Always,
@@ -1385,6 +1402,18 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     mblock->polylines.push_back(line);
   }
 
+  if (version >= 3) {
+    std::string labelError;
+    if (!map_label_block::decode(
+            reinterpret_cast<const uint8_t *>(file), fileSize, lineCount,
+            mblock->labelData, &labelError)) {
+      ESP_LOGE(TAG, "Could not decode FMB v3 labels: %s", labelError.c_str());
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
+  }
+
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
   if (!buildPolygonGrid(mblock)) {
@@ -1768,6 +1797,356 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   return true;
 }
 
+bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
+                            lv_obj_t *canvas, uint8_t zoom, double rotation,
+                            const ScreenMapRenderSettings &style) {
+  if (style.labelDensity == 0 || !labelFontAsset.healthy())
+    return true;
+  const uint32_t labelStartMs = MAPIO_TIME_MS();
+  const uint32_t cacheHitsBefore = labelFontAsset.cacheHits();
+  const uint32_t cacheMissesBefore = labelFontAsset.cacheMisses();
+  const uint32_t cacheEvictionsBefore = labelFontAsset.cacheEvictions();
+  size_t peakDecodedLabelBytes = 0;
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
+  if (drawBuffer == nullptr || drawBuffer->data == nullptr)
+    return true;
+
+  const int32_t screenWidth = drawBuffer->header.w;
+  const int32_t screenHeight = drawBuffer->header.h;
+  const int16_t screenAnchorX = mapAnchorXForWidth(screenWidth);
+  const int16_t screenAnchorY = mapAnchorYForHeight(screenHeight);
+  constexpr float LABEL_PI = 3.14159265358979323846F;
+  constexpr size_t MAX_GATHERED_CANDIDATES = 4096;
+  // Half-degree rotation buckets move an edge-of-screen label by at most two
+  // pixels and make repeated sensor redraws reuse one stable collision result.
+  const int16_t rotationBucket = static_cast<int16_t>(
+      std::lround(rotation * 360.0 / static_cast<double>(LABEL_PI)));
+  const double labelRotation =
+      rotationBucket * static_cast<double>(LABEL_PI) / 360.0;
+  const double mapCosine = std::cos(labelRotation);
+  const double mapSine = std::sin(labelRotation);
+  const int32_t centerQuantum = zoom >= 3 ? zoom - 1 : 1;
+  const auto quantize = [](int32_t value, int32_t quantum) {
+    if (quantum <= 1)
+      return value;
+    return (value >= 0 ? value + quantum / 2 : value - quantum / 2) /
+           quantum * quantum;
+  };
+  Point32 labelCenter = viewPort.center;
+  labelCenter.x = quantize(labelCenter.x, centerQuantum);
+  labelCenter.y = quantize(labelCenter.y, centerQuantum);
+  const uint8_t sizeId = std::min<uint8_t>(style.labelTextSize, 2);
+  const float fontPixels[3] = {12.0F, 15.0F, 18.0F};
+
+  uint64_t blockSignature = 1469598103934665603ULL;
+  const auto mixSignature = [&](uint32_t value) {
+    blockSignature ^= value;
+    blockSignature *= 1099511628211ULL;
+  };
+  for (const MapBlock *block : memCache.blocks) {
+    mixSignature(static_cast<uint32_t>(block->offset.x));
+    mixSignature(static_cast<uint32_t>(block->offset.y));
+    mixSignature(block->inView ? 1U : 0U);
+    mixSignature(block->formatVersion);
+    mixSignature(block->labelData.profileFingerprint);
+    mixSignature(static_cast<uint32_t>(block->labelData.labels.size()));
+  }
+  const bool guidance = isMapGuidanceScreenActive();
+  const LabelLayoutCacheKey cacheKey{
+      labelCenter.x,
+      labelCenter.y,
+      rotationBucket,
+      static_cast<uint16_t>(screenWidth),
+      static_cast<uint16_t>(screenHeight),
+      labelFontAsset.profileFingerprint(),
+      style.visibilityMask,
+      blockSignature,
+      zoom,
+      style.labelDensity,
+      style.labelLanguageMode,
+      sizeId,
+      style.labelOrientation,
+      style.positionMarkerScale,
+      guidance};
+
+  struct RenderItem {
+    uint32_t key = 0;
+    const map_label_block::ShapedRun *runs[2] = {nullptr, nullptr};
+    uint8_t runCount = 0;
+    float widths[2] = {0, 0};
+  };
+  MapLabelLayoutVector<map_label_layout::Option> options;
+  std::vector<RenderItem, PsramAllocator<RenderItem>> items;
+  using ItemIndexValue = std::pair<const uint32_t, size_t>;
+  std::unordered_map<uint32_t, size_t, std::hash<uint32_t>,
+                     std::equal_to<uint32_t>, PsramAllocator<ItemIndexValue>>
+      itemByKey;
+  options.reserve(MAX_GATHERED_CANDIDATES);
+  items.reserve(1024);
+  itemByKey.reserve(1024);
+
+  const auto transformed = [&](Point16 point, Point16 center) {
+    double dx = 0;
+    double dy = 0;
+    if (zoom == 0) {
+      dx = static_cast<double>(point.x - center.x) * 2.0;
+      dy = -static_cast<double>(point.y - center.y) * 2.0;
+    } else if (zoom == 1) {
+      dx = static_cast<double>(point.x - center.x) * 1.5;
+      dy = -static_cast<double>(point.y - center.y) * 1.5;
+    } else {
+      const int divisor = zoom - 1;
+      dx = static_cast<double>(point.x - center.x) / divisor;
+      dy = -static_cast<double>(point.y - center.y) / divisor;
+    }
+    return Point16(static_cast<int16_t>(std::round(dx * mapCosine -
+                                                   dy * mapSine)) +
+                       screenAnchorX,
+                   static_cast<int16_t>(std::round(dx * mapSine +
+                                                   dy * mapCosine)) +
+                       screenAnchorY);
+  };
+  const auto runWidth = [](const map_label_block::ShapedRun &run) {
+    int32_t advance = 0;
+    for (const auto &glyph : run.glyphs)
+      advance += glyph.xAdvance26_6;
+    return std::fabs(static_cast<float>(advance) / 64.0F);
+  };
+  // Rank buckets bound gathering before the layout sort, ensuring dense local
+  // roads cannot crowd out high-priority road names merely due to block order.
+  for (uint8_t rankBucket = 0;
+       rankBucket <= 6 && options.size() < MAX_GATHERED_CANDIDATES;
+       ++rankBucket) {
+    for (size_t blockIndex = 0;
+         blockIndex < memCache.blocks.size() &&
+         options.size() < MAX_GATHERED_CANDIDATES;
+         ++blockIndex) {
+      MapBlock *block = memCache.blocks[blockIndex];
+      if (block->inView)
+        peakDecodedLabelBytes =
+            std::max(peakDecodedLabelBytes, block->labelData.decodedBytes());
+      if (!block->inView || block->formatVersion < 3 ||
+          block->labelData.profileFingerprint !=
+              labelFontAsset.profileFingerprint() ||
+          !block->labelData.referencesResolve(labelFontAsset.glyphCount(),
+                                              labelFontAsset.languageCount()))
+        continue;
+      const Point16 blockCenter =
+          labelCenter.toPoint16() - block->offset.toPoint16();
+      for (size_t labelIndex = 0;
+           labelIndex < block->labelData.labels.size() &&
+           options.size() < MAX_GATHERED_CANDIDATES;
+           ++labelIndex) {
+        if ((labelIndex & 0x3fU) == 0 &&
+            shouldInterruptMapRenderForScreenCycle())
+          return false;
+        const auto &label = block->labelData.labels[labelIndex];
+        if (label.rank != rankBucket || zoom < label.minZoom ||
+            zoom > label.maxZoom ||
+            label.polylineIndex >= block->polylines.size())
+          continue;
+        const Polyline &road = block->polylines[label.polylineIndex];
+        if (!isLineVisible(road.typeId, road.color, road.width, style))
+          continue;
+
+        const auto selection =
+            map_label_selection::select(label, style.labelLanguageMode);
+        if (selection.count == 0)
+          continue;
+
+        RenderItem item;
+        item.key = (static_cast<uint32_t>(blockIndex + 1U) << 16U) |
+                   static_cast<uint32_t>(labelIndex + 1U);
+        bool validRuns = true;
+        float measuredWidth = 0;
+        for (uint8_t line = 0; line < selection.count; ++line) {
+          const uint16_t runId = selection.lines[line]->runIds[sizeId];
+          if (runId == 0 || runId > block->labelData.runs.size()) {
+            validRuns = false;
+            break;
+          }
+          item.runs[line] = &block->labelData.runs[runId - 1U];
+          item.widths[line] = runWidth(*item.runs[line]);
+          measuredWidth = std::max(measuredWidth, item.widths[line]);
+        }
+        if (!validRuns || measuredWidth <= 0)
+          continue;
+        item.runCount = selection.count;
+        const size_t itemIndex = items.size();
+        items.push_back(item);
+        itemByKey[item.key] = itemIndex;
+        const float measuredHeight =
+            fontPixels[sizeId] * selection.count +
+            (selection.count == 2 ? 4.0F : 0.0F) + 6.0F;
+
+        for (const auto &candidate : label.candidates) {
+          if (options.size() >= MAX_GATHERED_CANDIDATES)
+            break;
+          const Point16 start = transformed(
+              Point16(candidate.startX, candidate.startY), blockCenter);
+          const Point16 end =
+              transformed(Point16(candidate.endX, candidate.endY), blockCenter);
+          const float dx = static_cast<float>(end.x - start.x);
+          const float dy = static_cast<float>(end.y - start.y);
+          if (std::hypot(dx, dy) < measuredWidth + 12.0F)
+            continue;
+          float angle = style.labelOrientation == 0 ? std::atan2(dy, dx) : 0;
+          if (angle > LABEL_PI * 0.5F)
+            angle -= LABEL_PI;
+          else if (angle < -LABEL_PI * 0.5F)
+            angle += LABEL_PI;
+          options.push_back(
+              {item.key,
+               label.repeatGroup,
+               static_cast<uint16_t>(blockIndex),
+               static_cast<uint16_t>(labelIndex),
+               label.rank,
+               candidate.quality,
+               (start.x + end.x) * 0.5F,
+               (start.y + end.y) * 0.5F,
+               angle,
+               measuredWidth + 6.0F,
+               measuredHeight});
+        }
+      }
+    }
+  }
+
+  if (options.empty())
+    return true;
+  std::vector<map_label_layout::ReservedRegion> reserved;
+  const float markerSize = 48.0F *
+                           std::min<uint8_t>(
+                               std::max<uint8_t>(style.positionMarkerScale, 1),
+                               5);
+  reserved.push_back({static_cast<float>(screenAnchorX),
+                      static_cast<float>(screenAnchorY), markerSize,
+                      markerSize});
+  if (guidance)
+    reserved.push_back(
+        {screenWidth * 0.5F, 34.0F, static_cast<float>(screenWidth), 68.0F});
+  const size_t gatheredOptions = options.size();
+  map_label_layout::Diagnostics layoutDiagnostics;
+  const uint32_t layoutStartMs = MAPIO_TIME_MS();
+  const bool layoutCacheHit = labelLayoutCache.valid &&
+                              labelLayoutCache.key == cacheKey;
+  MapLabelLayoutVector<map_label_layout::Placement> placements;
+  if (layoutCacheHit) {
+    placements = labelLayoutCache.placements;
+    layoutDiagnostics = labelLayoutCache.diagnostics;
+  } else {
+    placements = map_label_layout::place(
+        std::move(options),
+        {static_cast<float>(screenWidth), static_cast<float>(screenHeight)},
+        style.labelDensity, reserved, &layoutDiagnostics);
+    labelLayoutCache.key = cacheKey;
+    labelLayoutCache.placements = placements;
+    labelLayoutCache.diagnostics = layoutDiagnostics;
+    labelLayoutCache.valid = true;
+  }
+  const uint32_t layoutMs = MAPIO_TIME_MS() - layoutStartMs;
+  const uint32_t drawLabelsStartMs = MAPIO_TIME_MS();
+
+  uint16_t *pixels = reinterpret_cast<uint16_t *>(drawBuffer->data);
+  const uint32_t stride = drawBuffer->header.stride / sizeof(uint16_t);
+  for (const auto &placement : placements) {
+    if (shouldInterruptMapRenderForScreenCycle())
+      return false;
+    const auto itemPosition = itemByKey.find(placement.option.labelKey);
+    if (itemPosition == itemByKey.end())
+      continue;
+    const RenderItem &item = items[itemPosition->second];
+    const int32_t centerX = static_cast<int32_t>(placement.option.centerX);
+    const int32_t centerY = static_cast<int32_t>(placement.option.centerY);
+    if (centerX < 0 || centerX >= screenWidth || centerY < 0 ||
+        centerY >= screenHeight)
+      continue;
+    const uint16_t background = pixels[centerY * stride + centerX];
+    const uint32_t luminance = ((background >> 11U) & 0x1fU) * 299U * 255U /
+                                   31U +
+                               ((background >> 5U) & 0x3fU) * 587U * 255U /
+                                   63U +
+                               (background & 0x1fU) * 114U * 255U / 31U;
+    const uint16_t fillColor = luminance > 128000U ? 0x0000U : 0xffffU;
+    const uint16_t haloColor = luminance > 128000U ? 0xffffU : 0x0000U;
+    const map_label_rasterizer::TransformQ15 transform{
+        centerX,
+        centerY,
+        static_cast<int32_t>(std::lround(
+            std::cos(placement.option.angleRadians) *
+            map_label_rasterizer::kQ15One)),
+        static_cast<int32_t>(std::lround(
+            std::sin(placement.option.angleRadians) *
+            map_label_rasterizer::kQ15One))};
+    const int32_t fontHeight = static_cast<int32_t>(fontPixels[sizeId]);
+    const int32_t totalHeight =
+        fontHeight * item.runCount + (item.runCount == 2 ? 4 : 0);
+
+    for (uint8_t pass = 0; pass < 2; ++pass) {
+      for (uint8_t line = 0; line < item.runCount; ++line) {
+        const auto &run = *item.runs[line];
+        int32_t totalAdvance26_6 = 0;
+        for (const auto &glyph : run.glyphs)
+          totalAdvance26_6 += glyph.xAdvance26_6;
+        int32_t penX26_6 = -std::abs(totalAdvance26_6) / 2;
+        const int32_t baselineY26_6 =
+            -totalHeight * 32 + line * (fontHeight + 4) * 64 +
+            fontHeight * 50;
+        for (const auto &glyph : run.glyphs) {
+          map_font_asset::GlyphBitmap bitmap;
+          if (!labelFontAsset.loadGlyph(glyph.glyphId, sizeId, bitmap)) {
+            const char *error = map_font_asset::runtimeErrorCode(
+                labelFontAsset.runtimeError());
+            MAPIO_LOG("MAPIO: label-font-failure code=%s consecutive=%u "
+                      "healthy=%u\n",
+                      error, (unsigned)labelFontAsset.consecutiveFailures(),
+                      (unsigned)labelFontAsset.healthy());
+            if (!labelFontAsset.healthy()) {
+              streetLabelRuntimeFailurePending = true;
+              streetLabelRuntimeFailureCode = error;
+              labelLayoutCache.clear();
+            }
+            return true; // Keep the base map visible on any asset I/O failure.
+          }
+          const int32_t glyphX26_6 = penX26_6 + glyph.xOffset26_6 +
+                                     bitmap.bearingX * 64;
+          const int32_t glyphY26_6 = baselineY26_6 - glyph.yOffset26_6 -
+                                     bitmap.bearingY * 64;
+          if (!map_label_rasterizer::drawGlyphPass(
+                  pixels, screenWidth, screenHeight, stride, bitmap.fill,
+                  bitmap.distance, bitmap.width, bitmap.height, glyphX26_6,
+                  glyphY26_6, transform, pass, fillColor, haloColor,
+                  shouldInterruptMapRenderForScreenCycle))
+            return false;
+          penX26_6 += glyph.xAdvance26_6;
+        }
+      }
+    }
+  }
+  MAPIO_LOG(
+      "MAPIO: labels gathered=%u invalid=%u duplicate=%u outside=%u "
+      "collisionTested=%u collision=%u capacity=%u accepted=%u "
+      "layoutCacheHit=%u layoutMs=%lu drawMs=%lu totalMs=%lu "
+      "cacheHit=%lu cacheMiss=%lu cacheEvict=%lu cacheBytes=%u "
+      "decodedBlockPeakBytes=%u\n",
+      (unsigned)gatheredOptions,
+      (unsigned)layoutDiagnostics.invalidOrDensityRejected,
+      (unsigned)layoutDiagnostics.duplicateRejected,
+      (unsigned)layoutDiagnostics.outsideScreenRejected,
+      (unsigned)layoutDiagnostics.collisionTested,
+      (unsigned)layoutDiagnostics.collisionRejected,
+      (unsigned)layoutDiagnostics.capacityRejected,
+      (unsigned)placements.size(), (unsigned)layoutCacheHit,
+      (unsigned long)layoutMs,
+      (unsigned long)(MAPIO_TIME_MS() - drawLabelsStartMs),
+      (unsigned long)(MAPIO_TIME_MS() - labelStartMs),
+      (unsigned long)(labelFontAsset.cacheHits() - cacheHitsBefore),
+      (unsigned long)(labelFontAsset.cacheMisses() - cacheMissesBefore),
+      (unsigned long)(labelFontAsset.cacheEvictions() - cacheEvictionsBefore),
+      (unsigned)labelFontAsset.cachedBytes(), (unsigned)peakDecodedLabelBytes);
+  return true;
+}
+
 /**
  * @brief Generate vectorized map
  *
@@ -2006,6 +2385,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 (unsigned long)polygonMs, (unsigned long)lineMs,
                 (unsigned long)(MAPIO_TIME_MS() - blockTime));
     }
+    if (!drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
+      return false;
     ESP_LOGI(TAG, "Total %i ms", millis() - totalTime);
 
     // TODO: paint only in NAV mode
@@ -2406,9 +2787,24 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
     return false;
   }
 
+  map_font_asset::Asset candidateFont;
+  const std::string fontPath =
+      std::string(normalized.c_str()) + "assets/street-labels.fma";
+  struct stat fontMetadata = {};
+  if (::stat(fontPath.c_str(), &fontMetadata) == 0) {
+    if (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath)) {
+      ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
+      return false;
+    }
+  }
+
   for (MapBlock *block : memCache.blocks)
     delete block;
   memCache.blocks.clear();
+  labelFontAsset = std::move(candidateFont);
+  labelLayoutCache.clear();
+  streetLabelRuntimeFailurePending = false;
+  streetLabelRuntimeFailureCode.clear();
   vectorMapFolder = normalized;
   invalidateRollingRasterWindow();
   isMapFound = false;
@@ -2417,6 +2813,14 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
   oldMapTile = {};
   currentMapTile = {};
   ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
+  return true;
+}
+
+bool Maps::takeStreetLabelRuntimeFailure(std::string &code) {
+  if (!streetLabelRuntimeFailurePending)
+    return false;
+  code = streetLabelRuntimeFailureCode;
+  streetLabelRuntimeFailurePending = false;
   return true;
 }
 
@@ -2438,7 +2842,19 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
   const bool previousMapFound = isMapFound;
   isMapFound = false;
   MapBlock *block = readMapBlock(String(blockBase.c_str()));
-  const bool loaded = isMapFound;
+  bool loaded = isMapFound;
+  if (loaded && block->formatVersion >= 3) {
+    map_font_asset::Asset candidateFont;
+    const std::string fontPath = normalized + "/assets/street-labels.fma";
+    loaded = candidateFont.open(fontPath) &&
+             candidateFont.profileFingerprint() ==
+                 block->labelData.profileFingerprint &&
+             block->labelData.referencesResolve(candidateFont.glyphCount(),
+                                                 candidateFont.languageCount());
+    if (!loaded)
+      ESP_LOGE(TAG, "Street-label block/font contract failed under %s",
+               normalized.c_str());
+  }
   delete block;
   isMapFound = previousMapFound;
   ESP_LOGI(TAG, "Vector map probe root=%s block=%s loaded=%d",
