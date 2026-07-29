@@ -565,6 +565,16 @@ bit `2`. ACK-capable firmware uses a tracked frame:
 Firmware persists the complete configuration and queues the configured sound
 after an AXP2101 short-press event, so the button works without an active app
 connection. The AXP2101's six-second hardware power-off behavior is unchanged.
+
+Independently of hard power-off, connected firmware dims after 15 seconds and
+turns the panel off after 45 seconds without meaningful activity when no
+navigation is active. GPS and workout telemetry alone do not keep the panel
+awake. A
+changed maneuver instruction/icon, a closer maneuver-distance threshold,
+route, screen/input event, connection/authentication event, ownership
+comparison, active sound, or transfer wakes or holds it as appropriate. BLE
+advertising/connection processing continues with the panel off, and wake
+restores the saved brightness with one synchronized full-screen refresh.
 Firmware echoes the request ID when acknowledging tracked requests on the
 navigation notification characteristic:
 

@@ -69,6 +69,17 @@ int main() {
   assert(restored.takeFullRefreshRequired());
   assert(!restored.takeFullRefreshRequired());
 
+  for (int cycle = 0; cycle < 10'000; ++cycle) {
+    restored.requestState(State::Off);
+    assert(restored.takePendingPanelUpdate(update));
+    assert(update.turnDisplayOff);
+    restored.requestState(State::Active);
+    assert(restored.takePendingPanelUpdate(update));
+    assert(update.turnDisplayOn);
+    assert(restored.takeFullRefreshRequired());
+    assert(!restored.takeFullRefreshRequired());
+  }
+
   for (uint8_t id : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{6},
                      uint8_t{7}, uint8_t{8}, uint8_t{9}, uint8_t{10},
                      uint8_t{16}, uint8_t{17}, uint8_t{18}, uint8_t{19},

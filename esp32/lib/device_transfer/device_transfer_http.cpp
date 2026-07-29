@@ -231,6 +231,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     }
     if (transferBoundary) {
       transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+      lastUsefulTrafficMs_ = millis();
     }
     unlockState();
   }
@@ -287,8 +288,19 @@ void HttpTransferServer::runWorker() {
     }
     WiFiClient client = server_.accept();
     if (client) {
+      lockState();
+      requestInProgress_ = true;
+      currentRequestAuthorized_ = false;
+      unlockState();
       handleClient(client);
       client.stop();
+      lockState();
+      if (currentRequestAuthorized_) {
+        lastUsefulTrafficMs_ = millis();
+      }
+      requestInProgress_ = false;
+      currentRequestAuthorized_ = false;
+      unlockState();
     } else {
       vTaskDelay(pdMS_TO_TICKS(2));
     }
@@ -313,6 +325,12 @@ HttpTransferStatus HttpTransferServer::status() const {
   const std::string sessionToken = sessionToken_;
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
+  const uint32_t errorSequence = errorSequence_;
+  const uint32_t lastUsefulTrafficMs = lastUsefulTrafficMs_;
+  // Only authenticated work may extend the transfer lifetime. A client that
+  // stalls before authorization must not keep the AP awake indefinitely.
+  const bool authorizedRequestInProgress =
+      requestInProgress_ && currentRequestAuthorized_;
   unlockState();
 
   std::string baseUrl;
@@ -326,23 +344,36 @@ HttpTransferStatus HttpTransferServer::status() const {
                 std::to_string(port);
     }
   }
-  return {configured,       enabled, port,     mode,
-          baseUrl,          startedAp ? apSsid : "",
-          sessionToken,     lastErrorCode,
-          lastErrorMessage};
+  return {configured,
+          enabled,
+          port,
+          mode,
+          baseUrl,
+          startedAp ? apSsid : "",
+          sessionToken,
+          lastErrorCode,
+          lastErrorMessage,
+          errorSequence,
+          lastUsefulTrafficMs,
+          authorizedRequestInProgress};
 }
 
 bool HttpTransferServer::isRequestAuthorized(
-    const HttpRequest &request) const {
+    const HttpRequest &request) {
   lockState();
   const bool enabled = enabled_;
   const std::string sessionToken = sessionToken_;
   const uint32_t transferGeneration = transferGeneration_;
+  const bool authorized =
+      isHttpTransferGenerationCurrent(enabled, transferGeneration,
+                                      request.transferGeneration) &&
+      !sessionToken.empty() && request.transferToken == sessionToken;
+  if (authorized) {
+    lastUsefulTrafficMs_ = millis();
+    currentRequestAuthorized_ = true;
+  }
   unlockState();
-  return isHttpTransferGenerationCurrent(enabled, transferGeneration,
-                                         request.transferGeneration) &&
-         !sessionToken.empty() &&
-         request.transferToken == sessionToken;
+  return authorized;
 }
 
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
@@ -487,6 +518,7 @@ void HttpTransferServer::rememberError(const std::string &code,
                                        const std::string &message) {
   lastErrorCode_ = code;
   lastErrorMessage_ = message;
+  errorSequence_ = nextHttpTransferGeneration(errorSequence_);
 }
 
 void HttpTransferServer::lockState() const {
