@@ -15,12 +15,10 @@ A sleek, Garmin-mounted bike computer.
 2. **Download [Bike Computer 2.0 on the App Store](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)** on your iPhone and pair your bike computer. The Apple Watch companion is included.
 3. **Ride.** Start tracking your workout on your Apple Watch or iPhone and check your live ride statistics on your bike computer.
 
-## Open roadmap
+## Contributing
 
 Explore proposed and in-progress features on our
 [open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature).
-
-## Contributing
 
 Ideas and feature requests are welcome—[open an issue](https://github.com/seichris/open-bike-computer/issues/new).
 
