@@ -38,6 +38,7 @@
 #include "../power_metrics/power_metrics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/pcf85063.hpp"
 #endif
@@ -156,6 +157,7 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
   ownershipUiPairingGeneration = pairingGeneration;
   ownershipUiUpdatePending = true;
   portEXIT_CRITICAL(&ownershipUiMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static void applyPendingOwnershipUiUpdate() {
@@ -244,6 +246,7 @@ static void setDestinationPickerStatus(DestinationPickerStatusCode code,
       '\0';
   destinationStatusUpdatedMs = nowMs;
   portEXIT_CRITICAL(&destinationPickerMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static bool beginDestinationRequest(uint32_t nowMs) {
@@ -279,6 +282,9 @@ static bool applyDestinationResponseIfPending(
     }
   }
   portEXIT_CRITICAL(&destinationPickerMux);
+  if (matches) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  }
   return matches;
 }
 
@@ -429,6 +435,7 @@ static uint32_t normalizedDisconnectedSleepTimeoutSeconds(int64_t rawSeconds) {
 static void clearCurrentNavigationData() {
   currentNavData = {0, 0, ""};
   navDataUpdated = true;
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 // Route geometry debouncing - skip redundant parses
@@ -510,6 +517,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   // Latest-state mailboxes make periodic GPS and repeated route/settings
   // updates bounded without ever dropping the newest authoritative value.
   free(replaced.data);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   return true;
 }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -635,6 +643,7 @@ static void parseNavigationData(const std::string &data) {
   Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", currentNavData.iconID,
                 currentNavData.distance, currentNavData.instruction);
 #endif
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static bool requireAuthenticated(const char *payloadName) {
@@ -1386,6 +1395,7 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
 static void queueTransferControl(ble_transfer::Action action,
                                  uint8_t notifications) {
   pendingTransferControl.merge(action, notifications);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static void processPendingTransferControl() {
@@ -1651,6 +1661,7 @@ static bool commitDestinationCatalog(const std::string &json) {
   candidate.revision = destinationCatalog.revision + 1;
   destinationCatalog = candidate;
   portEXIT_CRITICAL(&destinationPickerMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   Serial.printf("BLE Destination: committed generation=%lu items=%u\n",
                 (unsigned long)candidate.generation, candidate.count);
   return true;
@@ -1928,6 +1939,7 @@ static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   case workout_telemetry::ApplyResult::Applied:
   case workout_telemetry::ApplyResult::Cleared:
     // Health metrics remain RAM-only and are intentionally absent from logs.
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     return;
   default:
     Serial.printf("BLE Workout: rejected %s frame (%s)\n",
@@ -2371,6 +2383,7 @@ public:
       xSemaphoreGive(destinationCatalogReassemblerMutex);
     }
     Serial.println("BLE: iOS client connected!");
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
   }
@@ -2408,6 +2421,7 @@ public:
     ownershipDisconnectPending = false;
     bleDebugStats.connected = false;
     bleDebugStats.authenticated = false;
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
     pendingAuthNonce[0] = '\0';
@@ -2721,6 +2735,7 @@ public:
     if (!value.empty()) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
       handleAuthPayload(value);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     }
   }
 };

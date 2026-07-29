@@ -125,6 +125,10 @@ jobs:
             -o /tmp/test_display_inactivity_policy
           /tmp/test_display_inactivity_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ui_scheduler_policy.cpp \
+            -o /tmp/test_ui_scheduler_policy
+          /tmp/test_ui_scheduler_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ui_update_policy.cpp \
             -o /tmp/test_ui_update_policy
           /tmp/test_ui_update_policy

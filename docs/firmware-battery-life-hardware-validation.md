@@ -49,6 +49,29 @@ attention holds, transfer timeouts, and 10,000 display-off/wake transitions.
 Physical wake, touch, reconnect, and battery-depletion checks remain pending
 until the 1.75-inch device is connected again.
 
+## Event-driven UI scheduling
+
+LVGL now reads the monotonic ESP timer directly instead of waking a periodic
+5 ms timer only to advance its tick. The Arduino UI-owner task uses the delay
+returned by `lv_timer_handler()` together with explicit housekeeping deadlines,
+then blocks on a FreeRTOS task notification. Live navigation has a conservative
+50 ms maximum wait; connected-idle, disconnected, and display-off states have a
+250 ms maximum wait. An actual LVGL or housekeeping deadline can always shorten
+those waits.
+
+BLE state publication, touch and BOOT interrupts, display changes, audio state,
+and transfer completion notify the UI owner immediately. BLE callbacks continue
+to publish mailbox/state changes and never mutate LVGL objects directly. BLE
+ownership/timeout processing, disconnected shutdown, transfer completion, and
+PMU button polling now have explicit deadlines instead of running on every loop.
+The existing `PWRMET` `loop[count=...]` and `lvgl[count=...]` fields provide the
+software wakeup counters for later before/after battery-depletion runs.
+
+Host tests cover deadline selection, immediate deadlines, event-bit
+coalescing, wraparound, and the 50/250 ms maximum-wait policy. Physical maneuver,
+touch, reconnect, and long-running transfer latency remain pending until the
+1.75-inch device is connected again.
+
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
 percentage, or USB-powered observation is not a power baseline. Fill in the
