@@ -1,18 +1,18 @@
 <img width="2375" height="871" alt="bike_header" src="https://github.com/user-attachments/assets/06dda2a2-b5b1-4a5c-86de-9ac191c8e657" />
 
-Navigate and record bike rides with a sleek, Garmin-mounted bike computer,
-iPhone, and optional Apple Watch companion.
+Navigate your bike rides with a sleek, Garmin-mounted bike computer, and
+automatically track your workouts on your iPhone, and Apple Watch.
+
+Plan routes and follow turn-by-turn directions with Apple Maps. Completed
+cycling workouts are saved to Apple Health.
+
+[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)
 
 ## Get started
 
 1. **Get your bike computer.** Choose the round [Waveshare 1.75-inch](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), the larger rectangular [Waveshare 2.06-inch](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm), or a compact round build using the [Seeed Studio XIAO nRF52840](https://www.seeedstudio.com/Seeed-XIAO-BLE-nRF52840-p-5201.html) + [1.28-inch Round Touch Display](https://www.seeedstudio.com/1-28-Round-Touch-Display-for-Seeed-Studio-XIAO-ESP32.html).
-2. **Download the free iOS app** and pair your bike computer.
-3. **Optional: pair an Apple Watch.** On iOS 17 and watchOS 10 or later, the
-   Watch app can own and record an outdoor cycling workout, mirror live metrics
-   to iPhone, and relay supported metrics to compatible ESP32 firmware.
-4. **Ride.** Navigation and the Watch workout are independent: use either one
-   by itself, or run both together for turn-by-turn guidance and live ride
-   statistics on the handlebars.
+2. **Download [Bike Computer 2.0 on the App Store](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)** on your iPhone and pair your bike computer. The Apple Watch companion is included.
+3. **Ride.** Start tracking your workout on your Apple Watch or iPhone and check your live ride statistics on your bike computer.
 
 ## Apple Watch workouts
 
