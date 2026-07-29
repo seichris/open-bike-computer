@@ -2,9 +2,10 @@
 
 A sleek, Garmin-mounted bike computer.
 
-🗺️ Seamless Apple Maps integration.\
-🧭 Live ride stats and turn-by-turn directions.\
-🚴 Workouts automatically save to Apple Health.
+🗺️ Navigation with Apple Maps.\
+🚴 Workouts saved to Apple Health.\
+🧭 Ride stats and turn-by-turn directions on your bike computer.\
+📡 Connect your power meter and cadence sensor.
 
 [![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)
 
@@ -13,6 +14,11 @@ A sleek, Garmin-mounted bike computer.
 1. **Get your bike computer.** Choose the round [Waveshare 1.75-inch](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), the larger rectangular [Waveshare 2.06-inch](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm), or a compact round build using the [Seeed Studio XIAO nRF52840](https://www.seeedstudio.com/Seeed-XIAO-BLE-nRF52840-p-5201.html) + [1.28-inch Round Touch Display](https://www.seeedstudio.com/1-28-Round-Touch-Display-for-Seeed-Studio-XIAO-ESP32.html).
 2. **Download [Bike Computer 2.0 on the App Store](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)** on your iPhone and pair your bike computer. The Apple Watch companion is included.
 3. **Ride.** Start tracking your workout on your Apple Watch or iPhone and check your live ride statistics on your bike computer.
+
+## Open roadmap
+
+Explore proposed and in-progress features on our
+[open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature).
 
 ## Contributing
 
