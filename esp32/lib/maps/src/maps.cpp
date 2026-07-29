@@ -13,6 +13,7 @@
 #include "mapTransform.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
+#include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 
@@ -2392,6 +2393,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
 }
 
 bool Maps::setVectorMapFolder(const std::string &folder) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
@@ -2419,6 +2421,7 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
 }
 
 bool Maps::probeVectorMapFolder(const std::string &folder) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
   std::string normalized = folder;
   while (normalized.size() > 1 && normalized.back() == '/')
     normalized.pop_back();
@@ -3188,6 +3191,7 @@ void Maps::invalidatePinchZoomOutBackdrop() {
 }
 
 bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
   baseZoom = map_transform::clampRuntimeZoom(baseZoom);
   if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
       Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
@@ -4111,6 +4115,7 @@ void Maps::updatePositionOverlay() {
  * @param zoom -> Zoom Level
  */
 bool Maps::generateVectorMap(uint8_t zoom) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
   power_metrics::MapRenderMeasurement powerMeasurement;
 #if POWER_METRICS
   uint32_t powerBlocksUs = 0;

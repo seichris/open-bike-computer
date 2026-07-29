@@ -7,6 +7,7 @@
  */
 
 #include "storage.hpp"
+#include "../power_management/power_management.hpp"
 #include "driver/gpio.h"
 #include "driver/sdspi_host.h"
 #include "esp_log.h"
@@ -57,6 +58,8 @@ std::string formatSize(uint64_t size) {
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
 bool Storage::ensureSdMounted() {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
     mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
@@ -99,6 +102,8 @@ void Storage::markSdUnavailable() { isSdLoaded = false; }
  * @brief SD Card init with DMA using ESP-IDF
  */
 esp_err_t Storage::initSD() {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const uint32_t mountStartMs = millis();
   // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
@@ -275,6 +280,8 @@ esp_err_t Storage::initSD() {
  * @return esp_err_t Error code
  */
 esp_err_t Storage::initSPIFFS() {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   ESP_LOGI(TAG, "Initializing FFat as /sdcard");
 
   // Mount FFat at "/sdcard" so the rest of the application thinks it's
@@ -316,6 +323,8 @@ esp_err_t Storage::initSPIFFS() {
  * @return SDCardInfo structure containing SD card information
  */
 SDCardInfo Storage::getSDCardInfo() {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   SDCardInfo info;
 
 #ifndef SPI_SHARED
@@ -383,6 +392,8 @@ bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
  * @return FILE* Pointer to the opened file
  */
 FILE *Storage::open(const char *path, const char *mode) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Reconfigure SPI bus before SD access - QSPI display operations may have
   // altered SPI state. This ensures the SD card SPI is properly configured.
@@ -397,7 +408,11 @@ FILE *Storage::open(const char *path, const char *mode) {
  * @param file Pointer to the file
  * @return int 0 on success, EOF on error
  */
-int Storage::close(FILE *file) { return fclose(file); }
+int Storage::close(FILE *file) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return fclose(file);
+}
 
 /**
  * @brief Get the size of a file on the SD card
@@ -406,6 +421,8 @@ int Storage::close(FILE *file) { return fclose(file); }
  * @return size_t Size of the file in bytes
  */
 size_t Storage::size(const char *path) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   struct stat st;
   if (stat(path, &st) == 0)
     return st.st_size;
@@ -421,6 +438,8 @@ size_t Storage::size(const char *path) {
  * @return size_t Number of bytes actually read
  */
 size_t Storage::read(FILE *file, uint8_t *buffer, size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return 0;
   return fread(buffer, 1, size, file);
@@ -435,6 +454,8 @@ size_t Storage::read(FILE *file, uint8_t *buffer, size_t size) {
  * @return size_t Number of chars actually read
  */
 size_t Storage::read(FILE *file, char *buffer, size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return 0;
   return fread(buffer, 1, size, file);
@@ -449,6 +470,8 @@ size_t Storage::read(FILE *file, char *buffer, size_t size) {
  * @return size_t Number of bytes actually written
  */
 size_t Storage::write(FILE *file, const uint8_t *buffer, size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return 0;
   return fwrite(buffer, 1, size, file);
@@ -463,6 +486,8 @@ size_t Storage::write(FILE *file, const uint8_t *buffer, size_t size) {
  * @return size_t Number of bytes actually written
  */
 size_t Storage::write(FILE *file, const char *buffer, size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return 0;
   return fwrite(buffer, 1, size, file);
@@ -475,6 +500,8 @@ size_t Storage::write(FILE *file, const char *buffer, size_t size) {
  * @return true if the file exists, false otherwise
  */
 bool Storage::exists(const char *path) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   struct stat st;
   return stat(path, &st) == 0;
 }
@@ -485,7 +512,11 @@ bool Storage::exists(const char *path) {
  * @param path Path to the directory
  * @return true if the directory was created successfully, false otherwise
  */
-bool Storage::mkdir(const char *path) { return ::mkdir(path, 0777) == 0; }
+bool Storage::mkdir(const char *path) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return ::mkdir(path, 0777) == 0;
+}
 
 /**
  * @brief Remove a file from the SD card
@@ -493,7 +524,11 @@ bool Storage::mkdir(const char *path) { return ::mkdir(path, 0777) == 0; }
  * @param path Path to the file
  * @return true if the file was removed successfully, false otherwise
  */
-bool Storage::remove(const char *path) { return ::remove(path) == 0; }
+bool Storage::remove(const char *path) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return ::remove(path) == 0;
+}
 
 /**
  * @brief Remove a directory from the SD card
@@ -501,7 +536,11 @@ bool Storage::remove(const char *path) { return ::remove(path) == 0; }
  * @param path Path to the directory
  * @return true if the directory was removed successfully, false otherwise
  */
-bool Storage::rmdir(const char *path) { return ::rmdir(path) == 0; }
+bool Storage::rmdir(const char *path) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return ::rmdir(path) == 0;
+}
 
 /**
  * @brief Seek to a specific position in a file
@@ -513,6 +552,8 @@ bool Storage::rmdir(const char *path) { return ::rmdir(path) == 0; }
  * @return int 0 on success, non-zero on error
  */
 int Storage::seek(FILE *file, long offset, int whence) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return -1;
   return fseek(file, offset, whence);
@@ -526,6 +567,8 @@ int Storage::seek(FILE *file, long offset, int whence) {
  * @return int Number of characters written, negative on error
  */
 int Storage::print(FILE *file, const char *str) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return -1;
   return fprintf(file, "%s", str);
@@ -539,6 +582,8 @@ int Storage::print(FILE *file, const char *str) {
  * @return int Number of characters written, negative on error
  */
 int Storage::println(FILE *file, const char *str) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return -1;
   return fprintf(file, "%s\n", str);
@@ -551,6 +596,8 @@ int Storage::println(FILE *file, const char *str) {
  * @return size_t Number of bytes available to read
  */
 size_t Storage::fileAvailable(FILE *file) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   if (!file)
     return 0;
   long current_pos = ftell(file);

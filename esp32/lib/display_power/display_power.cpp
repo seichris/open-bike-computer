@@ -1,6 +1,7 @@
 #include "display_power.hpp"
 
 #include "../panel/WAVESHARE_AMOLED_175.hpp"
+#include "../power_management/power_management.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 
@@ -136,6 +137,8 @@ uint8_t DisplayPowerManager::effectiveBrightnessPercent() const {
 }
 
 bool DisplayPowerManager::initializePanel() {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Display);
   if (gfx == nullptr) {
     return false;
   }
@@ -179,6 +182,9 @@ bool DisplayPowerManager::applyPendingPanelChange() {
   if (!hasUpdate) {
     return false;
   }
+
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Display);
 
   if (update.turnDisplayOff) {
     gfx->setBrightness(0);

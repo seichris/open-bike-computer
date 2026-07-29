@@ -19,6 +19,7 @@
 #include "esp_log.h"
 #include "tinyxml2.h"
 #include "globalGpxDef.h"
+#include "../../power_management/power_management.hpp"
 
 static const char* TAGGPX PROGMEM = "GPXParser";
 
@@ -74,6 +75,8 @@ class GPXParser
 template <typename T>
 bool GPXParser::editTagAttrOrElem(const char* tag, const char* attribute, const char* element, const T& oldValue, const T& newValue)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   tinyxml2::XMLDocument doc;
   tinyxml2::XMLError result = doc.LoadFile(filePath.c_str());
   if (result != tinyxml2::XML_SUCCESS)
@@ -146,6 +149,8 @@ bool GPXParser::editTagAttrOrElem(const char* tag, const char* attribute, const 
 template <typename T>
 bool GPXParser::insertTagAttrOrElem(const char* tag, const char* attribute, const char* element, const T& value)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   tinyxml2::XMLDocument doc;
   tinyxml2::XMLError result = doc.LoadFile(filePath.c_str());
   if (result != tinyxml2::XML_SUCCESS)

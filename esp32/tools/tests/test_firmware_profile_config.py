@@ -23,6 +23,7 @@ assert "-DFIRMWARE_DIAGNOSTICS=" not in waveshare_flags
 assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
 assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
+assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
 
 diagnostic_profiles = {
     "env:WAVESHARE_AMOLED_175": (
@@ -65,6 +66,31 @@ for environment, target in expected_targets.items():
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
+
+light_sleep_profiles = {
+    "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
+        "env:WAVESHARE_AMOLED_175_POWER_METRICS",
+        "WAVESHARE_AMOLED_175",
+    ),
+    "env:WAVESHARE_AMOLED_206_LIGHT_SLEEP": (
+        "env:WAVESHARE_AMOLED_206_POWER_METRICS",
+        "WAVESHARE_AMOLED_206",
+    ),
+}
+for environment, (base, target) in light_sleep_profiles.items():
+    assert config.get(environment, "extends") == base
+    assert config.get(environment, "custom_firmware_target") == target
+    sdkconfig = config.get(environment, "custom_sdkconfig")
+    assert "CONFIG_PM_ENABLE=y" in sdkconfig
+    assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
+    assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
+    flags = config.get(environment, "build_flags")
+    assert f"${{{base}.build_flags}}" in flags
+    assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
+
+ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+for environment in light_sleep_profiles:
+    assert environment.removeprefix("env:") in ci_workflow
 
 release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
 for environment, target in expected_targets.items():

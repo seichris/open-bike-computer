@@ -1,4 +1,5 @@
 #include "speaker.hpp"
+#include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -529,6 +530,8 @@ void speakerTask(void *) {
       continue;
     }
 
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Audio);
     Sound sound = static_cast<Sound>(request.sound);
     if (!initializeCodec()) {
       playbackActive.store(false, std::memory_order_relaxed);

@@ -74,21 +74,78 @@ touch, reconnect, and long-running transfer latency remain pending until the
 
 ## Dynamic frequency scaling
 
-All Waveshare firmware profiles now compile ESP-IDF power-management support
-and explicitly request 80-240 MHz dynamic frequency scaling during setup.
-Automatic light sleep and FreeRTOS tickless idle remain disabled. The firmware
-reads the effective configuration back from ESP-IDF and exposes its enabled,
-error, minimum, maximum, and light-sleep fields in the ten-second `PWRMET`
-report. A rejected configuration request leaves the prior framework setting
-intact. Readback failure or an unexpected effective configuration is reported
-instead of making assumptions about the active frequency range.
+All ordinary Waveshare firmware profiles compile ESP-IDF power-management
+support and explicitly request 80-240 MHz dynamic frequency scaling during
+setup. Automatic light sleep and FreeRTOS tickless idle remain disabled in
+those profiles. The firmware reads the effective configuration back from
+ESP-IDF and exposes its enabled, error, minimum, maximum, and light-sleep fields
+in the ten-second `PWRMET` report. A rejected configuration request leaves the
+prior framework setting intact. Readback failure or an unexpected effective
+configuration is reported instead of making assumptions about the active
+frequency range.
 
 This is Phase 7 Step A only. The minimum frequency must remain at 80 MHz until
 physical map-render, display-flush, BLE, touch, transfer, audio, and overnight
-connected-navigation checks pass. Do not enable 40 MHz or automatic light
-sleep from build configuration alone. Step B requires explicit locks around
-every timing-sensitive display, map, SD, transfer, audio, and tested I2C path,
-then separate physical validation on the 1.75-inch board.
+connected-navigation checks pass. Do not enable 40 MHz from build
+configuration alone.
+
+On 2026-07-29, `WAVESHARE_AMOLED_175_POWER_METRICS` was flashed to the available
+1.75-inch board at `/dev/cu.usbmodem101` (USB serial
+`28:84:85:3B:68:60`). Boot, AXP2101, touch reset, display, SD, BLE advertising,
+iPhone connection/authentication, GPS-driven map loading, vector rendering,
+and the 15-second dim transition all completed. The effective configuration
+reported `min=80MHz`, `max=240MHz`, `lightSleep=0`, `pmError=0`, and zero
+application PM locks. This passes the initial Step A board gate; longer audio,
+transfer, RF, wake-cycle, and overnight checks remain part of the final matrix.
+
+## Automatic light-sleep experiment
+
+`WAVESHARE_AMOLED_175_LIGHT_SLEEP` and
+`WAVESHARE_AMOLED_206_LIGHT_SLEEP` are dedicated, CI-built validation profiles.
+They inherit power metrics, enable FreeRTOS tickless idle, and request automatic
+light sleep while retaining the 80-240 MHz DFS range. Ordinary, metrics-only,
+and production profiles continue to compile with tickless idle off and never
+request automatic light sleep.
+
+The experiment creates named `ESP_PM_NO_LIGHT_SLEEP` locks for startup,
+display/rotation/QSPI, map rendering, storage/GPX access, transfer and map
+activation, audio/codec/I2S work, and shared I2C operations. The startup lock is
+held before automatic light sleep is configured and released only after a
+valid wake source is configured, setup finishes, and pending-activation resume
+completes. A failed wake-source setup retains that guard. A failed power-policy
+readback or mismatch first restores and verifies DFS-only operation; if
+rollback or lock release itself fails, the startup lock is deliberately
+retained so the device fails awake. Active, peak, and failed application-lock
+counts, wake-source state/failures, and startup completion are emitted in
+`PWRMET`.
+
+The 1.75-inch experiment arms active-low EXT1 wake on BOOT/GPIO0 and the
+CST9217 interrupt/GPIO21. Its light-sleep-only touch policy avoids speculative
+controller reads while the interrupt is inactive, but continues reading for a
+latched edge, active gesture, or the short post-touch polling window. The
+2.06-inch touch interrupt is GPIO38, outside the ESP32-S3 RTC GPIO range, so
+that profile arms BOOT only and retains the existing timed touch fallback until
+a board-specific wake mechanism can be validated on hardware.
+
+On 2026-07-29, the first 1.75-inch light-sleep candidate booted, connected and
+authenticated over BLE, rendered the vector map, dimmed, and turned the display
+off. It then accumulated repeated recovered `ESP_ERR_INVALID_STATE` I2C
+failures during speculative idle CST9217 reads, so that candidate failed the
+gate. After adding the GPIO21 wake source and interrupt-gated idle sampling, a
+fresh 86-second capture on the same board and port completed the connected,
+map-loaded, dimmed, and display-off sequence with `lightSleep=1`,
+`appPmLocks=0`, `peakPmLocks=2`, `pmLockFailures=0`,
+`ext1WakeMask=0x200001`, `pmWakeFailures=0`, `startupComplete=1`, and zero I2C
+failures or recoveries throughout. BLE remained connected and authenticated.
+
+The corrected 1.75-inch light-sleep target builds at 91.0% flash and 52.9% RAM;
+the build-only 2.06-inch target builds at 90.8% flash and 52.9% RAM. The
+ordinary 1.75-inch target also builds after the shared-lock changes, and CI
+builds the complete ordinary, metrics, light-sleep, and production matrix.
+Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
+and repeated wake-cycle checks remain open. The experiment must not be enabled
+in production until those gates pass; the 2.06-inch profile remains build-only
+until that board is available.
 
 ## BLE, PMU, and SD characterization harness
 
@@ -168,9 +225,9 @@ The report contains:
   and the latest effective connection interval, latency, and timeout;
 - Wi-Fi mode, transfer state/mode, audio activity, current CPU frequency,
   effective DFS range, power-management error code, automatic-light-sleep
-  state, and the number of
-  application-managed power-management locks (`appPmLocks`, currently zero
-  because Step A creates none); and
+  state, active and peak application-managed power-management locks, lock
+  failures, and startup-lock completion (Step A reports zero locks; the opt-in
+  light-sleep profile reports live values); and
 - `appQueue=ios-diagnostic`, which identifies the separate
   `PWRMET_IOS v=2` ten-second interval report produced by a Debug iOS build.
 

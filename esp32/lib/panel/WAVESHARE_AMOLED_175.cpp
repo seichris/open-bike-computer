@@ -5,6 +5,7 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
@@ -24,6 +25,7 @@
 #include "power_metrics.hpp"
 #include "cst9217_touch_frame.hpp"
 #include "touch.hpp"
+#include "touch_sampling_policy.hpp"
 #include "waveshare_board.hpp"
 
 extern void appDisplayFlushCompleted();
@@ -167,6 +169,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     lv_display_flush_ready(disp);
     return;
   }
+
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Display);
 
   uint32_t startUs = micros();
 #if POWER_METRICS
@@ -857,6 +862,12 @@ void readTouch() {
       releaseAllTouches(now);
       return;
     }
+  }
+
+  if (!waveshare_board::touch_sampling_policy::shouldAttemptRead(
+          AUTOMATIC_LIGHT_SLEEP_EXPERIMENT != 0, touchHintActive,
+          touchPressed, interruptPending, now, touchFastPollUntilMs)) {
+    return;
   }
 
   uint32_t readInterval =

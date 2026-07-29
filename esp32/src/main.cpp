@@ -841,7 +841,8 @@ static void logPowerMetricsReport() {
       "system[powerMode=%s wifiMode=%d transfer=%d transferMode=%s "
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
-      "appPmLocks=0]\n",
+      "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
+      "ext1WakeMask=0x%llX pmWakeFailures=%lu startupComplete=%d]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
       powerMetricsDisplayStateName(snapshot.displayState),
@@ -898,7 +899,13 @@ static void logPowerMetricsReport() {
       powerManagementStatus.errorCode,
       powerManagementStatus.effective.minimumCpuMhz,
       powerManagementStatus.effective.maximumCpuMhz,
-      powerManagementStatus.effective.automaticLightSleep);
+      powerManagementStatus.effective.automaticLightSleep,
+      (unsigned long)powerManagementStatus.activeLockCount,
+      (unsigned long)powerManagementStatus.peakLockCount,
+      (unsigned long)powerManagementStatus.lockFailureCount,
+      static_cast<unsigned long long>(powerManagementStatus.ext1WakeMask),
+      (unsigned long)powerManagementStatus.wakeSourceFailureCount,
+      powerManagementStatus.startupComplete);
   if (reportLength < 0 ||
       static_cast<size_t>(reportLength) >= sizeof(report)) {
     Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
@@ -1015,6 +1022,14 @@ void setup() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
                   latchWaveshareBootScreenCycle, FALLING);
+  // BOOT is RTC-capable on both variants. The 1.75-inch touch interrupt is
+  // also RTC-capable; the 2.06-inch GPIO38 interrupt is not and must retain
+  // its timed fallback until a board-specific wake path passes validation.
+  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+#ifdef WAVESHARE_AMOLED_175
+  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#endif
+  power_management::configureExt1Wakeup(ext1WakeMask);
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -1251,6 +1266,7 @@ void setup() {
   log_i("Setup Complete");
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
+  power_management::completeStartup();
 }
 
 /**

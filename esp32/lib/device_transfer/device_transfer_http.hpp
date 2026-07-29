@@ -75,6 +75,7 @@ private:
   bool requestInProgress_ = false;
   bool currentRequestAuthorized_ = false;
   uint32_t transferGeneration_ = 0;
+  bool powerLockHeld_ = false;
   struct HandlerRegistration {
     std::string pathPrefix;
     HttpRequestHandler *handler = nullptr;

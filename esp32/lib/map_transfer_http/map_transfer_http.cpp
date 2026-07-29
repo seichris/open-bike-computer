@@ -1,4 +1,5 @@
 #include "map_transfer_http.hpp"
+#include "../power_management/power_management.hpp"
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../maps/src/mapBlockFormat.hpp"
@@ -220,6 +221,8 @@ void MapTransferHttpServer::setStreamStorageProbe(
 }
 
 bool MapTransferHttpServer::streamStoragePathAccessible() const {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   struct stat storage = {};
   struct stat mapNamespace = {};
   return ::stat(storageRoot_.c_str(), &storage) == 0 &&
@@ -230,6 +233,8 @@ bool MapTransferHttpServer::streamStoragePathAccessible() const {
 }
 
 bool MapTransferHttpServer::streamStoragePathWritable() const {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   struct stat storage = {};
   if (::stat(storageRoot_.c_str(), &storage) != 0 ||
       !S_ISDIR(storage.st_mode))
@@ -1312,31 +1317,35 @@ bool MapTransferHttpServer::runActivationTask(const std::string &sessionId,
 }
 
 void MapTransferHttpServer::activationTaskThunk(void *arg) {
-  auto *context = static_cast<ActivationTaskContext *>(arg);
-  if (context != nullptr && context->server != nullptr) {
-    MapTransferHttpServer *server = context->server;
-    std::string sessionId = context->sessionId;
-    const bool automaticExit = context->automaticExit;
-    const bool streamProtocol = context->streamProtocol;
-    delete context;
-    bool waitingForRenderer = false;
-    if (streamProtocol)
-      waitingForRenderer =
-          server->runStreamActivationTask(sessionId, automaticExit);
-    else
-      waitingForRenderer =
-          server->runActivationTask(sessionId, automaticExit);
-    if (!waitingForRenderer) {
-      if (!streamProtocol &&
-          !server->installer_.clearPendingArchiveActivation()) {
-        server->setLastError("activation_marker",
-                             "could not clear pending archive activation");
+  {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Transfer);
+    auto *context = static_cast<ActivationTaskContext *>(arg);
+    if (context != nullptr && context->server != nullptr) {
+      MapTransferHttpServer *server = context->server;
+      std::string sessionId = context->sessionId;
+      const bool automaticExit = context->automaticExit;
+      const bool streamProtocol = context->streamProtocol;
+      delete context;
+      bool waitingForRenderer = false;
+      if (streamProtocol)
+        waitingForRenderer =
+            server->runStreamActivationTask(sessionId, automaticExit);
+      else
+        waitingForRenderer =
+            server->runActivationTask(sessionId, automaticExit);
+      if (!waitingForRenderer) {
+        if (!streamProtocol &&
+            !server->installer_.clearPendingArchiveActivation()) {
+          server->setLastError("activation_marker",
+                               "could not clear pending archive activation");
+        }
+        if (automaticExit)
+          server->requestAutomaticExit();
       }
-      if (automaticExit)
-        server->requestAutomaticExit();
+    } else {
+      delete context;
     }
-  } else {
-    delete context;
   }
   vTaskDelete(nullptr);
 }
