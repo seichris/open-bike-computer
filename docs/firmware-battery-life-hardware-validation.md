@@ -46,8 +46,10 @@ resumes.
 
 Host tests cover time wraparound, inactivity boundaries, navigation/transfer/
 attention holds, transfer timeouts, and 10,000 display-off/wake transitions.
-Physical wake, touch, reconnect, and battery-depletion checks remain pending
-until the 1.75-inch device is connected again.
+On 2026-07-29, the exact Phase 9 light-sleep image was flashed and brought up on
+the available 1.75-inch device. Operator-driven wake, touch, reconnect, and
+later battery-depletion checks remain pending; the host-only 10,000-cycle test
+is not a substitute for the physical wake-cycle release gate.
 
 ## Event-driven UI scheduling
 
@@ -69,8 +71,8 @@ software wakeup counters for later before/after battery-depletion runs.
 
 Host tests cover deadline selection, immediate deadlines, event-bit
 coalescing, wraparound, and the 50/250 ms maximum-wait policy. Physical maneuver,
-touch, reconnect, and long-running transfer latency remain pending until the
-1.75-inch device is connected again.
+touch, reconnect, and long-running transfer latency remain pending on the
+available 1.75-inch device.
 
 ## Dynamic frequency scaling
 
@@ -142,6 +144,18 @@ The corrected 1.75-inch light-sleep target builds at 91.0% flash and 52.9% RAM;
 the build-only 2.06-inch target builds at 90.8% flash and 52.9% RAM. The
 ordinary 1.75-inch target also builds after the shared-lock changes, and CI
 builds the complete ordinary, metrics, light-sleep, and production matrix.
+
+The exact committed image at
+`97f26bda4489ecdf50973a15707c80fb253834d7` was then rebuilt and flashed to
+the same 1.75-inch board. Its firmware binary SHA-256 is
+`18f13ba6a24637e14f9c32476f3f5b6615543e8e17270adba82158b187693a12`.
+A 96-second reset-to-idle capture reached BLE advertising, active, dimmed, and
+display-off states with `lightSleep=1`, `pmError=0`, zero active application
+locks at idle, peak lock count two, zero lock or wake-source failures, EXT1
+mask `0x200001`, startup complete, and zero I2C failures or recoveries. The
+iPhone did not connect and no operator gesture was performed during that
+capture, so it does not close the reconnect, wake, drag, or pinch gates.
+
 Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
 and repeated wake-cycle checks remain open. The experiment must not be enabled
 in production until those gates pass; the 2.06-inch profile remains build-only
