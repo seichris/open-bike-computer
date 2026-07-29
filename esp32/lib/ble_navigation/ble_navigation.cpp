@@ -103,6 +103,31 @@ static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+#if BLE_RADIO_CHARACTERIZATION
+static std::atomic<bool> radioNavigationActive{false};
+static std::atomic<bool> radioUserWakePending{false};
+static std::atomic<uint8_t> radioAdvertisingMode{
+    static_cast<uint8_t>(ble_radio_policy::AdvertisingMode::Default)};
+static std::atomic<uint32_t> radioAdvertisingModeStartedMs{0};
+static std::atomic<uint8_t> radioRequestedConnectionProfile{
+    static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset)};
+#endif
+static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
+static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
+struct RadioDebugSnapshot {
+  bool connectionParametersValid = false;
+  uint16_t connectionIntervalUnits = 0;
+  uint16_t connectionLatency = 0;
+  uint16_t supervisionTimeoutUnits = 0;
+  uint32_t connectionParameterSampleCount = 0;
+  uint32_t lastConnectionParameterSampleMs = 0;
+  ble_radio_policy::AdvertisingMode advertisingMode =
+      ble_radio_policy::AdvertisingMode::Default;
+  ble_radio_policy::ConnectionProfile requestedConnectionProfile =
+      ble_radio_policy::ConnectionProfile::Unset;
+};
+static RadioDebugSnapshot radioDebugSnapshot;
+static portMUX_TYPE radioDebugMux = portMUX_INITIALIZER_UNLOCKED;
 static device_ownership::DeviceOwnership deviceOwnership;
 static bool deviceOwnershipReady = false;
 static bool ownershipPairingActiveSnapshot = false;
@@ -137,6 +162,160 @@ static uint32_t destinationStatusUpdatedMs = 0;
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
+
+#if BLE_RADIO_CHARACTERIZATION
+static const char *advertisingModeName(
+    ble_radio_policy::AdvertisingMode mode) {
+  switch (mode) {
+  case ble_radio_policy::AdvertisingMode::Fast:
+    return "fast";
+  case ble_radio_policy::AdvertisingMode::Slow:
+    return "slow";
+  case ble_radio_policy::AdvertisingMode::Default:
+  default:
+    return "default";
+  }
+}
+
+static const char *connectionProfileName(
+    ble_radio_policy::ConnectionProfile profile) {
+  switch (profile) {
+  case ble_radio_policy::ConnectionProfile::Navigation:
+    return "navigation";
+  case ble_radio_policy::ConnectionProfile::Idle:
+    return "idle";
+  case ble_radio_policy::ConnectionProfile::Unset:
+  default:
+    return "unset";
+  }
+}
+#endif
+
+static esp_power_level_t configuredTxPowerLevel() {
+  switch (ble_radio_policy::kConfiguration.txPowerDbm) {
+  case 0:
+    return ESP_PWR_LVL_N0;
+  case 3:
+    return ESP_PWR_LVL_P3;
+  case 9:
+  default:
+    return ESP_PWR_LVL_P9;
+  }
+}
+
+static void recordConnectionParameters(const ble_gap_conn_desc &description,
+                                       uint32_t nowMs) {
+  portENTER_CRITICAL(&radioDebugMux);
+  const bool changed = !radioDebugSnapshot.connectionParametersValid ||
+                       radioDebugSnapshot.connectionIntervalUnits !=
+                           description.conn_itvl ||
+                       radioDebugSnapshot.connectionLatency !=
+                           description.conn_latency ||
+                       radioDebugSnapshot.supervisionTimeoutUnits !=
+                           description.supervision_timeout;
+  radioDebugSnapshot.connectionParametersValid = true;
+  radioDebugSnapshot.connectionIntervalUnits = description.conn_itvl;
+  radioDebugSnapshot.connectionLatency = description.conn_latency;
+  radioDebugSnapshot.supervisionTimeoutUnits = description.supervision_timeout;
+  radioDebugSnapshot.connectionParameterSampleCount++;
+  radioDebugSnapshot.lastConnectionParameterSampleMs = nowMs;
+  portEXIT_CRITICAL(&radioDebugMux);
+  lastConnectionParameterSampleMs.store(nowMs, std::memory_order_release);
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  if (changed) {
+    Serial.printf(
+        "BLE Radio: effective intervalUnits=%u latency=%u timeoutUnits=%u\n",
+        description.conn_itvl, description.conn_latency,
+        description.supervision_timeout);
+  }
+#else
+  (void)changed;
+#endif
+}
+
+#if BLE_RADIO_CHARACTERIZATION
+static void applyCharacterizationAdvertisingMode(
+    ble_radio_policy::AdvertisingMode mode, bool restartAdvertising) {
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr) {
+    return;
+  }
+  if (restartAdvertising) {
+    if (!advertising->isAdvertising() ||
+        !NimBLEDevice::stopAdvertising()) {
+      return;
+    }
+  }
+  const ble_radio_policy::IntervalRange &range =
+      mode == ble_radio_policy::AdvertisingMode::Slow
+          ? ble_radio_policy::kConfiguration.slowAdvertising
+          : ble_radio_policy::kConfiguration.fastAdvertising;
+  advertising->setMinInterval(range.minimumUnits);
+  advertising->setMaxInterval(range.maximumUnits);
+  const uint32_t nowMs = millis();
+  radioAdvertisingMode.store(static_cast<uint8_t>(mode),
+                             std::memory_order_release);
+  radioAdvertisingModeStartedMs.store(nowMs, std::memory_order_release);
+  portENTER_CRITICAL(&radioDebugMux);
+  radioDebugSnapshot.advertisingMode = mode;
+  portEXIT_CRITICAL(&radioDebugMux);
+  Serial.printf("BLE Radio: advertising mode=%s minUnits=%u maxUnits=%u\n",
+                advertisingModeName(mode), range.minimumUnits,
+                range.maximumUnits);
+  if (restartAdvertising &&
+      radioConnectionHandle.load(std::memory_order_acquire) ==
+          BLE_HS_CONN_HANDLE_NONE &&
+      !NimBLEDevice::startAdvertising()) {
+    Serial.println("BLE Radio: failed to restart advertising");
+  }
+}
+
+static void processRadioCharacterization(uint32_t nowMs,
+                                         NimBLEServer *server) {
+  const uint16_t connectionHandle =
+      radioConnectionHandle.load(std::memory_order_acquire);
+  if (connectionHandle == BLE_HS_CONN_HANDLE_NONE) {
+    const bool wakeRequested =
+        radioUserWakePending.exchange(false, std::memory_order_acq_rel);
+    const auto currentMode = static_cast<ble_radio_policy::AdvertisingMode>(
+        radioAdvertisingMode.load(std::memory_order_acquire));
+    const uint32_t modeStartedMs =
+        radioAdvertisingModeStartedMs.load(std::memory_order_acquire);
+    const auto desiredMode = ble_radio_policy::nextAdvertisingMode(
+        currentMode, nowMs - modeStartedMs, wakeRequested);
+    if (desiredMode != currentMode || wakeRequested) {
+      applyCharacterizationAdvertisingMode(desiredMode, true);
+    }
+    return;
+  }
+
+  radioUserWakePending.store(false, std::memory_order_release);
+  const auto desiredProfile = ble_radio_policy::connectionProfile(
+      radioNavigationActive.load(std::memory_order_acquire));
+  const auto appliedProfile =
+      static_cast<ble_radio_policy::ConnectionProfile>(
+          radioRequestedConnectionProfile.load(std::memory_order_acquire));
+  if (server != nullptr && desiredProfile != appliedProfile) {
+    const ble_radio_policy::ConnectionParameters &parameters =
+        ble_radio_policy::connectionParameters(desiredProfile);
+    server->updateConnParams(
+        connectionHandle, parameters.minimumIntervalUnits,
+        parameters.maximumIntervalUnits, parameters.latency,
+        parameters.supervisionTimeoutUnits);
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(desiredProfile), std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile = desiredProfile;
+    portEXIT_CRITICAL(&radioDebugMux);
+    Serial.printf(
+        "BLE Radio: requested profile=%s intervalUnits=%u-%u latency=%u "
+        "timeoutUnits=%u\n",
+        connectionProfileName(desiredProfile),
+        parameters.minimumIntervalUnits, parameters.maximumIntervalUnits,
+        parameters.latency, parameters.supervisionTimeoutUnits);
+  }
+}
+#endif
 
 static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
                                    uint32_t pairingGeneration = 0) {
@@ -2357,6 +2536,17 @@ public:
       pServer->disconnect(desc->conn_handle);
       return;
     }
+    radioConnectionHandle.store(desc->conn_handle, std::memory_order_release);
+#if BLE_RADIO_CHARACTERIZATION
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
+        std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile =
+        ble_radio_policy::ConnectionProfile::Unset;
+    portEXIT_CRITICAL(&radioDebugMux);
+#endif
+    recordConnectionParameters(*desc, millis());
     acceptConnection();
   }
 
@@ -2398,6 +2588,11 @@ public:
                                     : desc->conn_handle);
       return;
     }
+    radioConnectionHandle.store(BLE_HS_CONN_HANDLE_NONE,
+                                std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.connectionParametersValid = false;
+    portEXIT_CRITICAL(&radioDebugMux);
     disconnectActive();
   }
 
@@ -2441,6 +2636,17 @@ public:
     Serial.println("BLE: iOS client disconnected");
     // Restart advertising
     Serial.println("BLE: Restarting advertising...");
+#if BLE_RADIO_CHARACTERIZATION
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
+        std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile =
+        ble_radio_policy::ConnectionProfile::Unset;
+    portEXIT_CRITICAL(&radioDebugMux);
+    applyCharacterizationAdvertisingMode(
+        ble_radio_policy::AdvertisingMode::Fast, false);
+#endif
     NimBLEDevice::startAdvertising();
   }
 };
@@ -2856,8 +3062,8 @@ void BLENavigationServer::init(const char *deviceName) {
   }
 
   initBleIdentityAndSecurity(effectiveDeviceName.c_str());
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
-  NimBLEDevice::setMTU(512);              // Increase MTU for route geometry
+  NimBLEDevice::setPower(configuredTxPowerLevel());
+  NimBLEDevice::setMTU(512); // Increase MTU for route geometry
 
   // Create server
   pServer = NimBLEDevice::createServer();
@@ -2923,6 +3129,10 @@ void BLENavigationServer::init(const char *deviceName) {
     pAdvertising->setManufacturerData(manufacturerData);
   }
   pAdvertising->setScanResponse(true);
+#if BLE_RADIO_CHARACTERIZATION
+  applyCharacterizationAdvertisingMode(
+      ble_radio_policy::AdvertisingMode::Fast, false);
+#endif
   pAdvertising->start();
 
   initialized = true;
@@ -2961,6 +3171,25 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   const uint32_t nowMs = millis();
+#if BLE_RADIO_CHARACTERIZATION
+  processRadioCharacterization(nowMs, pServer);
+#endif
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  constexpr uint32_t kConnectionParameterSamplePeriodMs = 5000;
+  const uint32_t lastSampleMs =
+      lastConnectionParameterSampleMs.load(std::memory_order_acquire);
+  const uint16_t connectionHandle =
+      radioConnectionHandle.load(std::memory_order_acquire);
+  if (connectionHandle != BLE_HS_CONN_HANDLE_NONE &&
+      nowMs - lastSampleMs >= kConnectionParameterSamplePeriodMs) {
+    ble_gap_conn_desc description{};
+    if (ble_gap_conn_find(connectionHandle, &description) == 0) {
+      recordConnectionParameters(description, nowMs);
+    } else {
+      lastConnectionParameterSampleMs.store(nowMs, std::memory_order_release);
+    }
+  }
+#endif
   if (destinationCatalogReassemblerMutex != nullptr &&
       xSemaphoreTake(destinationCatalogReassemblerMutex, 0) == pdTRUE) {
     const bool expired = destinationCatalogReassembler.expire(nowMs);
@@ -3047,11 +3276,40 @@ void BLENavigationServer::process() {
 #endif
 }
 
+void BLENavigationServer::noteUserWake() {
+#if BLE_RADIO_CHARACTERIZATION
+  radioUserWakePending.store(true, std::memory_order_release);
+#endif
+}
+
+void BLENavigationServer::setNavigationActivity(bool active) {
+#if BLE_RADIO_CHARACTERIZATION
+  radioNavigationActive.store(active, std::memory_order_release);
+#else
+  (void)active;
+#endif
+}
+
 BLEDebugStats BLENavigationServer::getDebugStats() const {
   BLEDebugStats stats = bleDebugStats;
   stats.initialized = initialized;
   stats.connected = connected;
   stats.authenticated = bleSessionAuthenticated;
+  portENTER_CRITICAL(&radioDebugMux);
+  stats.connectionParametersValid =
+      radioDebugSnapshot.connectionParametersValid;
+  stats.connectionIntervalUnits = radioDebugSnapshot.connectionIntervalUnits;
+  stats.connectionLatency = radioDebugSnapshot.connectionLatency;
+  stats.supervisionTimeoutUnits =
+      radioDebugSnapshot.supervisionTimeoutUnits;
+  stats.connectionParameterSampleCount =
+      radioDebugSnapshot.connectionParameterSampleCount;
+  stats.lastConnectionParameterSampleMs =
+      radioDebugSnapshot.lastConnectionParameterSampleMs;
+  stats.advertisingMode = radioDebugSnapshot.advertisingMode;
+  stats.requestedConnectionProfile =
+      radioDebugSnapshot.requestedConnectionProfile;
+  portEXIT_CRITICAL(&radioDebugMux);
   return stats;
 }
 

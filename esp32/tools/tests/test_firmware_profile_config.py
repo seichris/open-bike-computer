@@ -21,6 +21,8 @@ assert "-DDEBUG=1" not in waveshare_flags
 assert "-DCORE_DEBUG_LEVEL=" not in waveshare_flags
 assert "-DFIRMWARE_DIAGNOSTICS=" not in waveshare_flags
 assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
+assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
+assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 
 diagnostic_profiles = {
     "env:WAVESHARE_AMOLED_175": (
