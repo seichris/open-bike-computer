@@ -1,10 +1,10 @@
 <img width="2375" height="871" alt="bike_header" src="https://github.com/user-attachments/assets/06dda2a2-b5b1-4a5c-86de-9ac191c8e657" />
 
-Navigate your bike rides with a sleek, Garmin-mounted bike computer, and
-automatically track your workouts on your iPhone, and Apple Watch.
+A sleek, Garmin-mounted bike computer.
 
-Plan routes and follow turn-by-turn directions with Apple Maps. Completed
-cycling workouts are saved to Apple Health.
+🗺️ Seamless Apple Maps integration.\
+🧭 Live ride stats and turn-by-turn directions.\
+🚴 Workouts automatically save to Apple Health.
 
 [![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)
 
