@@ -570,7 +570,7 @@ static void logPowerMetricsReport() {
       "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
       "appQueue=ios-diagnostic] "
       "system[wifiMode=%d transfer=%d transferMode=%s audio=%d cpuMHz=%u "
-      "locks=0]\n",
+      "appPmLocks=0]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
       powerMetricsDisplayStateName(snapshot.displayState),

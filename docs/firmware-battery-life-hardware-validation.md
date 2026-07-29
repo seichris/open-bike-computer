@@ -27,7 +27,8 @@ The report contains:
   unwrapped, including packets later rejected by session authentication or
   application-payload validation;
 - Wi-Fi mode, transfer state/mode, audio activity, CPU frequency, and the
-  number of active power-management locks; and
+  number of application-managed power-management locks (`appPmLocks`,
+  currently zero because this firmware creates none); and
 - `appQueue=ios-diagnostic`, which identifies the separate
   `PWRMET_IOS v=1` ten-second interval report produced by a Debug iOS build.
 
