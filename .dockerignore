@@ -1,0 +1,4 @@
+.git
+map-platform/backend/.venv
+map-platform/backend/data/*
+!map-platform/backend/data/.gitkeep

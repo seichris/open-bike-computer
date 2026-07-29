@@ -168,7 +168,7 @@ std::string readFile(const std::string &path) {
 }
 
 std::map<std::string, std::string> readGoldenFixture() {
-  std::ifstream input("../backend/tests/fixtures/map_stream_v1_golden.txt");
+  std::ifstream input("../map-platform/backend/tests/fixtures/map_stream_v1_golden.txt");
   assert(input.good());
   std::map<std::string, std::string> values;
   std::string line;

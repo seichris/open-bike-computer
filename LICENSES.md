@@ -10,8 +10,8 @@ Unless a more specific notice applies, project-authored software source code,
 tests, scripts, and software configuration in these paths are licensed under
 the [GNU Affero General Public License version 3 only](LICENSES/AGPL-3.0-only.txt):
 
-- `backend/`
-- `config/`
+- `map-platform/backend/`
+- `map-platform/config/`
 
 The AGPL applies its source-sharing requirements to modified versions that
 users interact with remotely over a network as well as to distributed copies.

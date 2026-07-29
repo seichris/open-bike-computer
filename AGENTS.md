@@ -8,14 +8,14 @@
 - `ios-app/`: SwiftUI companion app using MapKit, CoreBluetooth, and
   CoreLocation for route planning, navigation, device settings, firmware
   updates, and offline-map creation/download/installation.
-- `backend/`: FastAPI map platform with installation-scoped authentication,
+- `map-platform/backend/`: FastAPI map platform with installation-scoped authentication,
   rate limits, persistent jobs, immutable artifacts, and separate API, worker,
   and maintenance processes.
-- `deploy/map-platform/`: digest-pinned production Compose lock plus image
+- `map-platform/deploy/`: digest-pinned production Compose lock plus image
   validation and promotion tooling.
 - `tools/OSM_Extract/`: Dockerized OSM/PBF extraction and vector-map pipeline
   used by the backend worker.
-- `config/`: checked-in map-stream trust, rollout approval, and hardware-gate
+- `map-platform/config/`: checked-in map-stream trust, rollout approval, and hardware-gate
   configuration.
 - `hardware/`: authoritative Waveshare pinouts, board findings, schematics,
   datasheets, and physical validation records. Read `hardware/README.md` before
@@ -63,16 +63,16 @@ xcodebuild -project BikeComputer/BikeComputer.xcodeproj \
 ### Map backend
 
 ```sh
-cd backend
+cd map-platform/backend
 python -m pip install -e '.[api,test,object-storage]'
 python -m unittest discover -s tests
-python -m unittest discover -s ../deploy/map-platform/tests
+python -m unittest discover -s ../deploy/tests
 MAP_PLATFORM_INSTALLATION_SECRET='local-development-secret-at-least-32-bytes' \
   uvicorn --factory map_platform.api:create_app --reload --port 8080
 ```
 
-See `backend/README.md` for local API/worker commands and
-`deploy/map-platform/README.md` for production promotion and rollback.
+See `map-platform/backend/README.md` for local API/worker commands and
+`map-platform/deploy/README.md` for production promotion and rollback.
 
 ## App/backend authentication contract
 
@@ -84,21 +84,21 @@ only for that installation's resources. Public issuance and map operations are
 protected by persistent server-side limits. Preserve this model when changing
 the app or backend.
 
-Coordinate request/response changes across `backend/map_platform/`,
+Coordinate request/response changes across `map-platform/backend/map_platform/`,
 `ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift`, and
 `ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift`, with tests
 on both sides.
 
 ## Production map backend updates
 
-For changes under `backend/` or other image inputs listed in
+For changes under `map-platform/backend/` or other image inputs listed in
 `.github/workflows/map-platform-image.yml`:
 
 1. Merge the code through a pull request to `main`; do not deploy `:latest` or
    change server-side image-selection variables.
 2. Wait for **Map Platform Image** to publish and attest the image, then review
    the generated `deploy/map-platform-production` pull request. Production is
-   defined by the immutable digest pins in `deploy/map-platform/compose.yaml`.
+   defined by the immutable digest pins in `map-platform/deploy/compose.yaml`.
 3. If the promotion moves the signed worker, complete the worker/hardware gates
    in `docs/map-stream-rollout-runbook.md`. Merge only after **Map Backend** CI
    passes; the manifest merge triggers the production deployment.
@@ -107,7 +107,7 @@ For changes under `backend/` or other image inputs listed in
    and both source markers.
 
 If promotion automation needs an explicit pending-worker decision, follow
-`deploy/map-platform/README.md`; never bypass the digest/provenance checks.
+`map-platform/deploy/README.md`; never bypass the digest/provenance checks.
 
 ## BLE contract
 

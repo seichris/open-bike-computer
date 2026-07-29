@@ -166,7 +166,7 @@ static void writeLe64(std::vector<uint8_t> &bytes, size_t offset,
 }
 
 static std::map<std::string, std::string> readFixture() {
-  std::ifstream input("../backend/tests/fixtures/map_stream_v1_golden.txt");
+  std::ifstream input("../map-platform/backend/tests/fixtures/map_stream_v1_golden.txt");
   assert(input.good());
   std::map<std::string, std::string> values;
   std::string line;

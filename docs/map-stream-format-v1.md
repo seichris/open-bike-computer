@@ -163,8 +163,8 @@ Integrity failures never automatically fall back to protocol v1.
 
 ## Production Trust Registry
 
-`config/map-stream-trust.json` is the only source of production verification
-keys. `backend/tools/generate_map_stream_trust.py` validates that registry and
+`map-platform/config/map-stream-trust.json` is the only source of production verification
+keys. `map-platform/backend/tools/generate_map_stream_trust.py` validates that registry and
 generates both the Swift and firmware trust lists; CI rejects drift, malformed
 P-256 points, private fields, duplicate keys, excessive active keys, and the
 golden-vector identities below. Rotation is additive and follows
@@ -173,7 +173,7 @@ golden-vector identities below. Rotation is additive and follows
 ## Golden Vector
 
 The shared golden vector is
-[`backend/tests/fixtures/map_stream_v1_golden.txt`](../backend/tests/fixtures/map_stream_v1_golden.txt).
+[`map-platform/backend/tests/fixtures/map_stream_v1_golden.txt`](../map-platform/backend/tests/fixtures/map_stream_v1_golden.txt).
 It contains the exact header, canonical manifest, signature envelope, payload,
 complete stream, receipts, primary test public key, and a second key/signature
 pair used to test trust-store rotation as hexadecimal fields.
