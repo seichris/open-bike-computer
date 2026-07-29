@@ -112,6 +112,12 @@ jobs:
             tools/tests/test_power_metrics_schema.cpp \
             -o /tmp/test_power_metrics_schema
           /tmp/test_power_metrics_schema
+      - name: Display power and redraw policy host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_display_power_policy.cpp \
+            -o /tmp/test_display_power_policy
+          /tmp/test_display_power_policy
       - name: Two-finger Map zoom host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

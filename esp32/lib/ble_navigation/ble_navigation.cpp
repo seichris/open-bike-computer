@@ -11,6 +11,8 @@
 #include "ownership_button_policy.hpp"
 #include "device_screen_protocol.hpp"
 #include "gps_position_protocol.hpp"
+#include "map_setting_packet.hpp"
+#include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -21,6 +23,9 @@
 #include "../gui/src/globalGuiDef.h"
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
+#ifdef USE_ARDUINO_GFX
+#include "../display_power/display_power.hpp"
+#endif
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
@@ -1999,6 +2004,21 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
                   mapRenderSettings.tapToSwitchScreens);
     break;
+  case 12:
+#ifdef USE_ARDUINO_GFX
+    if (!displayPowerManager.requestUserBrightness(settingValue)) {
+      Serial.printf("BLE Settings: brightness persistence failed from %s\n",
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+#ifdef DISPLAY_POWER_DIAGNOSTICS
+    Serial.printf("BLE Settings: brightness = %u%% (saved, pending)\n",
+                  displayPowerManager.savedBrightnessPercent());
+#endif
+#else
+    Serial.println("BLE Settings: brightness unsupported on this target");
+#endif
+    return;
   case 13: {
     settingValue = device_screen_protocol::applyCompatibility(
         settingValue, mapRenderSettings.enabledScreensMask);
@@ -2045,7 +2065,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.println("BLE Settings: Reboot command received! Restarting...");
     delay(500);
     ESP.restart();
-    break;
+    return;
   case 6:
     mapRenderSettings.mapRotationMode =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)1);
@@ -2155,26 +2175,26 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
-    break;
+    return;
   }
 
-  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
-  triggerMapRedraw();
+  if (map_setting_redraw_policy::invalidatesMap(settingId)) {
+    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
+    triggerMapRedraw();
+  }
 }
 
 static void handleMapSettingPayload(const uint8_t *data, size_t len,
                                     const char *source) {
   power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
-  if (data == nullptr || len < 5) {
-    Serial.printf("BLE: Rejected %s map setting: expected 5 bytes\n",
+  map_setting_packet::Packet packet;
+  if (!map_setting_packet::decode(data, len, packet)) {
+    Serial.printf("BLE: Rejected %s map setting: expected exactly 5 bytes\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
 
-  uint8_t settingId = data[0];
-  int32_t settingValue;
-  memcpy(&settingValue, data + 1, sizeof(settingValue));
-  handleMapSetting(settingId, settingValue, source);
+  handleMapSetting(packet.settingId, packet.value, source);
 }
 
 static void processPendingMapInputs() {

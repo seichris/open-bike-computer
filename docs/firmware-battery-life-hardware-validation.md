@@ -1,7 +1,23 @@
 # Firmware battery-life hardware validation
 
-Status: **source-monitor baseline measurements pending**. Physical bring-up has
-passed on the available 1.75-inch target; 2.06-inch hardware is unavailable.
+Status: **implementation validation in progress; electrical measurements
+deferred**. Physical bring-up has passed on the available 1.75-inch target;
+2.06-inch hardware is unavailable.
+
+## Operator-approved validation scope
+
+On 2026-07-29, the operator chose not to block implementation on a source
+monitor or multimeter setup. The battery-life phases may continue with both
+firmware targets built and the available 1.75-inch device physically tested.
+The 2.06-inch target remains build-only until hardware is available.
+
+Practical battery use will be evaluated later by running controlled rides or
+bench scenarios from comparable battery starting states and observing battery
+depletion and elapsed runtime. Those observations can support practical runtime
+decisions, but coarse battery percentage must not be presented as a measured
+current curve or precise watt-hour saving. The source-monitor procedure below
+is retained as an optional higher-precision campaign, not an implementation
+gate.
 
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
@@ -276,10 +292,11 @@ Record values from the same run windows used for the electrical results.
 | AMOLED 1.75 | **No — pending** | Pending | No | No |
 | AMOLED 2.06 | **No — pending** | Pending | No | No |
 
-No later phase may claim measured savings until both targets have three
-repeatable baseline runs for the relevant comparison scenario and the observed
-difference exceeds measurement noise. Update this summary only after reviewing
-the raw traces and documenting exclusions.
+No phase may claim measured current or energy savings without trace-quality
+measurements whose observed difference exceeds measurement noise. Continuing
+implementation does not depend on that campaign. Later battery-depletion tests
+must report their starting state, elapsed runtime, scenario, and limitations
+without converting coarse percentages into precise electrical savings.
 
 ## Campaign review checklist
 
