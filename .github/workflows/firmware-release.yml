@@ -17,9 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - WAVESHARE_AMOLED_175
-          - WAVESHARE_AMOLED_206
+        include:
+          - target: WAVESHARE_AMOLED_175
+            environment: WAVESHARE_AMOLED_175_PRODUCTION
+          - target: WAVESHARE_AMOLED_206
+            environment: WAVESHARE_AMOLED_206_PRODUCTION
     defaults:
       run:
         working-directory: esp32
@@ -31,11 +33,11 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
       - name: Build firmware
-        run: pio run -e "${{ matrix.target }}"
+        run: pio run -e "${{ matrix.environment }}"
       - name: Stage firmware image
         run: |
           mkdir -p dist
-          cp ".pio/build/${{ matrix.target }}/firmware.bin" "dist/${{ matrix.target }}.bin"
+          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/${{ matrix.target }}.bin"
           shasum -a 256 "dist/${{ matrix.target }}.bin"
       - uses: actions/upload-artifact@v4
         with:

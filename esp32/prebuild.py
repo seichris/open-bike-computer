@@ -29,6 +29,7 @@ config.read("platformio.ini")
 # get platformio source path
 srcdir = env.get("PROJECTSRC_DIR")
 flavor = env.get("PIOENV")
+firmware_target = env.GetProjectOption("custom_firmware_target", flavor)
 revision = config.get("common","revision")
 version = config.get("common", "version")
 build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -44,7 +45,7 @@ dfl_lon = os.environ.get('ICENAV3_LON')
 env.Append(BUILD_FLAGS=[
     u'-DREVISION=' + revision + '',
     u'-DVERSION=\\"' + version + '\\"',
-    u'-DFLAVOR=\\"' + flavor + '\\"',
+    u'-DFLAVOR=\\"' + firmware_target + '\\"',
     u'-DGIT_SHA=\\"' + git_sha + '\\"',
     u'-DBUILD_TIMESTAMP=\\"' + build_timestamp + '\\"',
     u'-D'+ flavor + '=1'
