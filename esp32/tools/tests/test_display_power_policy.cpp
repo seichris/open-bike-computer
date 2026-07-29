@@ -80,6 +80,10 @@ int main() {
                      uint8_t{24}, uint8_t{255}}) {
     assert(!map_setting_redraw_policy::invalidatesMap(id));
   }
+  assert(map_setting_redraw_policy::changesZoom(7));
+  assert(map_setting_redraw_policy::changesZoom(19));
+  assert(!map_setting_redraw_policy::changesZoom(3));
+  assert(!map_setting_redraw_policy::changesZoom(20));
 
   map_setting_packet::Packet packet;
   const uint8_t positivePacket[] = {12, 75, 0, 0, 0};

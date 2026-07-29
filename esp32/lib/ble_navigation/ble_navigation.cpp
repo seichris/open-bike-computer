@@ -25,6 +25,7 @@
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
+#include "../gui/src/mapRenderPolicy.hpp"
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
 #ifdef USE_ARDUINO_GFX
@@ -68,8 +69,8 @@ extern Storage storage;
 // Global instance
 BLENavigationServer bleNavServer;
 
-// Forward declaration of map redraw trigger
-extern void triggerMapRedraw();
+// Forward declaration of the LVGL-owner map scheduler entry point.
+extern void requestMapRender(map_render_policy::Reason reason);
 extern void applyDeviceScreenSettings();
 extern bool isMapScreenActive();
 extern bool isMapGuidanceScreenActive();
@@ -1818,8 +1819,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     bleDebugStats.lastRoutePacketMs = millis();
     routeOverlay.clear();
     clearCurrentNavigationData();
-    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
-    triggerMapRedraw();
+    requestMapRender(map_render_policy::Reason::Route);
     return;
   }
 
@@ -1860,8 +1860,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
   }
 
   routeOverlay.parseRouteData(data, len);
-  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
-  triggerMapRedraw();
+  requestMapRender(map_render_policy::Reason::Route);
 }
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
@@ -1912,8 +1911,9 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     Serial.println("BLE GPS: First position received, transitioning to map...");
   }
 
-  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Gps);
-  triggerMapRedraw();
+  // Retain every accepted fix. The LVGL owner updates lightweight telemetry and
+  // the position marker immediately, then independently decides whether the
+  // vector-map background crossed its time/movement/heading thresholds.
 }
 
 static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
@@ -2197,8 +2197,9 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   }
 
   if (map_setting_redraw_policy::invalidatesMap(settingId)) {
-    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
-    triggerMapRedraw();
+    requestMapRender(map_setting_redraw_policy::changesZoom(settingId)
+                         ? map_render_policy::Reason::Zoom
+                         : map_render_policy::Reason::Style);
   }
 }
 
@@ -3138,9 +3139,10 @@ bool BLENavigationServer::confirmOwnershipPairing() {
 // Map Redraw Trigger (weak symbol - can be overridden by main app)
 // ============================================================================
 
-__attribute__((weak)) void triggerMapRedraw() {
+__attribute__((weak)) void requestMapRender(map_render_policy::Reason reason) {
+  (void)reason;
   // Default implementation - will be overridden by mainScr.cpp
-  Serial.println("BLE: triggerMapRedraw called (default - no map linked)");
+  Serial.println("BLE: requestMapRender called (default - no map linked)");
 }
 
 __attribute__((weak)) void applyDeviceScreenSettings() {

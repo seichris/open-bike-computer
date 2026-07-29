@@ -9,6 +9,7 @@
 #pragma once
 
 #include "maps.hpp"
+#include "mapRenderPolicy.hpp"
 
 #include "buttonBar.hpp"
 #include "batteryStatusScr.hpp"
@@ -75,6 +76,7 @@ void updateMainScreen(lv_timer_t *t);
 void gestureEvent(lv_event_t *event);
 
 void updateMap(lv_event_t *event);
+void requestMapRender(map_render_policy::Reason reason);
 void updateSatTrack(lv_event_t *event);
 void mapToolBarEvent(lv_event_t *event);
 void scrollMapEvent(lv_event_t *event);

@@ -323,7 +323,9 @@ public:
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
+  bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
+  void updatePositionOverlay();
   void setWaypoint(double wptLat, double wptLon);
   void updateMap();
   void panMap(int8_t dx, int8_t dy);

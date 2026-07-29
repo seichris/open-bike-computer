@@ -124,6 +124,10 @@ jobs:
             tools/tests/test_ui_update_policy.cpp \
             -o /tmp/test_ui_update_policy
           /tmp/test_ui_update_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_render_policy.cpp \
+            -o /tmp/test_map_render_policy
+          /tmp/test_map_render_policy
           python tools/tests/test_firmware_profile_config.py
       - name: Two-finger Map zoom host tests
         run: |

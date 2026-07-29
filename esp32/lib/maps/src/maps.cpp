@@ -4025,10 +4025,13 @@ void Maps::generateRenderMap(uint8_t zoom) {
  * @brief Display Map (Stub for Vector Maps/Arduino_GFX)
  */
 void Maps::displayMap() {
-  const uint32_t displayStartMs = MAPIO_TIME_MS();
   if (Maps::canvasMap)
     lv_obj_invalidate(Maps::canvasMap);
+  updatePositionOverlay();
+}
 
+void Maps::updatePositionOverlay() {
+  const uint32_t displayStartMs = MAPIO_TIME_MS();
   // Update Arrow Position
   if (Maps::canvasArrow) {
     if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
