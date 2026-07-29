@@ -283,6 +283,18 @@ the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 
+The iOS sender treats GPS as replaceable state, not an ordered history. At most
+one unsent native or `GPSP` position is retained; a newer position replaces only
+that pending position and never route, settings, transfer, destination, auth, or
+workout traffic. A complete maneuver snapshot uses the bounded priority lane so
+it is delivered ahead of a GPS backlog. Native `2A72` prefers
+write-without-response only when the characteristic advertises it and the
+protected payload fits CoreBluetooth's current maximum. CoreBluetooth
+backpressure pauses dequeue without discarding the latest position. If the
+unacknowledged maximum is too small, iOS uses acknowledged native `2A72`; if no
+native write fits, it uses the authenticated navigation fallback. Route and
+catalog batches remain atomic and ordered.
+
 ## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
 
 Workout telemetry is iOS-to-device, RAM-only, and accepted only after the

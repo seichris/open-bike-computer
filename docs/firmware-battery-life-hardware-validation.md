@@ -48,7 +48,12 @@ The report contains:
   number of application-managed power-management locks (`appPmLocks`,
   currently zero because this firmware creates none); and
 - `appQueue=ios-diagnostic`, which identifies the separate
-  `PWRMET_IOS v=1` ten-second interval report produced by a Debug iOS build.
+  `PWRMET_IOS v=2` ten-second interval report produced by a Debug iOS build.
+
+The iOS queue report includes current/maximum depth, oldest pending and active
+retry age, total admissions/flushes/drops/rejections/coalesces, and packet-class
+drop/coalescing counters. Queue schema-version-1 traces remain usable but do not
+contain the age or packet-class fields; retain the raw version with every trace.
 
 The accumulator schema is defined in
 `esp32/lib/power_metrics/power_metrics_schema.hpp` and has a host test in
