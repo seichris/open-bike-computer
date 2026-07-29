@@ -42,6 +42,12 @@ pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
 pio run -e WAVESHARE_AMOLED_206_POWER_METRICS
 ```
 
+Metrics builds reserve a larger USB CDC transmit queue so each `PWRMET` record
+is enqueued as one complete line without changing the normal firmware's memory
+footprint or one-millisecond non-blocking serial timeout. Any
+`PWRMET_ERROR` line means that interval was not captured intact and must not be
+used for trace correlation.
+
 To correlate display flushes and map renders with a source-monitor trace,
 define `POWER_METRICS_PULSE_GPIO` in the selected metrics environment only
 after confirming that the pin is electrically spare on that exact board

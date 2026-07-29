@@ -520,6 +520,8 @@ static const char *powerMetricsDisplayStateName(
 
 static void logPowerMetricsReport() {
 #if POWER_METRICS
+  constexpr size_t kReportBufferSize = 2048;
+  static char report[kReportBufferSize];
   static uint32_t lastReportMs = 0;
   const uint32_t now = millis();
   if (now - lastReportMs < 10000) {
@@ -552,7 +554,8 @@ static void logPowerMetricsReport() {
     return metrics.blePacketCounts[static_cast<size_t>(packetClass)];
   };
 
-  Serial.printf(
+  const int reportLength = snprintf(
+      report, sizeof(report),
       "PWRMET v=%u intervalMs=%lu screen=%s tile=%s display=%s "
       "brightness[requested=%u effective=%u] "
       "loop[wakes=%llu maxGapMs=%lu] "
@@ -613,6 +616,21 @@ static void logPowerMetricsReport() {
       static_cast<int>(WiFi.getMode()), transferStatus.enabled,
       transferStatus.mode.empty() ? "none" : transferStatus.mode.c_str(),
       audioActive, getCpuFrequencyMhz());
+  if (reportLength < 0 ||
+      static_cast<size_t>(reportLength) >= sizeof(report)) {
+    Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
+                  static_cast<unsigned>(sizeof(report)));
+    return;
+  }
+
+  const size_t written = Serial.write(
+      reinterpret_cast<const uint8_t *>(report),
+      static_cast<size_t>(reportLength));
+  if (written != static_cast<size_t>(reportLength)) {
+    Serial.printf("PWRMET_ERROR serialWrite=%u/%u\n",
+                  static_cast<unsigned>(written),
+                  static_cast<unsigned>(reportLength));
+  }
 #endif
 }
 
@@ -663,11 +681,25 @@ void setup() {
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
 
-  // Initialize Serial for debug
+  // Initialize Serial for debug. A complete PWRMET report is larger than the
+  // default 256-byte HWCDC queue, so metrics builds reserve enough space for
+  // one atomic report while keeping the normal firmware footprint unchanged.
+#if POWER_METRICS
+  constexpr size_t kPowerMetricsSerialTxBufferSize = 4096;
+  const size_t configuredSerialTxBufferSize =
+      Serial.setTxBufferSize(kPowerMetricsSerialTxBufferSize);
+#endif
   Serial.begin(115200);
   // HWCDC uses this value as both a timeout and a retry counter. Zero
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
+#if POWER_METRICS
+  if (configuredSerialTxBufferSize != kPowerMetricsSerialTxBufferSize) {
+    Serial.printf("PWRMET_ERROR txBuffer=%u/%u\n",
+                  static_cast<unsigned>(configuredSerialTxBufferSize),
+                  static_cast<unsigned>(kPowerMetricsSerialTxBufferSize));
+  }
+#endif
   power_metrics::begin();
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
