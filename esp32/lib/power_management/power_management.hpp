@@ -25,7 +25,7 @@ struct RuntimeStatus {
   uint32_t activeLockCount = 0;
   uint32_t peakLockCount = 0;
   uint32_t lockFailureCount = 0;
-  uint64_t ext1WakeMask = 0;
+  uint64_t gpioWakeMask = 0;
   uint32_t wakeSourceFailureCount = 0;
   bool startupComplete = false;
 };
@@ -52,9 +52,9 @@ bool begin();
 // Release the startup guard only after display, storage, BLE, touch, transfer,
 // and audio initialization have completed. It is a no-op in DFS-only builds.
 void completeStartup();
-// Configure active-low RTC GPIOs as automatic-light-sleep wake sources without
-// changing their normal GPIO interrupt type. It is a no-op in DFS-only builds.
-bool configureExt1Wakeup(uint64_t gpioMask);
+// Configure one digital GPIO as an active-low light-sleep wake source. The
+// caller must install a level-safe ISR before calling this function.
+bool configureActiveLowGpioWakeup(uint8_t gpioNumber);
 bool acquire(LockDomain domain);
 bool release(LockDomain domain);
 RuntimeStatus status();

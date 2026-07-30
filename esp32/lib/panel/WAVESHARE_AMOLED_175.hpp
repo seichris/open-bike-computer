@@ -37,6 +37,7 @@ bool isPrimaryTouchSuppressed();
 using MultiTouchSuppressionPolicy = bool (*)();
 void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy);
 bool hasUnattemptedTouchInterrupt();
+void configureTouchWakeInterrupt();
 
 // Function declarations
 void setupDisplay();

@@ -6,6 +6,7 @@
 #include <esp_err.h>
 #include <esp_pm.h>
 #include <esp_sleep.h>
+#include <driver/gpio.h>
 
 #if !CONFIG_PM_ENABLE
 #error "Waveshare DFS requires CONFIG_PM_ENABLE=y"
@@ -13,6 +14,10 @@
 
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && !CONFIG_FREERTOS_USE_TICKLESS_IDLE
 #error "Phase 7B requires FreeRTOS tickless idle"
+#endif
+
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && !CONFIG_GPIO_CTRL_FUNC_IN_IRAM
+#error "Active-low wake ISR masking requires IRAM-safe GPIO control"
 #endif
 
 #if !AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && CONFIG_FREERTOS_USE_TICKLESS_IDLE
@@ -34,6 +39,7 @@ std::atomic<uint32_t> wakeSourceFailureCount{0};
 std::atomic<int> lastErrorCode{0};
 bool startupLockHeld = false;
 bool wakeSourcesReady = false;
+bool wakeSourceConfigurationFailed = false;
 
 void setError(int errorCode) { lastErrorCode.store(errorCode); }
 
@@ -271,38 +277,55 @@ void completeStartup() {
 #endif
 }
 
-bool configureExt1Wakeup(uint64_t gpioMask) {
+bool configureActiveLowGpioWakeup(uint8_t gpioNumber) {
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
   wakeSourcesReady = false;
-  runtimeStatus.ext1WakeMask = 0;
-  if (gpioMask == 0) {
+  if (gpioNumber >= 64 || !GPIO_IS_VALID_GPIO(gpioNumber)) {
     setError(ESP_ERR_INVALID_ARG);
     wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
     return false;
   }
 
-  const esp_err_t result =
-      esp_sleep_enable_ext1_wakeup(gpioMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  if (result != ESP_OK) {
-    setError(result);
+  const gpio_num_t gpio = static_cast<gpio_num_t>(gpioNumber);
+  const esp_err_t pinResult = gpio_wakeup_enable(gpio, GPIO_INTR_LOW_LEVEL);
+  if (pinResult != ESP_OK) {
+    setError(pinResult);
     wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
 #if FIRMWARE_DIAGNOSTICS || POWER_METRICS
-    Serial.printf("Power management: EXT1 wake configuration failed: %s "
-                  "(%d) mask=0x%llX\n",
-                  esp_err_to_name(result), result,
-                  static_cast<unsigned long long>(gpioMask));
+    Serial.printf("Power management: GPIO%u wake configuration failed: %s "
+                  "(%d)\n",
+                  static_cast<unsigned>(gpioNumber),
+                  esp_err_to_name(pinResult), pinResult);
 #endif
     return false;
   }
 
-  runtimeStatus.ext1WakeMask = gpioMask;
-  wakeSourcesReady = true;
+  const esp_err_t sourceResult = esp_sleep_enable_gpio_wakeup();
+  if (sourceResult != ESP_OK) {
+    gpio_wakeup_disable(gpio);
+    setError(sourceResult);
+    wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
 #if FIRMWARE_DIAGNOSTICS || POWER_METRICS
-  Serial.printf("Power management: EXT1 active-low wake mask=0x%llX\n",
-                static_cast<unsigned long long>(gpioMask));
+    Serial.printf("Power management: GPIO wake source enable failed: %s "
+                  "(%d) pin=%u\n",
+                  esp_err_to_name(sourceResult), sourceResult,
+                  static_cast<unsigned>(gpioNumber));
+#endif
+    return false;
+  }
+
+  runtimeStatus.gpioWakeMask |= 1ULL << gpioNumber;
+  wakeSourcesReady = !wakeSourceConfigurationFailed;
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  Serial.printf("Power management: GPIO active-low wake pin=%u mask=0x%llX\n",
+                static_cast<unsigned>(gpioNumber),
+                static_cast<unsigned long long>(runtimeStatus.gpioWakeMask));
 #endif
 #else
-  (void)gpioMask;
+  (void)gpioNumber;
 #endif
   return true;
 }

@@ -140,6 +140,10 @@ jobs:
             -o /tmp/test_power_management_policy_light_sleep
           /tmp/test_power_management_policy_light_sleep
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_active_low_wake_interrupt_gate.cpp \
+            -o /tmp/test_active_low_wake_interrupt_gate
+          /tmp/test_active_low_wake_interrupt_gate
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ble_radio_policy.cpp \
             -o /tmp/test_ble_radio_policy
           /tmp/test_ble_radio_policy

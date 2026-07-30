@@ -84,6 +84,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "power_management.hpp"
+#include "active_low_wake_interrupt_gate.hpp"
 #include "route_overlay.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
@@ -95,6 +96,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "qmi8658.hpp"
 #include "speaker.hpp"
 #include "waveshare_board.hpp"
+#include <driver/gpio.h>
 #endif
 
 extern Storage storage;
@@ -175,6 +177,8 @@ static bool waveshareBootWaitingForRelease = false;
 static bool waveshareBootHandledPairingConfirmation = false;
 static uint32_t waveshareBootReleaseStartMs = 0;
 static uint32_t waveshareBootPressStartMs = 0;
+static power_management::ActiveLowWakeInterruptGate
+    waveshareBootWakeInterruptGate;
 static ownership_button_policy::FreshPowerButtonGate
     wavesharePowerPairingGate;
 static uint32_t wavesharePowerPairingGeneration = 0;
@@ -186,6 +190,12 @@ void appDisplayFlushCompleted() {
 }
 
 static void IRAM_ATTR latchWaveshareBootScreenCycle() {
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  if (!waveshareBootWakeInterruptGate.latch()) {
+    return;
+  }
+  gpio_intr_disable(static_cast<gpio_num_t>(BOARD_BOOT_PIN));
+#endif
   portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
   waveshareBootScreenCyclePending = true;
   portEXIT_CRITICAL_ISR(&waveshareBootButtonMux);
@@ -205,6 +215,11 @@ static bool processWaveshareBootButton() {
 
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  if (waveshareBootWakeInterruptGate.rearmIfInactive(pressed)) {
+    gpio_intr_enable(static_cast<gpio_num_t>(BOARD_BOOT_PIN));
+  }
+#endif
   const bool latchedPress = takeWaveshareBootScreenCycle();
   const bool hadInput = latchedPress || pressed;
 
@@ -457,7 +472,7 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
 }
 
 static display_inactivity::Update updateDisplayInactivityPolicy(
-    uint32_t nowMs) {
+    uint32_t nowMs, bool touchWake) {
   struct Signals {
     bool initialized = false;
     lv_obj_t *screen = nullptr;
@@ -489,7 +504,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
   lv_obj_t *const activeScreen = lv_screen_active();
   const uint32_t routeRevision = routeOverlay.revision();
 
-  bool meaningfulActivity = false;
+  bool meaningfulActivity = touchWake;
   if (!signals.initialized) {
     signals.initialized = true;
     signals.screen = activeScreen;
@@ -519,7 +534,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.touchPending = touchPending;
   } else {
     meaningfulActivity =
-        activeScreen != signals.screen || activeTile != signals.tile ||
+        meaningfulActivity || activeScreen != signals.screen ||
+        activeTile != signals.tile ||
         bleStats.connectCount != signals.connectCount ||
         bleStats.authSuccessCount != signals.authSuccessCount ||
         routeRevision != signals.routeRevision ||
@@ -842,7 +858,7 @@ static void logPowerMetricsReport() {
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
       "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
-      "ext1WakeMask=0x%llX pmWakeFailures=%lu startupComplete=%d]\n",
+      "gpioWakeMask=0x%llX pmWakeFailures=%lu startupComplete=%d]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
       powerMetricsDisplayStateName(snapshot.displayState),
@@ -903,7 +919,7 @@ static void logPowerMetricsReport() {
       (unsigned long)powerManagementStatus.activeLockCount,
       (unsigned long)powerManagementStatus.peakLockCount,
       (unsigned long)powerManagementStatus.lockFailureCount,
-      static_cast<unsigned long long>(powerManagementStatus.ext1WakeMask),
+      static_cast<unsigned long long>(powerManagementStatus.gpioWakeMask),
       (unsigned long)powerManagementStatus.wakeSourceFailureCount,
       powerManagementStatus.startupComplete);
   if (reportLength < 0 ||
@@ -1020,16 +1036,15 @@ void setup() {
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
-                  latchWaveshareBootScreenCycle, FALLING);
-  // BOOT is RTC-capable on both variants. The 1.75-inch touch interrupt is
-  // also RTC-capable; the 2.06-inch GPIO38 interrupt is not and must retain
-  // its timed fallback until a board-specific wake path passes validation.
-  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
-#ifdef WAVESHARE_AMOLED_175
-  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  constexpr int bootInterruptMode = ONLOW;
+#else
+  constexpr int bootInterruptMode = FALLING;
 #endif
-  power_management::configureExt1Wakeup(ext1WakeMask);
+  attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
+                  latchWaveshareBootScreenCycle, bootInterruptMode);
+  power_management::configureActiveLowGpioWakeup(BOARD_BOOT_PIN);
+  configureTouchWakeInterrupt();
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -1367,7 +1382,9 @@ void loop() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  updateDisplayInactivityPolicy(now);
+  updateDisplayInactivityPolicy(
+      now, ui_scheduler::hasReason(wakeReasons,
+                                   ui_scheduler::WakeReason::Touch));
   displayPowerManager.applyPendingPanelChange();
   if (displayPowerManager.takeFullRefreshRequired()) {
     lv_obj_invalidate(lv_screen_active());
