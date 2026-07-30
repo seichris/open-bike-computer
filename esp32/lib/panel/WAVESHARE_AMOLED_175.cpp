@@ -944,18 +944,35 @@ void readTouch() {
     noteTouchReadFailure("data read", now);
     return;
   }
-  if (!acknowledgeCst9217Frame()) {
-    noteTouchReadFailure("frame acknowledgement", now);
-    return;
-  }
   consecutiveTouchReadFailures = 0;
 
   waveshare_board::touch::TouchFrame decodedFrame;
   const auto decodeStatus = waveshare_board::touch::decodeCst9217Frame(
       data, sizeof(data), waveshare_board::touch::ACTIVE_WIDTH,
       waveshare_board::touch::ACTIVE_HEIGHT, decodedFrame);
+  if (decodeStatus ==
+      waveshare_board::touch::Cst9217DecodeStatus::InvalidAcknowledgement) {
+    // An idle speculative read can return bytes without the controller's 0xAB
+    // ready marker. There is no frame to consume in that case, and writing the
+    // host ACK makes the CST9217 NACK often enough to exercise an ESP-IDF I2C
+    // INVALID_STATE bug. Only acknowledge packets the controller marked ready.
+    logTouchPacket("idle-no-frame", data, sizeof(data), 0, 0,
+                   touchHintActive, now);
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
+    releaseAllTouches(now);
+    return;
+  }
+  if (!acknowledgeCst9217Frame()) {
+    noteTouchReadFailure("frame acknowledgement", now);
+    return;
+  }
   if (decodeStatus != waveshare_board::touch::Cst9217DecodeStatus::Ok) {
-    logTouchPacket("ignored-no-ack", data, sizeof(data), 0, 0,
+    logTouchPacket("ignored-invalid", data, sizeof(data), 0, 0,
                    touchHintActive, now);
     if (touchPressed && now - lastValidTouchMs <
                             waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {

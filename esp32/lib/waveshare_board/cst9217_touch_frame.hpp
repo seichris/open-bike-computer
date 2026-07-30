@@ -52,6 +52,12 @@ inline bool isCst9217ContactStatus(uint8_t status) {
          status == CST9217_STATUS_PRESSED;
 }
 
+inline bool hasCst9217FrameAcknowledgement(const uint8_t *data,
+                                           std::size_t length) {
+  return data != nullptr && length >= CST9217_FRAME_LENGTH &&
+         data[6] == CST9217_FRAME_ACK;
+}
+
 inline TouchFrame activeCst9217Contacts(const TouchFrame &decoded) {
   TouchFrame active;
   for (uint8_t index = 0; index < decoded.count; ++index) {
@@ -70,7 +76,7 @@ decodeCst9217Frame(const uint8_t *data, std::size_t length,
   if (data == nullptr || length < CST9217_FRAME_LENGTH) {
     return Cst9217DecodeStatus::InvalidLength;
   }
-  if (data[6] != CST9217_FRAME_ACK) {
+  if (!hasCst9217FrameAcknowledgement(data, length)) {
     return Cst9217DecodeStatus::InvalidAcknowledgement;
   }
 

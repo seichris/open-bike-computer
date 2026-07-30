@@ -49,7 +49,11 @@ int main() {
   }
 
   uint8_t packet[CST9217_FRAME_LENGTH] = {};
+  assert(!hasCst9217FrameAcknowledgement(packet, sizeof(packet)));
+  assert(!hasCst9217FrameAcknowledgement(nullptr, sizeof(packet)));
+  assert(!hasCst9217FrameAcknowledgement(packet, sizeof(packet) - 1));
   packet[6] = CST9217_FRAME_ACK;
+  assert(hasCst9217FrameAcknowledgement(packet, sizeof(packet)));
   TouchFrame frame;
 
   assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==

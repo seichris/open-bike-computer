@@ -245,6 +245,25 @@ decoded-frame fallback to tickless builds. It requires a clean build, serial
 I2C/PM capture, and then the same active-gesture and dim/off wake retest before
 it can replace the failed interrupt-only experiment.
 
+Before that manual retest, a 105-second reset-to-idle capture of commit
+`790b4c9a9cbc5ab40c1d93bf0486ff3377ec66f0` reached connected active, dimmed,
+and display-off states with automatic light sleep enabled, but recorded 15
+recovered `ESP_ERR_INVALID_STATE` I2C failures. The ordinary DFS-only profile
+from the same source recorded at least 20 of the same recovered failures,
+showing that speculative CST9217 sampling, rather than the sleep boundary,
+caused the noise. Most failures occurred when the reader sent the host
+acknowledgement after bytes without the controller's `0xAB` ready marker.
+
+The successor reader decodes that marker first and acknowledges only a frame
+the controller marked ready. A counted 105-second ordinary-profile capture
+then completed active, dimmed, and display-off states with no panic or touch
+initialization loss and 12 recovered read failures. An A/B experiment using a
+combined write/read transaction produced 11 failures in a repeated run, which
+was not a meaningful improvement, so the known-good 1.75-inch stop-separated
+read sequence remains intact. The remaining failures are bounded speculative
+read NACKs; their count remains part of the light-sleep serial gate and must
+not be reported as zero.
+
 ## BLE, PMU, and SD characterization harness
 
 Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
