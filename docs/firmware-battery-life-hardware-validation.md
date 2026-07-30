@@ -66,11 +66,19 @@ held-low fallback to every 1.75-inch profile, but physical retest still failed.
 A diagnostic capture then established that GPIO21 remained `HIGH` even while
 the ordinary profile decoded valid press/release frames. Those frames were
 delivered to LVGL while dimmed but were not counted by the inactivity policy;
-after display-off paused LVGL, the controller was not read at all. The current
-candidate tracks decoded touch activity directly, keeps only the proven touch
-reader polling while dimmed/off in non-light-sleep profiles, and suppresses the
-wake contact until release so it cannot activate a hidden control. It is
-awaiting physical retest with light sleep disabled.
+after display-off paused LVGL, the controller was not read at all. Commit
+`a94a0633f7edd5e6c4ef5143dbcab1a6231febd8` therefore tracks decoded touch
+activity directly, keeps only the proven throttled touch reader running while
+dimmed/off in the ordinary non-light-sleep profile, and suppresses the wake
+contact until release so it cannot activate a hidden control. Its clean
+`WAVESHARE_AMOLED_175` image, SHA-256
+`886a6bd5510302a462f0f70b8550a53b6043d905135c14ac0dd8f78bb801ed42`, was
+flashed with the serial monitor closed. On 2026-07-31, the operator confirmed
+active map drag and pinch, tap wake from dimmed state, tap wake from the fully
+black display-off state, and working drag and pinch again after wake. This
+passes the basic single-cycle connected wake and gesture gate for the ordinary
+DFS-only profile. Repeated wake cycles and the automatic-light-sleep profile
+remain open.
 The host-only 10,000-cycle test is not a substitute for the physical wake-cycle
 release gate.
 
@@ -93,9 +101,10 @@ The existing `PWRMET` `loop[count=...]` and `lvgl[count=...]` fields provide the
 software wakeup counters for later before/after battery-depletion runs.
 
 Host tests cover deadline selection, immediate deadlines, event-bit
-coalescing, wraparound, and the 50/250 ms maximum-wait policy. Physical maneuver,
-touch, reconnect, and long-running transfer latency remain pending on the
-available 1.75-inch device.
+coalescing, wraparound, and the 50/250 ms maximum-wait policy. Basic active map
+gestures and connected dim/off wake have passed on the available 1.75-inch
+device; physical maneuver, reconnect, and long-running transfer latency remain
+pending.
 
 ## Dynamic frequency scaling
 
@@ -217,14 +226,16 @@ the same commit restored drag and pinch but not tap wake. Commit
 disabled and promoted the raw INT fallback to every 1.75-inch build, but it
 also failed physical tap wake. Its diagnostic capture showed valid decoded
 touch frames with GPIO21 still `HIGH` while dimmed, followed by no controller
-reads after LVGL paused in display-off mode. The next ordinary candidate uses
-decoded touch activity as the policy input and performs the existing throttled
-controller read while the display is inactive.
+reads after LVGL paused in display-off mode. The successor ordinary candidate,
+`a94a0633f7edd5e6c4ef5143dbcab1a6231febd8`, uses decoded touch activity as
+the policy input and performs the existing throttled controller read while the
+display is inactive. Manual validation passed for active drag and pinch,
+dimmed-state tap wake, display-off tap wake, and drag and pinch after wake.
 
-Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
-and repeated wake-cycle checks remain open. The experiment must not be enabled
-in production until those gates pass; the 2.06-inch profile remains build-only
-until that board is available.
+BLE reconnect, transfer, audio, extended soak, repeated wake-cycle checks, and
+equivalent automatic-light-sleep wake remain open. The experiment must not be
+enabled in production until those gates pass; the 2.06-inch profile remains
+build-only until that board is available.
 
 ## BLE, PMU, and SD characterization harness
 
@@ -386,6 +397,21 @@ The unchanged inline-meter reading is consistent with Phase 0 being
 instrumentation-only, but its resolution and connection point cannot establish
 equivalence or savings. It is retained solely as a bring-up observation.
 
+### Connected wake validation (ordinary DFS-only profile)
+
+| Field | AMOLED 1.75 observation |
+| --- | --- |
+| Validation date/time zone | 2026-07-31, Asia/Singapore |
+| Git commit SHA | `a94a0633f7edd5e6c4ef5143dbcab1a6231febd8` |
+| PlatformIO environment | `WAVESHARE_AMOLED_175` |
+| Firmware binary SHA-256 | `886a6bd5510302a462f0f70b8550a53b6043d905135c14ac0dd8f78bb801ed42` |
+| Power policy | DFS 80-240 MHz; automatic light sleep and tickless idle disabled |
+| Flash procedure | Esptool verified the image; serial monitor remained closed for the manual test |
+| Active interaction | Map drag and pinch-to-zoom passed |
+| Dimmed wake | One tap restored the display; subsequent drag and pinch passed |
+| Display-off wake | One tap restored the fully black display; subsequent drag and pinch passed |
+| Interpretation | Basic single-cycle functional gate passed; repeated cycles, soak, and automatic-light-sleep wake remain pending |
+
 ## Trace analysis
 
 Use `esp32/tools/power_trace_summary.py` to derive campaign statistics from
@@ -524,9 +550,9 @@ battery Wh.
 | 10 | Ride-statistics screen | 2.06 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 1.75 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 2.06 | Pending | — | — | — | — | Pending |
-| 12 | Connected dimmed state | 1.75 | GPIO wake candidates failed; decoded-frame activity candidate awaiting retest | — | — | — | — | Verify tap restores saved brightness without activating hidden UI |
+| 12 | Connected dimmed state | 1.75 | Pending | — | — | — | — | Manual single-cycle wake passed at `a94a0633`; electrical traces and repeated cycles pending |
 | 12 | Connected dimmed state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
-| 13 | Connected display-off state | 1.75 | GPIO/raw-INT candidates failed; throttled touch-reader candidate awaiting retest | — | — | — | — | Verify touch/BOOT/PWR wake |
+| 13 | Connected display-off state | 1.75 | Pending | — | — | — | — | Manual single-cycle touch wake passed at `a94a0633`; BOOT/PWR, electrical traces, and repeated cycles pending |
 | 13 | Connected display-off state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
 | 14 | Transfer AP enabled, idle | 1.75 | Pending | — | — | — | — | Pending |
 | 14 | Transfer AP enabled, idle | 2.06 | Pending | — | — | — | — | Pending |
@@ -552,8 +578,8 @@ Record values from the same run windows used for the electrical results.
 | Maneuver-to-visible latency p50/p95 | Pending | Pending | p95 no worse than baseline; target <250 ms |
 | BLE reconnect p50/p95 | Pending | Pending | Fast <2 s p95; slow <5 s p95 |
 | Queue depth/max/drops/retries/coalesces | Pending | Pending | No lost maneuver transition |
-| Touch/button misses | Pending | Pending | Zero in scripted run |
-| Display corruption/black wake | Pending | Pending | Zero observed |
+| Touch/button misses | Basic manual map/touch-wake pass; scripted run pending | Pending | Zero in scripted run |
+| Display corruption/black wake | Basic dim/off wake pass; repeated run pending | Pending | Zero observed |
 | SD/route/catalog/transfer errors | Pending | Pending | Zero corruption |
 
 ## Baseline summary
