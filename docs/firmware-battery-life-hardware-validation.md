@@ -157,10 +157,12 @@ The 1.75-inch experiment arms active-low EXT1 wake for BOOT/GPIO0 and the
 CST9217 interrupt on RTC-capable GPIO21. Its normal BOOT and touch handlers stay
 falling-edge triggered, preserving the active gesture path. An ESP-IDF
 light-sleep exit callback reads the EXT1 status and posts the corresponding
-touch/BOOT reason to the UI task. Because the CST9217 interrupt remains
-asserted until its frame is acknowledged, a non-active display also samples
-the raw INT line at the existing scheduler cadence. That fallback restores the
-panel even if the EXT1 wake reaches the task without a replayed GPIO edge.
+touch/BOOT reason to the UI task. Waveshare's reference driver notes that the
+CST9217 interrupt is transient rather than a continuously asserted touch
+level, and physical capture found valid frames while GPIO21 was high. EXT1 and
+the falling-edge ISR therefore remain best-effort hints. The current candidate
+also runs the existing throttled, PM-locked controller read from tickless task
+deadlines so decoded touch activity can restore the panel.
 
 The 2.06-inch experiment uses EXT1 for RTC-capable BOOT/GPIO0 and retains the
 one-shot low-level digital-GPIO wake path for its non-RTC FT3168 interrupt on
@@ -169,9 +171,10 @@ after the source returns high. This path remains build-only until 2.06-inch
 hardware is available. Startup retains its no-sleep guard unless the wake
 sources, callback, and UI notifier are all ready. `PWRMET` reports the EXT1 and
 digital-GPIO masks, last captured wake mask, event count, and callback/notifier
-readiness. The light-sleep-only touch policy avoids speculative controller
-reads while the interrupt is inactive, but continues reading for a latched
-interrupt, active gesture, or the short post-touch polling window.
+readiness. The 1.75-inch reader retains its 400 ms idle cadence and bounded
+failure backoff when the interrupt is inactive; the CPU remains eligible for
+automatic light sleep between those deadlines. The 2.06-inch path remains
+interrupt-gated pending physical hardware.
 
 On 2026-07-29, the first 1.75-inch light-sleep candidate booted, connected and
 authenticated over BLE, rendered the vector map, dimmed, and turned the display
@@ -236,6 +239,11 @@ BLE reconnect, transfer, audio, extended soak, repeated wake-cycle checks, and
 equivalent automatic-light-sleep wake remain open. The experiment must not be
 enabled in production until those gates pass; the 2.06-inch profile remains
 build-only until that board is available.
+
+The next 1.75-inch light-sleep candidate extends the physically proven
+decoded-frame fallback to tickless builds. It requires a clean build, serial
+I2C/PM capture, and then the same active-gesture and dim/off wake retest before
+it can replace the failed interrupt-only experiment.
 
 ## BLE, PMU, and SD characterization harness
 

@@ -22,13 +22,17 @@ int main() {
   assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
       Mode::Active, false));
   assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
-      Mode::Transfer, false));
-  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
-      Mode::Dimmed, false));
-  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
-      Mode::DisplayOff, false));
+      Mode::Active, true));
   assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Transfer, false));
+  assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Transfer, true));
+  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Dimmed, true));
+  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
       Mode::DisplayOff, true));
+  assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::DisplayOff, false));
 
   Policy idle;
   idle.begin(1'000);

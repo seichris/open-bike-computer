@@ -13,9 +13,12 @@ target:
   application-managed display, map, storage, transfer, audio, and I2C locks.
   It also enables an ESP-IDF light-sleep exit callback that hands active-low
   touch/BOOT GPIO wake events to the UI task before the wake cause can be
-  replaced by a later sleep cycle. GPIO interrupt control remains in IRAM so
-  each low-level live interrupt can mask itself until its source is released.
-  The profile is built in CI but is never selected by the release workflow.
+  replaced by a later sleep cycle. On 1.75-inch hardware, the CST9217 interrupt
+  is only a transient hint, so the profile also uses throttled, PM-locked frame
+  sampling from tickless task deadlines. On 2.06-inch hardware, GPIO interrupt
+  control remains in IRAM so each low-level live interrupt can mask itself
+  until its source is released. The profile is built in CI but is never
+  selected by the release workflow.
 - `*_PRODUCTION` compiles with `CORE_DEBUG_LEVEL=0`, leaves `DEBUG` undefined,
   and sets `FIRMWARE_DIAGNOSTICS=0`. It does not start USB CDC at application
   boot and does not wait for a serial host. GitHub firmware releases use these

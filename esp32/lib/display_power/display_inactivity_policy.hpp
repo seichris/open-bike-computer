@@ -31,8 +31,8 @@ constexpr bool touchActivityAdvanced(uint32_t currentGeneration,
 }
 
 constexpr bool shouldPollTouchWhileDisplayInactive(Mode currentMode,
-                                                    bool automaticLightSleep) {
-  return !automaticLightSleep && isTouchWakeDisplayMode(currentMode);
+                                                    bool decodedTouchPollingRequired) {
+  return decodedTouchPollingRequired && isTouchWakeDisplayMode(currentMode);
 }
 
 struct Context {

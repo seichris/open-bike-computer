@@ -921,9 +921,13 @@ void readTouch() {
     }
   }
 
+  // The CST9217's GPIO21 pulse is not a persistent touch level on the tested
+  // 1.75-inch board, so the existing throttled reader must retain its idle
+  // fallback even when automatic light sleep is enabled.
+  constexpr bool kAllowIdleFallback = true;
   if (!waveshare_board::touch_sampling_policy::shouldAttemptRead(
-          AUTOMATIC_LIGHT_SLEEP_EXPERIMENT != 0, touchHintActive,
-          touchPressed, interruptPending, now, touchFastPollUntilMs)) {
+          kAllowIdleFallback, touchHintActive, touchPressed, interruptPending,
+          now, touchFastPollUntilMs)) {
     return;
   }
 

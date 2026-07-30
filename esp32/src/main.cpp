@@ -1405,20 +1405,21 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
 #ifdef WAVESHARE_AMOLED_175
+  constexpr bool kDecodedTouchPollingRequired = true;
   if (display_inactivity::shouldPollTouchWhileDisplayInactive(
-          displayModeBeforeUpdate,
-          AUTOMATIC_LIGHT_SLEEP_EXPERIMENT != 0)) {
+          displayModeBeforeUpdate, kDecodedTouchPollingRequired)) {
     // LVGL is throttled while dimmed and paused while off. Keep only the
-    // proven controller reader alive so a decoded frame can restore the UI.
+    // proven, PM-locked controller reader alive so a decoded frame can restore
+    // the UI. Tickless builds may light-sleep between these throttled polls.
     readTouch();
   }
 #endif
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
 #ifdef WAVESHARE_AMOLED_175
-  // CST9217 keeps INT asserted until its frame is acknowledged. Treat that
-  // asserted line as the source of truth while dimmed/off so a missed GPIO
-  // edge cannot leave LVGL paused with the display dark.
+  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
+  // low-level state as a supplemental wake signal; decoded-frame activity from
+  // the throttled reader remains authoritative.
   touchWake = display_inactivity::touchWakeRequested(
       currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif
