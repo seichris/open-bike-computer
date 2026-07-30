@@ -85,10 +85,16 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
-    assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
+
+assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" not in config.get(
+    "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP", "custom_sdkconfig"
+)
+assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" in config.get(
+    "env:WAVESHARE_AMOLED_206_LIGHT_SLEEP", "custom_sdkconfig"
+)
 
 ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
 for environment in light_sleep_profiles:

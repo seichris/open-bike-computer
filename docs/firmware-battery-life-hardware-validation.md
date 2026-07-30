@@ -51,10 +51,15 @@ the available 1.75-inch device. On 2026-07-30, operator testing found that a tap
 did not restore full brightness from dimmed state or wake the display-off
 state. Two subsequent interrupt-only handoff candidates also failed the clean
 physical wake test, including commit
-`8d2f4a2e1d039321f155d99105e01dbf9c87b389`. The current candidate captures
-the asserted wake GPIO in an ESP-IDF light-sleep exit callback and explicitly
-notifies the UI task; it is awaiting reflash. The host-only 10,000-cycle test
-is not a substitute for the physical wake-cycle release gate.
+`8d2f4a2e1d039321f155d99105e01dbf9c87b389`. Commit
+`6b6deff4dacb1c20ef96ad88cc9973d6b9f178ad` added an ESP-IDF light-sleep exit
+callback, but the callback recorded zero GPIO wake events during failed taps
+and the low-level live interrupt also regressed map drag and pinch. The current
+candidate restores the proven falling-edge touch path, returns the 1.75-inch
+wake source to EXT1 with an explicit callback handoff, and adds a raw asserted
+INT fallback before LVGL consumes the frame. It is awaiting physical retest.
+The host-only 10,000-cycle test is not a substitute for the physical wake-cycle
+release gate.
 
 ## Event-driven UI scheduling
 
@@ -126,24 +131,25 @@ retained so the device fails awake. Active, peak, and failed application-lock
 counts, wake-source state/failures, and startup completion are emitted in
 `PWRMET`.
 
-The experiment arms active-low digital-GPIO light-sleep wake for BOOT/GPIO0 and
-the board's touch interrupt (CST9217/GPIO21 on 1.75, FT3168/GPIO38 on 2.06).
-Digital-GPIO wake works for both RTC and non-RTC IO during light sleep. The
-GPIO wake uses the same low-level trigger as the live GPIO interrupt. Each
-normal handler therefore masks itself after its first assertion and re-arms
-only after the source returns high, preventing an interrupt storm while a
-finger or button holds the line low. Independently, an ESP-IDF light-sleep exit
-callback samples only the configured active-low wake pins immediately after a
-GPIO wake and posts the corresponding touch/BOOT reason to the UI task. The
-CST9217 interrupt remains asserted until its frame is acknowledged, so the
-1.75-inch touch source is still observable during that callback. Startup
-retains its no-sleep guard unless the wake sources, callback, and UI notifier
-are all ready. `PWRMET` reports the last captured GPIO mask, event count, and
-callback/notifier readiness. The light-sleep-only 1.75 touch policy avoids
-speculative controller reads while the interrupt is inactive, but continues
-reading for a latched interrupt, active gesture, or the short post-touch
-polling window. The 2.06 path is build-validated only until that hardware is
-available.
+The 1.75-inch experiment arms active-low EXT1 wake for BOOT/GPIO0 and the
+CST9217 interrupt on RTC-capable GPIO21. Its normal BOOT and touch handlers stay
+falling-edge triggered, preserving the active gesture path. An ESP-IDF
+light-sleep exit callback reads the EXT1 status and posts the corresponding
+touch/BOOT reason to the UI task. Because the CST9217 interrupt remains
+asserted until its frame is acknowledged, a non-active display also samples
+the raw INT line at the existing scheduler cadence. That fallback restores the
+panel even if the EXT1 wake reaches the task without a replayed GPIO edge.
+
+The 2.06-inch experiment uses EXT1 for RTC-capable BOOT/GPIO0 and retains the
+one-shot low-level digital-GPIO wake path for its non-RTC FT3168 interrupt on
+GPIO38. That handler masks itself after its first assertion and re-arms only
+after the source returns high. This path remains build-only until 2.06-inch
+hardware is available. Startup retains its no-sleep guard unless the wake
+sources, callback, and UI notifier are all ready. `PWRMET` reports the EXT1 and
+digital-GPIO masks, last captured wake mask, event count, and callback/notifier
+readiness. The light-sleep-only touch policy avoids speculative controller
+reads while the interrupt is inactive, but continues reading for a latched
+interrupt, active gesture, or the short post-touch polling window.
 
 On 2026-07-29, the first 1.75-inch light-sleep candidate booted, connected and
 authenticated over BLE, rendered the vector map, dimmed, and turned the display
@@ -181,9 +187,17 @@ Commit `8d2f4a2e1d039321f155d99105e01dbf9c87b389` replaced the edge-only
 handoff with one-shot low-level GPIO interrupt gates and was flashed to the
 same board. A clean display-off test performed with the serial port closed
 still did not wake on touch. This established that automatic GPIO wake did not
-reliably replay the Arduino interrupt into the UI task on this hardware. The
-current exit-callback handoff replaces that failed mechanism and remains a
-candidate until the operator repeats the physical dimmed/off wake test.
+reliably replay the Arduino interrupt into the UI task on this hardware.
+
+Commit `6b6deff4dacb1c20ef96ad88cc9973d6b9f178ad` kept those low-level gates and
+added an exit-callback handoff. It was flashed to the same board, but manual
+touch still did not wake the display. The final pre-reset metrics showed
+`gpioWakeMask=0x200001`, `gpioWakeLast=0x0`, `gpioWakeEvents=0`,
+`wakeCapture=1`, `wakeNotifier=1`, and zero wake-source failures. The operator
+also found that map drag and pinch-to-zoom no longer worked while the display
+was active. The current candidate therefore restores falling-edge live input
+on 1.75-inch hardware and confines the low-level gate to the build-only
+2.06-inch GPIO38 path.
 
 Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
 and repeated wake-cycle checks remain open. The experiment must not be enabled
@@ -488,9 +502,9 @@ battery Wh.
 | 10 | Ride-statistics screen | 2.06 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 1.75 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 2.06 | Pending | — | — | — | — | Pending |
-| 12 | Connected dimmed state | 1.75 | Interrupt-only candidate failed; exit-callback candidate awaiting reflash | — | — | — | — | Verify tap restores saved brightness |
+| 12 | Connected dimmed state | 1.75 | Digital-GPIO callback candidate failed; EXT1 + falling-edge candidate awaiting retest | — | — | — | — | Verify tap restores saved brightness |
 | 12 | Connected dimmed state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
-| 13 | Connected display-off state | 1.75 | Interrupt-only candidate failed; exit-callback candidate awaiting reflash | — | — | — | — | Verify touch/BOOT/PWR wake |
+| 13 | Connected display-off state | 1.75 | Digital-GPIO callback candidate failed; EXT1 + raw-INT fallback awaiting retest | — | — | — | — | Verify touch/BOOT/PWR wake |
 | 13 | Connected display-off state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
 | 14 | Transfer AP enabled, idle | 1.75 | Pending | — | — | — | — | Pending |
 | 14 | Transfer AP enabled, idle | 2.06 | Pending | — | — | — | — | Pending |

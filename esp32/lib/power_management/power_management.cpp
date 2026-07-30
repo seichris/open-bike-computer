@@ -20,7 +20,8 @@
 #error "Phase 7B GPIO wake handoff requires light-sleep callbacks"
 #endif
 
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && !CONFIG_GPIO_CTRL_FUNC_IN_IRAM
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206) &&      \
+    !CONFIG_GPIO_CTRL_FUNC_IN_IRAM
 #error "Active-low wake ISR masking requires IRAM-safe GPIO control"
 #endif
 
@@ -54,20 +55,24 @@ void setError(int errorCode) { lastErrorCode.store(errorCode); }
 
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
 esp_err_t captureLightSleepGpioWake(int64_t, void *) {
-  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO) {
-    return ESP_OK;
-  }
-
-  uint64_t remainingConfiguredPins = runtimeStatus.gpioWakeMask;
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   uint64_t gpioMask = 0;
-  while (remainingConfiguredPins != 0) {
-    const uint8_t gpioNumber =
-        static_cast<uint8_t>(__builtin_ctzll(remainingConfiguredPins));
-    const uint64_t gpioBit = 1ULL << gpioNumber;
-    if (gpio_get_level(static_cast<gpio_num_t>(gpioNumber)) == 0) {
-      gpioMask |= gpioBit;
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
+    gpioMask =
+        esp_sleep_get_ext1_wakeup_status() & runtimeStatus.ext1WakeMask;
+  } else if (wakeCause == ESP_SLEEP_WAKEUP_GPIO) {
+    uint64_t remainingConfiguredPins = runtimeStatus.gpioWakeMask;
+    while (remainingConfiguredPins != 0) {
+      const uint8_t gpioNumber =
+          static_cast<uint8_t>(__builtin_ctzll(remainingConfiguredPins));
+      const uint64_t gpioBit = 1ULL << gpioNumber;
+      if (gpio_get_level(static_cast<gpio_num_t>(gpioNumber)) == 0) {
+        gpioMask |= gpioBit;
+      }
+      remainingConfiguredPins &= ~gpioBit;
     }
-    remainingConfiguredPins &= ~gpioBit;
+  } else {
+    return ESP_OK;
   }
   if (gpioMask == 0) {
     return ESP_OK;
@@ -368,6 +373,43 @@ void completeStartup() {
 #else
   runtimeStatus.startupComplete = runtimeStatus.enabled;
 #endif
+}
+
+bool configureExt1Wakeup(uint64_t gpioMask) {
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  wakeSourcesReady = false;
+  if (gpioMask == 0) {
+    setError(ESP_ERR_INVALID_ARG);
+    wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
+    return false;
+  }
+
+  const esp_err_t result =
+      esp_sleep_enable_ext1_wakeup(gpioMask, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (result != ESP_OK) {
+    setError(result);
+    wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+    Serial.printf("Power management: EXT1 wake configuration failed: %s "
+                  "(%d) mask=0x%llX\n",
+                  esp_err_to_name(result), result,
+                  static_cast<unsigned long long>(gpioMask));
+#endif
+    return false;
+  }
+
+  runtimeStatus.ext1WakeMask = gpioMask;
+  wakeSourcesReady = !wakeSourceConfigurationFailed;
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  Serial.printf("Power management: EXT1 active-low wake mask=0x%llX\n",
+                static_cast<unsigned long long>(gpioMask));
+#endif
+#else
+  (void)gpioMask;
+#endif
+  return true;
 }
 
 bool configureActiveLowGpioWakeup(uint8_t gpioNumber) {

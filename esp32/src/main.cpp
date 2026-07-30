@@ -84,7 +84,6 @@ extern xSemaphoreHandle gpsMutex;
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "power_management.hpp"
-#include "active_low_wake_interrupt_gate.hpp"
 #include "route_overlay.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
@@ -96,7 +95,6 @@ extern xSemaphoreHandle gpsMutex;
 #include "qmi8658.hpp"
 #include "speaker.hpp"
 #include "waveshare_board.hpp"
-#include <driver/gpio.h>
 #endif
 
 extern Storage storage;
@@ -177,8 +175,6 @@ static bool waveshareBootWaitingForRelease = false;
 static bool waveshareBootHandledPairingConfirmation = false;
 static uint32_t waveshareBootReleaseStartMs = 0;
 static uint32_t waveshareBootPressStartMs = 0;
-static power_management::ActiveLowWakeInterruptGate
-    waveshareBootWakeInterruptGate;
 static ownership_button_policy::FreshPowerButtonGate
     wavesharePowerPairingGate;
 static uint32_t wavesharePowerPairingGeneration = 0;
@@ -190,12 +186,6 @@ void appDisplayFlushCompleted() {
 }
 
 static void IRAM_ATTR latchWaveshareBootScreenCycle() {
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  if (!waveshareBootWakeInterruptGate.latch()) {
-    return;
-  }
-  gpio_intr_disable(static_cast<gpio_num_t>(BOARD_BOOT_PIN));
-#endif
   portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
   waveshareBootScreenCyclePending = true;
   portEXIT_CRITICAL_ISR(&waveshareBootButtonMux);
@@ -215,11 +205,6 @@ static bool processWaveshareBootButton() {
 
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  if (waveshareBootWakeInterruptGate.rearmIfInactive(pressed)) {
-    gpio_intr_enable(static_cast<gpio_num_t>(BOARD_BOOT_PIN));
-  }
-#endif
   const bool latchedPress = takeWaveshareBootScreenCycle();
   const bool hadInput = latchedPress || pressed;
 
@@ -872,7 +857,8 @@ static void logPowerMetricsReport() {
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
       "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
-      "gpioWakeMask=0x%llX gpioWakeLast=0x%llX gpioWakeEvents=%lu "
+      "ext1WakeMask=0x%llX gpioWakeMask=0x%llX "
+      "gpioWakeLast=0x%llX gpioWakeEvents=%lu "
       "wakeCapture=%d wakeNotifier=%d pmWakeFailures=%lu "
       "startupComplete=%d]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
@@ -935,6 +921,7 @@ static void logPowerMetricsReport() {
       (unsigned long)powerManagementStatus.activeLockCount,
       (unsigned long)powerManagementStatus.peakLockCount,
       (unsigned long)powerManagementStatus.lockFailureCount,
+      static_cast<unsigned long long>(powerManagementStatus.ext1WakeMask),
       static_cast<unsigned long long>(powerManagementStatus.gpioWakeMask),
       static_cast<unsigned long long>(
           powerManagementStatus.lastGpioWakeMask),
@@ -1061,14 +1048,13 @@ void setup() {
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  constexpr int bootInterruptMode = ONLOW;
-#else
-  constexpr int bootInterruptMode = FALLING;
-#endif
   attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
-                  latchWaveshareBootScreenCycle, bootInterruptMode);
-  power_management::configureActiveLowGpioWakeup(BOARD_BOOT_PIN);
+                  latchWaveshareBootScreenCycle, FALLING);
+  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+#ifdef WAVESHARE_AMOLED_175
+  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#endif
+  power_management::configureExt1Wakeup(ext1WakeMask);
   configureTouchWakeInterrupt();
 #endif
 #ifdef POWER_SAVE
@@ -1407,9 +1393,17 @@ void loop() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  updateDisplayInactivityPolicy(
-      now, ui_scheduler::hasReason(wakeReasons,
-                                   ui_scheduler::WakeReason::Touch));
+  bool touchWake = ui_scheduler::hasReason(
+      wakeReasons, ui_scheduler::WakeReason::Touch);
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_175)
+  // CST9217 keeps INT asserted until its frame is acknowledged. If an EXT1
+  // wake reaches the next scheduler iteration without its GPIO edge, the raw
+  // asserted line still restores the panel before LVGL consumes that frame.
+  if (currentDisplayMode != display_inactivity::Mode::Active) {
+    touchWake = touchWake || isTouchWakeSourceActive();
+  }
+#endif
+  updateDisplayInactivityPolicy(now, touchWake);
   displayPowerManager.applyPendingPanelChange();
   if (displayPowerManager.takeFullRefreshRequired()) {
     lv_obj_invalidate(lv_screen_active());
