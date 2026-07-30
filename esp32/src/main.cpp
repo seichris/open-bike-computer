@@ -1395,13 +1395,12 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_175)
-  // CST9217 keeps INT asserted until its frame is acknowledged. If an EXT1
-  // wake reaches the next scheduler iteration without its GPIO edge, the raw
-  // asserted line still restores the panel before LVGL consumes that frame.
-  if (currentDisplayMode != display_inactivity::Mode::Active) {
-    touchWake = touchWake || isTouchWakeSourceActive();
-  }
+#ifdef WAVESHARE_AMOLED_175
+  // CST9217 keeps INT asserted until its frame is acknowledged. Treat that
+  // asserted line as the source of truth while dimmed/off so a missed GPIO
+  // edge cannot leave LVGL paused with the display dark.
+  touchWake = display_inactivity::touchWakeRequested(
+      currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif
   updateDisplayInactivityPolicy(now, touchWake);
   displayPowerManager.applyPendingPanelChange();

@@ -10,6 +10,12 @@ int main() {
   using display_inactivity::Mode;
   using display_inactivity::Policy;
 
+  assert(!display_inactivity::touchWakeRequested(Mode::Active, false, false));
+  assert(!display_inactivity::touchWakeRequested(Mode::Active, false, true));
+  assert(display_inactivity::touchWakeRequested(Mode::Active, true, false));
+  assert(display_inactivity::touchWakeRequested(Mode::Dimmed, false, true));
+  assert(display_inactivity::touchWakeRequested(Mode::DisplayOff, false, true));
+
   Policy idle;
   idle.begin(1'000);
   assert(idle.update(15'999, {}).current == Mode::Active);

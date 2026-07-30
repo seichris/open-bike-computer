@@ -15,6 +15,12 @@ enum class Mode : uint8_t {
   Transfer,
 };
 
+constexpr bool touchWakeRequested(Mode currentMode, bool interruptNotified,
+                                  bool controllerInterruptActive) {
+  return interruptNotified ||
+         (currentMode != Mode::Active && controllerInterruptActive);
+}
+
 struct Context {
   bool navigating = false;
   bool transferActive = false;

@@ -54,10 +54,15 @@ physical wake test, including commit
 `8d2f4a2e1d039321f155d99105e01dbf9c87b389`. Commit
 `6b6deff4dacb1c20ef96ad88cc9973d6b9f178ad` added an ESP-IDF light-sleep exit
 callback, but the callback recorded zero GPIO wake events during failed taps
-and the low-level live interrupt also regressed map drag and pinch. The current
-candidate restores the proven falling-edge touch path, returns the 1.75-inch
-wake source to EXT1 with an explicit callback handoff, and adds a raw asserted
-INT fallback before LVGL consumes the frame. It is awaiting physical retest.
+and the low-level live interrupt also regressed map drag and pinch. The later
+light-sleep candidate at `37b97626e3bf0fd3f51c8e1b5b977c8df31a9336`
+restored the falling-edge path but still failed tap wake, active drag, and
+pinch. Flashing the ordinary DFS-only profile from that same commit restored
+drag and pinch, proving that automatic light sleep caused the active-touch
+regression. Tap wake still failed because the ordinary profile trusted the
+missed GPIO edge and did not consult the CST9217's asserted INT line. The
+current candidate uses that held-low line as the dimmed/off fallback in every
+1.75-inch profile and is awaiting physical retest with light sleep disabled.
 The host-only 10,000-cycle test is not a substitute for the physical wake-cycle
 release gate.
 
@@ -195,9 +200,13 @@ touch still did not wake the display. The final pre-reset metrics showed
 `gpioWakeMask=0x200001`, `gpioWakeLast=0x0`, `gpioWakeEvents=0`,
 `wakeCapture=1`, `wakeNotifier=1`, and zero wake-source failures. The operator
 also found that map drag and pinch-to-zoom no longer worked while the display
-was active. The current candidate therefore restores falling-edge live input
-on 1.75-inch hardware and confines the low-level gate to the build-only
-2.06-inch GPIO38 path.
+was active. Commit `37b97626e3bf0fd3f51c8e1b5b977c8df31a9336`
+therefore restored falling-edge live input on 1.75-inch hardware and confined
+the low-level gate to the build-only 2.06-inch GPIO38 path. Its light-sleep
+profile still failed active gestures and tap wake. The ordinary profile from
+the same commit restored drag and pinch but not tap wake. The next ordinary
+candidate keeps automatic light sleep disabled and promotes the CST9217's raw
+held-low INT fallback from the experiment-only path to every 1.75-inch build.
 
 Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
 and repeated wake-cycle checks remain open. The experiment must not be enabled
