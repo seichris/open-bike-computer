@@ -471,7 +471,7 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
 }
 
 static display_inactivity::Update updateDisplayInactivityPolicy(
-    uint32_t nowMs, bool touchWake) {
+    uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
   struct Signals {
     bool initialized = false;
     lv_obj_t *screen = nullptr;
@@ -494,15 +494,18 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     uint32_t lastTransferPollMs = 0;
     bool audioActive = false;
     bool touchPending = false;
+    uint32_t touchActivityGeneration = 0;
   };
   static Signals signals;
 
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const bool audioActive = waveshare_board::speaker::isPlaying();
   const bool touchPending = hasUnattemptedTouchInterrupt();
+  const uint32_t touchActivityGeneration = getTouchActivityGeneration();
   lv_obj_t *const activeScreen = lv_screen_active();
   const uint32_t routeRevision = routeOverlay.revision();
 
+  observedTouchActivity = touchWake;
   bool meaningfulActivity = touchWake;
   if (!signals.initialized) {
     signals.initialized = true;
@@ -531,7 +534,13 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.lastTransferPollMs = nowMs;
     signals.audioActive = audioActive;
     signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
   } else {
+    const bool decodedTouchActivity =
+        display_inactivity::touchActivityAdvanced(
+            touchActivityGeneration, signals.touchActivityGeneration);
+    observedTouchActivity =
+        observedTouchActivity || decodedTouchActivity;
     meaningfulActivity =
         meaningfulActivity || activeScreen != signals.screen ||
         activeTile != signals.tile ||
@@ -539,7 +548,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
         bleStats.authSuccessCount != signals.authSuccessCount ||
         routeRevision != signals.routeRevision ||
         audioActive != signals.audioActive ||
-        (touchPending && !signals.touchPending);
+        (touchPending && !signals.touchPending) || decodedTouchActivity;
     signals.screen = activeScreen;
     signals.tile = activeTile;
     signals.connectCount = bleStats.connectCount;
@@ -547,6 +556,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.routeRevision = routeRevision;
     signals.audioActive = audioActive;
     signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
 
     if (bleStats.navPacketCount != signals.navPacketCount) {
       signals.navPacketCount = bleStats.navPacketCount;
@@ -1393,6 +1403,16 @@ void loop() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
+#ifdef WAVESHARE_AMOLED_175
+  if (display_inactivity::shouldPollTouchWhileDisplayInactive(
+          displayModeBeforeUpdate,
+          AUTOMATIC_LIGHT_SLEEP_EXPERIMENT != 0)) {
+    // LVGL is throttled while dimmed and paused while off. Keep only the
+    // proven controller reader alive so a decoded frame can restore the UI.
+    readTouch();
+  }
+#endif
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
 #ifdef WAVESHARE_AMOLED_175
@@ -1402,7 +1422,16 @@ void loop() {
   touchWake = display_inactivity::touchWakeRequested(
       currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif
-  updateDisplayInactivityPolicy(now, touchWake);
+  bool observedTouchActivity = false;
+  const display_inactivity::Update displayUpdate =
+      updateDisplayInactivityPolicy(now, touchWake, observedTouchActivity);
+  if (display_inactivity::isTouchWakeDisplayMode(displayModeBeforeUpdate) &&
+      displayUpdate.current != displayModeBeforeUpdate &&
+      observedTouchActivity) {
+    // The first contact only restores the display. Releasing it clears this
+    // suppression before a subsequent intentional UI gesture.
+    suppressPrimaryTouchUntilReleaseForDisplayWake();
+  }
   displayPowerManager.applyPendingPanelChange();
   if (displayPowerManager.takeFullRefreshRequired()) {
     lv_obj_invalidate(lv_screen_active());

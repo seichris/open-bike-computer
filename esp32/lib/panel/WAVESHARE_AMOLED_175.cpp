@@ -266,6 +266,7 @@ bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
 static waveshare_board::touch::TouchFrame latestTouchFrame;
 static uint32_t touchFrameSequence = 0;
+static uint32_t touchActivityGeneration = 0;
 static bool suppressPrimaryTouchUntilRelease = false;
 static MultiTouchSuppressionPolicy multiTouchSuppressionPolicy = nullptr;
 static volatile uint32_t touchInterruptGeneration = 0;
@@ -308,8 +309,14 @@ waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {
   return latestTouchFrame;
 }
 
+uint32_t getTouchActivityGeneration() { return touchActivityGeneration; }
+
 bool isPrimaryTouchSuppressed() {
   return suppressPrimaryTouchUntilRelease;
+}
+
+void suppressPrimaryTouchUntilReleaseForDisplayWake() {
+  suppressPrimaryTouchUntilRelease = true;
 }
 
 void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy) {
@@ -326,6 +333,9 @@ static void publishTouchFrame(
   latestTouchFrame = rawFrame;
   latestTouchFrame.sequence = ++touchFrameSequence;
   latestTouchFrame.sampledAtMs = now;
+  if (latestTouchFrame.count != 0) {
+    touchActivityGeneration = touchActivityGeneration + 1;
+  }
   for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
     latestTouchFrame.contacts[index] =
         waveshare_board::touch::rotateTouchContact(

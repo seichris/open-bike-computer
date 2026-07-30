@@ -12,9 +12,23 @@ int main() {
 
   assert(!display_inactivity::touchWakeRequested(Mode::Active, false, false));
   assert(!display_inactivity::touchWakeRequested(Mode::Active, false, true));
+  assert(!display_inactivity::touchWakeRequested(Mode::Transfer, false, true));
   assert(display_inactivity::touchWakeRequested(Mode::Active, true, false));
   assert(display_inactivity::touchWakeRequested(Mode::Dimmed, false, true));
   assert(display_inactivity::touchWakeRequested(Mode::DisplayOff, false, true));
+  assert(!display_inactivity::touchActivityAdvanced(7, 7));
+  assert(display_inactivity::touchActivityAdvanced(8, 7));
+  assert(display_inactivity::touchActivityAdvanced(0, UINT32_MAX));
+  assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Active, false));
+  assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Transfer, false));
+  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::Dimmed, false));
+  assert(display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::DisplayOff, false));
+  assert(!display_inactivity::shouldPollTouchWhileDisplayInactive(
+      Mode::DisplayOff, true));
 
   Policy idle;
   idle.begin(1'000);

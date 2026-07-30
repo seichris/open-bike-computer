@@ -61,8 +61,16 @@ pinch. Flashing the ordinary DFS-only profile from that same commit restored
 drag and pinch, proving that automatic light sleep caused the active-touch
 regression. Tap wake still failed because the ordinary profile trusted the
 missed GPIO edge and did not consult the CST9217's asserted INT line. The
-current candidate uses that held-low line as the dimmed/off fallback in every
-1.75-inch profile and is awaiting physical retest with light sleep disabled.
+candidate at `07d8b2c8c19325a63fdacf628b0f1004801d3690` promoted that
+held-low fallback to every 1.75-inch profile, but physical retest still failed.
+A diagnostic capture then established that GPIO21 remained `HIGH` even while
+the ordinary profile decoded valid press/release frames. Those frames were
+delivered to LVGL while dimmed but were not counted by the inactivity policy;
+after display-off paused LVGL, the controller was not read at all. The current
+candidate tracks decoded touch activity directly, keeps only the proven touch
+reader polling while dimmed/off in non-light-sleep profiles, and suppresses the
+wake contact until release so it cannot activate a hidden control. It is
+awaiting physical retest with light sleep disabled.
 The host-only 10,000-cycle test is not a substitute for the physical wake-cycle
 release gate.
 
@@ -204,9 +212,14 @@ was active. Commit `37b97626e3bf0fd3f51c8e1b5b977c8df31a9336`
 therefore restored falling-edge live input on 1.75-inch hardware and confined
 the low-level gate to the build-only 2.06-inch GPIO38 path. Its light-sleep
 profile still failed active gestures and tap wake. The ordinary profile from
-the same commit restored drag and pinch but not tap wake. The next ordinary
-candidate keeps automatic light sleep disabled and promotes the CST9217's raw
-held-low INT fallback from the experiment-only path to every 1.75-inch build.
+the same commit restored drag and pinch but not tap wake. Commit
+`07d8b2c8c19325a63fdacf628b0f1004801d3690` kept automatic light sleep
+disabled and promoted the raw INT fallback to every 1.75-inch build, but it
+also failed physical tap wake. Its diagnostic capture showed valid decoded
+touch frames with GPIO21 still `HIGH` while dimmed, followed by no controller
+reads after LVGL paused in display-off mode. The next ordinary candidate uses
+decoded touch activity as the policy input and performs the existing throttled
+controller read while the display is inactive.
 
 Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
 and repeated wake-cycle checks remain open. The experiment must not be enabled
@@ -511,9 +524,9 @@ battery Wh.
 | 10 | Ride-statistics screen | 2.06 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 1.75 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 2.06 | Pending | — | — | — | — | Pending |
-| 12 | Connected dimmed state | 1.75 | Digital-GPIO callback candidate failed; EXT1 + falling-edge candidate awaiting retest | — | — | — | — | Verify tap restores saved brightness |
+| 12 | Connected dimmed state | 1.75 | GPIO wake candidates failed; decoded-frame activity candidate awaiting retest | — | — | — | — | Verify tap restores saved brightness without activating hidden UI |
 | 12 | Connected dimmed state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
-| 13 | Connected display-off state | 1.75 | Digital-GPIO callback candidate failed; EXT1 + raw-INT fallback awaiting retest | — | — | — | — | Verify touch/BOOT/PWR wake |
+| 13 | Connected display-off state | 1.75 | GPIO/raw-INT candidates failed; throttled touch-reader candidate awaiting retest | — | — | — | — | Verify touch/BOOT/PWR wake |
 | 13 | Connected display-off state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
 | 14 | Transfer AP enabled, idle | 1.75 | Pending | — | — | — | — | Pending |
 | 14 | Transfer AP enabled, idle | 2.06 | Pending | — | — | — | — | Pending |
