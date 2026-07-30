@@ -72,5 +72,22 @@ int main() {
       ui_scheduler::reasonBits(ui_scheduler::WakeReason::Boot),
       ui_scheduler::WakeReason::Touch));
 
+  constexpr uint8_t touchPin = 21;
+  constexpr uint8_t bootPin = 0;
+  assert(ui_scheduler::gpioWakeReasons(0, touchPin, bootPin) == 0);
+  const uint32_t touchWakeReasons =
+      ui_scheduler::gpioWakeReasons(1ULL << touchPin, touchPin, bootPin);
+  assert(ui_scheduler::hasReason(touchWakeReasons,
+                                 ui_scheduler::WakeReason::Touch));
+  assert(!ui_scheduler::hasReason(touchWakeReasons,
+                                  ui_scheduler::WakeReason::Boot));
+  const uint32_t bothGpioWakeReasons = ui_scheduler::gpioWakeReasons(
+      (1ULL << touchPin) | (1ULL << bootPin), touchPin, bootPin);
+  assert(ui_scheduler::hasReason(bothGpioWakeReasons,
+                                 ui_scheduler::WakeReason::Touch));
+  assert(ui_scheduler::hasReason(bothGpioWakeReasons,
+                                 ui_scheduler::WakeReason::Boot));
+  assert(ui_scheduler::gpioWakeReasons(1ULL << 7, touchPin, bootPin) == 0);
+
   return 0;
 }

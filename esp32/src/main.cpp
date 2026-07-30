@@ -311,6 +311,20 @@ static bool processWavesharePowerButton() {
   return hadInput;
 }
 
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
+  const uint32_t reasons =
+      ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Touch);
+  }
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
+  }
+}
+#endif
+
 static void armOwnershipPairingAfterRenderedComparison() {
   uint32_t pairingGeneration = 0;
   if (!bleNavServer.ownershipPairingRenderedRequest(pairingGeneration)) {
@@ -858,7 +872,9 @@ static void logPowerMetricsReport() {
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
       "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
-      "gpioWakeMask=0x%llX pmWakeFailures=%lu startupComplete=%d]\n",
+      "gpioWakeMask=0x%llX gpioWakeLast=0x%llX gpioWakeEvents=%lu "
+      "wakeCapture=%d wakeNotifier=%d pmWakeFailures=%lu "
+      "startupComplete=%d]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
       powerMetricsDisplayStateName(snapshot.displayState),
@@ -920,6 +936,11 @@ static void logPowerMetricsReport() {
       (unsigned long)powerManagementStatus.peakLockCount,
       (unsigned long)powerManagementStatus.lockFailureCount,
       static_cast<unsigned long long>(powerManagementStatus.gpioWakeMask),
+      static_cast<unsigned long long>(
+          powerManagementStatus.lastGpioWakeMask),
+      (unsigned long)powerManagementStatus.gpioWakeEventCount,
+      powerManagementStatus.wakeCaptureReady,
+      powerManagementStatus.wakeNotifierReady,
       (unsigned long)powerManagementStatus.wakeSourceFailureCount,
       powerManagementStatus.startupComplete);
   if (reportLength < 0 ||
@@ -1018,6 +1039,10 @@ void setup() {
   // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
   // enabling BLE, touch, BOOT, audio, or transfer publishers.
   ui_scheduler::bindCurrentTask();
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
+#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayPowerManager.begin();
 #endif

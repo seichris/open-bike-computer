@@ -8,6 +8,8 @@ from pioarduino_custom_core import (
     CORRECTED_PM_LITERAL_MAPPING,
     CORRECTED_PM_TEXT_MAPPING,
     PHASE_7A_PM_LITERAL_MAPPING,
+    PHASE_9_ISR_PM_LITERAL_MAPPING,
+    PHASE_9_ISR_PM_TEXT_MAPPING,
     STALE_FREERTOS_TICKLESS_LITERAL_MAPPING,
     STALE_FREERTOS_TICKLESS_TEXT_MAPPING,
     STALE_PM_TEXT_MAPPING,
@@ -44,6 +46,16 @@ class CorrectSectionsTextTests(unittest.TestCase):
 
         self.assertIn(CORRECTED_PM_LITERAL_MAPPING, corrected)
 
+    def test_upgrades_phase_9_isr_mapping(self):
+        source = self.source(PHASE_9_ISR_PM_LITERAL_MAPPING).replace(
+            STALE_PM_TEXT_MAPPING, PHASE_9_ISR_PM_TEXT_MAPPING
+        )
+
+        corrected = correct_sections_text(source)
+
+        self.assertIn(CORRECTED_PM_LITERAL_MAPPING, corrected)
+        self.assertIn(CORRECTED_PM_TEXT_MAPPING, corrected)
+
     def test_is_idempotent_when_installed_script_is_already_corrected(self):
         source = self.source()
         source = correct_sections_text(source)
@@ -70,6 +82,15 @@ class CorrectSectionsTextTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "unexpected format"):
+            correct_sections_text(source)
+
+    def test_rejects_mixed_corrected_and_stale_text_mappings(self):
+        source = correct_sections_text(self.source()).replace(
+            CORRECTED_PM_TEXT_MAPPING,
+            f"{CORRECTED_PM_TEXT_MAPPING}\n{STALE_PM_TEXT_MAPPING}",
+        )
+
+        with self.assertRaisesRegex(ValueError, "esp_pm text.*unexpected format"):
             correct_sections_text(source)
 
     def test_rejects_missing_tickless_mapping(self):

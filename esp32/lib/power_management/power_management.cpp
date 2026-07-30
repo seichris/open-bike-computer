@@ -16,6 +16,10 @@
 #error "Phase 7B requires FreeRTOS tickless idle"
 #endif
 
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && !CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+#error "Phase 7B GPIO wake handoff requires light-sleep callbacks"
+#endif
+
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && !CONFIG_GPIO_CTRL_FUNC_IN_IRAM
 #error "Active-low wake ISR masking requires IRAM-safe GPIO control"
 #endif
@@ -36,12 +40,87 @@ std::atomic<uint32_t> activeLockCount{0};
 std::atomic<uint32_t> peakLockCount{0};
 std::atomic<uint32_t> lockFailureCount{0};
 std::atomic<uint32_t> wakeSourceFailureCount{0};
+std::atomic<uint32_t> gpioWakeEventCount{0};
+std::atomic<uint32_t> lastGpioWakeMaskLow{0};
+std::atomic<uint32_t> lastGpioWakeMaskHigh{0};
 std::atomic<int> lastErrorCode{0};
 bool startupLockHeld = false;
 bool wakeSourcesReady = false;
 bool wakeSourceConfigurationFailed = false;
+bool wakeCaptureRegistered = false;
+std::atomic<GpioWakeNotifier> gpioWakeNotifier{nullptr};
 
 void setError(int errorCode) { lastErrorCode.store(errorCode); }
+
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+esp_err_t captureLightSleepGpioWake(int64_t, void *) {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO) {
+    return ESP_OK;
+  }
+
+  uint64_t remainingConfiguredPins = runtimeStatus.gpioWakeMask;
+  uint64_t gpioMask = 0;
+  while (remainingConfiguredPins != 0) {
+    const uint8_t gpioNumber =
+        static_cast<uint8_t>(__builtin_ctzll(remainingConfiguredPins));
+    const uint64_t gpioBit = 1ULL << gpioNumber;
+    if (gpio_get_level(static_cast<gpio_num_t>(gpioNumber)) == 0) {
+      gpioMask |= gpioBit;
+    }
+    remainingConfiguredPins &= ~gpioBit;
+  }
+  if (gpioMask == 0) {
+    return ESP_OK;
+  }
+
+  lastGpioWakeMaskLow.store(static_cast<uint32_t>(gpioMask),
+                            std::memory_order_relaxed);
+  lastGpioWakeMaskHigh.store(static_cast<uint32_t>(gpioMask >> 32),
+                             std::memory_order_relaxed);
+  gpioWakeEventCount.fetch_add(1, std::memory_order_relaxed);
+
+  const GpioWakeNotifier notifier =
+      gpioWakeNotifier.load(std::memory_order_acquire);
+  if (notifier != nullptr) {
+    notifier(gpioMask);
+  }
+  return ESP_OK;
+}
+
+esp_pm_sleep_cbs_register_config_t gpioWakeCaptureConfiguration() {
+  esp_pm_sleep_cbs_register_config_t configuration{};
+  configuration.exit_cb = captureLightSleepGpioWake;
+  return configuration;
+}
+
+bool registerGpioWakeCapture() {
+  esp_pm_sleep_cbs_register_config_t configuration =
+      gpioWakeCaptureConfiguration();
+  const esp_err_t result = esp_pm_light_sleep_register_cbs(&configuration);
+  if (result != ESP_OK) {
+    setError(result);
+    wakeSourceFailureCount.fetch_add(1);
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+    Serial.printf("Power management: light-sleep wake capture failed: %s "
+                  "(%d)\n",
+                  esp_err_to_name(result), result);
+#endif
+    return false;
+  }
+  wakeCaptureRegistered = true;
+  return true;
+}
+
+void unregisterGpioWakeCapture() {
+  if (!wakeCaptureRegistered) {
+    return;
+  }
+  esp_pm_sleep_cbs_register_config_t configuration =
+      gpioWakeCaptureConfiguration();
+  esp_pm_light_sleep_unregister_cbs(&configuration);
+  wakeCaptureRegistered = false;
+}
+#endif
 
 constexpr const char *lockName(LockDomain domain) {
   switch (domain) {
@@ -160,6 +239,7 @@ bool containConfigurationFailure(int originalError) {
     return false;
   }
   startupLockHeld = false;
+  unregisterGpioWakeCapture();
   deleteLocks();
   return true;
 }
@@ -189,6 +269,13 @@ bool begin() {
     return false;
   }
   startupLockHeld = true;
+  if (!registerGpioWakeCapture()) {
+    if (release(LockDomain::Startup)) {
+      startupLockHeld = false;
+      deleteLocks();
+    }
+    return false;
+  }
 #endif
 
   const esp_pm_config_t requested{
@@ -202,6 +289,7 @@ bool begin() {
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
     if (release(LockDomain::Startup)) {
       startupLockHeld = false;
+      unregisterGpioWakeCapture();
       deleteLocks();
     }
 #else
@@ -259,11 +347,16 @@ bool begin() {
 
 void completeStartup() {
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  if (!runtimeStatus.enabled || !startupLockHeld || !wakeSourcesReady) {
+  const bool wakePipelineReady =
+      wakeSourcesReady && wakeCaptureRegistered &&
+      gpioWakeNotifier.load(std::memory_order_acquire) != nullptr;
+  if (!runtimeStatus.enabled || !startupLockHeld || !wakePipelineReady) {
 #if FIRMWARE_DIAGNOSTICS || POWER_METRICS
-    if (runtimeStatus.enabled && startupLockHeld && !wakeSourcesReady) {
-      Serial.println("Power management: wake sources not ready; startup lock "
-                     "retained");
+    if (runtimeStatus.enabled && startupLockHeld && !wakePipelineReady) {
+      Serial.printf("Power management: wake pipeline not ready; startup lock "
+                    "retained sources=%d capture=%d notifier=%d\n",
+                    wakeSourcesReady, wakeCaptureRegistered,
+                    gpioWakeNotifier.load(std::memory_order_relaxed) != nullptr);
     }
 #endif
     return;
@@ -326,6 +419,21 @@ bool configureActiveLowGpioWakeup(uint8_t gpioNumber) {
 #endif
 #else
   (void)gpioNumber;
+#endif
+  return true;
+}
+
+bool setGpioWakeNotifier(GpioWakeNotifier notifier) {
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  if (notifier == nullptr) {
+    setError(ESP_ERR_INVALID_ARG);
+    wakeSourceFailureCount.fetch_add(1);
+    wakeSourceConfigurationFailed = true;
+    return false;
+  }
+  gpioWakeNotifier.store(notifier, std::memory_order_release);
+#else
+  (void)notifier;
 #endif
   return true;
 }
@@ -395,7 +503,19 @@ RuntimeStatus status() {
   snapshot.activeLockCount = activeLockCount.load();
   snapshot.peakLockCount = peakLockCount.load();
   snapshot.lockFailureCount = lockFailureCount.load();
+  snapshot.lastGpioWakeMask =
+      (static_cast<uint64_t>(
+           lastGpioWakeMaskHigh.load(std::memory_order_relaxed))
+       << 32) |
+      lastGpioWakeMaskLow.load(std::memory_order_relaxed);
+  snapshot.gpioWakeEventCount =
+      gpioWakeEventCount.load(std::memory_order_relaxed);
   snapshot.wakeSourceFailureCount = wakeSourceFailureCount.load();
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  snapshot.wakeCaptureReady = wakeCaptureRegistered;
+  snapshot.wakeNotifierReady =
+      gpioWakeNotifier.load(std::memory_order_relaxed) != nullptr;
+#endif
   return snapshot;
 }
 

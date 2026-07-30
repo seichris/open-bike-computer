@@ -26,9 +26,15 @@ struct RuntimeStatus {
   uint32_t peakLockCount = 0;
   uint32_t lockFailureCount = 0;
   uint64_t gpioWakeMask = 0;
+  uint64_t lastGpioWakeMask = 0;
+  uint32_t gpioWakeEventCount = 0;
   uint32_t wakeSourceFailureCount = 0;
+  bool wakeCaptureReady = false;
+  bool wakeNotifierReady = false;
   bool startupComplete = false;
 };
+
+using GpioWakeNotifier = void (*)(uint64_t gpioMask);
 
 class ScopedLock {
 public:
@@ -53,8 +59,13 @@ bool begin();
 // and audio initialization have completed. It is a no-op in DFS-only builds.
 void completeStartup();
 // Configure one digital GPIO as an active-low light-sleep wake source. The
-// caller must install a level-safe ISR before calling this function.
+// caller must install a level-safe ISR because ESP-IDF uses the same low-level
+// trigger for live GPIO interrupts. The light-sleep exit callback independently
+// captures the wake status before a later timer wake can overwrite it.
 bool configureActiveLowGpioWakeup(uint8_t gpioNumber);
+// Install the task-context handoff used by the light-sleep exit callback. The
+// notifier must only perform non-blocking work.
+bool setGpioWakeNotifier(GpioWakeNotifier notifier);
 bool acquire(LockDomain domain);
 bool release(LockDomain domain);
 RuntimeStatus status();

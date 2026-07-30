@@ -49,9 +49,12 @@ attention holds, transfer timeouts, and 10,000 display-off/wake transitions.
 On 2026-07-29, the first Phase 9 light-sleep image was flashed and brought up on
 the available 1.75-inch device. On 2026-07-30, operator testing found that a tap
 did not restore full brightness from dimmed state or wake the display-off
-state. That image failed the physical wake gate. A corrected wake-interrupt
-candidate is awaiting reflash; the host-only 10,000-cycle test is not a
-substitute for the physical wake-cycle release gate.
+state. Two subsequent interrupt-only handoff candidates also failed the clean
+physical wake test, including commit
+`8d2f4a2e1d039321f155d99105e01dbf9c87b389`. The current candidate captures
+the asserted wake GPIO in an ESP-IDF light-sleep exit callback and explicitly
+notifies the UI task; it is awaiting reflash. The host-only 10,000-cycle test
+is not a substitute for the physical wake-cycle release gate.
 
 ## Event-driven UI scheduling
 
@@ -126,14 +129,21 @@ counts, wake-source state/failures, and startup completion are emitted in
 The experiment arms active-low digital-GPIO light-sleep wake for BOOT/GPIO0 and
 the board's touch interrupt (CST9217/GPIO21 on 1.75, FT3168/GPIO38 on 2.06).
 Digital-GPIO wake works for both RTC and non-RTC IO during light sleep. The
-normal GPIO handlers use low-level interrupts, mask themselves after the first
-assertion, and re-arm only after the source returns high; this prevents an
-asserted controller/button line from creating an interrupt storm. The
-light-sleep-only 1.75 touch policy avoids speculative controller reads while
-the interrupt is inactive, but continues reading for a latched interrupt,
-active gesture, or the short post-touch polling window. GPIO control is placed
-in IRAM because the interrupt handlers mask their own pins. The 2.06 path is
-build-validated only until that hardware is available.
+GPIO wake uses the same low-level trigger as the live GPIO interrupt. Each
+normal handler therefore masks itself after its first assertion and re-arms
+only after the source returns high, preventing an interrupt storm while a
+finger or button holds the line low. Independently, an ESP-IDF light-sleep exit
+callback samples only the configured active-low wake pins immediately after a
+GPIO wake and posts the corresponding touch/BOOT reason to the UI task. The
+CST9217 interrupt remains asserted until its frame is acknowledged, so the
+1.75-inch touch source is still observable during that callback. Startup
+retains its no-sleep guard unless the wake sources, callback, and UI notifier
+are all ready. `PWRMET` reports the last captured GPIO mask, event count, and
+callback/notifier readiness. The light-sleep-only 1.75 touch policy avoids
+speculative controller reads while the interrupt is inactive, but continues
+reading for a latched interrupt, active gesture, or the short post-touch
+polling window. The 2.06 path is build-validated only until that hardware is
+available.
 
 On 2026-07-29, the first 1.75-inch light-sleep candidate booted, connected and
 authenticated over BLE, rendered the vector map, dimmed, and turned the display
@@ -149,8 +159,8 @@ but the later manual test showed that EXT1 wake did not reliably deliver the
 GPIO interrupt notification needed to restore the display. That predecessor
 therefore failed despite its clean idle capture.
 
-The current 1.75-inch light-sleep target builds at 91.1% flash and 52.9% RAM;
-the build-only 2.06-inch target builds at 90.8% flash and 52.9% RAM. The
+The current 1.75-inch light-sleep target builds at 91.1% flash and 53.0% RAM;
+the build-only 2.06-inch target builds at 90.9% flash and 52.9% RAM. The
 ordinary 1.75-inch target also builds after the shared-lock changes, and CI
 builds the complete ordinary, metrics, light-sleep, and production matrix.
 
@@ -166,6 +176,14 @@ iPhone did not connect and no operator gesture was performed during that
 capture. On 2026-07-30, manual taps from dimmed and display-off state both
 failed to restore the panel, so this exact predecessor image did not pass the
 wake gate.
+
+Commit `8d2f4a2e1d039321f155d99105e01dbf9c87b389` replaced the edge-only
+handoff with one-shot low-level GPIO interrupt gates and was flashed to the
+same board. A clean display-off test performed with the serial port closed
+still did not wake on touch. This established that automatic GPIO wake did not
+reliably replay the Arduino interrupt into the UI task on this hardware. The
+current exit-callback handoff replaces that failed mechanism and remains a
+candidate until the operator repeats the physical dimmed/off wake test.
 
 Manual touch wake, drag, pinch, BLE reconnect, transfer, audio, extended soak,
 and repeated wake-cycle checks remain open. The experiment must not be enabled
@@ -251,8 +269,9 @@ The report contains:
 - Wi-Fi mode, transfer state/mode, audio activity, current CPU frequency,
   effective DFS range, power-management error code, automatic-light-sleep
   state, active and peak application-managed power-management locks, lock
-  failures, and startup-lock completion (Step A reports zero locks; the opt-in
-  light-sleep profile reports live values); and
+  failures, configured and last-captured GPIO wake masks, GPIO wake count,
+  callback/notifier readiness, and startup-lock completion (Step A reports
+  zero locks; the opt-in light-sleep profile reports live values); and
 - `appQueue=ios-diagnostic`, which identifies the separate
   `PWRMET_IOS v=2` ten-second interval report produced by a Debug iOS build.
 
@@ -469,9 +488,9 @@ battery Wh.
 | 10 | Ride-statistics screen | 2.06 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 1.75 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 2.06 | Pending | — | — | — | — | Pending |
-| 12 | Connected dimmed state | 1.75 | Wake-fix candidate; reflash pending | — | — | — | — | Verify tap restores saved brightness |
+| 12 | Connected dimmed state | 1.75 | Interrupt-only candidate failed; exit-callback candidate awaiting reflash | — | — | — | — | Verify tap restores saved brightness |
 | 12 | Connected dimmed state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
-| 13 | Connected display-off state | 1.75 | Wake-fix candidate; reflash pending | — | — | — | — | Verify touch/BOOT/PWR wake |
+| 13 | Connected display-off state | 1.75 | Interrupt-only candidate failed; exit-callback candidate awaiting reflash | — | — | — | — | Verify touch/BOOT/PWR wake |
 | 13 | Connected display-off state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
 | 14 | Transfer AP enabled, idle | 1.75 | Pending | — | — | — | — | Pending |
 | 14 | Transfer AP enabled, idle | 2.06 | Pending | — | — | — | — | Pending |

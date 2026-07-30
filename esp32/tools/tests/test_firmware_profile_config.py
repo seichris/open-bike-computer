@@ -84,6 +84,7 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_PM_ENABLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
+    assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
     assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags

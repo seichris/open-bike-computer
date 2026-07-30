@@ -11,9 +11,11 @@ target:
 - `*_LIGHT_SLEEP` is the opt-in Phase 7B validation image. It inherits power
   metrics, enables tickless idle and automatic light sleep, and activates the
   application-managed display, map, storage, transfer, audio, and I2C locks.
-  It also compiles GPIO control into IRAM for the level-triggered touch/BOOT
-  wake interrupt gates. It is built in CI but is never selected by the release
-  workflow.
+  It also enables an ESP-IDF light-sleep exit callback that hands active-low
+  touch/BOOT GPIO wake events to the UI task before the wake cause can be
+  replaced by a later sleep cycle. GPIO interrupt control remains in IRAM so
+  each low-level live interrupt can mask itself until its source is released.
+  The profile is built in CI but is never selected by the release workflow.
 - `*_PRODUCTION` compiles with `CORE_DEBUG_LEVEL=0`, leaves `DEBUG` undefined,
   and sets `FIRMWARE_DIAGNOSTICS=0`. It does not start USB CDC at application
   boot and does not wait for a serial host. GitHub firmware releases use these
