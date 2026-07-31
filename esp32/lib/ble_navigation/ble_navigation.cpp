@@ -6,11 +6,17 @@
  */
 
 #include "ble_navigation.hpp"
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
 #include "ble_connection_policy.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
 #include "device_screen_protocol.hpp"
 #include "gps_position_protocol.hpp"
+#include "map_setting_packet.hpp"
+#include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -19,14 +25,20 @@
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
+#include "../gui/src/mapRenderPolicy.hpp"
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
+#ifdef USE_ARDUINO_GFX
+#include "../display_power/display_power.hpp"
+#endif
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../power_metrics/power_metrics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/pcf85063.hpp"
 #endif
@@ -58,8 +70,8 @@ extern Storage storage;
 // Global instance
 BLENavigationServer bleNavServer;
 
-// Forward declaration of map redraw trigger
-extern void triggerMapRedraw();
+// Forward declaration of the LVGL-owner map scheduler entry point.
+extern void requestMapRender(map_render_policy::Reason reason);
 extern void applyDeviceScreenSettings();
 extern bool isMapScreenActive();
 extern bool isMapGuidanceScreenActive();
@@ -91,6 +103,31 @@ static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+#if BLE_RADIO_CHARACTERIZATION
+static std::atomic<bool> radioNavigationActive{false};
+static std::atomic<bool> radioUserWakePending{false};
+static std::atomic<uint8_t> radioAdvertisingMode{
+    static_cast<uint8_t>(ble_radio_policy::AdvertisingMode::Default)};
+static std::atomic<uint32_t> radioAdvertisingModeStartedMs{0};
+static std::atomic<uint8_t> radioRequestedConnectionProfile{
+    static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset)};
+#endif
+static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
+static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
+struct RadioDebugSnapshot {
+  bool connectionParametersValid = false;
+  uint16_t connectionIntervalUnits = 0;
+  uint16_t connectionLatency = 0;
+  uint16_t supervisionTimeoutUnits = 0;
+  uint32_t connectionParameterSampleCount = 0;
+  uint32_t lastConnectionParameterSampleMs = 0;
+  ble_radio_policy::AdvertisingMode advertisingMode =
+      ble_radio_policy::AdvertisingMode::Default;
+  ble_radio_policy::ConnectionProfile requestedConnectionProfile =
+      ble_radio_policy::ConnectionProfile::Unset;
+};
+static RadioDebugSnapshot radioDebugSnapshot;
+static portMUX_TYPE radioDebugMux = portMUX_INITIALIZER_UNLOCKED;
 static device_ownership::DeviceOwnership deviceOwnership;
 static bool deviceOwnershipReady = false;
 static bool ownershipPairingActiveSnapshot = false;
@@ -106,6 +143,8 @@ static portMUX_TYPE ownershipUiMux = portMUX_INITIALIZER_UNLOCKED;
 static bool ownershipUiUpdatePending = false;
 static char ownershipUiName[device_ownership::MAX_DEVICE_NAME_BYTES + 1] = "";
 static bool ownershipUiClaimed = false;
+static bool ownershipUiConnected = false;
+static bool ownershipUiAuthenticated = false;
 static int32_t ownershipUiPairingCode = -1;
 static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
@@ -124,6 +163,160 @@ static uint32_t destinationStatusUpdatedMs = 0;
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
 
+#if BLE_RADIO_CHARACTERIZATION
+static const char *advertisingModeName(
+    ble_radio_policy::AdvertisingMode mode) {
+  switch (mode) {
+  case ble_radio_policy::AdvertisingMode::Fast:
+    return "fast";
+  case ble_radio_policy::AdvertisingMode::Slow:
+    return "slow";
+  case ble_radio_policy::AdvertisingMode::Default:
+  default:
+    return "default";
+  }
+}
+
+static const char *connectionProfileName(
+    ble_radio_policy::ConnectionProfile profile) {
+  switch (profile) {
+  case ble_radio_policy::ConnectionProfile::Navigation:
+    return "navigation";
+  case ble_radio_policy::ConnectionProfile::Idle:
+    return "idle";
+  case ble_radio_policy::ConnectionProfile::Unset:
+  default:
+    return "unset";
+  }
+}
+#endif
+
+static esp_power_level_t configuredTxPowerLevel() {
+  switch (ble_radio_policy::kConfiguration.txPowerDbm) {
+  case 0:
+    return ESP_PWR_LVL_N0;
+  case 3:
+    return ESP_PWR_LVL_P3;
+  case 9:
+  default:
+    return ESP_PWR_LVL_P9;
+  }
+}
+
+static void recordConnectionParameters(const ble_gap_conn_desc &description,
+                                       uint32_t nowMs) {
+  portENTER_CRITICAL(&radioDebugMux);
+  const bool changed = !radioDebugSnapshot.connectionParametersValid ||
+                       radioDebugSnapshot.connectionIntervalUnits !=
+                           description.conn_itvl ||
+                       radioDebugSnapshot.connectionLatency !=
+                           description.conn_latency ||
+                       radioDebugSnapshot.supervisionTimeoutUnits !=
+                           description.supervision_timeout;
+  radioDebugSnapshot.connectionParametersValid = true;
+  radioDebugSnapshot.connectionIntervalUnits = description.conn_itvl;
+  radioDebugSnapshot.connectionLatency = description.conn_latency;
+  radioDebugSnapshot.supervisionTimeoutUnits = description.supervision_timeout;
+  radioDebugSnapshot.connectionParameterSampleCount++;
+  radioDebugSnapshot.lastConnectionParameterSampleMs = nowMs;
+  portEXIT_CRITICAL(&radioDebugMux);
+  lastConnectionParameterSampleMs.store(nowMs, std::memory_order_release);
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  if (changed) {
+    Serial.printf(
+        "BLE Radio: effective intervalUnits=%u latency=%u timeoutUnits=%u\n",
+        description.conn_itvl, description.conn_latency,
+        description.supervision_timeout);
+  }
+#else
+  (void)changed;
+#endif
+}
+
+#if BLE_RADIO_CHARACTERIZATION
+static void applyCharacterizationAdvertisingMode(
+    ble_radio_policy::AdvertisingMode mode, bool restartAdvertising) {
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising == nullptr) {
+    return;
+  }
+  if (restartAdvertising) {
+    if (!advertising->isAdvertising() ||
+        !NimBLEDevice::stopAdvertising()) {
+      return;
+    }
+  }
+  const ble_radio_policy::IntervalRange &range =
+      mode == ble_radio_policy::AdvertisingMode::Slow
+          ? ble_radio_policy::kConfiguration.slowAdvertising
+          : ble_radio_policy::kConfiguration.fastAdvertising;
+  advertising->setMinInterval(range.minimumUnits);
+  advertising->setMaxInterval(range.maximumUnits);
+  const uint32_t nowMs = millis();
+  radioAdvertisingMode.store(static_cast<uint8_t>(mode),
+                             std::memory_order_release);
+  radioAdvertisingModeStartedMs.store(nowMs, std::memory_order_release);
+  portENTER_CRITICAL(&radioDebugMux);
+  radioDebugSnapshot.advertisingMode = mode;
+  portEXIT_CRITICAL(&radioDebugMux);
+  Serial.printf("BLE Radio: advertising mode=%s minUnits=%u maxUnits=%u\n",
+                advertisingModeName(mode), range.minimumUnits,
+                range.maximumUnits);
+  if (restartAdvertising &&
+      radioConnectionHandle.load(std::memory_order_acquire) ==
+          BLE_HS_CONN_HANDLE_NONE &&
+      !NimBLEDevice::startAdvertising()) {
+    Serial.println("BLE Radio: failed to restart advertising");
+  }
+}
+
+static void processRadioCharacterization(uint32_t nowMs,
+                                         NimBLEServer *server) {
+  const uint16_t connectionHandle =
+      radioConnectionHandle.load(std::memory_order_acquire);
+  if (connectionHandle == BLE_HS_CONN_HANDLE_NONE) {
+    const bool wakeRequested =
+        radioUserWakePending.exchange(false, std::memory_order_acq_rel);
+    const auto currentMode = static_cast<ble_radio_policy::AdvertisingMode>(
+        radioAdvertisingMode.load(std::memory_order_acquire));
+    const uint32_t modeStartedMs =
+        radioAdvertisingModeStartedMs.load(std::memory_order_acquire);
+    const auto desiredMode = ble_radio_policy::nextAdvertisingMode(
+        currentMode, nowMs - modeStartedMs, wakeRequested);
+    if (desiredMode != currentMode || wakeRequested) {
+      applyCharacterizationAdvertisingMode(desiredMode, true);
+    }
+    return;
+  }
+
+  radioUserWakePending.store(false, std::memory_order_release);
+  const auto desiredProfile = ble_radio_policy::connectionProfile(
+      radioNavigationActive.load(std::memory_order_acquire));
+  const auto appliedProfile =
+      static_cast<ble_radio_policy::ConnectionProfile>(
+          radioRequestedConnectionProfile.load(std::memory_order_acquire));
+  if (server != nullptr && desiredProfile != appliedProfile) {
+    const ble_radio_policy::ConnectionParameters &parameters =
+        ble_radio_policy::connectionParameters(desiredProfile);
+    server->updateConnParams(
+        connectionHandle, parameters.minimumIntervalUnits,
+        parameters.maximumIntervalUnits, parameters.latency,
+        parameters.supervisionTimeoutUnits);
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(desiredProfile), std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile = desiredProfile;
+    portEXIT_CRITICAL(&radioDebugMux);
+    Serial.printf(
+        "BLE Radio: requested profile=%s intervalUnits=%u-%u latency=%u "
+        "timeoutUnits=%u\n",
+        connectionProfileName(desiredProfile),
+        parameters.minimumIntervalUnits, parameters.maximumIntervalUnits,
+        parameters.latency, parameters.supervisionTimeoutUnits);
+  }
+}
+#endif
+
 static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
                                    uint32_t pairingGeneration = 0) {
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
@@ -137,15 +330,20 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
   strncpy(ownershipUiName, name.c_str(), sizeof(ownershipUiName) - 1);
   ownershipUiName[sizeof(ownershipUiName) - 1] = '\0';
   ownershipUiClaimed = claimed;
+  ownershipUiConnected = bleNavServer.isConnected();
+  ownershipUiAuthenticated = bleSessionAuthenticated;
   ownershipUiPairingCode = pairingCode;
   ownershipUiPairingGeneration = pairingGeneration;
   ownershipUiUpdatePending = true;
   portEXIT_CRITICAL(&ownershipUiMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static void applyPendingOwnershipUiUpdate() {
   char name[sizeof(ownershipUiName)] = "";
   bool claimed = false;
+  bool connected = false;
+  bool authenticated = false;
   int32_t pairingCode = -1;
   uint32_t pairingGeneration = 0;
   portENTER_CRITICAL(&ownershipUiMux);
@@ -153,13 +351,16 @@ static void applyPendingOwnershipUiUpdate() {
   if (pending) {
     strncpy(name, ownershipUiName, sizeof(name) - 1);
     claimed = ownershipUiClaimed;
+    connected = ownershipUiConnected;
+    authenticated = ownershipUiAuthenticated;
     pairingCode = ownershipUiPairingCode;
     pairingGeneration = ownershipUiPairingGeneration;
     ownershipUiUpdatePending = false;
   }
   portEXIT_CRITICAL(&ownershipUiMux);
   if (pending) {
-    updateWaitingOwnershipStatus(name, claimed, pairingCode);
+    updateWaitingOwnershipStatus(name, claimed, connected, authenticated,
+                                 pairingCode);
     portENTER_CRITICAL(&ownershipUiMux);
     if (pairingCode >= 0) {
       ownershipComparisonRenderGate.request(pairingGeneration);
@@ -224,6 +425,7 @@ static void setDestinationPickerStatus(DestinationPickerStatusCode code,
       '\0';
   destinationStatusUpdatedMs = nowMs;
   portEXIT_CRITICAL(&destinationPickerMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static bool beginDestinationRequest(uint32_t nowMs) {
@@ -259,6 +461,9 @@ static bool applyDestinationResponseIfPending(
     }
   }
   portEXIT_CRITICAL(&destinationPickerMux);
+  if (matches) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  }
   return matches;
 }
 
@@ -409,6 +614,7 @@ static uint32_t normalizedDisconnectedSleepTimeoutSeconds(int64_t rawSeconds) {
 static void clearCurrentNavigationData() {
   currentNavData = {0, 0, ""};
   navDataUpdated = true;
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 // Route geometry debouncing - skip redundant parses
@@ -490,6 +696,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   // Latest-state mailboxes make periodic GPS and repeated route/settings
   // updates bounded without ever dropping the newest authoritative value.
   free(replaced.data);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   return true;
 }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -611,8 +818,11 @@ static void parseNavigationData(const std::string &data) {
 
   navDataUpdated = true;
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", currentNavData.iconID,
                 currentNavData.distance, currentNavData.instruction);
+#endif
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static bool requireAuthenticated(const char *payloadName) {
@@ -767,6 +977,7 @@ static void completeBleSessionAuthentication() {
   bleDebugStats.authenticated = true;
   bleDebugStats.authSuccessCount++;
   bleDebugStats.lastAuthSuccessMs = millis();
+  queueOwnershipUiUpdate();
 }
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
@@ -1363,6 +1574,7 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
 static void queueTransferControl(ble_transfer::Action action,
                                  uint8_t notifications) {
   pendingTransferControl.merge(action, notifications);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
 static void processPendingTransferControl() {
@@ -1628,6 +1840,7 @@ static bool commitDestinationCatalog(const std::string &json) {
   candidate.revision = destinationCatalog.revision + 1;
   destinationCatalog = candidate;
   portEXIT_CRITICAL(&destinationPickerMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   Serial.printf("BLE Destination: committed generation=%lu items=%u\n",
                 (unsigned long)candidate.generation, candidate.count);
   return true;
@@ -1786,6 +1999,7 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
 
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                                        const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
   if (len == 0) {
     lastRouteHash = 0;
     lastRouteLen = 0;
@@ -1795,7 +2009,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     bleDebugStats.lastRoutePacketMs = millis();
     routeOverlay.clear();
     clearCurrentNavigationData();
-    triggerMapRedraw();
+    requestMapRender(map_render_policy::Reason::Route);
     return;
   }
 
@@ -1836,11 +2050,12 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
   }
 
   routeOverlay.parseRouteData(data, len);
-  triggerMapRedraw();
+  requestMapRender(map_render_policy::Reason::Route);
 }
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
                              const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
   gps_position_protocol::Packet packet{};
   if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
                                              &packet)) {
@@ -1866,6 +2081,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
@@ -1875,6 +2091,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
                 0
 #endif
   );
+#endif
   bleDebugStats.gpsPacketCount++;
   bleDebugStats.lastGpsPacketMs = millis();
 
@@ -1884,11 +2101,14 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     Serial.println("BLE GPS: First position received, transitioning to map...");
   }
 
-  triggerMapRedraw();
+  // Retain every accepted fix. The LVGL owner updates lightweight telemetry and
+  // the position marker immediately, then independently decides whether the
+  // vector-map background crossed its time/movement/heading thresholds.
 }
 
 static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
                                           const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Workout);
   if (!requireAuthenticated("workout telemetry")) {
     return;
   }
@@ -1898,6 +2118,7 @@ static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   case workout_telemetry::ApplyResult::Applied:
   case workout_telemetry::ApplyResult::Cleared:
     // Health metrics remain RAM-only and are intentionally absent from logs.
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     return;
   default:
     Serial.printf("BLE Workout: rejected %s frame (%s)\n",
@@ -1992,6 +2213,21 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
                   mapRenderSettings.tapToSwitchScreens);
     break;
+  case 12:
+#ifdef USE_ARDUINO_GFX
+    if (!displayPowerManager.requestUserBrightness(settingValue)) {
+      Serial.printf("BLE Settings: brightness persistence failed from %s\n",
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+#ifdef DISPLAY_POWER_DIAGNOSTICS
+    Serial.printf("BLE Settings: brightness = %u%% (saved, pending)\n",
+                  displayPowerManager.savedBrightnessPercent());
+#endif
+#else
+    Serial.println("BLE Settings: brightness unsupported on this target");
+#endif
+    return;
   case 13: {
     settingValue = device_screen_protocol::applyCompatibility(
         settingValue, mapRenderSettings.enabledScreensMask);
@@ -2038,7 +2274,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.println("BLE Settings: Reboot command received! Restarting...");
     delay(500);
     ESP.restart();
-    break;
+    return;
   case 6:
     mapRenderSettings.mapRotationMode =
         (uint8_t)std::min(std::max(settingValue, (int32_t)0), (int32_t)1);
@@ -2148,24 +2384,27 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
-    break;
+    return;
   }
 
-  triggerMapRedraw();
+  if (map_setting_redraw_policy::invalidatesMap(settingId)) {
+    requestMapRender(map_setting_redraw_policy::changesZoom(settingId)
+                         ? map_render_policy::Reason::Zoom
+                         : map_render_policy::Reason::Style);
+  }
 }
 
 static void handleMapSettingPayload(const uint8_t *data, size_t len,
                                     const char *source) {
-  if (data == nullptr || len < 5) {
-    Serial.printf("BLE: Rejected %s map setting: expected 5 bytes\n",
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
+  map_setting_packet::Packet packet;
+  if (!map_setting_packet::decode(data, len, packet)) {
+    Serial.printf("BLE: Rejected %s map setting: expected exactly 5 bytes\n",
                   source == nullptr ? "unknown" : source);
     return;
   }
 
-  uint8_t settingId = data[0];
-  int32_t settingValue;
-  memcpy(&settingValue, data + 1, sizeof(settingValue));
-  handleMapSetting(settingId, settingValue, source);
+  handleMapSetting(packet.settingId, packet.value, source);
 }
 
 static void processPendingMapInputs() {
@@ -2297,6 +2536,17 @@ public:
       pServer->disconnect(desc->conn_handle);
       return;
     }
+    radioConnectionHandle.store(desc->conn_handle, std::memory_order_release);
+#if BLE_RADIO_CHARACTERIZATION
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
+        std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile =
+        ble_radio_policy::ConnectionProfile::Unset;
+    portEXIT_CRITICAL(&radioDebugMux);
+#endif
+    recordConnectionParameters(*desc, millis());
     acceptConnection();
   }
 
@@ -2323,6 +2573,7 @@ public:
       xSemaphoreGive(destinationCatalogReassemblerMutex);
     }
     Serial.println("BLE: iOS client connected!");
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
   }
@@ -2337,6 +2588,11 @@ public:
                                     : desc->conn_handle);
       return;
     }
+    radioConnectionHandle.store(BLE_HS_CONN_HANDLE_NONE,
+                                std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.connectionParametersValid = false;
+    portEXIT_CRITICAL(&radioDebugMux);
     disconnectActive();
   }
 
@@ -2360,6 +2616,7 @@ public:
     ownershipDisconnectPending = false;
     bleDebugStats.connected = false;
     bleDebugStats.authenticated = false;
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
     pendingAuthNonce[0] = '\0';
@@ -2379,6 +2636,17 @@ public:
     Serial.println("BLE: iOS client disconnected");
     // Restart advertising
     Serial.println("BLE: Restarting advertising...");
+#if BLE_RADIO_CHARACTERIZATION
+    radioRequestedConnectionProfile.store(
+        static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
+        std::memory_order_release);
+    portENTER_CRITICAL(&radioDebugMux);
+    radioDebugSnapshot.requestedConnectionProfile =
+        ble_radio_policy::ConnectionProfile::Unset;
+    portEXIT_CRITICAL(&radioDebugMux);
+    applyCharacterizationAdvertisingMode(
+        ble_radio_policy::AdvertisingMode::Fast, false);
+#endif
     NimBLEDevice::startAdvertising();
   }
 };
@@ -2398,6 +2666,7 @@ public:
     }
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
@@ -2412,6 +2681,7 @@ public:
 
     if (hasPrefix(value, "MAPR")) {
       if (!requireAuthenticated("fallback route geometry")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
         return;
       }
       queueMapInput(PendingMapInputType::Route,
@@ -2422,6 +2692,7 @@ public:
 
     if (hasPrefix(value, "GPSP")) {
       if (!requireAuthenticated("fallback GPS position")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
         return;
       }
       queueMapInput(PendingMapInputType::Gps,
@@ -2432,6 +2703,7 @@ public:
 
     if (hasPrefix(value, "MSET")) {
       if (!requireAuthenticated("fallback map setting")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
         return;
       }
       queueMapInput(PendingMapInputType::Setting,
@@ -2441,6 +2713,7 @@ public:
     }
 
     if (hasPrefix(value, "MTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("map transfer control")) {
         return;
       }
@@ -2450,6 +2723,7 @@ public:
     }
 
     if (hasPrefix(value, "MSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("map transfer status")) {
         return;
       }
@@ -2459,6 +2733,7 @@ public:
     }
 
     if (hasPrefix(value, "DTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("device transfer control")) {
         return;
       }
@@ -2469,10 +2744,12 @@ public:
 
     if (handleDeviceCapabilitiesCommand(value, pChar,
                                         "device capabilities")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "DSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("device transfer status")) {
         return;
       }
@@ -2482,19 +2759,24 @@ public:
     }
 
     if (handleSoundPlayCommand(value, "sound playback", "fallback")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (handlePowerButtonHonkCommand(value, "PWR honk configuration",
                                      "fallback", pChar)) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Navigation);
     if (!requireAuthenticated("navigation instruction")) {
       return;
     }
 
+#if FIRMWARE_DIAGNOSTICS
     Serial.printf("BLE Nav received: %u bytes\n", (unsigned)value.length());
+#endif
     bleDebugStats.navPacketCount++;
     bleDebugStats.lastNavPacketMs = millis();
     parseNavigationData(value);
@@ -2512,6 +2794,7 @@ public:
       return;
     }
     if (!requireAuthenticated("route geometry")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
       return;
     }
 
@@ -2531,6 +2814,7 @@ public:
       return;
     }
     if (!requireAuthenticated("GPS position")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
       return;
     }
 
@@ -2575,10 +2859,12 @@ public:
     }
 
     if (handleDestinationPickerPayload(value, "native destination picker")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "MTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native map transfer control")) {
         return;
       }
@@ -2589,6 +2875,7 @@ public:
     }
 
     if (hasPrefix(value, "MSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native map transfer status")) {
         return;
       }
@@ -2598,6 +2885,7 @@ public:
     }
 
     if (hasPrefix(value, "DTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native device transfer control")) {
         return;
       }
@@ -2610,10 +2898,12 @@ public:
     if (handleDeviceCapabilitiesCommand(value,
                                         mapTransferStatusCharacteristic,
                                         "native device capabilities")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "DSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native device transfer status")) {
         return;
       }
@@ -2623,16 +2913,19 @@ public:
     }
 
     if (handleSoundPlayCommand(value, "native sound playback", "native")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (handlePowerButtonHonkCommand(value, "native PWR honk configuration",
                                      "native",
                                      mapTransferStatusCharacteristic)) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (!requireAuthenticated("map setting")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
       return;
     }
 
@@ -2646,7 +2939,9 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
     if (!value.empty()) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
       handleAuthPayload(value);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     }
   }
 };
@@ -2767,8 +3062,8 @@ void BLENavigationServer::init(const char *deviceName) {
   }
 
   initBleIdentityAndSecurity(effectiveDeviceName.c_str());
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power
-  NimBLEDevice::setMTU(512);              // Increase MTU for route geometry
+  NimBLEDevice::setPower(configuredTxPowerLevel());
+  NimBLEDevice::setMTU(512); // Increase MTU for route geometry
 
   // Create server
   pServer = NimBLEDevice::createServer();
@@ -2834,6 +3129,10 @@ void BLENavigationServer::init(const char *deviceName) {
     pAdvertising->setManufacturerData(manufacturerData);
   }
   pAdvertising->setScanResponse(true);
+#if BLE_RADIO_CHARACTERIZATION
+  applyCharacterizationAdvertisingMode(
+      ble_radio_policy::AdvertisingMode::Fast, false);
+#endif
   pAdvertising->start();
 
   initialized = true;
@@ -2872,6 +3171,25 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   const uint32_t nowMs = millis();
+#if BLE_RADIO_CHARACTERIZATION
+  processRadioCharacterization(nowMs, pServer);
+#endif
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
+  constexpr uint32_t kConnectionParameterSamplePeriodMs = 5000;
+  const uint32_t lastSampleMs =
+      lastConnectionParameterSampleMs.load(std::memory_order_acquire);
+  const uint16_t connectionHandle =
+      radioConnectionHandle.load(std::memory_order_acquire);
+  if (connectionHandle != BLE_HS_CONN_HANDLE_NONE &&
+      nowMs - lastSampleMs >= kConnectionParameterSamplePeriodMs) {
+    ble_gap_conn_desc description{};
+    if (ble_gap_conn_find(connectionHandle, &description) == 0) {
+      recordConnectionParameters(description, nowMs);
+    } else {
+      lastConnectionParameterSampleMs.store(nowMs, std::memory_order_release);
+    }
+  }
+#endif
   if (destinationCatalogReassemblerMutex != nullptr &&
       xSemaphoreTake(destinationCatalogReassemblerMutex, 0) == pdTRUE) {
     const bool expired = destinationCatalogReassembler.expire(nowMs);
@@ -2919,6 +3237,7 @@ void BLENavigationServer::process() {
     }
   }
 
+#if FIRMWARE_DIAGNOSTICS
   if (millis() - lastLog > 5000) {
     lastLog = millis();
     bleDebugStats.initialized = initialized;
@@ -2952,6 +3271,23 @@ void BLENavigationServer::process() {
                   bleDebugStats.lastSettingsPacketMs,
                   bleDebugStats.lastRejectedUnauthenticatedMs);
   }
+#else
+  (void)lastLog;
+#endif
+}
+
+void BLENavigationServer::noteUserWake() {
+#if BLE_RADIO_CHARACTERIZATION
+  radioUserWakePending.store(true, std::memory_order_release);
+#endif
+}
+
+void BLENavigationServer::setNavigationActivity(bool active) {
+#if BLE_RADIO_CHARACTERIZATION
+  radioNavigationActive.store(active, std::memory_order_release);
+#else
+  (void)active;
+#endif
 }
 
 BLEDebugStats BLENavigationServer::getDebugStats() const {
@@ -2959,6 +3295,21 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
   stats.initialized = initialized;
   stats.connected = connected;
   stats.authenticated = bleSessionAuthenticated;
+  portENTER_CRITICAL(&radioDebugMux);
+  stats.connectionParametersValid =
+      radioDebugSnapshot.connectionParametersValid;
+  stats.connectionIntervalUnits = radioDebugSnapshot.connectionIntervalUnits;
+  stats.connectionLatency = radioDebugSnapshot.connectionLatency;
+  stats.supervisionTimeoutUnits =
+      radioDebugSnapshot.supervisionTimeoutUnits;
+  stats.connectionParameterSampleCount =
+      radioDebugSnapshot.connectionParameterSampleCount;
+  stats.lastConnectionParameterSampleMs =
+      radioDebugSnapshot.lastConnectionParameterSampleMs;
+  stats.advertisingMode = radioDebugSnapshot.advertisingMode;
+  stats.requestedConnectionProfile =
+      radioDebugSnapshot.requestedConnectionProfile;
+  portEXIT_CRITICAL(&radioDebugMux);
   return stats;
 }
 
@@ -3061,9 +3412,10 @@ bool BLENavigationServer::confirmOwnershipPairing() {
 // Map Redraw Trigger (weak symbol - can be overridden by main app)
 // ============================================================================
 
-__attribute__((weak)) void triggerMapRedraw() {
+__attribute__((weak)) void requestMapRender(map_render_policy::Reason reason) {
+  (void)reason;
   // Default implementation - will be overridden by mainScr.cpp
-  Serial.println("BLE: triggerMapRedraw called (default - no map linked)");
+  Serial.println("BLE: requestMapRender called (default - no map linked)");
 }
 
 __attribute__((weak)) void applyDeviceScreenSettings() {

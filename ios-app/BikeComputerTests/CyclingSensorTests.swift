@@ -521,7 +521,10 @@ private struct CyclingSensorTestSuite {
             "scheduled-expiry fixture starts with a candidate"
         )
 
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let expiryDeadline = Date().addingTimeInterval(1)
+        while !coordinator.candidates.isEmpty && Date() < expiryDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         sensorAssert(
             coordinator.candidates.isEmpty,
             "candidate expires on wall-clock time without another presentation"

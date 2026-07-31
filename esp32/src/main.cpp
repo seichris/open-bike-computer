@@ -7,6 +7,12 @@
  */
 
 #include <Arduino.h>
+
+#include <algorithm>
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
 #include <SPI.h>
 #include <WiFi.h>
 #include <Wire.h>
@@ -68,11 +74,18 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#include "display_inactivity_policy.hpp"
+#include "display_power.hpp"
+#endif
 #include "disconnected_shutdown_policy.hpp"
 #include "ownership_button_policy.hpp"
+#include "power_metrics.hpp"
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
+#include "power_management.hpp"
 #include "route_overlay.hpp"
+#include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "WAVESHARE_AMOLED_175.hpp"
@@ -176,6 +189,7 @@ static void IRAM_ATTR latchWaveshareBootScreenCycle() {
   portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
   waveshareBootScreenCyclePending = true;
   portEXIT_CRITICAL_ISR(&waveshareBootButtonMux);
+  ui_scheduler::notifyFromIsr(ui_scheduler::WakeReason::Boot);
 }
 
 static bool takeWaveshareBootScreenCycle() {
@@ -186,20 +200,21 @@ static bool takeWaveshareBootScreenCycle() {
   return pending;
 }
 
-static void processWaveshareBootButton() {
+static bool processWaveshareBootButton() {
   constexpr uint32_t DEBOUNCE_MS = 50;
 
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
   const bool latchedPress = takeWaveshareBootScreenCycle();
+  const bool hadInput = latchedPress || pressed;
 
   if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {
-    return;
+    return hadInput;
   }
 
   if (!waveshareBootWaitingForRelease) {
     if (!latchedPress && !pressed) {
-      return;
+      return false;
     }
 
     waveshareBootWaitingForRelease = true;
@@ -221,21 +236,21 @@ static void processWaveshareBootButton() {
     } else {
       log_i("Waveshare BOOT pressed; handling forward action");
     }
-    return;
+    return true;
   }
 
   if (pressed) {
     waveshareBootReleaseStartMs = 0;
-    return;
+    return true;
   }
 
   if (waveshareBootReleaseStartMs == 0) {
     waveshareBootReleaseStartMs = now;
-    return;
+    return false;
   }
 
   if (now - waveshareBootReleaseStartMs < DEBOUNCE_MS) {
-    return;
+    return false;
   }
 
   waveshareBootWaitingForRelease = false;
@@ -250,22 +265,16 @@ static void processWaveshareBootButton() {
       log_i("Waveshare BOOT long press: no registered iPhone to clear");
     }
   }
+  return false;
 }
 
-static void processWavesharePowerButton() {
-  constexpr uint32_t POLL_INTERVAL_MS = 100;
-  static uint32_t lastPollMs = 0;
-
-  const uint32_t now = millis();
-  if (now - lastPollMs < POLL_INTERVAL_MS) {
-    return;
-  }
-  lastPollMs = now;
-
+static bool processWavesharePowerButton() {
   waveshare_board::axp2101::PowerButtonEvents events;
   if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(events)) {
-    return;
+    return false;
   }
+  const bool hadInput =
+      events.negativeEdge || events.positiveEdge || events.shortPress;
 
   if (bleNavServer.hasOwnershipPairingCode()) {
     if (wavesharePowerPairingGate.acceptEvents(
@@ -276,7 +285,7 @@ static void processWavesharePowerButton() {
     }
     // Never honk while a pairing comparison is active, including before the
     // screen has flushed and the fresh-edge gate has been armed.
-    return;
+    return hadInput;
   }
 
   wavesharePowerPairingGate.cancel();
@@ -284,7 +293,22 @@ static void processWavesharePowerButton() {
   if (events.shortPress) {
     waveshare_board::speaker::handlePowerButtonHonkPress();
   }
+  return hadInput;
 }
+
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
+  const uint32_t reasons =
+      ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Touch);
+  }
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
+  }
+}
+#endif
 
 static void armOwnershipPairingAfterRenderedComparison() {
   uint32_t pairingGeneration = 0;
@@ -336,6 +360,17 @@ static uint32_t lvglHandlerCount = 0;
 static uint32_t lastLvglHandlerMs = 0;
 static uint32_t lastLvglHandlerDurationUs = 0;
 static uint32_t maxLvglHandlerDurationUs = 0;
+static uint32_t nextLvglDelayMs = 0;
+static uint32_t pendingUiWakeReasons = 0;
+static uint32_t lastBleHousekeepingMs = 0;
+static uint32_t lastShutdownHousekeepingMs = 0;
+static uint32_t lastTransferHousekeepingMs = 0;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static display_inactivity::Policy displayInactivityPolicy;
+static display_inactivity::Mode currentDisplayMode =
+    display_inactivity::Mode::Active;
+static uint32_t lastPowerButtonHousekeepingMs = 0;
+#endif
 #include "lvglSetup.hpp"
 #include "settings.hpp"
 #include "tasks.hpp"
@@ -381,7 +416,253 @@ static const char *debugTileName(uint8_t tile) {
   }
 }
 
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static const char *displayInactivityModeName(display_inactivity::Mode mode) {
+  switch (mode) {
+  case display_inactivity::Mode::Active:
+    return "active";
+  case display_inactivity::Mode::Dimmed:
+    return "dimmed";
+  case display_inactivity::Mode::DisplayOff:
+    return "off";
+  case display_inactivity::Mode::Transfer:
+    return "transfer";
+  }
+  return "unknown";
+}
+
+static bool processTransferInactivityTimeout(uint32_t nowMs) {
+  static uint32_t lastCheckMs = 0;
+  constexpr uint32_t kCheckPeriodMs = 1'000;
+  if (lastCheckMs != 0 && nowMs - lastCheckMs < kCheckPeriodMs) {
+    return false;
+  }
+  lastCheckMs = nowMs;
+
+  const device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
+  if (!transferStatus.enabled ||
+      !display_inactivity::transferInactivityElapsed(
+          nowMs, transferStatus.lastUsefulTrafficMs,
+          display_inactivity::kTransferInactivityTimeoutMs,
+          transferStatus.authorizedRequestInProgress)) {
+    return false;
+  }
+
+  // Map activation continues after its initiating HTTP request. Do not revoke
+  // the AP while that transactional install is still using it.
+  if (mapTransferHttp.activationSnapshot().running) {
+    return false;
+  }
+
+  bool disabled = false;
+  if (transferStatus.mode == "map") {
+    disabled = mapTransferHttp.setEnabled(false);
+  } else if (transferStatus.mode == "firmware") {
+    disabled = firmwareUpdateHttp.setEnabled(false);
+  } else {
+    disabled = deviceTransferHttp.setEnabled(false);
+  }
+  Serial.printf(
+      "DEVICE_TRANSFER_HTTP: inactivity timeout mode=%s disabled=%d\n",
+      transferStatus.mode.empty() ? "unknown" : transferStatus.mode.c_str(),
+      disabled);
+  return disabled;
+}
+
+static display_inactivity::Update updateDisplayInactivityPolicy(
+    uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
+  struct Signals {
+    bool initialized = false;
+    lv_obj_t *screen = nullptr;
+    uint8_t tile = 0;
+    uint32_t connectCount = 0;
+    uint32_t authSuccessCount = 0;
+    uint32_t navPacketCount = 0;
+    uint32_t routeRevision = 0;
+    uint8_t maneuverIcon = 0;
+    uint16_t maneuverDistance = 0;
+    std::string maneuverInstruction;
+    bool pairing = false;
+    uint32_t lastPairingPollMs = 0;
+    bool transferEnabled = false;
+    std::string transferMode;
+    uint32_t transferErrorSequence = 0;
+    uint32_t activationSequence = 0;
+    uint8_t activationProgress = 0;
+    bool activationRunning = false;
+    uint32_t lastTransferPollMs = 0;
+    bool audioActive = false;
+    bool touchPending = false;
+    uint32_t touchActivityGeneration = 0;
+  };
+  static Signals signals;
+
+  const BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const bool audioActive = waveshare_board::speaker::isPlaying();
+  const bool touchPending = hasUnattemptedTouchInterrupt();
+  const uint32_t touchActivityGeneration = getTouchActivityGeneration();
+  lv_obj_t *const activeScreen = lv_screen_active();
+  const uint32_t routeRevision = routeOverlay.revision();
+
+  observedTouchActivity = touchWake;
+  bool meaningfulActivity = touchWake;
+  if (!signals.initialized) {
+    signals.initialized = true;
+    signals.screen = activeScreen;
+    signals.tile = activeTile;
+    signals.connectCount = bleStats.connectCount;
+    signals.authSuccessCount = bleStats.authSuccessCount;
+    signals.navPacketCount = bleStats.navPacketCount;
+    signals.routeRevision = routeRevision;
+    const NavigationData maneuver = getCurrentNavigationData();
+    signals.maneuverIcon = maneuver.iconID;
+    signals.maneuverDistance = maneuver.distance;
+    signals.maneuverInstruction = maneuver.instruction;
+    signals.pairing = bleNavServer.hasOwnershipPairingCode();
+    signals.lastPairingPollMs = nowMs;
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    signals.transferEnabled = transferStatus.enabled;
+    signals.transferMode = transferStatus.mode;
+    signals.transferErrorSequence = transferStatus.errorSequence;
+    const map_transfer::MapActivationSnapshot activation =
+        mapTransferHttp.activationSnapshot();
+    signals.activationSequence = activation.sequence;
+    signals.activationProgress = activation.progress;
+    signals.activationRunning = activation.running;
+    signals.lastTransferPollMs = nowMs;
+    signals.audioActive = audioActive;
+    signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
+  } else {
+    const bool decodedTouchActivity =
+        display_inactivity::touchActivityAdvanced(
+            touchActivityGeneration, signals.touchActivityGeneration);
+    observedTouchActivity =
+        observedTouchActivity || decodedTouchActivity;
+    meaningfulActivity =
+        meaningfulActivity || activeScreen != signals.screen ||
+        activeTile != signals.tile ||
+        bleStats.connectCount != signals.connectCount ||
+        bleStats.authSuccessCount != signals.authSuccessCount ||
+        routeRevision != signals.routeRevision ||
+        audioActive != signals.audioActive ||
+        (touchPending && !signals.touchPending) || decodedTouchActivity;
+    signals.screen = activeScreen;
+    signals.tile = activeTile;
+    signals.connectCount = bleStats.connectCount;
+    signals.authSuccessCount = bleStats.authSuccessCount;
+    signals.routeRevision = routeRevision;
+    signals.audioActive = audioActive;
+    signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
+
+    if (bleStats.navPacketCount != signals.navPacketCount) {
+      signals.navPacketCount = bleStats.navPacketCount;
+      const NavigationData maneuver = getCurrentNavigationData();
+      const std::string instruction = maneuver.instruction;
+      meaningfulActivity =
+          meaningfulActivity || maneuver.iconID != signals.maneuverIcon ||
+          instruction != signals.maneuverInstruction ||
+          display_inactivity::maneuverDataBecameActive(
+              signals.maneuverDistance,
+              !signals.maneuverInstruction.empty(), maneuver.distance,
+              !instruction.empty()) ||
+          display_inactivity::crossedCloserManeuverDistanceThreshold(
+              signals.maneuverDistance, maneuver.distance);
+      signals.maneuverIcon = maneuver.iconID;
+      signals.maneuverDistance = maneuver.distance;
+      signals.maneuverInstruction = instruction;
+    }
+
+    constexpr uint32_t kPairingPollPeriodMs = 100;
+    if (nowMs - signals.lastPairingPollMs >= kPairingPollPeriodMs) {
+      signals.lastPairingPollMs = nowMs;
+      const bool pairing = bleNavServer.hasOwnershipPairingCode();
+      meaningfulActivity = meaningfulActivity || pairing != signals.pairing;
+      signals.pairing = pairing;
+    }
+
+    constexpr uint32_t kTransferPollPeriodMs = 250;
+    if (nowMs - signals.lastTransferPollMs >= kTransferPollPeriodMs) {
+      signals.lastTransferPollMs = nowMs;
+      const device_transfer::HttpTransferStatus transferStatus =
+          deviceTransferHttp.status();
+      const map_transfer::MapActivationSnapshot activation =
+          mapTransferHttp.activationSnapshot();
+      meaningfulActivity =
+          meaningfulActivity ||
+          transferStatus.enabled != signals.transferEnabled ||
+          transferStatus.mode != signals.transferMode ||
+          (!transferStatus.lastErrorCode.empty() &&
+           transferStatus.errorSequence != signals.transferErrorSequence) ||
+          activation.sequence != signals.activationSequence ||
+          (activation.running &&
+           (activation.progress != signals.activationProgress ||
+            !signals.activationRunning));
+      signals.transferEnabled = transferStatus.enabled;
+      signals.transferMode = transferStatus.mode;
+      signals.transferErrorSequence = transferStatus.errorSequence;
+      signals.activationSequence = activation.sequence;
+      signals.activationProgress = activation.progress;
+      signals.activationRunning = activation.running;
+    }
+  }
+
+  if (meaningfulActivity) {
+    displayInactivityPolicy.noteMeaningfulActivity(nowMs);
+  }
+
+  display_inactivity::Context context;
+  context.navigating =
+      bleStats.connected && bleStats.authenticated &&
+      (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  context.transferActive =
+      signals.transferEnabled || signals.activationRunning;
+  context.attentionActive = signals.pairing || audioActive;
+  const display_inactivity::Update update =
+      displayInactivityPolicy.update(nowMs, context);
+  currentDisplayMode = update.current;
+  if (!update.changed) {
+    return update;
+  }
+
+  const bool displayOff =
+      update.current == display_inactivity::Mode::DisplayOff;
+  const bool dimmed = update.current == display_inactivity::Mode::Dimmed;
+  displayPowerManager.requestState(
+      displayOff ? display_power::State::Off
+                 : (dimmed ? display_power::State::Dimmed
+                            : display_power::State::Active));
+
+  if (mainTimer != nullptr) {
+    if (displayOff) {
+      lv_timer_pause(mainTimer);
+    } else if (isMainScreen) {
+      lv_timer_set_period(mainTimer,
+                          dimmed ? 250 : UPDATE_MAINSCR_PERIOD);
+      lv_timer_resume(mainTimer);
+      if (update.displayWakeRequired) {
+        lv_timer_ready(mainTimer);
+      }
+    }
+  }
+
+  Serial.printf("DisplayPower: mode %s -> %s idleMs=%lu\n",
+                displayInactivityModeName(update.previous),
+                displayInactivityModeName(update.current),
+                static_cast<unsigned long>(display_inactivity::elapsedMs(
+                    nowMs,
+                    displayInactivityPolicy.lastMeaningfulActivityMs())));
+  return update;
+}
+#endif
+
 static void logSystemDebugHeartbeat() {
+#if !FIRMWARE_DIAGNOSTICS
+  return;
+#else
   static uint32_t lastLogMs = 0;
   uint32_t now = millis();
   if (now - lastLogMs < 5000) {
@@ -432,6 +713,7 @@ static void logSystemDebugHeartbeat() {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+                "displayMode=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d "
                 "gps[fix=%u heading=%u] routePts=%u mapFound=%d mapBlocks=%u "
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
@@ -443,7 +725,9 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)ESP.getFreePsram(), screenName,
-                debugTileName(activeTile), waitScreenRefresh,
+                debugTileName(activeTile),
+                displayInactivityModeName(currentDisplayMode),
+                waitScreenRefresh,
                 gpsReceivedFromApp, pendingTransitionToMap,
                 (unsigned)gps.gpsData.fixMode,
                 (unsigned)gps.gpsData.heading,
@@ -502,6 +786,176 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount);
 #endif
+#endif
+}
+
+static const char *powerMetricsDisplayStateName(
+    power_metrics::DisplayState state) {
+  switch (state) {
+  case power_metrics::DisplayState::On:
+    return "on";
+  case power_metrics::DisplayState::Off:
+    return "off";
+  case power_metrics::DisplayState::Unknown:
+  default:
+    return "unknown";
+  }
+}
+
+static void logPowerMetricsReport() {
+#if POWER_METRICS
+  constexpr size_t kReportBufferSize = 2048;
+  static char report[kReportBufferSize];
+  static uint32_t lastReportMs = 0;
+  const uint32_t now = millis();
+  if (now - lastReportMs < 10000) {
+    return;
+  }
+  const uint32_t intervalMs = now - lastReportMs;
+  lastReportMs = now;
+
+  const power_metrics::RuntimeSnapshot snapshot =
+      power_metrics::snapshotAndReset();
+  const power_metrics::IntervalData &metrics = snapshot.interval;
+  const BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
+  const power_management::RuntimeStatus powerManagementStatus =
+      power_management::status();
+
+  const char *screenName = "unknown";
+  const lv_obj_t *activeScreen = lv_scr_act();
+  if (activeScreen == waitingScreen) {
+    screenName = "waiting";
+  } else if (isMainScreen) {
+    screenName = "main";
+  }
+
+  bool audioActive = false;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const char *powerMode = displayInactivityModeName(currentDisplayMode);
+#else
+  const char *powerMode = "unsupported";
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  audioActive = waveshare_board::speaker::isPlaying();
+#endif
+
+  const auto bleCount = [&](power_metrics::BlePacketClass packetClass) {
+    return metrics.blePacketCounts[static_cast<size_t>(packetClass)];
+  };
+
+  const int reportLength = snprintf(
+      report, sizeof(report),
+      "PWRMET v=%u intervalMs=%lu screen=%s tile=%s display=%s "
+      "brightness[requested=%u effective=%u] "
+      "loop[wakes=%llu maxGapMs=%lu] "
+      "lvgl[count=%lu totalUs=%llu maxUs=%lu] "
+      "flush[count=%lu rotationUs=%llu/%lu qspiUs=%llu/%lu "
+      "totalUs=%llu/%lu] "
+      "map[count=%lu completed=%lu interrupted=%lu totalUs=%llu/%lu "
+      "blocksUs=%llu/%lu drawUs=%llu/%lu routeUs=%llu/%lu "
+      "reasons=position:%lu,route:%lu,style:%lu,heading:%lu,zoom:%lu,"
+      "screen:%lu,recovery:%lu,other:%lu] "
+      "ble[connected=%d authenticated=%d "
+      "logical=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
+      "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
+      "appQueue=ios-diagnostic "
+      "radio=txDbm:%d,advMode:%u,requestedProfile:%u,valid:%d,"
+      "intervalUnits:%u,latency:%u,timeoutUnits:%u,samples:%lu] "
+      "system[powerMode=%s wifiMode=%d transfer=%d transferMode=%s "
+      "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
+      "lightSleep=%d "
+      "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
+      "ext1WakeMask=0x%llX gpioWakeMask=0x%llX "
+      "gpioWakeLast=0x%llX gpioWakeEvents=%lu "
+      "wakeCapture=%d wakeNotifier=%d pmWakeFailures=%lu "
+      "startupComplete=%d]\n",
+      power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
+      debugTileName(activeTile),
+      powerMetricsDisplayStateName(snapshot.displayState),
+      snapshot.requestedBrightness, snapshot.effectiveBrightness,
+      static_cast<unsigned long long>(metrics.loopWakeCount),
+      (unsigned long)metrics.maxLoopGapMs, (unsigned long)metrics.lvgl.count,
+      static_cast<unsigned long long>(metrics.lvgl.totalUs),
+      (unsigned long)metrics.lvgl.maxUs,
+      (unsigned long)metrics.displayFlush.count,
+      static_cast<unsigned long long>(metrics.displayRotation.totalUs),
+      (unsigned long)metrics.displayRotation.maxUs,
+      static_cast<unsigned long long>(metrics.displayQspi.totalUs),
+      (unsigned long)metrics.displayQspi.maxUs,
+      static_cast<unsigned long long>(metrics.displayFlush.totalUs),
+      (unsigned long)metrics.displayFlush.maxUs,
+      (unsigned long)metrics.mapRender.count,
+      (unsigned long)metrics.mapRenderCompleted,
+      (unsigned long)metrics.mapRenderInterrupted,
+      static_cast<unsigned long long>(metrics.mapRender.totalUs),
+      (unsigned long)metrics.mapRender.maxUs,
+      static_cast<unsigned long long>(metrics.mapBlocks.totalUs),
+      (unsigned long)metrics.mapBlocks.maxUs,
+      static_cast<unsigned long long>(metrics.mapDraw.totalUs),
+      (unsigned long)metrics.mapDraw.maxUs,
+      static_cast<unsigned long long>(metrics.mapRoute.totalUs),
+      (unsigned long)metrics.mapRoute.maxUs,
+      (unsigned long)metrics.mapReasonCounts[0],
+      (unsigned long)metrics.mapReasonCounts[1],
+      (unsigned long)metrics.mapReasonCounts[2],
+      (unsigned long)metrics.mapReasonCounts[3],
+      (unsigned long)metrics.mapReasonCounts[4],
+      (unsigned long)metrics.mapReasonCounts[5],
+      (unsigned long)metrics.mapReasonCounts[6],
+      (unsigned long)metrics.mapReasonCounts[7],
+      bleStats.connected, bleStats.authenticated,
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Navigation),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Route),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Gps),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Settings),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Workout),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Transfer),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Audio),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Control),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Auth),
+      static_cast<int>(bleStats.txPowerDbm),
+      static_cast<unsigned>(bleStats.advertisingMode),
+      static_cast<unsigned>(bleStats.requestedConnectionProfile),
+      bleStats.connectionParametersValid, bleStats.connectionIntervalUnits,
+      bleStats.connectionLatency, bleStats.supervisionTimeoutUnits,
+      (unsigned long)bleStats.connectionParameterSampleCount,
+      powerMode, static_cast<int>(WiFi.getMode()), transferStatus.enabled,
+      transferStatus.mode.empty() ? "none" : transferStatus.mode.c_str(),
+      audioActive, getCpuFrequencyMhz(), powerManagementStatus.enabled,
+      powerManagementStatus.errorCode,
+      powerManagementStatus.effective.minimumCpuMhz,
+      powerManagementStatus.effective.maximumCpuMhz,
+      powerManagementStatus.effective.automaticLightSleep,
+      (unsigned long)powerManagementStatus.activeLockCount,
+      (unsigned long)powerManagementStatus.peakLockCount,
+      (unsigned long)powerManagementStatus.lockFailureCount,
+      static_cast<unsigned long long>(powerManagementStatus.ext1WakeMask),
+      static_cast<unsigned long long>(powerManagementStatus.gpioWakeMask),
+      static_cast<unsigned long long>(
+          powerManagementStatus.lastGpioWakeMask),
+      (unsigned long)powerManagementStatus.gpioWakeEventCount,
+      powerManagementStatus.wakeCaptureReady,
+      powerManagementStatus.wakeNotifierReady,
+      (unsigned long)powerManagementStatus.wakeSourceFailureCount,
+      powerManagementStatus.startupComplete);
+  if (reportLength < 0 ||
+      static_cast<size_t>(reportLength) >= sizeof(report)) {
+    Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
+                  static_cast<unsigned>(sizeof(report)));
+    return;
+  }
+
+  const size_t written = Serial.write(
+      reinterpret_cast<const uint8_t *>(report),
+      static_cast<size_t>(reportLength));
+  if (written != static_cast<size_t>(reportLength)) {
+    Serial.printf("PWRMET_ERROR serialWrite=%u/%u\n",
+                  static_cast<unsigned>(written),
+                  static_cast<unsigned>(reportLength));
+  }
+#endif
 }
 
 static void processDisconnectedShutdown() {
@@ -548,15 +1002,50 @@ void setup() {
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif
+#if FIRMWARE_DIAGNOSTICS
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
+#else
+  esp_log_level_set("*", ESP_LOG_NONE);
+#endif
 
-  // Initialize Serial for debug
+  // Initialize Serial for debug. A complete PWRMET report is larger than the
+  // default 256-byte HWCDC queue, so metrics builds reserve enough space for
+  // one atomic report while keeping the normal firmware footprint unchanged.
+#if POWER_METRICS
+  constexpr size_t kPowerMetricsSerialTxBufferSize = 4096;
+  const size_t configuredSerialTxBufferSize =
+      Serial.setTxBufferSize(kPowerMetricsSerialTxBufferSize);
+#endif
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
   Serial.begin(115200);
   // HWCDC uses this value as both a timeout and a retry counter. Zero
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
-  delay(2000);              // Give time for USB CDC to attach
+#endif
+#if POWER_METRICS
+  if (configuredSerialTxBufferSize != kPowerMetricsSerialTxBufferSize) {
+    Serial.printf("PWRMET_ERROR txBuffer=%u/%u\n",
+                  static_cast<unsigned>(configuredSerialTxBufferSize),
+                  static_cast<unsigned>(kPowerMetricsSerialTxBufferSize));
+  }
+#endif
+  power_metrics::begin();
+  power.begin();
+  power_management::begin();
+  // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
+  // enabling BLE, touch, BOOT, audio, or transfer publishers.
+  ui_scheduler::bindCurrentTask();
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  displayPowerManager.begin();
+#endif
+#if FIRMWARE_DIAGNOSTICS
+  delay(2000); // Give a diagnostic USB CDC monitor time to attach.
+#endif
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
                 esp_reset_reason());
@@ -571,6 +1060,12 @@ void setup() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
                   latchWaveshareBootScreenCycle, FALLING);
+  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+#ifdef WAVESHARE_AMOLED_175
+  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#endif
+  power_management::configureExt1Wakeup(ext1WakeMask);
+  configureTouchWakeInterrupt();
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -800,10 +1295,14 @@ void setup() {
   // Show waiting screen - will transition to map when GPS is received via BLE
   log_i("Loading Waiting Screen...");
   lv_screen_load(waitingScreen);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  displayInactivityPolicy.begin(millis());
+#endif
 
   log_i("Setup Complete");
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
+  power_management::completeStartup();
 }
 
 /**
@@ -812,6 +1311,17 @@ void setup() {
  */
 void loop() {
   uint32_t now = millis();
+  const uint32_t wakeReasons =
+      pendingUiWakeReasons | ui_scheduler::wait(0);
+  pendingUiWakeReasons = 0;
+#if BLE_RADIO_CHARACTERIZATION
+  if (ui_scheduler::hasReason(wakeReasons,
+                              ui_scheduler::WakeReason::Touch) ||
+      ui_scheduler::hasReason(wakeReasons, ui_scheduler::WakeReason::Boot)) {
+    bleNavServer.noteUserWake();
+  }
+#endif
+  power_metrics::noteLoop(now);
   if (lastLoopMs != 0) {
     uint32_t gap = now - lastLoopMs;
     if (gap > maxLoopGapMs) {
@@ -821,58 +1331,146 @@ void loop() {
   lastLoopMs = now;
   loopCount++;
 
-  std::string activatedMapRoot;
-  if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
-    const std::string rendererRoot = std::string("/sdcard") + activatedMapRoot;
-    const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
-                        mapView.setVectorMapFolder(rendererRoot);
-    mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
+  constexpr uint32_t kStaticHousekeepingPeriodMs =
+      ui_scheduler::kStaticMaximumWaitMs;
+  const bool transferHousekeepingDue =
+      ui_scheduler::shouldRunForReason(
+          wakeReasons, ui_scheduler::WakeReason::Transfer, now,
+          lastTransferHousekeepingMs, kStaticHousekeepingPeriodMs);
+  if (transferHousekeepingDue) {
+    lastTransferHousekeepingMs = now;
+    std::string activatedMapRoot;
+    if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
+      const std::string rendererRoot =
+          std::string("/sdcard") + activatedMapRoot;
+      const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
+                          mapView.setVectorMapFolder(rendererRoot);
+      mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
+    }
+    if (mapTransferHttp.takeAutomaticExitRequest()) {
+      const bool disabled = mapTransferHttp.setEnabled(false);
+      Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
+                    disabled);
+    }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    processTransferInactivityTimeout(now);
+#endif
+    updateMapActivationProgressOverlay();
+    deviceTransferHttp.process();
   }
-  if (mapTransferHttp.takeAutomaticExitRequest()) {
-    const bool disabled = mapTransferHttp.setEnabled(false);
-    Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
-                  disabled);
+
+  const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();
+  const bool navigatingBeforeBleWork =
+      bleStatsBeforeWork.connected && bleStatsBeforeWork.authenticated &&
+      (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  const uint32_t bleHousekeepingPeriodMs =
+      navigatingBeforeBleWork
+          ? ui_scheduler::kConnectedNavigationMaximumWaitMs
+          : ui_scheduler::kStaticMaximumWaitMs;
+#if BLE_RADIO_CHARACTERIZATION
+  bleNavServer.setNavigationActivity(navigatingBeforeBleWork);
+#endif
+  if (ui_scheduler::shouldRunForReason(
+          wakeReasons, ui_scheduler::WakeReason::Ble, now,
+          lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {
+    lastBleHousekeepingMs = now;
+    bleNavServer.process();
+  }
+
+  if (ui_scheduler::isDue(now, lastShutdownHousekeepingMs,
+                          kStaticHousekeepingPeriodMs)) {
+    lastShutdownHousekeepingMs = now;
+    processDisconnectedShutdown();
   }
 
   // Process app-provided GPS transitions before any periodic work that can
   // briefly block on display, sensor, BLE, or debug output.
   checkPendingMapTransition();
-  updateMapActivationProgressOverlay();
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
-  processWaveshareBootButton();
+  if (processWaveshareBootButton()) {
+    displayInactivityPolicy.noteMeaningfulActivity(now);
+  }
+  if (ui_scheduler::isDue(now, lastPowerButtonHousekeepingMs,
+                          kStaticHousekeepingPeriodMs)) {
+    lastPowerButtonHousekeepingMs = now;
+    if (processWavesharePowerButton()) {
+      displayInactivityPolicy.noteMeaningfulActivity(now);
+    }
+  }
 #endif
 
-  if (!waitScreenRefresh) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
+#ifdef WAVESHARE_AMOLED_175
+  constexpr bool kDecodedTouchPollingRequired = true;
+  if (display_inactivity::shouldPollTouchWhileDisplayInactive(
+          displayModeBeforeUpdate, kDecodedTouchPollingRequired)) {
+    // LVGL is throttled while dimmed and paused while off. Keep only the
+    // proven, PM-locked controller reader alive so a decoded frame can restore
+    // the UI. Tickless builds may light-sleep between these throttled polls.
+    readTouch();
+  }
+#endif
+  bool touchWake = ui_scheduler::hasReason(
+      wakeReasons, ui_scheduler::WakeReason::Touch);
+#ifdef WAVESHARE_AMOLED_175
+  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
+  // low-level state as a supplemental wake signal; decoded-frame activity from
+  // the throttled reader remains authoritative.
+  touchWake = display_inactivity::touchWakeRequested(
+      currentDisplayMode, touchWake, isTouchWakeSourceActive());
+#endif
+  bool observedTouchActivity = false;
+  const display_inactivity::Update displayUpdate =
+      updateDisplayInactivityPolicy(now, touchWake, observedTouchActivity);
+  if (display_inactivity::isTouchWakeDisplayMode(displayModeBeforeUpdate) &&
+      displayUpdate.current != displayModeBeforeUpdate &&
+      observedTouchActivity) {
+    // The first contact only restores the display. Releasing it clears this
+    // suppression before a subsequent intentional UI gesture.
+    suppressPrimaryTouchUntilReleaseForDisplayWake();
+  }
+  displayPowerManager.applyPendingPanelChange();
+  if (displayPowerManager.takeFullRefreshRequired()) {
+    lv_obj_invalidate(lv_screen_active());
+  }
+#endif
+
+  bool runLvglHandler = !waitScreenRefresh;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  constexpr uint32_t kDimmedLvglCadenceMs = 100;
+  if (currentDisplayMode == display_inactivity::Mode::DisplayOff) {
+    runLvglHandler = false;
+  } else if (currentDisplayMode == display_inactivity::Mode::Dimmed &&
+             now - lastLvglHandlerMs < kDimmedLvglCadenceMs) {
+    runLvglHandler = false;
+  }
+#endif
+  if (runLvglHandler) {
     uint32_t startUs = micros();
-    lv_timer_handler();
+    nextLvglDelayMs = lv_timer_handler();
     lastLvglHandlerDurationUs = micros() - startUs;
+    power_metrics::noteLvgl(lastLvglHandlerDurationUs);
     if (lastLvglHandlerDurationUs > maxLvglHandlerDurationUs) {
       maxLvglHandlerDurationUs = lastLvglHandlerDurationUs;
     }
     lvglHandlerCount++;
     lastLvglHandlerMs = millis();
-    vTaskDelay(pdMS_TO_TICKS(TASK_SLEEP_PERIOD_MS));
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
     armOwnershipPairingAfterRenderedComparison();
 #endif
   }
 
-  // Process BLE events
-  bleNavServer.process();
-  processDisconnectedShutdown();
-
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   waveshare_board::imu::process();
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  processWavesharePowerButton();
-#endif
 
   logSystemDebugHeartbeat();
+  logPowerMetricsReport();
 
 #ifndef DISABLE_WEB_SERVER
   // Deleting recursive directories in webfile server
@@ -886,5 +1484,51 @@ void loop() {
   }
 #endif
 
-  deviceTransferHttp.process();
+  const uint32_t schedulerNow = millis();
+  const BLEDebugStats schedulerBleStats = bleNavServer.getDebugStats();
+  const bool connectedNavigation =
+      schedulerBleStats.connected && schedulerBleStats.authenticated &&
+      (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  const uint32_t nextBleHousekeepingMs = ui_scheduler::remainingUntil(
+      schedulerNow, lastBleHousekeepingMs,
+      connectedNavigation
+          ? ui_scheduler::kConnectedNavigationMaximumWaitMs
+          : ui_scheduler::kStaticMaximumWaitMs);
+  uint32_t nextHousekeepingMs = std::min(
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastTransferHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs),
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastShutdownHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs));
+  nextHousekeepingMs = std::min(nextHousekeepingMs, nextBleHousekeepingMs);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  nextHousekeepingMs = std::min(
+      nextHousekeepingMs,
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastPowerButtonHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs));
+#endif
+
+  uint32_t effectiveLvglDelayMs = ui_scheduler::remainingUntil(
+      schedulerNow, lastLvglHandlerMs, nextLvglDelayMs);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (currentDisplayMode == display_inactivity::Mode::Dimmed) {
+    effectiveLvglDelayMs =
+        std::max(effectiveLvglDelayMs,
+                 ui_scheduler::remainingUntil(schedulerNow,
+                                              lastLvglHandlerMs, 100));
+  }
+#endif
+  ui_scheduler::DeadlineContext deadline;
+  deadline.lvglDelayMs = effectiveLvglDelayMs;
+  deadline.housekeepingDelayMs = nextHousekeepingMs;
+  deadline.connectedNavigation = connectedNavigation;
+  deadline.lvglBlocked = waitScreenRefresh;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  deadline.displayOff =
+      currentDisplayMode == display_inactivity::Mode::DisplayOff;
+#endif
+  pendingUiWakeReasons =
+      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
 }

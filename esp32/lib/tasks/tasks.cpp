@@ -8,7 +8,6 @@
 
 #include "tasks.hpp"
 
-TaskHandle_t LVGLTaskHandler;
 #ifdef HAS_HARDWARE_GPS
 xSemaphoreHandle gpsMutex;
 extern Gps gps;
@@ -88,4 +87,3 @@ void cliTask(void *param)
 void initCLITask() { xTaskCreatePinnedToCore(cliTask, "cliTask ", 20000, NULL, 1, NULL, 1); }
 
 #endif
-

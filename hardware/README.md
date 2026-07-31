@@ -280,6 +280,10 @@ capability discovery also returns the persisted honk configuration, so
 reconnecting from a fresh app does not overwrite device state with app
 defaults.
 
+The local 2.06 schematic labels the AXP2101 IRQ net `EXIO5`, but does not route
+that net to an ESP32 GPIO or a populated I/O expander. It therefore cannot wake
+firmware through a direct GPIO interrupt on this board revision.
+
 ### Buttons, External Pads, And Power
 
 | Function | GPIO / Net | Notes |
@@ -550,6 +554,11 @@ Verified firmware behavior:
   Temporary test builds with `POWER_SAVE` reproduced Bluetooth/IPC instability,
   and BOOT-button short/long presses did not produce reliable sleep/shutdown
   transitions on the waiting screen.
+- The 1.75 schematic routes AXP2101 `IRQ` to TCA9554 P5 (`EXIO5`). The
+  TCA9554's own `INT` pin is not routed to the ESP32, so this is readable only
+  through another I2C transaction and is not a firmware wake GPIO. Keep the
+  deadline-based AXP2101 status polling unless a later board revision exposes
+  a direct interrupt.
 
 ### 3. Touch Coordinate Mirroring
 

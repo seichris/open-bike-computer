@@ -13,7 +13,14 @@
 #include "mapTransform.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
+#include "../../power_management/power_management.hpp"
+#include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
+
 // #include "../../compass/compass.hpp"
 extern Gps gps;
 extern Storage storage;
@@ -1930,8 +1937,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           }
         }
       }
+#if FIRMWARE_DIAGNOSTICS
       Serial.printf("[Maps] Block polygons: Total=%d, Checked=%d, Drawn=%d\n",
                     poly_total, poly_checked, poly_drawn);
+#endif
       const uint32_t polygonMs = millis() - polygonStartMs;
       log_i("Block polygons done %i ms", polygonMs);
       const uint32_t lineStartMs = millis();
@@ -2384,6 +2393,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
 }
 
 bool Maps::setVectorMapFolder(const std::string &folder) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
@@ -2411,6 +2421,7 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
 }
 
 bool Maps::probeVectorMapFolder(const std::string &folder) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
   std::string normalized = folder;
   while (normalized.size() > 1 && normalized.back() == '/')
     normalized.pop_back();
@@ -3180,6 +3191,7 @@ void Maps::invalidatePinchZoomOutBackdrop() {
 }
 
 bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
   baseZoom = map_transform::clampRuntimeZoom(baseZoom);
   if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
       Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
@@ -4017,10 +4029,13 @@ void Maps::generateRenderMap(uint8_t zoom) {
  * @brief Display Map (Stub for Vector Maps/Arduino_GFX)
  */
 void Maps::displayMap() {
-  const uint32_t displayStartMs = MAPIO_TIME_MS();
   if (Maps::canvasMap)
     lv_obj_invalidate(Maps::canvasMap);
+  updatePositionOverlay();
+}
 
+void Maps::updatePositionOverlay() {
+  const uint32_t displayStartMs = MAPIO_TIME_MS();
   // Update Arrow Position
   if (Maps::canvasArrow) {
     if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
@@ -4100,6 +4115,13 @@ void Maps::displayMap() {
  * @param zoom -> Zoom Level
  */
 bool Maps::generateVectorMap(uint8_t zoom) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
+  power_metrics::MapRenderMeasurement powerMeasurement;
+#if POWER_METRICS
+  uint32_t powerBlocksUs = 0;
+  uint32_t powerDrawUs = 0;
+  uint32_t powerRouteUs = 0;
+#endif
   const uint32_t generateStartMs = MAPIO_TIME_MS();
   if (Maps::canvasMap == nullptr || Maps::canvasMapTemp == nullptr) {
     ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
@@ -4217,10 +4239,23 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerBlocksStartUs = micros();
+#endif
   if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache)) {
+#if POWER_METRICS
+    powerBlocksUs = micros() - powerBlocksStartUs;
+    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                       powerRouteUs);
+#endif
     log_i("Map block loading interrupted to service a screen-cycle input");
     return false;
   }
+#if POWER_METRICS
+  powerBlocksUs = micros() - powerBlocksStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t blocksMs = MAPIO_TIME_MS() - blocksStartMs;
 
   ESP_LOGI(TAG,
@@ -4231,11 +4266,24 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Read Vector Map to Canvas (Pass calculated rotation)
   const uint32_t drawStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerDrawStartUs = micros();
+#endif
   if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
                            zoom, rotationRad)) {
+#if POWER_METRICS
+    powerDrawUs = micros() - powerDrawStartUs;
+    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                       powerRouteUs);
+#endif
     log_i("Map render interrupted to service a screen-cycle input");
     return false;
   }
+#if POWER_METRICS
+  powerDrawUs = micros() - powerDrawStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -4245,6 +4293,9 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 
   // Draw route overlay from iOS navigation (if available)
   const uint32_t routeStartMs = MAPIO_TIME_MS();
+#if POWER_METRICS
+  const uint32_t powerRouteStartUs = micros();
+#endif
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
@@ -4264,6 +4315,11 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   } else {
     ESP_LOGI(TAG, "No route overlay to draw (no route data)");
   }
+#if POWER_METRICS
+  powerRouteUs = micros() - powerRouteStartUs;
+  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
+                                     powerRouteUs);
+#endif
   const uint32_t routeMs = MAPIO_TIME_MS() - routeStartMs;
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -4313,6 +4369,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 #endif
   // NOTE: isPosMoved flag is now cleared in updateMap() after display,
   // not here, to allow queued BLE updates to trigger new regenerations
+  powerMeasurement.finish(true);
   return true;
 }
 

@@ -1,4 +1,6 @@
 #include "device_transfer_http.hpp"
+#include "../power_management/power_management.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
 
 #include <algorithm>
@@ -179,10 +181,20 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     return false;
   }
 
+  bool acquiredPowerLock = false;
   if (enabled && !wasEnabled) {
+    if (!power_management::acquire(
+            power_management::LockDomain::Transfer)) {
+      lockState();
+      rememberError("power_lock", "could not protect transfer from light sleep");
+      unlockState();
+      return false;
+    }
+    acquiredPowerLock = true;
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.mode(WIFI_AP);
       if (!WiFi.softAP(apSsid.c_str())) {
+        power_management::release(power_management::LockDomain::Transfer);
         lockState();
         rememberError("wifi_ap", "could not start transfer Wi-Fi");
         unlockState();
@@ -231,14 +243,24 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     }
     if (transferBoundary) {
       transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+      lastUsefulTrafficMs_ = millis();
     }
     unlockState();
   }
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
+    // Publish the worker handle and persistent power-lock ownership before the
+    // new task can observe state. Holding the mutex across xTaskCreate makes
+    // an immediately scheduled worker wait until both fields are coherent.
+    lockState();
     const BaseType_t created =
         xTaskCreate(workerTaskThunk, "device_http", 16384, this, 1, &worker);
+    if (created == pdPASS) {
+      workerTask_ = worker;
+      powerLockHeld_ = acquiredPowerLock;
+    }
+    unlockState();
     if (created != pdPASS) {
       server_.stop();
       if (startedAp_) {
@@ -252,11 +274,11 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       sessionToken_.clear();
       rememberError("http_worker", "could not start transfer HTTP worker");
       unlockState();
+      if (acquiredPowerLock) {
+        power_management::release(power_management::LockDomain::Transfer);
+      }
       return false;
     }
-    lockState();
-    workerTask_ = worker;
-    unlockState();
   }
   return true;
 }
@@ -282,13 +304,30 @@ void HttpTransferServer::runWorker() {
         continue;
       }
       workerTask_ = nullptr;
+      const bool releasePowerLock = powerLockHeld_;
+      powerLockHeld_ = false;
       unlockState();
+      if (releasePowerLock) {
+        power_management::release(power_management::LockDomain::Transfer);
+      }
       return;
     }
     WiFiClient client = server_.accept();
     if (client) {
+      lockState();
+      requestInProgress_ = true;
+      currentRequestAuthorized_ = false;
+      unlockState();
       handleClient(client);
       client.stop();
+      lockState();
+      if (currentRequestAuthorized_) {
+        lastUsefulTrafficMs_ = millis();
+      }
+      requestInProgress_ = false;
+      currentRequestAuthorized_ = false;
+      unlockState();
+      ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
     } else {
       vTaskDelay(pdMS_TO_TICKS(2));
     }
@@ -313,6 +352,12 @@ HttpTransferStatus HttpTransferServer::status() const {
   const std::string sessionToken = sessionToken_;
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
+  const uint32_t errorSequence = errorSequence_;
+  const uint32_t lastUsefulTrafficMs = lastUsefulTrafficMs_;
+  // Only authenticated work may extend the transfer lifetime. A client that
+  // stalls before authorization must not keep the AP awake indefinitely.
+  const bool authorizedRequestInProgress =
+      requestInProgress_ && currentRequestAuthorized_;
   unlockState();
 
   std::string baseUrl;
@@ -326,23 +371,36 @@ HttpTransferStatus HttpTransferServer::status() const {
                 std::to_string(port);
     }
   }
-  return {configured,       enabled, port,     mode,
-          baseUrl,          startedAp ? apSsid : "",
-          sessionToken,     lastErrorCode,
-          lastErrorMessage};
+  return {configured,
+          enabled,
+          port,
+          mode,
+          baseUrl,
+          startedAp ? apSsid : "",
+          sessionToken,
+          lastErrorCode,
+          lastErrorMessage,
+          errorSequence,
+          lastUsefulTrafficMs,
+          authorizedRequestInProgress};
 }
 
 bool HttpTransferServer::isRequestAuthorized(
-    const HttpRequest &request) const {
+    const HttpRequest &request) {
   lockState();
   const bool enabled = enabled_;
   const std::string sessionToken = sessionToken_;
   const uint32_t transferGeneration = transferGeneration_;
+  const bool authorized =
+      isHttpTransferGenerationCurrent(enabled, transferGeneration,
+                                      request.transferGeneration) &&
+      !sessionToken.empty() && request.transferToken == sessionToken;
+  if (authorized) {
+    lastUsefulTrafficMs_ = millis();
+    currentRequestAuthorized_ = true;
+  }
   unlockState();
-  return isHttpTransferGenerationCurrent(enabled, transferGeneration,
-                                         request.transferGeneration) &&
-         !sessionToken.empty() &&
-         request.transferToken == sessionToken;
+  return authorized;
 }
 
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
@@ -487,6 +545,7 @@ void HttpTransferServer::rememberError(const std::string &code,
                                        const std::string &message) {
   lastErrorCode_ = code;
   lastErrorMessage_ = message;
+  errorSequence_ = nextHttpTransferGeneration(errorSequence_);
 }
 
 void HttpTransferServer::lockState() const {

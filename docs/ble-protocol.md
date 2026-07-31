@@ -283,6 +283,18 @@ the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 
+The iOS sender treats GPS as replaceable state, not an ordered history. At most
+one unsent native or `GPSP` position is retained; a newer position replaces only
+that pending position and never route, settings, transfer, destination, auth, or
+workout traffic. A complete maneuver snapshot uses the bounded priority lane so
+it is delivered ahead of a GPS backlog. Native `2A72` prefers
+write-without-response only when the characteristic advertises it and the
+protected payload fits CoreBluetooth's current maximum. CoreBluetooth
+backpressure pauses dequeue without discarding the latest position. If the
+unacknowledged maximum is too small, iOS uses acknowledged native `2A72`; if no
+native write fits, it uses the authenticated navigation fallback. Route and
+catalog batches remain atomic and ordered.
+
 ## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
 
 Workout telemetry is iOS-to-device, RAM-only, and accepted only after the
@@ -459,7 +471,7 @@ Current setting IDs:
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
-| `12` | Device brightness | `5...100` percent on supported hardware |
+| `12` | Device brightness | Whole-number percent. Firmware clamps the signed value to `5...100`, saves the normalized value in NVS, and applies it from the display task. First boot defaults to `100`; the saved value is restored across reboot and display sleep/wake. |
 | `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
 | `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
 | `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. An unclaimed device waiting to be added applies a minimum 600-second registration grace period; `0` still disables automatic disconnected sleep. |
@@ -475,6 +487,12 @@ Current setting IDs:
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
+
+Setting ID `12` has no application-level acknowledgement or readback packet.
+An acknowledged GATT write confirms transport delivery only, not persistence or
+panel application. The app retains the normalized value locally and sends it
+again after every authenticated reconnect. Brightness updates do not invalidate
+or rerender the map.
 
 Feature visibility toggles are authoritative for their classes. Detail level
 controls small-area density without overriding the visibility mask: high uses
@@ -547,6 +565,19 @@ bit `2`. ACK-capable firmware uses a tracked frame:
 Firmware persists the complete configuration and queues the configured sound
 after an AXP2101 short-press event, so the button works without an active app
 connection. The AXP2101's six-second hardware power-off behavior is unchanged.
+
+Independently of hard power-off, connected firmware dims after 15 seconds and
+turns the panel off after 45 seconds without meaningful activity when no
+navigation is active. GPS and workout telemetry alone do not keep the panel
+awake. A
+changed maneuver instruction/icon, a closer maneuver-distance threshold,
+route, screen/input event, connection/authentication event, ownership
+comparison, active sound, or transfer wakes or holds it as appropriate. BLE
+advertising/connection processing continues with the panel off, and wake
+restores the saved brightness with one synchronized full-screen refresh.
+Incoming BLE callbacks publish their latest state and notify the firmware's UI
+owner task. The UI task applies those mailboxes and LVGL changes immediately;
+callbacks do not mutate LVGL objects directly.
 Firmware echoes the request ID when acknowledging tracked requests on the
 navigation notification characteristic:
 

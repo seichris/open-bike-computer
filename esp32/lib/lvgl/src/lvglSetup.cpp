@@ -9,6 +9,8 @@
 #include "lvglSetup.hpp"
 #include "../../power/power.hpp"
 
+#include <esp_timer.h>
+
 lv_display_t *display;
 
 lv_obj_t *searchSatScreen; // Search Satellite Screen
@@ -306,14 +308,8 @@ void modifyTheme() {
   lv_disp_set_theme(NULL, &th_new);
 }
 
-/**
- * @brief Setting up tick task for lvgl
- *
- * @param arg
- */
-void lv_tick_task(void *arg) {
-  (void)arg;
-  lv_tick_inc(LV_TICK_PERIOD_MS);
+static uint32_t lvMonotonicTickMs() {
+  return static_cast<uint32_t>(esp_timer_get_time() / 1000);
 }
 
 /**
@@ -398,6 +394,10 @@ void initLVGL() {
 
 #endif
 
+  // LVGL reads the monotonic ESP timer on demand. This removes the 5 ms
+  // periodic esp_timer wakeup previously used only to call lv_tick_inc().
+  lv_tick_set_cb(lvMonotonicTickMs);
+
   //  Create Main Timer
   mainTimer = lv_timer_create(updateMainScreen, UPDATE_MAINSCR_PERIOD, NULL);
   lv_timer_ready(mainTimer);
@@ -417,13 +417,6 @@ void initLVGL() {
   createGpxDetailScreen();
   createGpxListScreen();
 
-  // Create and start a periodic timer interrupt to call lv_tick_inc
-  const esp_timer_create_args_t periodic_timer_args = {
-      .callback = &lv_tick_task, .name = "periodic_gui"};
-  esp_timer_handle_t periodic_timer;
-  ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-  ESP_ERROR_CHECK(
-      esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
 }
 
 /**

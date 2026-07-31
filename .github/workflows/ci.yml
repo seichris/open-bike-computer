@@ -14,7 +14,13 @@ jobs:
       matrix:
         target:
           - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_175_POWER_METRICS
+          - WAVESHARE_AMOLED_175_LIGHT_SLEEP
+          - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_POWER_METRICS
+          - WAVESHARE_AMOLED_206_LIGHT_SLEEP
+          - WAVESHARE_AMOLED_206_PRODUCTION
     defaults:
       run:
         working-directory: esp32
@@ -102,6 +108,73 @@ jobs:
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_206
           /tmp/test_gui_layout_206
+      - name: Power metrics host tests
+        run: |
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_power_trace_summary
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_power_metrics_schema.cpp \
+            -o /tmp/test_power_metrics_schema
+          /tmp/test_power_metrics_schema
+      - name: Display power and redraw policy host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_display_power_policy.cpp \
+            -o /tmp/test_display_power_policy
+          /tmp/test_display_power_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_display_inactivity_policy.cpp \
+            -o /tmp/test_display_inactivity_policy
+          /tmp/test_display_inactivity_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ui_scheduler_policy.cpp \
+            -o /tmp/test_ui_scheduler_policy
+          /tmp/test_ui_scheduler_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_power_management_policy.cpp \
+            -o /tmp/test_power_management_policy
+          /tmp/test_power_management_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
+            tools/tests/test_power_management_policy.cpp \
+            -o /tmp/test_power_management_policy_light_sleep
+          /tmp/test_power_management_policy_light_sleep
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_active_low_wake_interrupt_gate.cpp \
+            -o /tmp/test_active_low_wake_interrupt_gate
+          /tmp/test_active_low_wake_interrupt_gate
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy
+          /tmp/test_ble_radio_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=3 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_p3
+          /tmp/test_ble_radio_policy_p3
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=0 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_p0
+          /tmp/test_ble_radio_policy_p0
+          if g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_TX_POWER_DBM=3 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_unsafe; then
+            echo "Non-default TX power compiled without characterization"
+            exit 1
+          fi
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_pioarduino_custom_core
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ui_update_policy.cpp \
+            -o /tmp/test_ui_update_policy
+          /tmp/test_ui_update_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_render_policy.cpp \
+            -o /tmp/test_map_render_policy
+          /tmp/test_map_render_policy
+          python tools/tests/test_firmware_profile_config.py
       - name: Two-finger Map zoom host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

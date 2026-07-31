@@ -14,6 +14,7 @@
  */
 
 #include <Arduino.h>
+#include "ble_radio_policy.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 
@@ -192,6 +193,17 @@ struct BLEDebugStats {
   uint32_t lastGpsPacketMs = 0;
   uint32_t lastSettingsPacketMs = 0;
   uint32_t lastRejectedUnauthenticatedMs = 0;
+  bool connectionParametersValid = false;
+  uint16_t connectionIntervalUnits = 0;
+  uint16_t connectionLatency = 0;
+  uint16_t supervisionTimeoutUnits = 0;
+  uint32_t connectionParameterSampleCount = 0;
+  uint32_t lastConnectionParameterSampleMs = 0;
+  int8_t txPowerDbm = ble_radio_policy::kConfiguration.txPowerDbm;
+  ble_radio_policy::AdvertisingMode advertisingMode =
+      ble_radio_policy::AdvertisingMode::Default;
+  ble_radio_policy::ConnectionProfile requestedConnectionProfile =
+      ble_radio_policy::ConnectionProfile::Unset;
 };
 
 class BLENavigationServer {
@@ -213,6 +225,12 @@ public:
    * @brief Process any pending BLE events (call from main loop)
    */
   void process();
+
+  /** Record physical input that should reopen the fast-advertising window. */
+  void noteUserWake();
+
+  /** Publish current navigation activity for opt-in radio experiments. */
+  void setNavigationActivity(bool active);
 
   /**
    * @brief Clear the registered iPhone owner after physical recovery input.

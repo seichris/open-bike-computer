@@ -8,6 +8,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "waveshare_board.hpp"
+#include "../power_management/power_management.hpp"
 #include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -87,6 +88,8 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
     attempts = 1;
   }
 
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) {
     i2cStats.failedTransactions++;
@@ -118,6 +121,8 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
 } // namespace
 
 void configureBus(uint32_t clockHz) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::I2c);
   ensureMutex();
   activeClockHz = clockHz;
 #ifdef WAVESHARE_AMOLED_175
@@ -145,6 +150,8 @@ void configureBus(uint32_t clockHz) {
 const Stats &stats() { return i2cStats; }
 
 void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) {
     out.println("Waveshare I2C scan: bus busy");
@@ -166,6 +173,8 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
     attempts = 1;
   }
 
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) {
     i2cStats.failedTransactions++;

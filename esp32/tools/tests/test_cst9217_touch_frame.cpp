@@ -1,4 +1,5 @@
 #include "../../lib/waveshare_board/cst9217_touch_frame.hpp"
+#include "../../lib/waveshare_board/touch_sampling_policy.hpp"
 #include "../../lib/utils/src/touchInterruptGate.hpp"
 
 #include <cassert>
@@ -21,6 +22,18 @@ void encodeContact(uint8_t *data, std::size_t offset, uint8_t id,
 } // namespace
 
 int main() {
+  using waveshare_board::touch_sampling_policy::shouldAttemptRead;
+
+  assert(shouldAttemptRead(true, false, false, false, 1000, 0));
+  assert(!shouldAttemptRead(false, false, false, false, 1000, 0));
+  assert(shouldAttemptRead(false, true, false, false, 1000, 0));
+  assert(shouldAttemptRead(false, false, true, false, 1000, 0));
+  assert(shouldAttemptRead(false, false, false, true, 1000, 0));
+  assert(shouldAttemptRead(false, false, false, false, 999, 1000));
+  assert(!shouldAttemptRead(false, false, false, false, 1000, 1000));
+  assert(shouldAttemptRead(false, false, false, false, UINT32_MAX - 2, 2));
+  assert(!shouldAttemptRead(false, false, false, false, 2, UINT32_MAX - 2));
+
   // Both CST9217 and FT3168 use the same generation gate. A new edge bypasses
   // throttling once, failure on that attempt does not create a busy retry
   // loop, and a later edge can preempt the existing backoff once.
@@ -36,7 +49,11 @@ int main() {
   }
 
   uint8_t packet[CST9217_FRAME_LENGTH] = {};
+  assert(!hasCst9217FrameAcknowledgement(packet, sizeof(packet)));
+  assert(!hasCst9217FrameAcknowledgement(nullptr, sizeof(packet)));
+  assert(!hasCst9217FrameAcknowledgement(packet, sizeof(packet) - 1));
   packet[6] = CST9217_FRAME_ACK;
+  assert(hasCst9217FrameAcknowledgement(packet, sizeof(packet)));
   TouchFrame frame;
 
   assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==

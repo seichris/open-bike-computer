@@ -33,10 +33,14 @@ extern volatile uint32_t maxDisplayFlushDurationUs;
 extern bool touchPressed;
 extern uint16_t touchX, touchY;
 waveshare_board::touch::TouchFrame getTouchFrameSnapshot();
+uint32_t getTouchActivityGeneration();
 bool isPrimaryTouchSuppressed();
+void suppressPrimaryTouchUntilReleaseForDisplayWake();
 using MultiTouchSuppressionPolicy = bool (*)();
 void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy);
 bool hasUnattemptedTouchInterrupt();
+void configureTouchWakeInterrupt();
+bool isTouchWakeSourceActive();
 
 // Function declarations
 void setupDisplay();

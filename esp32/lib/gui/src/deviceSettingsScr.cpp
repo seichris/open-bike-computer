@@ -7,6 +7,9 @@
  */
 
 #include "deviceSettingsScr.hpp"
+#ifdef USE_ARDUINO_GFX
+#include "../../display_power/display_power.hpp"
+#endif
 
 lv_obj_t *deviceSettingsScreen; // Device Settings Screen
 
@@ -27,7 +30,9 @@ static void deviceSettingsEvent(lv_event_t *event) {
     saveGPSUpdateRate(gpsUpdate);
   }
   if (strcmp(option, "back") == 0) {
+#ifndef USE_ARDUINO_GFX
     cfg.saveUInt(PKEYS::KDEF_BRIGT, defBright);
+#endif
     lv_screen_load(settingsScreen);
   }
 }
@@ -39,8 +44,12 @@ static void deviceSettingsEvent(lv_event_t *event) {
  */
 static void brightnessEvent(lv_event_t *e) {
   lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+#ifdef USE_ARDUINO_GFX
+  displayPowerManager.requestUserBrightness(lv_slider_get_value(obj));
+#else
   defBright = lv_slider_get_value(obj);
   tftOn(defBright);
+#endif
 }
 
 /**
@@ -182,8 +191,14 @@ void createDeviceSettingsScr() {
   lv_obj_add_event_cb(btn, upgradeEvent, LV_EVENT_CLICKED, NULL);
 
   // Brightness Slider
+#ifdef USE_ARDUINO_GFX
+  createBrightSlider(deviceSettingsOptions, LV_SYMBOL_SETTINGS, "Brightness", 5,
+                     100, displayPowerManager.savedBrightnessPercent(),
+                     brightnessEvent, LV_EVENT_VALUE_CHANGED);
+#else
   createBrightSlider(deviceSettingsOptions, LV_SYMBOL_SETTINGS, "Brightness", 5,
                      255, defBright, brightnessEvent, LV_EVENT_VALUE_CHANGED);
+#endif
 
   // Back button
   btn = lv_btn_create(deviceSettingsScreen);
