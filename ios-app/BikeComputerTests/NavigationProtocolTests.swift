@@ -573,6 +573,7 @@ struct NavigationProtocolTests {
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
+        testGPSQueuePolicy()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
         testWorkoutDeviceFrameSentinelsAndSaturation()
@@ -8486,11 +8487,13 @@ struct NavigationProtocolTests {
         assert(metricsQueue.enqueueCoalescing(NavigationWrite(
             data: Data([1]),
             label: "gps-1",
+            writeClass: .gpsPosition,
             coalescingKey: "gps"
         ), prioritized: false), "first replaceable state is accepted")
         assert(metricsQueue.enqueueCoalescing(NavigationWrite(
             data: Data([2]),
             label: "gps-2",
+            writeClass: .gpsPosition,
             coalescingKey: "gps"
         ), prioritized: false), "new state replaces the stale state")
         assert(!metricsQueue.enqueueAtomically([
@@ -8506,7 +8509,7 @@ struct NavigationProtocolTests {
         metricsQueue.removeAll()
 
         let queueMetrics = metricsQueue.snapshotMetricsAndReset()
-        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 1,
+        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 2,
                     "queue metrics schema is explicitly versioned")
         assertEqual(queueMetrics.enqueuedFrames, 3,
                     "queue metrics distinguish accepted frames")
@@ -8516,6 +8519,8 @@ struct NavigationProtocolTests {
                     "queue metrics count rejected atomic frames")
         assertEqual(queueMetrics.coalescedFrames, 1,
                     "queue metrics count superseded replaceable state")
+        assertEqual(queueMetrics.coalescedFrames(for: .gpsPosition), 1,
+                    "queue metrics attribute coalescing to GPS state")
         assertEqual(queueMetrics.clearedFrames, 1,
                     "queue metrics count disconnect-style clearing")
         assertEqual(queueMetrics.retrySchedules, 1,
@@ -8552,6 +8557,247 @@ struct NavigationProtocolTests {
         }
         assertEqual(boundaryWrites, [Data([6]), Data([7])],
                     "metrics snapshots do not mutate pending writes")
+    }
+
+    static func testGPSQueuePolicy() {
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
+            payloadLength: 30,
+            protectionOverhead: 22,
+            withResponseMaximum: 512,
+            withoutResponseMaximum: 512
+        ), .nativeWithoutResponse,
+                    "replaceable native GPS prefers write-without-response")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: false,
+            payloadLength: 30,
+            protectionOverhead: 22,
+            withResponseMaximum: 512,
+            withoutResponseMaximum: 512
+        ), .nativeWithResponse,
+                    "GPS remains acknowledged when that is the only native transport")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: false,
+            hasNativeWriteWithoutResponse: false,
+            payloadLength: 30,
+            protectionOverhead: 22,
+            withResponseMaximum: 512,
+            withoutResponseMaximum: 512
+        ), .navigationFallback,
+                    "missing native GPS uses the reliable navigation endpoint")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
+            payloadLength: 30,
+            protectionOverhead: 22,
+            withResponseMaximum: 512,
+            withoutResponseMaximum: 20
+        ), .nativeWithResponse,
+                    "insufficient unacknowledged MTU falls back to acknowledged native GPS")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
+            payloadLength: 30,
+            protectionOverhead: 22,
+            withResponseMaximum: 20,
+            withoutResponseMaximum: 20
+        ), .navigationFallback,
+                    "insufficient native MTU falls back without dropping current GPS")
+
+        let channelManager = BLEManager()
+        let writeSession = AuthenticatedBLEWriteSession(
+            ownerKey: Data((0..<32).map(UInt8.init)),
+            deviceID: "00112233445566778899aabbccddeeff",
+            clientNonce: "102132435465768798a9babbdcddedef",
+            serverNonce: "ffeeddccbbaa99887766554433221100"
+        )
+        let gpsPayload = DeviceGPSPacketBuilder.data(
+            lat: 1.3,
+            lon: 103.8,
+            heading: 45
+        )
+        let protectedGPS = channelManager.devicePayloadForTesting(
+            gpsPayload,
+            for: DeviceBLEProtocol.gpsPositionCharacteristicUUID,
+            authenticatedWriteSession: writeSession
+        )
+        let protectedNavigation = channelManager.devicePayloadForTesting(
+            gpsPayload,
+            for: DeviceBLEProtocol.navigationCharacteristicUUID,
+            authenticatedWriteSession: writeSession
+        )
+        assertEqual(
+            protectedGPS?.count,
+            gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
+            "native GPS capacity accounts for authenticated framing overhead"
+        )
+        assert(protectedGPS != protectedNavigation,
+               "native GPS uses its characteristic-bound authenticated channel")
+
+        var transportReady = false
+        var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
+        func gpsWrite(_ value: UInt8) -> NavigationWrite {
+            NavigationWrite(
+                data: Data([value]),
+                label: "gps-\(value)",
+                transportCanSend: { transportReady },
+                transportExpectsWriteResponse: false,
+                writeClass: .gpsPosition,
+                coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey
+            )
+        }
+
+        assert(queue.enqueueCoalescing(gpsWrite(1), prioritized: false),
+               "first GPS state enters the regular lane")
+        assert(queue.enqueueCoalescing(gpsWrite(2), prioritized: false),
+               "second GPS state replaces the first pending state")
+        assert(queue.enqueueAtomically([
+            NavigationWrite(
+                data: Data([40]),
+                label: "route-1",
+                writeClass: .route
+            ),
+            NavigationWrite(
+                data: Data([41]),
+                label: "route-2",
+                writeClass: .route
+            )
+        ]), "protected route chunks are admitted atomically")
+        assert(queue.enqueueCoalescing(NavigationWrite(
+            data: Data([9]),
+            label: "maneuver",
+            transportCanSend: { true },
+            transportExpectsWriteResponse: true,
+            writeClass: .navigationSnapshot,
+            coalescingKey: DeviceBLEProtocol.navigationSnapshotCoalescingKey
+        ), prioritized: true), "complete maneuver state enters the priority lane")
+
+        var sent: [Data] = []
+        queue.flush(canSend: { write in
+            write.transportCanSend?() ?? true
+        }, maxWrites: 1) { sent.append($0.data) }
+        assertEqual(sent, [Data([9])],
+                    "maneuver state is delivered ahead of stalled GPS and route traffic")
+
+        queue.flush(canSend: { write in
+            write.transportCanSend?() ?? true
+        }) { _ in
+            assert(false, "write-without-response backpressure must stop GPS dequeue")
+        }
+        assert(queue.enqueueCoalescing(gpsWrite(3), prioritized: false),
+               "latest GPS replaces the stalled pending value")
+        assert(queue.enqueueCoalescing(gpsWrite(4), prioritized: false),
+               "another GPS update still leaves only one pending position")
+
+        transportReady = true
+        queue.flush(canSend: { write in
+            write.transportCanSend?() ?? true
+        }) { sent.append($0.data) }
+        assertEqual(sent, [Data([9]), Data([40]), Data([41]), Data([4])],
+                    "recovery preserves the atomic route and sends only latest GPS state")
+        assertEqual(queue.metrics.coalescedFrames(for: .gpsPosition), 3,
+                    "GPS replacements are attributed separately in diagnostics")
+
+        var priorityCapacityQueue = NavigationWriteQueue(
+            maxCount: 1,
+            priorityMaxCount: 4
+        )
+        assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(
+                data: Data([20]),
+                label: "workout-core",
+                writeClass: .workoutTelemetry,
+                coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
+            ),
+            NavigationWrite(
+                data: Data([21]),
+                label: "workout-extended",
+                writeClass: .workoutTelemetry,
+                coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+            )
+        ]), "complete workout pair retains its existing priority transaction")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([22]),
+            label: "destination-status",
+            writeClass: .transfer,
+            coalescingKey: "destination-status"
+        ), prioritized: true), "destination status retains its priority slot")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([23]),
+            label: "maneuver",
+            writeClass: .navigationSnapshot,
+            coalescingKey: DeviceBLEProtocol.navigationSnapshotCoalescingKey
+        ), prioritized: true), "maneuver has a dedicated fourth priority slot")
+        assertEqual(priorityCapacityQueue.count, 4,
+                    "workout, destination, and maneuver priority traffic coexist")
+        assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(
+                data: Data([24]),
+                label: "new-workout-core",
+                writeClass: .workoutTelemetry,
+                coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
+            ),
+            NavigationWrite(
+                data: Data([25]),
+                label: "new-workout-extended",
+                writeClass: .workoutTelemetry,
+                coalescingKey:
+                    DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+            )
+        ]), "new workout pair replaces only its prior complete pair")
+        var priorityCapacityWrites: [Data] = []
+        priorityCapacityQueue.flush(canSend: { true }) {
+            priorityCapacityWrites.append($0.data)
+        }
+        assertEqual(
+            priorityCapacityWrites,
+            [Data([22]), Data([23]), Data([24]), Data([25])],
+            "workout replacement preserves destination and maneuver priority state"
+        )
+        assertEqual(
+            priorityCapacityQueue.metrics.coalescedFrames(
+                for: .workoutTelemetry
+            ),
+            2,
+            "atomic workout replacement is recorded as class coalescing"
+        )
+
+        var dropMetricsQueue = NavigationWriteQueue(maxCount: 1)
+        dropMetricsQueue.enqueue(NavigationWrite(
+            data: Data([30]),
+            label: "old-gps",
+            writeClass: .gpsPosition
+        ))
+        assert(dropMetricsQueue.enqueue(NavigationWrite(
+            data: Data([31]),
+            label: "new-setting",
+            writeClass: .settingsControl
+        )), "ordinary overflow evicts the oldest packet")
+        assertEqual(dropMetricsQueue.metrics.droppedFrames(for: .gpsPosition), 1,
+                    "drop metrics attribute capacity eviction to packet class")
+
+        var uptime: TimeInterval = 10
+        var ageQueue = NavigationWriteQueue(
+            maxCount: 1,
+            now: { uptime }
+        )
+        assert(ageQueue.enqueueCoalescing(gpsWrite(5), prioritized: false),
+               "age fixture admits one pending GPS state")
+        uptime = 10.25
+        ageQueue.noteRetryScheduled()
+        uptime = 10.5
+        assert(ageQueue.enqueueCoalescing(gpsWrite(6), prioritized: false),
+               "coalescing retains the active transport retry interval")
+        uptime = 11
+        assertEqual(ageQueue.metrics.oldestPendingAgeMs, 500,
+                    "oldest age follows the newest pending GPS replacement")
+        assertEqual(ageQueue.metrics.retryAgeMs, 750,
+                    "retry age survives replacement while backpressure remains active")
     }
 
     static func testDeviceBLEProtocolConstants() {
@@ -11095,6 +11341,34 @@ struct NavigationProtocolTests {
         manager.isNavigationReady = true
         assert(manager.sendNavigationData("2|120|Turn left"), "BLEManager should write after navigation characteristic readiness")
         assertEqual(sentPackets, ["2|120|Turn left"], "BLEManager writes encoded navigation packet")
+
+        let stalledManager = BLEManager()
+        stalledManager.installNavigationWriteQueueForTesting(
+            maxCount: 2,
+            priorityMaxCount: 2
+        )
+        var transportReady = false
+        var recoveredPackets: [String] = []
+        stalledManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: NavigationPacketBuilder.protocolMaxBytes,
+            expectsWriteResponse: true,
+            canSend: { transportReady },
+            write: { data in
+                recoveredPackets.append(String(data: data, encoding: .utf8) ?? "")
+            }
+        ))
+        stalledManager.isConnected = true
+        stalledManager.isNavigationReady = true
+        assert(stalledManager.sendNavigationData("2|120|Turn left"),
+               "first stalled maneuver snapshot is queued")
+        assert(stalledManager.sendNavigationData("3|80|Turn right"),
+               "new stalled maneuver snapshot replaces its predecessor")
+        assertEqual(recoveredPackets, [],
+                    "stalled transport sends no premature maneuver state")
+        transportReady = true
+        stalledManager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(recoveredPackets, ["3|80|Turn right"],
+                    "transport recovery sends only the newest complete maneuver snapshot")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
