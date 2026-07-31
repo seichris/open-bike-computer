@@ -9,6 +9,7 @@
 
 - [Offline-map build and SD-card installation](offline-map-build-and-sd-install.md)
 - [Map-stream rollout runbook](map-stream-rollout-runbook.md)
+- [Firmware power management](firmware-power-management.md)
 - [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
 - [Waveshare AMOLED 2.06 audio bring-up](waveshare-amoled-206-audio-bringup.md)
 - [App Store privacy disclosures](app-store-privacy-disclosures.md)
