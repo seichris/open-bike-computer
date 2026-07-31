@@ -31,18 +31,15 @@ struct PowerButtonEvents {
 bool begin();
 bool isAvailable();
 bool readRegister(uint8_t reg, uint8_t &value);
-bool writeRegister(uint8_t reg, uint8_t value);
 bool readPowerStatus(PowerStatus &status);
 bool readBatteryStatus(uint8_t &percentage, bool &charging);
 bool readBatteryPercentage(uint8_t &percentage);
 bool setPowerButtonEventMonitoring(bool enabled);
 bool readAndClearPowerButtonEvents(PowerButtonEvents &events);
-
-bool enableDisplayRails();
-bool enablePeripheralRails();
-bool setDisplayPower(bool enabled);
-bool setPeripheralPower(bool enabled);
-bool restoreDefaultRails();
+// Probe and report the PMIC state without changing any power-rail register.
+// The board-specific rail map has not been electrically validated, so the
+// vendor/factory configuration remains authoritative.
+bool initializePowerState();
 
 } // namespace waveshare_board::axp2101
 

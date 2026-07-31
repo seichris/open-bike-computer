@@ -1095,11 +1095,11 @@ void setup() {
 #endif
 
 #ifdef WAVESHARE_AMOLED_206
-  // OTA rollback/recovery can leave the PMU display rail off. Bring the rail
-  // up before CO5300 init so the panel does not stay black after a bad image.
+  // Recover the shared bus before PMIC inspection on the 2.06-inch board.
+  // Power-output registers remain at their factory/eFuse configuration.
   waveshare_board::recoverI2CBus();
   waveshare_board::i2c::configureBus();
-  waveshare_board::enablePowerRails();
+  waveshare_board::initializePowerManagement();
   initTFT();
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare 2.06 display probe complete; holding before I2C/PMU/SD/LVGL/BLE/touch init");
@@ -1117,7 +1117,7 @@ void setup() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175)
-  waveshare_board::enablePowerRails();
+  waveshare_board::initializePowerManagement();
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)

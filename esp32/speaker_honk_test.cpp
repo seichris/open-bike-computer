@@ -30,7 +30,7 @@ void setup() {
 
   waveshare_board::i2c::configureBus();
 #ifdef WAVESHARE_AMOLED_175
-  waveshare_board::enablePowerRails();
+  waveshare_board::initializePowerManagement();
 #endif
   if (!waveshare_board::speaker::begin()) {
     Serial.println("Speaker test: initialization failed");

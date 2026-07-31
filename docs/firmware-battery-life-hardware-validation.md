@@ -293,7 +293,7 @@ automatic light sleep can be considered for production enablement.
 
 Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
 default advertising and connection policy, the SD bus remains at 4 MHz, PMU
-rails retain their known-good masks, and the AXP2101 button status remains on
+rails retain their factory/eFuse state, and the AXP2101 button status remains on
 the 250 ms housekeeping deadline. No lower-power radio, rail, or SD setting is
 selected without physical evidence.
 

@@ -95,7 +95,7 @@ Temporary reference clone used during bring-up:
 | MCU | ESP32-S3R8 | internal | Dual-core LX7 up to 240 MHz; 8 MB PSRAM; external 32 MB flash |
 | Display Driver | CO5300 | QSPI | 2.06" AMOLED, 410x502, 16.7M colors |
 | Touch Controller | FT3168 | I2C | Vendor `FT3168_DEVICE_ADDRESS` is `0x38`; docs describe 10 kHz-400 kHz I2C support |
-| Power Management | AXP2101 | I2C | PMU, charging, battery management, multiple output rails |
+| Power Management | AXP2101 | I2C | PMU, charging, battery management; output-rail ownership is not yet electrically validated |
 | RTC | PCF85063ATL | I2C | Address `0x51`; RTC rail is powered through AXP2101/battery path |
 | IMU | QMI8658C | I2C | Schematic ties SDO/SAO low, so expected address is `0x6B` |
 | Audio Codec | ES8311 | I2C/I2S | Audio codec used by vendor `08_ES8311` demo |
@@ -335,7 +335,7 @@ card, and factory firmware.
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
 | IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
 | Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM; app selects the sound and `0...100%` playback volume, defaulting to 70% |
-| Power / Battery | Partially verified | AXP2101 status readable; current app preserves rails during boot; deeper sleep/rail shutdown still needs testing |
+| Power / Battery | Partially verified | AXP2101 status readable; current app preserves factory/eFuse rail state during boot and sleep; firmware rail control is intentionally disabled pending an electrically validated rail map |
 
 ## 2.06 Bring-up Rules
 
@@ -365,7 +365,7 @@ card, and factory firmware.
 
 | Component | IC | Bus | Address / Notes |
 |---|---|---|---|
-| Power Management | AXP2101 | I2C | 0x34; controls display/peripheral/RTC rails |
+| Power Management | AXP2101 | I2C | 0x34; provides board power and charging; firmware treats output-rail registers as read-only |
 | Touch Controller | CST9217 | I2C | 0x5A; interrupt on GPIO21 is a hint, not sole trigger |
 | I/O Expander | TCA9554 | I2C | 0x20; controls CST9217 reset on P0 |
 | RTC | PCF85063 | I2C | 0x51; on AXP2101 RTC rail, but no full power-removal retention on the tested board |
@@ -523,32 +523,33 @@ changing the amplifier or gain assumptions.
 
 **Verified:** This approach successfully initializes the CST9217 touch controller.
 
-### 2. Power Sequencing (AXP2101)
+### 2. PMIC Rail Safety (AXP2101)
 
-The display, touch peripherals, and ES8311 codec analog supply are powered by
-the AXP2101 PMU. You **must** initialize the AXP2101 via I2C and enable the
-relevant ALDO/DLDO voltage rails before these devices will respond.
+The AXP2101 provides board power and charging, but the populated load behind
+every programmable output has not been electrically validated. Waveshare's
+standard 1.75-inch display and ES8311 examples initialize those peripherals
+without programming AXP2101 output registers. Firmware must therefore preserve
+the PMIC's factory/eFuse rail configuration.
 
-**Initialization sequence:**
-```cpp
-Wire.beginTransmission(0x34);
-Wire.write(0x90); Wire.write(0x9D); // Enable ALDO1 plus display/peripheral rails
-Wire.endTransmission();
-// Enable ALDO1-4, BLDO1-2 similarly on registers 0x92-0x97
-```
-
-If the screen is black, it is likely an AXP2101 configuration issue, not a pinout error.
+Safety rules:
+- Probe AXP2101 at `0x34` and read status for diagnostics only.
+- Do not write DCDC control/voltage registers `0x80`-`0x86` or LDO
+  control/voltage registers `0x90`-`0x9A` during boot, display inactivity,
+  light sleep, or deep sleep.
+- Turn the AMOLED panel off with its controller command. Do not assume an
+  AXP2101 enable bit belongs exclusively to the display or another peripheral.
+- A black screen is not sufficient evidence that an AXP rail should be forced;
+  check the reset log, QSPI pins, build target, and panel initialization first.
+- If an older firmware image already changed persistent PMIC state, fully
+  remove USB and battery power before validating the safe firmware.
 
 Verified firmware behavior:
-- AXP2101 is found at `0x34`.
-- Enable register `0x90` should read back `0x9D` after display, peripheral, and
-  codec analog rails are enabled. Bit 0 (ALDO1) supplies the ES8311 `AVDD`;
-  leaving it clear makes speaker playback silent after a cold boot.
-- The normal peripheral shutdown path clears ALDO1 together with the other
-  managed 1.75 rails before deep sleep; it is enabled again during boot.
-- Voltage register readback can be noisy on this shared I2C bus; treat final
-  enable-register readback and successful peripheral initialization as the
-  stronger boot signal.
+- AXP2101 is found at `0x34`, and status plus the current LDO-enable value are
+  logged without modifying them.
+- A register-policy guard rejects future writes to the AXP2101 DCDC/LDO output
+  control blocks.
+- Deep and light sleep preserve PMIC output state; the panel, buses, and radio
+  are managed independently.
 - On USB, observed PMU status reports VBUS present and `battery=absent`.
 - `POWER_SAVE` is intentionally not enabled for `WAVESHARE_AMOLED_175`.
   Temporary test builds with `POWER_SAVE` reproduced Bluetooth/IPC instability,

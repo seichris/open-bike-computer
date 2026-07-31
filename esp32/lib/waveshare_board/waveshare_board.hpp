@@ -19,32 +19,8 @@ constexpr uint8_t PCF85063_ADDR = 0x51;
 constexpr uint8_t QMI8658_ADDR_PRIMARY = 0x6B;
 constexpr uint8_t QMI8658_ADDR_FALLBACK = 0x6A;
 
-constexpr uint8_t AXP2101_LDO_ENABLE_REG = 0x90;
-constexpr uint8_t AXP2101_ALDO1_VOLTAGE_REG = 0x92;
-constexpr uint8_t AXP2101_ALDO2_VOLTAGE_REG = 0x93;
-constexpr uint8_t AXP2101_ALDO3_VOLTAGE_REG = 0x94;
-constexpr uint8_t AXP2101_ALDO4_VOLTAGE_REG = 0x95;
-constexpr uint8_t AXP2101_BLDO1_VOLTAGE_REG = 0x96;
-constexpr uint8_t AXP2101_BLDO2_VOLTAGE_REG = 0x97;
-constexpr uint8_t AXP2101_LDO_VOLTAGE_3V3 = 0x1C;
-constexpr uint8_t AXP2101_LDO_VOLTAGE_MASK = 0x1F;
-constexpr uint8_t AXP2101_DISPLAY_ENABLE_MASK = 0x80;
-constexpr uint8_t AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK = 0x1C;
-#ifdef WAVESHARE_AMOLED_175
-constexpr uint8_t AXP2101_AUDIO_ENABLE_MASK = 0x01;
-constexpr uint8_t AXP2101_MANAGED_LDO_ENABLE_MASK =
-    AXP2101_AUDIO_ENABLE_MASK | AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
-constexpr uint8_t AXP2101_KNOWN_GOOD_LDO_ENABLES =
-    AXP2101_DISPLAY_ENABLE_MASK | AXP2101_MANAGED_LDO_ENABLE_MASK;
-#else
-constexpr uint8_t AXP2101_MANAGED_LDO_ENABLE_MASK =
-    AXP2101_MANAGED_PERIPHERAL_ENABLE_MASK;
-constexpr uint8_t AXP2101_KNOWN_GOOD_LDO_ENABLES = 0x9C;
-#endif
-constexpr uint8_t AXP2101_KNOWN_GOOD_LDO_RESET = 0x1C;
-
 void recoverI2CBus();
-void enablePowerRails();
+void initializePowerManagement();
 
 } // namespace waveshare_board
 

@@ -45,7 +45,7 @@ peripheral transaction part of the correctness boundary.
 | Connected, display off | 45 seconds without meaningful activity | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
 | Transfer or attention hold | Device transfer, activation, pairing, or audio needs immediate feedback | Display stays awake and required PM locks protect the operation | Hold ends when the operation ends |
 | Disconnected countdown | BLE is disconnected and the configured timeout is nonzero | Firmware remains available for reconnection | Reconnection cancels the countdown; expiry enters deep sleep |
-| Deep sleep | Disconnected timeout expires | RTC wake configuration only; panel and peripheral rails, buses, and radio are shut down | BOOT/PWR button on GPIO0 |
+| Deep sleep | Disconnected timeout expires | Panel is commanded off; buses and radio stop; unvalidated AXP2101 rails remain at their factory/eFuse state | BOOT/PWR button on GPIO0 |
 
 Display-off while connected is not deep sleep. The BLE connection is retained,
 and touch can wake the UI without requiring a reboot or reconnection.
@@ -57,10 +57,10 @@ The disconnected sleep timeout is BLE setting `15`. Supported values are 60,
 default is 120 seconds. An unclaimed device receives a minimum 600-second
 registration grace period unless the feature is disabled.
 
-Before deep sleep, firmware turns off the panel and peripheral rails, stops the
-SPI and I2C buses, and shuts down the radio. This existing deep-sleep path
-provides the lowest-power state and is independent of the connected light-sleep
-experiment.
+Before deep sleep, firmware commands the panel off, stops the SPI and I2C buses,
+and shuts down the radio. It does not rewrite AXP2101 output-enable or voltage
+registers because the populated rail map has not been electrically validated.
+This path is independent of the connected light-sleep experiment.
 
 ## Display inactivity policy
 

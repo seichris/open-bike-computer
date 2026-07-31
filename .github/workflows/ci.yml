@@ -135,6 +135,10 @@ jobs:
             -o /tmp/test_power_management_policy
           /tmp/test_power_management_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_axp2101_register_policy.cpp \
+            -o /tmp/test_axp2101_register_policy
+          /tmp/test_axp2101_register_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
             -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
             tools/tests/test_power_management_policy.cpp \
             -o /tmp/test_power_management_policy_light_sleep
