@@ -5,6 +5,10 @@
 # and maintenance control plane may advance to carry a rollout approval while
 # the hardware-tested worker remains pinned. Keep each source commit and digest
 # in sync through update_image.py; never replace a digest with a mutable tag.
+#
+# The current pins predate the repository relocation and expose `/app/backend`
+# and `/app/config`. New images retain aliases at those paths so control-plane
+# and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
   control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:e706c8792d1067688b3d080e1b3bff17082c4a5d7021215cc702984a507f91b7
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:a24b2ed3c3c2ff762381227b005a199a5fbdfa7b991bb56bd5a06849222cb1f5
@@ -15,7 +19,7 @@ services:
     environment:
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
-      MAP_PLATFORM_SOURCE_INDEX: /app/map-platform/backend/config/source-regions.json
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
       MAP_PLATFORM_ADMIN_TOKEN: ${MAP_PLATFORM_ADMIN_TOKEN:-}
       MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
       MAP_PLATFORM_INSTALLATION_SECRET: ${MAP_PLATFORM_INSTALLATION_SECRET:?set MAP_PLATFORM_INSTALLATION_SECRET in Coolify secrets}
@@ -45,7 +49,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: ${MAP_PLATFORM_MAP_STREAM_PROMOTION_ID:-}
-      MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/map-platform/config/map-stream-rollout-approvals.json
+      MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
     volumes:
@@ -65,7 +69,7 @@ services:
     environment:
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
-      MAP_PLATFORM_SOURCE_INDEX: /app/map-platform/backend/config/source-regions.json
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
       MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
       MAP_PLATFORM_MAX_ACTIVE_JOBS: ${MAP_PLATFORM_MAX_ACTIVE_JOBS:-25}
       MAP_PLATFORM_JOB_RETENTION_DAYS: ${MAP_PLATFORM_JOB_RETENTION_DAYS:-30}
@@ -100,7 +104,7 @@ services:
     environment:
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
-      MAP_PLATFORM_SOURCE_INDEX: /app/map-platform/backend/config/source-regions.json
+      MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
       MAP_PLATFORM_JOB_RETENTION_DAYS: ${MAP_PLATFORM_JOB_RETENTION_DAYS:-30}
       MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: ${MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS:-3600}
       MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS: ${MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS:-100}

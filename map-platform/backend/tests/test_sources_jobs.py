@@ -21,7 +21,7 @@ class SourceAndJobTests(unittest.TestCase):
             name="Singapore",
             url="https://example.invalid/sg.osm.pbf",
             bounds=Bounds(103.0, 1.0, 104.5, 1.8),
-            local_path="map-platform/backend/data/source-pbf/sg.osm.pbf",
+            local_path="backend/data/source-pbf/sg.osm.pbf",
         )
         self.germany = SourceRegion(
             id="de",
@@ -29,7 +29,7 @@ class SourceAndJobTests(unittest.TestCase):
             name="Germany",
             url="https://example.invalid/de.osm.pbf",
             bounds=Bounds(5.5, 47.0, 15.5, 55.2),
-            local_path="map-platform/backend/data/source-pbf/de.osm.pbf",
+            local_path="backend/data/source-pbf/de.osm.pbf",
         )
 
     def test_resolves_smallest_containing_source(self):
@@ -107,7 +107,7 @@ class SourceAndJobTests(unittest.TestCase):
             source = index.resolve_for_bounds(Bounds(136.75, 35.05, 137.04, 35.29))
 
         self.assertEqual(source.id, "geofabrik-japan")
-        self.assertEqual(source.local_path, "map-platform/backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
+        self.assertEqual(source.local_path, "backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
         self.assertEqual(source.preview_geometry["type"], "Polygon")
 
     def test_static_geofabrik_preview_geometry_is_deferred_to_catalog_provider(self):
@@ -150,7 +150,7 @@ class SourceAndJobTests(unittest.TestCase):
             preview_geometry = provider.preview_geometry_for_source(source)
 
         self.assertEqual(source.id, "geofabrik-asia-malaysia-singapore-brunei")
-        self.assertEqual(source.local_path, "map-platform/backend/data/source-pbf/malaysia-singapore-brunei-latest.osm.pbf")
+        self.assertEqual(source.local_path, "backend/data/source-pbf/malaysia-singapore-brunei-latest.osm.pbf")
         self.assertIsNone(source.preview_geometry)
         self.assertEqual(preview_geometry, geometry)
 

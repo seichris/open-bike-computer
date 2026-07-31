@@ -18,6 +18,12 @@ from map_platform.map_stream_build_identity import WORKER_SOURCE_ROOTS  # noqa: 
 
 
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+WORKER_CLASSIFICATION_ROOTS = WORKER_SOURCE_ROOTS + (
+    # Docker applies this file before copying and hashing the worker source.
+    # Treat every change conservatively because a rule can alter the effective
+    # worker tree without changing a path under WORKER_SOURCE_ROOTS.
+    ".dockerignore",
+)
 IMAGE_INPUT_ROOTS = (
     ".dockerignore",
     ".github/workflows/map-platform-image.yml",
@@ -31,6 +37,7 @@ IMAGE_INPUT_ROOTS = (
 PROMOTION_INPUT_ROOTS = IMAGE_INPUT_ROOTS + (
     ".github/workflows/map-platform-ci.yml",
     "map-platform/deploy/detect_worker_change.py",
+    "map-platform/deploy/export_pending_compose.py",
     "map-platform/deploy/select_worker_promotion.py",
     "map-platform/deploy/update_image.py",
     "map-platform/deploy/verify_registry_images.py",
@@ -45,7 +52,7 @@ def normalize_repo_path(value: str) -> str:
 
 
 def worker_inputs_changed(paths: Iterable[str]) -> bool:
-    roots = tuple(root.rstrip("/") for root in WORKER_SOURCE_ROOTS)
+    roots = tuple(root.rstrip("/") for root in WORKER_CLASSIFICATION_ROOTS)
     for raw_path in paths:
         path = normalize_repo_path(raw_path)
         if any(path == root or path.startswith(f"{root}/") for root in roots):

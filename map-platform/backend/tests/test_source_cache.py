@@ -4,10 +4,62 @@ import unittest
 from pathlib import Path
 
 from map_platform.models import Bounds, SourceRegion
-from map_platform.source_cache import SourceCache, SourceCacheError
+from map_platform.source_cache import (
+    SourceCache,
+    SourceCacheError,
+    default_backend_data_root,
+)
 
 
 class SourceCacheTests(unittest.TestCase):
+    def test_default_data_root_reuses_pre_relocation_local_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            relocated = root / "map-platform" / "backend" / "data"
+            relocated.mkdir(parents=True)
+            (relocated / ".gitkeep").touch()
+            (relocated / ".DS_Store").touch()
+            legacy_jobs = root / "backend" / "data" / "jobs"
+            legacy_jobs.mkdir(parents=True)
+            (legacy_jobs / "existing.json").write_text("{}")
+
+            self.assertEqual(
+                default_backend_data_root(root),
+                root / "backend" / "data",
+            )
+            self.assertEqual(
+                SourceCache(root).data_root,
+                root / "backend" / "data",
+            )
+
+    def test_default_data_root_ignores_legacy_finder_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "backend" / "data"
+            legacy.mkdir(parents=True)
+            (legacy / ".DS_Store").touch()
+
+            self.assertEqual(
+                default_backend_data_root(root),
+                root / "map-platform" / "backend" / "data",
+            )
+
+    def test_default_data_root_rejects_ambiguous_local_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_jobs = root / "backend" / "data" / "jobs"
+            legacy_jobs.mkdir(parents=True)
+            (legacy_jobs / "existing.json").write_text("{}")
+            relocated_jobs = root / "map-platform" / "backend" / "data" / "jobs"
+            relocated_jobs.mkdir(parents=True)
+            (relocated_jobs / "new.json").write_text("{}")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "set MAP_PLATFORM_DATA_ROOT explicitly",
+            ):
+                default_backend_data_root(root)
+
     def test_maps_legacy_backend_data_paths_to_the_data_volume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

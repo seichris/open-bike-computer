@@ -25,6 +25,12 @@ COPY map-platform/backend /app/map-platform/backend
 COPY map-platform/config /app/map-platform/config
 COPY tools/OSM_Extract /app/tools/OSM_Extract
 
+# Production advances the control-plane and worker pins independently. Keep the
+# pre-relocation container paths available while either pin can still reference
+# an image built before the repository layout changed.
+RUN ln -s /app/map-platform/backend /app/backend \
+  && ln -s /app/map-platform/config /app/config
+
 RUN python -m pip install '/app/map-platform/backend[api,object-storage]' \
   && python -m pip install shapely "matplotlib<3.6" pyyaml
 

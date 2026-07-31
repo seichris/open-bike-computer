@@ -38,6 +38,10 @@ class CIWorkflowSplitTests(unittest.TestCase):
 
         self.assertIn('      - ".github/workflows/map-platform-ci.yml"', image_workflow)
         self.assertNotIn('      - ".github/workflows/ci.yml"', image_workflow)
+        self.assertIn(
+            "python3 map-platform/deploy/export_pending_compose.py",
+            image_workflow,
+        )
         self.assertIn("gh workflow run map-platform-ci.yml", image_workflow)
         self.assertNotIn("gh workflow run ci.yml", image_workflow)
 

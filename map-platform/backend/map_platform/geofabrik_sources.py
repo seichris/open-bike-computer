@@ -203,7 +203,7 @@ class GeofabrikSourceProvider:
                 name=str(properties.get("name") or source_id),
                 url=str(pbf_url),
                 bounds=bounds,
-                local_path=f"map-platform/backend/data/source-pbf/geofabrik/{safe_id}-latest.osm.pbf",
+                local_path=f"backend/data/source-pbf/geofabrik/{safe_id}-latest.osm.pbf",
                 license="ODbL-1.0",
                 preview_geometry=geometry,
             ),

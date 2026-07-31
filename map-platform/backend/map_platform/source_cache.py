@@ -26,6 +26,30 @@ class CachedSource:
     cached_at: str
 
 
+def default_backend_data_root(repo_root: str | Path) -> Path:
+    root = Path(repo_root)
+    relocated = root / "map-platform" / "backend" / "data"
+    legacy = root / "backend" / "data"
+    metadata_entries = {".gitkeep", ".DS_Store"}
+
+    def has_runtime_state(path: Path) -> bool:
+        try:
+            return any(child.name not in metadata_entries for child in path.iterdir())
+        except FileNotFoundError:
+            return False
+
+    legacy_has_state = has_runtime_state(legacy)
+    relocated_has_state = has_runtime_state(relocated)
+    if legacy_has_state and relocated_has_state:
+        raise RuntimeError(
+            "both backend/data and map-platform/backend/data contain local "
+            "runtime state; set MAP_PLATFORM_DATA_ROOT explicitly"
+        )
+    if legacy_has_state:
+        return legacy
+    return relocated
+
+
 class SourceCache:
     def __init__(
         self,
@@ -39,7 +63,7 @@ class SourceCache:
         self.data_root = (
             Path(data_root)
             if data_root
-            else self.repo_root / "map-platform" / "backend" / "data"
+            else default_backend_data_root(self.repo_root)
         )
         self.metadata_path = (
             Path(metadata_path)

@@ -45,7 +45,11 @@ from .rate_limits import (
     RateLimitPolicy,
 )
 from .request_limits import RequestBodyLimitMiddleware
-from .source_cache import SourceCache, SourceCacheError
+from .source_cache import (
+    SourceCache,
+    SourceCacheError,
+    default_backend_data_root,
+)
 from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
@@ -53,7 +57,8 @@ from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 def create_app():
     if _FASTAPI_IMPORT_ERROR is not None:
         raise RuntimeError(
-            "Install backend API dependencies with `pip install -e backend[api]`"
+            "Install backend API dependencies with "
+            "`python -m pip install -e '.[api]'` from map-platform/backend"
         ) from _FASTAPI_IMPORT_ERROR
 
     repo_root = Path(os.environ.get("MAP_PLATFORM_REPO_ROOT", Path(__file__).resolve().parents[3]))
@@ -63,11 +68,11 @@ def create_app():
             repo_root / "map-platform" / "backend" / "config" / "source-regions.json",
         )
     )
-    data_root = Path(
-        os.environ.get(
-            "MAP_PLATFORM_DATA_ROOT",
-            repo_root / "map-platform" / "backend" / "data",
-        )
+    configured_data_root = os.environ.get("MAP_PLATFORM_DATA_ROOT")
+    data_root = (
+        Path(configured_data_root)
+        if configured_data_root
+        else default_backend_data_root(repo_root)
     )
     max_request_body_bytes = int(
         os.environ.get("MAP_PLATFORM_MAX_REQUEST_BODY_BYTES", "2097152")

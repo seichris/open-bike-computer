@@ -13,9 +13,29 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
+import map_platform.api as api_module
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
 from map_platform.models import MapJob
+
+
+class BackendDependencyHintTests(unittest.TestCase):
+    def test_missing_api_extra_uses_documented_backend_working_directory(self):
+        with patch.object(
+            api_module,
+            "_FASTAPI_IMPORT_ERROR",
+            ImportError("missing FastAPI"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                api_module.create_app()
+
+        command = "python -m pip install -e '.[api]'"
+        self.assertIn(command, str(raised.exception))
+        editable_target = command.split("'")[1].split("[", 1)[0]
+        documented_working_directory = Path(__file__).resolve().parents[1]
+        self.assertTrue(
+            (documented_working_directory / editable_target / "pyproject.toml").is_file()
+        )
 
 
 class MapJobRunAPITests(unittest.TestCase):

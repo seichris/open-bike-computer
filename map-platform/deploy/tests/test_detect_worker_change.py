@@ -18,7 +18,7 @@ SPEC.loader.exec_module(detect_worker_change)
 
 class DetectWorkerChangeTests(unittest.TestCase):
     def test_all_declared_worker_roots_are_classified_as_worker_changes(self) -> None:
-        for root in detect_worker_change.WORKER_SOURCE_ROOTS:
+        for root in detect_worker_change.WORKER_CLASSIFICATION_ROOTS:
             with self.subTest(root=root):
                 self.assertTrue(detect_worker_change.worker_inputs_changed([root]))
                 if "." not in Path(root).name:
@@ -39,6 +39,49 @@ class DetectWorkerChangeTests(unittest.TestCase):
                 ]
             )
         )
+
+    def test_dockerignore_only_git_range_moves_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.com"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"],
+                cwd=repo,
+                check=True,
+            )
+            dockerignore = repo / ".dockerignore"
+            dockerignore.write_text("backend/data\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+            before = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                text=True,
+            ).strip()
+
+            dockerignore.write_text(
+                "backend/data\nmap-platform/backend/map_platform/worker.py\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "commit", "-qam", "change worker context"],
+                cwd=repo,
+                check=True,
+            )
+            after = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                text=True,
+            ).strip()
+
+            paths = detect_worker_change.git_changed_paths(repo, before, after)
+            self.assertEqual([".dockerignore"], paths)
+            self.assertTrue(detect_worker_change.worker_inputs_changed(paths or []))
 
     def test_image_scope_matches_workflow_build_inputs(self) -> None:
         for root in detect_worker_change.IMAGE_INPUT_ROOTS:

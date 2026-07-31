@@ -184,7 +184,7 @@ test material. Neither public key may ever be accepted by an iOS or firmware
 production trust store. Regenerate the vector with:
 
 ```sh
-cd backend
+cd map-platform/backend
 python tools/generate_map_stream_golden.py \
   --output tests/fixtures/map_stream_v1_golden.txt
 ```

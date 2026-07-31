@@ -38,6 +38,35 @@ class UpdateImageTests(unittest.TestCase):
             r"^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$",
         )
 
+    def test_relocation_keeps_runtime_paths_compatible_with_existing_pins(self) -> None:
+        compose = self.compose.read_text(encoding="utf-8")
+        dockerfile = (
+            self.compose.parents[1] / "backend" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            3,
+            compose.count(
+                "MAP_PLATFORM_SOURCE_INDEX: "
+                "/app/backend/config/source-regions.json"
+            ),
+        )
+        self.assertEqual(
+            1,
+            compose.count(
+                "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: "
+                "/app/config/map-stream-rollout-approvals.json"
+            ),
+        )
+        self.assertIn(
+            "ln -s /app/map-platform/backend /app/backend",
+            dockerfile,
+        )
+        self.assertIn(
+            "ln -s /app/map-platform/config /app/config",
+            dockerfile,
+        )
+
     def test_control_plane_can_advance_without_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = self.copy_compose(directory)

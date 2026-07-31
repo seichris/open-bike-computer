@@ -13,6 +13,7 @@ on:
       - "map-platform/config/map-stream-rollout-approvals.json"
       - "map-platform/config/map-stream-trust.json"
       - "map-platform/deploy/detect_worker_change.py"
+      - "map-platform/deploy/export_pending_compose.py"
       - "map-platform/deploy/select_worker_promotion.py"
       - "map-platform/deploy/update_image.py"
       - "map-platform/deploy/verify_registry_images.py"
@@ -206,8 +207,9 @@ jobs:
             exit 1
           fi
           git fetch --no-tags origin "$pending_sha"
-          git show "${pending_sha}:map-platform/deploy/compose.yaml" \
-            > "$RUNNER_TEMP/pending-map-platform-compose.yaml"
+          python3 map-platform/deploy/export_pending_compose.py \
+            --commit "$pending_sha" \
+            --output "$RUNNER_TEMP/pending-map-platform-compose.yaml"
           pending_state="$(python3 map-platform/deploy/update_image.py \
             "$RUNNER_TEMP/pending-map-platform-compose.yaml" \
             --check)"

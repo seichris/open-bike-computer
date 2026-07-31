@@ -16,7 +16,7 @@ from .map_stream_build_identity import (
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .rate_limits import purge_expired_rate_limits
-from .source_cache import SourceCache
+from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
 from .worker import (
     ExpiredArtifactCleanupError,
@@ -320,7 +320,7 @@ def main() -> int:
     data_root = (
         Path(args.data_root).resolve()
         if args.data_root
-        else repo_root / "map-platform" / "backend" / "data"
+        else default_backend_data_root(repo_root)
     )
     source_index_path = (
         Path(args.source_index).resolve()
