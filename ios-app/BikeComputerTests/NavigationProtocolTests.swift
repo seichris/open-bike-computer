@@ -699,7 +699,7 @@ struct NavigationProtocolTests {
     }
 
     static func testBikeMapStreamGoldenVector() {
-        let fixtureURL = URL(fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt")
+        let fixtureURL = URL(fileURLWithPath: "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt")
         guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
             assert(false, "map stream golden fixture is readable")
             return
@@ -872,7 +872,7 @@ struct NavigationProtocolTests {
     }
 
     static func testBikeMapStreamArtifactValidation() {
-        let fixtureURL = URL(fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt")
+        let fixtureURL = URL(fileURLWithPath: "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt")
         guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
             assert(false, "map stream artifact fixture is readable")
             return
@@ -5283,7 +5283,7 @@ struct NavigationProtocolTests {
         relaunchedPersistedManager.forgetPendingMapJob()
 
         let signedFixtureURL = URL(
-            fileURLWithPath: "backend/tests/fixtures/map_stream_v1_golden.txt"
+            fileURLWithPath: "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
         )
         let signedFixtureText = try! String(contentsOf: signedFixtureURL, encoding: .utf8)
         let signedFixture = Dictionary(

@@ -1,0 +1,17 @@
+# Map Platform
+
+This directory groups the hosted offline-map service and its operational
+configuration:
+
+- [`backend/`](backend/) contains the FastAPI application, workers, tests, and
+  local Docker Compose setup.
+- [`config/`](config/) contains the checked-in map-stream trust, rollout, and
+  hardware-gate configuration.
+- [`deploy/`](deploy/) contains the digest-pinned production Compose lock and
+  image-promotion tooling.
+
+The map-generation pipeline remains in [`tools/OSM_Extract/`](../tools/OSM_Extract/)
+because it is independently licensed and usable outside the hosted service.
+
+Start with the [backend guide](backend/README.md) for local development or the
+[deployment guide](deploy/README.md) for production operations.

@@ -44,10 +44,15 @@ tools/OSM_Extract/pbf
 tools/OSM_Extract/__pycache__
 tools/OSM_Extract/conf/test*
 
-backend/.venv/
+map-platform/backend/.venv/
 *.egg-info/
-backend/data/*
-!backend/data/.gitkeep
+map-platform/backend/data/*
+!map-platform/backend/data/.gitkeep
+
+# Local state created before the backend moved under map-platform/. Keep it
+# ignored while existing checkouts continue to consume it during the migration.
+backend/.venv/
+backend/data/
 
 # waveshare_demo/
 waveshare_demo//IceNav-v3/

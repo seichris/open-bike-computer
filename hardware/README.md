@@ -10,21 +10,21 @@ connected-device bring-up tests on Chris's Mac.
 
 ## Documentation Library
 
-The vendor PDFs are stored locally under [`reference/`](reference/). Every PDF
-filename starts with `1.75 - ` or `2.06 - ` to identify its board. Manuals for
-components shared by both boards are available under both prefixes. The
-ESP32-S3 manuals use separate revisions because the 1.75 documentation and
-2.06 wiki currently link different copies.
+The vendor PDFs are stored locally under [`reference/`](reference/). Board-only
+documents live under `reference/boards/`, while manuals for components shared
+by both boards live once under `reference/components/`. The ESP32-S3 manuals
+remain board-specific because the 1.75 documentation and 2.06 wiki currently
+link different revisions.
 
 ### ESP32-S3-Touch-AMOLED-1.75
 
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262)
 - [Official documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.75)
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75)
-- [Schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>)
-- [Dimension drawing](<reference/1.75 - esp32-s3-touch-amoled-1.75-dimensions.pdf>),
+- [Schematic](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-schematic.pdf)
+- [Dimension drawing](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-dimensions.pdf),
   extracted from the official [design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-3D.zip)
-- [1.75-B dimension drawing](<reference/1.75 - esp32-s3-touch-amoled-1.75-b-dimensions.pdf>),
+- [1.75-B dimension drawing](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-b-dimensions.pdf),
   extracted from the official [1.75-B design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-B-3D.zip)
 
 ### ESP32-S3-Touch-AMOLED-2.06
@@ -32,26 +32,26 @@ ESP32-S3 manuals use separate revisions because the 1.75 documentation and
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm)
 - [Official wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06)
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06)
-- [Schematic](<reference/2.06 - esp32-s3-touch-amoled-2.06-schematic.pdf>)
-- [Dimension drawing](<reference/2.06 - esp32-s3-touch-amoled-2.06-dimensions.pdf>)
+- [Schematic](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-schematic.pdf)
+- [Dimension drawing](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-dimensions.pdf)
 
 ### ESP32-S3 Manuals
 
-- [ESP32-S3 datasheet - current Espressif copy linked by the 1.75 documentation](<reference/1.75 - esp32-s3-datasheet-espressif.pdf>)
-- [ESP32-S3 technical reference manual - current Espressif copy linked by the 1.75 documentation](<reference/1.75 - esp32-s3-trm-espressif.pdf>)
-- [ESP32-S3 datasheet - Waveshare mirror linked by the 2.06 wiki](<reference/2.06 - esp32-s3-datasheet-waveshare.pdf>)
-- [ESP32-S3 technical reference manual - Waveshare mirror linked by the 2.06 wiki](<reference/2.06 - esp32-s3-trm-waveshare.pdf>)
+- [ESP32-S3 datasheet - current Espressif copy linked by the 1.75 documentation](reference/boards/waveshare-amoled-175/esp32-s3-datasheet-espressif.pdf)
+- [ESP32-S3 technical reference manual - current Espressif copy linked by the 1.75 documentation](reference/boards/waveshare-amoled-175/esp32-s3-trm-espressif.pdf)
+- [ESP32-S3 datasheet - Waveshare mirror linked by the 2.06 wiki](reference/boards/waveshare-amoled-206/esp32-s3-datasheet-waveshare.pdf)
+- [ESP32-S3 technical reference manual - Waveshare mirror linked by the 2.06 wiki](reference/boards/waveshare-amoled-206/esp32-s3-trm-waveshare.pdf)
 
 ### Component Manuals
 
 | Component | Boards | Local PDF |
 | --- | --- | --- |
-| QMI8658C IMU | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - qmi8658c-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - qmi8658c-datasheet.pdf>) |
-| PCF85063A RTC | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - pcf85063a-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - pcf85063a-datasheet.pdf>) |
-| AXP2101 PMU | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - axp2101-datasheet.pdf>) and [2.06 datasheet](<reference/2.06 - axp2101-datasheet.pdf>) |
-| ES8311 audio codec | 1.75 and 2.06 | [1.75 datasheet](<reference/1.75 - es8311-datasheet.pdf>), [1.75 user guide](<reference/1.75 - es8311-user-guide.pdf>), [2.06 datasheet](<reference/2.06 - es8311-datasheet.pdf>), and [2.06 user guide](<reference/2.06 - es8311-user-guide.pdf>) |
-| FT3168 touch controller | 2.06 | [Datasheet](<reference/2.06 - ft3168-datasheet.pdf>) |
-| ES7210 audio ADC | 2.06 | [Datasheet](<reference/2.06 - es7210-datasheet.pdf>) |
+| QMI8658C IMU | 1.75 and 2.06 | [Datasheet](reference/components/qmi8658c-datasheet.pdf) |
+| PCF85063A RTC | 1.75 and 2.06 | [Datasheet](reference/components/pcf85063a-datasheet.pdf) |
+| AXP2101 PMU | 1.75 and 2.06 | [Datasheet](reference/components/axp2101-datasheet.pdf) |
+| ES8311 audio codec | 1.75 and 2.06 | [Datasheet](reference/components/es8311-datasheet.pdf) and [user guide](reference/components/es8311-user-guide.pdf) |
+| FT3168 touch controller | 2.06 | [Datasheet](reference/boards/waveshare-amoled-206/ft3168-datasheet.pdf) |
+| ES7210 audio ADC | 2.06 | [Datasheet](reference/boards/waveshare-amoled-206/es7210-datasheet.pdf) |
 
 ### Software
 
@@ -476,7 +476,7 @@ This verified status supersedes older bring-up notes that described the 1.75"
 audio path as TBD/untested or reported that the ES8311 was not detected. The
 current status is backed by the physical production-image and audible-playback
 validation recorded in [PR #62](https://github.com/seichris/open-bike-computer/pull/62),
-the checked-in [1.75 schematic](<reference/1.75 - esp32-s3-touch-amoled-1.75-schematic.pdf>),
+the checked-in [1.75 schematic](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-schematic.pdf),
 Waveshare's [`08_ES8311` playback example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75/tree/main/examples/arduino/08_ES8311),
 the board-specific [production speaker driver](../esp32/lib/speaker/speaker.cpp),
 and the dedicated smoke-test environment in [PlatformIO](../esp32/platformio.ini).

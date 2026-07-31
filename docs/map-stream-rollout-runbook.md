@@ -36,7 +36,7 @@ umask 077
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
   -out /secure/location/map-prod-2026-01.pem
 chmod 600 /secure/location/map-prod-2026-01.pem
-python backend/tools/generate_map_stream_trust.py \
+python map-platform/backend/tools/generate_map_stream_trust.py \
   --inspect-private-key /secure/location/map-prod-2026-01.pem \
   --key-id map-prod-2026-01 \
   --created-at 2026-07-13 \
@@ -44,11 +44,11 @@ python backend/tools/generate_map_stream_trust.py \
 ```
 
 The command prints public registry material only. Add that object to
-`config/map-stream-trust.json`, sorted by `keyId`, then regenerate and verify:
+`map-platform/config/map-stream-trust.json`, sorted by `keyId`, then regenerate and verify:
 
 ```sh
-python backend/tools/generate_map_stream_trust.py --write
-python backend/tools/generate_map_stream_trust.py --check
+python map-platform/backend/tools/generate_map_stream_trust.py --write
+python map-platform/backend/tools/generate_map_stream_trust.py --check
 ```
 
 Review and commit the registry plus both generated outputs. The generator
@@ -65,7 +65,7 @@ dirty or unidentified candidate therefore fails closed before v2 selection.
 
 Build the worker image once for the candidate, publish it to the registry, and
 record both its immutable registry digest and
-`/app/config/map-stream-build-identity.json`. The contained
+`/app/map-platform/config/map-stream-build-identity.json`. The contained
 `producerBuildSha256` is derived during the image build from worker/pipeline
 source bytes plus Python dependencies, architecture-qualified system packages,
 and native platform/architecture inventory. The worker recomputes it at startup;
@@ -104,7 +104,7 @@ promotion record. It still requires valid installation credentials. Check
 
 Copy `docs/map-stream-hardware-validation-report.example.json` to a protected
 test-results location outside the repository. Record every scenario in
-`config/map-stream-hardware-gate.json` for both production targets. Shanghai
+`map-platform/config/map-stream-hardware-gate.json` for both production targets. Shanghai
 clean installs require three repetitions per target. The per-board absolute
 temperature ceilings live in that reviewed requirements file; a report cannot
 raise its own limit after results are known.
@@ -116,7 +116,7 @@ run must record the exact iOS build/git/component identity, firmware
 version/build/git SHA, artifact SHA-256, signed manifest receipt, derived
 producer build SHA-256, worker image digest, and signing-key ID/fingerprint. The
 two compatibility runs must use the exact predecessor identities in
-`config/map-stream-hardware-gate.json` and prove that the retained ZIP path was
+`map-platform/config/map-stream-hardware-gate.json` and prove that the retained ZIP path was
 selected. Record values from the app/device/artifact under test, not from notes
 or a mutable deployment label. Every stream run enforces bounded integer byte
 counters and a reviewed write-amplification ceiling; clean scenarios require
@@ -151,7 +151,7 @@ For `old_app_new_firmware` and `new_app_old_firmware`, set `artifactFormat` to
 no component SHA, so its `iosBuildSha256` is also `null`.
 
 ```sh
-python backend/tools/check_map_stream_hardware_gate.py \
+python map-platform/backend/tools/check_map_stream_hardware_gate.py \
   --check-report /secure/test-results/map-stream-report.json \
   --promotion-id msr-20260713-first-production
 ```
@@ -160,7 +160,7 @@ First record all required runs with `approval.approved=false`. After review,
 set the approval timestamp later than every run and identify the approver; then
 run the checker. When the report passes and its approval is explicit, the
 command prints a hash-bound public approval object. Add that object to
-`config/map-stream-rollout-approvals.json` in a reviewed PR. Do not commit the
+`map-platform/config/map-stream-rollout-approvals.json` in a reviewed PR. Do not commit the
 raw report if it contains device or operator data. The record binds the report
 bytes, exact requirements bytes, candidate git SHA for audit, derived producer
 build SHA-256 and immutable worker image digest for enforcement, exact firmware
@@ -184,7 +184,7 @@ For `percentage` and `all`, set `MAP_PLATFORM_MAP_STREAM_PROMOTION_ID` to an ID
 present in the checked-in approval registry. The approval PR is expected to be
 later than the tested source commit; that control-plane-only change does not
 alter the derived worker component identity. Keep the worker image anchor in
-`deploy/map-platform/compose.yaml` on the exact
+`map-platform/deploy/compose.yaml` on the exact
 `registry/repository@sha256:<digest>` reference exercised by the hardware report
 and deploy it without rebuilding it. The production lock passes that value as
 both the worker service image and the API/worker admission identity; the

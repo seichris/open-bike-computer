@@ -3,13 +3,14 @@ name: Map Platform CI
 on:
   push:
     paths:
+      - ".dockerignore"
       - ".github/workflows/map-platform-ci.yml"
       - ".github/workflows/map-platform-image.yml"
-      - "backend/**"
-      - "config/map-stream-hardware-gate.json"
-      - "config/map-stream-rollout-approvals.json"
-      - "config/map-stream-trust.json"
-      - "deploy/map-platform/**"
+      - "map-platform/backend/**"
+      - "map-platform/config/map-stream-hardware-gate.json"
+      - "map-platform/config/map-stream-rollout-approvals.json"
+      - "map-platform/config/map-stream-trust.json"
+      - "map-platform/deploy/**"
       - "tools/OSM_Extract/**"
   # Keep the Map Backend check present on every pull request because repository
   # protection requires that status. Push builds remain path-filtered.
@@ -68,7 +69,7 @@ jobs:
       packages: read
     defaults:
       run:
-        working-directory: backend
+        working-directory: map-platform/backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -82,8 +83,8 @@ jobs:
           python -m py_compile
           map_platform/*.py
           tests/*.py
-          ../deploy/map-platform/*.py
-          ../deploy/map-platform/tests/*.py
+          ../deploy/*.py
+          ../deploy/tests/*.py
       - name: Generated map stream trust registry
         run: |
           python tools/generate_map_stream_trust.py --check
@@ -91,7 +92,7 @@ jobs:
       - name: Unit tests
         run: |
           python -m unittest discover -s tests
-          python -m unittest discover -s ../deploy/map-platform/tests
+          python -m unittest discover -s ../deploy/tests
       - name: Production Compose config
         env:
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
@@ -107,15 +108,15 @@ jobs:
           MAP_PLATFORM_TRUSTED_PROXY_CIDRS: "172.16.0.0/12"
           MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: "86400"
         run: |
-          docker compose -f ../deploy/map-platform/compose.yaml config
-          python ../deploy/map-platform/verify_registry_images.py \
-            ../deploy/map-platform/compose.yaml
+          docker compose -f ../deploy/compose.yaml config
+          python ../deploy/verify_registry_images.py \
+            ../deploy/compose.yaml
       - name: Build backend production image
         run: >-
           docker build
           --file Dockerfile
           --tag open-bike-map-platform-ci
-          ..
+          ../..
       - name: Smoke-start backend production image
         run: >-
           docker run --rm
@@ -123,7 +124,7 @@ jobs:
           -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
           -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
           open-bike-map-platform-ci
-          python -c "from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
+          python -c "from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/map-platform/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
       - name: Smoke worker heartbeat
         run: >-
           docker run --rm

@@ -3,18 +3,20 @@ name: Map Platform Image
 on:
   push:
     paths:
+      - ".dockerignore"
       - ".github/workflows/map-platform-image.yml"
       - ".github/workflows/map-platform-ci.yml"
-      - "backend/**"
+      - "map-platform/backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
-      - "config/map-stream-hardware-gate.json"
-      - "config/map-stream-rollout-approvals.json"
-      - "config/map-stream-trust.json"
-      - "deploy/map-platform/detect_worker_change.py"
-      - "deploy/map-platform/select_worker_promotion.py"
-      - "deploy/map-platform/update_image.py"
-      - "deploy/map-platform/verify_registry_images.py"
+      - "map-platform/config/map-stream-hardware-gate.json"
+      - "map-platform/config/map-stream-rollout-approvals.json"
+      - "map-platform/config/map-stream-trust.json"
+      - "map-platform/deploy/detect_worker_change.py"
+      - "map-platform/deploy/export_pending_compose.py"
+      - "map-platform/deploy/select_worker_promotion.py"
+      - "map-platform/deploy/update_image.py"
+      - "map-platform/deploy/verify_registry_images.py"
   workflow_dispatch:
     inputs:
       pending_worker:
@@ -69,7 +71,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: backend/Dockerfile
+          file: map-platform/backend/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
@@ -92,7 +94,7 @@ jobs:
           current_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
           if test "$current_sha" != "$GITHUB_SHA"; then
             git fetch --no-tags origin "$current_sha"
-            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+            superseded="$(python3 map-platform/deploy/detect_worker_change.py \
               --before "$GITHUB_SHA" \
               --after "$current_sha" \
               --scope promotion)"
@@ -142,7 +144,7 @@ jobs:
             exit 1
           fi
           if test "$default_sha" != "$GITHUB_SHA"; then
-            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+            superseded="$(python3 map-platform/deploy/detect_worker_change.py \
               --before "$GITHUB_SHA" \
               --after "$default_sha" \
               --scope promotion)"
@@ -167,8 +169,8 @@ jobs:
           promotion_branch_sha="$(git ls-remote --heads origin \
             "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
           echo "branch_sha=${promotion_branch_sha}" >> "$GITHUB_OUTPUT"
-          current_state="$(python3 deploy/map-platform/update_image.py \
-            deploy/map-platform/compose.yaml \
+          current_state="$(python3 map-platform/deploy/update_image.py \
+            map-platform/deploy/compose.yaml \
             --check)"
           printf '%s\n' "$current_state"
           current_worker_source="$(printf '%s\n' "$current_state" | awk '$1 == "worker" {print $2}')"
@@ -205,9 +207,10 @@ jobs:
             exit 1
           fi
           git fetch --no-tags origin "$pending_sha"
-          git show "${pending_sha}:deploy/map-platform/compose.yaml" \
-            > "$RUNNER_TEMP/pending-map-platform-compose.yaml"
-          pending_state="$(python3 deploy/map-platform/update_image.py \
+          python3 map-platform/deploy/export_pending_compose.py \
+            --commit "$pending_sha" \
+            --output "$RUNNER_TEMP/pending-map-platform-compose.yaml"
+          pending_state="$(python3 map-platform/deploy/update_image.py \
             "$RUNNER_TEMP/pending-map-platform-compose.yaml" \
             --check)"
           printf '%s\n' "$pending_state"
@@ -237,19 +240,19 @@ jobs:
           PENDING_WORKER_POLICY: ${{ inputs.pending_worker }}
           CURRENT_WORKER_SOURCE: ${{ steps.pending.outputs.current_worker_source }}
         run: |
-          adjacent_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+          adjacent_changed="$(python3 map-platform/deploy/detect_worker_change.py \
             --before "$BEFORE_SHA" \
             --after "$GITHUB_SHA")"
-          accumulated_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+          accumulated_changed="$(python3 map-platform/deploy/detect_worker_change.py \
             --before "$CURRENT_WORKER_SOURCE" \
             --after "$GITHUB_SHA")"
           pending_worker_changed=false
           if test "$PENDING_AVAILABLE" = "true"; then
-            pending_worker_changed="$(python3 deploy/map-platform/detect_worker_change.py \
+            pending_worker_changed="$(python3 map-platform/deploy/detect_worker_change.py \
               --before "$PENDING_WORKER_SOURCE" \
               --after "$GITHUB_SHA")"
           fi
-          python3 deploy/map-platform/select_worker_promotion.py \
+          python3 map-platform/deploy/select_worker_promotion.py \
             --event-name "$EVENT_NAME" \
             --requested-policy "$PENDING_WORKER_POLICY" \
             --pending-available "$PENDING_AVAILABLE" \
@@ -271,12 +274,12 @@ jobs:
           MAP_PLATFORM_TRUSTED_PROXY_CIDRS: 172.16.0.0/12
           GH_TOKEN: ${{ github.token }}
         run: |
-          base_state="$(python3 deploy/map-platform/update_image.py \
-            deploy/map-platform/compose.yaml \
+          base_state="$(python3 map-platform/deploy/update_image.py \
+            map-platform/deploy/compose.yaml \
             --check)"
           base_worker="$(printf '%s\n' "$base_state" | awk '$1 == "worker" {print $2 " " $3}')"
           update_args=(
-            deploy/map-platform/compose.yaml
+            map-platform/deploy/compose.yaml
             --control-plane-digest "$IMAGE_DIGEST"
             --source-commit "$GITHUB_SHA"
           )
@@ -288,9 +291,9 @@ jobs:
               "$RUNNER_TEMP/pending-map-platform-compose.yaml"
             )
           fi
-          python3 deploy/map-platform/update_image.py "${update_args[@]}"
-          final_state="$(python3 deploy/map-platform/update_image.py \
-            deploy/map-platform/compose.yaml \
+          python3 map-platform/deploy/update_image.py "${update_args[@]}"
+          final_state="$(python3 map-platform/deploy/update_image.py \
+            map-platform/deploy/compose.yaml \
             --check)"
           printf '%s\n' "$final_state"
           final_worker="$(printf '%s\n' "$final_state" | awk '$1 == "worker" {print $2 " " $3}')"
@@ -304,11 +307,11 @@ jobs:
           echo "moves_worker=${moves_worker}" >> "$GITHUB_OUTPUT"
           echo "worker_source=${final_worker_source}" >> "$GITHUB_OUTPUT"
           echo "worker_reference=${final_worker_reference}" >> "$GITHUB_OUTPUT"
-          docker compose -f deploy/map-platform/compose.yaml config >/dev/null
-          python3 deploy/map-platform/verify_registry_images.py \
-            deploy/map-platform/compose.yaml
+          docker compose -f map-platform/deploy/compose.yaml config >/dev/null
+          python3 map-platform/deploy/verify_registry_images.py \
+            map-platform/deploy/compose.yaml
           git diff --check
-          if git diff --quiet -- deploy/map-platform/compose.yaml; then
+          if git diff --quiet -- map-platform/deploy/compose.yaml; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -331,7 +334,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$PROMOTION_BRANCH"
-          git add deploy/map-platform/compose.yaml
+          git add map-platform/deploy/compose.yaml
           short_sha="${GITHUB_SHA:0:12}"
           git commit -m "Promote map platform image ${short_sha}"
 
@@ -342,13 +345,13 @@ jobs:
               echo "::error::Live ${DEFAULT_BRANCH} no longer descends from the proposal base"
               exit 1
             fi
-            superseded="$(python3 deploy/map-platform/detect_worker_change.py \
+            superseded="$(python3 map-platform/deploy/detect_worker_change.py \
               --before "$PROPOSAL_BASE_SHA" \
               --after "$latest_default_sha" \
               --scope promotion)"
             if test "$superseded" = "true" \
               || ! git diff --quiet "$PROPOSAL_BASE_SHA" "$latest_default_sha" \
-                -- deploy/map-platform/compose.yaml; then
+                -- map-platform/deploy/compose.yaml; then
               echo "::error::Live ${DEFAULT_BRANCH} changed production inputs; re-run the workflow"
               exit 1
             fi
