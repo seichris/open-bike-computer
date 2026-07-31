@@ -33,5 +33,5 @@ The available production, diagnostics, and test profiles are defined in
 
 This firmware retains its existing GNU General Public License version 3 terms.
 See [`LICENSE`](LICENSE) and the repository's
-[licensing guide](../LICENSES.md) for inherited and third-party licensing
+[license summary](../README.md#license) for inherited and third-party licensing
 details.

@@ -24,5 +24,5 @@ AGPL-3.0-only unless a more specific notice applies. Project-authored software
 and configuration under [`deploy/`](deploy/) follow the repository's
 GPL-3.0-only license.
 
-See the repository's [licensing guide](../LICENSES.md) for the exact
+See the repository's [license summary](../README.md#license) for the exact
 path-by-path boundaries and third-party notices.

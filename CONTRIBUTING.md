@@ -144,7 +144,8 @@ This is a multi-license repository. Contributions to the network backend and
 its configuration are made available under AGPL-3.0-only. Contributions to the
 iOS app and other distributed or local project software are made available
 under GPL-3.0-only. Existing component-level and third-party notices continue
-to take priority. See [LICENSES.md](LICENSES.md) for the complete mapping.
+to take priority. See the [root README license section](README.md#license) for
+the complete mapping.
 
 Before an external contribution can be accepted, its contributor must read and
 agree to the [Contributor License Agreement](CLA.md) using the acknowledgement
