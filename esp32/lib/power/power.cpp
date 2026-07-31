@@ -22,11 +22,9 @@
 extern const uint8_t BOARD_BOOT_PIN;
 #endif
 
-/**
- * @brief Power Class constructor
- *
- */
-Power::Power() {
+void Power::begin() {
+  // Radio shutdown touches Arduino/IDF subsystems and must not run from the
+  // global Power object's constructor before framework initialization.
 #ifdef DISABLE_RADIO
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -72,7 +70,6 @@ void Power::powerDeepSleep() {
  */
 void Power::powerLightSleepTimer(int millis) {
   esp_sleep_enable_timer_wakeup(millis * 1000);
-  esp_err_t rtc_gpio_hold_en(gpio_num_t GPIO_NUM_5);
   esp_light_sleep_start();
 }
 

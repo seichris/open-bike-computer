@@ -19,6 +19,36 @@ current curve or precise watt-hour saving. The source-monitor procedure below
 is retained as an optional higher-precision campaign, not an implementation
 gate.
 
+## Connected display-power policy
+
+The firmware now uses four connected operating modes:
+
+- `active`: saved user brightness and the normal LVGL cadence;
+- `dimmed`: at most 20% brightness after 15 seconds without meaningful input,
+  with the main UI timer reduced from 30 ms to 250 ms and LVGL serviced at most
+  every 100 ms;
+- `off`: after 45 seconds idle, the panel is turned off, the main UI timer is
+  paused, LVGL servicing stops, and any already-queued flush is acknowledged
+  without QSPI traffic; and
+- `transfer`: the panel remains active while the map/firmware transfer service
+  or map activation is active. An enabled transfer service exits after five
+  minutes without an authenticated request, unless an authenticated request or
+  map activation is still in progress.
+
+Active navigation guidance or a loaded route, an ownership comparison, and
+active audio hold the display active. Touch, BOOT/PWR input, screen changes,
+BLE connection or authentication, changed maneuver instructions/icons, closer
+maneuver-distance thresholds, route changes, transfer progress, and new
+actionable transfer errors restart the idle interval. Repeated GPS, workout,
+and unchanged maneuver-distance samples intentionally do not. Waking restores
+the saved brightness and forces one full-screen refresh before normal rendering
+resumes.
+
+Host tests cover time wraparound, inactivity boundaries, navigation/transfer/
+attention holds, transfer timeouts, and 10,000 display-off/wake transitions.
+Physical wake, touch, reconnect, and battery-depletion checks remain pending
+until the 1.75-inch device is connected again.
+
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
 percentage, or USB-powered observation is not a power baseline. Fill in the
@@ -263,10 +293,10 @@ battery Wh.
 | 10 | Ride-statistics screen | 2.06 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 1.75 | Pending | — | — | — | — | Pending |
 | 11 | Battery/status screen | 2.06 | Pending | — | — | — | — | Pending |
-| 12 | Connected dimmed state | 1.75 | Not implemented | — | — | — | — | Measure after state exists |
-| 12 | Connected dimmed state | 2.06 | Not implemented | — | — | — | — | Measure after state exists |
-| 13 | Connected display-off state | 1.75 | Not implemented | — | — | — | — | Measure after state exists |
-| 13 | Connected display-off state | 2.06 | Not implemented | — | — | — | — | Measure after state exists |
+| 12 | Connected dimmed state | 1.75 | Implemented; hardware pending | — | — | — | — | Compare battery depletion later |
+| 12 | Connected dimmed state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
+| 13 | Connected display-off state | 1.75 | Implemented; hardware pending | — | — | — | — | Verify touch/BOOT/PWR wake later |
+| 13 | Connected display-off state | 2.06 | Build-only; hardware unavailable | — | — | — | — | Hardware deferred |
 | 14 | Transfer AP enabled, idle | 1.75 | Pending | — | — | — | — | Pending |
 | 14 | Transfer AP enabled, idle | 2.06 | Pending | — | — | — | — | Pending |
 | 15 | Map upload in progress | 1.75 | Pending | — | — | — | — | Pending |

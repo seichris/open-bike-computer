@@ -21,6 +21,9 @@ struct HttpTransferStatus {
   std::string sessionToken;
   std::string lastErrorCode;
   std::string lastErrorMessage;
+  uint32_t errorSequence = 0;
+  uint32_t lastUsefulTrafficMs = 0;
+  bool authorizedRequestInProgress = false;
 };
 
 struct HttpRequest {
@@ -52,7 +55,7 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
-  bool isRequestAuthorized(const HttpRequest &request) const;
+  bool isRequestAuthorized(const HttpRequest &request);
   bool waitUntilStopped(uint32_t timeoutMs);
 
 private:
@@ -67,6 +70,10 @@ private:
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
+  uint32_t errorSequence_ = 0;
+  uint32_t lastUsefulTrafficMs_ = 0;
+  bool requestInProgress_ = false;
+  bool currentRequestAuthorized_ = false;
   uint32_t transferGeneration_ = 0;
   struct HandlerRegistration {
     std::string pathPrefix;

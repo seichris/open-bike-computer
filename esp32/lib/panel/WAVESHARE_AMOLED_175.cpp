@@ -159,6 +159,14 @@ static void drawDisplayTestPatterns(uint8_t appliedRotation) {
 // ============================================================================
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+  // LVGL may have queued a refresh just before the inactivity transition. The
+  // logical frame remains dirty for the synchronized full refresh on wake, but
+  // no QSPI traffic should reach a panel that is intentionally off.
+  if (displayPowerManager.state() == display_power::State::Off) {
+    lv_display_flush_ready(disp);
+    return;
+  }
+
   uint32_t startUs = micros();
 #if POWER_METRICS
   power_metrics::pulseBegin(power_metrics::Pulse::DisplayFlush);

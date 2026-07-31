@@ -31,7 +31,9 @@ private:
   void powerOffPeripherals();
 
 public:
-  Power();
+  Power() = default;
+
+  void begin();
 
   void deviceSuspend();
   void deviceShutdown();
