@@ -6,6 +6,11 @@ struct WatchSettingsView: View {
             Section("About") {
                 LabeledContent("Version", value: versionDescription)
             }
+
+            Link(destination: AppPrivacyPolicy.url) {
+                Label("Privacy Policy", systemImage: "hand.raised")
+            }
+            .listRowBackground(Color.clear)
         }
         .navigationTitle("Settings")
     }

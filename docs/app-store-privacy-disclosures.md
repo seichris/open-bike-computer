@@ -70,8 +70,8 @@ other identifier as linked even when the app has no account or real-world name.
 - Confirm each infrastructure provider processing app data is bound to use it
   only on our instructions and provide the same or equivalent protection stated
   in the public policy.
-- Open the privacy-policy link from both iPhone Settings and the Watch start
-  screen, and confirm the same URL is entered in App Store Connect metadata.
+- Open the privacy-policy link from both iPhone Settings and Watch Settings,
+  and confirm the same URL is entered in App Store Connect metadata.
 - Review the App Store product-page preview before selecting **Publish**.
 
 ## Bundled privacy manifests

@@ -44,7 +44,7 @@ To test:
    directly without a second confirmation.
 
 The privacy policy is available from **Settings > Privacy Policy** on iPhone and
-from **Privacy Policy** on the Watch start screen.
+from **Settings > Privacy Policy** on Apple Watch.
 
 Watch and iPhone starts proceed directly after their setup checks. Public APIs
 cannot detect another app's workout, so any resulting displacement is reported
