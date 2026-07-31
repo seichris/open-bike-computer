@@ -606,6 +606,7 @@ struct NavigationProtocolTests {
         testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
+        testBLEManagerResendsBrightnessAfterAuthentication()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -8595,6 +8596,10 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.legacyStreetWidthBoost(fromAbsoluteWidth: 1), -3, "one-pixel streets retain the legacy wire encoding")
         assertEqual(DeviceBLEProtocol.legacyStreetWidthBoost(fromAbsoluteWidth: 4), 0, "default street width uses a zero wire boost")
         assertEqual(DeviceBLEProtocol.brightnessSettingID, 12, "brightness uses firmware setting ID 12")
+        assertEqual(DeviceBLEProtocol.normalizedBrightnessPercent(-1), 5, "brightness clamps below the device range")
+        assertEqual(DeviceBLEProtocol.normalizedBrightnessPercent(65.4), 65, "brightness uses whole-number percent")
+        assertEqual(DeviceBLEProtocol.normalizedBrightnessPercent(101), 100, "brightness clamps above the device range")
+        assertEqual(DeviceBLEProtocol.normalizedBrightnessPercent(.nan), 100, "invalid stored brightness restores the compatibility default")
         assertEqual(DeviceBLEProtocol.enabledScreensSettingID, 13, "enabled screens use firmware setting ID 13")
         assertEqual(DeviceBLEProtocol.defaultScreenSettingID, 14, "default screen uses firmware setting ID 14")
         assertEqual(DeviceBLEProtocol.disconnectedSleepTimeoutSettingID, 15, "disconnected sleep timeout uses firmware setting ID 15")
@@ -11712,6 +11717,42 @@ struct NavigationProtocolTests {
 
         let reloaded = BLEManager()
         assertEqual(Int(reloaded.deviceBrightnessPercent), 65, "brightness setting persists for UI display")
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+    }
+
+    static func testBLEManagerResendsBrightnessAfterAuthentication() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.deviceBrightnessPercent = 70
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendInitialDeviceSettingsAfterAuthenticationForTesting()
+
+        let brightnessPackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.brightnessSettingID
+        }
+        assertEqual(brightnessPackets.count, 1,
+                    "authenticated reconnect sends brightness exactly once")
+        let valueBytes = Array(brightnessPackets[0][5..<9])
+        let value = Int32(valueBytes[0])
+            | (Int32(valueBytes[1]) << 8)
+            | (Int32(valueBytes[2]) << 16)
+            | (Int32(valueBytes[3]) << 24)
+        assertEqual(value, 70,
+                    "authenticated reconnect restores the saved brightness")
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
     }
 

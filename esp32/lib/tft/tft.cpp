@@ -10,7 +10,7 @@
 #include "power_metrics.hpp"
 
 #ifdef USE_ARDUINO_GFX
-#include <Arduino_GFX_Library.h>
+#include "display_power.hpp"
 #endif
 
 #ifndef USE_ARDUINO_GFX
@@ -30,18 +30,21 @@ extern Storage storage;
 void tftOn(uint8_t brightness)
 {
 #ifdef USE_ARDUINO_GFX
-  // For CO5300 AMOLED - use Arduino_GFX methods
-  gfx->displayOn();
-  delay(50);
-  gfx->setBrightness(brightness);
+  // Compatibility adapter for legacy callers. DisplayPowerManager remains the
+  // only owner that issues CO5300 brightness and display-state commands.
+  const int32_t percent =
+      (static_cast<uint32_t>(brightness) * 100u + 127u) / 255u;
+  displayPowerManager.requestUserBrightness(percent);
+  displayPowerManager.requestState(display_power::State::Active);
+  displayPowerManager.applyPendingPanelChange();
 #else
   // For other displays (ILI9488, etc.) - use LovyanGFX
   tft.writecommand(0x11);  // Sleep Out
   delay(120);
   tft.setBrightness(brightness);
-#endif
   power_metrics::noteDisplayState(power_metrics::DisplayState::On, brightness,
                                   brightness);
+#endif
 }
 
 /**
@@ -51,15 +54,14 @@ void tftOn(uint8_t brightness)
 void tftOff()
 {
 #ifdef USE_ARDUINO_GFX
-  // For CO5300 AMOLED - use Arduino_GFX methods
-  gfx->setBrightness(0);
-  gfx->displayOff();
+  displayPowerManager.requestState(display_power::State::Off);
+  displayPowerManager.applyPendingPanelChange();
 #else
   // For other displays (ILI9488, etc.) - use LovyanGFX
   tft.setBrightness(0);
   tft.writecommand(0x10);  // Sleep In
-#endif
   power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 0, 0);
+#endif
 }
 
 /**

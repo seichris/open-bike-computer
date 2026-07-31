@@ -68,6 +68,9 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#include "display_power.hpp"
+#endif
 #include "disconnected_shutdown_policy.hpp"
 #include "ownership_button_policy.hpp"
 #include "power_metrics.hpp"
@@ -701,6 +704,9 @@ void setup() {
   }
 #endif
   power_metrics::begin();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  displayPowerManager.begin();
+#endif
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
@@ -989,6 +995,13 @@ void loop() {
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
   processWaveshareBootButton();
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  displayPowerManager.applyPendingPanelChange();
+  if (displayPowerManager.takeFullRefreshRequired()) {
+    lv_obj_invalidate(lv_screen_active());
+  }
 #endif
 
   if (!waitScreenRefresh) {

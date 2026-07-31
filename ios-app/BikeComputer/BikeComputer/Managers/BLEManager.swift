@@ -177,6 +177,11 @@ enum DeviceBLEProtocol {
         min(max(width, 1), 24)
     }
 
+    static func normalizedBrightnessPercent(_ value: Double) -> Double {
+        guard value.isFinite else { return 100 }
+        return min(max(value.rounded(), 5), 100)
+    }
+
     static func legacyStreetWidthBoost(fromAbsoluteWidth width: Int32) -> Int32 {
         min(max(width, 1), 24) - defaultStreetWidth
     }
@@ -889,7 +894,9 @@ class BLEManager: NSObject, ObservableObject {
             defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
             defaults.set(true, forKey: SettingsKeys.defaultDeviceScreenMigrated)
         }
-        deviceBrightnessPercent = defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
+        deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
+            defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
+        )
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1129,6 +1136,9 @@ class BLEManager: NSObject, ObservableObject {
         )
         defaults.set(enabledDeviceScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
         defaults.set(defaultDeviceScreen.rawValue, forKey: SettingsKeys.defaultDeviceScreen)
+        deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
+            deviceBrightnessPercent
+        )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
@@ -1990,6 +2000,11 @@ class BLEManager: NSObject, ObservableObject {
     /// Persist and send a runtime map setting to ESP32 when supported.
     func sendSetting(id: UInt8, value: Int32,
                      synchronizeLegacyProfile: Bool = true) {
+        if id == DeviceBLEProtocol.brightnessSettingID {
+            deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
+                Double(value)
+            )
+        }
         if hasReceivedDeviceCapabilities,
            !supportsIndependentMapProfiles,
            !isSendingNegotiatedMapProfiles,
@@ -2004,7 +2019,9 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         let deviceValue: Int32
-        if id == 9 || id == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID {
+        if id == DeviceBLEProtocol.brightnessSettingID {
+            deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == 9 || id == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID {
             deviceValue = DeviceBLEProtocol.legacyStreetWidthBoost(
                 fromAbsoluteWidth: value
             )
@@ -2966,6 +2983,10 @@ class BLEManager: NSObject, ObservableObject {
             priorityMaxCount: priorityMaxCount
         )
     }
+
+    func sendInitialDeviceSettingsAfterAuthenticationForTesting() {
+        sendInitialDeviceSettingsAfterAuthentication()
+    }
 #endif
 
     func installPowerButtonHonkRetryTiming(
@@ -3751,13 +3772,22 @@ class BLEManager: NSObject, ObservableObject {
         log("BLE peripheral authenticated")
         enqueueAuthMessage("GET_NAME")
         requestDeviceCapabilities()
-        sendSetting(id: 6, value: Int32(mapRotationMode))
-        sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
-        sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(deviceBrightnessPercent))
-        sendSetting(id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
-                    value: disconnectedSleepTimeout.settingValue)
+        sendInitialDeviceSettingsAfterAuthentication()
         requestDeviceTransferStatus()
         requestMapTransferStatus()
+    }
+
+    private func sendInitialDeviceSettingsAfterAuthentication() {
+        sendSetting(id: 6, value: Int32(mapRotationMode))
+        sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
+        sendSetting(
+            id: DeviceBLEProtocol.brightnessSettingID,
+            value: Int32(deviceBrightnessPercent)
+        )
+        sendSetting(
+            id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+            value: disconnectedSleepTimeout.settingValue
+        )
     }
 
     private func enqueueNavigationWrite(

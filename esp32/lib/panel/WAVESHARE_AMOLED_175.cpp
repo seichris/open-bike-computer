@@ -6,6 +6,7 @@
 
 #include "WAVESHARE_AMOLED_175.hpp"
 #ifdef USE_ARDUINO_GFX
+#include "../display_power/display_power.hpp"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 #endif
@@ -983,12 +984,12 @@ void setupDisplay() {
   // 2.06-inch target remains native.
   applyCo5300Rotation(rotation);
 
-  // Turn on display and set brightness (CRITICAL for AMOLED!)
+  // DisplayPowerManager loads the saved percentage before panel init and owns
+  // every later brightness/off/restore transition.
   Serial.println("Turning on display and setting brightness...");
-  gfx->displayOn();
-  delay(50);
-  gfx->setBrightness(255); // Maximum brightness 0-255
-  power_metrics::noteDisplayState(power_metrics::DisplayState::On, 255, 255);
+  if (!displayPowerManager.initializePanel()) {
+    Serial.println("DisplayPower: panel state tracking unavailable");
+  }
   delay(50);
 
 #ifdef WAVESHARE_DISPLAY_TEST

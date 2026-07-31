@@ -70,7 +70,7 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(bus, 39 /*RST*/, 0 /*rotation*/);
 ```
 
 **Key Functions:**
-- `setupDisplay()` – Initializes gfx, sets brightness to max
+- `setupDisplay()` – Initializes gfx and delegates saved-brightness restore to `DisplayPowerManager`
 - `setupLVGLforArduinoGFX()` – Creates LVGL 9 display, allocates PSRAM buffer (~43KB), registers flush callback
 - `my_disp_flush()` – Uses `gfx->draw16bitRGBBitmap()` for RGB565 output
 - `readTouch()` / `my_touchpad_read()` – CST9217 I2C touch driver (currently disabled via `DISABLE_TOUCH`)
@@ -162,7 +162,9 @@ Conditional compilation for Arduino_GFX:
 #endif
 ```
 
-Functions `tftOn()` / `tftOff()` now use `gfx->setBrightness()` and `gfx->displayOn()/Off()`.
+Functions `tftOn()` / `tftOff()` are compatibility adapters. On the AMOLED
+targets they delegate to `DisplayPowerManager`, which is the sole owner of
+CO5300 brightness and display on/off commands.
 
 #### [lib/tft/tft.hpp](file:///Users/chris/Documents/Workspace/esp32-bike-computer/IceNav-v3/lib/tft/tft.hpp)
 

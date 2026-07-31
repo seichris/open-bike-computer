@@ -7,6 +7,9 @@
  */
 
 #include "power.hpp"
+#ifdef USE_ARDUINO_GFX
+#include "../display_power/display_power.hpp"
+#endif
 #include "power_metrics.hpp"
 #ifdef USE_ARDUINO_GFX
 #include <Arduino_GFX_Library.h>
@@ -90,12 +93,8 @@ void Power::powerOffPeripherals() {
   tftOff();
   tft.fillScreen(TFT_BLACK);
 #else
-  // Arduino_GFX: turn off display
-  if (gfx) {
-    gfx->displayOff();
-    gfx->fillScreen(0x0000);
-    power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 0, 0);
-  }
+  displayPowerManager.requestState(display_power::State::Off);
+  displayPowerManager.applyPendingPanelChange();
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::axp2101::setDisplayPower(false);
@@ -117,12 +116,11 @@ void Power::deviceSuspend() {
   powerLightSleep();
   tftOn(brightness);
 #else
-  // Arduino_GFX: simplified suspend without brightness control
+  const display_power::State resumeState = displayPowerManager.state();
   lv_msgbox_close(powerMsg);
   lv_refr_now(display);
-  if (gfx)
-    gfx->displayOff();
-  power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 255, 0);
+  displayPowerManager.requestState(display_power::State::Off);
+  displayPowerManager.applyPendingPanelChange();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   waveshare_board::axp2101::setDisplayPower(false);
 #endif
@@ -131,11 +129,8 @@ void Power::deviceSuspend() {
   waveshare_board::axp2101::setDisplayPower(true);
   delay(50);
 #endif
-  if (gfx) {
-    gfx->displayOn();
-    gfx->setBrightness(255);
-    power_metrics::noteDisplayState(power_metrics::DisplayState::On, 255, 255);
-  }
+  displayPowerManager.requestState(resumeState);
+  displayPowerManager.applyPendingPanelChange();
 #endif
   while (digitalRead(BOARD_BOOT_PIN) != 1) {
     delay(5);
