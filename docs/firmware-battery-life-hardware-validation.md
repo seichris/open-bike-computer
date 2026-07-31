@@ -72,6 +72,24 @@ coalescing, wraparound, and the 50/250 ms maximum-wait policy. Physical maneuver
 touch, reconnect, and long-running transfer latency remain pending until the
 1.75-inch device is connected again.
 
+## Dynamic frequency scaling
+
+All Waveshare firmware profiles now compile ESP-IDF power-management support
+and explicitly request 80-240 MHz dynamic frequency scaling during setup.
+Automatic light sleep and FreeRTOS tickless idle remain disabled. The firmware
+reads the effective configuration back from ESP-IDF and exposes its enabled,
+error, minimum, maximum, and light-sleep fields in the ten-second `PWRMET`
+report. A rejected configuration request leaves the prior framework setting
+intact. Readback failure or an unexpected effective configuration is reported
+instead of making assumptions about the active frequency range.
+
+This is Phase 7 Step A only. The minimum frequency must remain at 80 MHz until
+physical map-render, display-flush, BLE, touch, transfer, audio, and overnight
+connected-navigation checks pass. Do not enable 40 MHz or automatic light
+sleep from build configuration alone. Step B requires explicit locks around
+every timing-sensitive display, map, SD, transfer, audio, and tested I2C path,
+then separate physical validation on the 1.75-inch board.
+
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
 percentage, or USB-powered observation is not a power baseline. Fill in the
@@ -97,9 +115,11 @@ The report contains:
 - logically classified BLE packets after authenticated transport framing is
   unwrapped, including packets later rejected by session authentication or
   application-payload validation;
-- Wi-Fi mode, transfer state/mode, audio activity, CPU frequency, and the
-  number of application-managed power-management locks (`appPmLocks`,
-  currently zero because this firmware creates none); and
+- Wi-Fi mode, transfer state/mode, audio activity, current CPU frequency,
+  effective DFS range, power-management error code, automatic-light-sleep
+  state, and the number of
+  application-managed power-management locks (`appPmLocks`, currently zero
+  because Step A creates none); and
 - `appQueue=ios-diagnostic`, which identifies the separate
   `PWRMET_IOS v=2` ten-second interval report produced by a Debug iOS build.
 

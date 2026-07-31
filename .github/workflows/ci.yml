@@ -129,6 +129,12 @@ jobs:
             -o /tmp/test_ui_scheduler_policy
           /tmp/test_ui_scheduler_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_power_management_policy.cpp \
+            -o /tmp/test_power_management_policy
+          /tmp/test_power_management_policy
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_pioarduino_custom_core
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ui_update_policy.cpp \
             -o /tmp/test_ui_update_policy
           /tmp/test_ui_update_policy

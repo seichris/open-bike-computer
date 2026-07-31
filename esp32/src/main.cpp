@@ -83,6 +83,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "power_metrics.hpp"
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
+#include "power_management.hpp"
 #include "route_overlay.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
@@ -794,6 +795,8 @@ static void logPowerMetricsReport() {
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
+  const power_management::RuntimeStatus powerManagementStatus =
+      power_management::status();
 
   const char *screenName = "unknown";
   const lv_obj_t *activeScreen = lv_scr_act();
@@ -834,7 +837,8 @@ static void logPowerMetricsReport() {
       "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
       "appQueue=ios-diagnostic] "
       "system[powerMode=%s wifiMode=%d transfer=%d transferMode=%s "
-      "audio=%d cpuMHz=%u "
+      "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
+      "lightSleep=%d "
       "appPmLocks=0]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
@@ -882,7 +886,11 @@ static void logPowerMetricsReport() {
       (unsigned long)bleCount(power_metrics::BlePacketClass::Auth),
       powerMode, static_cast<int>(WiFi.getMode()), transferStatus.enabled,
       transferStatus.mode.empty() ? "none" : transferStatus.mode.c_str(),
-      audioActive, getCpuFrequencyMhz());
+      audioActive, getCpuFrequencyMhz(), powerManagementStatus.enabled,
+      powerManagementStatus.errorCode,
+      powerManagementStatus.effective.minimumCpuMhz,
+      powerManagementStatus.effective.maximumCpuMhz,
+      powerManagementStatus.effective.automaticLightSleep);
   if (reportLength < 0 ||
       static_cast<size_t>(reportLength) >= sizeof(report)) {
     Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
@@ -975,6 +983,7 @@ void setup() {
 #endif
   power_metrics::begin();
   power.begin();
+  power_management::begin();
   // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
   // enabling BLE, touch, BOOT, audio, or transfer publishers.
   ui_scheduler::bindCurrentTask();
