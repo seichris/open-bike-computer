@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IOS_PROJECT = REPO_ROOT / "ios-app" / "BikeComputer"
 PRIVACY_POLICY_URL = (
-    "https://github.com/seichris/open-bike-computer/blob/main/PRIVACY_POLICY.md"
+    "https://github.com/seichris/open-bike-computer/blob/main/ios-app/PRIVACY_POLICY.md"
 )
 
 
@@ -108,7 +108,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         ios_settings = (
             IOS_PROJECT / "BikeComputer" / "Views" / "SettingsView.swift"
         ).read_text()
-        public_policy = (REPO_ROOT / "PRIVACY_POLICY.md").read_text()
+        public_policy = (REPO_ROOT / "ios-app" / "PRIVACY_POLICY.md").read_text()
         normalized_policy = " ".join(public_policy.split())
         disclosures = (
             REPO_ROOT / "docs" / "app-store-privacy-disclosures.md"
@@ -313,7 +313,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         )
 
         required_files = [
-            REPO_ROOT / "PRIVACY_POLICY.md",
+            REPO_ROOT / "ios-app" / "PRIVACY_POLICY.md",
             REPO_ROOT / "ios-app" / "README.md",
             REPO_ROOT / "docs" / "app-store-privacy-disclosures.md",
             REPO_ROOT

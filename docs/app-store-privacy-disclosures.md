@@ -20,7 +20,7 @@ References:
 Use this public URL for both the App Store Connect privacy-policy field and the
 in-app privacy links:
 
-`https://github.com/seichris/open-bike-computer/blob/main/PRIVACY_POLICY.md`
+`https://github.com/seichris/open-bike-computer/blob/main/ios-app/PRIVACY_POLICY.md`
 
 Verify that the URL resolves after this release branch is merged and before
 submitting the build.

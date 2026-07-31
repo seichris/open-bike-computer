@@ -128,5 +128,5 @@ The remaining release acceptance checklist is tracked in
 Health and workout-route values stay within HealthKit and the rider's paired
 Watch, iPhone, and authenticated local bike computer connection. They are not
 sent to the Bike Computer backend. The ESP32 keeps workout metrics in RAM only.
-See [`../PRIVACY_POLICY.md`](../PRIVACY_POLICY.md) and
+See [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md) and
 [`../docs/app-store-privacy-disclosures.md`](../docs/app-store-privacy-disclosures.md).
