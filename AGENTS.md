@@ -41,6 +41,29 @@ pio device monitor -b 115200
 Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
 upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.
 
+For a reproducible post-flash or cold-start capture, prefer the repository
+helper over an interactive PlatformIO monitor. It waits for a disconnected
+board to reappear and leaves RTS/DTR deasserted so the serial reader does not
+hold the ESP32-S3 in reset:
+
+```sh
+cd esp32
+python tools/capture_boot.py \
+  --port '/dev/cu.usbmodem*' \
+  --duration 40 \
+  --expected-target WAVESHARE_AMOLED_175 \
+  --expected-git "$(git rev-parse HEAD)" \
+  --require-pmic-read-only \
+  --require-ready
+```
+
+Arm that command before reconnecting the device for a true cold-start test.
+Use `--reset` only when an intentional warm reset is wanted. Treat `BOOT_META`
+as the running-image source of truth, use `BOOT_PREVIOUS`/`BOOT_FAILURE` to
+locate an interrupted setup stage, and require a final `BOOT_STAGE ...
+event=ready`. Any `AXP_WRITE_BLOCKED` or `BOOT_DIAGNOSTICS_ERROR` makes the
+capture helper fail validation.
+
 ### iOS app
 
 Open `ios-app/BikeComputer/BikeComputer.xcodeproj`. Run the portable Swift

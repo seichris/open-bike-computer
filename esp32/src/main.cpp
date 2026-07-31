@@ -75,6 +75,7 @@ extern xSemaphoreHandle gpsMutex;
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#include "boot_diagnostics.hpp"
 #include "display_inactivity_policy.hpp"
 #include "display_power.hpp"
 #endif
@@ -1030,12 +1031,31 @@ void setup() {
                   static_cast<unsigned>(kPowerMetricsSerialTxBufferSize));
   }
 #endif
+#if FIRMWARE_DIAGNOSTICS
+  // Delay before the first structured marker so a post-flash USB CDC monitor
+  // can attach without missing firmware identity or the first boot stage.
+  delay(2000);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::begin();
+  if (boot_diagnostics::safeModeActive()) {
+    // setup() returns into a deliberately inert loop. No I2C, PMIC, display,
+    // storage, speaker, radio, or charging-control initialization is attempted.
+    return;
+  }
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Startup);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::CoreServices);
+#endif
   power_metrics::begin();
   power.begin();
   power_management::begin();
   // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
   // enabling BLE, touch, BOOT, audio, or transfer publishers.
   ui_scheduler::bindCurrentTask();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::CoreServices);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::WakeConfiguration);
+#endif
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
   power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
@@ -1043,12 +1063,7 @@ void setup() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayPowerManager.begin();
 #endif
-#if FIRMWARE_DIAGNOSTICS
-  delay(2000); // Give a diagnostic USB CDC monitor time to attach.
-#endif
   log_i("Starting Setup...");
-  Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
-                esp_reset_reason());
 
 #ifdef WAVESHARE_AMOLED_175
   // Configure Wire directly below; do not preemptively bit-bang the shared bus.
@@ -1074,6 +1089,10 @@ void setup() {
   gpio_deep_sleep_hold_dis();
 #endif
 #endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(
+      boot_diagnostics::Stage::WakeConfiguration);
+#endif
 
 #ifdef TDECK_ESP32S3
   pinMode(BOARD_POWERON, OUTPUT);
@@ -1097,10 +1116,16 @@ void setup() {
 #ifdef WAVESHARE_AMOLED_206
   // Recover the shared bus before PMIC inspection on the 2.06-inch board.
   // Power-output registers remain at their factory/eFuse configuration.
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
   waveshare_board::recoverI2CBus();
   waveshare_board::i2c::configureBus();
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::I2cBus);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
   initTFT();
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare 2.06 display probe complete; holding before I2C/PMU/SD/LVGL/BLE/touch init");
   while (true) {
@@ -1110,17 +1135,22 @@ void setup() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
   waveshare_board::i2c::configureBus();
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::I2cBus);
 #elif !defined(WAVESHARE_AMOLED_206)
   Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.begin();
 #endif
 
 #if defined(WAVESHARE_AMOLED_175)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::ClockAndSensors);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
@@ -1146,13 +1176,23 @@ void setup() {
 #endif
 
   battery.initADC();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(
+      boot_diagnostics::Stage::ClockAndSensors);
+#endif
 
   // IMPORTANT: Initialize TFT BEFORE SD card!
   // The QSPI display init can disrupt SPI bus settings.
   // By initializing display first, the SPI buses are settled
   // before we configure the SD card.
 #ifndef WAVESHARE_AMOLED_206
+#if defined(WAVESHARE_AMOLED_175)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
+#endif
   initTFT();
+#if defined(WAVESHARE_AMOLED_175)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
+#endif
 
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe complete; holding before SD/LVGL/BLE/touch init");
@@ -1163,12 +1203,19 @@ void setup() {
 #endif
 
   // Now initialize SD card after display is fully configured
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Storage);
+#endif
   esp_err_t sdResult = storage.initSD();
   if (sdResult != ESP_OK) {
     // SD card failed - fall back to internal FFat storage
     Serial.println("SD Card failed, falling back to FFat...");
     storage.initSPIFFS();
   }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);
+#endif
 
   {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
@@ -1214,6 +1261,11 @@ void setup() {
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
   }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);
+  boot_diagnostics::enterStage(
+      boot_diagnostics::Stage::ApplicationServices);
+#endif
   deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
@@ -1230,6 +1282,11 @@ void setup() {
   loadPreferences();
 #ifdef HAS_HARDWARE_GPS
   gps.init();
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(
+      boot_diagnostics::Stage::ApplicationServices);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
 #endif
   initLVGL();
   log_i("Checkpoint A: LVGL Init Done");
@@ -1272,16 +1329,28 @@ void setup() {
 
   log_i("Loading Splash Screen...");
   splashScreen();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::UserInterface);
+#endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Speaker);
   waveshare_board::speaker::begin();
   if (!waveshare_board::axp2101::setPowerButtonEventMonitoring(true)) {
     Serial.println("AXP2101: PWR button-event monitoring unavailable");
   }
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker);
 #endif
 
   // Initialize BLE early so device is discoverable while showing waiting screen
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Ble);
+#endif
   bleNavServer.init("BikeComputer");
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Ble);
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::Finalization);
+#endif
 
   // Set default coordinates as fallback (will be overwritten by BLE GPS)
 #if defined(DEFAULT_LAT) && defined(DEFAULT_LON)
@@ -1303,6 +1372,10 @@ void setup() {
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
   power_management::completeStartup();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Finalization);
+  boot_diagnostics::markReady();
+#endif
 }
 
 /**
@@ -1310,6 +1383,12 @@ void setup() {
  *
  */
 void loop() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (boot_diagnostics::safeModeActive()) {
+    delay(1000);
+    return;
+  }
+#endif
   uint32_t now = millis();
   const uint32_t wakeReasons =
       pendingUiWakeReasons | ui_scheduler::wait(0);

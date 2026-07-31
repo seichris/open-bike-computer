@@ -27,8 +27,6 @@ constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_MASK = 0x03;
 constexpr uint8_t AXP2101_SYSTEM_ON_MASK = 0x10;
 constexpr uint8_t AXP2101_VINDPM_ACTIVE_MASK = 0x08;
 constexpr uint8_t AXP2101_CHARGING_STATUS_MASK = 0x07;
-constexpr uint8_t AXP2101_INTERRUPT_ENABLE_1_REG = 0x41;
-constexpr uint8_t AXP2101_INTERRUPT_STATUS_1_REG = 0x49;
 constexpr uint8_t AXP2101_LDO_ENABLE_REG = 0x90;
 constexpr uint8_t AXP2101_POWER_BUTTON_SHORT_PRESS_MASK = 0x08;
 constexpr uint8_t AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK = 0x02;
@@ -40,8 +38,8 @@ constexpr uint8_t AXP2101_POWER_BUTTON_EVENT_MASK =
 
 bool writeRegister(uint8_t reg, uint8_t value) {
   if (!register_policy::isWriteAllowed(reg)) {
-    Serial.printf("AXP2101: blocked unvalidated power-rail write "
-                  "reg=0x%02X value=0x%02X\n",
+    Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X value=0x%02X "
+                  "policy=interrupt-only\n",
                   reg, value);
     return false;
   }
@@ -115,7 +113,7 @@ bool setPowerButtonEventMonitoring(bool enabled) {
   }
 
   uint8_t interruptEnable = 0;
-  if (!readRegister(AXP2101_INTERRUPT_ENABLE_1_REG, interruptEnable)) {
+  if (!readRegister(register_policy::INTERRUPT_ENABLE_1, interruptEnable)) {
     return false;
   }
 
@@ -123,14 +121,14 @@ bool setPowerButtonEventMonitoring(bool enabled) {
       enabled ? interruptEnable | AXP2101_POWER_BUTTON_EVENT_MASK
               : interruptEnable & ~AXP2101_POWER_BUTTON_EVENT_MASK;
   if (updatedInterruptEnable != interruptEnable &&
-      !writeRegister(AXP2101_INTERRUPT_ENABLE_1_REG,
+      !writeRegister(register_policy::INTERRUPT_ENABLE_1,
                      updatedInterruptEnable)) {
     return false;
   }
 
   // AXP2101 interrupt status is write-one-to-clear. Remove any stale press so
   // enabling the feature cannot immediately trigger playback.
-  return writeRegister(AXP2101_INTERRUPT_STATUS_1_REG,
+  return writeRegister(register_policy::INTERRUPT_STATUS_1,
                        AXP2101_POWER_BUTTON_EVENT_MASK);
 }
 
@@ -141,7 +139,7 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
   }
 
   uint8_t interruptStatus = 0;
-  if (!readRegister(AXP2101_INTERRUPT_STATUS_1_REG, interruptStatus)) {
+  if (!readRegister(register_policy::INTERRUPT_STATUS_1, interruptStatus)) {
     return false;
   }
   const uint8_t pendingEvents =
@@ -149,7 +147,7 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
   if (pendingEvents == 0) {
     return true;
   }
-  if (!writeRegister(AXP2101_INTERRUPT_STATUS_1_REG, pendingEvents)) {
+  if (!writeRegister(register_policy::INTERRUPT_STATUS_1, pendingEvents)) {
     return false;
   }
 
@@ -166,6 +164,7 @@ bool initializePowerState() {
   Serial.println("Probing AXP2101 without changing power rails...");
   if (!begin()) {
     Serial.println("AXP2101 not found");
+    Serial.println("BOOT_PMIC schema=1 mode=read-only available=0");
     return false;
   }
 
@@ -181,10 +180,21 @@ bool initializePowerState() {
                   status.batteryPresent ? "present" : "absent",
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "statusRead=1 status1=0x%02X status2=0x%02X vbus=%d "
+                  "battery=%d currentDirection=%u charging=%u ldoRead=%d "
+                  "ldo=0x%02X\n",
+                  status.status1, status.status2, status.vbusGood ? 1 : 0,
+                  status.batteryPresent ? 1 : 0,
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoReadOk ? 1 : 0, ldoEnable);
   } else {
     Serial.printf("AXP2101: preserving factory rails; status read failed "
                   "ldo=0x%02X ldoRead=%d\n",
                   ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "statusRead=0 ldoRead=%d ldo=0x%02X\n",
+                  ldoReadOk ? 1 : 0, ldoEnable);
   }
   return true;
 }

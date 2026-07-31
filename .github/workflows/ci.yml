@@ -98,7 +98,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
       - name: GUI layout host tests
         run: |
-          PYTHONPATH=tools python -m unittest tools.tests.test_firmware_build_identity
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_firmware_build_identity \
+            tools.tests.test_capture_boot
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175
@@ -138,6 +140,10 @@ jobs:
             tools/tests/test_axp2101_register_policy.cpp \
             -o /tmp/test_axp2101_register_policy
           /tmp/test_axp2101_register_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_boot_diagnostics_policy.cpp \
+            -o /tmp/test_boot_diagnostics_policy
+          /tmp/test_boot_diagnostics_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
             -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
             tools/tests/test_power_management_policy.cpp \

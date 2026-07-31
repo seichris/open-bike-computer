@@ -533,9 +533,10 @@ the PMIC's factory/eFuse rail configuration.
 
 Safety rules:
 - Probe AXP2101 at `0x34` and read status for diagnostics only.
-- Do not write DCDC control/voltage registers `0x80`-`0x86` or LDO
-  control/voltage registers `0x90`-`0x9A` during boot, display inactivity,
-  light sleep, or deep sleep.
+- The firmware write allowlist contains exactly two addresses: interrupt-enable
+  register `0x41` and write-one-to-clear interrupt-status register `0x49`, both
+  used only for PWR-button events. Charger current/voltage, input limits,
+  BATFET, DCDC, LDO, and every other AXP2101 register are read-only.
 - Turn the AMOLED panel off with its controller command. Do not assume an
   AXP2101 enable bit belongs exclusively to the display or another peripheral.
 - A black screen is not sufficient evidence that an AXP rail should be forced;
@@ -546,8 +547,8 @@ Safety rules:
 Verified firmware behavior:
 - AXP2101 is found at `0x34`, and status plus the current LDO-enable value are
   logged without modifying them.
-- A register-policy guard rejects future writes to the AXP2101 DCDC/LDO output
-  control blocks.
+- A register-policy guard rejects writes to all 254 non-allowlisted AXP2101
+  addresses, with an exhaustive host test covering the complete address space.
 - Deep and light sleep preserve PMIC output state; the panel, buses, and radio
   are managed independently.
 - On USB, observed PMU status reports VBUS present and `battery=absent`.
@@ -560,6 +561,38 @@ Verified firmware behavior:
   through another I2C transaction and is not a firmware wake GPIO. Keep the
   deadline-based AXP2101 status polling unless a later board revision exposes
   a direct interrupt.
+
+### Boot Failure Telemetry and Safe Mode
+
+Waveshare firmware records the active and last-completed setup stage in RTC
+no-init memory before touching each major subsystem. The state survives panic,
+watchdog, brownout, software, and USB resets. It is discarded after full power
+removal, checksum/schema failure, or when a newly built firmware image is
+flashed.
+
+Diagnostic builds emit stable, machine-readable lines:
+
+```text
+BOOT_META schema=1 ... target=... git=... built=... reset=... resetCode=...
+BOOT_PREVIOUS schema=1 ... active=... completed=...
+BOOT_FAILURE schema=1 ... count=... stage=... after=... safeMode=...
+BOOT_STAGE schema=1 ... event=enter|complete|ready name=...
+BOOT_PMIC schema=1 mode=read-only ... vbus=... battery=... ldo=...
+```
+
+`BOOT_META` is the source of truth for the image actually running; do not infer
+it only from the local checkout or the upload command. An entered stage without
+its matching completion marker identifies the first setup group to audit on
+the next boot. `BOOT_PMIC mode=read-only` confirms that the startup path only
+inspected the PMIC; any `AXP_WRITE_BLOCKED` line is a failed safety gate and
+must be investigated.
+
+After three unfinished early boots from the same exact build, the fourth boot
+enters minimal safe mode before I2C, PMIC, display, storage, speaker, or BLE
+initialization. Safe mode retains the original failing stage and can be cleared
+by flashing a newly built image or removing all USB and battery power. A safe
+mode decision is software containment evidence, not proof that a physical
+short was software-caused.
 
 ### 3. Touch Coordinate Mirroring
 

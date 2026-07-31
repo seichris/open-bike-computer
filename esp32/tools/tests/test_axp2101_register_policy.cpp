@@ -1,6 +1,7 @@
 #include "../../lib/waveshare_board/axp2101_register_policy.hpp"
 
 #include <cassert>
+#include <cstddef>
 
 int main() {
   using namespace waveshare_board::axp2101::register_policy;
@@ -14,11 +15,20 @@ int main() {
   static_assert(isPowerRailControlRegister(0x9A));
   static_assert(!isPowerRailControlRegister(0x9B));
 
-  assert(isWriteAllowed(0x41));
-  assert(isWriteAllowed(0x49));
-  assert(!isWriteAllowed(0x80));
-  assert(!isWriteAllowed(0x90));
-  assert(!isWriteAllowed(0x92));
-  assert(!isWriteAllowed(0x9A));
+  static_assert(isWriteAllowed(INTERRUPT_ENABLE_1));
+  static_assert(isWriteAllowed(INTERRUPT_STATUS_1));
+
+  std::size_t allowedCount = 0;
+  for (unsigned int address = 0; address <= 0xFF; ++address) {
+    const bool expected = address == INTERRUPT_ENABLE_1 ||
+                          address == INTERRUPT_STATUS_1;
+    const bool allowed = isWriteAllowed(static_cast<uint8_t>(address));
+    assert(allowed == expected);
+    allowedCount += allowed ? 1 : 0;
+  }
+
+  // The exhaustive loop makes any future permission an intentional test
+  // change instead of an accidental hole around the known rail registers.
+  assert(allowedCount == 2);
   return 0;
 }
