@@ -145,8 +145,7 @@ struct SettingsView: View {
                     Link(destination: AppPrivacyPolicy.url) {
                         Label("Privacy Policy", systemImage: "hand.raised")
                     }
-                } footer: {
-                    Text("Opens the Bike Computer 2.0 privacy policy in your browser.")
+                    .listRowBackground(Color.clear)
                 }
             }
             .navigationTitle("Settings")

@@ -116,6 +116,11 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
 
         self.assertIn(PRIVACY_POLICY_URL, shared_policy)
         self.assertIn("AppPrivacyPolicy.url", ios_settings)
+        self.assertIn(".listRowBackground(Color.clear)", ios_settings)
+        self.assertNotIn(
+            "Opens the Bike Computer 2.0 privacy policy in your browser.",
+            ios_settings,
+        )
         self.assertIn("same or equivalent privacy protection", normalized_policy)
         self.assertIn("30 days after a map job becomes ready", normalized_policy)
         self.assertIn("renaming or downloading a map does not extend", normalized_policy)
@@ -123,7 +128,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertIn("until you request its deletion", normalized_policy)
         self.assertIn(PRIVACY_POLICY_URL, disclosures)
 
-    def test_watch_settings_exposes_the_installed_app_version(self):
+    def test_watch_settings_exposes_version_and_privacy_policy(self):
         watch_root = (
             IOS_PROJECT
             / "BikeComputerWatch"
@@ -148,6 +153,8 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertIn('Image(systemName: "gearshape")', watch_start)
         self.assertIn('accessibilityLabel("Settings")', watch_start)
         self.assertNotIn("AppPrivacyPolicy.url", watch_start)
+        self.assertIn("AppPrivacyPolicy.url", watch_settings)
+        self.assertIn(".listRowBackground(Color.clear)", watch_settings)
         self.assertIn('LabeledContent("Version"', watch_settings)
         self.assertIn('"CFBundleShortVersionString"', watch_settings)
         self.assertIn('"CFBundleVersion"', watch_settings)
