@@ -90,6 +90,56 @@ sleep from build configuration alone. Step B requires explicit locks around
 every timing-sensitive display, map, SD, transfer, audio, and tested I2C path,
 then separate physical validation on the 1.75-inch board.
 
+## BLE, PMU, and SD characterization harness
+
+Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
+default advertising and connection policy, the SD bus remains at 4 MHz, PMU
+rails retain their known-good masks, and the AXP2101 button status remains on
+the 250 ms housekeeping deadline. No lower-power radio, rail, or SD setting is
+selected without physical evidence.
+
+Power-metrics and diagnostic builds now record the connected interval in
+1.25 ms units, slave latency, supervision timeout in 10 ms units, sample count,
+configured TX power, advertising mode, and requested experimental profile.
+The initial connection descriptor is captured immediately and the effective
+parameters are resampled every five seconds because iOS may negotiate values
+different from the firmware request.
+
+An explicitly opt-in build enables the Phase 8 radio matrix without changing
+ordinary firmware:
+
+```sh
+cd esp32
+PLATFORMIO_BUILD_FLAGS="-DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=9" \
+  pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
+```
+
+Repeat with `BLE_TX_POWER_DBM=3` and `0`. The experimental policy uses
+100-200 ms advertising for 30 seconds after boot, disconnect, or physical
+touch/BOOT wake, then 900-1100 ms advertising. It requests 30-50 ms with zero
+latency during navigation and 60-100 ms with latency four while connected-idle.
+These are requests only; the recorded effective values are authoritative.
+
+For the SD matrix, keep the card image and scenario fixed and repeat both
+targets at 4, 8, 12, and 16 MHz:
+
+```sh
+PLATFORMIO_BUILD_FLAGS="-DWAVESHARE_SD_SPI_FREQ_HZ=8000000 -DWAVESHARE_MAPIO_TIMING_LOG=1" \
+  pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
+```
+
+The checked-in schematics close the PMU-interrupt routing question for current
+board revisions. On 1.75, AXP2101 `IRQ` reaches TCA9554 P5 (`EXIO5`), while the
+expander's `INT` output is not routed to the ESP32. On 2.06, `EXIO5` has no
+populated receiver or ESP32 connection. Neither board exposes a direct usable
+PMU IRQ GPIO, so replacing deadline-based polling would add I2C work rather
+than create an interrupt-driven path.
+
+Audio-rail toggling and all PMU rail changes remain prohibited until the
+1.75-inch schematic mapping is verified against physical codec, display,
+touch, RTC, battery, SD, reboot, and wake tests. The 2.06 safe path continues
+to preserve PMU state.
+
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery
 percentage, or USB-powered observation is not a power baseline. Fill in the
@@ -114,7 +164,8 @@ The report contains:
   heading, zoom, screen, recovery, and other render-reason counts;
 - logically classified BLE packets after authenticated transport framing is
   unwrapped, including packets later rejected by session authentication or
-  application-payload validation;
+  application-payload validation, plus configured radio power/advertising mode
+  and the latest effective connection interval, latency, and timeout;
 - Wi-Fi mode, transfer state/mode, audio activity, current CPU frequency,
   effective DFS range, power-management error code, automatic-light-sleep
   state, and the number of

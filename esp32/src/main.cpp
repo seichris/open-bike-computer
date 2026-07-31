@@ -835,7 +835,9 @@ static void logPowerMetricsReport() {
       "ble[connected=%d authenticated=%d "
       "logical=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
       "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
-      "appQueue=ios-diagnostic] "
+      "appQueue=ios-diagnostic "
+      "radio=txDbm:%d,advMode:%u,requestedProfile:%u,valid:%d,"
+      "intervalUnits:%u,latency:%u,timeoutUnits:%u,samples:%lu] "
       "system[powerMode=%s wifiMode=%d transfer=%d transferMode=%s "
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
@@ -884,6 +886,12 @@ static void logPowerMetricsReport() {
       (unsigned long)bleCount(power_metrics::BlePacketClass::Audio),
       (unsigned long)bleCount(power_metrics::BlePacketClass::Control),
       (unsigned long)bleCount(power_metrics::BlePacketClass::Auth),
+      static_cast<int>(bleStats.txPowerDbm),
+      static_cast<unsigned>(bleStats.advertisingMode),
+      static_cast<unsigned>(bleStats.requestedConnectionProfile),
+      bleStats.connectionParametersValid, bleStats.connectionIntervalUnits,
+      bleStats.connectionLatency, bleStats.supervisionTimeoutUnits,
+      (unsigned long)bleStats.connectionParameterSampleCount,
       powerMode, static_cast<int>(WiFi.getMode()), transferStatus.enabled,
       transferStatus.mode.empty() ? "none" : transferStatus.mode.c_str(),
       audioActive, getCpuFrequencyMhz(), powerManagementStatus.enabled,
@@ -1254,6 +1262,13 @@ void loop() {
   const uint32_t wakeReasons =
       pendingUiWakeReasons | ui_scheduler::wait(0);
   pendingUiWakeReasons = 0;
+#if BLE_RADIO_CHARACTERIZATION
+  if (ui_scheduler::hasReason(wakeReasons,
+                              ui_scheduler::WakeReason::Touch) ||
+      ui_scheduler::hasReason(wakeReasons, ui_scheduler::WakeReason::Boot)) {
+    bleNavServer.noteUserWake();
+  }
+#endif
   power_metrics::noteLoop(now);
   if (lastLoopMs != 0) {
     uint32_t gap = now - lastLoopMs;
@@ -1300,6 +1315,9 @@ void loop() {
       navigatingBeforeBleWork
           ? ui_scheduler::kConnectedNavigationMaximumWaitMs
           : ui_scheduler::kStaticMaximumWaitMs;
+#if BLE_RADIO_CHARACTERIZATION
+  bleNavServer.setNavigationActivity(navigatingBeforeBleWork);
+#endif
   if (ui_scheduler::shouldRunForReason(
           wakeReasons, ui_scheduler::WakeReason::Ble, now,
           lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {

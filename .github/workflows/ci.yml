@@ -132,6 +132,27 @@ jobs:
             tools/tests/test_power_management_policy.cpp \
             -o /tmp/test_power_management_policy
           /tmp/test_power_management_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy
+          /tmp/test_ble_radio_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=3 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_p3
+          /tmp/test_ble_radio_policy_p3
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=0 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_p0
+          /tmp/test_ble_radio_policy_p0
+          if g++ -std=c++17 -Wall -Wextra -Werror \
+            -DBLE_TX_POWER_DBM=3 \
+            tools/tests/test_ble_radio_policy.cpp \
+            -o /tmp/test_ble_radio_policy_unsafe; then
+            echo "Non-default TX power compiled without characterization"
+            exit 1
+          fi
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_pioarduino_custom_core
           g++ -std=c++17 -Wall -Wextra -Werror \
