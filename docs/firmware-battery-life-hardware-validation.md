@@ -1,8 +1,9 @@
 # Firmware battery-life hardware validation
 
-Status: **implementation validation in progress; electrical measurements
-deferred**. Physical bring-up has passed on the available 1.75-inch target;
-2.06-inch hardware is unavailable.
+Status: **Phase 9 implementation validation passed on the available 1.75-inch
+target; electrical measurements deferred**. Automatic light sleep remains
+opt-in, ordinary and production profiles remain DFS-only, and 2.06-inch
+hardware is unavailable.
 
 ## Operator-approved validation scope
 
@@ -77,8 +78,8 @@ flashed with the serial monitor closed. On 2026-07-31, the operator confirmed
 active map drag and pinch, tap wake from dimmed state, tap wake from the fully
 black display-off state, and working drag and pinch again after wake. This
 passes the basic single-cycle connected wake and gesture gate for the ordinary
-DFS-only profile. Repeated wake cycles and the automatic-light-sleep profile
-remain open.
+DFS-only profile. At that point, repeated wake cycles and the
+automatic-light-sleep profile remained open.
 The host-only 10,000-cycle test is not a substitute for the physical wake-cycle
 release gate.
 
@@ -101,10 +102,10 @@ The existing `PWRMET` `loop[count=...]` and `lvgl[count=...]` fields provide the
 software wakeup counters for later before/after battery-depletion runs.
 
 Host tests cover deadline selection, immediate deadlines, event-bit
-coalescing, wraparound, and the 50/250 ms maximum-wait policy. Basic active map
-gestures and connected dim/off wake have passed on the available 1.75-inch
-device; physical maneuver, reconnect, and long-running transfer latency remain
-pending.
+coalescing, wraparound, and the 50/250 ms maximum-wait policy. Active map
+gestures, connected dim/off wake, and BLE reconnect have passed on the
+available 1.75-inch device; physical maneuver and long-running transfer
+latency remain pending.
 
 ## Dynamic frequency scaling
 
@@ -235,15 +236,15 @@ the policy input and performs the existing throttled controller read while the
 display is inactive. Manual validation passed for active drag and pinch,
 dimmed-state tap wake, display-off tap wake, and drag and pinch after wake.
 
-BLE reconnect, transfer, audio, extended soak, repeated wake-cycle checks, and
-equivalent automatic-light-sleep wake remain open. The experiment must not be
-enabled in production until those gates pass; the 2.06-inch profile remains
-build-only until that board is available.
+At that stage, BLE reconnect, transfer, audio, extended soak, repeated
+wake-cycle checks, and equivalent automatic-light-sleep wake remained open.
+The experiment must not be enabled in production until the production gates
+pass; the 2.06-inch profile remains build-only until that board is available.
 
-The next 1.75-inch light-sleep candidate extends the physically proven
-decoded-frame fallback to tickless builds. It requires a clean build, serial
-I2C/PM capture, and then the same active-gesture and dim/off wake retest before
-it can replace the failed interrupt-only experiment.
+The next 1.75-inch light-sleep candidate therefore extended the physically
+proven decoded-frame fallback to tickless builds and was subjected to a clean
+build, serial I2C/PM capture, and the same active-gesture and dim/off wake
+retest.
 
 Before that manual retest, a 105-second reset-to-idle capture of commit
 `790b4c9a9cbc5ab40c1d93bf0486ff3377ec66f0` reached connected active, dimmed,
@@ -263,6 +264,30 @@ was not a meaningful improvement, so the known-good 1.75-inch stop-separated
 read sequence remains intact. The remaining failures are bounded speculative
 read NACKs; their count remains part of the light-sleep serial gate and must
 not be reported as zero.
+
+The exact final light-sleep candidate at
+`63a1d40ea37f2c373d6387ee3c83fead04540268` was clean-built and app-flashed
+to the same 1.75-inch board. Its firmware binary SHA-256 is
+`ce2a8cfa3a7c0f637cecb99a412945238a24713482ad495ad3cec900cc86315d`.
+A 105-second reset-to-idle capture remained connected and authenticated while
+moving through active, dimmed, and display-off states with `lightSleep=1`,
+`pmError=0`, zero active application locks at idle, peak lock count two, zero
+lock failures, EXT1 mask `0x200001`, ready wake capture and notifier paths,
+zero wake-source failures, and startup complete. It did not panic. The capture
+recorded 15 instances of the already characterized
+`ESP_ERR_INVALID_STATE` speculative-read failure; 14 had completed recovery
+before the capture ended. This is the same bounded failure class seen in the
+ordinary-profile baseline, not a new sleep-boundary regression.
+
+On 2026-07-31, the operator then confirmed repeated wake cycles from both the
+dimmed and fully black display-off states, map drag and pinch-to-zoom after
+wake, BLE reconnect, and PWR-button wake. This passes the Phase 9 physical
+implementation gate on the available 1.75-inch board. Automatic light sleep
+remains confined to the opt-in validation profile: ordinary and production
+profiles still use DFS without automatic light sleep. Longer audio, transfer,
+maneuver, connected-navigation, and practical battery-runtime trials, plus
+physical validation on the unavailable 2.06-inch board, remain required before
+automatic light sleep can be considered for production enablement.
 
 ## BLE, PMU, and SD characterization harness
 
