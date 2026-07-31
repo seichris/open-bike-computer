@@ -5,6 +5,7 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #include <Arduino_GFX_Library.h>
@@ -261,6 +262,7 @@ static uint32_t attemptedTouchInterruptGeneration = 0;
 
 static void IRAM_ATTR latchTouchInterrupt() {
   touchInterruptGeneration = touchInterruptGeneration + 1;
+  ui_scheduler::notifyFromIsr(ui_scheduler::WakeReason::Touch);
 }
 
 waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {

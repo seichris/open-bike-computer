@@ -8,6 +8,8 @@
 
 #include <Arduino.h>
 
+#include <algorithm>
+
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
@@ -82,6 +84,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "route_overlay.hpp"
+#include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "WAVESHARE_AMOLED_175.hpp"
@@ -185,6 +188,7 @@ static void IRAM_ATTR latchWaveshareBootScreenCycle() {
   portENTER_CRITICAL_ISR(&waveshareBootButtonMux);
   waveshareBootScreenCyclePending = true;
   portEXIT_CRITICAL_ISR(&waveshareBootButtonMux);
+  ui_scheduler::notifyFromIsr(ui_scheduler::WakeReason::Boot);
 }
 
 static bool takeWaveshareBootScreenCycle() {
@@ -264,15 +268,6 @@ static bool processWaveshareBootButton() {
 }
 
 static bool processWavesharePowerButton() {
-  constexpr uint32_t POLL_INTERVAL_MS = 100;
-  static uint32_t lastPollMs = 0;
-
-  const uint32_t now = millis();
-  if (now - lastPollMs < POLL_INTERVAL_MS) {
-    return false;
-  }
-  lastPollMs = now;
-
   waveshare_board::axp2101::PowerButtonEvents events;
   if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(events)) {
     return false;
@@ -350,10 +345,16 @@ static uint32_t lvglHandlerCount = 0;
 static uint32_t lastLvglHandlerMs = 0;
 static uint32_t lastLvglHandlerDurationUs = 0;
 static uint32_t maxLvglHandlerDurationUs = 0;
+static uint32_t nextLvglDelayMs = 0;
+static uint32_t pendingUiWakeReasons = 0;
+static uint32_t lastBleHousekeepingMs = 0;
+static uint32_t lastShutdownHousekeepingMs = 0;
+static uint32_t lastTransferHousekeepingMs = 0;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static display_inactivity::Policy displayInactivityPolicy;
 static display_inactivity::Mode currentDisplayMode =
     display_inactivity::Mode::Active;
+static uint32_t lastPowerButtonHousekeepingMs = 0;
 #endif
 #include "lvglSetup.hpp"
 #include "settings.hpp"
@@ -974,6 +975,9 @@ void setup() {
 #endif
   power_metrics::begin();
   power.begin();
+  // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
+  // enabling BLE, touch, BOOT, audio, or transfer publishers.
+  ui_scheduler::bindCurrentTask();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayPowerManager.begin();
 #endif
@@ -1238,6 +1242,9 @@ void setup() {
  */
 void loop() {
   uint32_t now = millis();
+  const uint32_t wakeReasons =
+      pendingUiWakeReasons | ui_scheduler::wait(0);
+  pendingUiWakeReasons = 0;
   power_metrics::noteLoop(now);
   if (lastLoopMs != 0) {
     uint32_t gap = now - lastLoopMs;
@@ -1248,32 +1255,71 @@ void loop() {
   lastLoopMs = now;
   loopCount++;
 
-  std::string activatedMapRoot;
-  if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
-    const std::string rendererRoot = std::string("/sdcard") + activatedMapRoot;
-    const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
-                        mapView.setVectorMapFolder(rendererRoot);
-    mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
-  }
-  if (mapTransferHttp.takeAutomaticExitRequest()) {
-    const bool disabled = mapTransferHttp.setEnabled(false);
-    Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
-                  disabled);
-  }
+  constexpr uint32_t kStaticHousekeepingPeriodMs =
+      ui_scheduler::kStaticMaximumWaitMs;
+  const bool transferHousekeepingDue =
+      ui_scheduler::shouldRunForReason(
+          wakeReasons, ui_scheduler::WakeReason::Transfer, now,
+          lastTransferHousekeepingMs, kStaticHousekeepingPeriodMs);
+  if (transferHousekeepingDue) {
+    lastTransferHousekeepingMs = now;
+    std::string activatedMapRoot;
+    if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
+      const std::string rendererRoot =
+          std::string("/sdcard") + activatedMapRoot;
+      const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
+                          mapView.setVectorMapFolder(rendererRoot);
+      mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
+    }
+    if (mapTransferHttp.takeAutomaticExitRequest()) {
+      const bool disabled = mapTransferHttp.setEnabled(false);
+      Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
+                    disabled);
+    }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  processTransferInactivityTimeout(now);
+    processTransferInactivityTimeout(now);
 #endif
+    updateMapActivationProgressOverlay();
+    deviceTransferHttp.process();
+  }
+
+  const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();
+  const bool navigatingBeforeBleWork =
+      bleStatsBeforeWork.connected && bleStatsBeforeWork.authenticated &&
+      (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  const uint32_t bleHousekeepingPeriodMs =
+      navigatingBeforeBleWork
+          ? ui_scheduler::kConnectedNavigationMaximumWaitMs
+          : ui_scheduler::kStaticMaximumWaitMs;
+  if (ui_scheduler::shouldRunForReason(
+          wakeReasons, ui_scheduler::WakeReason::Ble, now,
+          lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {
+    lastBleHousekeepingMs = now;
+    bleNavServer.process();
+  }
+
+  if (ui_scheduler::isDue(now, lastShutdownHousekeepingMs,
+                          kStaticHousekeepingPeriodMs)) {
+    lastShutdownHousekeepingMs = now;
+    processDisconnectedShutdown();
+  }
 
   // Process app-provided GPS transitions before any periodic work that can
   // briefly block on display, sensor, BLE, or debug output.
   checkPendingMapTransition();
-  updateMapActivationProgressOverlay();
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
   if (processWaveshareBootButton()) {
     displayInactivityPolicy.noteMeaningfulActivity(now);
+  }
+  if (ui_scheduler::isDue(now, lastPowerButtonHousekeepingMs,
+                          kStaticHousekeepingPeriodMs)) {
+    lastPowerButtonHousekeepingMs = now;
+    if (processWavesharePowerButton()) {
+      displayInactivityPolicy.noteMeaningfulActivity(now);
+    }
   }
 #endif
 
@@ -1297,7 +1343,7 @@ void loop() {
 #endif
   if (runLvglHandler) {
     uint32_t startUs = micros();
-    lv_timer_handler();
+    nextLvglDelayMs = lv_timer_handler();
     lastLvglHandlerDurationUs = micros() - startUs;
     power_metrics::noteLvgl(lastLvglHandlerDurationUs);
     if (lastLvglHandlerDurationUs > maxLvglHandlerDurationUs) {
@@ -1310,30 +1356,9 @@ void loop() {
 #endif
   }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  const uint32_t loopDelayMs =
-      currentDisplayMode == display_inactivity::Mode::DisplayOff
-          ? 20
-          : TASK_SLEEP_PERIOD_MS;
-  vTaskDelay(pdMS_TO_TICKS(loopDelayMs));
-#else
-  if (runLvglHandler) {
-    vTaskDelay(pdMS_TO_TICKS(TASK_SLEEP_PERIOD_MS));
-  }
-#endif
-
-  // Process BLE events
-  bleNavServer.process();
-  processDisconnectedShutdown();
-
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   waveshare_board::imu::process();
-#endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (processWavesharePowerButton()) {
-    displayInactivityPolicy.noteMeaningfulActivity(millis());
-  }
 #endif
 
   logSystemDebugHeartbeat();
@@ -1351,5 +1376,51 @@ void loop() {
   }
 #endif
 
-  deviceTransferHttp.process();
+  const uint32_t schedulerNow = millis();
+  const BLEDebugStats schedulerBleStats = bleNavServer.getDebugStats();
+  const bool connectedNavigation =
+      schedulerBleStats.connected && schedulerBleStats.authenticated &&
+      (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  const uint32_t nextBleHousekeepingMs = ui_scheduler::remainingUntil(
+      schedulerNow, lastBleHousekeepingMs,
+      connectedNavigation
+          ? ui_scheduler::kConnectedNavigationMaximumWaitMs
+          : ui_scheduler::kStaticMaximumWaitMs);
+  uint32_t nextHousekeepingMs = std::min(
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastTransferHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs),
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastShutdownHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs));
+  nextHousekeepingMs = std::min(nextHousekeepingMs, nextBleHousekeepingMs);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  nextHousekeepingMs = std::min(
+      nextHousekeepingMs,
+      ui_scheduler::remainingUntil(schedulerNow,
+                                   lastPowerButtonHousekeepingMs,
+                                   kStaticHousekeepingPeriodMs));
+#endif
+
+  uint32_t effectiveLvglDelayMs = ui_scheduler::remainingUntil(
+      schedulerNow, lastLvglHandlerMs, nextLvglDelayMs);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (currentDisplayMode == display_inactivity::Mode::Dimmed) {
+    effectiveLvglDelayMs =
+        std::max(effectiveLvglDelayMs,
+                 ui_scheduler::remainingUntil(schedulerNow,
+                                              lastLvglHandlerMs, 100));
+  }
+#endif
+  ui_scheduler::DeadlineContext deadline;
+  deadline.lvglDelayMs = effectiveLvglDelayMs;
+  deadline.housekeepingDelayMs = nextHousekeepingMs;
+  deadline.connectedNavigation = connectedNavigation;
+  deadline.lvglBlocked = waitScreenRefresh;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  deadline.displayOff =
+      currentDisplayMode == display_inactivity::Mode::DisplayOff;
+#endif
+  pendingUiWakeReasons =
+      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
 }

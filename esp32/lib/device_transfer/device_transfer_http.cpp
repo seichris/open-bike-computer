@@ -1,4 +1,5 @@
 #include "device_transfer_http.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
 
 #include <algorithm>
@@ -301,6 +302,7 @@ void HttpTransferServer::runWorker() {
       requestInProgress_ = false;
       currentRequestAuthorized_ = false;
       unlockState();
+      ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
     } else {
       vTaskDelay(pdMS_TO_TICKS(2));
     }

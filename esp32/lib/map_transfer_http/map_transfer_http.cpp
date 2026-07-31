@@ -3,6 +3,7 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../maps/src/mapBlockFormat.hpp"
 #include "map_stream_compiled_trust.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -1157,6 +1158,7 @@ void MapTransferHttpServer::requestAutomaticExit() {
   lockState();
   pendingAutomaticExit_ = true;
   unlockState();
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
 void MapTransferHttpServer::finishActivation(const std::string &status,
@@ -1169,6 +1171,7 @@ void MapTransferHttpServer::finishActivation(const std::string &status,
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);
   }
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
 void MapTransferHttpServer::updateActivationProgress(
@@ -1176,6 +1179,7 @@ void MapTransferHttpServer::updateActivationProgress(
   lockState();
   activationState_.updateProgress(progress);
   unlockState();
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
 bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
@@ -1228,6 +1232,7 @@ bool MapTransferHttpServer::runStreamActivationTask(
   pendingRendererStreamProtocol_ = true;
   activationState_.updateProgress({3, 3, 2, 3});
   unlockState();
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
   return true;
 }
 
@@ -1302,6 +1307,7 @@ bool MapTransferHttpServer::runActivationTask(const std::string &sessionId,
   pendingRendererStreamProtocol_ = false;
   activationState_.updateProgress({5, 5, 4, 5});
   unlockState();
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
   return true;
 }
 

@@ -1,4 +1,5 @@
 #include "speaker.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
@@ -536,6 +537,7 @@ void speakerTask(void *) {
     }
 
     playbackActive.store(true, std::memory_order_relaxed);
+    ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
     if (esp_codec_dev_set_out_vol(speakerDevice, request.volumePercent) !=
         ESP_CODEC_DEV_OK) {
       Serial.printf("Speaker: failed to set volume to %u%%\n",
@@ -552,6 +554,7 @@ void speakerTask(void *) {
       }
     }
     playbackActive.store(false, std::memory_order_relaxed);
+    ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
 
     if (uxQueueMessagesWaiting(soundQueue) == 0) {
       releaseCodecResources();

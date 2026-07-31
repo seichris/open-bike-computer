@@ -8,8 +8,6 @@
 
 #pragma once
 
-#define LV_TICK_PERIOD_MS 5
-
 #include "globalGpxDef.h"
 #include "lvgl_private.h"
 #include "tasks.hpp"
@@ -51,6 +49,5 @@ uint8_t gpioGetBut();
 #endif
 void applyModifyTheme(lv_theme_t *th, lv_obj_t *obj);
 void modifyTheme();
-void lv_tick_task(void *arg);
 void initLVGL();
 void loadMainScreen();

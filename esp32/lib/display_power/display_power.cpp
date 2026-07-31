@@ -2,6 +2,7 @@
 
 #include "../panel/WAVESHARE_AMOLED_175.hpp"
 #include "../power_metrics/power_metrics.hpp"
+#include "../ui_scheduler/ui_scheduler.hpp"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -86,6 +87,8 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
 
   if (!persisted) {
     Serial.println("DisplayPower: failed to persist brightness");
+  } else {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Display);
   }
   return persisted;
 }
@@ -97,8 +100,12 @@ void DisplayPowerManager::requestState(display_power::State state) {
   if (!lock()) {
     return;
   }
+  const bool changed = policy_.state() != state;
   policy_.requestState(state);
   unlock();
+  if (changed) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+  }
 }
 
 display_power::State DisplayPowerManager::state() const {

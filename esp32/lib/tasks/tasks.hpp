@@ -26,8 +26,6 @@
 #include "globalGpxDef.h"
 #include "lvglFuncs.hpp"
 
-#define TASK_SLEEP_PERIOD_MS 5
-
 #ifdef HAS_HARDWARE_GPS
 void gpsTask(void *pvParameters);
 void initGpsTask();

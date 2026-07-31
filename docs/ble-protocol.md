@@ -575,6 +575,9 @@ route, screen/input event, connection/authentication event, ownership
 comparison, active sound, or transfer wakes or holds it as appropriate. BLE
 advertising/connection processing continues with the panel off, and wake
 restores the saved brightness with one synchronized full-screen refresh.
+Incoming BLE callbacks publish their latest state and notify the firmware's UI
+owner task. The UI task applies those mailboxes and LVGL changes immediately;
+callbacks do not mutate LVGL objects directly.
 Firmware echoes the request ID when acknowledging tracked requests on the
 navigation notification characteristic:
 
