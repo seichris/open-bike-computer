@@ -5,6 +5,7 @@
 #include "../../lib/gui/src/navigationContentMode.hpp"
 #include "../../lib/gui/src/rideMetricFontSelection.hpp"
 #include "../../lib/gui/src/rideTelemetryLayout.hpp"
+#include "../../lib/gui/src/waitingScreenLayout.hpp"
 #include "../../lib/maps/src/mapLineStyle.hpp"
 
 #include <cassert>
@@ -36,6 +37,7 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(502, 502) == 251);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(410, 502);
   constexpr auto batteryLayout = battery_status_layout::makeLayout(410, 502);
+  constexpr auto waitingLayout = waiting_screen_layout::makeLayout(410, 502);
   static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
 #else
@@ -46,9 +48,12 @@ int main() {
   assert(gui_layout::mapScreenAnchorY(466, 466) == 233);
   constexpr auto rideLayout = ride_telemetry_layout::makeLayout(466, 466);
   constexpr auto batteryLayout = battery_status_layout::makeLayout(466, 466);
+  constexpr auto waitingLayout = waiting_screen_layout::makeLayout(466, 466);
   static_assert(ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
 #endif
+  static_assert(waiting_screen_layout::isValid(waitingLayout));
+  static_assert(waitingLayout.state.width == 112);
   static_assert(batteryLayout.topMargin == batteryLayout.bottomMargin);
   assert(batteryLayout.deviceY == batteryLayout.topMargin);
   assert(batteryLayout.phoneY + batteryLayout.diameter +

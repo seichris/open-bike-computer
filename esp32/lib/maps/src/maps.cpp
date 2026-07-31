@@ -15,6 +15,11 @@
 #include "../../gui/src/guiLayout.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
+
 // #include "../../compass/compass.hpp"
 extern Gps gps;
 extern Storage storage;
@@ -1931,8 +1936,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           }
         }
       }
+#if FIRMWARE_DIAGNOSTICS
       Serial.printf("[Maps] Block polygons: Total=%d, Checked=%d, Drawn=%d\n",
                     poly_total, poly_checked, poly_drawn);
+#endif
       const uint32_t polygonMs = millis() - polygonStartMs;
       log_i("Block polygons done %i ms", polygonMs);
       const uint32_t lineStartMs = millis();

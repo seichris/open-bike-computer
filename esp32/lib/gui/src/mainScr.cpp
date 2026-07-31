@@ -14,8 +14,12 @@
 #include "guiLayout.hpp"
 #include "mapTileTransition.hpp"
 #include "navigationContentMode.hpp"
+#include "uiUpdatePolicy.hpp"
+#include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "../../utils/src/mapTapArbiter.hpp"
 #include <algorithm>
+#include <cstring>
+#include <type_traits>
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../../panel/WAVESHARE_AMOLED_175.hpp"
 #endif
@@ -38,6 +42,7 @@ extern uint32_t DOUBLE_TOUCH_EVENT;
 extern Compass compass;
 #endif
 extern Gps gps;
+extern Battery battery;
 extern wayPoint loadWpt;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 extern bool touchPressed;
@@ -88,11 +93,233 @@ struct DestinationPickerView {
 };
 static DestinationPickerView mapGuidanceDestinationPicker;
 static DestinationPickerView navigationDestinationPicker;
+static ui_update_policy::ChangeTracker uiChangeTracker;
+static uint32_t lastRideStatsUpdateMs = 0;
 static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
     {3, 18}, {5, 11}, {0, 7},  {7, 6},   {9, 0}};
 
 static void refreshDestinationPickersAsync(void *userData);
+
+namespace {
+
+constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+
+template <typename T> void hashScalar(uint64_t &hash, const T &value) {
+  static_assert(std::is_trivially_copyable<T>::value,
+                "UI signatures only accept scalar values");
+  const auto *bytes = reinterpret_cast<const uint8_t *>(&value);
+  for (std::size_t index = 0; index < sizeof(T); ++index) {
+    hash ^= bytes[index];
+    hash *= FNV_PRIME;
+  }
+}
+
+void hashText(uint64_t &hash, const char *text, std::size_t maximumLength) {
+  if (text == nullptr) {
+    const uint8_t empty = 0;
+    hashScalar(hash, empty);
+    return;
+  }
+  const std::size_t length = strnlen(text, maximumLength);
+  for (std::size_t index = 0; index < length; ++index) {
+    hash ^= static_cast<uint8_t>(text[index]);
+    hash *= FNV_PRIME;
+  }
+  hashScalar(hash, length);
+}
+
+template <typename T>
+void hashOptionalMetric(uint64_t &hash,
+                        const workout_telemetry::OptionalMetric<T> &metric) {
+  hashScalar(hash, metric.available);
+  if (metric.available) {
+    hashScalar(hash, metric.value);
+  }
+}
+
+uint64_t navigationSignature() {
+  const NavigationData navigation = getCurrentNavigationData();
+  uint64_t hash = FNV_OFFSET;
+  hashScalar(hash, navigation.iconID);
+  hashScalar(hash, navigation.distance);
+  hashText(hash, navigation.instruction, sizeof(navigation.instruction));
+  if (activeTile == NAV || activeTile == MAP_GUIDANCE) {
+    const DestinationCatalogSnapshot catalog = getDestinationCatalogSnapshot();
+    const DestinationPickerStatusSnapshot status =
+        getDestinationPickerStatusSnapshot();
+    hashScalar(hash, catalog.revision);
+    hashScalar(hash, status.revision);
+  }
+  return hash;
+}
+
+uint64_t gpsSignature() {
+  uint64_t hash = FNV_OFFSET;
+  hashScalar(hash, gps.gpsData.satellites);
+  hashScalar(hash, gps.gpsData.fixMode);
+  hashScalar(hash, isGpsFixed);
+  hashScalar(hash, gps.gpsData.altitude);
+  hashScalar(hash, gps.gpsData.speed);
+  hashScalar(hash, gps.gpsData.distanceTraveled);
+  hashScalar(hash, gps.gpsData.elapsedSeconds);
+  hashScalar(hash, gps.gpsData.routeRemaining);
+  hashScalar(hash, gps.gpsData.hasRouteRemaining);
+  hashScalar(hash, gps.gpsData.latitude);
+  hashScalar(hash, gps.gpsData.longitude);
+  hashScalar(hash, gps.gpsData.heading);
+  hashScalar(hash, gps.gpsData.hdop);
+  hashScalar(hash, gps.gpsData.pdop);
+  hashScalar(hash, gps.gpsData.vdop);
+  hashScalar(hash, gps.gpsData.satInView);
+  if (activeTile == SATTRACK) {
+    const uint8_t count = std::min<uint8_t>(gps.gpsData.satInView,
+                                            MAX_SATELLLITES_IN_VIEW);
+    for (uint8_t index = 0; index < count; ++index) {
+      const auto &satellite = gps.satTracker[index];
+      hashScalar(hash, satellite.active);
+      hashScalar(hash, satellite.satNum);
+      hashScalar(hash, satellite.elev);
+      hashScalar(hash, satellite.azim);
+      hashScalar(hash, satellite.snr);
+      hashScalar(hash, satellite.posX);
+      hashScalar(hash, satellite.posY);
+      hashText(hash, satellite.talker_id, sizeof(satellite.talker_id));
+    }
+  }
+  return hash;
+}
+
+uint64_t workoutSignature(uint32_t nowMs) {
+  const workout_telemetry::Snapshot snapshot =
+      workout_telemetry_runtime::snapshot(nowMs);
+  const workout_telemetry::State &state = snapshot.state;
+  uint64_t hash = FNV_OFFSET;
+  hashScalar(hash, state.sessionState);
+  hashScalar(hash, state.sessionToken);
+  hashScalar(hash, state.lastCoreReceivedAtMs);
+  hashScalar(hash, state.lastExtendedReceivedAtMs);
+  hashScalar(hash, state.pendingUnavailableCoreReceivedAtMs);
+  hashScalar(hash, state.coreReceived);
+  hashScalar(hash, state.extendedReceived);
+  hashScalar(hash, state.transportUnavailable);
+  hashScalar(hash, state.pendingUnavailableCore);
+  hashOptionalMetric(hash, state.elapsedSeconds);
+  hashOptionalMetric(hash, state.distanceMeters);
+  hashOptionalMetric(hash, state.speedCentimetersPerSecond);
+  hashOptionalMetric(hash, state.currentHeartRateBpm);
+  hashScalar(hash, state.sourceFlags);
+  hashOptionalMetric(hash, state.averageHeartRateBpm);
+  hashOptionalMetric(hash, state.activeEnergyTenthsKilocalorie);
+  hashOptionalMetric(hash, state.cyclingPowerWatts);
+  hashOptionalMetric(hash, state.cyclingCadenceTenthsRpm);
+  hashOptionalMetric(hash, state.currentHeartRateZone);
+  hashOptionalMetric(hash, state.altitudeMeters);
+  hashOptionalMetric(hash, state.heartRateZoneCount);
+  hashScalar(hash, snapshot.stale);
+  return hash;
+}
+
+void hashScreenMapSettings(uint64_t &hash,
+                           const ScreenMapRenderSettings &settings) {
+  hashScalar(hash, settings.minPolygonSize);
+  hashScalar(hash, settings.detailLevel);
+  hashScalar(hash, settings.routeLineWidth);
+  hashScalar(hash, settings.streetLineWidth);
+  hashScalar(hash, settings.positionMarkerScale);
+  hashScalar(hash, settings.zoomLevel);
+  hashScalar(hash, settings.visibilityMask);
+}
+
+uint64_t settingsSignature() {
+  uint64_t hash = FNV_OFFSET;
+  hashScreenMapSettings(hash, mapRenderSettings.mapStyle);
+  hashScreenMapSettings(hash, mapRenderSettings.mapNavigationStyle);
+  hashScalar(hash, mapRenderSettings.mapRotationMode);
+  hashScalar(hash, mapRenderSettings.tapToSwitchScreens);
+  hashScalar(hash, mapRenderSettings.enabledScreensMask);
+  hashScalar(hash, mapRenderSettings.defaultScreen);
+  hashScalar(hash, mapRenderSettings.disconnectedSleepTimeoutSeconds);
+  hashScalar(hash, mapRenderSettings.navigationOverlayVisibilityMask);
+  hashScalar(hash, mapSet.showMapCompass);
+  hashScalar(hash, mapSet.compassRotation);
+  hashScalar(hash, mapSet.mapRotationComp);
+  hashScalar(hash, mapSet.mapFullScreen);
+  hashScalar(hash, mapSet.showMapSpeed);
+  hashScalar(hash, mapSet.vectorMap);
+  hashScalar(hash, mapSet.showMapScale);
+  hashScalar(hash, zoom);
+  return hash;
+}
+
+ui_update_policy::SourceSignatures captureSourceSignatures(uint32_t nowMs) {
+  static uint64_t cachedWorkoutSignature = FNV_OFFSET;
+  static uint64_t cachedDeviceBatterySignature = FNV_OFFSET;
+  static uint32_t lastWorkoutSampleMs = 0;
+  static uint32_t lastDeviceBatterySampleMs = 0;
+
+  if (ui_update_policy::cadenceDue(
+          nowMs, lastWorkoutSampleMs,
+          ui_update_policy::kRideStatsPeriodMs)) {
+    cachedWorkoutSignature = workoutSignature(nowMs);
+  }
+  if (ui_update_policy::cadenceDue(
+          nowMs, lastDeviceBatterySampleMs,
+          ui_update_policy::kDeviceBatteryPeriodMs)) {
+    uint8_t percentage = 0;
+    bool charging = false;
+    const bool available = battery.readBatteryStatus(percentage, charging);
+    cachedDeviceBatterySignature = FNV_OFFSET;
+    hashScalar(cachedDeviceBatterySignature, available);
+    if (available) {
+      hashScalar(cachedDeviceBatterySignature, percentage);
+      hashScalar(cachedDeviceBatterySignature, charging);
+    }
+  }
+
+  ui_update_policy::SourceSignatures signatures;
+  signatures[ui_update_policy::Source::Navigation] = navigationSignature();
+  signatures[ui_update_policy::Source::Gps] = gpsSignature();
+  signatures[ui_update_policy::Source::Route] = routeOverlay.revision();
+  signatures[ui_update_policy::Source::Workout] = cachedWorkoutSignature;
+  uint64_t phoneBattery = FNV_OFFSET;
+  const int16_t phoneLevel = getPhoneBatteryLevelPercent();
+  const bool phoneCharging = isPhoneBatteryCharging();
+  hashScalar(phoneBattery, phoneLevel);
+  hashScalar(phoneBattery, phoneCharging);
+  signatures[ui_update_policy::Source::PhoneBattery] = phoneBattery;
+  signatures[ui_update_policy::Source::Settings] = settingsSignature();
+  signatures[ui_update_policy::Source::DeviceBattery] =
+      cachedDeviceBatterySignature;
+  return signatures;
+}
+
+void setHiddenIfChanged(lv_obj_t *object, bool hidden) {
+  if (object == nullptr || lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hidden) {
+    return;
+  }
+  if (hidden) {
+    lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void setLabelTextIfChanged(lv_obj_t *label, const char *text) {
+  if (label != nullptr && text != nullptr &&
+      strcmp(lv_label_get_text(label), text) != 0) {
+    lv_label_set_text(label, text);
+  }
+}
+
+void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
+  if (image != nullptr && lv_img_get_angle(image) != angle) {
+    lv_img_set_angle(image, angle);
+  }
+}
+
+} // namespace
 
 Maps mapView;
 static map_tap_arbiter::Controller mapTapController;
@@ -412,13 +639,15 @@ static int16_t navigationArrowAngle(uint8_t iconID) {
 
 static void setNavigationDistanceLabel(lv_obj_t *label,
                                        uint16_t distanceMeters) {
+  char text[24];
   if (distanceMeters >= 1000) {
     const uint16_t deciKilometers = (distanceMeters + 50U) / 100U;
-    lv_label_set_text_fmt(label, "%u.%u km", deciKilometers / 10U,
-                          deciKilometers % 10U);
+    snprintf(text, sizeof(text), "%u.%u km", deciKilometers / 10U,
+             deciKilometers % 10U);
   } else {
-    lv_label_set_text_fmt(label, "%u m", distanceMeters);
+    snprintf(text, sizeof(text), "%u m", distanceMeters);
   }
+  setLabelTextIfChanged(label, text);
 }
 
 static void applyMapRotationForActiveTile() {
@@ -705,30 +934,32 @@ static void updateMapGuidanceOverlay() {
     return;
   }
 
-  LV_IMG_DECLARE(navup);
-  lv_img_set_src(mapGuidanceArrow, &navup);
-
   const navigation_content_mode::Mode contentMode =
       navigation_content_mode::forNavigationState(hasCurrentNavigationData());
-  applyMapGuidanceOverlayLayout();
+  static int8_t displayedContentMode = -1;
+  const int8_t nextContentMode = static_cast<int8_t>(contentMode);
+  if (displayedContentMode != nextContentMode) {
+    applyMapGuidanceOverlayLayout();
+    displayedContentMode = nextContentMode;
+  }
 
   if (contentMode == navigation_content_mode::Mode::FavoriteDestinations) {
-    lv_img_set_angle(mapGuidanceArrow, 0);
-    lv_label_set_text_static(mapGuidanceDistance, "--");
-    lv_obj_add_flag(mapGuidanceArrow, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(mapGuidanceDistance, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(mapGuidanceDestinationPicker.container,
-                      LV_OBJ_FLAG_HIDDEN);
+    setImageAngleIfChanged(mapGuidanceArrow, 0);
+    setLabelTextIfChanged(mapGuidanceDistance, "--");
+    setHiddenIfChanged(mapGuidanceArrow, true);
+    setHiddenIfChanged(mapGuidanceDistance, true);
+    setHiddenIfChanged(mapGuidanceDestinationPicker.container, false);
     renderDestinationPicker(mapGuidanceDestinationPicker);
     return;
   }
 
-  lv_obj_add_flag(mapGuidanceDestinationPicker.container, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(mapGuidanceArrow, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(mapGuidanceDistance, LV_OBJ_FLAG_HIDDEN);
+  setHiddenIfChanged(mapGuidanceDestinationPicker.container, true);
+  setHiddenIfChanged(mapGuidanceArrow, false);
+  setHiddenIfChanged(mapGuidanceDistance, false);
 
   NavigationData navData = getCurrentNavigationData();
-  lv_img_set_angle(mapGuidanceArrow, navigationArrowAngle(navData.iconID));
+  setImageAngleIfChanged(mapGuidanceArrow,
+                         navigationArrowAngle(navData.iconID));
   setNavigationDistanceLabel(mapGuidanceDistance, navData.distance);
 }
 
@@ -846,6 +1077,7 @@ void scrollTile(lv_event_t *event) {
  *
  */
 void updateMainScreen(lv_timer_t *t) {
+  (void)t;
   processMapPinchZoom();
   processDeferredMapTap();
 
@@ -855,6 +1087,17 @@ void updateMainScreen(lv_timer_t *t) {
   if (shouldInterruptMapRenderForScreenCycle()) {
     return;
   }
+
+  // The 30 ms timer remains the input path for touch responsiveness, but
+  // source acquisition is unnecessary while another screen is active.
+  if (!isMainScreen) {
+    serviceMapPinchZoomOutBackdrop();
+    return;
+  }
+
+  const uint32_t nowMs = millis();
+  (void)uiChangeTracker.observe(captureSourceSignatures(nowMs));
+  bool mapEventSent = false;
 
   // Handle BLE-triggered map updates OUTSIDE of isScrolled check
   // This ensures continuous updates even when user hasn't dragged
@@ -874,6 +1117,7 @@ void updateMainScreen(lv_timer_t *t) {
 
     // Trigger map regeneration and display
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    mapEventSent = true;
     if (shouldInterruptMapRenderForScreenCycle()) {
       return;
     }
@@ -889,9 +1133,16 @@ void updateMainScreen(lv_timer_t *t) {
         lv_obj_send_event(compassHeading, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
 #ifndef ENABLE_COMPASS
-      heading = gps.gpsData.heading;
-      lv_obj_send_event(compassHeading, LV_EVENT_VALUE_CHANGED, NULL);
+      if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
+        heading = gps.gpsData.heading;
+        lv_obj_send_event(compassHeading, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_send_event(latitude, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_send_event(longitude, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_send_event(altitude, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_send_event(speedLabel, LV_EVENT_VALUE_CHANGED, NULL);
+      }
 #endif
+#ifdef ENABLE_COMPASS
       if (gps.hasLocationChange()) {
         lv_obj_send_event(latitude, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_send_event(longitude, LV_EVENT_VALUE_CHANGED, NULL);
@@ -900,6 +1151,7 @@ void updateMainScreen(lv_timer_t *t) {
         lv_obj_send_event(altitude, LV_EVENT_VALUE_CHANGED, NULL);
       if (gps.isSpeedChanged())
         lv_obj_send_event(speedLabel, LV_EVENT_VALUE_CHANGED, NULL);
+#endif
       break;
 
     case MAP:
@@ -917,7 +1169,9 @@ void updateMainScreen(lv_timer_t *t) {
       applyMapRotationForActiveTile();
       if (activeTile == MAP_GUIDANCE) {
         mapView.followGps = true;
-        updateMapGuidanceOverlay();
+        if (uiChangeTracker.take(ui_update_policy::Source::Navigation)) {
+          updateMapGuidanceOverlay();
+        }
       }
 
       // Track last heading for Course-Up auto-rotation
@@ -970,30 +1224,62 @@ void updateMainScreen(lv_timer_t *t) {
         mapView.redrawMap = true;
       }
 
-      lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+      if (!mapEventSent && (mapView.isPosMoved || mapView.redrawMap)) {
+        lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+        mapEventSent = true;
+      }
+      (void)uiChangeTracker.take(ui_update_policy::Source::Gps);
       break;
     }
 
     case NAV:
-      lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
+      if (uiChangeTracker.take(ui_update_policy::Source::Navigation)) {
+        lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
+      }
       break;
 
-    case RIDESTATS:
-      lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+    case RIDESTATS: {
+      constexpr uint32_t rideSources =
+          ui_update_policy::sourceMask(ui_update_policy::Source::Gps) |
+          ui_update_policy::sourceMask(ui_update_policy::Source::Workout);
+      if ((uiChangeTracker.pending() & rideSources) != 0 &&
+          ui_update_policy::cadenceDue(
+              nowMs, lastRideStatsUpdateMs,
+              ui_update_policy::kRideStatsPeriodMs)) {
+        (void)uiChangeTracker.take(rideSources);
+        lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+      }
       break;
+    }
 
-    case BATTERY_STATUS:
-      lv_obj_send_event(batteryStatusTile, LV_EVENT_VALUE_CHANGED, NULL);
+    case BATTERY_STATUS: {
+      constexpr uint32_t batterySources =
+          ui_update_policy::sourceMask(
+              ui_update_policy::Source::PhoneBattery) |
+          ui_update_policy::sourceMask(
+              ui_update_policy::Source::DeviceBattery);
+      if (uiChangeTracker.take(batterySources) != 0) {
+        lv_obj_send_event(batteryStatusTile, LV_EVENT_VALUE_CHANGED, NULL);
+      }
       break;
+    }
 
     case SATTRACK:
-      lv_obj_send_event(satTrackTile, LV_EVENT_VALUE_CHANGED, NULL);
+      if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
+        lv_obj_send_event(satTrackTile, LV_EVENT_VALUE_CHANGED, NULL);
+      }
       break;
 
     default:
       break;
     }
   }
+
+  // Route and settings handlers already set the concrete map redraw flags or
+  // apply screen settings. Consuming their signatures prevents stale work from
+  // being mistaken for a later visible-widget change.
+  (void)uiChangeTracker.take(ui_update_policy::Source::Route);
+  (void)uiChangeTracker.take(ui_update_policy::Source::Settings);
 
   serviceMapPinchZoomOutBackdrop();
 }
@@ -1503,36 +1789,32 @@ void updateNavEvent(lv_event_t *event) {
     return;
   }
 
-  LV_IMG_DECLARE(navup);
-  lv_img_set_src(arrowNav, &navup);
-
   const navigation_content_mode::Mode contentMode =
       navigation_content_mode::forNavigationState(hasCurrentNavigationData());
   if (contentMode == navigation_content_mode::Mode::FavoriteDestinations) {
-    lv_obj_add_flag(nameNav, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(distNav, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(arrowNav, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(navigationDestinationPicker.container,
-                      LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text_static(distNav, "--");
-    lv_img_set_angle(arrowNav, 0);
+    setHiddenIfChanged(nameNav, true);
+    setHiddenIfChanged(distNav, true);
+    setHiddenIfChanged(arrowNav, true);
+    setHiddenIfChanged(navigationDestinationPicker.container, false);
+    setLabelTextIfChanged(distNav, "--");
+    setImageAngleIfChanged(arrowNav, 0);
     renderDestinationPicker(navigationDestinationPicker);
     return;
   }
 
-  lv_obj_add_flag(navigationDestinationPicker.container, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(nameNav, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(distNav, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(arrowNav, LV_OBJ_FLAG_HIDDEN);
+  setHiddenIfChanged(navigationDestinationPicker.container, true);
+  setHiddenIfChanged(nameNav, false);
+  setHiddenIfChanged(distNav, false);
+  setHiddenIfChanged(arrowNav, false);
 
   NavigationData navData = getCurrentNavigationData();
   char formattedInstruction[160];
   formatNavigationInstruction(navData.instruction, formattedInstruction,
                               sizeof(formattedInstruction));
-  lv_label_set_text(nameNav, formattedInstruction);
+  setLabelTextIfChanged(nameNav, formattedInstruction);
   setNavigationDistanceLabel(distNav, navData.distance);
 
-  lv_img_set_angle(arrowNav, navigationArrowAngle(navData.iconID));
+  setImageAngleIfChanged(arrowNav, navigationArrowAngle(navData.iconID));
 }
 
 static void createMapGuidanceOverlay() {
@@ -1633,26 +1915,43 @@ static void showMainTile(tileName tile) {
 
   switch (tile) {
   case MAP_GUIDANCE:
+    uiChangeTracker.mark(ui_update_policy::Source::Navigation);
     mapView.followGps = true;
     applyMapRotationForActiveTile();
     updateMapGuidanceOverlay();
+    (void)uiChangeTracker.take(ui_update_policy::Source::Navigation);
     mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map guidance screen");
     break;
   case NAV:
+    uiChangeTracker.mark(ui_update_policy::Source::Navigation);
     lv_obj_clear_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(navTile, LV_EVENT_VALUE_CHANGED, NULL);
+    (void)uiChangeTracker.take(ui_update_policy::Source::Navigation);
     log_i("UI: switched to navigation instruction screen");
     break;
   case RIDESTATS:
+    uiChangeTracker.mark(ui_update_policy::Source::Gps);
+    uiChangeTracker.mark(ui_update_policy::Source::Workout);
     lv_obj_clear_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(rideStatsTile, LV_EVENT_VALUE_CHANGED, NULL);
+    (void)uiChangeTracker.take(
+        ui_update_policy::sourceMask(ui_update_policy::Source::Gps) |
+        ui_update_policy::sourceMask(ui_update_policy::Source::Workout));
+    lastRideStatsUpdateMs = millis();
     log_i("UI: switched to ride telemetry screen");
     break;
   case BATTERY_STATUS:
+    uiChangeTracker.mark(ui_update_policy::Source::PhoneBattery);
+    uiChangeTracker.mark(ui_update_policy::Source::DeviceBattery);
     lv_obj_clear_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_send_event(batteryStatusTile, LV_EVENT_VALUE_CHANGED, NULL);
+    (void)uiChangeTracker.take(
+        ui_update_policy::sourceMask(
+            ui_update_policy::Source::PhoneBattery) |
+        ui_update_policy::sourceMask(
+            ui_update_policy::Source::DeviceBattery));
     log_i("UI: switched to battery status screen");
     break;
   case MAP:

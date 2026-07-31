@@ -7,6 +7,10 @@
  */
 
 #include "route_overlay.hpp"
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
 #include "../ble_navigation/ble_navigation.hpp"
 #include "../maps/src/mapTransform.hpp"
 #include "../utils/src/line_rasterizer.hpp"
@@ -183,8 +187,10 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
     return; // Need at least 2 points to draw a line
   }
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("RouteOverlay::drawRoute: zoom=%d points=%d rot=%.2frad\n",
                 zoom, points.size(), rotationRad);
+#endif
 
   // Get canvas buffer
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
@@ -205,8 +211,10 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
     anchorY = bufH / 2;
   }
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("RouteOverlay: Canvas buffer W=%d H=%d stride=%d\n", bufW, bufH,
                 stride);
+#endif
 
   // Pre-calculate rotation values
   double cosA = cos(rotationRad);

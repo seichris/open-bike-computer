@@ -7,6 +7,10 @@
  */
 
 #include <Arduino.h>
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
 #include <SPI.h>
 #include <WiFi.h>
 #include <Wire.h>
@@ -386,6 +390,9 @@ static const char *debugTileName(uint8_t tile) {
 }
 
 static void logSystemDebugHeartbeat() {
+#if !FIRMWARE_DIAGNOSTICS
+  return;
+#else
   static uint32_t lastLogMs = 0;
   uint32_t now = millis();
   if (now - lastLogMs < 5000) {
@@ -505,6 +512,7 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount);
+#endif
 #endif
 }
 
@@ -681,8 +689,12 @@ void setup() {
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif
+#if FIRMWARE_DIAGNOSTICS
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
+#else
+  esp_log_level_set("*", ESP_LOG_NONE);
+#endif
 
   // Initialize Serial for debug. A complete PWRMET report is larger than the
   // default 256-byte HWCDC queue, so metrics builds reserve enough space for
@@ -692,10 +704,12 @@ void setup() {
   const size_t configuredSerialTxBufferSize =
       Serial.setTxBufferSize(kPowerMetricsSerialTxBufferSize);
 #endif
+#if FIRMWARE_DIAGNOSTICS || POWER_METRICS
   Serial.begin(115200);
   // HWCDC uses this value as both a timeout and a retry counter. Zero
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
+#endif
 #if POWER_METRICS
   if (configuredSerialTxBufferSize != kPowerMetricsSerialTxBufferSize) {
     Serial.printf("PWRMET_ERROR txBuffer=%u/%u\n",
@@ -707,7 +721,9 @@ void setup() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayPowerManager.begin();
 #endif
-  delay(2000);              // Give time for USB CDC to attach
+#if FIRMWARE_DIAGNOSTICS
+  delay(2000); // Give a diagnostic USB CDC monitor time to attach.
+#endif
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
                 esp_reset_reason());

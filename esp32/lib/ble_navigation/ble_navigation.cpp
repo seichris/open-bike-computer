@@ -6,6 +6,10 @@
  */
 
 #include "ble_navigation.hpp"
+
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
 #include "ble_connection_policy.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
@@ -112,6 +116,8 @@ static portMUX_TYPE ownershipUiMux = portMUX_INITIALIZER_UNLOCKED;
 static bool ownershipUiUpdatePending = false;
 static char ownershipUiName[device_ownership::MAX_DEVICE_NAME_BYTES + 1] = "";
 static bool ownershipUiClaimed = false;
+static bool ownershipUiConnected = false;
+static bool ownershipUiAuthenticated = false;
 static int32_t ownershipUiPairingCode = -1;
 static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
@@ -143,6 +149,8 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
   strncpy(ownershipUiName, name.c_str(), sizeof(ownershipUiName) - 1);
   ownershipUiName[sizeof(ownershipUiName) - 1] = '\0';
   ownershipUiClaimed = claimed;
+  ownershipUiConnected = bleNavServer.isConnected();
+  ownershipUiAuthenticated = bleSessionAuthenticated;
   ownershipUiPairingCode = pairingCode;
   ownershipUiPairingGeneration = pairingGeneration;
   ownershipUiUpdatePending = true;
@@ -152,6 +160,8 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
 static void applyPendingOwnershipUiUpdate() {
   char name[sizeof(ownershipUiName)] = "";
   bool claimed = false;
+  bool connected = false;
+  bool authenticated = false;
   int32_t pairingCode = -1;
   uint32_t pairingGeneration = 0;
   portENTER_CRITICAL(&ownershipUiMux);
@@ -159,13 +169,16 @@ static void applyPendingOwnershipUiUpdate() {
   if (pending) {
     strncpy(name, ownershipUiName, sizeof(name) - 1);
     claimed = ownershipUiClaimed;
+    connected = ownershipUiConnected;
+    authenticated = ownershipUiAuthenticated;
     pairingCode = ownershipUiPairingCode;
     pairingGeneration = ownershipUiPairingGeneration;
     ownershipUiUpdatePending = false;
   }
   portEXIT_CRITICAL(&ownershipUiMux);
   if (pending) {
-    updateWaitingOwnershipStatus(name, claimed, pairingCode);
+    updateWaitingOwnershipStatus(name, claimed, connected, authenticated,
+                                 pairingCode);
     portENTER_CRITICAL(&ownershipUiMux);
     if (pairingCode >= 0) {
       ownershipComparisonRenderGate.request(pairingGeneration);
@@ -617,8 +630,10 @@ static void parseNavigationData(const std::string &data) {
 
   navDataUpdated = true;
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", currentNavData.iconID,
                 currentNavData.distance, currentNavData.instruction);
+#endif
 }
 
 static bool requireAuthenticated(const char *payloadName) {
@@ -773,6 +788,7 @@ static void completeBleSessionAuthentication() {
   bleDebugStats.authenticated = true;
   bleDebugStats.authSuccessCount++;
   bleDebugStats.lastAuthSuccessMs = millis();
+  queueOwnershipUiUpdate();
 }
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
@@ -1876,6 +1892,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
+#if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
@@ -1885,6 +1902,7 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
                 0
 #endif
   );
+#endif
   bleDebugStats.gpsPacketCount++;
   bleDebugStats.lastGpsPacketMs = millis();
 
@@ -2535,7 +2553,9 @@ public:
       return;
     }
 
+#if FIRMWARE_DIAGNOSTICS
     Serial.printf("BLE Nav received: %u bytes\n", (unsigned)value.length());
+#endif
     bleDebugStats.navPacketCount++;
     bleDebugStats.lastNavPacketMs = millis();
     parseNavigationData(value);
@@ -2972,6 +2992,7 @@ void BLENavigationServer::process() {
     }
   }
 
+#if FIRMWARE_DIAGNOSTICS
   if (millis() - lastLog > 5000) {
     lastLog = millis();
     bleDebugStats.initialized = initialized;
@@ -3005,6 +3026,9 @@ void BLENavigationServer::process() {
                   bleDebugStats.lastSettingsPacketMs,
                   bleDebugStats.lastRejectedUnauthenticatedMs);
   }
+#else
+  (void)lastLog;
+#endif
 }
 
 BLEDebugStats BLENavigationServer::getDebugStats() const {

@@ -15,8 +15,10 @@ jobs:
         target:
           - WAVESHARE_AMOLED_175
           - WAVESHARE_AMOLED_175_POWER_METRICS
+          - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
           - WAVESHARE_AMOLED_206_POWER_METRICS
+          - WAVESHARE_AMOLED_206_PRODUCTION
     defaults:
       run:
         working-directory: esp32
@@ -118,6 +120,11 @@ jobs:
             tools/tests/test_display_power_policy.cpp \
             -o /tmp/test_display_power_policy
           /tmp/test_display_power_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ui_update_policy.cpp \
+            -o /tmp/test_ui_update_policy
+          /tmp/test_ui_update_policy
+          python tools/tests/test_firmware_profile_config.py
       - name: Two-finger Map zoom host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
