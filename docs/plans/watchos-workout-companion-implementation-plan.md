@@ -807,8 +807,8 @@ Presentation rules:
   encoded snapshots.
 - ESP32 keeps workout telemetry in RAM only.
 - Clear ESP32 health metrics on explicit idle and reboot.
-- Update PRIVACY_POLICY.md and App Store privacy disclosures before release to
-  describe Health & Fitness and workout-route use accurately.
+- Update `ios-app/PRIVACY_POLICY.md` and App Store privacy disclosures before
+  release to describe Health & Fitness and workout-route use accurately.
 - Keep permission descriptions specific to user-visible cycling features.
 
 ## Failure behavior
@@ -1041,7 +1041,7 @@ Protocol/firmware:
 
 Product/release:
 
-- PRIVACY_POLICY.md
+- `ios-app/PRIVACY_POLICY.md`
 - README.md and ios-app documentation where Watch requirements are described
 - App Store privacy answers and Watch app metadata/assets
 

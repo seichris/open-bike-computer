@@ -123,4 +123,4 @@ for those records.
 
 For privacy questions or requests, contact:
 
-cerujurasa@gmail.com
+privacy@bicino.com

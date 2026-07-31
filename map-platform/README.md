@@ -15,3 +15,14 @@ because it is independently licensed and usable outside the hosted service.
 
 Start with the [backend guide](backend/README.md) for local development or the
 [deployment guide](deploy/README.md) for production operations.
+
+## License
+
+Project-authored software, tests, scripts, and configuration under
+[`backend/`](backend/) and [`config/`](config/) are licensed
+AGPL-3.0-only unless a more specific notice applies. Project-authored software
+and configuration under [`deploy/`](deploy/) follow the repository's
+GPL-3.0-only license.
+
+See the repository's [license summary](../README.md#license) for the exact
+path-by-path boundaries and third-party notices.

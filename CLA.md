@@ -80,9 +80,9 @@ distribution channels such as the App Store.
 
 As a condition of that right, We will also make Your Contribution available
 under the public license or licenses identified for the Material in
-[`LICENSES.md`](LICENSES.md), or by a more specific component-level or
-file-level notice, on the Submission Date. A separate license will not withdraw
-that public license from Your accepted Contribution.
+the [root README license section](README.md#license), or by a more specific
+component-level or file-level notice, on the Submission Date. A separate
+license will not withdraw that public license from Your accepted Contribution.
 
 Contributions to Material that has no identified public license require a
 separate written agreement and are not accepted under this CLA alone.

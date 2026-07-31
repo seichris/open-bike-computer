@@ -27,17 +27,26 @@ For code contributions, see
 
 ## License
 
-Open Bike Computer uses an open source component model:
+Open Bike Computer is a multi-license open source repository. Unless a more
+specific notice applies:
 
-- the network map backend and its configuration are AGPL-3.0-only;
-- the iOS app and other project-authored distributed or local software are
-  GPL-3.0-only; and
-- imported GPL components such as the ESP32 firmware base and map extraction
-  tools retain their existing license terms.
+- project-authored software, tests, scripts, and configuration in
+  `map-platform/backend/` and `map-platform/config/` are
+  [AGPL-3.0-only](LICENSES/AGPL-3.0-only.txt);
+- all other project-authored software, tests, scripts, and configuration are
+  [GPL-3.0-only](LICENSE); and
+- `esp32/` and `tools/OSM_Extract/` retain the GNU GPL version 3 terms stated
+  in their own [`LICENSE`](esp32/LICENSE) and
+  [`LICENSE`](tools/OSM_Extract/LICENSE) files.
+
+Component-level and file-level notices take priority. Third-party material
+retains its own terms, including the
+[Lucide Bike icon](LICENSES/Lucide-ISC.txt) and
+[Montserrat fonts](LICENSES/Montserrat-OFL-1.1.txt). Documentation, artwork,
+hardware reference material, and trademarks are not covered by the software
+licenses above unless a specific notice says otherwise.
 
 Contributors retain copyright and contribute under the
 [Contributor License Agreement](CLA.md). The agreement keeps contributions
 available under the applicable public license while allowing the repository
 owner to offer separately licensed official builds, including App Store builds.
-
-See [LICENSES.md](LICENSES.md) for the exact path-by-path licensing boundaries.
