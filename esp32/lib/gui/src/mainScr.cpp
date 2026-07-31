@@ -12,6 +12,7 @@
 #include "../../route_overlay/route_overlay.hpp"
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
+#include "mapRenderPolicy.hpp"
 #include "mapTileTransition.hpp"
 #include "navigationContentMode.hpp"
 #include "uiUpdatePolicy.hpp"
@@ -94,6 +95,7 @@ struct DestinationPickerView {
 static DestinationPickerView mapGuidanceDestinationPicker;
 static DestinationPickerView navigationDestinationPicker;
 static ui_update_policy::ChangeTracker uiChangeTracker;
+static map_render_policy::Scheduler mapRenderScheduler;
 static uint32_t lastRideStatsUpdateMs = 0;
 static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
@@ -323,6 +325,43 @@ void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
 
 Maps mapView;
 static map_tap_arbiter::Controller mapTapController;
+static uint16_t currentCourseUpHeading();
+
+static map_render_policy::Fix currentMapFix() {
+  return {gps.gpsData.latitude, gps.gpsData.longitude,
+          currentCourseUpHeading()};
+}
+
+static void noteMapRenderReasons(uint32_t reasons) {
+  using PolicyReason = map_render_policy::Reason;
+  using MetricsReason = power_metrics::MapRenderReason;
+  struct Mapping {
+    PolicyReason policy;
+    MetricsReason metrics;
+  };
+  static constexpr Mapping mappings[] = {
+      {PolicyReason::Position, MetricsReason::Position},
+      {PolicyReason::Heading, MetricsReason::Heading},
+      {PolicyReason::Route, MetricsReason::Route},
+      {PolicyReason::Style, MetricsReason::Style},
+      {PolicyReason::Zoom, MetricsReason::Zoom},
+      {PolicyReason::Screen, MetricsReason::Screen},
+      {PolicyReason::Recovery, MetricsReason::Recovery},
+      {PolicyReason::Other, MetricsReason::Other},
+  };
+  for (const Mapping &mapping : mappings) {
+    if ((reasons & map_render_policy::reasonMask(mapping.policy)) != 0) {
+      power_metrics::noteMapRequest(mapping.metrics);
+    }
+  }
+}
+
+void requestMapRender(map_render_policy::Reason reason) {
+  mapRenderScheduler.request(reason);
+  noteMapRenderReasons(map_render_policy::reasonMask(reason));
+  mapView.isPosMoved = true;
+  mapView.redrawMap = true;
+}
 
 #if defined(WAVESHARE_AMOLED_175)
 static map_pinch_zoom::Controller mapPinchController;
@@ -377,6 +416,7 @@ static void processMapPinchZoom() {
     zoom = decision.targetZoom;
     mapView.commitPinchZoom(zoom, decision.previewRatio, decision.midpointX,
                             decision.midpointY);
+    requestMapRender(map_render_policy::Reason::Zoom);
     break;
   case map_pinch_zoom::Action::Cancel:
     mapView.cancelPinchPreview();
@@ -660,8 +700,7 @@ static void applyMapRotationForActiveTile() {
         mapView.rotationRad = 0;
       }
       mapView.updateArrowColor();
-      mapView.isPosMoved = true;
-      power_metrics::noteMapRequest(power_metrics::MapRenderReason::Heading);
+      requestMapRender(map_render_policy::Reason::Heading);
       log_i("Map guidance: rotation switched to %s",
             desiredMode == Maps::ROT_COURSE_UP ? "Course Up" : "North Up");
     }
@@ -676,16 +715,14 @@ static void applyMapRotationForActiveTile() {
       mapView.rotationMode != Maps::ROT_COURSE_UP) {
     mapView.rotationMode = Maps::ROT_COURSE_UP;
     mapView.updateArrowColor();
-    mapView.isPosMoved = true;
-    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
+    requestMapRender(map_render_policy::Reason::Style);
     log_i("Creating Map: Syncing rotation to Course Up (from settings)");
   } else if (mapRenderSettings.mapRotationMode == 0 &&
              mapView.rotationMode != Maps::ROT_NORTH_UP) {
     mapView.rotationMode = Maps::ROT_NORTH_UP;
     mapView.rotationRad = 0;
     mapView.updateArrowColor();
-    mapView.isPosMoved = true;
-    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
+    requestMapRender(map_render_policy::Reason::Style);
     log_i("Creating Map: Syncing rotation to North Up (from settings)");
   }
 }
@@ -979,14 +1016,6 @@ static void refreshDestinationPickersAsync(void *userData) {
 }
 
 /**
- * @brief Trigger map redraw (called by BLE when route geometry is received)
- */
-void triggerMapRedraw() {
-  mapView.isPosMoved = true;
-  mapView.redrawMap = true;
-}
-
-/**
  * @brief Update compass screen event
  *
  * @param event
@@ -1072,6 +1101,62 @@ void scrollTile(lv_event_t *event) {
   mapView.deleteMapScrSprites();
 }
 
+static bool prepareVisibleMapUpdate(uint32_t nowMs) {
+  if (!isMapBackedTile(activeTile) || !mapView.hasMapCanvas()) {
+    return false;
+  }
+
+#ifdef ENABLE_COMPASS
+  heading = compass.getHeading();
+#endif
+  applyMapRotationForActiveTile();
+
+  bool navigationOverlayChanged = false;
+  if (activeTile == MAP_GUIDANCE) {
+    mapView.followGps = true;
+    navigationOverlayChanged =
+        uiChangeTracker.take(ui_update_policy::Source::Navigation);
+    if (navigationOverlayChanged) {
+      // Apply the maneuver model before considering synchronous base-map work.
+      // The caller gives LVGL one cycle to present this overlay first.
+      updateMapGuidanceOverlay();
+    }
+  }
+
+  if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
+    // Keep the lightweight marker current for every accepted fix. The vector
+    // background has a separate, bounded regeneration policy.
+    mapView.updatePositionOverlay();
+    mapRenderScheduler.observe(currentMapFix());
+  }
+
+  if (mapRenderScheduler.hasPendingWork()) {
+    const bool followPosition =
+        mapView.followGps || activeTile == MAP_GUIDANCE;
+    const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
+    const map_render_policy::Decision decision =
+        mapRenderScheduler.evaluate(nowMs, followPosition, courseUp);
+    if (decision.render) {
+      mapRenderScheduler.commit(decision);
+      noteMapRenderReasons(decision.reasons);
+      if (followPosition) {
+        mapView.followGps = true;
+        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+      } else {
+        mapView.isPosMoved = true;
+      }
+      mapView.redrawMap = true;
+      log_i("Map scheduler: render reasons=0x%02lx distance=%.1fm "
+            "heading=%u",
+            static_cast<unsigned long>(decision.reasons),
+            decision.distanceMeters,
+            static_cast<unsigned>(decision.headingDeltaDegrees));
+    }
+  }
+
+  return navigationOverlayChanged;
+}
+
 /**
  * @brief Update Main Screen
  *
@@ -1097,31 +1182,7 @@ void updateMainScreen(lv_timer_t *t) {
 
   const uint32_t nowMs = millis();
   (void)uiChangeTracker.observe(captureSourceSignatures(nowMs));
-  bool mapEventSent = false;
-
-  // Handle BLE-triggered map updates OUTSIDE of isScrolled check
-  // This ensures continuous updates even when user hasn't dragged
-  if (isMainScreen && isMapBackedTile(activeTile) &&
-      (mapView.isPosMoved || mapView.redrawMap)) {
-
-    applyMapRotationForActiveTile();
-
-    log_i("BLE map update: isPosMoved=%d redrawMap=%d followGps=%d",
-          mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
-
-    // Re-center on GPS if in follow mode
-    if (mapView.followGps || activeTile == MAP_GUIDANCE) {
-      mapView.followGps = true;
-      mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-    }
-
-    // Trigger map regeneration and display
-    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
-    mapEventSent = true;
-    if (shouldInterruptMapRenderForScreenCycle()) {
-      return;
-    }
-  }
+  const bool navigationOverlayChanged = prepareVisibleMapUpdate(nowMs);
 
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
@@ -1155,82 +1216,8 @@ void updateMainScreen(lv_timer_t *t) {
       break;
 
     case MAP:
-    case MAP_GUIDANCE: {
-      if (shouldInterruptMapRenderForScreenCycle()) {
-        return;
-      }
-
-      // SIMULATE GPS MOVEMENT - TEST MODE
-      // Removed legacy simulation code - controlled via BLE now
-
-#ifdef ENABLE_COMPASS
-      heading = compass.getHeading();
-#endif
-      applyMapRotationForActiveTile();
-      if (activeTile == MAP_GUIDANCE) {
-        mapView.followGps = true;
-        if (uiChangeTracker.take(ui_update_policy::Source::Navigation)) {
-          updateMapGuidanceOverlay();
-        }
-      }
-
-      // Track last heading for Course-Up auto-rotation
-      static uint16_t lastHeading = 0;
-      uint16_t currentHeading = currentCourseUpHeading();
-
-      // In Course-Up mode, redraw map when heading changes significantly (> 5
-      // degrees)
-      if (mapView.rotationMode == Maps::ROT_COURSE_UP) {
-        int headingDiff = abs((int)currentHeading - (int)lastHeading);
-        // Handle wrap-around (e.g., 355 to 5 = 10 degrees, not 350)
-        if (headingDiff > 180)
-          headingDiff = 360 - headingDiff;
-
-        if (headingDiff > 5) {
-          log_i("Course-Up: Heading changed from %d to %d (diff=%d), "
-                "triggering redraw",
-                lastHeading, currentHeading, headingDiff);
-          mapView.isPosMoved = true; // Force map regeneration with new rotation
-          power_metrics::noteMapRequest(
-              power_metrics::MapRenderReason::Heading);
-          lastHeading = currentHeading;
-        }
-      } else {
-        lastHeading = currentHeading; // Track heading even in North-Up for
-                                      // smooth transition
-      }
-
-      // Handle BLE simulated GPS: triggerMapRedraw() sets isPosMoved/redrawMap
-      // ALWAYS regenerate map when these flags are set, regardless of followGps
-      // This ensures continuous updates for GPS position and route overlay
-      if (mapView.isPosMoved || mapView.redrawMap) {
-        log_i(
-            "MAP case: Flags detected! isPosMoved=%d redrawMap=%d followGps=%d",
-            mapView.isPosMoved, mapView.redrawMap, mapView.followGps);
-        // Only re-center on GPS if in follow mode
-        if (mapView.followGps || activeTile == MAP_GUIDANCE) {
-          mapView.followGps = true;
-          mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-        }
-        mapView.redrawMap = true;
-      }
-
-      // Also handle hardware GPS location changes (when in follow mode)
-      if (gps.hasLocationChange() &&
-          (mapView.followGps || activeTile == MAP_GUIDANCE)) {
-        power_metrics::noteMapRequest(power_metrics::MapRenderReason::Gps);
-        mapView.followGps = true;
-        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-        mapView.redrawMap = true;
-      }
-
-      if (!mapEventSent && (mapView.isPosMoved || mapView.redrawMap)) {
-        lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
-        mapEventSent = true;
-      }
-      (void)uiChangeTracker.take(ui_update_policy::Source::Gps);
+    case MAP_GUIDANCE:
       break;
-    }
 
     case NAV:
       if (uiChangeTracker.take(ui_update_policy::Source::Navigation)) {
@@ -1280,6 +1267,18 @@ void updateMainScreen(lv_timer_t *t) {
   // being mistaken for a later visible-widget change.
   (void)uiChangeTracker.take(ui_update_policy::Source::Route);
   (void)uiChangeTracker.take(ui_update_policy::Source::Settings);
+
+  // Synchronous vector-map generation can be long. When a new maneuver and a
+  // base-map request arrive together, return to LVGL once so the lightweight
+  // overlay can be presented before the expensive background regeneration.
+  if (!navigationOverlayChanged && isMapBackedTile(activeTile) &&
+      mapView.hasMapCanvas() &&
+      (mapView.isPosMoved || mapView.redrawMap)) {
+    if (shouldInterruptMapRenderForScreenCycle()) {
+      return;
+    }
+    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+  }
 
   serviceMapPinchZoomOutBackdrop();
 }
@@ -1343,18 +1342,19 @@ void updateMap(lv_event_t *event) {
       // Keep both flags set so the map is regenerated cleanly if the user
       // remains on this screen. Do not display the partially rendered canvas.
       mapView.redrawMap = true;
-      power_metrics::noteMapRequest(power_metrics::MapRenderReason::Retry);
+      mapRenderScheduler.markInterrupted();
+      noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
       return;
     }
     // Clear flag AFTER generation complete (not inside generateVectorMap)
     // This ensures BLE updates during generation will queue another cycle
     mapView.isPosMoved = false;
+    mapRenderScheduler.markRendered(millis(), currentMapFix());
     if (mapView.takeDeferredVectorRedraw()) {
       // Course-up heading changed while a pinch was in flight. First present
       // the focal-stable settlement frame, then render the latest heading on
       // the following LVGL cycle.
-      mapView.isPosMoved = true;
-      mapView.redrawMap = true;
+      requestMapRender(map_render_policy::Reason::Heading);
     }
   }
 
@@ -1557,7 +1557,7 @@ void scrollMapEvent(lv_event_t *event) {
             log_i("LONG PRESS DETECTED: Re-enabling GPS following");
             mapView.followGps = true;
             mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-            mapView.redrawMap = true;
+            requestMapRender(map_render_policy::Reason::Other);
             longPressTriggered = true;
             // Don't process as a scroll
             break;
@@ -1661,6 +1661,7 @@ void scrollMapEvent(lv_event_t *event) {
             if (distX < 120 && distY < 120) {
               log_i("SHORT TAP ON GPS DOT: Toggling rotation mode");
               mapView.toggleRotationMode();
+              requestMapRender(map_render_policy::Reason::Style);
 
               // Sync back to mapRenderSettings so it persists if we save or app
               // queries it (though app push is one-way usually)
@@ -1720,7 +1721,7 @@ void fullScreenEvent(lv_event_t *event) {
   mapView.deleteMapScrSprites();
   mapView.createMapScrSprites();
 
-  mapView.redrawMap = true;
+  requestMapRender(map_render_policy::Reason::Style);
 
   lv_obj_invalidate(tilesScreen);
   lv_obj_send_event(mapTile, LV_EVENT_REFRESH, NULL);
@@ -1739,8 +1740,7 @@ static bool requestVectorRuntimeZoom(int8_t levelDelta) {
     return false;
   }
   zoom = target;
-  mapView.isPosMoved = true;
-  mapView.redrawMap = true;
+  requestMapRender(map_render_policy::Reason::Zoom);
   return true;
 }
 
@@ -1904,7 +1904,7 @@ static void showMainTile(tileName tile) {
     }
     mapTileTransition.begin();
     zoom = currentMapStyleSettings().zoomLevel;
-    mapView.isPosMoved = true;
+    requestMapRender(map_render_policy::Reason::Screen);
   } else {
     mapTileTransition.cancel();
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
@@ -1920,7 +1920,6 @@ static void showMainTile(tileName tile) {
     applyMapRotationForActiveTile();
     updateMapGuidanceOverlay();
     (void)uiChangeTracker.take(ui_update_policy::Source::Navigation);
-    mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map guidance screen");
     break;
@@ -1956,7 +1955,6 @@ static void showMainTile(tileName tile) {
     break;
   case MAP:
   default:
-    mapView.redrawMap = true;
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     log_i("UI: switched to map screen");
     break;

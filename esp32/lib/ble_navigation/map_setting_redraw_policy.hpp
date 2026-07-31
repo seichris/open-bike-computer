@@ -27,4 +27,8 @@ constexpr bool invalidatesMap(uint8_t settingId) {
   }
 }
 
+constexpr bool changesZoom(uint8_t settingId) {
+  return settingId == 7 || settingId == 19;
+}
+
 } // namespace map_setting_redraw_policy

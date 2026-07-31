@@ -26,11 +26,11 @@ tables below only from saved source-monitor traces taken at the battery input.
 
 ## Instrumentation contract
 
-Power-metrics firmware uses schema version `1` and emits one aggregate line
+Power-metrics firmware uses schema version `2` and emits one aggregate line
 every ten seconds:
 
 ```text
-PWRMET v=1 intervalMs=... screen=... tile=... display=... brightness[...] loop[...] lvgl[...] flush[...] map[...] ble[...] system[...]
+PWRMET v=2 intervalMs=... screen=... tile=... display=... brightness[...] loop[...] lvgl[...] flush[...] map[...] ble[...] system[...]
 ```
 
 The report contains:
@@ -39,7 +39,8 @@ The report contains:
 - main-loop wakes and maximum loop gap;
 - LVGL call count plus total/maximum handler time;
 - display flush count plus rotation, QSPI, and total time;
-- completed/interrupted map renders, stage timing, and render-reason counts;
+- completed/interrupted map renders, stage timing, and position, route, style,
+  heading, zoom, screen, recovery, and other render-reason counts;
 - logically classified BLE packets after authenticated transport framing is
   unwrapped, including packets later rejected by session authentication or
   application-payload validation;
@@ -53,6 +54,10 @@ The accumulator schema is defined in
 `esp32/lib/power_metrics/power_metrics_schema.hpp` and has a host test in
 `esp32/tools/tests/test_power_metrics_schema.cpp`. Metrics builds are separate
 from normal firmware builds:
+
+Phase 0 traces remain valid schema-version-1 records. Always keep the raw
+version field with a trace rather than interpreting an older reason vector as
+version 2.
 
 ```sh
 cd esp32

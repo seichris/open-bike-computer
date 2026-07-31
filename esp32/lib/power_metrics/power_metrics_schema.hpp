@@ -6,25 +6,28 @@
 
 namespace power_metrics {
 
-constexpr uint8_t kSchemaVersion = 1;
+constexpr uint8_t kSchemaVersion = 2;
 
 enum class MapRenderReason : uint32_t {
-  Gps = 1u << 0,
+  Position = 1u << 0,
   Route = 1u << 1,
-  Settings = 1u << 2,
+  Style = 1u << 2,
   Heading = 1u << 3,
-  Retry = 1u << 4,
-  Other = 1u << 5,
+  Zoom = 1u << 4,
+  Screen = 1u << 5,
+  Recovery = 1u << 6,
+  Other = 1u << 7,
 };
 
 constexpr uint32_t reasonMask(MapRenderReason reason) {
   return static_cast<uint32_t>(reason);
 }
 
-constexpr std::array<MapRenderReason, 6> kMapRenderReasons = {
-    MapRenderReason::Gps,     MapRenderReason::Route,
-    MapRenderReason::Settings, MapRenderReason::Heading,
-    MapRenderReason::Retry,   MapRenderReason::Other,
+constexpr std::array<MapRenderReason, 8> kMapRenderReasons = {
+    MapRenderReason::Position, MapRenderReason::Route,
+    MapRenderReason::Style,    MapRenderReason::Heading,
+    MapRenderReason::Zoom,     MapRenderReason::Screen,
+    MapRenderReason::Recovery, MapRenderReason::Other,
 };
 
 enum class BlePacketClass : uint8_t {

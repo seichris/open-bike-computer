@@ -7,7 +7,7 @@
 int main() {
   using namespace power_metrics;
 
-  static_assert(kSchemaVersion == 1);
+  static_assert(kSchemaVersion == 2);
   IntervalAccumulator accumulator;
 
   accumulator.noteLoop(100);
@@ -19,7 +19,8 @@ int main() {
   accumulator.noteDisplayFlush(20, 180, 225);
   accumulator.noteMapRender(
       true, 9'000, 2'000, 5'000, 1'000,
-      reasonMask(MapRenderReason::Gps) | reasonMask(MapRenderReason::Heading));
+      reasonMask(MapRenderReason::Position) |
+          reasonMask(MapRenderReason::Heading));
   accumulator.noteMapRender(false, 1'500, 1'000, 0, 0, 0);
   accumulator.noteBlePacket(BlePacketClass::Gps);
   accumulator.noteBlePacket(BlePacketClass::Gps);
@@ -40,9 +41,9 @@ int main() {
   assert(first.mapRenderCompleted == 1);
   assert(first.mapRenderInterrupted == 1);
   assert(first.mapRender.totalUs == 10'500);
-  assert(first.mapReasonCounts[0] == 1); // GPS
+  assert(first.mapReasonCounts[0] == 1); // position
   assert(first.mapReasonCounts[3] == 1); // heading
-  assert(first.mapReasonCounts[5] == 1); // missing reason becomes other
+  assert(first.mapReasonCounts[7] == 1); // missing reason becomes other
   assert(first.blePacketCounts[static_cast<std::size_t>(
              BlePacketClass::Gps)] == 2);
   assert(first.blePacketCounts[static_cast<std::size_t>(

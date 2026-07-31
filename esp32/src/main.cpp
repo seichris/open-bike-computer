@@ -575,7 +575,8 @@ static void logPowerMetricsReport() {
       "totalUs=%llu/%lu] "
       "map[count=%lu completed=%lu interrupted=%lu totalUs=%llu/%lu "
       "blocksUs=%llu/%lu drawUs=%llu/%lu routeUs=%llu/%lu "
-      "reasons=gps:%lu,route:%lu,settings:%lu,heading:%lu,retry:%lu,other:%lu] "
+      "reasons=position:%lu,route:%lu,style:%lu,heading:%lu,zoom:%lu,"
+      "screen:%lu,recovery:%lu,other:%lu] "
       "ble[connected=%d authenticated=%d "
       "logical=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
       "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
@@ -614,6 +615,8 @@ static void logPowerMetricsReport() {
       (unsigned long)metrics.mapReasonCounts[3],
       (unsigned long)metrics.mapReasonCounts[4],
       (unsigned long)metrics.mapReasonCounts[5],
+      (unsigned long)metrics.mapReasonCounts[6],
+      (unsigned long)metrics.mapReasonCounts[7],
       bleStats.connected, bleStats.authenticated,
       (unsigned long)bleCount(power_metrics::BlePacketClass::Navigation),
       (unsigned long)bleCount(power_metrics::BlePacketClass::Route),
