@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "../power_management/power_management.hpp"
 #include "Stream.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdspi_host.h"
@@ -52,6 +53,8 @@ public:
   FileStream(FILE *file) : file(file) {}
 
   virtual int available() override {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (!file)
       return 0;
     long current_pos = ftell(file);
@@ -62,24 +65,32 @@ public:
   }
 
   virtual int read() override {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (!file)
       return -1;
     return fgetc(file);
   }
 
   virtual size_t read(uint8_t *buffer, size_t size) {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (!file)
       return 0;
     return fread(buffer, 1, size, file);
   }
 
   virtual size_t readBytes(char *buffer, size_t length) override {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (!file)
       return 0;
     return fread(buffer, 1, length, file);
   }
 
   virtual int peek() override {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (!file)
       return -1;
     int c = fgetc(file);
@@ -89,6 +100,8 @@ public:
   }
 
   virtual void flush() override {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
     if (file)
       fflush(file);
   }

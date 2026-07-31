@@ -5,6 +5,10 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
+#include "../power_management/active_low_wake_interrupt_gate.hpp"
+#endif
+#include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
@@ -16,6 +20,9 @@
 #ifdef USE_ARDUINO_GFX
 
 #include <cstring>
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
+#include <driver/gpio.h>
+#endif
 
 // Include HAL for pin definitions
 #include "../../include/hal.hpp"
@@ -24,6 +31,7 @@
 #include "power_metrics.hpp"
 #include "cst9217_touch_frame.hpp"
 #include "touch.hpp"
+#include "touch_sampling_policy.hpp"
 #include "waveshare_board.hpp"
 
 extern void appDisplayFlushCompleted();
@@ -168,6 +176,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     return;
   }
 
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Display);
+
   uint32_t startUs = micros();
 #if POWER_METRICS
   power_metrics::pulseBegin(power_metrics::Pulse::DisplayFlush);
@@ -255,22 +266,57 @@ bool touchPressed = false;
 uint16_t touchX = 0, touchY = 0;
 static waveshare_board::touch::TouchFrame latestTouchFrame;
 static uint32_t touchFrameSequence = 0;
+static uint32_t touchActivityGeneration = 0;
 static bool suppressPrimaryTouchUntilRelease = false;
 static MultiTouchSuppressionPolicy multiTouchSuppressionPolicy = nullptr;
 static volatile uint32_t touchInterruptGeneration = 0;
 static uint32_t attemptedTouchInterruptGeneration = 0;
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
+static constexpr uint8_t touchWakeInterruptPin =
+    waveshare_board::touch::FT3168_INT_PIN;
+static power_management::ActiveLowWakeInterruptGate touchWakeInterruptGate;
+#endif
 
 static void IRAM_ATTR latchTouchInterrupt() {
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
+  if (!touchWakeInterruptGate.latch()) {
+    return;
+  }
+  gpio_intr_disable(static_cast<gpio_num_t>(touchWakeInterruptPin));
+#endif
   touchInterruptGeneration = touchInterruptGeneration + 1;
   ui_scheduler::notifyFromIsr(ui_scheduler::WakeReason::Touch);
+}
+
+#if !AUTOMATIC_LIGHT_SLEEP_EXPERIMENT || defined(WAVESHARE_AMOLED_175)
+static void latchTouchInterruptFromTask() {
+  touchInterruptGeneration = touchInterruptGeneration + 1;
+  ui_scheduler::notify(ui_scheduler::WakeReason::Touch);
+}
+#endif
+
+static void rearmTouchWakeInterruptIfInactive(bool sourceActive) {
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
+  if (touchWakeInterruptGate.rearmIfInactive(sourceActive)) {
+    gpio_intr_enable(static_cast<gpio_num_t>(touchWakeInterruptPin));
+  }
+#else
+  (void)sourceActive;
+#endif
 }
 
 waveshare_board::touch::TouchFrame getTouchFrameSnapshot() {
   return latestTouchFrame;
 }
 
+uint32_t getTouchActivityGeneration() { return touchActivityGeneration; }
+
 bool isPrimaryTouchSuppressed() {
   return suppressPrimaryTouchUntilRelease;
+}
+
+void suppressPrimaryTouchUntilReleaseForDisplayWake() {
+  suppressPrimaryTouchUntilRelease = true;
 }
 
 void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy) {
@@ -287,6 +333,9 @@ static void publishTouchFrame(
   latestTouchFrame = rawFrame;
   latestTouchFrame.sequence = ++touchFrameSequence;
   latestTouchFrame.sampledAtMs = now;
+  if (latestTouchFrame.count != 0) {
+    touchActivityGeneration = touchActivityGeneration + 1;
+  }
   for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
     latestTouchFrame.contacts[index] =
         waveshare_board::touch::rotateTouchContact(
@@ -332,21 +381,32 @@ static void setTouchPressed(bool pressed) {
   touchPressed = pressed;
 }
 
-static void configureTouchHintPin() {
+void configureTouchWakeInterrupt() {
   if (touchHintConfigured) {
     return;
   }
   pinMode(waveshare_board::touch::FT3168_INT_PIN, INPUT_PULLUP);
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  constexpr int touchInterruptMode = ONLOW;
+#else
+  constexpr int touchInterruptMode = FALLING;
+#endif
   attachInterrupt(digitalPinToInterrupt(waveshare_board::touch::FT3168_INT_PIN),
-                  latchTouchInterrupt, FALLING);
+                  latchTouchInterrupt, touchInterruptMode);
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  power_management::configureActiveLowGpioWakeup(
+      waveshare_board::touch::FT3168_INT_PIN);
+#endif
+#if !AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
   if (digitalRead(waveshare_board::touch::FT3168_INT_PIN) == LOW) {
-    latchTouchInterrupt();
+    latchTouchInterruptFromTask();
   }
+#endif
   touchHintConfigured = true;
 }
 
 static bool isTouchHintActive() {
-  configureTouchHintPin();
+  configureTouchWakeInterrupt();
   return digitalRead(waveshare_board::touch::FT3168_INT_PIN) == LOW;
 }
 
@@ -412,7 +472,7 @@ void initTouchController() {
     return;
   }
   lastTouchInitAttemptMs = now;
-  configureTouchHintPin();
+  configureTouchWakeInterrupt();
 
   pinMode(waveshare_board::touch::FT3168_RST_PIN, OUTPUT);
   digitalWrite(waveshare_board::touch::FT3168_RST_PIN, HIGH);
@@ -447,6 +507,7 @@ void initTouchController() {
 void readTouch() {
   uint32_t now = millis();
   bool touchHintActive = isTouchHintActive();
+  rearmTouchWakeInterruptIfInactive(touchHintActive);
   const uint32_t interruptGenerationBeforeAttempt = touchInterruptGeneration;
   const bool interruptPending =
       touch_interrupt_gate::hasUnattemptedGeneration(
@@ -657,7 +718,7 @@ static void logTouchDiagnostics(uint32_t now) {
 }
 #endif
 
-static void configureTouchHintPin() {
+void configureTouchWakeInterrupt() {
   if (touchHintConfigured) {
     return;
   }
@@ -666,13 +727,13 @@ static void configureTouchHintPin() {
   attachInterrupt(digitalPinToInterrupt(waveshare_board::touch::CST9217_INT_PIN),
                   latchTouchInterrupt, FALLING);
   if (digitalRead(waveshare_board::touch::CST9217_INT_PIN) == LOW) {
-    latchTouchInterrupt();
+    latchTouchInterruptFromTask();
   }
   touchHintConfigured = true;
 }
 
 static bool isTouchHintActive() {
-  configureTouchHintPin();
+  configureTouchWakeInterrupt();
   return digitalRead(waveshare_board::touch::CST9217_INT_PIN) == LOW;
 }
 
@@ -801,7 +862,7 @@ void initTouchController() {
     return;
   }
   lastTouchInitAttemptMs = now;
-  configureTouchHintPin();
+  configureTouchWakeInterrupt();
 
   // Check for TCA9554 and reset touch controller
   if (waveshare_board::i2c::probe(waveshare_board::TCA9554_ADDR, "TCA9554")) {
@@ -828,6 +889,7 @@ void initTouchController() {
 void readTouch() {
   uint32_t now = millis();
   bool touchHintActive = isTouchHintActive();
+  rearmTouchWakeInterruptIfInactive(touchHintActive);
   const uint32_t interruptGenerationBeforeAttempt = touchInterruptGeneration;
   const bool interruptPending =
       touch_interrupt_gate::hasUnattemptedGeneration(
@@ -859,6 +921,16 @@ void readTouch() {
     }
   }
 
+  // The CST9217's GPIO21 pulse is not a persistent touch level on the tested
+  // 1.75-inch board, so the existing throttled reader must retain its idle
+  // fallback even when automatic light sleep is enabled.
+  constexpr bool kAllowIdleFallback = true;
+  if (!waveshare_board::touch_sampling_policy::shouldAttemptRead(
+          kAllowIdleFallback, touchHintActive, touchPressed, interruptPending,
+          now, touchFastPollUntilMs)) {
+    return;
+  }
+
   uint32_t readInterval =
       touchReadInterval(touchHintActive, touchHintChanged, now);
   if (!interruptPending && now - lastTouchReadMs < readInterval) {
@@ -872,18 +944,35 @@ void readTouch() {
     noteTouchReadFailure("data read", now);
     return;
   }
-  if (!acknowledgeCst9217Frame()) {
-    noteTouchReadFailure("frame acknowledgement", now);
-    return;
-  }
   consecutiveTouchReadFailures = 0;
 
   waveshare_board::touch::TouchFrame decodedFrame;
   const auto decodeStatus = waveshare_board::touch::decodeCst9217Frame(
       data, sizeof(data), waveshare_board::touch::ACTIVE_WIDTH,
       waveshare_board::touch::ACTIVE_HEIGHT, decodedFrame);
+  if (decodeStatus ==
+      waveshare_board::touch::Cst9217DecodeStatus::InvalidAcknowledgement) {
+    // An idle speculative read can return bytes without the controller's 0xAB
+    // ready marker. There is no frame to consume in that case, and writing the
+    // host ACK makes the CST9217 NACK often enough to exercise an ESP-IDF I2C
+    // INVALID_STATE bug. Only acknowledge packets the controller marked ready.
+    logTouchPacket("idle-no-frame", data, sizeof(data), 0, 0,
+                   touchHintActive, now);
+    if (touchPressed && now - lastValidTouchMs <
+                            waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
+      touchBackoffUntilMs =
+          now + waveshare_board::touch::ACTIVE_READ_INTERVAL_MS;
+      return;
+    }
+    releaseAllTouches(now);
+    return;
+  }
+  if (!acknowledgeCst9217Frame()) {
+    noteTouchReadFailure("frame acknowledgement", now);
+    return;
+  }
   if (decodeStatus != waveshare_board::touch::Cst9217DecodeStatus::Ok) {
-    logTouchPacket("ignored-no-ack", data, sizeof(data), 0, 0,
+    logTouchPacket("ignored-invalid", data, sizeof(data), 0, 0,
                    touchHintActive, now);
     if (touchPressed && now - lastValidTouchMs <
                             waveshare_board::touch::ACTIVE_FAILURE_GRACE_MS) {
@@ -926,6 +1015,8 @@ void readTouch() {
 }
 
 #endif // WAVESHARE_AMOLED_206
+
+bool isTouchWakeSourceActive() { return isTouchHintActive(); }
 
 void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
   readTouch();

@@ -1,4 +1,5 @@
 #include "device_transfer_http.hpp"
+#include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
 
@@ -180,10 +181,20 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     return false;
   }
 
+  bool acquiredPowerLock = false;
   if (enabled && !wasEnabled) {
+    if (!power_management::acquire(
+            power_management::LockDomain::Transfer)) {
+      lockState();
+      rememberError("power_lock", "could not protect transfer from light sleep");
+      unlockState();
+      return false;
+    }
+    acquiredPowerLock = true;
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.mode(WIFI_AP);
       if (!WiFi.softAP(apSsid.c_str())) {
+        power_management::release(power_management::LockDomain::Transfer);
         lockState();
         rememberError("wifi_ap", "could not start transfer Wi-Fi");
         unlockState();
@@ -239,8 +250,17 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
+    // Publish the worker handle and persistent power-lock ownership before the
+    // new task can observe state. Holding the mutex across xTaskCreate makes
+    // an immediately scheduled worker wait until both fields are coherent.
+    lockState();
     const BaseType_t created =
         xTaskCreate(workerTaskThunk, "device_http", 16384, this, 1, &worker);
+    if (created == pdPASS) {
+      workerTask_ = worker;
+      powerLockHeld_ = acquiredPowerLock;
+    }
+    unlockState();
     if (created != pdPASS) {
       server_.stop();
       if (startedAp_) {
@@ -254,11 +274,11 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       sessionToken_.clear();
       rememberError("http_worker", "could not start transfer HTTP worker");
       unlockState();
+      if (acquiredPowerLock) {
+        power_management::release(power_management::LockDomain::Transfer);
+      }
       return false;
     }
-    lockState();
-    workerTask_ = worker;
-    unlockState();
   }
   return true;
 }
@@ -284,7 +304,12 @@ void HttpTransferServer::runWorker() {
         continue;
       }
       workerTask_ = nullptr;
+      const bool releasePowerLock = powerLockHeld_;
+      powerLockHeld_ = false;
       unlockState();
+      if (releasePowerLock) {
+        power_management::release(power_management::LockDomain::Transfer);
+      }
       return;
     }
     WiFiClient client = server_.accept();

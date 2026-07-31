@@ -15,6 +15,26 @@ enum class Mode : uint8_t {
   Transfer,
 };
 
+constexpr bool isTouchWakeDisplayMode(Mode currentMode) {
+  return currentMode == Mode::Dimmed || currentMode == Mode::DisplayOff;
+}
+
+constexpr bool touchWakeRequested(Mode currentMode, bool interruptNotified,
+                                  bool controllerInterruptActive) {
+  return interruptNotified ||
+         (isTouchWakeDisplayMode(currentMode) && controllerInterruptActive);
+}
+
+constexpr bool touchActivityAdvanced(uint32_t currentGeneration,
+                                     uint32_t observedGeneration) {
+  return currentGeneration != observedGeneration;
+}
+
+constexpr bool shouldPollTouchWhileDisplayInactive(Mode currentMode,
+                                                    bool decodedTouchPollingRequired) {
+  return decodedTouchPollingRequired && isTouchWakeDisplayMode(currentMode);
+}
+
 struct Context {
   bool navigating = false;
   bool transferActive = false;

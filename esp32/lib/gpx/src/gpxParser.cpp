@@ -36,6 +36,8 @@ GPXParser::~GPXParser() {}
  */
 std::map<std::string, std::vector<std::string>> GPXParser::getTagElementList(const char* tag, const char* element, const std::string& folderPath)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   std::map<std::string, std::vector<std::string>> elementsByFile;
 
   DIR* dir = opendir(folderPath.c_str());
@@ -101,6 +103,8 @@ std::map<std::string, std::vector<std::string>> GPXParser::getTagElementList(con
  */
 bool GPXParser::deleteTagByName(const char* tag, const char* name)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   tinyxml2::XMLDocument doc;
   tinyxml2::XMLError result = doc.LoadFile(filePath.c_str());
   if (result != tinyxml2::XML_SUCCESS) 
@@ -161,6 +165,8 @@ bool GPXParser::deleteTagByName(const char* tag, const char* name)
  */
 wayPoint GPXParser::getWaypointInfo(const char* name) 
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   wayPoint wp = {0};
 
   tinyxml2::XMLDocument doc;
@@ -250,6 +256,8 @@ wayPoint GPXParser::getWaypointInfo(const char* name)
  */
 bool GPXParser::addWaypoint(const wayPoint& wp)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   time_t tUTCwpt = time(NULL);
   struct tm UTCwpt_tm;
   struct tm *tmUTCwpt = gmtime_r(&tUTCwpt, &UTCwpt_tm);
@@ -344,6 +352,8 @@ bool GPXParser::addWaypoint(const wayPoint& wp)
  */
 bool GPXParser::loadTrack(std::vector<wayPoint>& trackData)
 {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   tinyxml2::XMLDocument doc;
   tinyxml2::XMLError result = doc.LoadFile(filePath.c_str());
   if (result != tinyxml2::XML_SUCCESS)
@@ -388,4 +398,3 @@ bool GPXParser::loadTrack(std::vector<wayPoint>& trackData)
 
     return true;
 }
-

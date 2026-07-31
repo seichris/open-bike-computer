@@ -28,6 +28,18 @@ constexpr bool hasReason(uint32_t reasons, WakeReason reason) {
   return (reasons & reasonBits(reason)) != 0;
 }
 
+constexpr uint32_t gpioWakeReasons(uint64_t gpioMask, uint8_t touchPin,
+                                   uint8_t bootPin) {
+  uint32_t reasons = 0;
+  if (touchPin < 64 && (gpioMask & (1ULL << touchPin)) != 0) {
+    reasons |= reasonBits(WakeReason::Touch);
+  }
+  if (bootPin < 64 && (gpioMask & (1ULL << bootPin)) != 0) {
+    reasons |= reasonBits(WakeReason::Boot);
+  }
+  return reasons;
+}
+
 struct DeadlineContext {
   uint32_t lvglDelayMs = kNoDeadline;
   uint32_t housekeepingDelayMs = kNoDeadline;

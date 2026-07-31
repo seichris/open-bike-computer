@@ -15,9 +15,11 @@ jobs:
         target:
           - WAVESHARE_AMOLED_175
           - WAVESHARE_AMOLED_175_POWER_METRICS
+          - WAVESHARE_AMOLED_175_LIGHT_SLEEP
           - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
           - WAVESHARE_AMOLED_206_POWER_METRICS
+          - WAVESHARE_AMOLED_206_LIGHT_SLEEP
           - WAVESHARE_AMOLED_206_PRODUCTION
     defaults:
       run:
@@ -132,6 +134,15 @@ jobs:
             tools/tests/test_power_management_policy.cpp \
             -o /tmp/test_power_management_policy
           /tmp/test_power_management_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
+            tools/tests/test_power_management_policy.cpp \
+            -o /tmp/test_power_management_policy_light_sleep
+          /tmp/test_power_management_policy_light_sleep
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_active_low_wake_interrupt_gate.cpp \
+            -o /tmp/test_active_low_wake_interrupt_gate
+          /tmp/test_active_low_wake_interrupt_gate
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ble_radio_policy.cpp \
             -o /tmp/test_ble_radio_policy

@@ -296,6 +296,20 @@ static bool processWavesharePowerButton() {
   return hadInput;
 }
 
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
+  const uint32_t reasons =
+      ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Touch);
+  }
+  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
+  }
+}
+#endif
+
 static void armOwnershipPairingAfterRenderedComparison() {
   uint32_t pairingGeneration = 0;
   if (!bleNavServer.ownershipPairingRenderedRequest(pairingGeneration)) {
@@ -457,7 +471,7 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
 }
 
 static display_inactivity::Update updateDisplayInactivityPolicy(
-    uint32_t nowMs) {
+    uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
   struct Signals {
     bool initialized = false;
     lv_obj_t *screen = nullptr;
@@ -480,16 +494,19 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     uint32_t lastTransferPollMs = 0;
     bool audioActive = false;
     bool touchPending = false;
+    uint32_t touchActivityGeneration = 0;
   };
   static Signals signals;
 
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const bool audioActive = waveshare_board::speaker::isPlaying();
   const bool touchPending = hasUnattemptedTouchInterrupt();
+  const uint32_t touchActivityGeneration = getTouchActivityGeneration();
   lv_obj_t *const activeScreen = lv_screen_active();
   const uint32_t routeRevision = routeOverlay.revision();
 
-  bool meaningfulActivity = false;
+  observedTouchActivity = touchWake;
+  bool meaningfulActivity = touchWake;
   if (!signals.initialized) {
     signals.initialized = true;
     signals.screen = activeScreen;
@@ -517,14 +534,21 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.lastTransferPollMs = nowMs;
     signals.audioActive = audioActive;
     signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
   } else {
+    const bool decodedTouchActivity =
+        display_inactivity::touchActivityAdvanced(
+            touchActivityGeneration, signals.touchActivityGeneration);
+    observedTouchActivity =
+        observedTouchActivity || decodedTouchActivity;
     meaningfulActivity =
-        activeScreen != signals.screen || activeTile != signals.tile ||
+        meaningfulActivity || activeScreen != signals.screen ||
+        activeTile != signals.tile ||
         bleStats.connectCount != signals.connectCount ||
         bleStats.authSuccessCount != signals.authSuccessCount ||
         routeRevision != signals.routeRevision ||
         audioActive != signals.audioActive ||
-        (touchPending && !signals.touchPending);
+        (touchPending && !signals.touchPending) || decodedTouchActivity;
     signals.screen = activeScreen;
     signals.tile = activeTile;
     signals.connectCount = bleStats.connectCount;
@@ -532,6 +556,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.routeRevision = routeRevision;
     signals.audioActive = audioActive;
     signals.touchPending = touchPending;
+    signals.touchActivityGeneration = touchActivityGeneration;
 
     if (bleStats.navPacketCount != signals.navPacketCount) {
       signals.navPacketCount = bleStats.navPacketCount;
@@ -841,7 +866,11 @@ static void logPowerMetricsReport() {
       "system[powerMode=%s wifiMode=%d transfer=%d transferMode=%s "
       "audio=%d cpuMHz=%u dfs=%d pmError=%d minCpuMHz=%u maxCpuMHz=%u "
       "lightSleep=%d "
-      "appPmLocks=0]\n",
+      "appPmLocks=%lu peakPmLocks=%lu pmLockFailures=%lu "
+      "ext1WakeMask=0x%llX gpioWakeMask=0x%llX "
+      "gpioWakeLast=0x%llX gpioWakeEvents=%lu "
+      "wakeCapture=%d wakeNotifier=%d pmWakeFailures=%lu "
+      "startupComplete=%d]\n",
       power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
       debugTileName(activeTile),
       powerMetricsDisplayStateName(snapshot.displayState),
@@ -898,7 +927,19 @@ static void logPowerMetricsReport() {
       powerManagementStatus.errorCode,
       powerManagementStatus.effective.minimumCpuMhz,
       powerManagementStatus.effective.maximumCpuMhz,
-      powerManagementStatus.effective.automaticLightSleep);
+      powerManagementStatus.effective.automaticLightSleep,
+      (unsigned long)powerManagementStatus.activeLockCount,
+      (unsigned long)powerManagementStatus.peakLockCount,
+      (unsigned long)powerManagementStatus.lockFailureCount,
+      static_cast<unsigned long long>(powerManagementStatus.ext1WakeMask),
+      static_cast<unsigned long long>(powerManagementStatus.gpioWakeMask),
+      static_cast<unsigned long long>(
+          powerManagementStatus.lastGpioWakeMask),
+      (unsigned long)powerManagementStatus.gpioWakeEventCount,
+      powerManagementStatus.wakeCaptureReady,
+      powerManagementStatus.wakeNotifierReady,
+      (unsigned long)powerManagementStatus.wakeSourceFailureCount,
+      powerManagementStatus.startupComplete);
   if (reportLength < 0 ||
       static_cast<size_t>(reportLength) >= sizeof(report)) {
     Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
@@ -995,6 +1036,10 @@ void setup() {
   // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
   // enabling BLE, touch, BOOT, audio, or transfer publishers.
   ui_scheduler::bindCurrentTask();
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
+#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayPowerManager.begin();
 #endif
@@ -1015,6 +1060,12 @@ void setup() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
                   latchWaveshareBootScreenCycle, FALLING);
+  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+#ifdef WAVESHARE_AMOLED_175
+  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#endif
+  power_management::configureExt1Wakeup(ext1WakeMask);
+  configureTouchWakeInterrupt();
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -1251,6 +1302,7 @@ void setup() {
   log_i("Setup Complete");
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
+  power_management::completeStartup();
 }
 
 /**
@@ -1351,7 +1403,36 @@ void loop() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  updateDisplayInactivityPolicy(now);
+  const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
+#ifdef WAVESHARE_AMOLED_175
+  constexpr bool kDecodedTouchPollingRequired = true;
+  if (display_inactivity::shouldPollTouchWhileDisplayInactive(
+          displayModeBeforeUpdate, kDecodedTouchPollingRequired)) {
+    // LVGL is throttled while dimmed and paused while off. Keep only the
+    // proven, PM-locked controller reader alive so a decoded frame can restore
+    // the UI. Tickless builds may light-sleep between these throttled polls.
+    readTouch();
+  }
+#endif
+  bool touchWake = ui_scheduler::hasReason(
+      wakeReasons, ui_scheduler::WakeReason::Touch);
+#ifdef WAVESHARE_AMOLED_175
+  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
+  // low-level state as a supplemental wake signal; decoded-frame activity from
+  // the throttled reader remains authoritative.
+  touchWake = display_inactivity::touchWakeRequested(
+      currentDisplayMode, touchWake, isTouchWakeSourceActive());
+#endif
+  bool observedTouchActivity = false;
+  const display_inactivity::Update displayUpdate =
+      updateDisplayInactivityPolicy(now, touchWake, observedTouchActivity);
+  if (display_inactivity::isTouchWakeDisplayMode(displayModeBeforeUpdate) &&
+      displayUpdate.current != displayModeBeforeUpdate &&
+      observedTouchActivity) {
+    // The first contact only restores the display. Releasing it clears this
+    // suppression before a subsequent intentional UI gesture.
+    suppressPrimaryTouchUntilReleaseForDisplayWake();
+  }
   displayPowerManager.applyPendingPanelChange();
   if (displayPowerManager.takeFullRefreshRequired()) {
     lv_obj_invalidate(lv_screen_active());
