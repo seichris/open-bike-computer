@@ -70,6 +70,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "ble_navigation.hpp"
 #include "disconnected_shutdown_policy.hpp"
 #include "ownership_button_policy.hpp"
+#include "power_metrics.hpp"
 #include "guiLayout.hpp"
 #include "mainScr.hpp"
 #include "route_overlay.hpp"
@@ -504,6 +505,135 @@ static void logSystemDebugHeartbeat() {
 #endif
 }
 
+static const char *powerMetricsDisplayStateName(
+    power_metrics::DisplayState state) {
+  switch (state) {
+  case power_metrics::DisplayState::On:
+    return "on";
+  case power_metrics::DisplayState::Off:
+    return "off";
+  case power_metrics::DisplayState::Unknown:
+  default:
+    return "unknown";
+  }
+}
+
+static void logPowerMetricsReport() {
+#if POWER_METRICS
+  constexpr size_t kReportBufferSize = 2048;
+  static char report[kReportBufferSize];
+  static uint32_t lastReportMs = 0;
+  const uint32_t now = millis();
+  if (now - lastReportMs < 10000) {
+    return;
+  }
+  const uint32_t intervalMs = now - lastReportMs;
+  lastReportMs = now;
+
+  const power_metrics::RuntimeSnapshot snapshot =
+      power_metrics::snapshotAndReset();
+  const power_metrics::IntervalData &metrics = snapshot.interval;
+  const BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
+
+  const char *screenName = "unknown";
+  const lv_obj_t *activeScreen = lv_scr_act();
+  if (activeScreen == waitingScreen) {
+    screenName = "waiting";
+  } else if (isMainScreen) {
+    screenName = "main";
+  }
+
+  bool audioActive = false;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  audioActive = waveshare_board::speaker::isPlaying();
+#endif
+
+  const auto bleCount = [&](power_metrics::BlePacketClass packetClass) {
+    return metrics.blePacketCounts[static_cast<size_t>(packetClass)];
+  };
+
+  const int reportLength = snprintf(
+      report, sizeof(report),
+      "PWRMET v=%u intervalMs=%lu screen=%s tile=%s display=%s "
+      "brightness[requested=%u effective=%u] "
+      "loop[wakes=%llu maxGapMs=%lu] "
+      "lvgl[count=%lu totalUs=%llu maxUs=%lu] "
+      "flush[count=%lu rotationUs=%llu/%lu qspiUs=%llu/%lu "
+      "totalUs=%llu/%lu] "
+      "map[count=%lu completed=%lu interrupted=%lu totalUs=%llu/%lu "
+      "blocksUs=%llu/%lu drawUs=%llu/%lu routeUs=%llu/%lu "
+      "reasons=gps:%lu,route:%lu,settings:%lu,heading:%lu,retry:%lu,other:%lu] "
+      "ble[connected=%d authenticated=%d "
+      "logical=nav:%lu,route:%lu,gps:%lu,settings:%lu,workout:%lu,"
+      "transfer:%lu,audio:%lu,control:%lu,auth:%lu "
+      "appQueue=ios-diagnostic] "
+      "system[wifiMode=%d transfer=%d transferMode=%s audio=%d cpuMHz=%u "
+      "appPmLocks=0]\n",
+      power_metrics::kSchemaVersion, (unsigned long)intervalMs, screenName,
+      debugTileName(activeTile),
+      powerMetricsDisplayStateName(snapshot.displayState),
+      snapshot.requestedBrightness, snapshot.effectiveBrightness,
+      static_cast<unsigned long long>(metrics.loopWakeCount),
+      (unsigned long)metrics.maxLoopGapMs, (unsigned long)metrics.lvgl.count,
+      static_cast<unsigned long long>(metrics.lvgl.totalUs),
+      (unsigned long)metrics.lvgl.maxUs,
+      (unsigned long)metrics.displayFlush.count,
+      static_cast<unsigned long long>(metrics.displayRotation.totalUs),
+      (unsigned long)metrics.displayRotation.maxUs,
+      static_cast<unsigned long long>(metrics.displayQspi.totalUs),
+      (unsigned long)metrics.displayQspi.maxUs,
+      static_cast<unsigned long long>(metrics.displayFlush.totalUs),
+      (unsigned long)metrics.displayFlush.maxUs,
+      (unsigned long)metrics.mapRender.count,
+      (unsigned long)metrics.mapRenderCompleted,
+      (unsigned long)metrics.mapRenderInterrupted,
+      static_cast<unsigned long long>(metrics.mapRender.totalUs),
+      (unsigned long)metrics.mapRender.maxUs,
+      static_cast<unsigned long long>(metrics.mapBlocks.totalUs),
+      (unsigned long)metrics.mapBlocks.maxUs,
+      static_cast<unsigned long long>(metrics.mapDraw.totalUs),
+      (unsigned long)metrics.mapDraw.maxUs,
+      static_cast<unsigned long long>(metrics.mapRoute.totalUs),
+      (unsigned long)metrics.mapRoute.maxUs,
+      (unsigned long)metrics.mapReasonCounts[0],
+      (unsigned long)metrics.mapReasonCounts[1],
+      (unsigned long)metrics.mapReasonCounts[2],
+      (unsigned long)metrics.mapReasonCounts[3],
+      (unsigned long)metrics.mapReasonCounts[4],
+      (unsigned long)metrics.mapReasonCounts[5],
+      bleStats.connected, bleStats.authenticated,
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Navigation),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Route),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Gps),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Settings),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Workout),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Transfer),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Audio),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Control),
+      (unsigned long)bleCount(power_metrics::BlePacketClass::Auth),
+      static_cast<int>(WiFi.getMode()), transferStatus.enabled,
+      transferStatus.mode.empty() ? "none" : transferStatus.mode.c_str(),
+      audioActive, getCpuFrequencyMhz());
+  if (reportLength < 0 ||
+      static_cast<size_t>(reportLength) >= sizeof(report)) {
+    Serial.printf("PWRMET_ERROR formatLength=%d capacity=%u\n", reportLength,
+                  static_cast<unsigned>(sizeof(report)));
+    return;
+  }
+
+  const size_t written = Serial.write(
+      reinterpret_cast<const uint8_t *>(report),
+      static_cast<size_t>(reportLength));
+  if (written != static_cast<size_t>(reportLength)) {
+    Serial.printf("PWRMET_ERROR serialWrite=%u/%u\n",
+                  static_cast<unsigned>(written),
+                  static_cast<unsigned>(reportLength));
+  }
+#endif
+}
+
 static void processDisconnectedShutdown() {
   static disconnected_shutdown_policy::Tracker shutdownTracker;
   const bool connected = bleNavServer.isConnected();
@@ -551,11 +681,26 @@ void setup() {
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
 
-  // Initialize Serial for debug
+  // Initialize Serial for debug. A complete PWRMET report is larger than the
+  // default 256-byte HWCDC queue, so metrics builds reserve enough space for
+  // one atomic report while keeping the normal firmware footprint unchanged.
+#if POWER_METRICS
+  constexpr size_t kPowerMetricsSerialTxBufferSize = 4096;
+  const size_t configuredSerialTxBufferSize =
+      Serial.setTxBufferSize(kPowerMetricsSerialTxBufferSize);
+#endif
   Serial.begin(115200);
   // HWCDC uses this value as both a timeout and a retry counter. Zero
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
+#if POWER_METRICS
+  if (configuredSerialTxBufferSize != kPowerMetricsSerialTxBufferSize) {
+    Serial.printf("PWRMET_ERROR txBuffer=%u/%u\n",
+                  static_cast<unsigned>(configuredSerialTxBufferSize),
+                  static_cast<unsigned>(kPowerMetricsSerialTxBufferSize));
+  }
+#endif
+  power_metrics::begin();
   delay(2000);              // Give time for USB CDC to attach
   log_i("Starting Setup...");
   Serial.printf("Reset reason: CPU0=%d CPU1=%d\n", esp_reset_reason(),
@@ -812,6 +957,7 @@ void setup() {
  */
 void loop() {
   uint32_t now = millis();
+  power_metrics::noteLoop(now);
   if (lastLoopMs != 0) {
     uint32_t gap = now - lastLoopMs;
     if (gap > maxLoopGapMs) {
@@ -849,6 +995,7 @@ void loop() {
     uint32_t startUs = micros();
     lv_timer_handler();
     lastLvglHandlerDurationUs = micros() - startUs;
+    power_metrics::noteLvgl(lastLvglHandlerDurationUs);
     if (lastLvglHandlerDurationUs > maxLvglHandlerDurationUs) {
       maxLvglHandlerDurationUs = lastLvglHandlerDurationUs;
     }
@@ -873,6 +1020,7 @@ void loop() {
 #endif
 
   logSystemDebugHeartbeat();
+  logPowerMetricsReport();
 
 #ifndef DISABLE_WEB_SERVER
   // Deleting recursive directories in webfile server

@@ -25,6 +25,7 @@
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../power_metrics/power_metrics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -1786,6 +1787,7 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
 
 static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                                        const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
   if (len == 0) {
     lastRouteHash = 0;
     lastRouteLen = 0;
@@ -1795,6 +1797,7 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     bleDebugStats.lastRoutePacketMs = millis();
     routeOverlay.clear();
     clearCurrentNavigationData();
+    power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
     triggerMapRedraw();
     return;
   }
@@ -1836,11 +1839,13 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
   }
 
   routeOverlay.parseRouteData(data, len);
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Route);
   triggerMapRedraw();
 }
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
                              const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
   gps_position_protocol::Packet packet{};
   if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
                                              &packet)) {
@@ -1884,11 +1889,13 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
     Serial.println("BLE GPS: First position received, transitioning to map...");
   }
 
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Gps);
   triggerMapRedraw();
 }
 
 static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
                                           const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Workout);
   if (!requireAuthenticated("workout telemetry")) {
     return;
   }
@@ -2151,11 +2158,13 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   }
 
+  power_metrics::noteMapRequest(power_metrics::MapRenderReason::Settings);
   triggerMapRedraw();
 }
 
 static void handleMapSettingPayload(const uint8_t *data, size_t len,
                                     const char *source) {
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
   if (data == nullptr || len < 5) {
     Serial.printf("BLE: Rejected %s map setting: expected 5 bytes\n",
                   source == nullptr ? "unknown" : source);
@@ -2398,6 +2407,7 @@ public:
     }
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
@@ -2412,6 +2422,7 @@ public:
 
     if (hasPrefix(value, "MAPR")) {
       if (!requireAuthenticated("fallback route geometry")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
         return;
       }
       queueMapInput(PendingMapInputType::Route,
@@ -2422,6 +2433,7 @@ public:
 
     if (hasPrefix(value, "GPSP")) {
       if (!requireAuthenticated("fallback GPS position")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
         return;
       }
       queueMapInput(PendingMapInputType::Gps,
@@ -2432,6 +2444,7 @@ public:
 
     if (hasPrefix(value, "MSET")) {
       if (!requireAuthenticated("fallback map setting")) {
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
         return;
       }
       queueMapInput(PendingMapInputType::Setting,
@@ -2441,6 +2454,7 @@ public:
     }
 
     if (hasPrefix(value, "MTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("map transfer control")) {
         return;
       }
@@ -2450,6 +2464,7 @@ public:
     }
 
     if (hasPrefix(value, "MSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("map transfer status")) {
         return;
       }
@@ -2459,6 +2474,7 @@ public:
     }
 
     if (hasPrefix(value, "DTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("device transfer control")) {
         return;
       }
@@ -2469,10 +2485,12 @@ public:
 
     if (handleDeviceCapabilitiesCommand(value, pChar,
                                         "device capabilities")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "DSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("device transfer status")) {
         return;
       }
@@ -2482,14 +2500,17 @@ public:
     }
 
     if (handleSoundPlayCommand(value, "sound playback", "fallback")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (handlePowerButtonHonkCommand(value, "PWR honk configuration",
                                      "fallback", pChar)) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Navigation);
     if (!requireAuthenticated("navigation instruction")) {
       return;
     }
@@ -2512,6 +2533,7 @@ public:
       return;
     }
     if (!requireAuthenticated("route geometry")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
       return;
     }
 
@@ -2531,6 +2553,7 @@ public:
       return;
     }
     if (!requireAuthenticated("GPS position")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
       return;
     }
 
@@ -2575,10 +2598,12 @@ public:
     }
 
     if (handleDestinationPickerPayload(value, "native destination picker")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "MTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native map transfer control")) {
         return;
       }
@@ -2589,6 +2614,7 @@ public:
     }
 
     if (hasPrefix(value, "MSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native map transfer status")) {
         return;
       }
@@ -2598,6 +2624,7 @@ public:
     }
 
     if (hasPrefix(value, "DTRN")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native device transfer control")) {
         return;
       }
@@ -2610,10 +2637,12 @@ public:
     if (handleDeviceCapabilitiesCommand(value,
                                         mapTransferStatusCharacteristic,
                                         "native device capabilities")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
     }
 
     if (hasPrefix(value, "DSTS")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native device transfer status")) {
         return;
       }
@@ -2623,16 +2652,19 @@ public:
     }
 
     if (handleSoundPlayCommand(value, "native sound playback", "native")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (handlePowerButtonHonkCommand(value, "native PWR honk configuration",
                                      "native",
                                      mapTransferStatusCharacteristic)) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Audio);
       return;
     }
 
     if (!requireAuthenticated("map setting")) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Settings);
       return;
     }
 
@@ -2646,6 +2678,7 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     std::string value = pChar->getValue();
     if (!value.empty()) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
       handleAuthPayload(value);
     }
   }

@@ -8267,6 +8267,16 @@ struct NavigationProtocolTests {
         assertEqual(sent, [Data([2]), Data([3])], "queue flushes remaining packet")
         assertEqual(labels, ["second", "third"], "queue flushes write metadata in order")
         assertEqual(queue.count, 0, "queue is empty after flush")
+        assertEqual(queue.metrics.enqueuedFrames, 3,
+                    "diagnostic metrics count accepted regular frames")
+        assertEqual(queue.metrics.flushedFrames, 2,
+                    "diagnostic metrics count flushed frames")
+        assertEqual(queue.metrics.droppedFrames, 1,
+                    "diagnostic metrics count capacity evictions")
+        assertEqual(queue.metrics.currentDepth, 0,
+                    "diagnostic metrics expose current queue depth")
+        assertEqual(queue.metrics.maxDepth, 2,
+                    "diagnostic metrics retain peak bounded depth")
 
         var pacedQueue = NavigationWriteQueue(maxCount: 3)
         pacedQueue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
@@ -8470,6 +8480,77 @@ struct NavigationProtocolTests {
         }
         assert(catalogWriteFailureWasReported,
                "atomic batch protection preserves the transport failure callback")
+
+        var metricsQueue = NavigationWriteQueue(maxCount: 1)
+        assert(metricsQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([1]),
+            label: "gps-1",
+            coalescingKey: "gps"
+        ), prioritized: false), "first replaceable state is accepted")
+        assert(metricsQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([2]),
+            label: "gps-2",
+            coalescingKey: "gps"
+        ), prioritized: false), "new state replaces the stale state")
+        assert(!metricsQueue.enqueueAtomically([
+            NavigationWrite(data: Data([3]), label: "oversized-1"),
+            NavigationWrite(data: Data([4]), label: "oversized-2")
+        ]), "oversized atomic diagnostics fixture is rejected")
+        metricsQueue.flush(canSend: { false }) { _ in
+            assert(false, "backpressured queue must not write")
+        }
+        metricsQueue.noteRetryScheduled()
+        metricsQueue.flush(canSend: { true }) { _ in }
+        metricsQueue.enqueue(NavigationWrite(data: Data([5]), label: "clear"))
+        metricsQueue.removeAll()
+
+        let queueMetrics = metricsQueue.snapshotMetricsAndReset()
+        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 1,
+                    "queue metrics schema is explicitly versioned")
+        assertEqual(queueMetrics.enqueuedFrames, 3,
+                    "queue metrics distinguish accepted frames")
+        assertEqual(queueMetrics.flushedFrames, 1,
+                    "queue metrics count transport writes")
+        assertEqual(queueMetrics.rejectedFrames, 2,
+                    "queue metrics count rejected atomic frames")
+        assertEqual(queueMetrics.coalescedFrames, 1,
+                    "queue metrics count superseded replaceable state")
+        assertEqual(queueMetrics.clearedFrames, 1,
+                    "queue metrics count disconnect-style clearing")
+        assertEqual(queueMetrics.retrySchedules, 1,
+                    "queue metrics count retry scheduling")
+        assertEqual(queueMetrics.backpressureStops, 1,
+                    "queue metrics count transport backpressure")
+        assertEqual(queueMetrics.currentDepth, 0,
+                    "queue metrics depth returns to zero")
+        assertEqual(metricsQueue.metrics.enqueuedFrames, 0,
+                    "queue interval metrics reset after a snapshot")
+        assertEqual(metricsQueue.metrics.maxDepth, 0,
+                    "an empty queue starts the next interval at zero depth")
+
+        var boundaryQueue = NavigationWriteQueue(maxCount: 3)
+        boundaryQueue.enqueue(NavigationWrite(data: Data([6]), label: "pending-1"))
+        boundaryQueue.enqueue(NavigationWrite(data: Data([7]), label: "pending-2"))
+        let boundarySnapshot = boundaryQueue.snapshotMetricsAndReset()
+        assertEqual(boundarySnapshot.enqueuedFrames, 2,
+                    "the completed interval retains pre-boundary events")
+        assertEqual(boundarySnapshot.currentDepth, 2,
+                    "the completed interval reports pending queue depth")
+
+        let nextBoundarySnapshot = boundaryQueue.snapshotMetricsAndReset()
+        assertEqual(nextBoundarySnapshot.enqueuedFrames, 0,
+                    "the next interval starts with cleared event counters")
+        assertEqual(nextBoundarySnapshot.currentDepth, 2,
+                    "the next interval retains pending queue depth")
+        assertEqual(nextBoundarySnapshot.maxDepth, 2,
+                    "the next interval starts at the existing queue depth")
+
+        var boundaryWrites: [Data] = []
+        boundaryQueue.flush(canSend: { _ in true }) { write in
+            boundaryWrites.append(write.data)
+        }
+        assertEqual(boundaryWrites, [Data([6]), Data([7])],
+                    "metrics snapshots do not mutate pending writes")
     }
 
     static func testDeviceBLEProtocolConstants() {

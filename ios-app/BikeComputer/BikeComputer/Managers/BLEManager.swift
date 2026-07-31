@@ -630,6 +630,10 @@ class BLEManager: NSObject, ObservableObject {
         priorityMaxCount: 3
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
+#if DEBUG
+    private var navigationQueueMetricsTimer: Timer?
+    private var lastNavigationQueueMetricsUptime: TimeInterval = 0
+#endif
     private var isConnecting: Bool = false
     private var isPairingMode: Bool = false
     private var pendingAuthNonce: String?
@@ -802,9 +806,23 @@ class BLEManager: NSObject, ObservableObject {
         )
 #endif
         log("BLE debug session started")
+#if DEBUG
+        lastNavigationQueueMetricsUptime = ProcessInfo.processInfo.systemUptime
+        let metricsTimer = Timer(
+            timeInterval: 10,
+            repeats: true
+        ) { [weak self] _ in
+            self?.logNavigationQueueMetricsInterval()
+        }
+        RunLoop.main.add(metricsTimer, forMode: .common)
+        navigationQueueMetricsTimer = metricsTimer
+#endif
     }
 
     deinit {
+#if DEBUG
+        navigationQueueMetricsTimer?.invalidate()
+#endif
 #if canImport(UIKit) && !HOST_TESTING
         NotificationCenter.default.removeObserver(
             self,
@@ -3913,6 +3931,27 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    private func logNavigationQueueMetricsInterval() {
+#if DEBUG
+        let now = ProcessInfo.processInfo.systemUptime
+        let intervalMs = Int(
+            max(0, (now - lastNavigationQueueMetricsUptime) * 1_000).rounded()
+        )
+        lastNavigationQueueMetricsUptime = now
+        let metrics = navigationWriteQueue.snapshotMetricsAndReset()
+        log(
+            "PWRMET_IOS v=\(NavigationWriteQueueMetrics.schemaVersion) " +
+            "intervalMs=\(intervalMs) " +
+            "queue[depth=\(metrics.currentDepth) maxDepth=\(metrics.maxDepth) " +
+            "enqueued=\(metrics.enqueuedFrames) flushed=\(metrics.flushedFrames) " +
+            "dropped=\(metrics.droppedFrames) rejected=\(metrics.rejectedFrames) " +
+            "coalesced=\(metrics.coalescedFrames) cleared=\(metrics.clearedFrames) " +
+            "retries=\(metrics.retrySchedules) " +
+            "backpressure=\(metrics.backpressureStops)]"
+        )
+#endif
+    }
+
     private func completeNavigationWrite(error: Error?) {
         writeWithResponseInFlight = false
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
@@ -4003,6 +4042,7 @@ class BLEManager: NSObject, ObservableObject {
             self.flushPendingNavigationWrites(endpoint: endpoint)
             self.scheduleNavigationFlushRetryIfNeeded()
         }
+        navigationWriteQueue.noteRetryScheduled()
     }
 }
 

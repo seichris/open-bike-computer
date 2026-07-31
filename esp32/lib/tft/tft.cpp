@@ -7,6 +7,7 @@
  */
 
 #include "tft.hpp"
+#include "power_metrics.hpp"
 
 #ifdef USE_ARDUINO_GFX
 #include <Arduino_GFX_Library.h>
@@ -39,6 +40,8 @@ void tftOn(uint8_t brightness)
   delay(120);
   tft.setBrightness(brightness);
 #endif
+  power_metrics::noteDisplayState(power_metrics::DisplayState::On, brightness,
+                                  brightness);
 }
 
 /**
@@ -56,6 +59,7 @@ void tftOff()
   tft.setBrightness(0);
   tft.writecommand(0x10);  // Sleep In
 #endif
+  power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 0, 0);
 }
 
 /**

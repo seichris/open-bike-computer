@@ -22,6 +22,12 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <math.h>
+#ifndef POWER_METRICS
+#define POWER_METRICS 0
+#endif
+#if POWER_METRICS
+#include <atomic>
+#endif
 #include <string.h>
 
 namespace waveshare_board::speaker {
@@ -81,6 +87,9 @@ esp_codec_dev_handle_t speakerDevice = nullptr;
 QueueHandle_t soundQueue = nullptr;
 SemaphoreHandle_t powerButtonConfigMutex = nullptr;
 bool initialized = false;
+#if POWER_METRICS
+std::atomic<bool> playbackActive{false};
+#endif
 bool powerButtonHonkAvailable = false;
 bool powerButtonMonitoringConfigured = false;
 float codecHardwareGainDb = 0.0f;
@@ -528,10 +537,16 @@ void speakerTask(void *) {
 
     Sound sound = static_cast<Sound>(request.sound);
     if (!initializeCodec()) {
+#if POWER_METRICS
+      playbackActive.store(false, std::memory_order_relaxed);
+#endif
       Serial.println("Speaker: playback skipped because initialization failed");
       continue;
     }
 
+#if POWER_METRICS
+    playbackActive.store(true, std::memory_order_relaxed);
+#endif
     if (esp_codec_dev_set_out_vol(speakerDevice, request.volumePercent) !=
         ESP_CODEC_DEV_OK) {
       Serial.printf("Speaker: failed to set volume to %u%%\n",
@@ -547,6 +562,9 @@ void speakerTask(void *) {
         Serial.printf("Speaker: sound %u playback failed\n", request.sound);
       }
     }
+#if POWER_METRICS
+    playbackActive.store(false, std::memory_order_relaxed);
+#endif
 
     if (uxQueueMessagesWaiting(soundQueue) == 0) {
       releaseCodecResources();
@@ -610,6 +628,14 @@ bool begin() {
 }
 
 bool isAvailable() { return soundQueue != nullptr; }
+
+bool isPlaying() {
+#if POWER_METRICS
+  return playbackActive.load(std::memory_order_relaxed);
+#else
+  return false;
+#endif
+}
 
 bool requestPlay(Sound sound, uint8_t volumePercent) {
   if (!isSupported(sound) || volumePercent > 100 || soundQueue == nullptr) {
@@ -716,6 +742,7 @@ namespace waveshare_board::speaker {
 
 bool begin() { return false; }
 bool isAvailable() { return false; }
+bool isPlaying() { return false; }
 bool requestPlay(Sound, uint8_t) { return false; }
 bool isSupported(Sound) { return false; }
 bool isPowerButtonHonkAvailable() { return false; }
