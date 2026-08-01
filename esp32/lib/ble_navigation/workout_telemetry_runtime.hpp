@@ -14,6 +14,8 @@ workout_telemetry::ApplyResult ingestFrame(const uint8_t *bytes,
 
 workout_telemetry::Snapshot snapshot(uint32_t nowMs);
 
+bool isWorkoutActive();
+
 void beginAuthenticatedResynchronization();
 
 void reset();

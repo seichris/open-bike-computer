@@ -40,7 +40,7 @@ peripheral transaction part of the correctness boundary.
 
 | State | Entry policy | What remains active | Exit |
 | --- | --- | --- | --- |
-| Connected, active display | Default connected state, meaningful activity, navigation, transfer, pairing, or audio attention | Display at saved brightness, BLE, UI scheduler, required peripherals | Inactivity can dim the display |
+| Connected, active display | Default connected state, meaningful activity, navigation, workout, transfer, pairing, or audio attention | Display at saved brightness, BLE, UI scheduler, required peripherals | Inactivity can dim the display |
 | Connected, dimmed display | 15 seconds without meaningful activity | BLE and touch remain available; display brightness is capped at 20%; UI work is throttled | Meaningful activity restores the saved brightness; continued inactivity turns the display off |
 | Connected, display off | 45 seconds without meaningful activity | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
 | Transfer or attention hold | Device transfer, activation, pairing, or audio needs immediate feedback | Display stays awake and required PM locks protect the operation | Hold ends when the operation ends |
@@ -82,10 +82,13 @@ The user's active brightness is stored in NVS under namespace
 `deviceSettings`, key `brightnessPct`. It is clamped to 5–100%, restored after
 reboot and display wake, and capped at 20% while dimmed.
 
-Navigation, transfer, and attention states deliberately hold the display awake:
+Navigation, workout, transfer, and attention states deliberately hold the
+display awake:
 
 - navigation requires an authenticated BLE connection plus a route or active
   maneuver;
+- workout requires an authenticated BLE connection plus a live Starting,
+  Running, Paused, or Ending workout state;
 - transfer includes the transfer service and device-activation work; and
 - attention includes pairing and audio.
 
@@ -93,7 +96,8 @@ Meaningful activity includes touch, screen or tile changes, BLE
 connect/authentication, route revisions, audio transitions, pairing and
 transfer state changes, new transfer progress/errors, and materially changed
 maneuver information. Repeated GPS fixes, routine workout samples, and an
-unchanged maneuver-distance update do not keep the panel awake by themselves.
+unchanged maneuver-distance update are not treated as activity events; the live
+workout state itself holds the panel awake instead.
 
 When the display is dimmed, the legacy UI timer runs at 250 ms and LVGL work is
 bounded to at most once per 100 ms. When the display is off, the main LVGL timer

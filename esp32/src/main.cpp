@@ -88,6 +88,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "route_overlay.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
+#include "workout_telemetry_runtime.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "WAVESHARE_AMOLED_175.hpp"
 #include "axp2101.hpp"
@@ -619,6 +620,9 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
   context.navigating =
       bleStats.connected && bleStats.authenticated &&
       (routeOverlay.hasRoute() || hasCurrentNavigationData());
+  context.workoutActive =
+      bleStats.connected && bleStats.authenticated &&
+      workout_telemetry_runtime::isWorkoutActive();
   context.transferActive =
       signals.transferEnabled || signals.activationRunning;
   context.attentionActive = signals.pairing || audioActive;
