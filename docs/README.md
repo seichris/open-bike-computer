@@ -29,6 +29,7 @@
 | [Watch + Bicino navigation release notes](watch-bicino-navigation-release-notes.md) | Draft release copy and release blockers |
 | [watchOS workout companion](plans/watchos-workout-companion-implementation-plan.md) | Implemented |
 | [Firmware runtime, core cache, SD, and maintenance hardening](plans/firmware-runtime-cache-sd-hardening-implementation-plan.md) | Software implementation split across [#222](https://github.com/seichris/open-bike-computer/pull/222), [#223](https://github.com/seichris/open-bike-computer/pull/223), [#228](https://github.com/seichris/open-bike-computer/pull/228), [#229](https://github.com/seichris/open-bike-computer/pull/229), [#231](https://github.com/seichris/open-bike-computer/pull/231), and [#232](https://github.com/seichris/open-bike-computer/pull/232); physical SD/audio acceptance remains open |
+| [Pioarduino first-run Python supply-chain hardening reconciliation](plans/pioarduino-wheelhouse-hardening.md) | Mandatory wheelhouse gap implemented by [#228](https://github.com/seichris/open-bike-computer/pull/228) and [#229](https://github.com/seichris/open-bike-computer/pull/229); document tracks the as-built boundary and long-term maintenance gates |
 | [Bicino real-device browser debugging](plans/bicino-real-device-browser-debugging-implementation-plan.md) | Implemented in branch; two-target physical validation pending |
 
 ## Releases
