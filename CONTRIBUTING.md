@@ -38,14 +38,14 @@ Build the default Waveshare ESP32-S3 1.75 firmware:
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_175
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175
 ```
 
 Build the Waveshare ESP32-S3 2.06 firmware:
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_206
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 ```
 
 Upload ESP32 firmware:

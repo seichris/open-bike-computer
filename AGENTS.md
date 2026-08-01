@@ -31,12 +31,18 @@ device is connected. Do not assume 1.75 versus 2.06.
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_175
-pio run -e WAVESHARE_AMOLED_206
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 pio device list
 pio run -e WAVESHARE_AMOLED_175 -t upload --upload-port /dev/cu.usbmodemXXXX
 pio device monitor -b 115200
 ```
+
+Use `tools/build_firmware.py` for build-only checks and CI. A clean pioarduino
+installation can spend its first PlatformIO invocation compiling a custom core
+against a generated `.dummy` sketch; the helper detects that bootstrap pass,
+rebuilds the requested source, and requires the target `firmware.elf`. Direct
+`pio run -e ... -t upload` remains the upload command.
 
 Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
 upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.

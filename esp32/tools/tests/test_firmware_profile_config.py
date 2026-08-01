@@ -138,6 +138,14 @@ for section in config.sections():
         )
 
 ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+speaker_workflow = (
+    repo_root / ".github/workflows/speaker-firmware.yml"
+).read_text()
+assert "python tools/build_firmware.py" in ci_workflow
+assert "workflow_dispatch:" in speaker_workflow
+assert "push:" not in speaker_workflow
+assert "pull_request:" not in speaker_workflow
+assert "python tools/build_firmware.py" in speaker_workflow
 for environment in light_sleep_profiles:
     assert environment.removeprefix("env:") in ci_workflow
 
@@ -153,7 +161,8 @@ for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"
     assert "+<../speaker_honk_test.cpp>" in config.get(profile, "build_src_filter")
-    assert profile.removeprefix("env:") in ci_workflow
+    assert profile.removeprefix("env:") not in ci_workflow
+    assert profile.removeprefix("env:") in speaker_workflow
 assert speaker_source.index("boot_diagnostics::begin()") < speaker_source.index(
     "waveshare_board::i2c::configureBus()"
 )
@@ -214,6 +223,7 @@ assert not raw_write_offenders, (
 )
 
 release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
+assert "python tools/build_firmware.py" in release_workflow
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"

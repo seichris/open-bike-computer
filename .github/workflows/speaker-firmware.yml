@@ -1,0 +1,27 @@
+name: Speaker firmware builds
+
+on:
+  workflow_dispatch:
+
+jobs:
+  esp32-speaker:
+    name: ESP32 Speaker (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - WAVESHARE_AMOLED_175_SPEAKER_HONK
+          - WAVESHARE_AMOLED_206_SPEAKER_HONK
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+      - name: Build speaker firmware
+        run: python tools/build_firmware.py "${{ matrix.target }}"

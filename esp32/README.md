@@ -22,9 +22,14 @@ Install [PlatformIO](https://platformio.org/), then build the profile matching
 your device:
 
 ```sh
-pio run -e WAVESHARE_AMOLED_175
-pio run -e WAVESHARE_AMOLED_206
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 ```
+
+The helper handles pioarduino's one-time custom-core bootstrap and confirms
+that PlatformIO produced the requested firmware rather than its generated
+bootstrap sketch. The speaker test profiles remain available through the
+manual **Speaker firmware builds** GitHub Actions workflow.
 
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).
