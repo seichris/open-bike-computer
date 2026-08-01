@@ -53,8 +53,12 @@ also isolates ESP-IDF Component Manager state, rejects or scrubs ambient source
 overrides, and requires strict component checksums. This is upload-input
 preflight evidence, not flash readback: a later `BOOT_META` confirms the
 embedded Git/profile independently but does not contain the artifact SHA-256s.
-The host Python interpreter and top-level `pio` launcher are part of the trusted
-workstation or CI boundary and are not covered by `coreAttestationSha256`.
+The host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
+online Python dependency resolver (its registries, external `uv`, private
+`penv`, and ESP-IDF venv before their resulting trees are attested) are part of
+the trusted workstation or CI boundary and are not pre-execution-proven by
+`coreAttestationSha256`. The digest records the resulting installed trees and
+rejects later mutation or mismatched reuse; it is not a Python dependency lock.
 
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).

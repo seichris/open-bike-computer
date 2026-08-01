@@ -129,16 +129,21 @@ compiler/linker/CMake injection variables, legacy component-manager aliases,
 and `ICENAV3_LAT`/`ICENAV3_LON` are rejected; all other nonessential ambient
 values are scrubbed from the build subprocess. Put deliberate flags and inputs
 in a named, tracked environment in `platformio.ini`. The helper downloads the
-pioarduino release and every executable package bootstrap to its private store,
-verifies their tracked sizes and SHA-256 values before PlatformIO can execute
-them, seeds the exact SCons runtime, forces the bootstrap and every recursive
+pioarduino release and every tracked PlatformIO executable-package bootstrap to
+its private store, verifies their tracked sizes and SHA-256 values before those
+package payloads execute, seeds the exact SCons runtime, forces the bootstrap and every recursive
 custom-core pass through generated local project configs, and enables strict
 component checksums. Project-level PlatformIO directory overrides and
 `extra_configs` likewise disable cache/upload attestation. The emitted
 `coreAttestationSha256` summarizes the PlatformIO-installed package, tool,
 nested-runtime, platform, framework, private global-library, and core-board
-state. It does not cover the host Python interpreter or top-level `pio`
-launcher; those remain part of the trusted workstation or CI boundary. Raw Waveshare
+state after bootstrap. It does not cover the host Python interpreter, top-level
+`pio` launcher, or pioarduino's first-run online Python dependency resolver
+(including its package registries, external `uv`, private `penv`, and ESP-IDF
+venv before their resulting trees are attested); those remain part of the
+trusted workstation or CI boundary. The attestation detects later mutation or
+cache reuse of those installed trees, but it is not a pre-execution Python
+supply-chain proof. Raw Waveshare
 PlatformIO builds fail with a pointer to the helper; raw legacy-board builds are
 stamped `unverified-...` rather than advertising an exact Git SHA. AMOLED upload
 rechecks the clean source identity, generated state, managed components,

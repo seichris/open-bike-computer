@@ -315,7 +315,7 @@ def _download_verified_archive(
 
 
 def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
-    """Content-pin the platform plus every executable package bootstrap."""
+    """Content-pin the platform and its tracked PlatformIO package archives."""
     source_config = project_dir / "platformio.ini"
     if source_config.is_symlink() or not source_config.is_file():
         raise BuildError(f"unsafe PlatformIO project file: {source_config}")

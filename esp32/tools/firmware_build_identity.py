@@ -22,6 +22,19 @@ def firmware_git_identity(
         ).strip()
         if not FULL_GIT_SHA.fullmatch(git_sha):
             return "unidentified"
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "-v", "-z"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        )
+        for entry in tracked.split(b"\0"):
+            if not entry:
+                continue
+            marker = chr(entry[0])
+            # `git status` deliberately trusts both of these index hints, so
+            # either can hide working-tree bytes from the dirty-tree gate.
+            if marker == "S" or marker.islower():
+                return f"dirty-{git_sha}"
         dirty = subprocess.check_output(
             [
                 "git",

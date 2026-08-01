@@ -61,8 +61,12 @@ pioarduino platform and executable-package archive digests, keeps pioarduino's
 recursive custom-core build on the generated local config, isolates and attests
 PlatformIO-installed package/tool/nested-runtime and ESP-IDF component state,
 and gives PlatformIO only the image set attested by the preceding build. The
-host Python interpreter and top-level `pio` launcher remain part of the trusted
-host boundary. Command success is not a flash
+host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
+online Python dependency resolver (including its registries, external `uv`,
+private `penv`, and ESP-IDF venv before their resulting trees are attested)
+remain part of the trusted host boundary. The resulting installed trees are
+included in the later core attestation, but this is not a pre-execution Python
+dependency lock. Command success is not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
 If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then retry. For the
