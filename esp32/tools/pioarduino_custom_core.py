@@ -31,6 +31,9 @@ VERIFIED_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
                     + " ".join(['"%s"' % pio_cmd])
                 ),'''
 
+UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
+CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=2.0.0",'
+
 
 UPSTREAM_PM_LITERAL_MAPPING = (
     "*libesp_pm.a:pm_impl.*(.literal.esp_pm_get_configuration"
@@ -104,6 +107,22 @@ def correct_nested_pio_command(source: str) -> str:
         UPSTREAM_NESTED_PIO_BLOCK,
         VERIFIED_NESTED_PIO_BLOCK,
         "nested PlatformIO command",
+    )
+
+
+def correct_penv_setup_text(source: str) -> str:
+    """Keep pioarduino's resolver compatible with pinned esptool 5.x.
+
+    The pinned platform requests urllib3<2, while its pinned esptool package
+    requires urllib3>=2. Without one compatible rule, consecutive PlatformIO
+    passes alternately replace the executed dependency and invalidate the core
+    attestation.
+    """
+    return _replace_exactly_once(
+        source,
+        UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+        CORRECTED_PENV_URLLIB3_REQUIREMENT,
+        "Python resolver urllib3 requirement",
     )
 
 

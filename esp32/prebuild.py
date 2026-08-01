@@ -18,7 +18,11 @@ if str(TOOLS_DIR) not in sys.path:
 
 from firmware_build_identity import firmware_git_identity
 from generated_sdkconfig import recognized_generated_sdkconfigs
-from pioarduino_custom_core import correct_nested_pio_command, correct_sections_text
+from pioarduino_custom_core import (
+    correct_nested_pio_command,
+    correct_penv_setup_text,
+    correct_sections_text,
+)
 
 
 def ensure_custom_core_generated_source_alias():
@@ -124,39 +128,51 @@ def ensure_verified_nested_build_config():
         )
 
     platform_dir = Path(env.PioPlatform().get_dir())
-    nested_builder = platform_dir / "builder/frameworks/espidf.py"
-    if nested_builder.is_symlink() or not nested_builder.is_file():
-        raise RuntimeError(
-            f"pioarduino nested-build script is unsafe: {nested_builder}"
-        )
-    source = nested_builder.read_text(encoding="utf-8")
-    try:
-        corrected = correct_nested_pio_command(source)
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
-    if corrected == source:
-        return
+    patches = (
+        (
+            platform_dir / "builder/frameworks/espidf.py",
+            correct_nested_pio_command,
+            "nested-build",
+        ),
+        (
+            platform_dir / "builder/penv_setup.py",
+            correct_penv_setup_text,
+            "Python resolver",
+        ),
+    )
+    for installed_path, transform, label in patches:
+        if installed_path.is_symlink() or not installed_path.is_file():
+            raise RuntimeError(
+                f"pioarduino {label} script is unsafe: {installed_path}"
+            )
+        source = installed_path.read_text(encoding="utf-8")
+        try:
+            corrected = transform(source)
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if corrected == source:
+            continue
 
-    temporary_name = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=nested_builder.parent,
-            prefix=f".{nested_builder.name}.",
-            delete=False,
-        ) as stream:
-            temporary_name = stream.name
-            stream.write(corrected)
-        Path(temporary_name).chmod(nested_builder.stat().st_mode & 0o777)
-        os.replace(temporary_name, nested_builder)
         temporary_name = None
-    finally:
-        if temporary_name is not None:
-            try:
-                Path(temporary_name).unlink()
-            except OSError:
-                pass
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=installed_path.parent,
+                prefix=f".{installed_path.name}.",
+                delete=False,
+            ) as stream:
+                temporary_name = stream.name
+                stream.write(corrected)
+            Path(temporary_name).chmod(installed_path.stat().st_mode & 0o777)
+            os.replace(temporary_name, installed_path)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                try:
+                    Path(temporary_name).unlink()
+                except OSError:
+                    pass
 
 
 ensure_verified_nested_build_config()
