@@ -117,7 +117,7 @@ void assertClippingAndInverseBounds() {
 }
 
 void assertRotationAndBlockBudget() {
-  for (const auto dimensions : {
+  for (const auto &dimensions : {
            std::pair<uint16_t, uint16_t>{466, 366},
            std::pair<uint16_t, uint16_t>{466, 466},
            std::pair<uint16_t, uint16_t>{410, 430},
