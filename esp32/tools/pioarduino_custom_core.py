@@ -1,6 +1,40 @@
 """Pure helpers for pioarduino custom-core build workarounds."""
 
 
+UPSTREAM_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
+        env.Execute(
+            env.VerboseAction(
+                (
+                    '"%s" run -e ' % pio_exe_path
+                    + " ".join(['"%s"' % pio_cmd])
+                ),'''
+VERIFIED_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
+        scons_marker = (
+            Path(env.subst("$PROJECT_CORE_DIR"))
+            / "packages"
+            / "tool-scons"
+            / ".piopm"
+        )
+        if scons_marker.is_symlink() or not scons_marker.is_file():
+            raise RuntimeError("verified SCons package marker is missing or unsafe")
+        scons_marker.write_text(
+            os.environ["OPEN_BIKE_PINNED_SCONS_PIOPM"],
+            encoding="utf-8",
+        )
+        env.Execute(
+            env.VerboseAction(
+                (
+                    '"%s" run --project-conf "%s" -e ' % (
+                        pio_exe_path,
+                        os.environ["OPEN_BIKE_VERIFIED_PROJECT_CONFIG"],
+                    )
+                    + " ".join(['"%s"' % pio_cmd])
+                ),'''
+
+UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
+CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
+
+
 UPSTREAM_PM_LITERAL_MAPPING = (
     "*libesp_pm.a:pm_impl.*(.literal.esp_pm_get_configuration"
 )
@@ -59,11 +93,39 @@ CORRECTED_FREERTOS_TICKLESS_TEXT_MAPPING = (
 
 
 def _replace_exactly_once(source: str, stale: str, corrected: str, label: str) -> str:
-    if source.count(corrected) == 1:
+    stale_count = source.count(stale)
+    corrected_count = source.count(corrected)
+    if corrected_count == 1 and stale_count == 0:
         return source
-    if source.count(corrected) != 0 or source.count(stale) != 1:
-        raise ValueError(f"pioarduino {label} linker mapping has an unexpected format")
+    if corrected_count != 0 or stale_count != 1:
+        raise ValueError(f"pioarduino {label} has an unexpected format")
     return source.replace(stale, corrected, 1)
+
+
+def correct_nested_pio_command(source: str) -> str:
+    """Force pioarduino's recursive build through the verified project config."""
+    return _replace_exactly_once(
+        source,
+        UPSTREAM_NESTED_PIO_BLOCK,
+        VERIFIED_NESTED_PIO_BLOCK,
+        "nested PlatformIO command",
+    )
+
+
+def correct_penv_setup_text(source: str) -> str:
+    """Keep pioarduino's root HTTP dependency stable across nested passes.
+
+    The pinned platform requests urllib3<2, while a later ``--upgrade`` pass
+    resolves the root requests 2.x stack back to urllib3 2.x. Using requests'
+    supported range lets both passes accept the same installed dependency
+    instead of alternately replacing it and invalidating the core attestation.
+    """
+    return _replace_exactly_once(
+        source,
+        UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+        CORRECTED_PENV_URLLIB3_REQUIREMENT,
+        "Python resolver urllib3 requirement",
+    )
 
 
 def correct_sections_text(sections_text: str) -> str:

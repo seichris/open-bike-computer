@@ -476,10 +476,11 @@ Wire.begin(I2C_SDA, I2C_SCL, 100000);
 
 ```bash
 # Build for Waveshare AMOLED
-pio run -e WAVESHARE_AMOLED_175
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175
 
-# Upload
-pio run -e WAVESHARE_AMOLED_175 -t upload
+# Build and upload while preserving the exact firmware Git identity
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
+  --upload-port /dev/cu.usbmodemXXXX
 
 # Monitor
 pio device monitor -b 115200

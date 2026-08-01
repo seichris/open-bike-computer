@@ -33,7 +33,7 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
       - name: Build firmware
-        run: python tools/build_firmware.py "${{ matrix.target }}"
+        run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.target }}"
 
   ios:
     name: iOS
@@ -102,6 +102,7 @@ jobs:
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_build_identity \
+            tools.tests.test_generated_sdkconfig \
             tools.tests.test_capture_boot
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \

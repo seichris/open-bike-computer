@@ -17,6 +17,36 @@ _POST_READY_BOOT_RECORD_MARKERS = (
     "BOOT_PMIC",
     "BOOT_SAFE_MODE",
 )
+_SUPPORTED_BOOT_SCHEMA = "1"
+
+_EMPTY_RETAINED_HISTORY = {
+    "schema": "1",
+    "history": "empty_or_invalid",
+    "valid": "0",
+    "sameFirmware": "0",
+    "sequence": "0",
+    "fingerprint": "00000000",
+    "ready": "0",
+    "safeMode": "0",
+    "diagnosticHold": "0",
+    "reset": "unknown",
+    "resetCode": "0",
+    "active": "none",
+    "completed": "none",
+    "failureCount": "0",
+    "failureStage": "none",
+    "failureAfter": "none",
+    "failureReset": "unknown",
+    "failureResetCode": "0",
+}
+
+_COLD_START_RESET_CODES = {
+    "power_on": "1",
+    # On the ESP32-S3 USB-only path, a physical reconnect can be classified by
+    # the ROM as USB reset even when the operator removed every power source.
+    # The retained record is supporting evidence, not independent proof.
+    "usb": "11",
+}
 
 
 def _fields(line: str, marker: str) -> dict[str, str] | None:
@@ -46,6 +76,7 @@ class BootSummary:
     failure: dict[str, str]
     pmic: dict[str, str]
     ready: bool
+    stage_schema_mismatches: int
     sequence_mismatches: int
     boot_discontinuities: int
     blocked_writes: int
@@ -63,6 +94,7 @@ def summarize(capture: str) -> BootSummary:
     meta = _latest(latest_boot, "BOOT_META")
     expected_sequence = meta.get("sequence")
     ready = False
+    stage_schema_mismatches = 0
     sequence_mismatches = 0
     boot_discontinuities = 0
     saw_ready = False
@@ -80,6 +112,12 @@ def summarize(capture: str) -> BootSummary:
                 # while USB serial re-enumerated.
                 boot_discontinuities += 1
                 ready = False
+            continue
+        if stage.get("schema") != _SUPPORTED_BOOT_SCHEMA:
+            stage_schema_mismatches += 1
+            if not expected_sequence or stage.get("sequence") != expected_sequence:
+                sequence_mismatches += 1
+            ready = False
             continue
         if not expected_sequence or stage.get("sequence") != expected_sequence:
             sequence_mismatches += 1
@@ -102,6 +140,7 @@ def summarize(capture: str) -> BootSummary:
         failure=_latest(latest_boot, "BOOT_FAILURE"),
         pmic=_latest(latest_boot, "BOOT_PMIC"),
         ready=ready,
+        stage_schema_mismatches=stage_schema_mismatches,
         sequence_mismatches=sequence_mismatches,
         boot_discontinuities=boot_discontinuities,
         blocked_writes=sum(
@@ -115,10 +154,38 @@ def summarize(capture: str) -> BootSummary:
     )
 
 
-def format_summary(summary: BootSummary) -> str:
+def cold_start_evidence(summary: BootSummary) -> str | None:
+    """Return supporting cold-start evidence from the device boot records.
+
+    Empty RTC history is ambiguous by itself: a warm USB reset after a schema
+    change or checksum failure emits the same record. Callers that use this as
+    a physical power-removal gate must also obtain explicit operator
+    confirmation that USB and battery power were removed.
+    """
+    reset = summary.meta.get("reset")
+    expected_reset_code = _COLD_START_RESET_CODES.get(reset or "")
+    if (
+        summary.meta.get("schema") != "1"
+        or summary.meta.get("sequence") != "1"
+        or expected_reset_code is None
+        or summary.meta.get("resetCode") != expected_reset_code
+    ):
+        return None
+    if any(
+        summary.previous.get(field) != expected
+        for field, expected in _EMPTY_RETAINED_HISTORY.items()
+    ):
+        return None
+    return f"{reset}_empty_history"
+
+
+def format_summary(
+    summary: BootSummary, *, confirmed_all_power_removed: bool = False
+) -> str:
     def value(fields: dict[str, str], key: str) -> str:
         return fields.get(key, "missing")
 
+    cold_start = cold_start_evidence(summary)
     return (
         "BOOT_CAPTURE_SUMMARY schema=1 "
         f"target={value(summary.meta, 'target')} "
@@ -126,6 +193,12 @@ def format_summary(summary: BootSummary) -> str:
         f"git={value(summary.meta, 'git')} "
         f"sequence={value(summary.meta, 'sequence')} "
         f"reset={value(summary.meta, 'reset')} "
+        f"coldStartCandidate={1 if cold_start else 0} "
+        f"coldStartEvidence={cold_start or 'missing'} "
+        "operatorPowerRemovalConfirmed="
+        f"{1 if confirmed_all_power_removed else 0} "
+        "coldStartValidated="
+        f"{1 if cold_start and confirmed_all_power_removed else 0} "
         f"previousFingerprint={value(summary.previous, 'fingerprint')} "
         f"previousActive={value(summary.previous, 'active')} "
         f"previousFailures={value(summary.previous, 'failureCount')} "
@@ -143,6 +216,7 @@ def format_summary(summary: BootSummary) -> str:
         f"battery={value(summary.pmic, 'battery')} "
         f"ldo={value(summary.pmic, 'ldo')} "
         f"ready={1 if summary.ready else 0} "
+        f"stageSchemaMismatches={summary.stage_schema_mismatches} "
         f"sequenceMismatches={summary.sequence_mismatches} "
         f"bootDiscontinuities={summary.boot_discontinuities} "
         f"blockedWrites={summary.blocked_writes} "
@@ -157,11 +231,39 @@ def validation_errors(
     expected_profile: str | None = None,
     expected_git: str | None = None,
     expected_reset: str | None = None,
+    require_cold_start: bool = False,
+    confirmed_all_power_removed: bool = False,
     require_ready: bool = False,
     require_pmic_read_only: bool = False,
     require_pmic_display_enable_only: bool = False,
 ) -> list[str]:
     errors: list[str] = []
+    gated_validation = any(
+        value is not None
+        for value in (
+            expected_target,
+            expected_profile,
+            expected_git,
+            expected_reset,
+        )
+    ) or any(
+        (
+            require_cold_start,
+            require_ready,
+            require_pmic_read_only,
+            require_pmic_display_enable_only,
+        )
+    )
+    if gated_validation and summary.meta.get("schema") != _SUPPORTED_BOOT_SCHEMA:
+        errors.append(
+            "BOOT_META schema 1 required for gated validation "
+            f"(got {summary.meta.get('schema', 'missing')})"
+        )
+    if summary.stage_schema_mismatches:
+        errors.append(
+            "unsupported BOOT_STAGE schema observed: "
+            f"{summary.stage_schema_mismatches} marker(s)"
+        )
     if summary.sequence_mismatches:
         errors.append(
             "boot sequence mismatch observed: "
@@ -190,9 +292,28 @@ def validation_errors(
         errors.append(
             f"reset expected {expected_reset}, got {summary.meta.get('reset', 'missing')}"
         )
+    if require_cold_start and cold_start_evidence(summary) is None:
+        errors.append(
+            "cold start required; got "
+            f"reset={summary.meta.get('reset', 'missing')} "
+            f"resetCode={summary.meta.get('resetCode', 'missing')} "
+            f"sequence={summary.meta.get('sequence', 'missing')} "
+            f"history={summary.previous.get('history', 'missing')} "
+            f"previousValid={summary.previous.get('valid', 'missing')}"
+        )
+    if require_cold_start and not confirmed_all_power_removed:
+        errors.append(
+            "cold start requires explicit operator confirmation that USB and "
+            "battery power were removed"
+        )
     if require_ready and not summary.ready:
         errors.append("ready marker missing")
     if require_pmic_read_only:
+        if summary.pmic.get("schema") != _SUPPORTED_BOOT_SCHEMA:
+            errors.append(
+                "BOOT_PMIC schema 1 required for read-only validation "
+                f"(got {summary.pmic.get('schema', 'missing')})"
+            )
         if summary.pmic.get("mode") != "read-only":
             errors.append(
                 "PMIC read-only marker missing "
@@ -207,7 +328,17 @@ def validation_errors(
                 errors.append(
                     f"{label} required (got {summary.pmic.get(field, 'missing')})"
                 )
+        if summary.pmic.get("railState") != "current-preserved":
+            errors.append(
+                "PMIC current-preserved rail state required "
+                f"(got {summary.pmic.get('railState', 'missing')})"
+            )
     if require_pmic_display_enable_only:
+        if summary.pmic.get("schema") != _SUPPORTED_BOOT_SCHEMA:
+            errors.append(
+                "BOOT_PMIC schema 1 required for display-enable validation "
+                f"(got {summary.pmic.get('schema', 'missing')})"
+            )
         if summary.pmic.get("mode") != "display-enable-only":
             errors.append(
                 "PMIC display-enable-only marker missing "
@@ -290,6 +421,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-profile")
     parser.add_argument("--expected-git")
     parser.add_argument("--expected-reset")
+    parser.add_argument(
+        "--require-cold-start",
+        action="store_true",
+        help=(
+            "require sequence 1 plus empty retained history; accepts the "
+            "ESP32-S3 USB-only reset classification"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-all-power-removed",
+        action="store_true",
+        help=(
+            "confirm that USB and battery power were physically removed before "
+            "reconnect; required with --require-cold-start because empty RTC "
+            "history alone is ambiguous"
+        ),
+    )
     parser.add_argument("--require-ready", action="store_true")
     pmic_gate = parser.add_mutually_exclusive_group()
     pmic_gate.add_argument("--require-pmic-read-only", action="store_true")
@@ -297,6 +445,17 @@ def main(argv: list[str] | None = None) -> int:
         "--require-pmic-display-enable-only", action="store_true"
     )
     args = parser.parse_args(argv)
+
+    if args.require_cold_start and args.reset:
+        parser.error("--reset cannot be combined with --require-cold-start")
+    if args.require_cold_start and not args.confirm_all_power_removed:
+        parser.error(
+            "--require-cold-start also requires --confirm-all-power-removed"
+        )
+    if args.confirm_all_power_removed and not args.require_cold_start:
+        parser.error(
+            "--confirm-all-power-removed requires --require-cold-start"
+        )
 
     try:
         import serial
@@ -341,13 +500,21 @@ def main(argv: list[str] | None = None) -> int:
             device.close()
 
     summary = summarize("".join(chunks))
-    print("\n" + format_summary(summary))
+    print(
+        "\n"
+        + format_summary(
+            summary,
+            confirmed_all_power_removed=args.confirm_all_power_removed,
+        )
+    )
     errors = validation_errors(
         summary,
         expected_target=args.expected_target,
         expected_profile=args.expected_profile,
         expected_git=args.expected_git,
         expected_reset=args.expected_reset,
+        require_cold_start=args.require_cold_start,
+        confirmed_all_power_removed=args.confirm_all_power_removed,
         require_ready=args.require_ready,
         require_pmic_read_only=args.require_pmic_read_only,
         require_pmic_display_enable_only=args.require_pmic_display_enable_only,

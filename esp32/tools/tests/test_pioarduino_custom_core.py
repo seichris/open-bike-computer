@@ -7,6 +7,7 @@ from pioarduino_custom_core import (
     CORRECTED_FREERTOS_TICKLESS_TEXT_MAPPING,
     CORRECTED_PM_LITERAL_MAPPING,
     CORRECTED_PM_TEXT_MAPPING,
+    CORRECTED_PENV_URLLIB3_REQUIREMENT,
     PHASE_7A_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_TEXT_MAPPING,
@@ -14,6 +15,11 @@ from pioarduino_custom_core import (
     STALE_FREERTOS_TICKLESS_TEXT_MAPPING,
     STALE_PM_TEXT_MAPPING,
     UPSTREAM_PM_LITERAL_MAPPING,
+    UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+    UPSTREAM_NESTED_PIO_BLOCK,
+    VERIFIED_NESTED_PIO_BLOCK,
+    correct_nested_pio_command,
+    correct_penv_setup_text,
     correct_sections_text,
 )
 
@@ -98,6 +104,58 @@ class CorrectSectionsTextTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "FreeRTOS tickless text"):
             correct_sections_text(source)
+
+
+class CorrectNestedPioCommandTests(unittest.TestCase):
+    def test_routes_recursive_build_through_verified_config(self):
+        corrected = correct_nested_pio_command(
+            f"before\n{UPSTREAM_NESTED_PIO_BLOCK}\nafter"
+        )
+
+        self.assertIn(VERIFIED_NESTED_PIO_BLOCK, corrected)
+        self.assertNotIn(UPSTREAM_NESTED_PIO_BLOCK, corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{VERIFIED_NESTED_PIO_BLOCK}\nafter"
+
+        self.assertEqual(correct_nested_pio_command(source), source)
+
+    def test_rejects_unknown_or_ambiguous_nested_commands(self):
+        with self.assertRaisesRegex(ValueError, "nested PlatformIO command"):
+            correct_nested_pio_command("no recursive command")
+        with self.assertRaisesRegex(ValueError, "nested PlatformIO command"):
+            correct_nested_pio_command(
+                f"{UPSTREAM_NESTED_PIO_BLOCK}\n{UPSTREAM_NESTED_PIO_BLOCK}"
+            )
+
+
+class CorrectPenvSetupTextTests(unittest.TestCase):
+    def test_aligns_urllib3_with_pinned_esptool(self):
+        corrected = correct_penv_setup_text(
+            f"before\n{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\nafter"
+        )
+
+        self.assertIn(CORRECTED_PENV_URLLIB3_REQUIREMENT, corrected)
+        self.assertNotIn(UPSTREAM_PENV_URLLIB3_REQUIREMENT, corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}\nafter"
+
+        self.assertEqual(correct_penv_setup_text(source), source)
+
+    def test_rejects_unknown_or_ambiguous_requirements(self):
+        with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
+            correct_penv_setup_text("no urllib3 requirement")
+        with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
+            correct_penv_setup_text(
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}"
+            )
+        with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
+            correct_penv_setup_text(
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
+                f"{CORRECTED_PENV_URLLIB3_REQUIREMENT}"
+            )
 
 
 if __name__ == "__main__":

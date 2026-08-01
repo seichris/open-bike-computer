@@ -52,11 +52,25 @@ Upload ESP32 firmware:
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_175 -t upload
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
+  --upload-port /dev/cu.usbmodemXXXX
 ```
 
+Use this helper rather than a raw Waveshare `pio run`. It verifies the tracked
+pioarduino platform and executable-package archive digests, keeps pioarduino's
+recursive custom-core build on the generated local config, isolates and attests
+PlatformIO-installed package/tool/nested-runtime and ESP-IDF component state,
+and gives PlatformIO only the image set attested by the preceding build. The
+host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
+online Python dependency resolver (including its registries, external `uv`,
+private `penv`, and ESP-IDF venv before their resulting trees are attested)
+remain part of the trusted host boundary. The resulting installed trees are
+included in the later core attestation, but this is not a pre-execution Python
+dependency lock. Command success is not a flash
+readback; confirm the embedded Git/profile with the later boot capture.
+
 If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then retry. For the
-2.06 board, use `-e WAVESHARE_AMOLED_206`.
+2.06 board, use the `WAVESHARE_AMOLED_206` environment.
 
 View ESP32 serial logs:
 

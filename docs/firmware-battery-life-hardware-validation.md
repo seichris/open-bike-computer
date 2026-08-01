@@ -306,12 +306,16 @@ parameters are resampled every five seconds because iOS may negotiate values
 different from the firmware request.
 
 An explicitly opt-in build enables the Phase 8 radio matrix without changing
-ordinary firmware:
+ordinary firmware. Add each flag combination to a dedicated, clearly named
+PlatformIO environment in a measurement branch and commit it before building.
+Ambient `PLATFORMIO_BUILD_FLAGS` are intentionally rejected because they would
+let a physically tested image advertise a clean Git/profile identity that does
+not describe its effective inputs. Then build the tracked environment through
+the deterministic helper:
 
 ```sh
 cd esp32
-PLATFORMIO_BUILD_FLAGS="-DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=9" \
-  pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
+python3 tools/build_firmware.py TRACKED_BLE_POWER_METRICS_ENVIRONMENT
 ```
 
 Repeat with `BLE_TX_POWER_DBM=3` and `0`. The experimental policy uses
@@ -321,11 +325,11 @@ latency during navigation and 60-100 ms with latency four while connected-idle.
 These are requests only; the recorded effective values are authoritative.
 
 For the SD matrix, keep the card image and scenario fixed and repeat both
-targets at 4, 8, 12, and 16 MHz:
+targets at 4, 8, 12, and 16 MHz. Put each frequency and the timing-log flag in
+a named, tracked environment before running the helper:
 
 ```sh
-PLATFORMIO_BUILD_FLAGS="-DWAVESHARE_SD_SPI_FREQ_HZ=8000000 -DWAVESHARE_MAPIO_TIMING_LOG=1" \
-  pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
+python3 tools/build_firmware.py TRACKED_SD_POWER_METRICS_ENVIRONMENT
 ```
 
 The checked-in schematics close the PMU-interrupt routing question for current
@@ -393,8 +397,8 @@ version 2.
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_175_POWER_METRICS
-pio run -e WAVESHARE_AMOLED_206_POWER_METRICS
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175_POWER_METRICS
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206_POWER_METRICS
 ```
 
 Metrics builds reserve a larger USB CDC transmit queue so each `PWRMET` record

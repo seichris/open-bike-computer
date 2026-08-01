@@ -34,6 +34,59 @@ class FirmwareBuildIdentityTests(unittest.TestCase):
             source.write_text("dirty\n", encoding="utf-8")
             self.assertEqual(firmware_git_identity(root), f"dirty-{full_sha}")
 
+    def test_allows_only_explicit_generated_untracked_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "user.email", "test@example.invalid")
+            self.git(root, "config", "user.name", "Test")
+            source = root / "firmware.cpp"
+            source.write_text("clean\n", encoding="utf-8")
+            self.git(root, "add", "firmware.cpp")
+            self.git(root, "commit", "-qm", "candidate")
+            full_sha = self.git(root, "rev-parse", "HEAD")
+
+            generated = root / "sdkconfig.TEST"
+            generated.write_text("generated\n", encoding="utf-8")
+            self.assertEqual(firmware_git_identity(root), f"dirty-{full_sha}")
+            self.assertEqual(
+                firmware_git_identity(
+                    root,
+                    allowed_untracked_paths=(generated,),
+                ),
+                full_sha,
+            )
+
+            (root / "manual.txt").write_text("dirty\n", encoding="utf-8")
+            self.assertEqual(
+                firmware_git_identity(
+                    root,
+                    allowed_untracked_paths=(generated,),
+                ),
+                f"dirty-{full_sha}",
+            )
+
+    def test_index_flags_cannot_hide_modified_tracked_sources(self):
+        for index_flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(index_flag=index_flag):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.git(root, "init", "-q")
+                    self.git(root, "config", "user.email", "test@example.invalid")
+                    self.git(root, "config", "user.name", "Test")
+                    source = root / "firmware.cpp"
+                    source.write_text("clean\n", encoding="utf-8")
+                    self.git(root, "add", "firmware.cpp")
+                    self.git(root, "commit", "-qm", "candidate")
+                    full_sha = self.git(root, "rev-parse", "HEAD")
+
+                    self.git(root, "update-index", index_flag, "firmware.cpp")
+                    source.write_text("hidden modification\n", encoding="utf-8")
+                    self.assertEqual(
+                        firmware_git_identity(root),
+                        f"dirty-{full_sha}",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
