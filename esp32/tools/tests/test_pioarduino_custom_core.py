@@ -151,6 +151,11 @@ class CorrectPenvSetupTextTests(unittest.TestCase):
                 f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
                 f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}"
             )
+        with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
+            correct_penv_setup_text(
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
+                f"{CORRECTED_PENV_URLLIB3_REQUIREMENT}"
+            )
 
 
 if __name__ == "__main__":

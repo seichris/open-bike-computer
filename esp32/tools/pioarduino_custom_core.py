@@ -32,7 +32,7 @@ VERIFIED_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
                 ),'''
 
 UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
-CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=2.0.0",'
+CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
 
 
 UPSTREAM_PM_LITERAL_MAPPING = (
@@ -93,10 +93,12 @@ CORRECTED_FREERTOS_TICKLESS_TEXT_MAPPING = (
 
 
 def _replace_exactly_once(source: str, stale: str, corrected: str, label: str) -> str:
-    if source.count(corrected) == 1:
+    stale_count = source.count(stale)
+    corrected_count = source.count(corrected)
+    if corrected_count == 1 and stale_count == 0:
         return source
-    if source.count(corrected) != 0 or source.count(stale) != 1:
-        raise ValueError(f"pioarduino {label} linker mapping has an unexpected format")
+    if corrected_count != 0 or stale_count != 1:
+        raise ValueError(f"pioarduino {label} has an unexpected format")
     return source.replace(stale, corrected, 1)
 
 
@@ -111,12 +113,12 @@ def correct_nested_pio_command(source: str) -> str:
 
 
 def correct_penv_setup_text(source: str) -> str:
-    """Keep pioarduino's resolver compatible with pinned esptool 5.x.
+    """Keep pioarduino's root HTTP dependency stable across nested passes.
 
-    The pinned platform requests urllib3<2, while its pinned esptool package
-    requires urllib3>=2. Without one compatible rule, consecutive PlatformIO
-    passes alternately replace the executed dependency and invalidate the core
-    attestation.
+    The pinned platform requests urllib3<2, while a later ``--upgrade`` pass
+    resolves the root requests 2.x stack back to urllib3 2.x. Using requests'
+    supported range lets both passes accept the same installed dependency
+    instead of alternately replacing it and invalidating the core attestation.
     """
     return _replace_exactly_once(
         source,
