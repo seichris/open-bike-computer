@@ -1,5 +1,6 @@
 #pragma once
 
+#include "speaker_playback_policy.hpp"
 #include "sound_protocol.hpp"
 
 #include <Arduino.h>
@@ -11,6 +12,9 @@ bool isAvailable();
 bool isPlaying();
 bool requestPlay(Sound sound,
                  uint8_t volumePercent = DEFAULT_VOLUME_PERCENT);
+bool requestPlayTracked(Sound sound, uint8_t volumePercent,
+                        uint32_t &requestId);
+PlaybackCompletion latestPlaybackCompletion();
 bool isSupported(Sound sound);
 bool isPowerButtonHonkAvailable();
 bool getPowerButtonHonkConfig(PowerButtonHonkConfig &config);

@@ -292,10 +292,11 @@ automatic light sleep can be considered for production enablement.
 ## BLE, PMU, and SD characterization harness
 
 Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
-default advertising and connection policy, the SD bus remains at 4 MHz, PMU
-rails retain their known-good masks, and the AXP2101 button status remains on
-the 250 ms housekeeping deadline. No lower-power radio, rail, or SD setting is
-selected without physical evidence.
+default advertising and connection policy, the SD bus remains at 4 MHz,
+runtime power paths do not switch PMU outputs, and the AXP2101 button status
+remains on the 250 ms housekeeping deadline. No lower-power radio, rail, or SD
+setting is selected without physical evidence. The 2.06-inch boot-only
+display-enable compatibility operation is not a power-saving setting.
 
 Power-metrics and diagnostic builds now record the connected interval in
 1.25 ms units, slave latency, supervision timeout in 10 ms units, sample count,
@@ -334,10 +335,12 @@ populated receiver or ESP32 connection. Neither board exposes a direct usable
 PMU IRQ GPIO, so replacing deadline-based polling would add I2C work rather
 than create an interrupt-driven path.
 
-Audio-rail toggling and all PMU rail changes remain prohibited until the
-1.75-inch schematic mapping is verified against physical codec, display,
-touch, RTC, battery, SD, reboot, and wake tests. The 2.06 safe path continues
-to preserve PMU state.
+On 1.75-inch hardware, audio-rail toggling and every PMU output-rail change
+remain prohibited until the schematic mapping is verified against physical
+codec, display, touch, RTC, battery, SD, reboot, and wake tests. The 2.06-inch
+runtime and sleep paths likewise do not switch PMU outputs; its sole exception
+is the one-way boot compatibility operation that may set register `0x90` bit
+`0x80` while preserving all other bits.
 
 This document is the source of truth for physical power measurements made
 during the battery-life program. A firmware build, simulator result, PMU battery

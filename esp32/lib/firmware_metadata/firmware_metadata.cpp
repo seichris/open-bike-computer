@@ -12,6 +12,10 @@
 #define FLAVOR "unknown"
 #endif
 
+#ifndef BUILD_PROFILE
+#define BUILD_PROFILE "unknown"
+#endif
+
 #ifndef GIT_SHA
 #define GIT_SHA "unknown"
 #endif
@@ -44,6 +48,8 @@ static std::string jsonEscape(const std::string &value) {
 } // namespace
 
 const char *target() { return FLAVOR; }
+
+const char *buildProfile() { return BUILD_PROFILE; }
 
 const char *version() { return VERSION; }
 

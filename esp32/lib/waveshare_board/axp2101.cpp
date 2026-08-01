@@ -8,6 +8,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "i2c_bus.hpp"
+#include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
 
 namespace waveshare_board::axp2101 {
@@ -26,8 +27,7 @@ constexpr uint8_t AXP2101_BATTERY_CURRENT_DIRECTION_MASK = 0x03;
 constexpr uint8_t AXP2101_SYSTEM_ON_MASK = 0x10;
 constexpr uint8_t AXP2101_VINDPM_ACTIVE_MASK = 0x08;
 constexpr uint8_t AXP2101_CHARGING_STATUS_MASK = 0x07;
-constexpr uint8_t AXP2101_INTERRUPT_ENABLE_1_REG = 0x41;
-constexpr uint8_t AXP2101_INTERRUPT_STATUS_1_REG = 0x49;
+constexpr uint8_t AXP2101_LDO_ENABLE_REG = 0x90;
 constexpr uint8_t AXP2101_POWER_BUTTON_SHORT_PRESS_MASK = 0x08;
 constexpr uint8_t AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK = 0x02;
 constexpr uint8_t AXP2101_POWER_BUTTON_POSITIVE_EDGE_MASK = 0x01;
@@ -36,44 +36,14 @@ constexpr uint8_t AXP2101_POWER_BUTTON_EVENT_MASK =
     AXP2101_POWER_BUTTON_NEGATIVE_EDGE_MASK |
     AXP2101_POWER_BUTTON_POSITIVE_EDGE_MASK;
 
-constexpr uint8_t peripheralRailRegs[] = {
-    AXP2101_ALDO1_VOLTAGE_REG, AXP2101_ALDO2_VOLTAGE_REG,
-    AXP2101_ALDO3_VOLTAGE_REG, AXP2101_ALDO4_VOLTAGE_REG,
-    AXP2101_BLDO1_VOLTAGE_REG, AXP2101_BLDO2_VOLTAGE_REG};
-
-bool writeRegisterChecked(const char *label, uint8_t reg, uint8_t value,
-                          uint8_t readbackMask = 0xFF) {
-  uint8_t readback = 0;
-  for (uint8_t attempt = 0; attempt < 2; attempt++) {
-    if (!writeRegister(reg, value)) {
-      Serial.printf("AXP2101: %s write failed reg=0x%02X value=0x%02X\n",
-                    label, reg, value);
-      return false;
-    }
-
-    delay(5);
-    if (!readRegister(reg, readback)) {
-      Serial.printf("AXP2101: %s readback failed reg=0x%02X expected=0x%02X\n",
-                    label, reg, value);
-      continue;
-    }
-
-    bool ok = (readback & readbackMask) == (value & readbackMask);
-    Serial.printf("AXP2101: %s reg=0x%02X value=0x%02X read=0x%02X mask=0x%02X %s\n",
-                  label, reg, value, readback, readbackMask,
-                  ok ? "ok" : "mismatch");
-    if (ok) {
-      return true;
-    }
+bool writeRegister(uint8_t reg, uint8_t value) {
+  if (!register_policy::isWriteAllowed(reg)) {
+    Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X value=0x%02X "
+                  "policy=interrupt-only\n",
+                  reg, value);
+    return false;
   }
-
-  return false;
-}
-
-uint8_t currentLdoEnableValue(uint8_t fallback) {
-  uint8_t value = fallback;
-  readRegister(AXP2101_LDO_ENABLE_REG, value);
-  return value;
+  return i2c::writeRegister8(AXP2101_ADDR, reg, value, "AXP2101");
 }
 
 } // namespace
@@ -87,10 +57,6 @@ bool isAvailable() { return pmuAvailable; }
 
 bool readRegister(uint8_t reg, uint8_t &value) {
   return i2c::readRegister8(AXP2101_ADDR, reg, value, "AXP2101");
-}
-
-bool writeRegister(uint8_t reg, uint8_t value) {
-  return i2c::writeRegister8(AXP2101_ADDR, reg, value, "AXP2101");
 }
 
 bool readPowerStatus(PowerStatus &status) {
@@ -147,7 +113,7 @@ bool setPowerButtonEventMonitoring(bool enabled) {
   }
 
   uint8_t interruptEnable = 0;
-  if (!readRegister(AXP2101_INTERRUPT_ENABLE_1_REG, interruptEnable)) {
+  if (!readRegister(register_policy::INTERRUPT_ENABLE_1, interruptEnable)) {
     return false;
   }
 
@@ -155,14 +121,14 @@ bool setPowerButtonEventMonitoring(bool enabled) {
       enabled ? interruptEnable | AXP2101_POWER_BUTTON_EVENT_MASK
               : interruptEnable & ~AXP2101_POWER_BUTTON_EVENT_MASK;
   if (updatedInterruptEnable != interruptEnable &&
-      !writeRegister(AXP2101_INTERRUPT_ENABLE_1_REG,
+      !writeRegister(register_policy::INTERRUPT_ENABLE_1,
                      updatedInterruptEnable)) {
     return false;
   }
 
   // AXP2101 interrupt status is write-one-to-clear. Remove any stale press so
   // enabling the feature cannot immediately trigger playback.
-  return writeRegister(AXP2101_INTERRUPT_STATUS_1_REG,
+  return writeRegister(register_policy::INTERRUPT_STATUS_1,
                        AXP2101_POWER_BUTTON_EVENT_MASK);
 }
 
@@ -173,7 +139,7 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
   }
 
   uint8_t interruptStatus = 0;
-  if (!readRegister(AXP2101_INTERRUPT_STATUS_1_REG, interruptStatus)) {
+  if (!readRegister(register_policy::INTERRUPT_STATUS_1, interruptStatus)) {
     return false;
   }
   const uint8_t pendingEvents =
@@ -181,7 +147,7 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
   if (pendingEvents == 0) {
     return true;
   }
-  if (!writeRegister(AXP2101_INTERRUPT_STATUS_1_REG, pendingEvents)) {
+  if (!writeRegister(register_policy::INTERRUPT_STATUS_1, pendingEvents)) {
     return false;
   }
 
@@ -194,70 +160,64 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
   return true;
 }
 
-bool setDisplayPower(bool enabled) {
-  uint8_t value = currentLdoEnableValue(AXP2101_KNOWN_GOOD_LDO_ENABLES);
-  Serial.printf("AXP2101: display power request enabled=%d currentLdo=0x%02X "
-                "mask=0x%02X\n",
-                enabled ? 1 : 0, value, AXP2101_DISPLAY_ENABLE_MASK);
-  if (enabled) {
-    value |= AXP2101_DISPLAY_ENABLE_MASK;
-  } else {
-    value &= ~AXP2101_DISPLAY_ENABLE_MASK;
-  }
-  return writeRegisterChecked(enabled ? "display on" : "display off",
-                              AXP2101_LDO_ENABLE_REG, value);
-}
-
-bool enableDisplayRails() { return setDisplayPower(true); }
-
-bool setPeripheralPower(bool enabled) {
-  uint8_t value = currentLdoEnableValue(
-      enabled ? AXP2101_KNOWN_GOOD_LDO_ENABLES
-              : AXP2101_MANAGED_LDO_ENABLE_MASK);
-  if (enabled) {
-    value |= AXP2101_MANAGED_LDO_ENABLE_MASK;
-  } else {
-    value &= ~AXP2101_MANAGED_LDO_ENABLE_MASK;
-  }
-  return writeRegisterChecked(enabled ? "peripheral on" : "peripheral off",
-                              AXP2101_LDO_ENABLE_REG, value);
-}
-
-bool enablePeripheralRails() {
-  bool voltageOk = true;
-  for (uint8_t reg : peripheralRailRegs) {
-    voltageOk = writeRegisterChecked("peripheral 3v3", reg,
-                                     AXP2101_LDO_VOLTAGE_3V3,
-                                     AXP2101_LDO_VOLTAGE_MASK) &&
-                voltageOk;
-  }
-
-  if (!voltageOk) {
-    Serial.println("AXP2101: peripheral voltage readback warning");
-  }
-
-  return writeRegisterChecked("peripheral on", AXP2101_LDO_ENABLE_REG,
-                              AXP2101_KNOWN_GOOD_LDO_ENABLES);
-}
-
-bool restoreDefaultRails() {
-  Serial.println("Enabling display power via AXP2101...");
+bool initializePowerState() {
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  Serial.println("Probing AXP2101 with 2.06 display-enable-only recovery...");
+#else
+  Serial.println("Probing AXP2101 without changing output rails...");
+#endif
   if (!begin()) {
-    Serial.println("AXP2101 not found - display may not work!");
+    Serial.println("AXP2101 not found");
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.println("BOOT_PMIC schema=1 mode=display-enable-only available=0 "
+                   "railState=unknown displayRecovery=0");
+#else
+    Serial.println("BOOT_PMIC schema=1 mode=read-only available=0 "
+                   "railState=unknown");
+#endif
     return false;
   }
 
-  Serial.println("AXP2101 found!");
-
-#ifdef WAVESHARE_AMOLED_206
-  // Waveshare's 2.06 Arduino display examples do not program AXP2101 rails
-  // before gfx->begin(). Preserve the PMU state during bring-up instead of
-  // reusing the 1.75 board's known-good LDO mask and voltage sequence.
   PowerStatus status;
-  if (readPowerStatus(status)) {
-    uint8_t ldoEnable = 0;
-    bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
-    Serial.printf("AXP2101: 2.06 safe mode preserving rails; status1=0x%02X "
+  uint8_t ldoEnable = 0;
+  bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
+  const bool statusReadOk = readPowerStatus(status);
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  i2c::Axp2101DisplayEnableResult displayEnable;
+  const bool displayRecoveryOk =
+      i2c::ensureAxp2101DisplayEnabled(displayEnable);
+  if (displayRecoveryOk) {
+    ldoEnable = displayEnable.after;
+    ldoReadOk = true;
+  }
+  Serial.printf("AXP2101: 2.06 display-enable-only recovery ok=%d changed=%d "
+                "before=0x%02X after=0x%02X\n",
+                displayRecoveryOk ? 1 : 0, displayEnable.changed ? 1 : 0,
+                displayEnable.before, displayEnable.after);
+#endif
+  if (statusReadOk) {
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
+                  "status1=0x%02X status2=0x%02X vbus=%s battery=%s "
+                  "currentDir=%u charge=%u ldo=0x%02X ldoRead=%d\n",
+                  status.status1, status.status2,
+                  status.vbusGood ? "good" : "not-good",
+                  status.batteryPresent ? "present" : "absent",
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+                  "railState=%s statusRead=1 status1=0x%02X status2=0x%02X "
+                  "vbus=%d battery=%d currentDirection=%u charging=%u "
+                  "ldoRead=%d ldo=0x%02X displayRecovery=%d "
+                  "displayChanged=%d\n",
+                  displayRecoveryOk ? "display-enabled" : "unknown",
+                  status.status1, status.status2, status.vbusGood ? 1 : 0,
+                  status.batteryPresent ? 1 : 0,
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoReadOk ? 1 : 0, ldoEnable, displayRecoveryOk ? 1 : 0,
+                  displayEnable.changed ? 1 : 0);
+#else
+    Serial.printf("AXP2101: preserving current PMIC rail state; status1=0x%02X "
                   "status2=0x%02X vbus=%s battery=%s currentDir=%u "
                   "charge=%u ldo=0x%02X ldoRead=%d\n",
                   status.status1, status.status2,
@@ -265,45 +225,42 @@ bool restoreDefaultRails() {
                   status.batteryPresent ? "present" : "absent",
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "railState=current-preserved "
+                  "statusRead=1 status1=0x%02X status2=0x%02X vbus=%d "
+                  "battery=%d currentDirection=%u charging=%u ldoRead=%d "
+                  "ldo=0x%02X\n",
+                  status.status1, status.status2, status.vbusGood ? 1 : 0,
+                  status.batteryPresent ? 1 : 0,
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoReadOk ? 1 : 0, ldoEnable);
+#endif
   } else {
-    Serial.println("AXP2101: 2.06 safe mode status read failed");
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
+                  "status read failed ldo=0x%02X ldoRead=%d\n",
+                  ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+                  "railState=%s statusRead=0 ldoRead=%d ldo=0x%02X "
+                  "displayRecovery=%d displayChanged=%d\n",
+                  displayRecoveryOk ? "display-enabled" : "unknown",
+                  ldoReadOk ? 1 : 0, ldoEnable,
+                  displayRecoveryOk ? 1 : 0,
+                  displayEnable.changed ? 1 : 0);
+#else
+    Serial.printf("AXP2101: preserving current PMIC rail state; status read failed "
+                  "ldo=0x%02X ldoRead=%d\n",
+                  ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "railState=current-preserved "
+                  "statusRead=0 ldoRead=%d ldo=0x%02X\n",
+                  ldoReadOk ? 1 : 0, ldoEnable);
+#endif
   }
-
-#ifdef WAVESHARE_206_FORCE_AXP_DISPLAY
-  Serial.println("AXP2101: 2.06 forcing display rail by explicit build flag");
-  return enableDisplayRails();
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  return displayRecoveryOk;
 #else
   return true;
-#endif
-#else
-  bool ok = writeRegisterChecked("ldo baseline reset", AXP2101_LDO_ENABLE_REG,
-                                 AXP2101_KNOWN_GOOD_LDO_RESET);
-  ok = writeRegisterChecked("ldo baseline on", AXP2101_LDO_ENABLE_REG,
-                            AXP2101_KNOWN_GOOD_LDO_ENABLES) &&
-       ok;
-
-  PowerStatus status;
-  if (readPowerStatus(status)) {
-    Serial.printf("AXP2101: status1=0x%02X status2=0x%02X vbus=%s battery=%s "
-                  "currentDir=%u charge=%u\n",
-                  status.status1, status.status2,
-                  status.vbusGood ? "good" : "not-good",
-                  status.batteryPresent ? "present" : "absent",
-                  status.batteryCurrentDirection, status.chargingStatus);
-  } else {
-    Serial.println("AXP2101: status read failed");
-  }
-
-  Serial.println("Configuring Peripheral Power...");
-  ok = enablePeripheralRails() && ok;
-
-  delay(500);
-  if (ok) {
-    Serial.println("AXP2101 display power enabled");
-  } else {
-    Serial.println("! AXP2101 rail setup completed with readback errors");
-  }
-  return ok;
 #endif
 }
 

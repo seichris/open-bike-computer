@@ -44,8 +44,8 @@ void recoverI2CBus() {
   log_i("I2C bus recovery done (%d clocks)", clockCount);
 }
 
-void enablePowerRails() {
-  axp2101::restoreDefaultRails();
+void initializePowerManagement() {
+  axp2101::initializePowerState();
 }
 
 } // namespace waveshare_board

@@ -16,7 +16,6 @@
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "axp2101.hpp"
 #include "hal.hpp"
 #else
 extern const uint8_t BOARD_BOOT_PIN;
@@ -93,10 +92,6 @@ void Power::powerOffPeripherals() {
   displayPowerManager.requestState(display_power::State::Off);
   displayPowerManager.applyPendingPanelChange();
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  waveshare_board::axp2101::setDisplayPower(false);
-  waveshare_board::axp2101::setPeripheralPower(false);
-#endif
   SPI.end();
   Wire.end();
 }
@@ -118,14 +113,7 @@ void Power::deviceSuspend() {
   lv_refr_now(display);
   displayPowerManager.requestState(display_power::State::Off);
   displayPowerManager.applyPendingPanelChange();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  waveshare_board::axp2101::setDisplayPower(false);
-#endif
   powerLightSleep();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  waveshare_board::axp2101::setDisplayPower(true);
-  delay(50);
-#endif
   displayPowerManager.requestState(resumeState);
   displayPowerManager.applyPendingPanelChange();
 #endif

@@ -136,6 +136,7 @@ env.Append(BUILD_FLAGS=[
     u'-DREVISION=' + revision + '',
     u'-DVERSION=\\"' + version + '\\"',
     u'-DFLAVOR=\\"' + firmware_target + '\\"',
+    u'-DBUILD_PROFILE=\\"' + flavor + '\\"',
     u'-DGIT_SHA=\\"' + git_sha + '\\"',
     u'-DBUILD_TIMESTAMP=\\"' + build_timestamp + '\\"',
     u'-D'+ flavor + '=1'

@@ -1,5 +1,10 @@
 # IceNav-v3: Waveshare ESP32-S3 AMOLED 1.75" Port
 
+> **Historical snapshot:** This document records the original porting work and
+> contains superseded pin and power assumptions. Do not use it as a bring-up
+> recipe. [../hardware/README.md](../hardware/README.md) is authoritative for
+> current hardware behavior, especially AXP2101 safety.
+
 **Target Board:** [Waveshare ESP32-S3 Touch AMOLED 1.75"](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm)
 
 **Goal:** Get the vector map view working on this 466×466 round AMOLED display with CO5300 driver.
@@ -273,20 +278,14 @@ Added `#include <SD.h>` and `#include <FFat.h>` conditionally.
 
 #### [src/main.cpp](file:///Users/chris/Documents/Workspace/esp32-bike-computer/IceNav-v3/src/main.cpp)
 
-**AXP2101 Power Management** (lines 150-212):
-```cpp
-// Enable DLDO1 (3.3V for display)
-Wire.beginTransmission(0x34);
-Wire.write(0x90); Wire.write(0x9C);  // Enable + 3.3V
-Wire.endTransmission();
+**AXP2101 Power Management (superseded):**
 
-// Power cycle all LDOs for SD card stability
-for (uint8_t reg : {0x92, 0x93, 0x94, 0x95, 0x96, 0x97}) {
-  // Disable then re-enable each LDO
-}
-
-Wire.end();  // Release I2C pins for SD (GPIO 14/15 shared)
-```
+The original port forced an assumed display-enable mask and rewrote every
+ALDO/BLDO voltage register. Those writes were not based on a validated populated
+rail map and are now prohibited. Current firmware preserves the PMIC's live
+output state and permits writes only to the two PWR-button interrupt registers.
+Do not copy the historical rail sequence into application or diagnostic code;
+follow [../hardware/README.md](../hardware/README.md#2-pmic-rail-safety-axp2101).
 
 **GPS Bypass** (lines 278-289):
 ```cpp
