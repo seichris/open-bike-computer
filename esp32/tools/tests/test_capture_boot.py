@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import io
 import unittest
+from contextlib import redirect_stderr
 
-from capture_boot import _open_serial, format_summary, summarize, validation_errors
+from capture_boot import (
+    _EMPTY_RETAINED_HISTORY,
+    _open_serial,
+    cold_start_evidence,
+    format_summary,
+    main,
+    summarize,
+    validation_errors,
+)
 
 
 HEALTHY_CAPTURE = """
@@ -11,6 +21,14 @@ BOOT_PREVIOUS schema=1 history=retained valid=1 sameFirmware=1 sequence=1 finger
 BOOT_FAILURE schema=1 recorded=0 count=0 threshold=3 stage=none after=none reset=unknown resetCode=0 safeMode=0
 BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF
 BOOT_STAGE schema=1 sequence=2 event=ready id=15 name=ready uptimeMs=1042
+"""
+
+USB_COLD_CAPTURE = """
+BOOT_META schema=1 sequence=1 target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175 version=0.2.2 build=7 git=0123456789012345678901234567890123456789 built=2026-07-31T01:02:03Z fingerprint=12345678 reset=usb resetCode=11
+BOOT_PREVIOUS schema=1 history=empty_or_invalid valid=0 sameFirmware=0 sequence=0 fingerprint=00000000 ready=0 safeMode=0 diagnosticHold=0 reset=unknown resetCode=0 active=none completed=none failureCount=0 failureStage=none failureAfter=none failureReset=unknown failureResetCode=0
+BOOT_FAILURE schema=1 recorded=0 count=0 threshold=3 stage=none after=none reset=unknown resetCode=0 safeMode=0
+BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF
+BOOT_STAGE schema=1 sequence=1 event=ready id=15 name=ready uptimeMs=1042
 """
 
 DISPLAY_RECOVERY_CAPTURE = HEALTHY_CAPTURE.replace(
@@ -23,6 +41,130 @@ DISPLAY_RECOVERY_CAPTURE = HEALTHY_CAPTURE.replace(
 
 
 class CaptureBootTests(unittest.TestCase):
+    def test_usb_empty_history_plus_confirmation_validates_cold_start(self) -> None:
+        summary = summarize(USB_COLD_CAPTURE)
+        self.assertEqual(cold_start_evidence(summary), "usb_empty_history")
+        self.assertEqual(
+            validation_errors(
+                summary,
+                expected_reset="usb",
+                require_cold_start=True,
+                confirmed_all_power_removed=True,
+                require_ready=True,
+                require_pmic_read_only=True,
+            ),
+            [],
+        )
+        rendered = format_summary(summary, confirmed_all_power_removed=True)
+        self.assertIn("coldStartCandidate=1", rendered)
+        self.assertIn("coldStartEvidence=usb_empty_history", rendered)
+        self.assertIn("operatorPowerRemovalConfirmed=1", rendered)
+        self.assertIn("coldStartValidated=1", rendered)
+
+        # The new gate does not weaken exact reset-cause validation.
+        self.assertIn(
+            "reset expected power_on, got usb",
+            validation_errors(summary, expected_reset="power_on"),
+        )
+
+    def test_cold_start_evidence_fails_closed(self) -> None:
+        self.assertIsNone(cold_start_evidence(summarize(HEALTHY_CAPTURE)))
+        self.assertIn(
+            "cold start required; got reset=usb resetCode=11 sequence=2 "
+            "history=retained previousValid=1",
+            validation_errors(summarize(HEALTHY_CAPTURE), require_cold_start=True),
+        )
+
+        corruptions = (
+            ("sequence=1 target=", "sequence=2 target="),
+            ("reset=usb resetCode=11", "reset=usb resetCode=1"),
+            ("history=empty_or_invalid", "history=retained"),
+            ("valid=0 sameFirmware=0", "valid=1 sameFirmware=0"),
+            ("sequence=0 fingerprint=00000000", "sequence=1 fingerprint=00000000"),
+            ("fingerprint=00000000", "fingerprint=12345678"),
+            ("ready=0 safeMode=0", "ready=1 safeMode=0"),
+            ("active=none completed=none", "active=ready completed=ready"),
+        )
+        for original, replacement in corruptions:
+            with self.subTest(replacement=replacement):
+                summary = summarize(USB_COLD_CAPTURE.replace(original, replacement, 1))
+                self.assertIsNone(cold_start_evidence(summary))
+                self.assertTrue(
+                    validation_errors(
+                        summary,
+                        require_cold_start=True,
+                        confirmed_all_power_removed=True,
+                    )
+                )
+
+        previous_line = next(
+            line
+            for line in USB_COLD_CAPTURE.splitlines()
+            if line.startswith("BOOT_PREVIOUS ")
+        )
+        for field in _EMPTY_RETAINED_HISTORY:
+            with self.subTest(missing_field=field):
+                incomplete_line = " ".join(
+                    token
+                    for token in previous_line.split()
+                    if not token.startswith(f"{field}=")
+                )
+                summary = summarize(
+                    USB_COLD_CAPTURE.replace(previous_line, incomplete_line, 1)
+                )
+                self.assertIsNone(cold_start_evidence(summary))
+                self.assertTrue(
+                    validation_errors(
+                        summary,
+                        require_cold_start=True,
+                        confirmed_all_power_removed=True,
+                    )
+                )
+
+    def test_empty_history_requires_operator_power_removal_confirmation(self) -> None:
+        summary = summarize(USB_COLD_CAPTURE)
+        self.assertEqual(cold_start_evidence(summary), "usb_empty_history")
+        self.assertIn(
+            "cold start requires explicit operator confirmation that USB and "
+            "battery power were removed",
+            validation_errors(summary, require_cold_start=True),
+        )
+        self.assertEqual(
+            validation_errors(
+                summary,
+                require_cold_start=True,
+                confirmed_all_power_removed=True,
+            ),
+            [],
+        )
+
+    def test_cold_start_cli_rejects_unconfirmed_or_warm_reset_options(self) -> None:
+        invalid_arguments = (
+            ["--require-cold-start"],
+            ["--confirm-all-power-removed"],
+            [
+                "--require-cold-start",
+                "--confirm-all-power-removed",
+                "--reset",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as error:
+                        main(arguments)
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn("error:", stderr.getvalue())
+
+    def test_power_on_with_empty_history_is_supporting_evidence(self) -> None:
+        capture = USB_COLD_CAPTURE.replace(
+            "reset=usb resetCode=11", "reset=power_on resetCode=1", 1
+        )
+        self.assertEqual(
+            cold_start_evidence(summarize(capture)), "power_on_empty_history"
+        )
+
     def test_healthy_capture(self) -> None:
         summary = summarize(HEALTHY_CAPTURE)
         self.assertTrue(summary.ready)
@@ -30,6 +172,7 @@ class CaptureBootTests(unittest.TestCase):
         self.assertEqual(summary.previous["active"], "ready")
         self.assertEqual(summary.previous["fingerprint"], "12345678")
         self.assertEqual(summary.pmic["ldo"], "0xFF")
+        self.assertEqual(summary.stage_schema_mismatches, 0)
         self.assertEqual(summary.sequence_mismatches, 0)
         self.assertEqual(summary.boot_discontinuities, 0)
         self.assertEqual(summary.blocked_writes, 0)
@@ -51,6 +194,7 @@ class CaptureBootTests(unittest.TestCase):
         self.assertIn("pmicRailState=current-preserved", rendered)
         self.assertIn("profile=WAVESHARE_AMOLED_175", rendered)
         self.assertIn("previousFingerprint=12345678", rendered)
+        self.assertIn("stageSchemaMismatches=0", rendered)
         self.assertIn("sequenceMismatches=0", rendered)
         self.assertIn("bootDiscontinuities=0", rendered)
 
@@ -79,6 +223,49 @@ class CaptureBootTests(unittest.TestCase):
         errors = validation_errors(summary, require_ready=True)
         self.assertIn("ready marker missing", errors)
         self.assertIn("blocked AXP2101 writes observed: 1", errors)
+
+    def test_safety_gates_reject_unknown_record_schemas(self) -> None:
+        unknown_meta = summarize(
+            HEALTHY_CAPTURE.replace("BOOT_META schema=1", "BOOT_META schema=2")
+        )
+        self.assertIn(
+            "BOOT_META schema 1 required for gated validation (got 2)",
+            validation_errors(
+                unknown_meta,
+                expected_target="WAVESHARE_AMOLED_175",
+                require_ready=True,
+            ),
+        )
+
+        unknown_stage = summarize(
+            HEALTHY_CAPTURE.replace("BOOT_STAGE schema=1", "BOOT_STAGE schema=2")
+        )
+        self.assertFalse(unknown_stage.ready)
+        self.assertEqual(unknown_stage.stage_schema_mismatches, 1)
+        stage_errors = validation_errors(unknown_stage, require_ready=True)
+        self.assertIn("unsupported BOOT_STAGE schema observed: 1 marker(s)", stage_errors)
+        self.assertIn("ready marker missing", stage_errors)
+
+        unknown_pmic = summarize(
+            HEALTHY_CAPTURE.replace("BOOT_PMIC schema=1", "BOOT_PMIC schema=2")
+        )
+        self.assertIn(
+            "BOOT_PMIC schema 1 required for read-only validation (got 2)",
+            validation_errors(unknown_pmic, require_pmic_read_only=True),
+        )
+
+        unknown_display_pmic = summarize(
+            DISPLAY_RECOVERY_CAPTURE.replace(
+                "BOOT_PMIC schema=1", "BOOT_PMIC schema=2"
+            )
+        )
+        self.assertIn(
+            "BOOT_PMIC schema 1 required for display-enable validation (got 2)",
+            validation_errors(
+                unknown_display_pmic,
+                require_pmic_display_enable_only=True,
+            ),
+        )
 
     def test_only_latest_boot_can_satisfy_ready_gate(self) -> None:
         interrupted_boot = """
@@ -244,6 +431,16 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
         self.assertNotIn("PMIC probe required (got 0)", errors)
         self.assertIn("PMIC status read required (got 0)", errors)
         self.assertIn("PMIC LDO-state read required (got 0)", errors)
+
+        changed_rails = HEALTHY_CAPTURE.replace(
+            "railState=current-preserved", "railState=changed"
+        )
+        self.assertIn(
+            "PMIC current-preserved rail state required (got changed)",
+            validation_errors(
+                summarize(changed_rails), require_pmic_read_only=True
+            ),
+        )
 
     def test_206_pmic_gate_requires_verified_display_enable_only_recovery(self) -> None:
         summary = summarize(DISPLAY_RECOVERY_CAPTURE)

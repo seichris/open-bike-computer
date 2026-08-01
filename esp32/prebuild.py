@@ -6,6 +6,7 @@ import os.path
 from platformio import util
 import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from SCons.Script import DefaultEnvironment
@@ -16,7 +17,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from firmware_build_identity import firmware_git_identity
-from pioarduino_custom_core import correct_sections_text
+from generated_sdkconfig import recognized_generated_sdkconfigs
+from pioarduino_custom_core import correct_nested_pio_command, correct_sections_text
 
 
 def ensure_custom_core_generated_source_alias():
@@ -107,6 +109,58 @@ def ensure_custom_core_generated_source_alias():
 
 ensure_custom_core_generated_source_alias()
 
+
+def ensure_verified_nested_build_config():
+    """Keep pioarduino's recursive custom-core build on verified local inputs."""
+    if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") != "1":
+        return
+    verified_config = os.environ.get("OPEN_BIKE_VERIFIED_PROJECT_CONFIG")
+    if not verified_config:
+        raise RuntimeError("verified nested PlatformIO config is missing")
+    config_path = Path(verified_config)
+    if config_path.is_symlink() or not config_path.is_file():
+        raise RuntimeError(
+            f"verified nested PlatformIO config is unsafe: {config_path}"
+        )
+
+    platform_dir = Path(env.PioPlatform().get_dir())
+    nested_builder = platform_dir / "builder/frameworks/espidf.py"
+    if nested_builder.is_symlink() or not nested_builder.is_file():
+        raise RuntimeError(
+            f"pioarduino nested-build script is unsafe: {nested_builder}"
+        )
+    source = nested_builder.read_text(encoding="utf-8")
+    try:
+        corrected = correct_nested_pio_command(source)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    if corrected == source:
+        return
+
+    temporary_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=nested_builder.parent,
+            prefix=f".{nested_builder.name}.",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(corrected)
+        Path(temporary_name).chmod(nested_builder.stat().st_mode & 0o777)
+        os.replace(temporary_name, nested_builder)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
+
+
+ensure_verified_nested_build_config()
+
 try:
     import configparser
 except ImportError:
@@ -123,7 +177,33 @@ firmware_target = env.GetProjectOption("custom_firmware_target", flavor)
 revision = config.get("common","revision")
 version = config.get("common", "version")
 build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-git_sha = firmware_git_identity(Path(env.get("PROJECT_DIR")).resolve().parent)
+project_dir = Path(env.get("PROJECT_DIR")).resolve()
+allowed_generated_paths = ()
+deterministic_build = os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1"
+if firmware_target.startswith("WAVESHARE_AMOLED_") and not deterministic_build:
+    raise RuntimeError(
+        "Waveshare firmware builds must use tools/build_firmware.py so generated "
+        "inputs and the flashed source identity are verified"
+    )
+if deterministic_build:
+    allowed_generated_paths = recognized_generated_sdkconfigs(project_dir, flavor)
+detected_git_sha = firmware_git_identity(
+    project_dir.parent,
+    allowed_untracked_paths=allowed_generated_paths,
+)
+if deterministic_build:
+    expected_git_sha = os.environ.get("OPEN_BIKE_EXPECTED_GIT_SHA")
+    if not expected_git_sha or detected_git_sha != expected_git_sha:
+        raise RuntimeError(
+            "deterministic firmware source identity changed before prebuild: "
+            f"expected {expected_git_sha or 'missing'}, got {detected_git_sha}"
+        )
+    git_sha = detected_git_sha
+else:
+    # Raw PlatformIO invocations can inherit source/build overrides that are
+    # outside the tracked repository. Never let those images claim an exact
+    # clean Git SHA in BOOT_META.
+    git_sha = f"unverified-{detected_git_sha}"
 
 dfl_lat = os.environ.get('ICENAV3_LAT')
 dfl_lon = os.environ.get('ICENAV3_LON')
@@ -150,21 +230,16 @@ if dfl_lat != None and dfl_lon != None:
         u'-DDEFAULT_LON=' + dfl_lon + ''
         ])
 
-# NeoGps Config files
-config_path = "lib/gps/GPSfix_cfg.h"
-output_path =  ".pio/libdeps/" + flavor + "/NeoGPS/src" 
-target_path = output_path + "/GPSfix_cfg.h"
-os.makedirs(output_path, 0o755, True)
-shutil.copy(config_path , target_path)
-
-config_path = "lib/gps/NeoGPS_cfg.h"
-output_path =  ".pio/libdeps/" + flavor + "/NeoGPS/src" 
-target_path = output_path + "/NeoGPS_cfg.h"
-os.makedirs(output_path, 0o755, True)
-shutil.copy(config_path , target_path)
-
-config_path = "lib/gps/NMEAGPS_cfg.h"
-output_path =  ".pio/libdeps/" + flavor + "/NeoGPS/src" 
-target_path = output_path + "/NMEAGPS_cfg.h"
-os.makedirs(output_path, 0o755, True)
-shutil.copy(config_path , target_path)
+# NeoGPS configuration must follow PlatformIO's effective dependency store.
+# The verified Waveshare helper isolates that store per profile; a hard-coded
+# .pio/libdeps path would edit a different tree and silently compile NeoGPS with
+# its packaged defaults.
+neogps_source_dir = (
+    Path(env.subst("$PROJECT_LIBDEPS_DIR")).resolve() / flavor / "NeoGPS" / "src"
+)
+neogps_source_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+for config_name in ("GPSfix_cfg.h", "NeoGPS_cfg.h", "NMEAGPS_cfg.h"):
+    shutil.copy(
+        project_dir / "lib" / "gps" / config_name,
+        neogps_source_dir / config_name,
+    )

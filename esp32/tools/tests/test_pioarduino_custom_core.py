@@ -14,6 +14,9 @@ from pioarduino_custom_core import (
     STALE_FREERTOS_TICKLESS_TEXT_MAPPING,
     STALE_PM_TEXT_MAPPING,
     UPSTREAM_PM_LITERAL_MAPPING,
+    UPSTREAM_NESTED_PIO_BLOCK,
+    VERIFIED_NESTED_PIO_BLOCK,
+    correct_nested_pio_command,
     correct_sections_text,
 )
 
@@ -98,6 +101,29 @@ class CorrectSectionsTextTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "FreeRTOS tickless text"):
             correct_sections_text(source)
+
+
+class CorrectNestedPioCommandTests(unittest.TestCase):
+    def test_routes_recursive_build_through_verified_config(self):
+        corrected = correct_nested_pio_command(
+            f"before\n{UPSTREAM_NESTED_PIO_BLOCK}\nafter"
+        )
+
+        self.assertIn(VERIFIED_NESTED_PIO_BLOCK, corrected)
+        self.assertNotIn(UPSTREAM_NESTED_PIO_BLOCK, corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{VERIFIED_NESTED_PIO_BLOCK}\nafter"
+
+        self.assertEqual(correct_nested_pio_command(source), source)
+
+    def test_rejects_unknown_or_ambiguous_nested_commands(self):
+        with self.assertRaisesRegex(ValueError, "nested PlatformIO command"):
+            correct_nested_pio_command("no recursive command")
+        with self.assertRaisesRegex(ValueError, "nested PlatformIO command"):
+            correct_nested_pio_command(
+                f"{UPSTREAM_NESTED_PIO_BLOCK}\n{UPSTREAM_NESTED_PIO_BLOCK}"
+            )
 
 
 if __name__ == "__main__":

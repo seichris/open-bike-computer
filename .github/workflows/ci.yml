@@ -102,6 +102,7 @@ jobs:
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_build_identity \
+            tools.tests.test_generated_sdkconfig \
             tools.tests.test_capture_boot
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \

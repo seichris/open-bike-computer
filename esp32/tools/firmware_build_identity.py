@@ -3,12 +3,15 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import Iterable
 
 
 FULL_GIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
-def firmware_git_identity(repo_root: Path) -> str:
+def firmware_git_identity(
+    repo_root: Path, *, allowed_untracked_paths: Iterable[Path] = ()
+) -> str:
     """Return a release-grade source identity, or a fail-closed dirty marker."""
     try:
         git_sha = subprocess.check_output(
@@ -20,11 +23,26 @@ def firmware_git_identity(repo_root: Path) -> str:
         if not FULL_GIT_SHA.fullmatch(git_sha):
             return "unidentified"
         dirty = subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+            ],
             cwd=repo_root,
             stderr=subprocess.DEVNULL,
-            text=True,
         )
-        return git_sha if not dirty.strip() else f"dirty-{git_sha}"
+        allowed = {
+            path.resolve().relative_to(repo_root.resolve()).as_posix()
+            for path in allowed_untracked_paths
+        }
+        entries = [entry for entry in dirty.split(b"\0") if entry]
+        for entry in entries:
+            decoded = entry.decode("utf-8", errors="surrogateescape")
+            if decoded.startswith("?? ") and decoded[3:] in allowed:
+                continue
+            return f"dirty-{git_sha}"
+        return git_sha
     except (OSError, subprocess.CalledProcessError):
         return "unidentified"

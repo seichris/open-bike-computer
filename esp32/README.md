@@ -26,10 +26,35 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_175
 python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 ```
 
-The helper handles pioarduino's one-time custom-core bootstrap and confirms
-that PlatformIO produced the requested firmware rather than its generated
-bootstrap sketch. The speaker test profiles remain available through the
-manual **Speaker firmware builds** GitHub Actions workflow.
+The helper handles pioarduino's one-time tool-package conversion and
+custom-core bootstrap, keeps pioarduino's recursive build on the verified
+local project config, and confirms that PlatformIO produced the requested
+firmware rather than its generated bootstrap sketch. The speaker test profiles
+remain available through the manual **Speaker firmware builds** GitHub Actions
+workflow.
+
+After confirming the connected hardware profile, use the same helper for
+upload so the exact Git identity remains active through PlatformIO's upload
+prebuild:
+
+```sh
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
+  --upload-port /dev/cu.usbmodemXXXX
+```
+
+Archive the emitted `FIRMWARE_BUILD_PROVENANCE` and
+`FIRMWARE_UPLOAD_PROVENANCE` lines with physical test results. They bind the
+clean Git/profile identity to the exact firmware, bootloader, partition-table,
+and OTA-bootstrap image set plus the content-pinned pioarduino platform archive
+and executable-package bootstraps, PlatformIO-installed compiler/uploader/nested
+runtime trees through `coreAttestationSha256`, and ignored generated dependency
+inputs presented for that upload. The helper
+also isolates ESP-IDF Component Manager state, rejects or scrubs ambient source
+overrides, and requires strict component checksums. This is upload-input
+preflight evidence, not flash readback: a later `BOOT_META` confirms the
+embedded Git/profile independently but does not contain the artifact SHA-256s.
+The host Python interpreter and top-level `pio` launcher are part of the trusted
+workstation or CI boundary and are not covered by `coreAttestationSha256`.
 
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).

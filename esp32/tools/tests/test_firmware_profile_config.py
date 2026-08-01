@@ -26,6 +26,11 @@ def inherited_option(section: str, option: str) -> str:
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
 assert "-DBUILD_PROFILE=" in prebuild_source
+assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
+assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
+assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
+assert 'env.subst("$PROJECT_LIBDEPS_DIR")' in prebuild_source
+assert '".pio/libdeps/" + flavor' not in prebuild_source
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
@@ -42,6 +47,16 @@ assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
 assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
+waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
+assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
+assert (
+    "https://github.com/jgauchia/NeoGPS.git#"
+    "43c47665f3f8a1b809d809d9f685b376edd40238"
+) in waveshare_dependencies
+assert "moononournation/GFX Library for Arduino @ 1.6.7" in waveshare_dependencies
+assert "h2zero/NimBLE-Arduino@1.4.3" in waveshare_dependencies
+assert "bblanchon/ArduinoJson@7.4.3" in waveshare_dependencies
+assert "^" not in waveshare_dependencies
 
 diagnostic_profiles = {
     "env:WAVESHARE_AMOLED_175": (
@@ -148,6 +163,13 @@ assert "pull_request:" not in speaker_workflow
 assert "python tools/build_firmware.py" in speaker_workflow
 for environment in light_sleep_profiles:
     assert environment.removeprefix("env:") in ci_workflow
+
+battery_validation = (
+    repo_root / "docs/firmware-battery-life-hardware-validation.md"
+).read_text()
+assert "pio run -e WAVESHARE_AMOLED" not in battery_validation
+assert "PLATFORMIO_BUILD_FLAGS=" not in battery_validation
+assert "tools/build_firmware.py" in battery_validation
 
 display_probe_profile = "env:WAVESHARE_AMOLED_206_DISPLAY_TEST"
 assert config.get(display_probe_profile, "extends") == "env:WAVESHARE_AMOLED_206"
