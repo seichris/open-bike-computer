@@ -21,6 +21,7 @@ int main() {
   using namespace boot_diagnostics::policy;
 
   static_assert(kSafeModeFailureThreshold == 3);
+  static_assert(kStructuredSerialTxBufferSize >= 512);
   assert(std::strcmp(stageName(Stage::PmicInspection),
                      "pmic_inspection") == 0);
 
@@ -46,6 +47,7 @@ int main() {
   assert(!afterReady.failureRecorded);
   assert(state.bootSequence == 2);
   assert(state.consecutiveEarlyFailures == 0);
+  assert(state.lastFailureResetReason == 0);
 
   // Three unfinished boots of the same exact image trigger the fourth boot's
   // minimal safe mode and retain the actual failing stage.
@@ -55,12 +57,14 @@ int main() {
   assert(!secondAttempt.safeMode);
   assert(state.consecutiveEarlyFailures == 1);
   assert(state.lastFailureStage == static_cast<uint8_t>(Stage::Display));
+  assert(state.lastFailureResetReason == 4);
 
   enterAndCrash(state, Stage::Display);
   BeginResult thirdAttempt = beginBoot(state, kFirmwareA, 6, false);
   assert(thirdAttempt.failureRecorded);
   assert(!thirdAttempt.safeMode);
   assert(state.consecutiveEarlyFailures == 2);
+  assert(state.lastFailureResetReason == 6);
 
   enterAndCrash(state, Stage::Display);
   BeginResult safeAttempt = beginBoot(state, kFirmwareA, 9, false);
@@ -69,6 +73,7 @@ int main() {
   assert(isSafeMode(state));
   assert(state.consecutiveEarlyFailures == 3);
   assert(state.lastFailureStage == static_cast<uint8_t>(Stage::Display));
+  assert(state.lastFailureResetReason == 9);
   assert(!enterStage(state, Stage::I2cBus));
   assert(!markReady(state));
 
@@ -79,12 +84,14 @@ int main() {
   assert(heldAgain.safeMode);
   assert(state.consecutiveEarlyFailures == 3);
   assert(state.lastFailureStage == static_cast<uint8_t>(Stage::Display));
+  assert(state.lastFailureResetReason == 9);
 
   // A newly built firmware is allowed to try again without requiring a power
   // cycle, while a true cold power-on also clears retained failure history.
   BeginResult newFirmware = beginBoot(state, kFirmwareB, 11, false);
   assert(newFirmware.previousValid);
   assert(!newFirmware.previousSameFirmware);
+  assert(newFirmware.previous.lastFailureResetReason == 9);
   assert(!newFirmware.safeMode);
   assert(state.bootSequence == 1);
   assert(state.consecutiveEarlyFailures == 0);
@@ -105,6 +112,27 @@ int main() {
   assert(!recovered.previousValid);
   assert(isValid(corrupt));
   assert(corrupt.bootSequence == 1);
+
+  // An intentional partial bring-up is neither a full application-ready boot
+  // nor a failure. Repeatedly resetting a display-probe image must continue to
+  // reach the display instead of entering safe mode on the fourth attempt.
+  PersistentState probe{};
+  for (unsigned attempt = 0; attempt < 5; ++attempt) {
+    BeginResult probeBoot = beginBoot(probe, kFirmwareA,
+                                      attempt == 0 ? 1 : 3,
+                                      attempt == 0);
+    assert(!probeBoot.failureRecorded);
+    assert(!probeBoot.safeMode);
+    assert(completeStage(probe, Stage::Startup));
+    assert(enterStage(probe, Stage::Display));
+    assert(completeStage(probe, Stage::Display));
+    assert(markDiagnosticHold(probe));
+    assert(isDiagnosticHold(probe));
+    assert(!isReady(probe));
+    assert(probe.consecutiveEarlyFailures == 0);
+    assert(probe.lastFailureStage == static_cast<uint8_t>(Stage::None));
+    assert(probe.lastFailureResetReason == 0);
+  }
 
   return 0;
 }

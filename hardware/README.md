@@ -335,7 +335,7 @@ card, and factory firmware.
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
 | IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
 | Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM; app selects the sound and `0...100%` playback volume, defaulting to 70% |
-| Power / Battery | Partially verified | AXP2101 status readable; current app preserves factory/eFuse rail state during boot and sleep; firmware rail control is intentionally disabled pending an electrically validated rail map |
+| Power / Battery | Partially verified | AXP2101 status readable; runtime and sleep paths never switch PMIC outputs. At boot, one compatibility operation may set only register `0x90` bit `0x80` to recover the established display supply after older firmware left it off; all other bits and voltage registers remain unchanged |
 
 ## 2.06 Bring-up Rules
 
@@ -355,6 +355,10 @@ card, and factory firmware.
   its first pixel through a 1x1 window to present the completed frame.
 - USB CDC logging uses a 1 ms TX timeout so display rendering remains
   independent of whether a serial reader is attached.
+- New firmware never turns the AXP2101 display-enable bit off. At boot it may
+  set only register `0x90` bit `0x80`, preserving every other bit, so an OTA or
+  rollback can recover from the state left by older 2.06 firmware. Generic PMIC
+  writes to `0x90` remain blocked.
 - A full USB and battery power removal can matter after failed experiments; the
   verified standalone display test became visible after power removal and
   USB-only replug.
@@ -529,7 +533,8 @@ The AXP2101 provides board power and charging, but the populated load behind
 every programmable output has not been electrically validated. Waveshare's
 standard 1.75-inch display and ES8311 examples initialize those peripherals
 without programming AXP2101 output registers. Firmware must therefore preserve
-the PMIC's factory/eFuse rail configuration.
+the PMIC's current output-rail configuration. That is not evidence of factory
+state when an older image may have programmed a still-powered PMIC.
 
 Safety rules:
 - Probe AXP2101 at `0x34` and read status for diagnostics only.
@@ -541,14 +546,18 @@ Safety rules:
   AXP2101 enable bit belongs exclusively to the display or another peripheral.
 - A black screen is not sufficient evidence that an AXP rail should be forced;
   check the reset log, QSPI pins, build target, and panel initialization first.
-- If an older firmware image already changed persistent PMIC state, fully
-  remove USB and battery power before validating the safe firmware.
+- Before validating a migration from older firmware, disconnect both USB and
+  battery. Reconnect only after all power is removed so the PMIC reloads its
+  power-on baseline; otherwise the safe image preserves the older live state.
 
 Verified firmware behavior:
 - AXP2101 is found at `0x34`, and status plus the current LDO-enable value are
-  logged without modifying them.
+  logged without modifying them. The log labels that value as preserved current
+  state, not verified factory state.
 - A register-policy guard rejects writes to all 254 non-allowlisted AXP2101
   addresses, with an exhaustive host test covering the complete address space.
+  A source-policy test also rejects raw `Wire.beginTransmission()` calls
+  outside the guarded shared-I2C implementation.
 - Deep and light sleep preserve PMIC output state; the panel, buses, and radio
   are managed independently.
 - On USB, observed PMU status reports VBUS present and `battery=absent`.
@@ -562,30 +571,53 @@ Verified firmware behavior:
   deadline-based AXP2101 status polling unless a later board revision exposes
   a direct interrupt.
 
+These rules are intentionally strict for the 1.75-inch board implicated in the
+short investigation. The 2.06-inch board has one separate, established
+compatibility exception: during boot only, firmware reads register `0x90`, sets
+bit `0x80` if needed, and verifies the result while preserving every other bit.
+That one-way operation recovers a display supply that older 2.06 firmware could
+leave disabled; it cannot turn any output off or change a voltage. Generic
+AXP2101 writes remain limited to interrupt registers `0x41` and `0x49` on both
+targets.
+
 ### Boot Failure Telemetry and Safe Mode
 
-Waveshare firmware records the active and last-completed setup stage in RTC
-no-init memory before touching each major subsystem. The state survives panic,
-watchdog, brownout, software, and USB resets. It is discarded after full power
-removal, checksum/schema failure, or when a newly built firmware image is
-flashed.
+Waveshare main-application and speaker-smoke firmware record the active and
+last-completed setup stage in RTC no-init memory before touching each major
+subsystem. The vendor-hello sketch remains an isolated upstream bring-up image
+and does not implement this contract. The state survives panic, watchdog,
+brownout, software, and USB resets. A new firmware fingerprint first emits the
+prior valid record in `BOOT_PREVIOUS`, then starts fresh same-build failure
+history. Full power removal or a checksum/schema failure makes the prior record
+unavailable.
 
 Diagnostic builds emit stable, machine-readable lines:
 
 ```text
-BOOT_META schema=1 ... target=... git=... built=... reset=... resetCode=...
-BOOT_PREVIOUS schema=1 ... active=... completed=...
-BOOT_FAILURE schema=1 ... count=... stage=... after=... safeMode=...
-BOOT_STAGE schema=1 ... event=enter|complete|ready name=...
-BOOT_PMIC schema=1 mode=read-only ... vbus=... battery=... ldo=...
+BOOT_META schema=1 ... target=... profile=... git=... built=... reset=... resetCode=...
+BOOT_PREVIOUS schema=1 ... fingerprint=... active=... completed=... failureCount=... failureStage=... failureAfter=... failureReset=...
+BOOT_FAILURE schema=1 ... count=... stage=... after=... reset=... safeMode=...
+BOOT_STAGE schema=1 ... event=enter|complete|ready|hold name=...
+BOOT_PMIC schema=1 mode=read-only railState=current-preserved ... vbus=... battery=... ldo=...
+BOOT_PMIC schema=1 mode=display-enable-only railState=display-enabled ... displayRecovery=1 displayChanged=...
 ```
 
 `BOOT_META` is the source of truth for the image actually running; do not infer
-it only from the local checkout or the upload command. An entered stage without
-its matching completion marker identifies the first setup group to audit on
-the next boot. `BOOT_PMIC mode=read-only` confirms that the startup path only
-inspected the PMIC; any `AXP_WRITE_BLOCKED` line is a failed safety gate and
-must be investigated.
+it only from the local checkout or the upload command. `target` is the canonical
+hardware/OTA identity, while `profile` distinguishes experimental and
+production variants built from the same commit. An entered stage without its
+matching completion marker identifies the first setup group to audit on the
+next boot. `BOOT_PREVIOUS` retains the failed image fingerprint, original
+failure fields, and the reset cause that ended it even when a new diagnostic
+build clears the current history. On 1.75-inch firmware,
+`BOOT_PMIC mode=read-only` means startup did not request an output-rail change;
+the matching capture gate separately requires a successful PMIC probe and
+status/LDO reads. On 2.06-inch firmware,
+`BOOT_PMIC mode=display-enable-only` means the dedicated one-way compatibility
+operation verified bit `0x80` enabled without changing other register bits;
+its capture gate additionally requires `displayRecovery=1`. A preserved 1.75
+`railState` remains unverified unless the PMIC was fully power-cycled. Any
+`AXP_WRITE_BLOCKED` line is a failed safety gate and must be investigated.
 
 After three unfinished early boots from the same exact build, the fourth boot
 enters minimal safe mode before I2C, PMIC, display, storage, speaker, or BLE
@@ -593,6 +625,10 @@ initialization. Safe mode retains the original failing stage and can be cleared
 by flashing a newly built image or removing all USB and battery power. A safe
 mode decision is software containment evidence, not proof that a physical
 short was software-caused.
+
+Display-probe builds end in a distinct `diagnostic_hold` state after their
+intended partial bring-up. That state does not satisfy full-app readiness and
+does not count as a failed boot on the next reset.
 
 ### 3. Touch Coordinate Mirroring
 

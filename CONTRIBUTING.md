@@ -90,8 +90,9 @@ Definitive Waveshare pinouts and known quirks live in
 - The 1.75 and 2.06 Waveshare boards both use CO5300 AMOLED displays, but they
   do not share the same display, touch, or SD pinout. Keep
   `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` changes separate.
-- Waveshare 1.75 display power is controlled through AXP2101, touch reset is
-  via TCA9554 P0, and SD uses `CS=41, MOSI=1, MISO=3, SCK=2`.
+- Waveshare 1.75 display power is supplied through AXP2101, but firmware must
+  preserve its current output-rail state; touch reset is via TCA9554 P0, and SD
+  uses `CS=41, MOSI=1, MISO=3, SCK=2`.
 - Waveshare 2.06 uses direct FT3168 touch reset on `GPIO9`, display clock on
   `GPIO11`, display reset on `GPIO8`, and SD `CS=17`.
 

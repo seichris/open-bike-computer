@@ -161,18 +161,63 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
 }
 
 bool initializePowerState() {
-  Serial.println("Probing AXP2101 without changing power rails...");
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  Serial.println("Probing AXP2101 with 2.06 display-enable-only recovery...");
+#else
+  Serial.println("Probing AXP2101 without changing output rails...");
+#endif
   if (!begin()) {
     Serial.println("AXP2101 not found");
-    Serial.println("BOOT_PMIC schema=1 mode=read-only available=0");
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.println("BOOT_PMIC schema=1 mode=display-enable-only available=0 "
+                   "railState=unknown displayRecovery=0");
+#else
+    Serial.println("BOOT_PMIC schema=1 mode=read-only available=0 "
+                   "railState=unknown");
+#endif
     return false;
   }
 
   PowerStatus status;
   uint8_t ldoEnable = 0;
-  const bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
-  if (readPowerStatus(status)) {
-    Serial.printf("AXP2101: preserving factory rails; status1=0x%02X "
+  bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
+  const bool statusReadOk = readPowerStatus(status);
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  i2c::Axp2101DisplayEnableResult displayEnable;
+  const bool displayRecoveryOk =
+      i2c::ensureAxp2101DisplayEnabled(displayEnable);
+  if (displayRecoveryOk) {
+    ldoEnable = displayEnable.after;
+    ldoReadOk = true;
+  }
+  Serial.printf("AXP2101: 2.06 display-enable-only recovery ok=%d changed=%d "
+                "before=0x%02X after=0x%02X\n",
+                displayRecoveryOk ? 1 : 0, displayEnable.changed ? 1 : 0,
+                displayEnable.before, displayEnable.after);
+#endif
+  if (statusReadOk) {
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
+                  "status1=0x%02X status2=0x%02X vbus=%s battery=%s "
+                  "currentDir=%u charge=%u ldo=0x%02X ldoRead=%d\n",
+                  status.status1, status.status2,
+                  status.vbusGood ? "good" : "not-good",
+                  status.batteryPresent ? "present" : "absent",
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+                  "railState=%s statusRead=1 status1=0x%02X status2=0x%02X "
+                  "vbus=%d battery=%d currentDirection=%u charging=%u "
+                  "ldoRead=%d ldo=0x%02X displayRecovery=%d "
+                  "displayChanged=%d\n",
+                  displayRecoveryOk ? "display-enabled" : "unknown",
+                  status.status1, status.status2, status.vbusGood ? 1 : 0,
+                  status.batteryPresent ? 1 : 0,
+                  status.batteryCurrentDirection, status.chargingStatus,
+                  ldoReadOk ? 1 : 0, ldoEnable, displayRecoveryOk ? 1 : 0,
+                  displayEnable.changed ? 1 : 0);
+#else
+    Serial.printf("AXP2101: preserving current PMIC rail state; status1=0x%02X "
                   "status2=0x%02X vbus=%s battery=%s currentDir=%u "
                   "charge=%u ldo=0x%02X ldoRead=%d\n",
                   status.status1, status.status2,
@@ -181,6 +226,7 @@ bool initializePowerState() {
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoEnable, ldoReadOk ? 1 : 0);
     Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "railState=current-preserved "
                   "statusRead=1 status1=0x%02X status2=0x%02X vbus=%d "
                   "battery=%d currentDirection=%u charging=%u ldoRead=%d "
                   "ldo=0x%02X\n",
@@ -188,15 +234,34 @@ bool initializePowerState() {
                   status.batteryPresent ? 1 : 0,
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoReadOk ? 1 : 0, ldoEnable);
+#endif
   } else {
-    Serial.printf("AXP2101: preserving factory rails; status read failed "
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+    Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
+                  "status read failed ldo=0x%02X ldoRead=%d\n",
+                  ldoEnable, ldoReadOk ? 1 : 0);
+    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+                  "railState=%s statusRead=0 ldoRead=%d ldo=0x%02X "
+                  "displayRecovery=%d displayChanged=%d\n",
+                  displayRecoveryOk ? "display-enabled" : "unknown",
+                  ldoReadOk ? 1 : 0, ldoEnable,
+                  displayRecoveryOk ? 1 : 0,
+                  displayEnable.changed ? 1 : 0);
+#else
+    Serial.printf("AXP2101: preserving current PMIC rail state; status read failed "
                   "ldo=0x%02X ldoRead=%d\n",
                   ldoEnable, ldoReadOk ? 1 : 0);
     Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+                  "railState=current-preserved "
                   "statusRead=0 ldoRead=%d ldo=0x%02X\n",
                   ldoReadOk ? 1 : 0, ldoEnable);
+#endif
   }
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  return displayRecoveryOk;
+#else
   return true;
+#endif
 }
 
 } // namespace waveshare_board::axp2101

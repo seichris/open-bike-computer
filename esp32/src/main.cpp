@@ -1010,13 +1010,20 @@ void setup() {
   esp_log_level_set("*", ESP_LOG_NONE);
 #endif
 
-  // Initialize Serial for debug. A complete PWRMET report is larger than the
-  // default 256-byte HWCDC queue, so metrics builds reserve enough space for
-  // one atomic report while keeping the normal firmware footprint unchanged.
-#if POWER_METRICS
-  constexpr size_t kPowerMetricsSerialTxBufferSize = 4096;
+  // Initialize Serial for debug. BOOT_PREVIOUS and complete PWRMET reports are
+  // larger than the default 256-byte HWCDC queue. Reserve enough room before
+  // opening USB CDC so the host-attach window cannot truncate their tails.
+#if POWER_METRICS ||                                                         \
+    (FIRMWARE_DIAGNOSTICS &&                                                \
+     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)))
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  constexpr size_t kSerialTxBufferSize =
+      boot_diagnostics::kStructuredSerialTxBufferSize;
+#else
+  constexpr size_t kSerialTxBufferSize = 4096;
+#endif
   const size_t configuredSerialTxBufferSize =
-      Serial.setTxBufferSize(kPowerMetricsSerialTxBufferSize);
+      Serial.setTxBufferSize(kSerialTxBufferSize);
 #endif
 #if FIRMWARE_DIAGNOSTICS || POWER_METRICS
   Serial.begin(115200);
@@ -1025,10 +1032,18 @@ void setup() {
   Serial.setTxTimeoutMs(1);
 #endif
 #if POWER_METRICS
-  if (configuredSerialTxBufferSize != kPowerMetricsSerialTxBufferSize) {
+  if (configuredSerialTxBufferSize != kSerialTxBufferSize) {
     Serial.printf("PWRMET_ERROR txBuffer=%u/%u\n",
                   static_cast<unsigned>(configuredSerialTxBufferSize),
-                  static_cast<unsigned>(kPowerMetricsSerialTxBufferSize));
+                  static_cast<unsigned>(kSerialTxBufferSize));
+  }
+#elif FIRMWARE_DIAGNOSTICS &&                                               \
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  if (configuredSerialTxBufferSize != kSerialTxBufferSize) {
+    Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 operation=serial_buffer "
+                  "configured=%u required=%u\n",
+                  static_cast<unsigned>(configuredSerialTxBufferSize),
+                  static_cast<unsigned>(kSerialTxBufferSize));
   }
 #endif
 #if FIRMWARE_DIAGNOSTICS
@@ -1115,7 +1130,8 @@ void setup() {
 
 #ifdef WAVESHARE_AMOLED_206
   // Recover the shared bus before PMIC inspection on the 2.06-inch board.
-  // Power-output registers remain at their factory/eFuse configuration.
+  // PMIC inspection may set only the established display-enable bit for
+  // compatibility with older images; every other output bit remains intact.
   boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
   waveshare_board::recoverI2CBus();
   waveshare_board::i2c::configureBus();
@@ -1127,7 +1143,8 @@ void setup() {
   initTFT();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #ifdef WAVESHARE_DISPLAY_PROBE
-  Serial.println("Waveshare 2.06 display probe complete; holding before I2C/PMU/SD/LVGL/BLE/touch init");
+  boot_diagnostics::markDiagnosticHold();
+  Serial.println("Waveshare 2.06 display probe complete; holding before RTC/IMU/SD/LVGL/BLE/touch init");
   while (true) {
     delay(1000);
   }
@@ -1195,6 +1212,7 @@ void setup() {
 #endif
 
 #ifdef WAVESHARE_DISPLAY_PROBE
+  boot_diagnostics::markDiagnosticHold();
   Serial.println("Waveshare display probe complete; holding before SD/LVGL/BLE/touch init");
   while (true) {
     delay(1000);

@@ -36,9 +36,11 @@ bool readBatteryStatus(uint8_t &percentage, bool &charging);
 bool readBatteryPercentage(uint8_t &percentage);
 bool setPowerButtonEventMonitoring(bool enabled);
 bool readAndClearPowerButtonEvents(PowerButtonEvents &events);
-// Probe and report the PMIC state without changing any power-rail register.
-// The board-specific rail map has not been electrically validated, so the
-// vendor/factory configuration remains authoritative.
+// Probe and report the PMIC state. The 1.75-inch target leaves every output
+// rail unchanged. The 2.06-inch target has one boot-only compatibility
+// exception: it may set the established display-enable bit while preserving
+// every other bit in that register. No target rewrites rail voltages or turns
+// an output off.
 bool initializePowerState();
 
 } // namespace waveshare_board::axp2101

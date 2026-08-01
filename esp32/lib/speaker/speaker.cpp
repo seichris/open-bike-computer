@@ -85,6 +85,8 @@ QueueHandle_t soundQueue = nullptr;
 SemaphoreHandle_t powerButtonConfigMutex = nullptr;
 bool initialized = false;
 std::atomic<bool> playbackActive{false};
+std::atomic<uint32_t> nextPlaybackRequestId{1U};
+std::atomic<uint32_t> latestPlaybackCompletionToken{0U};
 bool powerButtonHonkAvailable = false;
 bool powerButtonMonitoringConfigured = false;
 float codecHardwareGainDb = 0.0f;
@@ -103,9 +105,28 @@ constexpr char POWER_BUTTON_SOUND_KEY[] = "pwrSound";
 constexpr char POWER_BUTTON_VOLUME_KEY[] = "pwrVolume";
 
 struct QueuedPlaybackRequest {
+  uint32_t requestId;
   uint8_t sound;
   uint8_t volumePercent;
 };
+
+uint32_t allocatePlaybackRequestId() {
+  uint32_t requestId = nextPlaybackRequestId.fetch_add(
+                           1U, std::memory_order_relaxed) &
+                       kPlaybackRequestIdMask;
+  if (requestId == 0U) {
+    requestId = nextPlaybackRequestId.fetch_add(
+                    1U, std::memory_order_relaxed) &
+                kPlaybackRequestIdMask;
+  }
+  return requestId;
+}
+
+void recordPlaybackCompletion(uint32_t requestId, bool succeeded) {
+  latestPlaybackCompletionToken.store(
+      encodePlaybackCompletion(requestId, succeeded),
+      std::memory_order_release);
+}
 
 class PowerButtonConfigLock {
 public:
@@ -533,35 +554,39 @@ void speakerTask(void *) {
     power_management::ScopedLock powerLock(
         power_management::LockDomain::Audio);
     Sound sound = static_cast<Sound>(request.sound);
+    bool playbackSucceeded = false;
     if (!initializeCodec()) {
       playbackActive.store(false, std::memory_order_relaxed);
       Serial.println("Speaker: playback skipped because initialization failed");
-      continue;
-    }
-
-    playbackActive.store(true, std::memory_order_relaxed);
-    ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
-    if (esp_codec_dev_set_out_vol(speakerDevice, request.volumePercent) !=
-        ESP_CODEC_DEV_OK) {
-      Serial.printf("Speaker: failed to set volume to %u%%\n",
-                    request.volumePercent);
     } else {
-      currentDacGainDb = speaker_dac_gain_db(
-          request.volumePercent, codecHardwareGainDb,
-          VOLUME_DB_AT_70_PERCENT, MAX_DAC_GAIN_DB);
-      speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
-      Serial.printf("Speaker: playing sound %u at %u%% volume\n", request.sound,
-                    request.volumePercent);
-      if (!playNow(sound)) {
-        Serial.printf("Speaker: sound %u playback failed\n", request.sound);
+      playbackActive.store(true, std::memory_order_relaxed);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
+      if (esp_codec_dev_set_out_vol(speakerDevice, request.volumePercent) !=
+          ESP_CODEC_DEV_OK) {
+        Serial.printf("Speaker: failed to set volume to %u%%\n",
+                      request.volumePercent);
+      } else {
+        currentDacGainDb = speaker_dac_gain_db(
+            request.volumePercent, codecHardwareGainDb,
+            VOLUME_DB_AT_70_PERCENT, MAX_DAC_GAIN_DB);
+        speaker_configure_limiter(&playbackLimiter, currentDacGainDb);
+        Serial.printf("Speaker: playing sound %u at %u%% volume\n",
+                      request.sound, request.volumePercent);
+        playbackSucceeded = playNow(sound);
+        if (!playbackSucceeded) {
+          Serial.printf("Speaker: sound %u playback failed\n", request.sound);
+        }
       }
+      playbackActive.store(false, std::memory_order_relaxed);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
     }
-    playbackActive.store(false, std::memory_order_relaxed);
-    ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
-
-    if (uxQueueMessagesWaiting(soundQueue) == 0) {
-      releaseCodecResources();
-    }
+    const bool cleanupRequired = uxQueueMessagesWaiting(soundQueue) == 0;
+    const bool cleanupSucceeded =
+        !cleanupRequired || releaseCodecResources();
+    recordPlaybackCompletion(
+        request.requestId,
+        playbackRequestLifecycleSucceeded(
+            playbackSucceeded, cleanupRequired, cleanupSucceeded));
   }
 }
 
@@ -627,12 +652,30 @@ bool isPlaying() {
 }
 
 bool requestPlay(Sound sound, uint8_t volumePercent) {
+  uint32_t requestId = 0U;
+  return requestPlayTracked(sound, volumePercent, requestId);
+}
+
+bool requestPlayTracked(Sound sound, uint8_t volumePercent,
+                        uint32_t &requestId) {
+  requestId = 0U;
   if (!isSupported(sound) || volumePercent > 100 || soundQueue == nullptr) {
     return false;
   }
 
-  QueuedPlaybackRequest request{static_cast<uint8_t>(sound), volumePercent};
-  return xQueueSend(soundQueue, &request, 0) == pdTRUE;
+  const uint32_t candidateRequestId = allocatePlaybackRequestId();
+  QueuedPlaybackRequest request{candidateRequestId,
+                                static_cast<uint8_t>(sound), volumePercent};
+  if (xQueueSend(soundQueue, &request, 0) != pdTRUE) {
+    return false;
+  }
+  requestId = candidateRequestId;
+  return true;
+}
+
+PlaybackCompletion latestPlaybackCompletion() {
+  return decodePlaybackCompletion(
+      latestPlaybackCompletionToken.load(std::memory_order_acquire));
 }
 
 bool isPowerButtonHonkAvailable() {
@@ -733,6 +776,11 @@ bool begin() { return false; }
 bool isAvailable() { return false; }
 bool isPlaying() { return false; }
 bool requestPlay(Sound, uint8_t) { return false; }
+bool requestPlayTracked(Sound, uint8_t, uint32_t &requestId) {
+  requestId = 0U;
+  return false;
+}
+PlaybackCompletion latestPlaybackCompletion() { return {0U, false}; }
 bool isSupported(Sound) { return false; }
 bool isPowerButtonHonkAvailable() { return false; }
 bool getPowerButtonHonkConfig(PowerButtonHonkConfig &) { return false; }

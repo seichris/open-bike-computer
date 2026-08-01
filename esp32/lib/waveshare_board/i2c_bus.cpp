@@ -7,6 +7,7 @@
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
+#include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
 #include "../power_management/power_management.hpp"
 #include <Wire.h>
@@ -18,11 +19,32 @@ namespace waveshare_board::i2c {
 
 namespace {
 
+namespace axp_policy = waveshare_board::axp2101::register_policy;
+
+static_assert(axp_policy::DEVICE_ADDRESS == AXP2101_ADDR,
+              "AXP2101 address must match the write policy");
+
 Stats i2cStats;
 bool busConfigured = false;
 uint32_t activeClockHz = DEFAULT_CLOCK_HZ;
 uint32_t lastFailureLogMs = 0;
 SemaphoreHandle_t busMutex = nullptr;
+
+bool writeAllowed(uint8_t address, uint16_t reg,
+                  std::size_t registerAddressBytes,
+                  std::size_t payloadBytes, const char *shape) {
+  if (axp_policy::isTransactionWriteAllowed(
+          address, reg, registerAddressBytes, payloadBytes)) {
+    return true;
+  }
+
+  Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%04X shape=%s "
+                "registerBytes=%u payloadBytes=%u policy=interrupt-only\n",
+                static_cast<unsigned>(reg), shape,
+                static_cast<unsigned>(registerAddressBytes),
+                static_cast<unsigned>(payloadBytes));
+  return false;
+}
 
 void ensureMutex() {
   if (busMutex == nullptr) {
@@ -211,6 +233,9 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
 
 bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
                     const char *label, uint8_t attempts) {
+  if (!writeAllowed(address, reg, 1, 1, "write8")) {
+    return false;
+  }
   return withRetries(address, label, "write8", attempts,
                      [address, reg, value]() {
                        Wire.beginTransmission(address);
@@ -223,6 +248,9 @@ bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
 bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t len, const char *label, uint8_t attempts) {
   if (data == nullptr || len == 0) {
+    return false;
+  }
+  if (!writeAllowed(address, reg, 1, len, "writeBlock8")) {
     return false;
   }
 
@@ -239,6 +267,9 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
 
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      const char *label, uint8_t attempts) {
+  if (!writeAllowed(address, reg, 2, 1, "write16")) {
+    return false;
+  }
   return withRetries(address, label, "write16", attempts,
                      [address, reg, value]() {
                        Wire.beginTransmission(address);
@@ -248,6 +279,78 @@ bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                        return Wire.endTransmission() == 0;
                      });
 }
+
+#ifdef WAVESHARE_AMOLED_206
+bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
+                                uint8_t attempts) {
+  result = {};
+  bool observedInitialValue = false;
+  return withRetries(
+      axp_policy::DEVICE_ADDRESS, "AXP2101", "display-enable-only", attempts,
+      [&result, &observedInitialValue]() {
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::DISPLAY_ENABLE_REGISTER_206);
+        if (Wire.endTransmission() != 0 ||
+            Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                             static_cast<uint8_t>(1)) != 1) {
+          return false;
+        }
+
+        const uint8_t current = Wire.read();
+        if (!observedInitialValue) {
+          result.before = current;
+          observedInitialValue = true;
+        }
+        const uint8_t updated = axp_policy::withDisplayEnabled206(current);
+        if (current == updated) {
+          result.after = current;
+          const bool valid =
+              axp_policy::isDisplayEnableOnlyTransition206(result.before,
+                                                            current);
+          if (valid) {
+            result.changed = result.before != current;
+          }
+          return valid;
+        }
+
+        if (!axp_policy::isDisplayEnableOnlyTransition206(current, updated) ||
+            !axp_policy::isDisplayEnableOnlyTransition206(result.before,
+                                                           updated)) {
+          Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X value=0x%02X "
+                        "policy=206-display-enable-only\n",
+                        axp_policy::DISPLAY_ENABLE_REGISTER_206, updated);
+          return false;
+        }
+
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::DISPLAY_ENABLE_REGISTER_206);
+        Wire.write(updated);
+        if (Wire.endTransmission() != 0) {
+          return false;
+        }
+
+        delay(5);
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::DISPLAY_ENABLE_REGISTER_206);
+        if (Wire.endTransmission() != 0 ||
+            Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                             static_cast<uint8_t>(1)) != 1) {
+          return false;
+        }
+
+        const uint8_t readback = Wire.read();
+        result.after = readback;
+        const bool valid =
+            readback == updated &&
+            axp_policy::isDisplayEnableOnlyTransition206(result.before,
+                                                          readback);
+        if (valid) {
+          result.changed = result.before != readback;
+        }
+        return valid;
+      });
+}
+#endif
 
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {

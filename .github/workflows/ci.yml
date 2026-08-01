@@ -17,10 +17,13 @@ jobs:
           - WAVESHARE_AMOLED_175_POWER_METRICS
           - WAVESHARE_AMOLED_175_LIGHT_SLEEP
           - WAVESHARE_AMOLED_175_PRODUCTION
+          - WAVESHARE_AMOLED_175_SPEAKER_HONK
           - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_DISPLAY_TEST
           - WAVESHARE_AMOLED_206_POWER_METRICS
           - WAVESHARE_AMOLED_206_LIGHT_SLEEP
           - WAVESHARE_AMOLED_206_PRODUCTION
+          - WAVESHARE_AMOLED_206_SPEAKER_HONK
     defaults:
       run:
         working-directory: esp32
@@ -144,6 +147,10 @@ jobs:
             tools/tests/test_boot_diagnostics_policy.cpp \
             -o /tmp/test_boot_diagnostics_policy
           /tmp/test_boot_diagnostics_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_speaker_playback_policy.cpp \
+            -o /tmp/test_speaker_playback_policy
+          /tmp/test_speaker_playback_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
             -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
             tools/tests/test_power_management_policy.cpp \

@@ -48,21 +48,34 @@ hold the ESP32-S3 in reset:
 
 ```sh
 cd esp32
-python tools/capture_boot.py \
+python3 tools/capture_boot.py \
   --port '/dev/cu.usbmodem*' \
   --duration 40 \
   --expected-target WAVESHARE_AMOLED_175 \
+  --expected-profile WAVESHARE_AMOLED_175 \
   --expected-git "$(git rev-parse HEAD)" \
+  --expected-reset power_on \
   --require-pmic-read-only \
   --require-ready
 ```
 
-Arm that command before reconnecting the device for a true cold-start test.
-Use `--reset` only when an intentional warm reset is wanted. Treat `BOOT_META`
-as the running-image source of truth, use `BOOT_PREVIOUS`/`BOOT_FAILURE` to
-locate an interrupted setup stage, and require a final `BOOT_STAGE ...
-event=ready`. Any `AXP_WRITE_BLOCKED` or `BOOT_DIAGNOSTICS_ERROR` makes the
-capture helper fail validation.
+Arm that command before reconnecting a fully unpowered device for a true
+cold-start test. Disconnect both USB and battery first so the PMIC reloads its
+power-on baseline; preserving rails cannot prove that a still-powered PMIC is
+in factory state. Use `--reset` only when an intentional warm reset is wanted,
+and change or omit `--expected-reset` accordingly. Treat `BOOT_META` as the
+running-image source of truth: target identifies OTA compatibility, while
+profile distinguishes ordinary, production, metrics, light-sleep, and other
+builds from the same Git SHA. Use `BOOT_PREVIOUS`/`BOOT_FAILURE` to locate an
+interrupted setup stage; their fingerprint and failure-reset fields identify
+the failed image and how it ended after rescue firmware is flashed. Require a
+final `BOOT_STAGE ... event=ready` from the same boot sequence.
+`--require-pmic-read-only` also requires a successful PMIC probe plus status and
+LDO-state reads and is the 1.75-inch safety gate. For a 2.06-inch capture, use
+`--require-pmic-display-enable-only`; it additionally requires the dedicated
+one-way display recovery and verified display-enable bit. Any
+`AXP_WRITE_BLOCKED` or `BOOT_DIAGNOSTICS_ERROR` makes the capture helper fail
+validation.
 
 ### iOS app
 

@@ -39,6 +39,7 @@ uint32_t mixString(uint32_t hash, const char *value) {
 uint32_t firmwareFingerprint() {
   uint32_t hash = 2166136261U;
   hash = mixString(hash, firmware_metadata::target());
+  hash = mixString(hash, firmware_metadata::buildProfile());
   hash = mixString(hash, firmware_metadata::version());
   hash = policy::mixU32(hash, firmware_metadata::build());
   hash = mixString(hash, firmware_metadata::gitSha());
@@ -126,11 +127,13 @@ void begin() {
   runtimeSafeMode = result.safeMode;
 
   if (kLogEnabled) {
-    Serial.printf("BOOT_META schema=1 sequence=%lu target=%s version=%s "
+    Serial.printf("BOOT_META schema=1 sequence=%lu target=%s profile=%s version=%s "
                   "build=%lu git=%s built=%s fingerprint=%08lX reset=%s "
                   "resetCode=%lu\n",
                   static_cast<unsigned long>(persistentState.bootSequence),
-                  firmware_metadata::target(), firmware_metadata::version(),
+                  firmware_metadata::target(),
+                  firmware_metadata::buildProfile(),
+                  firmware_metadata::version(),
                   static_cast<unsigned long>(firmware_metadata::build()),
                   firmware_metadata::gitSha(),
                   firmware_metadata::buildTimestamp(),
@@ -140,15 +143,24 @@ void begin() {
 
     const policy::PersistentState &previous = result.previous;
     Serial.printf("BOOT_PREVIOUS schema=1 history=%s valid=%d sameFirmware=%d "
-                  "sequence=%lu ready=%d safeMode=%d reset=%s resetCode=%lu "
-                  "active=%s completed=%s\n",
+                  "sequence=%lu fingerprint=%08lX ready=%d safeMode=%d "
+                  "diagnosticHold=%d "
+                  "reset=%s resetCode=%lu active=%s completed=%s "
+                  "failureCount=%u failureStage=%s failureAfter=%s "
+                  "failureReset=%s failureResetCode=%lu\n",
                   historyStatus(result), result.previousValid ? 1 : 0,
                   result.previousSameFirmware ? 1 : 0,
                   static_cast<unsigned long>(result.previousValid
                                                  ? previous.bootSequence
                                                  : 0),
+                  static_cast<unsigned long>(result.previousValid
+                                                 ? previous.firmwareFingerprint
+                                                 : 0),
                   result.previousValid && policy::isReady(previous) ? 1 : 0,
                   result.previousValid && policy::isSafeMode(previous) ? 1 : 0,
+                  result.previousValid && policy::isDiagnosticHold(previous)
+                      ? 1
+                      : 0,
                   resetReasonName(result.previousValid ? previous.resetReason
                                                        : 0),
                   static_cast<unsigned long>(result.previousValid
@@ -157,10 +169,25 @@ void begin() {
                   policy::stageName(static_cast<Stage>(
                       result.previousValid ? previous.activeStage : 0)),
                   policy::stageName(static_cast<Stage>(
-                      result.previousValid ? previous.completedStage : 0)));
+                      result.previousValid ? previous.completedStage : 0)),
+                  static_cast<unsigned>(
+                      result.previousValid ? previous.consecutiveEarlyFailures
+                                           : 0),
+                  policy::stageName(static_cast<Stage>(
+                      result.previousValid ? previous.lastFailureStage : 0)),
+                  policy::stageName(static_cast<Stage>(
+                      result.previousValid
+                          ? previous.lastFailureCompletedStage
+                          : 0)),
+                  resetReasonName(result.previousValid
+                                      ? previous.lastFailureResetReason
+                                      : 0),
+                  static_cast<unsigned long>(
+                      result.previousValid ? previous.lastFailureResetReason
+                                           : 0));
 
     Serial.printf("BOOT_FAILURE schema=1 recorded=%d count=%u threshold=%u "
-                  "stage=%s after=%s safeMode=%d\n",
+                  "stage=%s after=%s reset=%s resetCode=%lu safeMode=%d\n",
                   result.failureRecorded ? 1 : 0,
                   static_cast<unsigned>(
                       persistentState.consecutiveEarlyFailures),
@@ -169,6 +196,9 @@ void begin() {
                       persistentState.lastFailureStage)),
                   policy::stageName(static_cast<Stage>(
                       persistentState.lastFailureCompletedStage)),
+                  resetReasonName(persistentState.lastFailureResetReason),
+                  static_cast<unsigned long>(
+                      persistentState.lastFailureResetReason),
                   runtimeSafeMode ? 1 : 0);
 
     if (runtimeSafeMode) {
@@ -217,6 +247,18 @@ void markReady() {
     logStage("ready", Stage::Ready);
   } else if (kLogEnabled) {
     Serial.println("BOOT_DIAGNOSTICS_ERROR schema=1 operation=ready");
+  }
+}
+
+void markDiagnosticHold() {
+  if (!initialized || runtimeSafeMode) {
+    return;
+  }
+  if (policy::markDiagnosticHold(persistentState)) {
+    logStage("hold", Stage::DiagnosticHold);
+  } else if (kLogEnabled) {
+    Serial.println(
+        "BOOT_DIAGNOSTICS_ERROR schema=1 operation=diagnostic_hold");
   }
 }
 

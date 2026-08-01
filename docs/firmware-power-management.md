@@ -45,7 +45,7 @@ peripheral transaction part of the correctness boundary.
 | Connected, display off | 45 seconds without meaningful activity | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
 | Transfer or attention hold | Device transfer, activation, pairing, or audio needs immediate feedback | Display stays awake and required PM locks protect the operation | Hold ends when the operation ends |
 | Disconnected countdown | BLE is disconnected and the configured timeout is nonzero | Firmware remains available for reconnection | Reconnection cancels the countdown; expiry enters deep sleep |
-| Deep sleep | Disconnected timeout expires | Panel is commanded off; buses and radio stop; unvalidated AXP2101 rails remain at their factory/eFuse state | BOOT/PWR button on GPIO0 |
+| Deep sleep | Disconnected timeout expires | Panel is commanded off; buses and radio stop; firmware does not turn off or rewrite AXP2101 output rails | BOOT/PWR button on GPIO0 |
 
 Display-off while connected is not deep sleep. The BLE connection is retained,
 and touch can wake the UI without requiring a reboot or reconnection.
@@ -60,6 +60,13 @@ registration grace period unless the feature is disabled.
 Before deep sleep, firmware commands the panel off, stops the SPI and I2C buses,
 and shuts down the radio. It does not rewrite AXP2101 output-enable or voltage
 registers because the populated rail map has not been electrically validated.
+That preserves the PMIC's current state; it does not prove factory defaults are
+loaded unless USB and battery were both removed before the boot.
+The 2.06-inch boot path has one one-way compatibility exception outside the
+sleep path: it may set established display-enable bit `0x80` in register `0x90`
+after older firmware left that bit clear. It preserves every other bit, verifies
+readback, and never clears the bit. The 1.75-inch boot path remains read-only
+for every output-rail register.
 This path is independent of the connected light-sleep experiment.
 
 ## Display inactivity policy

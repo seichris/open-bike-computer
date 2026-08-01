@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import configparser
+import re
 from pathlib import Path
 
 
@@ -8,6 +9,23 @@ project_dir = Path(__file__).resolve().parents[2]
 repo_root = project_dir.parent
 config = configparser.ConfigParser(interpolation=None)
 config.read(project_dir / "platformio.ini")
+
+
+def inherited_option(section: str, option: str) -> str:
+    """Resolve the single-parent PlatformIO inheritance used by this file."""
+    visited: set[str] = set()
+    current = section
+    while current:
+        assert current not in visited, f"cyclic PlatformIO inheritance at {current}"
+        visited.add(current)
+        if config.has_option(current, option):
+            return config.get(current, option)
+        current = config.get(current, "extends", fallback="").strip()
+    raise AssertionError(f"{section} does not resolve {option}")
+
+
+prebuild_source = (project_dir / "prebuild.py").read_text()
+assert "-DBUILD_PROFILE=" in prebuild_source
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
@@ -37,6 +55,7 @@ diagnostic_profiles = {
 }
 for environment, (base, board_define) in diagnostic_profiles.items():
     assert config.get(environment, "extends") == base
+    assert inherited_option(environment, "custom_firmware_target") == board_define
     base_flags = config.get(base, "build_flags")
     assert f"-D{board_define}" in base_flags
     flags = config.get(environment, "build_flags")
@@ -45,13 +64,20 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DFIRMWARE_DIAGNOSTICS=1" in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" in flags
 
+assert "-DWAVESHARE_206_FORCE_AXP_DISPLAY=1" in config.get(
+    "waveshare_amoled_206_base", "build_flags"
+)
+assert "-DWAVESHARE_206_FORCE_AXP_DISPLAY" not in config.get(
+    "waveshare_amoled_175_base", "build_flags"
+)
+
 expected_targets = {
     "env:WAVESHARE_AMOLED_175_PRODUCTION": "WAVESHARE_AMOLED_175",
     "env:WAVESHARE_AMOLED_206_PRODUCTION": "WAVESHARE_AMOLED_206",
 }
 
 for environment, target in expected_targets.items():
-    assert config.get(environment, "custom_firmware_target") == target
+    assert inherited_option(environment, "custom_firmware_target") == target
     base = diagnostic_profiles[environment.replace("_PRODUCTION", "")][0]
     assert config.get(environment, "extends") == base
     flags = config.get(environment, "build_flags")
@@ -79,7 +105,7 @@ light_sleep_profiles = {
 }
 for environment, (base, target) in light_sleep_profiles.items():
     assert config.get(environment, "extends") == base
-    assert config.get(environment, "custom_firmware_target") == target
+    assert inherited_option(environment, "custom_firmware_target") == target
     sdkconfig = config.get(environment, "custom_sdkconfig")
     assert "CONFIG_PM_ENABLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
@@ -96,9 +122,96 @@ assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" in config.get(
     "env:WAVESHARE_AMOLED_206_LIGHT_SLEEP", "custom_sdkconfig"
 )
 
+# Every board-named firmware profile reports the stable hardware/OTA target;
+# BUILD_PROFILE remains the distinct PIO environment identity in boot logs.
+for section in config.sections():
+    profile = section.removeprefix("env:")
+    if profile.startswith("WAVESHARE_AMOLED_175"):
+        assert (
+            inherited_option(section, "custom_firmware_target")
+            == "WAVESHARE_AMOLED_175"
+        )
+    elif profile.startswith("WAVESHARE_AMOLED_206"):
+        assert (
+            inherited_option(section, "custom_firmware_target")
+            == "WAVESHARE_AMOLED_206"
+        )
+
 ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
 for environment in light_sleep_profiles:
     assert environment.removeprefix("env:") in ci_workflow
+
+display_probe_profile = "env:WAVESHARE_AMOLED_206_DISPLAY_TEST"
+assert config.get(display_probe_profile, "extends") == "env:WAVESHARE_AMOLED_206"
+display_probe_flags = config.get(display_probe_profile, "build_flags")
+assert "-DWAVESHARE_DISPLAY_PROBE=1" in display_probe_flags
+assert display_probe_profile.removeprefix("env:") in ci_workflow
+
+speaker_source = (project_dir / "speaker_honk_test.cpp").read_text()
+speaker_implementation = (project_dir / "lib/speaker/speaker.cpp").read_text()
+for board in ("175", "206"):
+    profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
+    assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"
+    assert "+<../speaker_honk_test.cpp>" in config.get(profile, "build_src_filter")
+    assert profile.removeprefix("env:") in ci_workflow
+assert speaker_source.index("boot_diagnostics::begin()") < speaker_source.index(
+    "waveshare_board::i2c::configureBus()"
+)
+assert speaker_source.index(
+    "waveshare_board::i2c::configureBus()"
+) < speaker_source.index("waveshare_board::initializePowerManagement()")
+assert "boot_diagnostics::safeModeActive()" in speaker_source
+assert "boot_diagnostics::markReady()" in speaker_source
+assert "waveshare_board::speaker::requestPlayTracked" in speaker_source
+assert "waveshare_board::speaker::latestPlaybackCompletion" in speaker_source
+assert "TrackedPlaybackResult::Succeeded" in speaker_source
+assert "TrackedPlaybackResult::Failed" in speaker_source
+assert "playbackSucceeded = playNow(sound)" in speaker_implementation
+cleanup_call = speaker_implementation.index(
+    "!cleanupRequired || releaseCodecResources();"
+)
+completion_publish = speaker_implementation.index(
+    "recordPlaybackCompletion(\n        request.requestId"
+)
+assert cleanup_call < completion_publish
+assert "playbackRequestLifecycleSucceeded(" in speaker_implementation[
+    completion_publish:
+]
+startup_ready_guard = speaker_source.index("if (startupSoundsCompleted ==")
+assert startup_ready_guard < speaker_source.index("boot_diagnostics::markReady()")
+assert startup_ready_guard < speaker_source.index(
+    "boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker)"
+)
+assert "startupSoundsCompleted" in speaker_source
+assert "if (!testInitialized)" in speaker_source
+
+boot_policy_source = (
+    project_dir / "lib/boot_diagnostics/boot_diagnostics_policy.hpp"
+).read_text()
+assert "kStructuredSerialTxBufferSize = 4096" in boot_policy_source
+main_source = (project_dir / "src/main.cpp").read_text()
+for source in (main_source, speaker_source):
+    assert "Serial.setTxBufferSize(" in source
+    assert "boot_diagnostics::kStructuredSerialTxBufferSize" in source
+
+# Keep every raw I2C write transaction behind i2c_bus.cpp, where the AXP2101
+# allowlist is enforced. Direct requestFrom() reads remain permitted.
+i2c_boundary = (project_dir / "lib/waveshare_board/i2c_bus.cpp").resolve()
+raw_write_pattern = re.compile(r"\bWire\s*\.\s*beginTransmission\s*\(")
+raw_write_offenders: list[str] = []
+source_paths = set(project_dir.glob("*.cpp")) | set(project_dir.glob("*.ino"))
+for source_root in (project_dir / "src", project_dir / "lib"):
+    for suffix in ("*.cpp", "*.hpp", "*.h", "*.ino"):
+        source_paths.update(source_root.rglob(suffix))
+for source_path in sorted(source_paths):
+    if source_path.resolve() == i2c_boundary:
+        continue
+    if raw_write_pattern.search(source_path.read_text(errors="ignore")):
+        raw_write_offenders.append(str(source_path.relative_to(project_dir)))
+assert not raw_write_offenders, (
+    "raw Wire.beginTransmission() bypasses the AXP2101 policy boundary: "
+    + ", ".join(raw_write_offenders)
+)
 
 release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
 for environment, target in expected_targets.items():
