@@ -9,6 +9,7 @@
  */
 
 #include "../utils/src/psram_allocator.hpp"
+#include "../maps/src/map_projection.hpp"
 #include "navigation_visual_style.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
@@ -44,23 +45,14 @@ public:
   /**
    * @brief Draw route overlay on LVGL canvas
    *
-   * Uses the current map center and zoom to transform geographic
-   * coordinates to screen pixels.
+   * Uses the same immutable projection as the base vector map so the route
+   * remains aligned in both flat and bird's-eye modes.
    *
    * @param canvas LVGL canvas object to draw on
-   * @param centerLat Map center latitude in microdegrees
-   * @param centerMercatorX Map center X in Mercator units (meters)
-   * @param centerMercatorY Map center Y in Mercator units (meters)
-   * @param zoom Current zoom level (higher = more zoomed in)
-   * @param mapScrWidth Map screen width (for coordinate centering)
-   * @param mapScrHeight Map screen height (for Y-axis flip)
+   * @param projection Projection snapshot used for the current map frame
    */
-  void drawRoute(lv_obj_t *canvas, double centerMercatorX,
-                 double centerMercatorY, uint8_t zoom, uint16_t mapScrWidth,
-                 uint16_t mapScrHeight, double rotationRad = 0.0,
-                 int16_t anchorX = -1, int16_t anchorY = -1,
-                 int32_t rasterCellOffsetX = 0,
-                 int32_t rasterCellOffsetY = 0);
+  void drawRoute(lv_obj_t *canvas,
+                 const map_projection::Projection &projection);
 
   /**
    * @brief Clear all route points
@@ -94,19 +86,6 @@ public:
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
   uint32_t revisionCounter = 0;
-
-  /**
-   * @brief Convert longitude to screen X coordinate
-   */
-  double geoToScreenX(int32_t lon, double centerLon, uint8_t zoom,
-                      int16_t screenWidth, int16_t anchorX);
-
-  /**
-   * @brief Convert latitude to screen Y coordinate
-   */
-  double geoToScreenY(int32_t lat, double centerLat, uint8_t zoom,
-                      int16_t screenHeight, int16_t screenWidth,
-                      int16_t anchorY);
 
   /**
    * @brief Draw a single line segment with thickness

@@ -484,6 +484,7 @@ Current setting IDs:
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
+| `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
@@ -504,6 +505,12 @@ Navigation profile. On firmware upgrade, missing Map + Navigation values inherit
 the persisted Map values. Map rotation mode remains Map-only; Map + Navigation
 automatically uses course-up while navigating. Route and current-position
 overlay visibility remains shared by both profiles.
+
+Setting ID `25` is separately capability-gated and does not change the
+`16...22` independent-profile range. The ordinary Map screen and Map +
+Navigation without an active route remain flat. During active navigation the
+bird's-eye renderer uses one projection snapshot for vector features, route
+geometry, and the current-position marker so all three layers stay aligned.
 
 Fresh Map profiles default to high detail, zoom level `3`, a `4` px route line,
 `4` px streets, and a `2x` position marker. Fresh Map + Navigation profiles
@@ -613,8 +620,22 @@ screen settings so the device can distinguish a current screen mask from one
 sent by an older four-screen app; older app masks preserve the device's
 existing Battery Status preference. Version `5` advertises destination-catalog
 and device-originated route-request support. Version `6` advertises that the
-client understands the dedicated Watch-workout telemetry contract. Receiving a `CAPS` request alone does not
-switch the firmware's
+client understands the dedicated Watch-workout telemetry contract. Version `7`
+asks firmware to append an extended capability byte after the optional
+PWR-button configuration:
+
+```text
+"CAPS" | Flags: UInt8 | ExtendedFlags: UInt8
+"CAPS" | Flags: UInt8 | Enabled: UInt8 | SoundID: UInt8 | VolumePercent: UInt8 | ExtendedFlags: UInt8
+```
+
+Extended flag bit `0` reports support for the Map + Navigation bird's-eye
+projection and setting ID `25`. iOS keeps the switch disabled and never sends
+ID `25` when this bit is absent. Firmware only appends this byte for version
+`7` or newer requests, so older clients continue receiving the exact legacy
+five- or eight-byte response.
+
+Receiving a `CAPS` request alone does not switch the firmware's
 setting semantics: a session switches to independent profiles only after the
 first setting ID in `16...22` is received. This keeps legacy IDs shared when a
 capability response is dropped.

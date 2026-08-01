@@ -17,6 +17,11 @@ int main() {
   assert(clientSupportsIndependentProfiles(3));
   assert(!clientSupportsExtendedVisibility(2));
   assert(clientSupportsExtendedVisibility(3));
+  assert(BIRDS_EYE_EXTENDED_CAPABILITY_MASK == (1 << 0));
+  assert(BIRDS_EYE_CLIENT_VERSION == 7);
+  assert(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID == 25);
+  assert(!clientSupportsBirdsEyeProjection(6));
+  assert(clientSupportsBirdsEyeProjection(7));
   assert(DEFAULT_STREET_WIDTH == 4);
   assert(MAP_DEFAULT_DETAIL_LEVEL == 2);
   assert(MAP_DEFAULT_ROUTE_LINE_WIDTH == 4);
@@ -93,6 +98,8 @@ int main() {
   assert(clampValue(21, -4) == -3);
   assert(clampValue(10, 0) == 1);
   assert(clampValue(22, 6) == 5);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID, -1) == 0);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID, 2) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(-3) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(0) == 4);
   assert(absoluteStreetWidthFromLegacyBoost(4) == 8);

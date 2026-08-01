@@ -8,6 +8,9 @@ constexpr uint8_t CAPABILITY_MASK = 1 << 3;
 constexpr uint8_t CLIENT_VERSION = 2;
 constexpr uint8_t EXTENDED_VISIBILITY_CAPABILITY_MASK = 1 << 4;
 constexpr uint8_t EXTENDED_VISIBILITY_CLIENT_VERSION = 3;
+constexpr uint8_t BIRDS_EYE_EXTENDED_CAPABILITY_MASK = 1 << 0;
+constexpr uint8_t BIRDS_EYE_CLIENT_VERSION = 7;
+constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_SETTING_ID = 25;
 constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
 constexpr uint8_t MAP_DEFAULT_ROUTE_LINE_WIDTH = 4;
@@ -44,6 +47,10 @@ inline bool clientSupportsIndependentProfiles(uint8_t clientVersion) {
 
 inline bool clientSupportsExtendedVisibility(uint8_t clientVersion) {
   return clientVersion >= EXTENDED_VISIBILITY_CLIENT_VERSION;
+}
+
+inline bool clientSupportsBirdsEyeProjection(uint8_t clientVersion) {
+  return clientVersion >= BIRDS_EYE_CLIENT_VERSION;
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
@@ -140,6 +147,9 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
   case 22:
     minimum = 1;
     maximum = 5;
+    break;
+  case MAP_NAVIGATION_BIRDS_EYE_SETTING_ID:
+    maximum = 1;
     break;
   default:
     return value;

@@ -14,6 +14,7 @@
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
+#include "map_projection.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
@@ -141,7 +142,8 @@ private:
                 int16_t y2, uint16_t color, uint8_t width);
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
-                     uint8_t zoom, double rotation);
+                     uint8_t zoom, double rotation,
+                     const map_projection::Projection &projection);
   bool renderRollingRasterCell(double rasterOriginX, double rasterOriginY,
                                int32_t cellOffsetX, int32_t cellOffsetY,
                                uint8_t zoom, double rotation,
@@ -271,6 +273,8 @@ private:
   } rollingRasterWindow;
 
   map_drag_preview::Controller dragPreviewController;
+  map_projection::Projection visibleProjection;
+  bool hasVisibleProjection = false;
   bool deferredVectorRedraw = false;
   struct DragPresentation {
     uint8_t baseZoom = map_transform::kMinimumRuntimeZoom;

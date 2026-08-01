@@ -6,6 +6,16 @@
 
 namespace map_profile_persistence {
 
+template <typename Store>
+inline bool loadBirdsEyeEnabled(Store &store) {
+  return store.getBool("navBirdEye", true);
+}
+
+template <typename Store>
+inline void persistBirdsEyeEnabled(Store &store, bool enabled) {
+  store.putBool("navBirdEye", enabled);
+}
+
 template <typename Store, typename Profile>
 inline void load(Store &store, Profile &mapStyle,
                  Profile &mapNavigationStyle) {

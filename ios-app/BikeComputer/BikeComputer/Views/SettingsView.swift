@@ -991,6 +991,16 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
     }
 
+    private var birdsEyeFooter: String {
+        if !bleManager.hasReceivedDeviceCapabilities {
+            return "Connect to the Bike Computer to check bird's-eye view support."
+        }
+        if !bleManager.supportsBirdsEyeMapNavigation {
+            return "Update the Bike Computer firmware to enable bird's-eye view."
+        }
+        return "Tilts the map during active navigation. The ordinary Map screen stays flat."
+    }
+
     var body: some View {
         Form {
             if screen == .map {
@@ -1003,6 +1013,27 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: bleManager.mapRotationMode) { newValue in
                         bleManager.sendSetting(id: 6, value: Int32(newValue))
                     }
+                }
+            }
+
+            if screen == .mapPlusNavigation {
+                Section(header: Text("View"), footer: Text(birdsEyeFooter)) {
+                    Toggle(
+                        "Bird's-Eye View",
+                        isOn: $bleManager.mapPlusNavigationBirdsEyeViewEnabled
+                    )
+                    .onChange(
+                        of: bleManager.mapPlusNavigationBirdsEyeViewEnabled
+                    ) { enabled in
+                        bleManager.sendSetting(
+                            id: DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID,
+                            value: enabled ? 1 : 0
+                        )
+                    }
+                    .disabled(
+                        !bleManager.hasReceivedDeviceCapabilities ||
+                            !bleManager.supportsBirdsEyeMapNavigation
+                    )
                 }
             }
 

@@ -28,8 +28,13 @@ public:
     const auto value = values.find(key);
     return value == values.end() ? fallback : value->second;
   }
+  bool getBool(const char *key, bool fallback) const {
+    const auto value = values.find(key);
+    return value == values.end() ? fallback : value->second != 0;
+  }
   void putUChar(const char *key, uint8_t value) { values[key] = value; }
   void putUInt(const char *key, uint32_t value) { values[key] = value; }
+  void putBool(const char *key, bool value) { values[key] = value ? 1 : 0; }
 
 private:
   std::unordered_map<std::string, uint32_t> values;
@@ -59,6 +64,7 @@ int main() {
   TestProfile loadedMap;
   TestProfile loadedNavigation;
   map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
+  assert(map_profile_persistence::loadBirdsEyeEnabled(freshStore));
   assert(loadedMap.detailLevel == MAP_DEFAULT_DETAIL_LEVEL);
   assert(loadedMap.routeLineWidth == MAP_DEFAULT_ROUTE_LINE_WIDTH);
   assert(loadedMap.streetLineWidth == DEFAULT_STREET_WIDTH);
@@ -122,6 +128,11 @@ int main() {
   assert(independentStore.getUInt("visMask", 0) ==
          (map.visibilityMask | VISIBILITY_OVERLAY_MASK |
           VISIBILITY_EXTENDED_MARKER));
+
+  map_profile_persistence::persistBirdsEyeEnabled(independentStore, false);
+  assert(!map_profile_persistence::loadBirdsEyeEnabled(independentStore));
+  map_profile_persistence::persistBirdsEyeEnabled(independentStore, true);
+  assert(map_profile_persistence::loadBirdsEyeEnabled(independentStore));
 
   std::cout << "Map profile persistence tests passed\n";
   return 0;

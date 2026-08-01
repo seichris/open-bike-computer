@@ -37,8 +37,8 @@ struct NavigationData {
  * IDs 1,2,3,7,8,9,10 configure the Map screen. IDs 16-22 configure
  * Map + Navigation. IDs 6,11-15 configure shared/device behavior, and IDs
  * 23-24 carry the connected phone's transient battery percentage and charging
- * state. Legacy ID 4 is ignored because display rotation is selected by the
- * hardware target.
+ * state. ID 25 controls the Map + Navigation bird's-eye projection. Legacy ID
+ * 4 is ignored because display rotation is selected by the hardware target.
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
@@ -113,6 +113,7 @@ struct MapRenderSettings {
         map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK;
     return settings;
   }();
+  bool mapNavigationBirdsEyeEnabled = true;
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
