@@ -42,7 +42,8 @@ int main() {
   assert(idle.update(46'000, {}).current == Mode::DisplayOff);
 
   // Connection state and replaceable GPS/workout samples are intentionally not
-  // policy inputs, so repeated updates alone cannot postpone idle states.
+  // meaningful-activity inputs, so repeated updates alone cannot postpone idle
+  // states without an explicit navigation or workout hold.
   Policy gpsOnly;
   gpsOnly.begin(0);
   for (uint32_t now = 1'000; now <= 50'000; now += 1'000) {
@@ -99,6 +100,16 @@ int main() {
   assert(navigation.update(200'000, {}).current == Mode::Active);
   assert(navigation.update(215'000, {}).current == Mode::Dimmed);
 
+  Policy workout;
+  workout.begin(0);
+  Context workingOut;
+  workingOut.workoutActive = true;
+  assert(workout.update(100'000, workingOut).current == Mode::Active);
+  assert(workout.update(200'000, workingOut).current == Mode::Active);
+  assert(workout.update(300'000, {}).current == Mode::Active);
+  assert(workout.update(315'000, {}).current == Mode::Dimmed);
+  assert(workout.update(345'000, {}).current == Mode::DisplayOff);
+
   Policy transfer;
   transfer.begin(0);
   Context transferring;
@@ -142,12 +153,21 @@ int main() {
     assert(eventUpdate.displayWakeRequired ==
            (previous == Mode::DisplayOff));
 
-    // Route/navigation start, pairing/ownership, audio, and transfer entry are
-    // policy holds and must work from every prior state as well.
+    // Route/navigation start, workout start, pairing/ownership, audio, and
+    // transfer entry are policy holds and must work from every prior state as
+    // well.
     Policy route = policyAtMode(previous);
     Context routeStarted;
     routeStarted.navigating = true;
     assert(route.update(100'000, routeStarted).current == Mode::Active);
+
+    Policy workout = policyAtMode(previous);
+    Context workoutStarted;
+    workoutStarted.workoutActive = true;
+    const auto workoutUpdate = workout.update(100'000, workoutStarted);
+    assert(workoutUpdate.current == Mode::Active);
+    assert(workoutUpdate.displayWakeRequired ==
+           (previous == Mode::DisplayOff));
 
     Policy pairing = policyAtMode(previous);
     Context pairingStarted;

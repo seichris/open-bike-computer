@@ -37,6 +37,7 @@ constexpr bool shouldPollTouchWhileDisplayInactive(Mode currentMode,
 
 struct Context {
   bool navigating = false;
+  bool workoutActive = false;
   bool transferActive = false;
   bool attentionActive = false;
 };
@@ -115,11 +116,13 @@ public:
       begin(nowMs);
     }
 
-    const bool heldAwake = context.navigating || context.transferActive ||
-                           context.attentionActive;
+    const bool heldAwake =
+        context.navigating || context.workoutActive || context.transferActive ||
+        context.attentionActive;
     if (heldAwake_ && !heldAwake) {
-      // Leaving navigation, transfer, pairing, or audio should start a fresh
-      // idle interval instead of immediately inheriting the time spent held.
+      // Leaving navigation, workout, transfer, pairing, or audio should start
+      // a fresh idle interval instead of immediately inheriting the time spent
+      // held.
       lastMeaningfulActivityMs_ = nowMs;
     }
     heldAwake_ = heldAwake;
@@ -127,7 +130,8 @@ public:
     Mode requested = Mode::Active;
     if (context.transferActive) {
       requested = Mode::Transfer;
-    } else if (context.navigating || context.attentionActive) {
+    } else if (context.navigating || context.workoutActive ||
+               context.attentionActive) {
       requested = Mode::Active;
     } else {
       const uint32_t idleMs = elapsedMs(nowMs, lastMeaningfulActivityMs_);

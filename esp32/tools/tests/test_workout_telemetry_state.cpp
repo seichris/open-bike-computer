@@ -85,6 +85,31 @@ void assertResultPreservesState(Reducer &reducer, const uint8_t *bytes,
 } // namespace
 
 int main() {
+  State activityState;
+  const SessionState liveStates[] = {
+      SessionState::Starting,
+      SessionState::Running,
+      SessionState::Paused,
+      SessionState::Ending,
+  };
+  for (const SessionState state : liveStates) {
+    activityState.sessionState = state;
+    activityState.coreReceived = false;
+    assert(!workout_telemetry::isActiveWorkout(activityState));
+    activityState.coreReceived = true;
+    assert(workout_telemetry::isActiveWorkout(activityState));
+  }
+  const SessionState inactiveStates[] = {
+      SessionState::Idle,
+      SessionState::Ended,
+      SessionState::Failed,
+  };
+  for (const SessionState state : inactiveStates) {
+    activityState.sessionState = state;
+    activityState.coreReceived = true;
+    assert(!workout_telemetry::isActiveWorkout(activityState));
+  }
+
   const uint8_t core[workout_telemetry_protocol::FRAME_SIZE] = {
       0x01, 0x02, 0x34, 0x12, 0x4D, 0x0E, 0x00, 0x00,
       0x39, 0x30, 0x00, 0x00, 0xD2, 0x04, 0x9D, 0x00,

@@ -111,6 +111,10 @@ inline bool isLiveSessionState(
          state == SessionState::Paused || state == SessionState::Ending;
 }
 
+inline bool isActiveWorkout(const State &state) {
+  return state.coreReceived && isLiveSessionState(state.sessionState);
+}
+
 inline bool isValidSessionState(uint8_t raw) {
   return raw <= static_cast<uint8_t>(
                     workout_telemetry_protocol::SessionState::Failed);

@@ -30,6 +30,14 @@ workout_telemetry::Snapshot snapshot(uint32_t nowMs) {
   return workout_telemetry::makeSnapshot(state, nowMs);
 }
 
+bool isWorkoutActive() {
+  portENTER_CRITICAL(&workoutTelemetryMux);
+  const bool active =
+      workout_telemetry::isActiveWorkout(workoutTelemetryReducer.state());
+  portEXIT_CRITICAL(&workoutTelemetryMux);
+  return active;
+}
+
 void beginAuthenticatedResynchronization() {
   portENTER_CRITICAL(&workoutTelemetryMux);
   workoutTelemetryReducer.beginResynchronization();
