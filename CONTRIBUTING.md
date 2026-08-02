@@ -52,15 +52,44 @@ Upload ESP32 firmware:
 
 ```sh
 cd esp32
-python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
-  --upload-port /dev/cu.usbmodemXXXX
+pio device list
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+```
+
+Retry an already verified build after a transient connection failure without
+recompiling:
+
+```sh
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --upload-only \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
 ```
 
 Use this helper rather than a raw Waveshare `pio run`. It verifies the tracked
 pioarduino platform and executable-package archive digests, keeps pioarduino's
 recursive custom-core build on the generated local config, isolates and attests
 PlatformIO-installed package/tool/nested-runtime and ESP-IDF component state,
-and gives PlatformIO only the image set attested by the preceding build. The
+and records PlatformIO's resolved flash plan during the preceding build. The
+application offset is taken from the built, attested partition table because
+pioarduino can clear its corresponding environment value after custom-core reuse;
+any non-empty PlatformIO value must agree. Upload revalidates that plan, its exact
+uploader, and every referenced image before replaying it directly without another
+PlatformIO build. The final
+attested command uses esptool's `keep` values for flash mode, frequency, and
+size so esptool cannot rewrite a hashed bootloader image. The original resolved
+values remain in the plan provenance. The
+hardware-serial selector resolves the current OS port immediately before
+esptool runs and waits 60 seconds by default. USB port numbers are transient and
+must not be used to distinguish multiple attached boards. The upload subprocess
+also suppresses Python bytecode writes inside the attested private environment,
+keeping an unchanged build eligible for upload-only retry after a connection
+failure. The verified build clock is the exact Git commit's committer timestamp.
+It is exported as `SOURCE_DATE_EPOCH` to the full toolchain and embedded as
+`BOOT_META built=`, so that field is source commit time rather than local
+compile time. The manifest attests both the epoch and its ISO UTC rendering.
+Public dependency fetches use an empty isolated Git configuration so ambient
+URL rewrites cannot alter the transport. The
 host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
 online Python dependency resolver (including its registries, external `uv`,
 private `penv`, and ESP-IDF venv before their resulting trees are attested)
@@ -69,8 +98,12 @@ included in the later core attestation, but this is not a pre-execution Python
 dependency lock. Command success is not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
-If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then retry. For the
-2.06 board, use the `WAVESHARE_AMOLED_206` environment.
+If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then use the
+upload-only command. For the 2.06 board, use the `WAVESHARE_AMOLED_206`
+environment. Confirm the expected target/profile/Git identity from `BOOT_META`
+before reporting a physical installation as complete. Pass the same stable
+hardware identity to `tools/capture_boot.py --device-serial ...`; this prevents
+boot verification from following a different board after USB re-enumeration.
 
 View ESP32 serial logs:
 

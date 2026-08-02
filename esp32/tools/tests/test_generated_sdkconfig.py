@@ -37,6 +37,12 @@ class GeneratedSdkconfigTests(unittest.TestCase):
         )
         self.source_identity_patch.start()
         self.addCleanup(self.source_identity_patch.stop)
+        self.source_date_epoch_patch = patch(
+            "generated_sdkconfig.git_commit_source_date_epoch",
+            return_value="1712345678",
+        )
+        self.source_date_epoch_mock = self.source_date_epoch_patch.start()
+        self.addCleanup(self.source_date_epoch_patch.stop)
         self.tracked_patch = patch(
             "generated_sdkconfig._is_tracked", return_value=False
         )
@@ -53,6 +59,20 @@ class GeneratedSdkconfigTests(unittest.TestCase):
         )
         self.artifact_patch.start()
         self.addCleanup(self.artifact_patch.stop)
+        self.flash_plan = {
+            "schema": 1,
+            "environment": "WAVESHARE_AMOLED_175",
+            "uploadPortPlaceholder": "__OPEN_BIKE_UPLOAD_PORT__",
+            "uploader": "/attested/esptool",
+            "command": ["/attested/esptool", "write-flash"],
+            "images": [],
+        }
+        self.flash_plan_patch = patch(
+            "generated_sdkconfig._validated_flash_plan",
+            return_value=self.flash_plan,
+        )
+        self.flash_plan_patch.start()
+        self.addCleanup(self.flash_plan_patch.stop)
 
     def test_matches_platformio_windows_legacy_default_core(self) -> None:
         with (
@@ -98,9 +118,11 @@ class GeneratedSdkconfigTests(unittest.TestCase):
         for path in (
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
+            core / "penv/bin/esptool",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
+            path.chmod(0o755)
         (core / "lib").mkdir()
         (core / "boards").mkdir()
         with patch.dict(
@@ -112,6 +134,84 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             },
         ):
             yield core
+
+    def test_requires_a_safe_executable_esptool_in_core_attestation(self) -> None:
+        for state in ("missing", "symlink", "not-executable"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                defaults = project / "sdkconfig.defaults"
+                (project / "platformio.ini").write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                    encoding="utf-8",
+                )
+                defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+                with self.fake_core(project) as core:
+                    uploader = core / "penv/bin/esptool"
+                    if state == "missing":
+                        uploader.unlink()
+                    elif state == "symlink":
+                        external = project / "external-esptool"
+                        external.write_text("external\n", encoding="utf-8")
+                        external.chmod(0o755)
+                        uploader.unlink()
+                        uploader.symlink_to(external)
+                    else:
+                        uploader.chmod(0o644)
+                    self.assertIsNone(
+                        record_generated_sdkconfig_defaults(
+                            project, "WAVESHARE_AMOLED_175"
+                        )
+                    )
+
+    def test_manifest_attests_the_git_derived_build_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(manifest["schema"], 19)
+                self.assertEqual(manifest["sourceDateEpoch"], "1712345678")
+                self.assertEqual(
+                    manifest["buildTimestamp"], "2024-04-05T19:34:38Z"
+                )
+
+                self.source_date_epoch_mock.return_value = "1712345679"
+                with self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "custom-core state changed"
+                ):
+                    require_validated_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+
+    def test_uploader_mode_change_invalidates_recorded_core(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project) as core:
+                record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                (core / "penv/bin/esptool").chmod(0o644)
+                with self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "custom-core state changed"
+                ):
+                    require_validated_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
 
     def test_preserves_only_a_successfully_recorded_defaults_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

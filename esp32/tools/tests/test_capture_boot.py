@@ -7,12 +7,14 @@ from contextlib import redirect_stderr
 from capture_boot import (
     _EMPTY_RETAINED_HISTORY,
     _open_serial,
+    _resolve_port,
     cold_start_evidence,
     format_summary,
     main,
     summarize,
     validation_errors,
 )
+from resolve_upload_port import ResolvedDevice
 
 
 HEALTHY_CAPTURE = """
@@ -41,6 +43,51 @@ DISPLAY_RECOVERY_CAPTURE = HEALTHY_CAPTURE.replace(
 
 
 class CaptureBootTests(unittest.TestCase):
+    def test_hardware_serial_resolution_uses_current_port(self) -> None:
+        calls: list[tuple[str, float]] = []
+
+        def resolve(serial_number: str, timeout_seconds: float) -> ResolvedDevice:
+            calls.append((serial_number, timeout_seconds))
+            return ResolvedDevice(
+                port="/dev/cu.current",
+                serial_number=serial_number,
+                vid=0x303A,
+                pid=0x1001,
+                description="USB JTAG/serial debug unit",
+            )
+
+        self.assertEqual(
+            _resolve_port(
+                None,
+                45.0,
+                device_serial="3c:dc:75:6e:f0:10",
+                device_resolver=resolve,
+            ),
+            "/dev/cu.current",
+        )
+        self.assertEqual(calls, [("3c:dc:75:6e:f0:10", 45.0)])
+
+    def test_capture_port_rejects_invalid_wait(self) -> None:
+        for wait_seconds in (-1.0, float("nan"), float("inf")):
+            with self.subTest(wait_seconds=wait_seconds):
+                with self.assertRaisesRegex(RuntimeError, "finite nonnegative"):
+                    _resolve_port("/dev/cu.test", wait_seconds)
+
+    def test_capture_cli_rejects_two_port_selectors(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as error:
+                main(
+                    [
+                        "--port",
+                        "/dev/cu.test",
+                        "--device-serial",
+                        "3c:dc:75:6e:f0:10",
+                    ]
+                )
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("not allowed with argument", stderr.getvalue())
+
     def test_usb_empty_history_plus_confirmation_validates_cold_start(self) -> None:
         summary = summarize(USB_COLD_CAPTURE)
         self.assertEqual(cold_start_evidence(summary), "usb_empty_history")

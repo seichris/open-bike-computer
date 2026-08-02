@@ -7,6 +7,7 @@ import argparse
 import configparser
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
 from generated_sdkconfig import (
+    FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_ARCHIVE_SIZE,
@@ -32,7 +34,12 @@ from generated_sdkconfig import (
     record_generated_sdkconfig_defaults,
     require_validated_generated_sdkconfig_defaults,
 )
-from firmware_build_identity import FULL_GIT_SHA
+from firmware_build_identity import (
+    FULL_GIT_SHA,
+    build_timestamp_from_source_date_epoch,
+    git_commit_source_date_epoch,
+    git_head_identity,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -146,12 +153,6 @@ PIOARDUINO_BOOTSTRAP_PACKAGES = {
     "tool-ninja",
     "toolchain-xtensa-esp-elf",
 }
-ESP32_S3_FLASH_LAYOUT = (
-    ("0x0", "bootloader.bin"),
-    ("0x8000", "partitions.bin"),
-    ("0xe000", "boot_app0.bin"),
-    ("0x10000", "firmware.bin"),
-)
 PLATFORMIO_CORE_SCONS_PIOPM = json.dumps(
     {
         "type": "tool",
@@ -171,6 +172,122 @@ PLATFORMIO_CORE_SCONS_PIOPM = json.dumps(
 
 class BuildError(RuntimeError):
     """Raised when a deterministic real-target build cannot be confirmed."""
+
+
+def _resolved_device_port(
+    project_dir: Path,
+    manifest: dict[str, object],
+    device_serial: str,
+    timeout_seconds: float,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """Resolve a stable USB hardware serial using the attested private Python."""
+    requested = device_serial.strip()
+    if (
+        not requested
+        or not requested.isprintable()
+        or "\0" in requested
+        or len(requested) > 255
+    ):
+        raise BuildError("device serial must not be empty or invalid")
+    if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+        raise BuildError("device timeout must be a finite nonnegative value")
+
+    core_attestation = manifest.get("coreAttestation")
+    if not isinstance(core_attestation, dict):
+        raise BuildError("verified build provenance is missing its core attestation")
+    core_dir_value = core_attestation.get("coreDir")
+    if not isinstance(core_dir_value, str):
+        raise BuildError("verified core attestation is missing its core directory")
+    core_dir = Path(core_dir_value)
+    manifest_environment = manifest.get("environment")
+    if not isinstance(manifest_environment, str):
+        raise BuildError("verified build provenance is missing its environment")
+    expected_core_dir = (
+        project_dir / ".pio/open-bike-build/platformio" / manifest_environment
+    ).resolve()
+    if core_dir != expected_core_dir:
+        raise BuildError("verified core attestation references another core directory")
+    private_python = core_dir / (
+        "penv/Scripts/python.exe" if os.name == "nt" else "penv/bin/python"
+    )
+    resolver = project_dir / "tools/resolve_upload_port.py"
+    if (
+        not private_python.is_file()
+        or not os.access(private_python, os.X_OK)
+        or resolver.is_symlink()
+        or not resolver.is_file()
+    ):
+        raise BuildError("verified upload device resolver is missing or unsafe")
+
+    command = (
+        str(private_python),
+        str(resolver),
+        "--device-serial",
+        requested,
+        "--timeout",
+        f"{timeout_seconds:g}",
+    )
+    try:
+        result = runner(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise BuildError(f"could not run the upload device resolver: {error}") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise BuildError(f"could not resolve upload device {requested!r}: {detail}")
+    try:
+        resolved = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise BuildError("upload device resolver returned invalid output") from error
+    if not isinstance(resolved, dict) or resolved.get("schema") != 1:
+        raise BuildError("upload device resolver returned an unsupported result")
+    port = resolved.get("port")
+    actual_serial = resolved.get("serialNumber")
+    if (
+        not isinstance(port, str)
+        or not port.strip()
+        or not port.isprintable()
+        or "\0" in port
+        or len(port) > 4096
+        or not isinstance(actual_serial, str)
+        or not actual_serial.isprintable()
+        or actual_serial.strip().casefold() != requested.casefold()
+    ):
+        raise BuildError("upload device resolver returned a mismatched device")
+    print(
+        f"FIRMWARE_UPLOAD_DEVICE serial={actual_serial} port={port}",
+        flush=True,
+    )
+    return port
+
+
+def _verified_flash_command(
+    upload_port: str,
+    manifest: dict[str, object],
+) -> tuple[str, ...]:
+    """Bind the requested port into the already-attested PlatformIO plan."""
+    flash_plan = manifest.get("flashPlan")
+    if not isinstance(flash_plan, dict):
+        raise BuildError("verified build provenance is missing its flash plan")
+    command = flash_plan.get("command")
+    if not isinstance(command, list) or not all(
+        isinstance(token, str) for token in command
+    ):
+        raise BuildError("verified build provenance has an invalid flash command")
+    if command.count(FLASH_PLAN_PORT_PLACEHOLDER) != 1:
+        raise BuildError(
+            "verified build provenance has an invalid upload-port placeholder"
+        )
+    return tuple(
+        upload_port if token == FLASH_PLAN_PORT_PLACEHOLDER else token
+        for token in command
+    )
 
 
 def _ensure_private_directory(project_dir: Path, relative: Path) -> Path:
@@ -547,9 +664,39 @@ def _deterministic_build_environment(
     platform_archive: Path,
     verified_config: Path,
 ) -> Iterator[None]:
+    commit_identity = expected_identity.removeprefix("dirty-")
+    try:
+        if FULL_GIT_SHA.fullmatch(commit_identity) is None:
+            commit_identity = git_head_identity(project_dir)
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, commit_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError as error:
+        raise BuildError(
+            "deterministic firmware build requires a Git-derived build clock: "
+            f"{error}"
+        ) from error
+
     store_root = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/platformio") / environment
     )
+    config_root = _ensure_private_directory(
+        project_dir, Path(".pio/open-bike-build/config")
+    )
+    isolated_git_config = config_root / "gitconfig-empty"
+    if isolated_git_config.is_symlink() or (
+        isolated_git_config.exists() and not isolated_git_config.is_file()
+    ):
+        raise BuildError(
+            f"refusing to replace unsafe isolated Git config: {isolated_git_config}"
+        )
+    try:
+        isolated_git_config.write_text("", encoding="utf-8")
+    except OSError as error:
+        raise BuildError(f"could not write isolated Git config: {error}") from error
     for child in (
         "packages",
         "platforms",
@@ -589,8 +736,13 @@ def _deterministic_build_environment(
             "IDF_COMPONENT_STRICT_CHECKSUM": "1",
             "IDF_COMPONENT_VERIFY_SSL": "1",
             "IDF_TOOLS_PATH": str(store_root),
+            "GIT_CONFIG_GLOBAL": str(isolated_git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
             "OPEN_BIKE_DETERMINISTIC_BUILD": "1",
             "OPEN_BIKE_EXPECTED_GIT_SHA": expected_identity,
+            "SOURCE_DATE_EPOCH": source_date_epoch,
+            "OPEN_BIKE_BUILD_TIMESTAMP": build_timestamp,
             "OPEN_BIKE_PINNED_SCONS_PIOPM": _pinned_nested_scons_piopm(),
             "OPEN_BIKE_VERIFIED_PROJECT_CONFIG": str(verified_config),
             "OPEN_BIKE_PLATFORM_ARCHIVE_SHA256": _file_sha256(platform_archive),
@@ -680,11 +832,14 @@ def _print_provenance(
     print(
         f"{marker} schema=1 environment={environment} git={source_identity} "
         f"uploadEligible={1 if manifest else 0} "
+        f"sourceDateEpoch={value('sourceDateEpoch')} "
+        f"buildTimestamp={value('buildTimestamp')} "
         f"firmwareBinSha256={value('firmwareBinSha256')} "
         f"firmwareElfSha256={value('firmwareElfSha256')} "
         f"bootloaderBinSha256={value('bootloaderBinSha256')} "
         f"partitionTableBinSha256={value('partitionTableBinSha256')} "
         f"bootApp0Sha256={value('bootApp0Sha256')} "
+        f"flashPlanSha256={value('flashPlanSha256')} "
         f"coreAttestationSha256={value('coreAttestationSha256')} "
         f"platformArchiveSha256={value('platformArchiveSha256')} "
         f"platformPackagesSha256={value('platformPackagesSha256')} "
@@ -1003,11 +1158,14 @@ def build_firmware(
 def upload_firmware(
     project_dir: Path,
     environment: str,
-    upload_port: str,
+    upload_port: str | None = None,
     *,
+    device_serial: str | None = None,
+    device_timeout: float = 60.0,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    resolver_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
-    """Upload attested images directly without rebuilding the verified target."""
+    """Upload the exact verified images without asking PlatformIO to rebuild."""
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
@@ -1015,8 +1173,16 @@ def upload_firmware(
         raise BuildError(
             "verified upload is limited to attested WAVESHARE_AMOLED profiles"
         )
-    if not upload_port.strip():
+    if (upload_port is None) == (device_serial is None):
+        raise BuildError("provide exactly one upload port or device serial")
+    if upload_port is not None and (not upload_port.strip() or "\0" in upload_port):
         raise BuildError("upload port must not be empty")
+    if device_serial is not None and (
+        not device_serial.strip()
+        or not device_serial.strip().isprintable()
+        or "\0" in device_serial
+    ):
+        raise BuildError("device serial must not be empty")
 
     firmware_elf = project_dir / ".pio" / "build" / environment / "firmware.elf"
     if firmware_elf.is_symlink() or not firmware_elf.is_file():
@@ -1048,74 +1214,26 @@ def upload_firmware(
                 )
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
-            core_attestation = manifest.get("coreAttestation")
-            if not isinstance(core_attestation, dict):
-                raise BuildError(
-                    "refusing AMOLED upload without attested PlatformIO core paths"
+            # The attested private esptool environment must remain reusable after
+            # both successful uploads and connection failures. Importing pyserial
+            # can otherwise create new bytecode inside the attested penv and make
+            # an unchanged build fail its next validation.
+            os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+            resolved_port = upload_port
+            if device_serial is not None:
+                resolved_port = _resolved_device_port(
+                    project_dir,
+                    manifest,
+                    device_serial,
+                    device_timeout,
+                    runner=resolver_runner,
                 )
-            core_dir_value = core_attestation.get("coreDir")
-            packages_dir_value = core_attestation.get("packagesDir")
-            if not isinstance(core_dir_value, str) or not isinstance(
-                packages_dir_value, str
-            ):
-                raise BuildError(
-                    "refusing AMOLED upload without attested PlatformIO core paths"
-                )
-            core_dir = Path(core_dir_value)
-            packages_dir = Path(packages_dir_value)
-            esptool = core_dir / "penv" / "bin" / (
-                "esptool.exe" if os.name == "nt" else "esptool"
+            if resolved_port is None:
+                raise AssertionError("validated upload selector did not resolve")
+            command: Sequence[str] = _verified_flash_command(
+                resolved_port,
+                manifest,
             )
-            if esptool.is_symlink() or not esptool.is_file():
-                raise BuildError(
-                    "refusing AMOLED upload without the attested esptool executable: "
-                    f"{esptool}"
-                )
-
-            build_dir = project_dir / ".pio" / "build" / environment
-            boot_app0 = (
-                packages_dir
-                / "framework-arduinoespressif32"
-                / "tools"
-                / "partitions"
-                / "boot_app0.bin"
-            )
-            flash_images = {
-                "bootloader.bin": build_dir / "bootloader.bin",
-                "partitions.bin": build_dir / "partitions.bin",
-                "boot_app0.bin": boot_app0,
-                "firmware.bin": build_dir / "firmware.bin",
-            }
-            for image in flash_images.values():
-                if image.is_symlink() or not image.is_file():
-                    raise BuildError(
-                        "refusing AMOLED upload without an attested flash image: "
-                        f"{image}"
-                    )
-
-            command: list[str] = [
-                str(esptool),
-                "--chip",
-                "esp32s3",
-                "--port",
-                upload_port,
-                "--baud",
-                "460800",
-                "--before",
-                "default-reset",
-                "--after",
-                "hard-reset",
-                "write-flash",
-                "--compress",
-                "--flash-mode",
-                "dio",
-                "--flash-freq",
-                "80m",
-                "--flash-size",
-                "16MB",
-            ]
-            for offset, filename in ESP32_S3_FLASH_LAYOUT:
-                command.extend((offset, str(flash_images[filename])))
             _print_provenance(
                 "FIRMWARE_UPLOAD_PROVENANCE",
                 environment,
@@ -1125,7 +1243,9 @@ def upload_firmware(
             try:
                 result = runner(command, cwd=project_dir)
             except OSError as error:
-                raise BuildError(f"could not run attested esptool: {error}") from error
+                raise BuildError(
+                    f"could not run the verified esptool uploader: {error}"
+                ) from error
     if result.returncode != 0:
         raise BuildError(
             f"esptool exited with status {result.returncode} while uploading "
@@ -1147,12 +1267,31 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("PLATFORMIO_CMD", "pio"),
         help="PlatformIO executable (default: pio or PLATFORMIO_CMD)",
     )
-    parser.add_argument(
+    upload_selector = parser.add_mutually_exclusive_group()
+    upload_selector.add_argument(
         "--upload-port",
         help=(
             "after a verified build, upload through the same deterministic "
             "identity boundary"
         ),
+    )
+    upload_selector.add_argument(
+        "--device-serial",
+        help=(
+            "resolve the upload port immediately before flashing from this stable "
+            "USB hardware serial"
+        ),
+    )
+    parser.add_argument(
+        "--device-timeout",
+        type=float,
+        default=60.0,
+        help="seconds to wait for --device-serial to appear (default: 60)",
+    )
+    parser.add_argument(
+        "--upload-only",
+        action="store_true",
+        help="revalidate and upload an existing attested build without rebuilding",
     )
     return parser.parse_args(argv)
 
@@ -1160,12 +1299,21 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        build_firmware(args.project_dir, args.environment, pio_command=args.pio)
-        if args.upload_port is not None:
+        if args.upload_only and args.upload_port is None and args.device_serial is None:
+            raise BuildError("--upload-only requires --upload-port or --device-serial")
+        if args.device_serial is None and args.device_timeout != 60.0:
+            raise BuildError("--device-timeout requires --device-serial")
+        if not math.isfinite(args.device_timeout) or args.device_timeout < 0:
+            raise BuildError("device timeout must be a finite nonnegative value")
+        if not args.upload_only:
+            build_firmware(args.project_dir, args.environment, pio_command=args.pio)
+        if args.upload_port is not None or args.device_serial is not None:
             upload_firmware(
                 args.project_dir,
                 args.environment,
                 args.upload_port,
+                device_serial=args.device_serial,
+                device_timeout=args.device_timeout,
             )
     except BuildError as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)

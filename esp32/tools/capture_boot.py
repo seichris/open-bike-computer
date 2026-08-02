@@ -6,9 +6,13 @@ from __future__ import annotations
 import argparse
 import codecs
 import glob
+import math
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from resolve_upload_port import ResolvedDevice, resolve_device_port
 
 
 _POST_READY_BOOT_RECORD_MARKERS = (
@@ -379,7 +383,18 @@ def validation_errors(
     return errors
 
 
-def _resolve_port(requested: str | None, wait_seconds: float) -> str:
+def _resolve_port(
+    requested: str | None,
+    wait_seconds: float,
+    *,
+    device_serial: str | None = None,
+    device_resolver: Callable[[str, float], ResolvedDevice] = resolve_device_port,
+) -> str:
+    if not math.isfinite(wait_seconds) or wait_seconds < 0:
+        raise RuntimeError("wait time must be a finite nonnegative value")
+    if device_serial is not None:
+        return device_resolver(device_serial, wait_seconds).port
+
     deadline = time.monotonic() + wait_seconds
     while True:
         matches = sorted(glob.glob(requested or "/dev/cu.usbmodem*"))
@@ -410,7 +425,14 @@ def _open_serial(serial_module, port: str, baud: int):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", help="serial device or glob; auto-detects one modem")
+    port_selector = parser.add_mutually_exclusive_group()
+    port_selector.add_argument(
+        "--port", help="serial device or glob; auto-detects one modem"
+    )
+    port_selector.add_argument(
+        "--device-serial",
+        help="select a USB serial device by its stable hardware serial number",
+    )
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--duration", type=float, default=35.0)
     parser.add_argument("--wait-seconds", type=float, default=30.0)
@@ -464,7 +486,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        port = _resolve_port(args.port, args.wait_seconds)
+        port = _resolve_port(
+            args.port,
+            args.wait_seconds,
+            device_serial=args.device_serial,
+        )
     except RuntimeError as error:
         print(f"BOOT_CAPTURE_ERROR {error}", file=sys.stderr)
         return 2

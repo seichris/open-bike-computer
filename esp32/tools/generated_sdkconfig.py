@@ -8,18 +8,37 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from firmware_build_identity import FULL_GIT_SHA, firmware_git_identity
+from firmware_build_identity import (
+    FULL_GIT_SHA,
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+    git_commit_source_date_epoch,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GENERATED_BANNER = b"# Automatically generated file. DO NOT EDIT."
 GENERATED_DESCRIPTION = b"Project Configuration"
-CACHE_SCHEMA = 16
+CACHE_SCHEMA = 19
+FLASH_PLAN_SCHEMA = 2
+FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
+FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
+FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
+FLASH_PLAN_MAX_BYTES = 1024 * 1024
+ESP_PARTITION_TABLE_MAX_BYTES = 0xC00
+ESP_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
+ESP_PARTITION_MAGIC = 0x50AA
+ESP_PARTITION_MD5_MAGIC = 0xEBEB
+ESP_PARTITION_END_MAGIC = 0xFFFF
+ESP_PARTITION_TYPE_APP = 0x00
+ESP_PARTITION_SUBTYPE_FACTORY = 0x00
+ESP_PARTITION_SUBTYPE_OTA_0 = 0x10
 WAVESHARE_MCU = "esp32s3"
 WAVESHARE_MEMORY_TYPE = "qio_opi"
 WAVESHARE_PLATFORM_URL = (
@@ -444,6 +463,9 @@ def _core_attestation(
     mcu_root = libs_root / WAVESHARE_MCU
     tools_root = core_dir / "tools"
     penv_root = core_dir / "penv"
+    esptool_uploader = penv_root / (
+        "Scripts/esptool.exe" if os.name == "nt" else "bin/esptool"
+    )
     evidence_paths = {
         "frameworkPackageSha256": framework_root / "package.json",
         "bootApp0Sha256": framework_root / "tools/partitions/boot_app0.bin",
@@ -456,10 +478,13 @@ def _core_attestation(
         "boardManifestSha256": (
             platform_root / "boards/esp32-s3-devkitc-1.json"
         ),
+        "esptoolUploaderSha256": esptool_uploader,
     }
     for path in evidence_paths.values():
         if path.is_symlink() or not path.is_file():
             return None
+    if not os.access(esptool_uploader, os.X_OK):
+        return None
     if (
         framework_root.is_symlink()
         or not framework_root.is_dir()
@@ -512,6 +537,475 @@ def _core_attestation(
     return evidence
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _application_partition_from_partition_table(path: Path) -> tuple[int, int]:
+    """Return the slot PlatformIO must use for the application image."""
+    if path.is_symlink() or not path.is_file():
+        raise GeneratedSdkconfigError(
+            f"verified partition table is missing or unsafe: {path}"
+        )
+    try:
+        table = path.read_bytes()
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not read verified partition table: {error}"
+        ) from error
+    if (
+        not table
+        or len(table) > ESP_PARTITION_TABLE_MAX_BYTES
+        or len(table) % ESP_PARTITION_ENTRY.size != 0
+    ):
+        raise GeneratedSdkconfigError(
+            "verified partition table has an invalid size"
+        )
+
+    factory_partitions: list[tuple[int, int]] = []
+    ota_0_partitions: list[tuple[int, int]] = []
+    found_end = False
+    for entry_start in range(0, len(table), ESP_PARTITION_ENTRY.size):
+        magic, kind, subtype, offset, size, _, _ = ESP_PARTITION_ENTRY.unpack_from(
+            table, entry_start
+        )
+        if magic == ESP_PARTITION_END_MAGIC:
+            found_end = True
+            break
+        if magic == ESP_PARTITION_MD5_MAGIC:
+            continue
+        if magic != ESP_PARTITION_MAGIC:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains an invalid entry"
+            )
+        if offset == 0 or size == 0 or offset + size > 0x1_0000_0000:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains an invalid range"
+            )
+        if kind != ESP_PARTITION_TYPE_APP:
+            continue
+        if offset % 0x10000 != 0:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains a misaligned application slot"
+            )
+        if subtype == ESP_PARTITION_SUBTYPE_FACTORY:
+            factory_partitions.append((offset, size))
+        elif subtype == ESP_PARTITION_SUBTYPE_OTA_0:
+            ota_0_partitions.append((offset, size))
+
+    if not found_end:
+        raise GeneratedSdkconfigError(
+            "verified partition table has no end marker"
+        )
+    selected_partitions = ota_0_partitions or factory_partitions
+    if len(selected_partitions) != 1:
+        raise GeneratedSdkconfigError(
+            "verified partition table does not identify exactly one bootable "
+            "application slot"
+        )
+    return selected_partitions[0]
+
+
+def _parse_esptool_options(
+    tokens: tuple[str, ...],
+    *,
+    value_options: set[str],
+    flag_options: set[str],
+    label: str,
+) -> dict[str, str | bool]:
+    parsed: dict[str, str | bool] = {}
+    index = 0
+    while index < len(tokens):
+        option = tokens[index]
+        if option in flag_options:
+            if option in parsed:
+                raise GeneratedSdkconfigError(
+                    f"verified esptool {label} repeats {option}"
+                )
+            parsed[option] = True
+            index += 1
+            continue
+        if option not in value_options or index + 1 >= len(tokens):
+            raise GeneratedSdkconfigError(
+                f"verified esptool {label} contains an unsupported argument: "
+                f"{option}"
+            )
+        if option in parsed:
+            raise GeneratedSdkconfigError(
+                f"verified esptool {label} repeats {option}"
+            )
+        parsed[option] = tokens[index + 1]
+        index += 2
+    expected = value_options | flag_options
+    if set(parsed) != expected:
+        missing = ", ".join(sorted(expected - set(parsed)))
+        raise GeneratedSdkconfigError(
+            f"verified esptool {label} is missing required options: {missing}"
+        )
+    return parsed
+
+
+def _validated_flash_plan(
+    project_dir: Path,
+    environment: str,
+    core_attestation: dict[str, object],
+) -> dict[str, object]:
+    """Validate and normalize PlatformIO's resolved esptool command."""
+    build_dir = project_dir / ".pio" / "build" / environment
+    plan_path = build_dir / FLASH_PLAN_FILENAME
+    if plan_path.is_symlink() or not plan_path.is_file():
+        raise GeneratedSdkconfigError(
+            f"verified PlatformIO flash plan is missing or unsafe: {plan_path}"
+        )
+    try:
+        if plan_path.stat().st_size > FLASH_PLAN_MAX_BYTES:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan exceeds its size limit"
+            )
+        raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise GeneratedSdkconfigError(
+            f"could not read verified PlatformIO flash plan: {error}"
+        ) from error
+    if not isinstance(raw_plan, dict):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan is not an object"
+        )
+    if raw_plan.get("schema") != FLASH_PLAN_SCHEMA:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an unsupported schema"
+        )
+    if raw_plan.get("environment") != environment:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan references another environment"
+        )
+    if raw_plan.get("uploadPortPlaceholder") != FLASH_PLAN_PORT_PLACEHOLDER:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid port placeholder"
+        )
+
+    core_dir_value = core_attestation.get("coreDir")
+    expected_uploader_hash = core_attestation.get("esptoolUploaderSha256")
+    if not isinstance(core_dir_value, str) or not isinstance(
+        expected_uploader_hash, str
+    ):
+        raise GeneratedSdkconfigError(
+            "verified core attestation is missing its esptool uploader"
+        )
+    core_dir = Path(core_dir_value).resolve()
+    expected_core_dir = (
+        project_dir / ".pio/open-bike-build/platformio" / environment
+    ).resolve()
+    if core_dir != expected_core_dir:
+        raise GeneratedSdkconfigError(
+            "verified core attestation references another core directory"
+        )
+    expected_uploader = core_dir / (
+        "penv/Scripts/esptool.exe" if os.name == "nt" else "penv/bin/esptool"
+    )
+    uploader_value = raw_plan.get("uploader")
+    if not isinstance(uploader_value, str):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid uploader"
+        )
+    uploader = Path(uploader_value)
+    if (
+        not uploader.is_absolute()
+        or uploader != uploader.resolve()
+        or uploader != expected_uploader
+        or uploader.is_symlink()
+        or not uploader.is_file()
+        or not os.access(uploader, os.X_OK)
+        or _file_sha256(uploader) != expected_uploader_hash
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan references an unattested uploader"
+        )
+
+    raw_command = raw_plan.get("command")
+    if (
+        not isinstance(raw_command, list)
+        or not 2 <= len(raw_command) <= 256
+        or not all(
+            isinstance(token, str)
+            and token
+            and "\0" not in token
+            and len(token) <= 4096
+            for token in raw_command
+        )
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid command"
+        )
+    command = tuple(raw_command)
+    if command[0] != str(uploader):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command does not invoke its uploader"
+        )
+    if command.count(FLASH_PLAN_PORT_PLACEHOLDER) != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command has an invalid port placeholder"
+        )
+    if command.count(FLASH_PLAN_APP_OFFSET_PLACEHOLDER) != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command has an invalid application-offset "
+            "placeholder"
+        )
+    if command.count("--port") != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command has an invalid port option"
+        )
+    port_index = command.index("--port")
+    if (
+        port_index + 1 >= len(command)
+        or command[port_index + 1] != FLASH_PLAN_PORT_PLACEHOLDER
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command does not bind the upload port"
+        )
+    if command.count("write-flash") != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command is not a single write-flash action"
+        )
+
+    raw_platformio_parameters = raw_plan.get("platformioFlashParameters")
+    if (
+        not isinstance(raw_platformio_parameters, dict)
+        or set(raw_platformio_parameters) != {"mode", "frequency", "size"}
+        or not all(
+            isinstance(value, str)
+            and value
+            and "\0" not in value
+            and len(value) <= 64
+            for value in raw_platformio_parameters.values()
+        )
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has invalid resolved flash parameters"
+        )
+    raw_platformio_app_offset = raw_plan.get("platformioAppOffset")
+    if (
+        not isinstance(raw_platformio_app_offset, str)
+        or "\0" in raw_platformio_app_offset
+        or len(raw_platformio_app_offset) > 64
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid resolved application "
+            "offset"
+        )
+
+    application_offset, application_partition_size = (
+        _application_partition_from_partition_table(
+            build_dir / "partitions.bin"
+        )
+    )
+    if raw_platformio_app_offset:
+        try:
+            reported_application_offset = int(raw_platformio_app_offset, 0)
+        except ValueError as error:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan has an invalid resolved application "
+                "offset"
+            ) from error
+        if reported_application_offset != application_offset:
+            raise GeneratedSdkconfigError(
+                "PlatformIO's resolved application offset does not match the "
+                "verified partition table"
+            )
+
+    raw_images = raw_plan.get("images")
+    if not isinstance(raw_images, list) or not 1 <= len(raw_images) <= 32:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid image set"
+        )
+    project_root = project_dir.resolve()
+    normalized_images: list[dict[str, object]] = []
+    raw_command_tail: list[str] = []
+    normalized_command_tail: list[str] = []
+    offsets: set[int] = set()
+    image_ranges: list[tuple[int, int, Path]] = []
+    application_images = 0
+    for raw_image in raw_images:
+        if not isinstance(raw_image, dict):
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan contains an invalid image"
+            )
+        offset_token = raw_image.get("offset")
+        path_value = raw_image.get("path")
+        if not isinstance(offset_token, str) or not isinstance(path_value, str):
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan contains invalid image fields"
+            )
+        raw_command_tail.extend((offset_token, path_value))
+        if offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER:
+            application_images += 1
+            offset = application_offset
+            normalized_offset_token = hex(application_offset)
+        else:
+            try:
+                offset = int(offset_token, 0)
+            except ValueError as error:
+                raise GeneratedSdkconfigError(
+                    "verified PlatformIO flash plan contains an invalid image offset"
+                ) from error
+            normalized_offset_token = offset_token
+        if offset < 0 or offset > 0xFFFFFFFF or offset in offsets:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan contains a duplicate or out-of-range "
+                "image offset"
+            )
+        offsets.add(offset)
+        image = Path(path_value)
+        if (
+            not image.is_absolute()
+            or image != image.resolve()
+            or image.is_symlink()
+            or not image.is_file()
+            or not (
+                _path_is_within(image, project_root)
+                or _path_is_within(image, core_dir)
+            )
+        ):
+            raise GeneratedSdkconfigError(
+                f"verified PlatformIO flash image is missing or unsafe: {image}"
+            )
+        if (
+            offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
+            and image != (build_dir / "firmware.bin").resolve()
+        ):
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO application-offset placeholder does not "
+                "reference the firmware image"
+            )
+        try:
+            size = image.stat().st_size
+        except OSError as error:
+            raise GeneratedSdkconfigError(
+                f"could not inspect verified PlatformIO flash image: {error}"
+            ) from error
+        if size <= 0:
+            raise GeneratedSdkconfigError(
+                f"verified PlatformIO flash image is empty: {image}"
+            )
+        if (
+            offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
+            and size > application_partition_size
+        ):
+            raise GeneratedSdkconfigError(
+                "verified firmware image exceeds its application partition"
+            )
+        if offset + size > 0x1_0000_0000:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash image exceeds the address space"
+            )
+        image_ranges.append((offset, offset + size, image))
+        normalized_images.append(
+            {
+                "offset": normalized_offset_token,
+                "path": str(image),
+                "size": size,
+                "sha256": _file_sha256(image),
+            }
+        )
+        normalized_command_tail.extend((normalized_offset_token, str(image)))
+
+    if application_images != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan does not identify exactly one "
+            "application image"
+        )
+
+    for previous, current in zip(
+        sorted(image_ranges), sorted(image_ranges)[1:]
+    ):
+        if previous[1] > current[0]:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan contains overlapping images: "
+                f"{previous[2]} and {current[2]}"
+            )
+
+    if list(command[-len(raw_command_tail) :]) != raw_command_tail:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command does not exactly match its image set"
+        )
+    image_boundary = len(command) - len(raw_command_tail)
+    command = command[:image_boundary] + tuple(normalized_command_tail)
+    write_flash_index = command.index("write-flash")
+    if write_flash_index >= image_boundary:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command has an invalid image boundary"
+        )
+    global_options = _parse_esptool_options(
+        command[1:write_flash_index],
+        value_options={"--chip", "--port", "--baud", "--before", "--after"},
+        flag_options=set(),
+        label="global options",
+    )
+    write_options = _parse_esptool_options(
+        command[write_flash_index + 1 : image_boundary],
+        value_options={"--flash-mode", "--flash-freq", "--flash-size"},
+        flag_options={"-z"},
+        label="write-flash options",
+    )
+    if global_options["--chip"] != "esp32s3":
+        raise GeneratedSdkconfigError(
+            "verified esptool command targets another chip"
+        )
+    if global_options["--port"] != FLASH_PLAN_PORT_PLACEHOLDER:
+        raise GeneratedSdkconfigError(
+            "verified esptool command has an invalid upload port"
+        )
+    baud = global_options["--baud"]
+    if (
+        not isinstance(baud, str)
+        or not baud.isdigit()
+        or not 1 <= int(baud) <= 10_000_000
+    ):
+        raise GeneratedSdkconfigError(
+            "verified esptool command has an invalid upload baud rate"
+        )
+    if global_options["--before"] not in {
+        "default-reset",
+        "usb-reset",
+        "no-reset",
+        "no-reset-no-sync",
+    }:
+        raise GeneratedSdkconfigError(
+            "verified esptool command has an invalid before-reset action"
+        )
+    if global_options["--after"] not in {
+        "hard-reset",
+        "soft-reset",
+        "no-reset",
+        "no-reset-stub",
+    }:
+        raise GeneratedSdkconfigError(
+            "verified esptool command has an invalid after-reset action"
+        )
+    if any(
+        write_options[option] != "keep"
+        for option in ("--flash-mode", "--flash-freq", "--flash-size")
+    ):
+        raise GeneratedSdkconfigError(
+            "verified esptool command may rewrite an attested flash image"
+        )
+    return {
+        "schema": FLASH_PLAN_SCHEMA,
+        "environment": environment,
+        "uploadPortPlaceholder": FLASH_PLAN_PORT_PLACEHOLDER,
+        "uploader": str(uploader),
+        "command": list(command),
+        "platformioFlashParameters": dict(raw_platformio_parameters),
+        "platformioAppOffset": raw_platformio_app_offset,
+        "applicationOffsetSource": "partition-table",
+        "images": normalized_images,
+    }
+
+
 def _is_tracked(project_dir: Path, path: Path) -> bool:
     try:
         tracked = subprocess.run(
@@ -559,6 +1053,15 @@ def _cached_defaults_match(
     except GeneratedSdkconfigError:
         return False
     source_identity = current_source_identity(project_dir, environment)
+    try:
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, source_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError:
+        return False
     return (
         manifest.get("schema") == CACHE_SCHEMA
         and "environmentSdkconfigSha256" in manifest
@@ -570,6 +1073,8 @@ def _cached_defaults_match(
         == WAVESHARE_PLATFORM_PACKAGES_SHA256
         and FULL_GIT_SHA.fullmatch(source_identity) is not None
         and manifest.get("sourceIdentity") == source_identity
+        and manifest.get("sourceDateEpoch") == source_date_epoch
+        and manifest.get("buildTimestamp") == build_timestamp
         and manifest.get("managedComponentsSha256") == managed_components_sha
         and manifest.get("libraryDependenciesSha256")
         == library_dependencies_sha
@@ -722,6 +1227,23 @@ def require_validated_generated_sdkconfig_defaults(
                 "refusing AMOLED upload because the generated environment SDK "
                 "configuration changed after the verified build"
             )
+    core_attestation = manifest.get("coreAttestation")
+    if not isinstance(core_attestation, dict):
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload without a verified core attestation"
+        )
+    current_flash_plan = _validated_flash_plan(
+        project_dir, environment, core_attestation
+    )
+    if (
+        manifest.get("flashPlan") != current_flash_plan
+        or manifest.get("flashPlanSha256")
+        != _canonical_json_sha256(current_flash_plan)
+    ):
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload because the PlatformIO flash plan changed "
+            "after the verified build"
+        )
     return manifest
 
 
@@ -754,6 +1276,17 @@ def record_generated_sdkconfig_defaults(
         if manifest_path.is_file() or manifest_path.is_symlink():
             manifest_path.unlink()
         return None
+    try:
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, source_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError as error:
+        raise GeneratedSdkconfigError(
+            f"could not derive the verified firmware build clock: {error}"
+        ) from error
     managed_components_sha = _managed_components_sha256(project_dir)
     library_dependencies_sha = _library_dependencies_sha256(
         project_dir, environment
@@ -762,6 +1295,8 @@ def record_generated_sdkconfig_defaults(
     manifest = {
         "schema": CACHE_SCHEMA,
         "sourceIdentity": source_identity,
+        "sourceDateEpoch": source_date_epoch,
+        "buildTimestamp": build_timestamp,
         "managedComponentsSha256": managed_components_sha,
         "libraryDependenciesSha256": library_dependencies_sha,
         "sdkconfigDefaultsSha256": _file_sha256(defaults),
@@ -774,6 +1309,12 @@ def record_generated_sdkconfig_defaults(
         "environmentSdkconfigSha256": None,
         **firmware_artifacts,
     }
+    if environment.startswith("WAVESHARE_AMOLED_"):
+        flash_plan = _validated_flash_plan(
+            project_dir, environment, core_attestation
+        )
+        manifest["flashPlan"] = flash_plan
+        manifest["flashPlanSha256"] = _canonical_json_sha256(flash_plan)
     if os.path.lexists(environment_config):
         if not _is_generated_sdkconfig(environment_config):
             raise GeneratedSdkconfigError(

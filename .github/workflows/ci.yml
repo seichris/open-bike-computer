@@ -103,7 +103,8 @@ jobs:
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
-            tools.tests.test_capture_boot
+            tools.tests.test_capture_boot \
+            tools.tests.test_resolve_upload_port
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175
