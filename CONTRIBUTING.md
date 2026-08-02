@@ -84,7 +84,12 @@ esptool runs and waits 60 seconds by default. USB port numbers are transient and
 must not be used to distinguish multiple attached boards. The upload subprocess
 also suppresses Python bytecode writes inside the attested private environment,
 keeping an unchanged build eligible for upload-only retry after a connection
-failure. The
+failure. The verified build clock is the exact Git commit's committer timestamp.
+It is exported as `SOURCE_DATE_EPOCH` to the full toolchain and embedded as
+`BOOT_META built=`, so that field is source commit time rather than local
+compile time. The manifest attests both the epoch and its ISO UTC rendering.
+Public dependency fetches use an empty isolated Git configuration so ambient
+URL rewrites cannot alter the transport. The
 host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
 online Python dependency resolver (including its registries, external `uv`,
 private `penv`, and ESP-IDF venv before their resulting trees are attested)

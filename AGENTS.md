@@ -74,6 +74,15 @@ configure or build again. The uploader and hardware-serial resolver suppress
 Python bytecode writes inside the attested private environment so a connection
 failure cannot invalidate an otherwise unchanged retry.
 
+Verified builds use the exact Git commit's committer timestamp as
+`SOURCE_DATE_EPOCH` for PlatformIO, ESP-IDF, and the firmware metadata. The
+`BOOT_META built=` value therefore means source commit time, not workstation
+compile time. The epoch and ISO UTC value are recorded in build provenance and
+must remain identical across clean rebuilds of the same commit. Do not
+reintroduce wall-clock values into verified firmware artifacts. The wrapper also
+uses an empty isolated Git configuration for public dependency resolution, so
+ambient URL rewrites cannot change the transport or inputs.
+
 Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
 upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.
 

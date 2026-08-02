@@ -25,7 +25,10 @@ from build_firmware import (
     main,
     upload_firmware,
 )
-from firmware_build_identity import firmware_git_identity
+from firmware_build_identity import (
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+)
 from generated_sdkconfig import (
     FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
     FLASH_PLAN_FILENAME,
@@ -600,11 +603,27 @@ class FirmwareBuildTests(unittest.TestCase):
         environment.write_text(GENERATED_CONFIG, encoding="utf-8")
         other.write_text(GENERATED_CONFIG, encoding="utf-8")
         calls = 0
+        expected_source_date_epoch = subprocess.check_output(
+            ["git", "show", "--no-patch", "--format=%ct", "HEAD"],
+            cwd=self.project_dir,
+            text=True,
+        ).strip()
+        observed_build_clocks = []
 
         def runner(command, cwd):
             nonlocal calls
             calls += 1
             self.assertEqual(os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD"), "1")
+            isolated_git_config = Path(os.environ["GIT_CONFIG_GLOBAL"])
+            self.assertEqual(isolated_git_config.read_text(encoding="utf-8"), "")
+            self.assertEqual(os.environ.get("GIT_CONFIG_NOSYSTEM"), "1")
+            self.assertEqual(os.environ.get("GIT_TERMINAL_PROMPT"), "0")
+            observed_build_clocks.append(
+                (
+                    os.environ.get("SOURCE_DATE_EPOCH"),
+                    os.environ.get("OPEN_BIKE_BUILD_TIMESTAMP"),
+                )
+            )
             if calls == 1:
                 self.assertFalse(defaults.exists())
                 self.assertFalse(environment.exists())
@@ -619,7 +638,9 @@ class FirmwareBuildTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         original = os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD")
+        original_source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
         os.environ["OPEN_BIKE_DETERMINISTIC_BUILD"] = "original"
+        os.environ["SOURCE_DATE_EPOCH"] = "999"
         try:
             build_firmware(self.project_dir, self.environment, runner=runner)
         finally:
@@ -630,8 +651,25 @@ class FirmwareBuildTests(unittest.TestCase):
                 os.environ.pop("OPEN_BIKE_DETERMINISTIC_BUILD", None)
             else:
                 os.environ["OPEN_BIKE_DETERMINISTIC_BUILD"] = original
+            self.assertEqual(os.environ.get("SOURCE_DATE_EPOCH"), "999")
+            if original_source_date_epoch is None:
+                os.environ.pop("SOURCE_DATE_EPOCH", None)
+            else:
+                os.environ["SOURCE_DATE_EPOCH"] = original_source_date_epoch
 
         self.assertEqual(calls, 2)
+        self.assertEqual(
+            observed_build_clocks,
+            [
+                (
+                    expected_source_date_epoch,
+                    build_timestamp_from_source_date_epoch(
+                        expected_source_date_epoch
+                    ),
+                )
+            ]
+            * 2,
+        )
 
     def test_sequential_profiles_keep_second_build_identity_exact(self):
         full_sha = self.initialize_git_repo()

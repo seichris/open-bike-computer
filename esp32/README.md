@@ -90,6 +90,12 @@ embedded Git/profile independently but does not contain the artifact SHA-256s.
 The upload subprocess suppresses Python bytecode writes inside the attested
 private environment so a missing-port failure remains eligible for an unchanged
 upload-only retry.
+Verified builds also export the exact Git commit's committer timestamp as
+`SOURCE_DATE_EPOCH` to PlatformIO and ESP-IDF. Firmware `built=` metadata is
+therefore the reproducible source commit time, not the local compilation time;
+the manifest records both the epoch and ISO UTC timestamp. Public dependency
+fetches use an empty isolated Git configuration so workstation URL rewrites do
+not change the transport.
 The host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
 online Python dependency resolver (its registries, external `uv`, private
 `penv`, and ESP-IDF venv before their resulting trees are attested) are part of

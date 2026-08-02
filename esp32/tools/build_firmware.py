@@ -34,7 +34,12 @@ from generated_sdkconfig import (
     record_generated_sdkconfig_defaults,
     require_validated_generated_sdkconfig_defaults,
 )
-from firmware_build_identity import FULL_GIT_SHA
+from firmware_build_identity import (
+    FULL_GIT_SHA,
+    build_timestamp_from_source_date_epoch,
+    git_commit_source_date_epoch,
+    git_head_identity,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -659,9 +664,39 @@ def _deterministic_build_environment(
     platform_archive: Path,
     verified_config: Path,
 ) -> Iterator[None]:
+    commit_identity = expected_identity.removeprefix("dirty-")
+    try:
+        if FULL_GIT_SHA.fullmatch(commit_identity) is None:
+            commit_identity = git_head_identity(project_dir)
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, commit_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError as error:
+        raise BuildError(
+            "deterministic firmware build requires a Git-derived build clock: "
+            f"{error}"
+        ) from error
+
     store_root = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/platformio") / environment
     )
+    config_root = _ensure_private_directory(
+        project_dir, Path(".pio/open-bike-build/config")
+    )
+    isolated_git_config = config_root / "gitconfig-empty"
+    if isolated_git_config.is_symlink() or (
+        isolated_git_config.exists() and not isolated_git_config.is_file()
+    ):
+        raise BuildError(
+            f"refusing to replace unsafe isolated Git config: {isolated_git_config}"
+        )
+    try:
+        isolated_git_config.write_text("", encoding="utf-8")
+    except OSError as error:
+        raise BuildError(f"could not write isolated Git config: {error}") from error
     for child in (
         "packages",
         "platforms",
@@ -701,8 +736,13 @@ def _deterministic_build_environment(
             "IDF_COMPONENT_STRICT_CHECKSUM": "1",
             "IDF_COMPONENT_VERIFY_SSL": "1",
             "IDF_TOOLS_PATH": str(store_root),
+            "GIT_CONFIG_GLOBAL": str(isolated_git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
             "OPEN_BIKE_DETERMINISTIC_BUILD": "1",
             "OPEN_BIKE_EXPECTED_GIT_SHA": expected_identity,
+            "SOURCE_DATE_EPOCH": source_date_epoch,
+            "OPEN_BIKE_BUILD_TIMESTAMP": build_timestamp,
             "OPEN_BIKE_PINNED_SCONS_PIOPM": _pinned_nested_scons_piopm(),
             "OPEN_BIKE_VERIFIED_PROJECT_CONFIG": str(verified_config),
             "OPEN_BIKE_PLATFORM_ARCHIVE_SHA256": _file_sha256(platform_archive),
@@ -792,6 +832,8 @@ def _print_provenance(
     print(
         f"{marker} schema=1 environment={environment} git={source_identity} "
         f"uploadEligible={1 if manifest else 0} "
+        f"sourceDateEpoch={value('sourceDateEpoch')} "
+        f"buildTimestamp={value('buildTimestamp')} "
         f"firmwareBinSha256={value('firmwareBinSha256')} "
         f"firmwareElfSha256={value('firmwareElfSha256')} "
         f"bootloaderBinSha256={value('bootloaderBinSha256')} "

@@ -37,6 +37,12 @@ class GeneratedSdkconfigTests(unittest.TestCase):
         )
         self.source_identity_patch.start()
         self.addCleanup(self.source_identity_patch.stop)
+        self.source_date_epoch_patch = patch(
+            "generated_sdkconfig.git_commit_source_date_epoch",
+            return_value="1712345678",
+        )
+        self.source_date_epoch_mock = self.source_date_epoch_patch.start()
+        self.addCleanup(self.source_date_epoch_patch.stop)
         self.tracked_patch = patch(
             "generated_sdkconfig._is_tracked", return_value=False
         )
@@ -155,6 +161,35 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         record_generated_sdkconfig_defaults(
                             project, "WAVESHARE_AMOLED_175"
                         )
+                    )
+
+    def test_manifest_attests_the_git_derived_build_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(manifest["schema"], 19)
+                self.assertEqual(manifest["sourceDateEpoch"], "1712345678")
+                self.assertEqual(
+                    manifest["buildTimestamp"], "2024-04-05T19:34:38Z"
+                )
+
+                self.source_date_epoch_mock.return_value = "1712345679"
+                with self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "custom-core state changed"
+                ):
+                    require_validated_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
                     )
 
     def test_uploader_mode_change_invalidates_recorded_core(self) -> None:

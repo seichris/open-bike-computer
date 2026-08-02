@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from firmware_build_identity import firmware_git_identity
+from firmware_build_identity import (
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+    git_commit_source_date_epoch,
+)
 
 
 class FirmwareBuildIdentityTests(unittest.TestCase):
@@ -33,6 +38,44 @@ class FirmwareBuildIdentityTests(unittest.TestCase):
 
             source.write_text("dirty\n", encoding="utf-8")
             self.assertEqual(firmware_git_identity(root), f"dirty-{full_sha}")
+
+    def test_commit_time_is_a_stable_source_date_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "user.email", "test@example.invalid")
+            self.git(root, "config", "user.name", "Test")
+            (root / "firmware.cpp").write_text("clean\n", encoding="utf-8")
+            self.git(root, "add", "firmware.cpp")
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "GIT_AUTHOR_DATE": "2024-04-05T19:34:38Z",
+                    "GIT_COMMITTER_DATE": "2024-04-05T19:34:38Z",
+                }
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "candidate"],
+                cwd=root,
+                env=environment,
+                check=True,
+            )
+
+            full_sha = self.git(root, "rev-parse", "HEAD")
+            source_date_epoch = git_commit_source_date_epoch(root, full_sha)
+            self.assertEqual(source_date_epoch, "1712345678")
+            self.assertEqual(
+                build_timestamp_from_source_date_epoch(source_date_epoch),
+                "2024-04-05T19:34:38Z",
+            )
+
+    def test_source_date_epoch_validation_fails_closed(self):
+        for invalid in ("", "-1", "+1", "01", "1.5", "not-a-time"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "canonical nonnegative"):
+                    build_timestamp_from_source_date_epoch(invalid)
+        with self.assertRaisesRegex(ValueError, "full Git commit SHA"):
+            git_commit_source_date_epoch(Path.cwd(), "dirty")
 
     def test_allows_only_explicit_generated_untracked_paths(self):
         with tempfile.TemporaryDirectory() as directory:
