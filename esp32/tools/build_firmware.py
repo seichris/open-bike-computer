@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
 from generated_sdkconfig import (
+    FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_ARCHIVE_SIZE,
@@ -161,10 +162,31 @@ PLATFORMIO_CORE_SCONS_PIOPM = json.dumps(
     },
     separators=(",", ":"),
 )
-
-
 class BuildError(RuntimeError):
     """Raised when a deterministic real-target build cannot be confirmed."""
+
+
+def _verified_flash_command(
+    upload_port: str,
+    manifest: dict[str, object],
+) -> tuple[str, ...]:
+    """Bind the requested port into the already-attested PlatformIO plan."""
+    flash_plan = manifest.get("flashPlan")
+    if not isinstance(flash_plan, dict):
+        raise BuildError("verified build provenance is missing its flash plan")
+    command = flash_plan.get("command")
+    if not isinstance(command, list) or not all(
+        isinstance(token, str) for token in command
+    ):
+        raise BuildError("verified build provenance has an invalid flash command")
+    if command.count(FLASH_PLAN_PORT_PLACEHOLDER) != 1:
+        raise BuildError(
+            "verified build provenance has an invalid upload-port placeholder"
+        )
+    return tuple(
+        upload_port if token == FLASH_PLAN_PORT_PLACEHOLDER else token
+        for token in command
+    )
 
 
 def _ensure_private_directory(project_dir: Path, relative: Path) -> Path:
@@ -679,6 +701,7 @@ def _print_provenance(
         f"bootloaderBinSha256={value('bootloaderBinSha256')} "
         f"partitionTableBinSha256={value('partitionTableBinSha256')} "
         f"bootApp0Sha256={value('bootApp0Sha256')} "
+        f"flashPlanSha256={value('flashPlanSha256')} "
         f"coreAttestationSha256={value('coreAttestationSha256')} "
         f"platformArchiveSha256={value('platformArchiveSha256')} "
         f"platformPackagesSha256={value('platformPackagesSha256')} "
@@ -999,10 +1022,9 @@ def upload_firmware(
     environment: str,
     upload_port: str,
     *,
-    pio_command: str = "pio",
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
-    """Upload a verified build without weakening its source-identity gate."""
+    """Upload the exact verified images without asking PlatformIO to rebuild."""
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
@@ -1010,7 +1032,7 @@ def upload_firmware(
         raise BuildError(
             "verified upload is limited to attested WAVESHARE_AMOLED profiles"
         )
-    if not upload_port.strip():
+    if not upload_port.strip() or "\0" in upload_port:
         raise BuildError("upload port must not be empty")
 
     firmware_elf = project_dir / ".pio" / "build" / environment / "firmware.elf"
@@ -1029,20 +1051,6 @@ def upload_firmware(
         verified_config, platform_archive = _verified_platformio_project_config(
             project_dir
         )
-        command: Sequence[str] = (
-            pio_command,
-            "run",
-            "--project-conf",
-            str(verified_config),
-            "-e",
-            environment,
-            "-t",
-            "nobuild",
-            "-t",
-            "upload",
-            "--upload-port",
-            upload_port,
-        )
         with _deterministic_build_environment(
             project_dir,
             environment,
@@ -1057,6 +1065,10 @@ def upload_firmware(
                 )
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
+            command: Sequence[str] = _verified_flash_command(
+                upload_port,
+                manifest,
+            )
             _print_provenance(
                 "FIRMWARE_UPLOAD_PROVENANCE",
                 environment,
@@ -1066,10 +1078,12 @@ def upload_firmware(
             try:
                 result = runner(command, cwd=project_dir)
             except OSError as error:
-                raise BuildError(f"could not run {pio_command!r}: {error}") from error
+                raise BuildError(
+                    f"could not run the verified esptool uploader: {error}"
+                ) from error
     if result.returncode != 0:
         raise BuildError(
-            f"PlatformIO exited with status {result.returncode} while uploading "
+            f"esptool exited with status {result.returncode} while uploading "
             f"{environment}"
         )
 
@@ -1107,7 +1121,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.project_dir,
                 args.environment,
                 args.upload_port,
-                pio_command=args.pio,
             )
     except BuildError as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)

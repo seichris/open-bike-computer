@@ -34,8 +34,17 @@ remain available through the manual **Speaker firmware builds** GitHub Actions
 workflow.
 
 After confirming the connected hardware profile, use the same helper for
-upload so the exact Git identity remains active through PlatformIO's upload
-prebuild:
+upload. It revalidates the exact Git identity, toolchain, and image hashes, then
+replays the esptool plan captured from PlatformIO during that build. The plan
+includes PlatformIO's chip, reset, speed, resolved flash settings, non-application
+offsets, and every referenced image. Because pioarduino can clear its application
+offset after custom-core reuse, the helper resolves that one offset from the built,
+attested partition table and rejects any non-empty PlatformIO value that disagrees.
+Before attestation, the helper normalizes only
+esptool's flash-mode, frequency, and size arguments to `keep`; otherwise esptool
+can rewrite the bootloader header after it was hashed. This avoids a second
+PlatformIO build and keeps the bytes and flash layout crossing the upload
+boundary identical to the verified build:
 
 ```sh
 python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
@@ -44,11 +53,11 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
 
 Archive the emitted `FIRMWARE_BUILD_PROVENANCE` and
 `FIRMWARE_UPLOAD_PROVENANCE` lines with physical test results. They bind the
-clean Git/profile identity to the exact firmware, bootloader, partition-table,
-and OTA-bootstrap image set plus the content-pinned pioarduino platform archive
-and executable-package bootstraps, PlatformIO-installed compiler/uploader/nested
-runtime trees through `coreAttestationSha256`, and ignored generated dependency
-inputs presented for that upload. The helper
+clean Git/profile identity to PlatformIO's complete resolved flash plan and the
+hash of every referenced image, plus the content-pinned pioarduino platform
+archive and executable-package bootstraps, PlatformIO-installed
+compiler/uploader/nested runtime trees through `coreAttestationSha256`, and
+ignored generated dependency inputs presented for that upload. The helper
 also isolates ESP-IDF Component Manager state, rejects or scrubs ambient source
 overrides, and requires strict component checksums. This is upload-input
 preflight evidence, not flash readback: a later `BOOT_META` confirms the
