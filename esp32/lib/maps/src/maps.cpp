@@ -120,7 +120,9 @@ map_projection::Projection makeMapProjection(
     double rasterOriginX, double rasterOriginY, int32_t rasterCellOffsetX,
     int32_t rasterCellOffsetY, uint8_t zoom, double rotation,
     uint16_t viewportWidth, uint16_t viewportHeight,
-    map_projection::Mode mode) {
+    map_projection::Mode mode,
+    map_projection::BirdsEyePerspective birdsEyePerspective =
+        map_projection::BirdsEyePerspective::Standard) {
   map_projection::Config config;
   config.viewportWidth = viewportWidth;
   config.viewportHeight = viewportHeight;
@@ -133,6 +135,8 @@ map_projection::Projection makeMapProjection(
                        : gui_layout::mapAnchorY(viewportHeight);
   config.rasterCellOffset = {rasterCellOffsetX, rasterCellOffsetY};
   config.mode = mode;
+  config.topEdgeScale =
+      map_projection::birdsEyeTopEdgeScale(birdsEyePerspective);
   return map_projection::Projection(config);
 }
 
@@ -4315,7 +4319,9 @@ bool Maps::generateVectorMap(uint8_t zoom) {
       Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY, zoom,
       rotationRad, renderExtent.width, renderExtent.height,
       birdsEyeActive ? map_projection::Mode::BirdsEye
-                     : map_projection::Mode::Flat);
+                     : map_projection::Mode::Flat,
+      map_projection::birdsEyePerspectiveForValue(
+          mapRenderSettings.mapNavigationBirdsEyePerspective));
   if (frameProjection.isBirdsEye()) {
     const auto bounds = frameProjection.worldBounds(4.0);
     Maps::viewPort.bbox.min =

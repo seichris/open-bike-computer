@@ -10,7 +10,11 @@ constexpr uint8_t EXTENDED_VISIBILITY_CAPABILITY_MASK = 1 << 4;
 constexpr uint8_t EXTENDED_VISIBILITY_CLIENT_VERSION = 3;
 constexpr uint8_t BIRDS_EYE_EXTENDED_CAPABILITY_MASK = 1 << 0;
 constexpr uint8_t BIRDS_EYE_CLIENT_VERSION = 7;
+constexpr uint8_t BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK = 1 << 1;
+constexpr uint8_t BIRDS_EYE_PERSPECTIVE_CLIENT_VERSION = 8;
 constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_SETTING_ID = 25;
+constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID = 26;
+constexpr uint8_t MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE = 1;
 constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
 constexpr uint8_t MAP_DEFAULT_ROUTE_LINE_WIDTH = 4;
@@ -51,6 +55,19 @@ inline bool clientSupportsExtendedVisibility(uint8_t clientVersion) {
 
 inline bool clientSupportsBirdsEyeProjection(uint8_t clientVersion) {
   return clientVersion >= BIRDS_EYE_CLIENT_VERSION;
+}
+
+inline bool clientSupportsBirdsEyePerspective(uint8_t clientVersion) {
+  return clientVersion >= BIRDS_EYE_PERSPECTIVE_CLIENT_VERSION;
+}
+
+inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
+  uint8_t flags = 0;
+  if (clientSupportsBirdsEyeProjection(clientVersion))
+    flags |= BIRDS_EYE_EXTENDED_CAPABILITY_MASK;
+  if (clientSupportsBirdsEyePerspective(clientVersion))
+    flags |= BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK;
+  return flags;
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
@@ -150,6 +167,9 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     break;
   case MAP_NAVIGATION_BIRDS_EYE_SETTING_ID:
     maximum = 1;
+    break;
+  case MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID:
+    maximum = 2;
     break;
   default:
     return value;

@@ -83,7 +83,8 @@ int main() {
   for (uint8_t id : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{6},
                      uint8_t{7}, uint8_t{8}, uint8_t{9}, uint8_t{10},
                      uint8_t{16}, uint8_t{17}, uint8_t{18}, uint8_t{19},
-                     uint8_t{20}, uint8_t{21}, uint8_t{22}, uint8_t{25}}) {
+                     uint8_t{20}, uint8_t{21}, uint8_t{22}, uint8_t{25},
+                     uint8_t{26}}) {
     assert(map_setting_redraw_policy::invalidatesMap(id));
   }
   for (uint8_t id : {uint8_t{4}, uint8_t{5}, uint8_t{11}, uint8_t{12},

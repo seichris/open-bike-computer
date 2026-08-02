@@ -65,6 +65,8 @@ int main() {
   TestProfile loadedNavigation;
   map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
   assert(map_profile_persistence::loadBirdsEyeEnabled(freshStore));
+  assert(map_profile_persistence::loadBirdsEyePerspective(freshStore) ==
+         MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE);
   assert(loadedMap.detailLevel == MAP_DEFAULT_DETAIL_LEVEL);
   assert(loadedMap.routeLineWidth == MAP_DEFAULT_ROUTE_LINE_WIDTH);
   assert(loadedMap.streetLineWidth == DEFAULT_STREET_WIDTH);
@@ -133,6 +135,15 @@ int main() {
   assert(!map_profile_persistence::loadBirdsEyeEnabled(independentStore));
   map_profile_persistence::persistBirdsEyeEnabled(independentStore, true);
   assert(map_profile_persistence::loadBirdsEyeEnabled(independentStore));
+  map_profile_persistence::persistBirdsEyePerspective(independentStore, 0);
+  assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
+         0);
+  map_profile_persistence::persistBirdsEyePerspective(independentStore, 2);
+  assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
+         2);
+  map_profile_persistence::persistBirdsEyePerspective(independentStore, 3);
+  assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
+         2);
 
   std::cout << "Map profile persistence tests passed\n";
   return 0;

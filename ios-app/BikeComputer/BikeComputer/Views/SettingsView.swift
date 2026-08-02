@@ -998,7 +998,10 @@ private struct MapStyleSettingsView: View {
         if !bleManager.supportsBirdsEyeMapNavigation {
             return "Update the Bike Computer firmware to enable bird's-eye view."
         }
-        return "Tilts the map during active navigation. The ordinary Map screen stays flat."
+        if !bleManager.supportsBirdsEyeMapNavigationPerspective {
+            return "Tilts the map during active navigation. Update the Bike Computer firmware to adjust the perspective."
+        }
+        return "Choose how strongly the map tilts during active navigation. The ordinary Map screen stays flat."
     }
 
     var body: some View {
@@ -1034,6 +1037,27 @@ private struct MapStyleSettingsView: View {
                         !bleManager.hasReceivedDeviceCapabilities ||
                             !bleManager.supportsBirdsEyeMapNavigation
                     )
+
+                    if bleManager.supportsBirdsEyeMapNavigationPerspective {
+                        Picker(
+                            "Perspective",
+                            selection: $bleManager.mapPlusNavigationBirdsEyePerspective
+                        ) {
+                            ForEach(MapNavigationBirdsEyePerspective.allCases) { perspective in
+                                Text(perspective.title).tag(perspective)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(
+                            of: bleManager.mapPlusNavigationBirdsEyePerspective
+                        ) { perspective in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
+                                value: Int32(perspective.rawValue)
+                            )
+                        }
+                        .disabled(!bleManager.mapPlusNavigationBirdsEyeViewEnabled)
+                    }
                 }
             }
 

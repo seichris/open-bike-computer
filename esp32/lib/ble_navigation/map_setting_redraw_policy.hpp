@@ -22,6 +22,7 @@ constexpr bool invalidatesMap(uint8_t settingId) {
   case 21:
   case 22:
   case 25:
+  case 26:
     return true;
   default:
     return false;

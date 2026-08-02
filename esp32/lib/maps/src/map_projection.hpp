@@ -16,6 +16,35 @@ namespace map_projection {
 
 enum class Mode : uint8_t { Flat = 0, BirdsEye = 1 };
 
+enum class BirdsEyePerspective : uint8_t {
+  Gentle = 0,
+  Standard = 1,
+  Strong = 2,
+};
+
+inline BirdsEyePerspective birdsEyePerspectiveForValue(uint8_t value) {
+  switch (value) {
+  case static_cast<uint8_t>(BirdsEyePerspective::Gentle):
+    return BirdsEyePerspective::Gentle;
+  case static_cast<uint8_t>(BirdsEyePerspective::Strong):
+    return BirdsEyePerspective::Strong;
+  default:
+    return BirdsEyePerspective::Standard;
+  }
+}
+
+inline double birdsEyeTopEdgeScale(BirdsEyePerspective perspective) {
+  switch (perspective) {
+  case BirdsEyePerspective::Gentle:
+    return 0.75;
+  case BirdsEyePerspective::Strong:
+    return 0.48;
+  case BirdsEyePerspective::Standard:
+  default:
+    return 0.60;
+  }
+}
+
 struct Config {
   uint16_t viewportWidth = 0;
   uint16_t viewportHeight = 0;
@@ -26,7 +55,8 @@ struct Config {
   double anchorY = 0.0;
   map_transform::PixelOffset rasterCellOffset{};
   Mode mode = Mode::Flat;
-  double topEdgeScale = 0.60;
+  double topEdgeScale =
+      birdsEyeTopEdgeScale(BirdsEyePerspective::Standard);
   double maximumDepthScale = 1.35;
   double nearPlaneMarginPixels = 8.0;
 };

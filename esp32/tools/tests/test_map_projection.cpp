@@ -10,7 +10,9 @@ constexpr double kPi = 3.14159265358979323846;
 
 map_projection::Projection makeProjection(
     map_projection::Mode mode, uint16_t width = 466,
-    uint16_t height = 466, uint8_t zoom = 3, double rotation = 0.0) {
+    uint16_t height = 466, uint8_t zoom = 3, double rotation = 0.0,
+    map_projection::BirdsEyePerspective perspective =
+        map_projection::BirdsEyePerspective::Standard) {
   map_projection::Config config;
   config.viewportWidth = width;
   config.viewportHeight = height;
@@ -22,6 +24,7 @@ map_projection::Projection makeProjection(
                        ? map_projection::birdsEyeAnchorY(height)
                        : height / 2;
   config.mode = mode;
+  config.topEdgeScale = map_projection::birdsEyeTopEdgeScale(perspective);
   return map_projection::Projection(config);
 }
 
@@ -76,6 +79,41 @@ void assertPerspectiveBehavior() {
   assert(!invalid.valid);
 }
 
+void assertPerspectivePresets() {
+  using map_projection::BirdsEyePerspective;
+  assertNear(map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::Gentle),
+             0.75);
+  assertNear(map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::Standard),
+             0.60);
+  assertNear(map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::Strong),
+             0.48);
+  assert(map_projection::birdsEyePerspectiveForValue(0) ==
+         BirdsEyePerspective::Gentle);
+  assert(map_projection::birdsEyePerspectiveForValue(1) ==
+         BirdsEyePerspective::Standard);
+  assert(map_projection::birdsEyePerspectiveForValue(2) ==
+         BirdsEyePerspective::Strong);
+  assert(map_projection::birdsEyePerspectiveForValue(3) ==
+         BirdsEyePerspective::Standard);
+
+  const auto gentle = makeProjection(map_projection::Mode::BirdsEye, 466, 466,
+                                     3, 0.0,
+                                     BirdsEyePerspective::Gentle);
+  const auto standard = makeProjection(map_projection::Mode::BirdsEye);
+  const auto strong = makeProjection(map_projection::Mode::BirdsEye, 466, 466,
+                                     3, 0.0,
+                                     BirdsEyePerspective::Strong);
+  const auto gentleFar = gentle.projectGround({100.0, 200.0});
+  const auto standardFar = standard.projectGround({100.0, 200.0});
+  const auto strongFar = strong.projectGround({100.0, 200.0});
+  assert(gentleFar.valid && standardFar.valid && strongFar.valid);
+  assert(gentleFar.depthScale > standardFar.depthScale);
+  assert(standardFar.depthScale > strongFar.depthScale);
+}
+
 void assertClippingAndInverseBounds() {
   const auto projection = makeProjection(map_projection::Mode::BirdsEye);
   map_projection::GroundPoint start{30.0,
@@ -123,13 +161,19 @@ void assertRotationAndBlockBudget() {
            std::pair<uint16_t, uint16_t>{410, 430},
            std::pair<uint16_t, uint16_t>{410, 502}}) {
     for (uint8_t zoom = 1; zoom <= 5; ++zoom) {
-      for (int heading = 0; heading < 360; heading += 5) {
-        const auto projection = makeProjection(
-            map_projection::Mode::BirdsEye, dimensions.first,
-            dimensions.second, zoom, -heading * kPi / 180.0);
-        const auto bounds = projection.worldBounds(4.0);
-        assert(bounds.max.x - bounds.min.x < 4096.0);
-        assert(bounds.max.y - bounds.min.y < 4096.0);
+      for (const auto perspective : {
+               map_projection::BirdsEyePerspective::Gentle,
+               map_projection::BirdsEyePerspective::Standard,
+               map_projection::BirdsEyePerspective::Strong}) {
+        for (int heading = 0; heading < 360; heading += 5) {
+          const auto projection = makeProjection(
+              map_projection::Mode::BirdsEye, dimensions.first,
+              dimensions.second, zoom, -heading * kPi / 180.0,
+              perspective);
+          const auto bounds = projection.worldBounds(4.0);
+          assert(bounds.max.x - bounds.min.x < 4096.0);
+          assert(bounds.max.y - bounds.min.y < 4096.0);
+        }
       }
     }
   }
@@ -153,6 +197,7 @@ void assertLineWidthScaling() {
 int main() {
   assertFlatParity();
   assertPerspectiveBehavior();
+  assertPerspectivePresets();
   assertClippingAndInverseBounds();
   assertRotationAndBlockBudget();
   assertLineWidthScaling();
