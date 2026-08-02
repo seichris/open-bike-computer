@@ -55,6 +55,17 @@ production. Its control-plane lock contains the same backend revision currently
 deployed from `main`, so changing the Compose location does not introduce a new
 worker binary.
 
+## Hardware-validation deployment
+
+Create a separate Coolify Docker Compose application using
+`compose.hardware-validation.yaml`. Set `MAP_PLATFORM_VALIDATION_IMAGE` to the
+candidate's immutable `ghcr.io/...@sha256:...` reference, use a separate
+hostname, and enable stream or target-format gates only for the exact
+hardware-validation installation. The validation stack always uses its own
+filesystem-backed volume; it must not share the production data volume.
+Production continues to use `compose.yaml` and its independently reviewed image
+pins.
+
 ## Promotion flow
 
 The `Map Platform Image` workflow builds and attests candidate images. After a
