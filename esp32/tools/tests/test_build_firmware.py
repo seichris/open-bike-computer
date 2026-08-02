@@ -17,6 +17,7 @@ from unittest.mock import patch
 from build_firmware import (
     BuildError,
     WAVESHARE_PLATFORM_URL,
+    _resolved_device_port,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
     _print_provenance,
@@ -24,7 +25,10 @@ from build_firmware import (
     main,
     upload_firmware,
 )
-from firmware_build_identity import firmware_git_identity
+from firmware_build_identity import (
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+)
 from generated_sdkconfig import (
     FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
     FLASH_PLAN_FILENAME,
@@ -599,11 +603,27 @@ class FirmwareBuildTests(unittest.TestCase):
         environment.write_text(GENERATED_CONFIG, encoding="utf-8")
         other.write_text(GENERATED_CONFIG, encoding="utf-8")
         calls = 0
+        expected_source_date_epoch = subprocess.check_output(
+            ["git", "show", "--no-patch", "--format=%ct", "HEAD"],
+            cwd=self.project_dir,
+            text=True,
+        ).strip()
+        observed_build_clocks = []
 
         def runner(command, cwd):
             nonlocal calls
             calls += 1
             self.assertEqual(os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD"), "1")
+            isolated_git_config = Path(os.environ["GIT_CONFIG_GLOBAL"])
+            self.assertEqual(isolated_git_config.read_text(encoding="utf-8"), "")
+            self.assertEqual(os.environ.get("GIT_CONFIG_NOSYSTEM"), "1")
+            self.assertEqual(os.environ.get("GIT_TERMINAL_PROMPT"), "0")
+            observed_build_clocks.append(
+                (
+                    os.environ.get("SOURCE_DATE_EPOCH"),
+                    os.environ.get("OPEN_BIKE_BUILD_TIMESTAMP"),
+                )
+            )
             if calls == 1:
                 self.assertFalse(defaults.exists())
                 self.assertFalse(environment.exists())
@@ -618,7 +638,9 @@ class FirmwareBuildTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         original = os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD")
+        original_source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
         os.environ["OPEN_BIKE_DETERMINISTIC_BUILD"] = "original"
+        os.environ["SOURCE_DATE_EPOCH"] = "999"
         try:
             build_firmware(self.project_dir, self.environment, runner=runner)
         finally:
@@ -629,8 +651,25 @@ class FirmwareBuildTests(unittest.TestCase):
                 os.environ.pop("OPEN_BIKE_DETERMINISTIC_BUILD", None)
             else:
                 os.environ["OPEN_BIKE_DETERMINISTIC_BUILD"] = original
+            self.assertEqual(os.environ.get("SOURCE_DATE_EPOCH"), "999")
+            if original_source_date_epoch is None:
+                os.environ.pop("SOURCE_DATE_EPOCH", None)
+            else:
+                os.environ["SOURCE_DATE_EPOCH"] = original_source_date_epoch
 
         self.assertEqual(calls, 2)
+        self.assertEqual(
+            observed_build_clocks,
+            [
+                (
+                    expected_source_date_epoch,
+                    build_timestamp_from_source_date_epoch(
+                        expected_source_date_epoch
+                    ),
+                )
+            ]
+            * 2,
+        )
 
     def test_sequential_profiles_keep_second_build_identity_exact(self):
         full_sha = self.initialize_git_repo()
@@ -1250,6 +1289,159 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertEqual(result, 1)
         mocked_build.assert_called_once()
         self.assertIn("upload port must not be empty", errors.getvalue())
+
+    def test_cli_upload_only_skips_build_and_resolves_device_serial_late(self):
+        with patch("build_firmware.build_firmware") as mocked_build, patch(
+            "build_firmware.upload_firmware"
+        ) as mocked_upload:
+            result = main(
+                [
+                    self.environment,
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--upload-only",
+                    "--device-serial",
+                    "3C:DC:75:6E:F0:10",
+                    "--device-timeout",
+                    "12.5",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        mocked_build.assert_not_called()
+        mocked_upload.assert_called_once_with(
+            self.project_dir,
+            self.environment,
+            None,
+            device_serial="3C:DC:75:6E:F0:10",
+            device_timeout=12.5,
+        )
+
+    def test_cli_upload_only_requires_a_device_selector(self):
+        errors = StringIO()
+        with patch("build_firmware.build_firmware") as mocked_build, patch(
+            "build_firmware.upload_firmware"
+        ) as mocked_upload, redirect_stderr(errors):
+            result = main(
+                [
+                    self.environment,
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--upload-only",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        mocked_build.assert_not_called()
+        mocked_upload.assert_not_called()
+        self.assertIn("requires --upload-port or --device-serial", errors.getvalue())
+
+    def test_upload_device_serial_binds_the_resolved_port(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        calls = []
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+            with patch(
+                "build_firmware._resolved_device_port",
+                return_value="/dev/cu.renumbered",
+            ) as mocked_resolver:
+                upload_firmware(
+                    self.project_dir,
+                    self.environment,
+                    device_serial="3C:DC:75:6E:F0:10",
+                    device_timeout=7,
+                    runner=lambda command, cwd: (
+                        calls.append(tuple(command))
+                        or subprocess.CompletedProcess(command, 0)
+                    ),
+                )
+
+        mocked_resolver.assert_called_once()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("/dev/cu.renumbered", calls[0])
+        self.assertNotIn(FLASH_PLAN_PORT_PLACEHOLDER, calls[0])
+
+    def test_failed_upload_keeps_attested_environment_retryable(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        results = iter((2, 0))
+
+        def runner(command, cwd):
+            self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+            return subprocess.CompletedProcess(command, next(results))
+
+        os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+            with self.assertRaisesRegex(BuildError, "status 2"):
+                upload_firmware(
+                    self.project_dir,
+                    self.environment,
+                    "/dev/cu.missing",
+                    runner=runner,
+                )
+            upload_firmware(
+                self.project_dir,
+                self.environment,
+                "/dev/cu.returned",
+                runner=runner,
+            )
+
+        self.assertNotIn("PYTHONDONTWRITEBYTECODE", os.environ)
+
+    def test_private_device_resolver_output_is_validated(self):
+        core = self.write_core_attestation()
+        private_python = core / "penv/bin/python"
+        private_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        private_python.chmod(0o755)
+        resolver = self.project_dir / "tools/resolve_upload_port.py"
+        resolver.parent.mkdir()
+        resolver.write_text("# resolver\n", encoding="utf-8")
+        manifest = {
+            "environment": self.environment,
+            "coreAttestation": {"coreDir": str(core.resolve())},
+        }
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((tuple(command), kwargs))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "schema": 1,
+                        "port": "/dev/cu.current",
+                        "serialNumber": "3c:dc:75:6e:f0:10",
+                    }
+                ),
+                stderr="",
+            )
+
+        port = _resolved_device_port(
+            self.project_dir,
+            manifest,
+            "3C:DC:75:6E:F0:10",
+            9,
+            runner=runner,
+        )
+
+        self.assertEqual(port, "/dev/cu.current")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], str(private_python.resolve()))
+        self.assertEqual(calls[0][0][-1], "9")
+        self.assertTrue(calls[0][1]["capture_output"])
+        self.assertTrue(calls[0][1]["text"])
 
     def test_refuses_unrecognized_sdkconfig_before_running_platformio(self):
         config = self.project_dir / f"sdkconfig.{self.environment}"

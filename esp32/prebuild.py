@@ -16,7 +16,10 @@ TOOLS_DIR = Path(env.get("PROJECT_DIR")).resolve() / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from firmware_build_identity import firmware_git_identity
+from firmware_build_identity import (
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+)
 from generated_sdkconfig import recognized_generated_sdkconfigs
 from pioarduino_custom_core import (
     correct_nested_pio_command,
@@ -192,7 +195,6 @@ flavor = env.get("PIOENV")
 firmware_target = env.GetProjectOption("custom_firmware_target", flavor)
 revision = config.get("common","revision")
 version = config.get("common", "version")
-build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 project_dir = Path(env.get("PROJECT_DIR")).resolve()
 allowed_generated_paths = ()
 deterministic_build = os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1"
@@ -201,6 +203,24 @@ if firmware_target.startswith("WAVESHARE_AMOLED_") and not deterministic_build:
         "Waveshare firmware builds must use tools/build_firmware.py so generated "
         "inputs and the flashed source identity are verified"
     )
+if deterministic_build:
+    source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+    try:
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            f"invalid deterministic firmware build clock: {error}"
+        ) from error
+    expected_build_timestamp = os.environ.get("OPEN_BIKE_BUILD_TIMESTAMP")
+    if expected_build_timestamp != build_timestamp:
+        raise RuntimeError(
+            "deterministic firmware build timestamp changed before prebuild: "
+            f"expected {expected_build_timestamp or 'missing'}, got {build_timestamp}"
+        )
+else:
+    build_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 if deterministic_build:
     allowed_generated_paths = recognized_generated_sdkconfigs(project_dir, flavor)
 detected_git_sha = firmware_git_identity(

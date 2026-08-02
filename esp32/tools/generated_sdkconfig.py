@@ -14,13 +14,18 @@ import sys
 import tempfile
 from pathlib import Path
 
-from firmware_build_identity import FULL_GIT_SHA, firmware_git_identity
+from firmware_build_identity import (
+    FULL_GIT_SHA,
+    build_timestamp_from_source_date_epoch,
+    firmware_git_identity,
+    git_commit_source_date_epoch,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GENERATED_BANNER = b"# Automatically generated file. DO NOT EDIT."
 GENERATED_DESCRIPTION = b"Project Configuration"
-CACHE_SCHEMA = 18
+CACHE_SCHEMA = 19
 FLASH_PLAN_SCHEMA = 2
 FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
@@ -1048,6 +1053,15 @@ def _cached_defaults_match(
     except GeneratedSdkconfigError:
         return False
     source_identity = current_source_identity(project_dir, environment)
+    try:
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, source_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError:
+        return False
     return (
         manifest.get("schema") == CACHE_SCHEMA
         and "environmentSdkconfigSha256" in manifest
@@ -1059,6 +1073,8 @@ def _cached_defaults_match(
         == WAVESHARE_PLATFORM_PACKAGES_SHA256
         and FULL_GIT_SHA.fullmatch(source_identity) is not None
         and manifest.get("sourceIdentity") == source_identity
+        and manifest.get("sourceDateEpoch") == source_date_epoch
+        and manifest.get("buildTimestamp") == build_timestamp
         and manifest.get("managedComponentsSha256") == managed_components_sha
         and manifest.get("libraryDependenciesSha256")
         == library_dependencies_sha
@@ -1260,6 +1276,17 @@ def record_generated_sdkconfig_defaults(
         if manifest_path.is_file() or manifest_path.is_symlink():
             manifest_path.unlink()
         return None
+    try:
+        source_date_epoch = git_commit_source_date_epoch(
+            project_dir, source_identity
+        )
+        build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+    except ValueError as error:
+        raise GeneratedSdkconfigError(
+            f"could not derive the verified firmware build clock: {error}"
+        ) from error
     managed_components_sha = _managed_components_sha256(project_dir)
     library_dependencies_sha = _library_dependencies_sha256(
         project_dir, environment
@@ -1268,6 +1295,8 @@ def record_generated_sdkconfig_defaults(
     manifest = {
         "schema": CACHE_SCHEMA,
         "sourceIdentity": source_identity,
+        "sourceDateEpoch": source_date_epoch,
+        "buildTimestamp": build_timestamp,
         "managedComponentsSha256": managed_components_sha,
         "libraryDependenciesSha256": library_dependencies_sha,
         "sdkconfigDefaultsSha256": _file_sha256(defaults),
