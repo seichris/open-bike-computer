@@ -12,6 +12,9 @@ constexpr uint8_t BIRDS_EYE_EXTENDED_CAPABILITY_MASK = 1 << 0;
 constexpr uint8_t BIRDS_EYE_CLIENT_VERSION = 7;
 constexpr uint8_t BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK = 1 << 1;
 constexpr uint8_t BIRDS_EYE_PERSPECTIVE_CLIENT_VERSION = 8;
+constexpr uint8_t BIRDS_EYE_STRONGER_PERSPECTIVE_EXTENDED_CAPABILITY_MASK =
+    1 << 2;
+constexpr uint8_t BIRDS_EYE_STRONGER_PERSPECTIVE_CLIENT_VERSION = 9;
 constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_SETTING_ID = 25;
 constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID = 26;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE = 1;
@@ -61,12 +64,18 @@ inline bool clientSupportsBirdsEyePerspective(uint8_t clientVersion) {
   return clientVersion >= BIRDS_EYE_PERSPECTIVE_CLIENT_VERSION;
 }
 
+inline bool clientSupportsStrongerBirdsEyePerspective(uint8_t clientVersion) {
+  return clientVersion >= BIRDS_EYE_STRONGER_PERSPECTIVE_CLIENT_VERSION;
+}
+
 inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
   uint8_t flags = 0;
   if (clientSupportsBirdsEyeProjection(clientVersion))
     flags |= BIRDS_EYE_EXTENDED_CAPABILITY_MASK;
   if (clientSupportsBirdsEyePerspective(clientVersion))
     flags |= BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK;
+  if (clientSupportsStrongerBirdsEyePerspective(clientVersion))
+    flags |= BIRDS_EYE_STRONGER_PERSPECTIVE_EXTENDED_CAPABILITY_MASK;
   return flags;
 }
 
@@ -169,7 +178,7 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     maximum = 1;
     break;
   case MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID:
-    maximum = 2;
+    maximum = 4;
     break;
   default:
     return value;

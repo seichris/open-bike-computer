@@ -8829,7 +8829,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.workoutTelemetryCapabilityMask, 128, "workout telemetry uses capability bit 7")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask, 1, "bird's-eye Map + Navigation uses extended capability bit 0")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask, 2, "bird's-eye perspective uses extended capability bit 1")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 8, "capability version advertises adjustable bird's-eye perspective support")
+        assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask, 4, "stronger bird's-eye perspectives use extended capability bit 2")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 9, "capability version advertises five bird's-eye perspective levels")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -8865,6 +8866,10 @@ struct NavigationProtocolTests {
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: -1), .standard, "unknown bird's-eye perspectives use Standard")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 0), .gentle, "perspective zero is Gentle")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 2), .strong, "perspective two is Strong")
+        assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 3), .veryStrong, "perspective three is Very Strong")
+        assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 4), .maximum, "perspective four is Maximum")
+        assertEqual(MapNavigationBirdsEyePerspective.maximum.supportedValue(supportsStrongerPerspectives: false), .strong, "older firmware receives Strong instead of Maximum")
+        assertEqual(MapNavigationBirdsEyePerspective.maximum.supportedValue(supportsStrongerPerspectives: true), .maximum, "new firmware retains Maximum")
         assertEqual(DeviceBLEProtocol.currentScreenMaskMarker, 1 << 30, "current screen masks use bit 30 as a compatibility marker")
         assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: -1), nil, "unavailable iPhone battery levels stay unknown")
         assertEqual(DeviceBLEProtocol.phoneBatteryPercentage(from: 0), 0, "empty iPhone battery maps to zero percent")
@@ -10329,6 +10334,19 @@ struct NavigationProtocolTests {
                "adjustable bird's-eye CAPS should be consumed")
         assert(manager.supportsBirdsEyeMapNavigationPerspective,
                "extended CAPS bit one enables the perspective control")
+        assert(!manager.supportsBirdsEyeMapNavigationStrongerPerspective,
+               "bit one alone limits the picker to the first three levels")
+
+        let strongerBirdsEyePerspective =
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask,
+                  DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask |
+                    DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask |
+                    DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask])
+        assert(manager.handleDeviceCapabilitiesNotification(strongerBirdsEyePerspective),
+               "five-level bird's-eye CAPS should be consumed")
+        assert(manager.supportsBirdsEyeMapNavigationStrongerPerspective,
+               "extended CAPS bit two enables Very Strong and Maximum")
 
         let acknowledgedFlags = supportedFlags |
             DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask
@@ -10355,7 +10373,8 @@ struct NavigationProtocolTests {
             Data([acknowledgedFlags, 1,
                   DeviceSound.rotatingBicycleBell.rawValue, 65,
                   DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask |
-                    DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask])
+                    DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask |
+                    DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask])
         assert(manager.handleDeviceCapabilitiesNotification(
             extendedDeviceConfig
         ), "extended CAPS with a PWR configuration should be consumed")
@@ -10363,6 +10382,8 @@ struct NavigationProtocolTests {
                "the extended byte follows the complete PWR configuration")
         assert(manager.supportsBirdsEyeMapNavigationPerspective,
                "the PWR configuration response also carries perspective support")
+        assert(manager.supportsBirdsEyeMapNavigationStrongerPerspective,
+               "the PWR configuration response carries five-level perspective support")
 
         let invalidDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([acknowledgedFlags, 2, DeviceSound.bellDing.rawValue, 70])
@@ -10393,6 +10414,8 @@ struct NavigationProtocolTests {
                "malformed CAPS clears bird's-eye Map + Navigation support")
         assert(!manager.supportsBirdsEyeMapNavigationPerspective,
                "malformed CAPS clears bird's-eye perspective support")
+        assert(!manager.supportsBirdsEyeMapNavigationStrongerPerspective,
+               "malformed CAPS clears stronger bird's-eye perspective support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
@@ -10544,7 +10567,7 @@ struct NavigationProtocolTests {
                "the disabled bird's-eye preference survives a settings reload")
 
         let (perspectiveManager, perspectivePackets) = configuredManager()
-        perspectiveManager.mapPlusNavigationBirdsEyePerspective = .strong
+        perspectiveManager.mapPlusNavigationBirdsEyePerspective = .maximum
         let perspectiveCapabilities =
             Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask,
@@ -10558,11 +10581,26 @@ struct NavigationProtocolTests {
                     "adjustable firmware receives both bird's-eye settings")
         let perspectiveSetting = perspectivePackets().first { $0[4] == 26 }
         assertEqual(readInt32LE(perspectiveSetting!, offset: 5), 2,
-                    "the Strong perspective is sent as two")
+                    "older adjustable firmware receives Strong instead of Maximum")
         let restoredPerspectiveManager = BLEManager()
         assertEqual(restoredPerspectiveManager.mapPlusNavigationBirdsEyePerspective,
-                    .strong,
+                    .maximum,
                     "the bird's-eye perspective survives a settings reload")
+
+        let (strongerPerspectiveManager, strongerPerspectivePackets) = configuredManager()
+        strongerPerspectiveManager.mapPlusNavigationBirdsEyePerspective = .maximum
+        let strongerPerspectiveCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
+            Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask,
+                  DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask |
+                    DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask |
+                    DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask])
+        assert(strongerPerspectiveManager.handleDeviceCapabilitiesNotification(
+            strongerPerspectiveCapabilities
+        ), "five-level bird's-eye perspective capability should be consumed")
+        let strongerPerspectiveSetting = strongerPerspectivePackets().first { $0[4] == 26 }
+        assertEqual(readInt32LE(strongerPerspectiveSetting!, offset: 5), 4,
+                    "Maximum is sent as four to five-level firmware")
 
         let (legacyManager, legacyPackets) = configuredManager()
         let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])

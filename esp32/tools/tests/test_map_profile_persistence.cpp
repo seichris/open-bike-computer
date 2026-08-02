@@ -143,7 +143,13 @@ int main() {
          2);
   map_profile_persistence::persistBirdsEyePerspective(independentStore, 3);
   assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
-         2);
+         3);
+  map_profile_persistence::persistBirdsEyePerspective(independentStore, 4);
+  assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
+         4);
+  map_profile_persistence::persistBirdsEyePerspective(independentStore, 5);
+  assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
+         4);
 
   std::cout << "Map profile persistence tests passed\n";
   return 0;

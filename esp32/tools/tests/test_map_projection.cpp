@@ -90,6 +90,12 @@ void assertPerspectivePresets() {
   assertNear(map_projection::birdsEyeTopEdgeScale(
                  BirdsEyePerspective::Strong),
              0.48);
+  assertNear(map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::VeryStrong),
+             0.36);
+  assertNear(map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::Maximum),
+             0.24);
   assert(map_projection::birdsEyePerspectiveForValue(0) ==
          BirdsEyePerspective::Gentle);
   assert(map_projection::birdsEyePerspectiveForValue(1) ==
@@ -97,6 +103,10 @@ void assertPerspectivePresets() {
   assert(map_projection::birdsEyePerspectiveForValue(2) ==
          BirdsEyePerspective::Strong);
   assert(map_projection::birdsEyePerspectiveForValue(3) ==
+         BirdsEyePerspective::VeryStrong);
+  assert(map_projection::birdsEyePerspectiveForValue(4) ==
+         BirdsEyePerspective::Maximum);
+  assert(map_projection::birdsEyePerspectiveForValue(5) ==
          BirdsEyePerspective::Standard);
 
   const auto gentle = makeProjection(map_projection::Mode::BirdsEye, 466, 466,
@@ -106,12 +116,35 @@ void assertPerspectivePresets() {
   const auto strong = makeProjection(map_projection::Mode::BirdsEye, 466, 466,
                                      3, 0.0,
                                      BirdsEyePerspective::Strong);
+  const auto veryStrong = makeProjection(
+      map_projection::Mode::BirdsEye, 466, 466, 3, 0.0,
+      BirdsEyePerspective::VeryStrong);
+  const auto maximum = makeProjection(map_projection::Mode::BirdsEye, 466,
+                                      466, 3, 0.0,
+                                      BirdsEyePerspective::Maximum);
   const auto gentleFar = gentle.projectGround({100.0, 200.0});
   const auto standardFar = standard.projectGround({100.0, 200.0});
   const auto strongFar = strong.projectGround({100.0, 200.0});
-  assert(gentleFar.valid && standardFar.valid && strongFar.valid);
+  const auto veryStrongFar = veryStrong.projectGround({100.0, 200.0});
+  const auto maximumFar = maximum.projectGround({100.0, 200.0});
+  assert(gentleFar.valid && standardFar.valid && strongFar.valid &&
+         veryStrongFar.valid && maximumFar.valid);
   assert(gentleFar.depthScale > standardFar.depthScale);
   assert(standardFar.depthScale > strongFar.depthScale);
+  assert(strongFar.depthScale > veryStrongFar.depthScale);
+  assert(veryStrongFar.depthScale > maximumFar.depthScale);
+
+  const auto constrainedMaximum = makeProjection(
+      map_projection::Mode::BirdsEye, 466, 366, 5, 0.0,
+      BirdsEyePerspective::Maximum);
+  assert(constrainedMaximum.config().topEdgeScale >
+         map_projection::birdsEyeTopEdgeScale(BirdsEyePerspective::Maximum));
+  const auto unconstrainedMaximum = makeProjection(
+      map_projection::Mode::BirdsEye, 466, 366, 2, 0.0,
+      BirdsEyePerspective::Maximum);
+  assertNear(unconstrainedMaximum.config().topEdgeScale,
+             map_projection::birdsEyeTopEdgeScale(
+                 BirdsEyePerspective::Maximum));
 }
 
 void assertClippingAndInverseBounds() {
@@ -164,7 +197,9 @@ void assertRotationAndBlockBudget() {
       for (const auto perspective : {
                map_projection::BirdsEyePerspective::Gentle,
                map_projection::BirdsEyePerspective::Standard,
-               map_projection::BirdsEyePerspective::Strong}) {
+               map_projection::BirdsEyePerspective::Strong,
+               map_projection::BirdsEyePerspective::VeryStrong,
+               map_projection::BirdsEyePerspective::Maximum}) {
         for (int heading = 0; heading < 360; heading += 5) {
           const auto projection = makeProjection(
               map_projection::Mode::BirdsEye, dimensions.first,

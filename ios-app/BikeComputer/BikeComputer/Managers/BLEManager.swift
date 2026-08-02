@@ -146,7 +146,8 @@ enum DeviceBLEProtocol {
     static let workoutTelemetryCapabilityMask: UInt8 = 1 << 7
     static let birdsEyeMapNavigationExtendedCapabilityMask: UInt8 = 1 << 0
     static let birdsEyeMapNavigationPerspectiveExtendedCapabilityMask: UInt8 = 1 << 1
-    static let deviceCapabilitiesVersion: UInt8 = 8
+    static let birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask: UInt8 = 1 << 2
+    static let deviceCapabilitiesVersion: UInt8 = 9
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
     static let workoutTelemetryExtendedCoalescingKey =
@@ -505,6 +506,8 @@ enum MapNavigationBirdsEyePerspective: Int, CaseIterable, Identifiable {
     case gentle = 0
     case standard = 1
     case strong = 2
+    case veryStrong = 3
+    case maximum = 4
 
     var id: Int { rawValue }
 
@@ -513,7 +516,17 @@ enum MapNavigationBirdsEyePerspective: Int, CaseIterable, Identifiable {
         case .gentle: return "Gentle"
         case .standard: return "Standard"
         case .strong: return "Strong"
+        case .veryStrong: return "Very Strong"
+        case .maximum: return "Maximum"
         }
+    }
+
+    static let baselineCases: [Self] = [.gentle, .standard, .strong]
+
+    func supportedValue(supportsStrongerPerspectives: Bool) -> Self {
+        supportsStrongerPerspectives || rawValue <= Self.strong.rawValue
+            ? self
+            : .strong
     }
 
     static func normalized(rawValue: Int) -> Self {
@@ -553,6 +566,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
     @Published private(set) var supportsBirdsEyeMapNavigation: Bool = false
     @Published private(set) var supportsBirdsEyeMapNavigationPerspective: Bool = false
+    @Published private(set) var supportsBirdsEyeMapNavigationStrongerPerspective: Bool = false
     @Published private(set) var supportsBatteryStatusScreen: Bool = false
     @Published private(set) var supportsDestinationPicker: Bool = false
     @Published private(set) var supportsWorkoutTelemetry: Bool = false
@@ -2169,6 +2183,11 @@ class BLEManager: NSObject, ObservableObject {
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
+            let maximum = supportsBirdsEyeMapNavigationStrongerPerspective
+                ? MapNavigationBirdsEyePerspective.maximum.rawValue
+                : MapNavigationBirdsEyePerspective.strong.rawValue
+            deviceValue = min(max(value, 0), Int32(maximum))
         } else if id == 9 || id == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID {
             deviceValue = DeviceBLEProtocol.legacyStreetWidthBoost(
                 fromAbsoluteWidth: value
@@ -2345,6 +2364,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
         supportsBirdsEyeMapNavigationPerspective = false
+        supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         updateWorkoutTelemetryCapability(false)
@@ -3113,6 +3133,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
         supportsBirdsEyeMapNavigationPerspective = false
+        supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         updateWorkoutTelemetryCapability(false)
@@ -5019,6 +5040,7 @@ extension BLEManager: CBPeripheralDelegate {
             supportsExtendedMapVisibility = false
             supportsBirdsEyeMapNavigation = false
             supportsBirdsEyeMapNavigationPerspective = false
+            supportsBirdsEyeMapNavigationStrongerPerspective = false
             supportsBatteryStatusScreen = false
             supportsDestinationPicker = false
             updateWorkoutTelemetryCapability(false)
@@ -5059,6 +5081,9 @@ extension BLEManager: CBPeripheralDelegate {
         let hasBirdsEyeMapNavigationPerspective =
             hasBirdsEyeMapNavigation && extendedFlags &
                 DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask != 0
+        let hasBirdsEyeMapNavigationStrongerPerspective =
+            hasBirdsEyeMapNavigationPerspective && extendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask != 0
         let hasDevicePowerButtonConfig = data.count == 8 || data.count == 9
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
@@ -5072,6 +5097,7 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsExtendedMapVisibility = false
                 supportsBirdsEyeMapNavigation = false
                 supportsBirdsEyeMapNavigationPerspective = false
+                supportsBirdsEyeMapNavigationStrongerPerspective = false
                 supportsBatteryStatusScreen = false
                 supportsDestinationPicker = false
                 updateWorkoutTelemetryCapability(false)
@@ -5104,7 +5130,9 @@ extension BLEManager: CBPeripheralDelegate {
             hasReceivedDeviceCapabilities &&
             ((!supportsBirdsEyeMapNavigation && hasBirdsEyeMapNavigation) ||
              (!supportsBirdsEyeMapNavigationPerspective &&
-              hasBirdsEyeMapNavigationPerspective))
+              hasBirdsEyeMapNavigationPerspective) ||
+             (!supportsBirdsEyeMapNavigationStrongerPerspective &&
+              hasBirdsEyeMapNavigationStrongerPerspective))
         if shouldResendMapProfilesForExtendedVisibility {
             hasSentMapProfileForConnection = false
             hasSentMapNavigationProfileForConnection = false
@@ -5122,6 +5150,8 @@ extension BLEManager: CBPeripheralDelegate {
         supportsExtendedMapVisibility = hasExtendedMapVisibility
         supportsBirdsEyeMapNavigation = hasBirdsEyeMapNavigation
         supportsBirdsEyeMapNavigationPerspective = hasBirdsEyeMapNavigationPerspective
+        supportsBirdsEyeMapNavigationStrongerPerspective =
+            hasBirdsEyeMapNavigationStrongerPerspective
         supportsBatteryStatusScreen = hasBatteryStatusScreen
         supportsDestinationPicker = hasDestinationPicker
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)

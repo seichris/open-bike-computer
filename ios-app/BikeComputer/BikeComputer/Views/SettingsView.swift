@@ -1001,7 +1001,28 @@ private struct MapStyleSettingsView: View {
         if !bleManager.supportsBirdsEyeMapNavigationPerspective {
             return "Tilts the map during active navigation. Update the Bike Computer firmware to adjust the perspective."
         }
+        if !bleManager.supportsBirdsEyeMapNavigationStrongerPerspective {
+            return "Choose how strongly the map tilts during active navigation. Update the Bike Computer firmware for Very Strong and Maximum."
+        }
         return "Choose how strongly the map tilts during active navigation. The ordinary Map screen stays flat."
+    }
+
+    private var birdsEyePerspectiveOptions: [MapNavigationBirdsEyePerspective] {
+        bleManager.supportsBirdsEyeMapNavigationStrongerPerspective
+            ? MapNavigationBirdsEyePerspective.allCases
+            : MapNavigationBirdsEyePerspective.baselineCases
+    }
+
+    private var birdsEyePerspectiveSelection: Binding<MapNavigationBirdsEyePerspective> {
+        Binding(
+            get: {
+                bleManager.mapPlusNavigationBirdsEyePerspective.supportedValue(
+                    supportsStrongerPerspectives:
+                        bleManager.supportsBirdsEyeMapNavigationStrongerPerspective
+                )
+            },
+            set: { bleManager.mapPlusNavigationBirdsEyePerspective = $0 }
+        )
     }
 
     var body: some View {
@@ -1041,13 +1062,13 @@ private struct MapStyleSettingsView: View {
                     if bleManager.supportsBirdsEyeMapNavigationPerspective {
                         Picker(
                             "Perspective",
-                            selection: $bleManager.mapPlusNavigationBirdsEyePerspective
+                            selection: birdsEyePerspectiveSelection
                         ) {
-                            ForEach(MapNavigationBirdsEyePerspective.allCases) { perspective in
+                            ForEach(birdsEyePerspectiveOptions) { perspective in
                                 Text(perspective.title).tag(perspective)
                             }
                         }
-                        .pickerStyle(.segmented)
+                        .pickerStyle(.menu)
                         .onChange(
                             of: bleManager.mapPlusNavigationBirdsEyePerspective
                         ) { perspective in

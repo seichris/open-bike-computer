@@ -485,7 +485,7 @@ Current setting IDs:
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
 | `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
-| `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. |
+| `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong, `3` Very Strong, `4` Maximum; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. At extreme zoom/viewport combinations, firmware eases the requested strength only as much as needed to stay within the four-block renderer budget. |
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.
@@ -634,10 +634,13 @@ Extended flag bit `0` reports support for the Map + Navigation bird's-eye
 projection and setting ID `25`. iOS keeps the switch disabled and never sends
 ID `25` when this bit is absent. Version `8` additionally requests bit `1`,
 which reports support for the Gentle, Standard, and Strong perspective presets
-and setting ID `26`. iOS hides the perspective picker and never sends ID `26`
-when bit `1` is absent. Version `7` clients receive only bit `0`; firmware only
-appends the extended byte for version `7` or newer requests, so older clients
-continue receiving the exact legacy five- or eight-byte response.
+and setting ID `26`. Version `9` additionally requests bit `2`, which reports
+support for the Very Strong and Maximum values. iOS hides the perspective
+picker when bit `1` is absent and limits it to the first three presets when bit
+`2` is absent. Values `3` and `4` are clamped to Strong before being sent to
+older perspective-capable firmware. Version `7` clients receive only bit `0`;
+firmware only appends the extended byte for version `7` or newer requests, so
+older clients continue receiving the exact legacy five- or eight-byte response.
 
 Receiving a `CAPS` request alone does not switch the firmware's
 setting semantics: a session switches to independent profiles only after the

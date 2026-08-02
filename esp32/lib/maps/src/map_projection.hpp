@@ -20,6 +20,8 @@ enum class BirdsEyePerspective : uint8_t {
   Gentle = 0,
   Standard = 1,
   Strong = 2,
+  VeryStrong = 3,
+  Maximum = 4,
 };
 
 inline BirdsEyePerspective birdsEyePerspectiveForValue(uint8_t value) {
@@ -28,6 +30,10 @@ inline BirdsEyePerspective birdsEyePerspectiveForValue(uint8_t value) {
     return BirdsEyePerspective::Gentle;
   case static_cast<uint8_t>(BirdsEyePerspective::Strong):
     return BirdsEyePerspective::Strong;
+  case static_cast<uint8_t>(BirdsEyePerspective::VeryStrong):
+    return BirdsEyePerspective::VeryStrong;
+  case static_cast<uint8_t>(BirdsEyePerspective::Maximum):
+    return BirdsEyePerspective::Maximum;
   default:
     return BirdsEyePerspective::Standard;
   }
@@ -39,6 +45,10 @@ inline double birdsEyeTopEdgeScale(BirdsEyePerspective perspective) {
     return 0.75;
   case BirdsEyePerspective::Strong:
     return 0.48;
+  case BirdsEyePerspective::VeryStrong:
+    return 0.36;
+  case BirdsEyePerspective::Maximum:
+    return 0.24;
   case BirdsEyePerspective::Standard:
   default:
     return 0.60;
@@ -59,6 +69,10 @@ struct Config {
       birdsEyeTopEdgeScale(BirdsEyePerspective::Standard);
   double maximumDepthScale = 1.35;
   double nearPlaneMarginPixels = 8.0;
+  // Keep the inverse-projected viewport narrower than one 4096-coordinate map
+  // block per axis so the existing four-block cache remains sufficient.
+  double maximumWorldSpan = 4095.0;
+  double worldBoundsMarginPixels = 4.0;
 };
 
 struct GroundPoint {
@@ -81,11 +95,36 @@ class Projection {
 public:
   Projection() = default;
   explicit Projection(const Config &config) : config_(config) {
-    const double topScale =
+    const auto applyTopScale = [this](double topScale) {
+      config_.topEdgeScale = topScale;
+      focalDistance_ = config_.anchorY / (1.0 - topScale);
+      if (!(focalDistance_ > config_.anchorY)) {
+        focalDistance_ = std::max(1.0, config_.viewportHeight * 1.4);
+      }
+    };
+    const double requestedTopScale =
         std::max(0.05, std::min(0.95, config_.topEdgeScale));
-    focalDistance_ = config_.anchorY / (1.0 - topScale);
-    if (!(focalDistance_ > config_.anchorY)) {
-      focalDistance_ = std::max(1.0, config_.viewportHeight * 1.4);
+    applyTopScale(requestedTopScale);
+    if (isBirdsEye() && config_.maximumWorldSpan > 0.0) {
+      const auto worldSpanFits = [this]() {
+        const auto bounds = worldBounds(config_.worldBoundsMarginPixels);
+        return bounds.max.x - bounds.min.x <= config_.maximumWorldSpan &&
+               bounds.max.y - bounds.min.y <= config_.maximumWorldSpan;
+      };
+      if (!worldSpanFits()) {
+        double unsafeTopScale = requestedTopScale;
+        double safeTopScale = 0.95;
+        applyTopScale(safeTopScale);
+        for (uint8_t iteration = 0; iteration < 32; ++iteration) {
+          const double candidate = (unsafeTopScale + safeTopScale) / 2.0;
+          applyTopScale(candidate);
+          if (worldSpanFits())
+            safeTopScale = candidate;
+          else
+            unsafeTopScale = candidate;
+        }
+        applyTopScale(safeTopScale);
+      }
     }
     nearPlaneForward_ =
         inverseForward(config_.viewportHeight + config_.nearPlaneMarginPixels);
