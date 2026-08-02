@@ -47,9 +47,11 @@ steady verified config after tool conversion, forces pioarduino's recursive
 build through that config, rebuilds the requested source, and requires the
 target `firmware.elf`. Direct
 `pio run -e ... -t upload` is intentionally not the documented upload path:
-PlatformIO reruns prebuild before upload, so the helper must preserve its narrow
-generated-config allowance through that pass to keep the flashed Git identity
-exact.
+PlatformIO reruns prebuild before upload. The helper instead records the fully
+resolved esptool command during the verified build, attests its uploader and
+every referenced image, normalizes the three header-mutating flash parameters
+to `keep`, and replays that immutable plan without asking PlatformIO to
+configure or build again.
 
 Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
 upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.
@@ -148,14 +150,17 @@ PlatformIO builds fail with a pointer to the helper; raw legacy-board builds are
 stamped `unverified-...` rather than advertising an exact Git SHA. AMOLED upload
 rechecks the clean source identity, generated state, managed components,
 profile-private library dependencies, isolated installed-core attestation, and
-the exact ELF and binary while holding the project-wide lock, then invokes
-PlatformIO's `nobuild` upload target so it cannot relink different bytes. Keep the
+the exact ELF and binary while holding the project-wide lock, then replays the
+complete PlatformIO-resolved esptool plan so it cannot relink different bytes or
+reconstruct offsets independently. Its final flash mode, frequency, and size
+are `keep`, preventing esptool from rewriting a bootloader after hashing. Keep the
 structured `FIRMWARE_BUILD_PROVENANCE` and
 `FIRMWARE_UPLOAD_PROVENANCE` lines with test notes. The upload marker is a
 preflight record of the eligible USB-upload inputs: firmware binary/ELF,
 bootloader, partition table, OTA bootstrap, platform/package archives,
-library dependencies, and managed components. A successful command means
-PlatformIO accepted the upload. A later `BOOT_META` independently confirms the
+library dependencies, and managed components. A successful command means the
+attested esptool process completed the upload. A later `BOOT_META`
+independently confirms the
 embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.

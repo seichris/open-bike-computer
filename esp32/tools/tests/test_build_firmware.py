@@ -26,10 +26,15 @@ from build_firmware import (
 )
 from firmware_build_identity import firmware_git_identity
 from generated_sdkconfig import (
+    FLASH_PLAN_FILENAME,
+    FLASH_PLAN_PORT_PLACEHOLDER,
+    FLASH_PLAN_SCHEMA,
+    GeneratedSdkconfigError,
     WAVESHARE_PLATFORM_PACKAGES,
     record_generated_sdkconfig_defaults,
     recognized_generated_sdkconfigs,
 )
+from record_flash_plan import record_flash_plan
 
 
 DUMMY_FILES = {
@@ -106,11 +111,94 @@ class FirmwareBuildTests(unittest.TestCase):
         firmware.with_suffix(".bin").write_bytes(b"real flash image")
         (firmware.parent / "bootloader.bin").write_bytes(b"real bootloader")
         self.write_partition_table(environment)
+        self.write_flash_plan(environment)
         if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1":
             defaults = self.project_dir / "sdkconfig.defaults"
             if not defaults.exists():
                 defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
             self.write_core_attestation(environment)
+
+    def write_flash_plan(
+        self,
+        environment=None,
+        *,
+        ota_data_offset="0xe000",
+        app_offset="0x10000",
+        flash_mode="qio",
+        extra_images=(),
+    ):
+        environment = environment or self.environment
+        project_dir = self.project_dir.resolve()
+        build_dir = project_dir / ".pio/build" / environment
+        core = (
+            project_dir
+            / ".pio/open-bike-build/platformio"
+            / environment
+        )
+        uploader = core / "penv/bin/esptool"
+        images = [
+            {"offset": "0x0", "path": str(build_dir / "bootloader.bin")},
+            {"offset": "0x8000", "path": str(build_dir / "partitions.bin")},
+            {
+                "offset": ota_data_offset,
+                "path": str(
+                    core
+                    / "packages/framework-arduinoespressif32/tools/partitions"
+                    / "boot_app0.bin"
+                ),
+            },
+        ]
+        for offset, path, contents in extra_images:
+            path = Path(path).resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            images.append({"offset": offset, "path": str(path)})
+        images.append(
+            {"offset": app_offset, "path": str(build_dir / "firmware.bin")}
+        )
+        command = [
+            str(uploader),
+            "--chip",
+            "esp32s3",
+            "--port",
+            FLASH_PLAN_PORT_PLACEHOLDER,
+            "--baud",
+            "460800",
+            "--before",
+            "default-reset",
+            "--after",
+            "hard-reset",
+            "write-flash",
+            "-z",
+            "--flash-mode",
+            "keep",
+            "--flash-freq",
+            "keep",
+            "--flash-size",
+            "keep",
+        ]
+        command.extend(
+            value
+            for image in images
+            for value in (image["offset"], image["path"])
+        )
+        plan = {
+            "schema": FLASH_PLAN_SCHEMA,
+            "environment": environment,
+            "uploadPortPlaceholder": FLASH_PLAN_PORT_PLACEHOLDER,
+            "uploader": str(uploader),
+            "command": command,
+            "platformioFlashParameters": {
+                "mode": flash_mode,
+                "frequency": "80m",
+                "size": "detect",
+            },
+            "images": images,
+        }
+        (build_dir / FLASH_PLAN_FILENAME).write_text(
+            json.dumps(plan) + "\n", encoding="utf-8"
+        )
+        return plan
 
     def write_partition_table(
         self,
@@ -254,6 +342,88 @@ class FirmwareBuildTests(unittest.TestCase):
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=self.project_dir, text=True
         ).strip()
+
+    def test_records_resolved_arguments_without_shell_quote_leakage(self):
+        class FakeEnvironment:
+            def __init__(self, values):
+                self.values = values
+
+            def Clone(self):
+                return FakeEnvironment(dict(self.values))
+
+            def Replace(self, **values):
+                self.values.update(values)
+
+            def get(self, key, default=None):
+                return self.values.get(key, default)
+
+            def subst(self, expression):
+                result = expression
+                for key, value in self.values.items():
+                    if isinstance(value, str):
+                        result = result.replace(f"${{{key}}}", value)
+                        result = result.replace(f"${key}", value)
+                return result
+
+        build_dir = self.project_dir / "build with spaces"
+        uploader = self.project_dir / "core with spaces/penv/bin/esptool"
+        environment = FakeEnvironment(
+            {
+                "PIOENV": self.environment,
+                "BUILD_DIR": str(build_dir),
+                "PROGNAME": "firmware",
+                "UPLOADER": f'"{uploader}"',
+                "UPLOAD_PORT": "/dev/ignored",
+                "ESP32_APP_OFFSET": "0x10000",
+                "FLASH_EXTRA_IMAGES": [
+                    ("0x0", "$BUILD_DIR/bootloader.bin")
+                ],
+                "UPLOADERFLAGS": [
+                    "--chip",
+                    "esp32s3",
+                    "--port",
+                    '"$UPLOAD_PORT"',
+                    "--baud",
+                    "460800",
+                    "--before",
+                    "default-reset",
+                    "--after",
+                    "hard-reset",
+                    "write-flash",
+                    "-z",
+                    "--flash-mode",
+                    "qio",
+                    "--flash-freq",
+                    "80m",
+                    "--flash-size",
+                    "detect",
+                    "0x0",
+                    "$BUILD_DIR/bootloader.bin",
+                ],
+            }
+        )
+
+        record_flash_plan(environment)
+
+        plan = json.loads(
+            (build_dir / FLASH_PLAN_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(plan["command"][0], str(uploader.resolve()))
+        self.assertIn(FLASH_PLAN_PORT_PLACEHOLDER, plan["command"])
+        self.assertNotIn(
+            f'"{FLASH_PLAN_PORT_PLACEHOLDER}"', plan["command"]
+        )
+        self.assertEqual(
+            plan["platformioFlashParameters"],
+            {"mode": "qio", "frequency": "80m", "size": "detect"},
+        )
+        for option in ("--flash-mode", "--flash-freq", "--flash-size"):
+            self.assertEqual(
+                plan["command"][plan["command"].index(option) + 1], "keep"
+            )
+        self.assertEqual(
+            plan["command"][-1], str((build_dir / "firmware.bin").resolve())
+        )
 
     def test_rebuilds_after_successful_custom_core_dummy_bootstrap(self):
         return_codes = iter((0, 0))
@@ -641,17 +811,21 @@ class FirmwareBuildTests(unittest.TestCase):
                     ),
                 )
 
-    def test_upload_uses_offsets_from_the_verified_partition_image(self):
+    def test_upload_replays_offsets_from_the_verified_platformio_plan(self):
         core = self.write_core_attestation().resolve()
         project_dir = self.project_dir.resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
         defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
         self.write_firmware()
-        self.write_partition_table(ota_data_offset=0xF000, app_offset=0x20000)
+        self.write_flash_plan(
+            ota_data_offset="0xf000",
+            app_offset="0x20000",
+            flash_mode="dio",
+        )
         calls = []
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
-            record_generated_sdkconfig_defaults(
+            manifest_path = record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
             upload_firmware(
@@ -679,27 +853,46 @@ class FirmwareBuildTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index(boot_app0) - 1], "0xf000")
         self.assertEqual(command[command.index(firmware) - 1], "0x20000")
+        self.assertEqual(command[command.index("--flash-mode") + 1], "keep")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["flashPlan"]["platformioFlashParameters"]["mode"],
+            "dio",
+        )
         self.assertNotIn("nobuild", command)
         self.assertNotIn("upload", command)
 
-    def test_upload_refuses_a_malformed_verified_partition_image(self):
-        core = self.write_core_attestation()
+    def test_upload_replays_and_attests_additional_platformio_images(self):
+        core = self.write_core_attestation().resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
         defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
         self.write_firmware()
-        partitions = (
-            self.project_dir
+        extra_image = (
+            self.project_dir.resolve()
             / ".pio/build"
             / self.environment
-            / "partitions.bin"
+            / "recovery.bin"
         )
-        partitions.write_bytes(b"not an ESP32 partition image")
+        self.write_flash_plan(
+            extra_images=(("0x310000", extra_image, b"recovery image"),)
+        )
+        calls = []
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
-            with self.assertRaisesRegex(BuildError, "truncated entry"):
+            upload_firmware(
+                self.project_dir,
+                self.environment,
+                "/dev/cu.test",
+                runner=lambda command, cwd: (
+                    calls.append(tuple(command))
+                    or subprocess.CompletedProcess(command, 0)
+                ),
+            )
+            extra_image.write_bytes(b"changed recovery image")
+            with self.assertRaisesRegex(BuildError, "flash plan changed"):
                 upload_firmware(
                     self.project_dir,
                     self.environment,
@@ -708,6 +901,133 @@ class FirmwareBuildTests(unittest.TestCase):
                         "runner must not be called"
                     ),
                 )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("0x310000", calls[0])
+        self.assertIn(str(extra_image), calls[0])
+
+    def test_upload_refuses_a_flash_plan_changed_after_attestation(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+            self.write_flash_plan(app_offset="0x20000")
+            output = StringIO()
+            with self.assertRaisesRegex(BuildError, "flash plan changed"), redirect_stdout(
+                output
+            ):
+                upload_firmware(
+                    self.project_dir,
+                    self.environment,
+                    "/dev/cu.test",
+                    runner=lambda command, cwd: self.fail(
+                        "runner must not be called"
+                    ),
+                )
+        self.assertNotIn("FIRMWARE_UPLOAD_PROVENANCE", output.getvalue())
+
+    def test_attestation_rejects_duplicate_or_overlapping_flash_ranges(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+
+        for offset, expected_error in (
+            ("0x0", "duplicate or out-of-range"),
+            ("0x1", "overlapping images"),
+        ):
+            with self.subTest(offset=offset):
+                self.write_firmware()
+                plan_path = (
+                    self.project_dir
+                    / ".pio/build"
+                    / self.environment
+                    / FLASH_PLAN_FILENAME
+                )
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                plan["images"][1]["offset"] = offset
+                image_tail = [
+                    value
+                    for image in plan["images"]
+                    for value in (image["offset"], image["path"])
+                ]
+                plan["command"][-len(image_tail) :] = image_tail
+                plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+                with patch.dict(
+                    os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+                ), self.assertRaisesRegex(
+                    GeneratedSdkconfigError, expected_error
+                ):
+                    record_generated_sdkconfig_defaults(
+                        self.project_dir, self.environment
+                    )
+
+    def test_attestation_rejects_a_command_not_matching_its_image_set(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        plan_path = (
+            self.project_dir
+            / ".pio/build"
+            / self.environment
+            / FLASH_PLAN_FILENAME
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["command"][-1] = str(self.project_dir / "unattested.bin")
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(GeneratedSdkconfigError, "exactly match"):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+
+    def test_attestation_rejects_unattested_or_mutating_command_arguments(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+
+        for mutation, expected_error in (
+            ("undeclared-image", "unsupported argument"),
+            ("header-rewrite", "may rewrite"),
+        ):
+            with self.subTest(mutation=mutation):
+                self.write_firmware()
+                plan_path = (
+                    self.project_dir
+                    / ".pio/build"
+                    / self.environment
+                    / FLASH_PLAN_FILENAME
+                )
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                if mutation == "undeclared-image":
+                    image_tail_size = len(plan["images"]) * 2
+                    plan["command"][-image_tail_size:-image_tail_size] = [
+                        "0x700000",
+                        "/definitely/not/attested.bin",
+                    ]
+                else:
+                    mode_index = plan["command"].index("--flash-mode")
+                    plan["command"][mode_index + 1] = "qio"
+                plan_path.write_text(
+                    json.dumps(plan) + "\n", encoding="utf-8"
+                )
+
+                with patch.dict(
+                    os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+                ), self.assertRaisesRegex(
+                    GeneratedSdkconfigError, expected_error
+                ):
+                    record_generated_sdkconfig_defaults(
+                        self.project_dir, self.environment
+                    )
 
     def test_upload_allows_environment_config_absent_in_verified_build(self):
         core = self.write_core_attestation()

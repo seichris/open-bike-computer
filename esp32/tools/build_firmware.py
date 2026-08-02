@@ -10,7 +10,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import tarfile
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
 from generated_sdkconfig import (
+    FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_ARCHIVE_SIZE,
@@ -162,168 +162,30 @@ PLATFORMIO_CORE_SCONS_PIOPM = json.dumps(
     },
     separators=(",", ":"),
 )
-ESP32_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
-ESP32_PARTITION_MAGIC = 0x50AA
-ESP32_PARTITION_END_MAGIC = 0xFFFF
-ESP32_PARTITION_MD5_MAGIC = 0xEBEB
-ESP32_PARTITION_TABLE_OFFSET = 0x8000
-ESP32_PARTITION_TABLE_SIZE = 0x1000
-ESP32_BOOTLOADER_OFFSET = 0x0000
-ESP32_APP_TYPE = 0x00
-ESP32_OTA_0_SUBTYPE = 0x10
-ESP32_DATA_TYPE = 0x01
-ESP32_OTA_DATA_SUBTYPE = 0x00
-WAVESHARE_UPLOAD_BAUD = "460800"
-
-
 class BuildError(RuntimeError):
     """Raised when a deterministic real-target build cannot be confirmed."""
 
 
-def _parse_partition_layout(
-    partition_table: Path,
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Return the OTA-data and OTA-0 ranges from an ESP32 partition image."""
-    try:
-        contents = partition_table.read_bytes()
-    except OSError as error:
-        raise BuildError(f"could not read verified partition table: {error}") from error
-    if not contents or len(contents) > ESP32_PARTITION_TABLE_SIZE:
-        raise BuildError("verified partition table has an invalid size")
-
-    ota_data: tuple[int, int] | None = None
-    ota_0: tuple[int, int] | None = None
-    for entry_offset in range(0, len(contents), ESP32_PARTITION_ENTRY.size):
-        entry = contents[entry_offset : entry_offset + ESP32_PARTITION_ENTRY.size]
-        if len(entry) != ESP32_PARTITION_ENTRY.size:
-            raise BuildError("verified partition table has a truncated entry")
-        magic, entry_type, subtype, offset, size, _label, _flags = (
-            ESP32_PARTITION_ENTRY.unpack(entry)
-        )
-        if magic in (ESP32_PARTITION_END_MAGIC, ESP32_PARTITION_MD5_MAGIC):
-            break
-        if magic != ESP32_PARTITION_MAGIC or size == 0:
-            raise BuildError("verified partition table contains an invalid entry")
-        partition_range = (offset, size)
-        if entry_type == ESP32_DATA_TYPE and subtype == ESP32_OTA_DATA_SUBTYPE:
-            if ota_data is not None:
-                raise BuildError("verified partition table contains duplicate OTA data")
-            ota_data = partition_range
-        if entry_type == ESP32_APP_TYPE and subtype == ESP32_OTA_0_SUBTYPE:
-            if ota_0 is not None:
-                raise BuildError(
-                    "verified partition table contains duplicate OTA slot 0"
-                )
-            ota_0 = partition_range
-
-    if ota_data is None or ota_0 is None:
-        raise BuildError(
-            "verified partition table is missing OTA data or OTA application slot 0"
-        )
-    if ota_data[0] < ESP32_PARTITION_TABLE_OFFSET + ESP32_PARTITION_TABLE_SIZE:
-        raise BuildError("verified OTA data partition overlaps the partition table")
-    if ota_0[0] % 0x10000 != 0:
-        raise BuildError("verified OTA application slot 0 is not 64 KiB aligned")
-    return ota_data, ota_0
-
-
-def _verified_esptool_command(
-    project_dir: Path,
-    environment: str,
+def _verified_flash_command(
     upload_port: str,
     manifest: dict[str, object],
 ) -> tuple[str, ...]:
-    """Build the exact esptool command for the already-attested image set."""
-    core_attestation = manifest.get("coreAttestation")
-    if not isinstance(core_attestation, dict):
-        raise BuildError("verified build provenance is missing its core attestation")
-    core_dir_value = core_attestation.get("coreDir")
-    if not isinstance(core_dir_value, str):
-        raise BuildError("verified build provenance has an invalid core directory")
-    core_dir = Path(core_dir_value)
-    expected_core_dir = (
-        project_dir / ".pio/open-bike-build/platformio" / environment
-    ).resolve()
-    if core_dir.resolve() != expected_core_dir:
-        raise BuildError("verified build provenance references another core directory")
-
-    executable = core_dir / (
-        "penv/Scripts/esptool.exe" if os.name == "nt" else "penv/bin/esptool"
-    )
-    if executable.is_symlink() or not executable.is_file():
+    """Bind the requested port into the already-attested PlatformIO plan."""
+    flash_plan = manifest.get("flashPlan")
+    if not isinstance(flash_plan, dict):
+        raise BuildError("verified build provenance is missing its flash plan")
+    command = flash_plan.get("command")
+    if not isinstance(command, list) or not all(
+        isinstance(token, str) for token in command
+    ):
+        raise BuildError("verified build provenance has an invalid flash command")
+    if command.count(FLASH_PLAN_PORT_PLACEHOLDER) != 1:
         raise BuildError(
-            f"verified esptool uploader is missing or unsafe: {executable}"
+            "verified build provenance has an invalid upload-port placeholder"
         )
-
-    build_dir = project_dir / ".pio/build" / environment
-    bootloader = build_dir / "bootloader.bin"
-    partitions = build_dir / "partitions.bin"
-    firmware = build_dir / "firmware.bin"
-    boot_app0 = (
-        core_dir
-        / "packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
-    )
-    for image in (bootloader, partitions, boot_app0, firmware):
-        if image.is_symlink() or not image.is_file():
-            raise BuildError(f"verified flash image is missing or unsafe: {image}")
-
-    ota_data, ota_0 = _parse_partition_layout(partitions)
-    image_bounds = (
-        (
-            "bootloader",
-            bootloader,
-            ESP32_BOOTLOADER_OFFSET,
-            ESP32_PARTITION_TABLE_OFFSET,
-        ),
-        (
-            "partition table",
-            partitions,
-            ESP32_PARTITION_TABLE_OFFSET,
-            ESP32_PARTITION_TABLE_SIZE,
-        ),
-        ("OTA bootstrap", boot_app0, ota_data[0], ota_data[1]),
-        ("firmware", firmware, ota_0[0], ota_0[1]),
-    )
-    for label, image, _offset, capacity in image_bounds:
-        try:
-            image_size = image.stat().st_size
-        except OSError as error:
-            raise BuildError(
-                f"could not inspect verified {label} image: {error}"
-            ) from error
-        if image_size == 0 or image_size > capacity:
-            raise BuildError(f"verified {label} image does not fit its flash region")
-
-    return (
-        str(executable),
-        "--chip",
-        "esp32s3",
-        "--port",
-        upload_port,
-        "--baud",
-        WAVESHARE_UPLOAD_BAUD,
-        "--before",
-        "default-reset",
-        "--after",
-        "hard-reset",
-        "write-flash",
-        "-z",
-        # Preserve the attested bootloader header instead of letting esptool
-        # rewrite its flash configuration during upload.
-        "--flash-mode",
-        "keep",
-        "--flash-freq",
-        "keep",
-        "--flash-size",
-        "keep",
-        hex(ESP32_BOOTLOADER_OFFSET),
-        str(bootloader),
-        hex(ESP32_PARTITION_TABLE_OFFSET),
-        str(partitions),
-        hex(ota_data[0]),
-        str(boot_app0),
-        hex(ota_0[0]),
-        str(firmware),
+    return tuple(
+        upload_port if token == FLASH_PLAN_PORT_PLACEHOLDER else token
+        for token in command
     )
 
 
@@ -839,6 +701,7 @@ def _print_provenance(
         f"bootloaderBinSha256={value('bootloaderBinSha256')} "
         f"partitionTableBinSha256={value('partitionTableBinSha256')} "
         f"bootApp0Sha256={value('bootApp0Sha256')} "
+        f"flashPlanSha256={value('flashPlanSha256')} "
         f"coreAttestationSha256={value('coreAttestationSha256')} "
         f"platformArchiveSha256={value('platformArchiveSha256')} "
         f"platformPackagesSha256={value('platformPackagesSha256')} "
@@ -1169,7 +1032,7 @@ def upload_firmware(
         raise BuildError(
             "verified upload is limited to attested WAVESHARE_AMOLED profiles"
         )
-    if not upload_port.strip():
+    if not upload_port.strip() or "\0" in upload_port:
         raise BuildError("upload port must not be empty")
 
     firmware_elf = project_dir / ".pio" / "build" / environment / "firmware.elf"
@@ -1202,16 +1065,14 @@ def upload_firmware(
                 )
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
+            command: Sequence[str] = _verified_flash_command(
+                upload_port,
+                manifest,
+            )
             _print_provenance(
                 "FIRMWARE_UPLOAD_PROVENANCE",
                 environment,
                 expected_identity,
-                manifest,
-            )
-            command: Sequence[str] = _verified_esptool_command(
-                project_dir,
-                environment,
-                upload_port,
                 manifest,
             )
             try:
