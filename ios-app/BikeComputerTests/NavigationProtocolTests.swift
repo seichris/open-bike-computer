@@ -583,6 +583,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
         testDevicePacketRouting()
+        testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
         testBatteryStatusScreenCapabilityNegotiation()
@@ -4087,6 +4088,43 @@ struct NavigationProtocolTests {
         assert(statusRetryWrites.dropFirst().allSatisfy {
             $0 == statusRetryWrites.first
         }, "status retries preserve the exact terminal response")
+
+        let concurrentManager = BLEManager()
+        concurrentManager.isConnected = true
+        concurrentManager.isNavigationReady = true
+        var concurrentTransportReady = true
+        var concurrentStatusWrites: [Data] = []
+        var concurrentTransferWrites: [Data] = []
+        concurrentManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 64,
+                expectsWriteResponse: true,
+                canSend: { concurrentTransportReady },
+                write: { data in
+                    concurrentStatusWrites.append(data)
+                    concurrentTransportReady = false
+                }
+            )
+        )
+        assert(concurrentManager.sendDestinationStatus(
+            generation: 17,
+            token: 3,
+            status: .failed,
+            message: "Could not start navigation"
+        ), "acknowledged status starts the concurrent transport fixture")
+        assert(concurrentManager.enqueueUnacknowledgedTransferWriteForTesting(
+            Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8),
+            write: { concurrentTransferWrites.append($0) }
+        ), "unacknowledged transfer control is admitted during an acknowledged write")
+        assertEqual(concurrentTransferWrites.count, 1,
+                    "transfer control bypasses an unrelated response callback")
+        concurrentTransportReady = true
+        concurrentManager.completeNavigationWriteForTesting(
+            error: simulatedWriteError
+        )
+        assert(waitForMainLoop(timeout: 3) {
+            concurrentStatusWrites.count == 2
+        }, "concurrent transfer control preserves the acknowledged write failure callback")
     }
 
     static func testRouteInitialLocationUsesResolvedSource() {
@@ -8824,7 +8862,7 @@ struct NavigationProtocolTests {
 
         var priorityCapacityQueue = NavigationWriteQueue(
             maxCount: 1,
-            priorityMaxCount: 4
+            priorityMaxCount: 6
         )
         assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
             NavigationWrite(
@@ -8854,18 +8892,30 @@ struct NavigationProtocolTests {
             writeClass: .navigationSnapshot,
             coalescingKey: DeviceBLEProtocol.navigationSnapshotCoalescingKey
         ), prioritized: true), "maneuver has a dedicated fourth priority slot")
-        assertEqual(priorityCapacityQueue.count, 4,
-                    "workout, destination, and maneuver priority traffic coexist")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([24]),
+            label: "transfer-control",
+            writeClass: .transfer,
+            coalescingKey: "transfer.map.control"
+        ), prioritized: true), "transfer control has a dedicated fifth priority slot")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([25]),
+            label: "transfer-status",
+            writeClass: .transfer,
+            coalescingKey: "transfer.device.status"
+        ), prioritized: true), "transfer status has a dedicated sixth priority slot")
+        assertEqual(priorityCapacityQueue.count, 6,
+                    "workout, navigation, and transfer priority traffic coexist")
         assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
             NavigationWrite(
-                data: Data([24]),
+                data: Data([26]),
                 label: "new-workout-core",
                 writeClass: .workoutTelemetry,
                 coalescingKey:
                     DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
             ),
             NavigationWrite(
-                data: Data([25]),
+                data: Data([27]),
                 label: "new-workout-extended",
                 writeClass: .workoutTelemetry,
                 coalescingKey:
@@ -8878,8 +8928,11 @@ struct NavigationProtocolTests {
         }
         assertEqual(
             priorityCapacityWrites,
-            [Data([22]), Data([23]), Data([24]), Data([25])],
-            "workout replacement preserves destination and maneuver priority state"
+            [
+                Data([22]), Data([23]), Data([24]), Data([25]),
+                Data([26]), Data([27])
+            ],
+            "workout replacement preserves navigation and transfer priority state"
         )
         assertEqual(
             priorityCapacityQueue.metrics.coalescedFrames(
@@ -10420,6 +10473,21 @@ struct NavigationProtocolTests {
         assert(!failed, "two failed routes report failure")
         assertEqual(attempts, ["preferred", "fallback"],
                     "route failure still attempts each route exactly once")
+    }
+
+    static func testDeviceTransferHandshakePolicy() {
+        assertEqual(DeviceTransferHandshakePolicy.attemptCount, 32,
+                    "transfer handshake retains its eight-second readiness window")
+        assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
+               "transfer handshake refreshes status after one second")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
+               "transfer handshake does not flood status between refreshes")
+        assert(DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 8),
+               "legacy map entry is attempted after two seconds without DSTS")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 7),
+               "generic DTRN gets the full compatibility grace period")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 9),
+               "legacy map entry is sent only once")
     }
 
     static func testDeviceCapabilitiesProtocol() {
@@ -12116,16 +12184,15 @@ struct NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.count < 2 {
+        for _ in 0..<100 where sentPackets.isEmpty {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        assertEqual(sentPackets.count, 2,
-                    "map transfer handshake requests only its authoritative status")
-        if sentPackets.count == 2 {
-            assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter",
-                        "map transfer handshake enables map mode")
-            assertEqual(String(data: sentPackets[1], encoding: .utf8), "DSTS",
-                        "map transfer handshake requests its HTTP credential")
+        assertEqual(sentPackets.count, 1,
+                    "map transfer handshake starts with one authoritative command")
+        if sentPackets.count == 1 {
+            assertEqual(String(data: sentPackets[0], encoding: .utf8),
+                        "DTRNenter|map",
+                        "generic map entry requests mode and fresh HTTP credential atomically")
         }
 
         let mapStatus = """
@@ -12179,11 +12246,11 @@ struct NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.count < 2 {
+        for _ in 0..<100 where sentPackets.isEmpty {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        assertEqual(sentPackets.count, 2,
-                    "map transfer handshake does not request chunked map status")
+        assertEqual(sentPackets.count, 1,
+                    "map transfer handshake does not need a separate status command")
 
         // DSTS is the atomic transfer-session response. A dropped MSTC chunk
         // must not make an otherwise ready authenticated HTTP server unusable.

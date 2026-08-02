@@ -22,6 +22,22 @@ struct DeviceTransferSession: Equatable {
     let sessionToken: String?
 }
 
+enum DeviceTransferHandshakePolicy {
+    static let attemptCount = 32
+    static let retryIntervalNanoseconds: UInt64 = 250_000_000
+
+    static func shouldRequestStatus(attempt: Int) -> Bool {
+        attempt > 0 && attempt % 4 == 0
+    }
+
+    static func shouldRequestLegacyMapEnter(attempt: Int) -> Bool {
+        // A generic DTRN-aware device responds to the enter command itself.
+        // Give that application-level acknowledgement two seconds before
+        // trying the pre-DTRN map-control command for older firmware.
+        attempt == 8
+    }
+}
+
 @MainActor
 final class DeviceTransferManager {
     private var joinedAccessPointSSID: String?
@@ -37,22 +53,16 @@ final class DeviceTransferManager {
         let initialDeviceTransferStatusRevision =
             bleManager.deviceTransferStatusRevision
 
-        guard bleManager.requestMapTransferMode(enabled: true) else {
-            throw OfflineMapPlatformError.missingTransferBaseURL
-        }
-        // MSTS carries map/install state for the UI and is refreshed elsewhere.
-        // The shared DSTS response atomically owns transfer readiness and the
-        // short-lived HTTP credential, so it is the only status requested by
-        // this handshake. Requesting the larger, independently chunked MSTS
-        // response here competes with DSTS and can delay a ready HTTP session.
-        guard bleManager.requestDeviceTransferStatus() else {
-            throw OfflineMapPlatformError.transferCommandNotSent
-        }
-        guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
+        // DTRN enter is the authoritative handshake: current firmware applies
+        // map mode and publishes the token-bearing DSTS response from this one
+        // command. Do not wait for the shared navigation queue to become empty;
+        // unrelated GPS/settings traffic may remain queued even after the
+        // transfer command has been delivered.
+        guard bleManager.requestDeviceTransferMode(.map) else {
             throw OfflineMapPlatformError.transferCommandNotSent
         }
 
-        for attempt in 0..<32 {
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
             let hasFreshDeviceStatus =
                 bleManager.deviceTransferStatusRevision !=
                 initialDeviceTransferStatusRevision
@@ -74,10 +84,24 @@ final class DeviceTransferManager {
                                                 status: status)
                 return session
             }
-            if attempt % 4 == 3 {
-                bleManager.requestDeviceTransferStatus()
+            if DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(
+                attempt: attempt
+            ) {
+                // Compatibility only: firmware predating generic DTRN map
+                // mode needs the legacy MTRN command plus an explicit DSTS
+                // request. Current firmware never takes this path because its
+                // fresh DSTS response wins above.
+                _ = bleManager.requestMapTransferMode(enabled: true)
             }
-            try await Task.sleep(nanoseconds: 250_000_000)
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                attempt: attempt
+            ) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
         }
         // The device retains its last transfer error for diagnostics, so only
         // surface it after the full readiness window. A successful session
@@ -117,14 +141,8 @@ final class DeviceTransferManager {
         guard bleManager.requestDeviceTransferMode(.firmware) else {
             throw FirmwareUpdateError.transferCommandNotSent
         }
-        guard bleManager.requestDeviceTransferStatus() else {
-            throw FirmwareUpdateError.transferCommandNotSent
-        }
-        guard await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2) else {
-            throw FirmwareUpdateError.transferCommandNotSent
-        }
 
-        for attempt in 0..<32 {
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
             if bleManager.deviceTransferStatusRevision !=
                    initialDeviceTransferStatusRevision,
                bleManager.deviceTransferMode == DeviceTransferSession.Mode.firmware.rawValue,
@@ -143,10 +161,15 @@ final class DeviceTransferManager {
                                                 status: status)
                 return session
             }
-            if attempt % 4 == 3 {
-                bleManager.requestDeviceTransferStatus()
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                attempt: attempt
+            ) {
+                _ = bleManager.requestDeviceTransferStatus()
             }
-            try await Task.sleep(nanoseconds: 250_000_000)
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
         }
         throw FirmwareUpdateError.missingTransferSession
     }

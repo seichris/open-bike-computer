@@ -731,9 +731,10 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
         maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity,
-        // One complete workout pair plus the latest destination status and
-        // maneuver snapshot must coexist while an acknowledged write is in flight.
-        priorityMaxCount: 4
+        // One complete workout pair plus the latest destination status,
+        // maneuver snapshot, transfer control, and transfer status must
+        // coexist while an acknowledged write is in flight.
+        priorityMaxCount: 6
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
 #if DEBUG
@@ -2776,33 +2777,21 @@ class BLEManager: NSObject, ObservableObject {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
         let label = enabled ? "map transfer enter" : "map transfer exit"
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: label,
-            writeClass: .transfer
+            coalescingKey: "transfer.map.control"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: label,
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "map transfer status",
-            writeClass: .transfer
+            coalescingKey: "transfer.map.status"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "map transfer status",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     func resetMapTransferActivationObservation() {
@@ -2820,50 +2809,35 @@ class BLEManager: NSObject, ObservableObject {
     func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("enter|\(mode.rawValue)".utf8))
-        let sentNative = sendNativeMapTransferPacket(
+        let coalescingKey = mode == .map
+            ? "transfer.map.control"
+            : "transfer.device.control"
+        return sendTransferControlPacket(
             packet,
             label: "\(mode.rawValue) transfer enter",
-            writeClass: .transfer
+            coalescingKey: coalescingKey
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "\(mode.rawValue) transfer enter",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestDeviceTransferExit() -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("exit".utf8))
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "device transfer exit",
-            writeClass: .transfer
+            coalescingKey: "transfer.device.control"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "device transfer exit",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestDeviceTransferStatus() -> Bool {
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "device transfer status",
-            writeClass: .transfer
+            coalescingKey: "transfer.device.status"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "device transfer status",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
@@ -3295,11 +3269,30 @@ class BLEManager: NSObject, ObservableObject {
 
     func installNavigationWriteQueueForTesting(
         maxCount: Int,
-        priorityMaxCount: Int = 4
+        priorityMaxCount: Int = 6
     ) {
         navigationWriteQueue = NavigationWriteQueue(
             maxCount: maxCount,
             priorityMaxCount: priorityMaxCount
+        )
+    }
+
+    @discardableResult
+    func enqueueUnacknowledgedTransferWriteForTesting(
+        _ data: Data,
+        write: @escaping (Data) -> Void
+    ) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "test unacknowledged transfer",
+            writeClass: .transfer,
+            coalescingKey: "test.transfer.control",
+            prioritized: true,
+            transportWrite: write,
+            transportCanSend: { true },
+            transportExpectsWriteResponse: false
         )
     }
 
@@ -3404,8 +3397,13 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func preferredWriteType(
-        for characteristic: CBCharacteristic
+        for characteristic: CBCharacteristic,
+        preferWriteWithoutResponse: Bool = false
     ) -> CBCharacteristicWriteType? {
+        if preferWriteWithoutResponse,
+           characteristic.properties.contains(.writeWithoutResponse) {
+            return .withoutResponse
+        }
         if characteristic.properties.contains(.write) { return .withResponse }
         if characteristic.properties.contains(.writeWithoutResponse) { return .withoutResponse }
         return nil
@@ -4250,29 +4248,87 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    private func sendTransferControlPacket(
+        _ data: Data,
+        label: String,
+        coalescingKey: String
+    ) -> Bool {
+        DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    data,
+                    label: label,
+                    writeClass: .transfer,
+                    coalescingKey: coalescingKey,
+                    prioritized: true,
+                    preferWriteWithoutResponse: true
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    data,
+                    label: label,
+                    writeClass: .transfer,
+                    coalescingKey: coalescingKey,
+                    prioritized: true
+                )
+            }
+        )
+    }
+
+    @discardableResult
     private func sendNativeMapTransferPacket(
         _ data: Data,
         label: String,
-        writeClass: NavigationWriteClass = .settingsControl
+        writeClass: NavigationWriteClass = .settingsControl,
+        coalescingKey: String? = nil,
+        prioritized: Bool = false,
+        preferWriteWithoutResponse: Bool = false
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
               let endpoint = navigationWriteEndpoint,
-              data.count <= endpoint.maximumWriteLength else {
+              let writeType = preferredWriteType(
+                for: characteristic,
+                preferWriteWithoutResponse: preferWriteWithoutResponse
+              ) else {
             return false
         }
+
+        let protectedLength = data.count + (authenticatedWriteSession == nil
+            ? 0
+            : AuthenticatedBLEWriteSession.frameOverhead)
+        guard data.count <= endpoint.maximumWriteLength,
+              protectedLength <= peripheral.maximumWriteValueLength(
+                for: writeType
+              ) else { return false }
+        let expectsWriteResponse = writeType == .withResponse
 
         guard enqueueNavigationWrite(
             data,
             endpoint: endpoint,
             label: "native \(label)",
             writeClass: writeClass,
+            coalescingKey: coalescingKey,
+            prioritized: prioritized,
             transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
                 guard let self, let peripheral, let characteristic else { return }
-                self.writeDeviceData(payload, to: characteristic, on: peripheral)
-            }
+                self.writeDeviceData(
+                    payload,
+                    to: characteristic,
+                    on: peripheral,
+                    type: writeType
+                )
+            },
+            transportCanSend: { [weak self, weak peripheral] in
+                guard let self, let peripheral else { return false }
+                return expectsWriteResponse
+                    ? !self.writeWithResponseInFlight
+                    : peripheral.canSendWriteWithoutResponse
+            },
+            transportExpectsWriteResponse: expectsWriteResponse
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -4298,7 +4354,10 @@ class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         navigationWriteQueue.flush(canSend: { [weak self] write in
-            guard let self, !self.writeWithResponseInFlight else {
+            guard let self else { return false }
+            let expectsWriteResponse = write.transportExpectsWriteResponse
+                ?? endpoint.expectsWriteResponse
+            if expectsWriteResponse && self.writeWithResponseInFlight {
                 return false
             }
             return write.transportCanSend?() ?? endpoint.canSend()
@@ -4308,13 +4367,8 @@ class BLEManager: NSObject, ObservableObject {
             if expectsWriteResponse {
                 writeWithResponseInFlight = true
                 navigationWriteWithResponseFailureHandler = write.onWriteFailure
-            } else {
-                navigationWriteWithResponseFailureHandler = nil
             }
             write.perform(using: endpoint.write)
-            if !writeWithResponseInFlight {
-                navigationWriteWithResponseFailureHandler = nil
-            }
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {

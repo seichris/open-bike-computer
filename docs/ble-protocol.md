@@ -865,6 +865,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
+| `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
+| `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
 When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
 continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
@@ -872,11 +874,15 @@ payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
 
-The HTTP credential is not part of the map-status payload. After sending
-`MTRNenter`, iOS also sends the shared `DSTS` status request and waits for a new
-authenticated response whose `mode` is `map`, whose `baseUrl` matches the map
-status, and whose `sessionToken` is non-empty. A status cached before the enter
-request is not sufficient. The app sends that token as
+The HTTP credential is not part of the map-status payload. Current iOS clients
+send `DTRNenter|map`, which applies map mode and publishes a fresh generic
+device-transfer response in one application-level handshake. If no fresh
+response arrives after two seconds, the client sends the legacy `MTRNenter`
+command and requests `DSTS` explicitly for compatibility with older firmware.
+In either case, iOS requires a new authenticated response whose `mode` is
+`map`, whose `baseUrl` identifies the transfer server, and whose `sessionToken`
+is non-empty. A status cached before the enter request is not sufficient. The
+app sends that token as
 `X-BikeComputer-Transfer-Token` on every local HTTP request.
 
 Status responses should include:
