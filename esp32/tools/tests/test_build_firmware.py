@@ -152,9 +152,11 @@ class FirmwareBuildTests(unittest.TestCase):
         for path in (
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
+            core / "penv/bin/esptool",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
+            path.chmod(0o755)
         (core / "lib").mkdir(exist_ok=True)
         (core / "globallib").mkdir(exist_ok=True)
         (core / "boards").mkdir(exist_ok=True)
@@ -479,6 +481,8 @@ class FirmwareBuildTests(unittest.TestCase):
     def test_upload_preserves_exact_identity_through_prebuild(self):
         full_sha = self.initialize_git_repo()
         core = self.write_core_attestation()
+        resolved_core = core.resolve()
+        resolved_project = self.project_dir.resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
         current = self.project_dir / f"sdkconfig.{self.environment}"
         defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
@@ -497,18 +501,52 @@ class FirmwareBuildTests(unittest.TestCase):
             self.assertEqual(
                 tuple(command),
                 (
-                    "pio",
-                    "run",
-                    "--project-conf",
-                    str(self.project_dir / "platformio.ini"),
-                    "-e",
-                    self.environment,
-                    "-t",
-                    "nobuild",
-                    "-t",
-                    "upload",
-                    "--upload-port",
+                    str(resolved_core / "penv/bin/esptool"),
+                    "--chip",
+                    "esp32s3",
+                    "--port",
                     "/dev/cu.test",
+                    "--baud",
+                    "460800",
+                    "--before",
+                    "default-reset",
+                    "--after",
+                    "hard-reset",
+                    "write-flash",
+                    "--compress",
+                    "--flash-mode",
+                    "dio",
+                    "--flash-freq",
+                    "80m",
+                    "--flash-size",
+                    "16MB",
+                    "0x0",
+                    str(
+                        resolved_project
+                        / ".pio/build"
+                        / self.environment
+                        / "bootloader.bin"
+                    ),
+                    "0x8000",
+                    str(
+                        resolved_project
+                        / ".pio/build"
+                        / self.environment
+                        / "partitions.bin"
+                    ),
+                    "0xe000",
+                    str(
+                        resolved_core
+                        / "packages/framework-arduinoespressif32/tools/partitions"
+                        / "boot_app0.bin"
+                    ),
+                    "0x10000",
+                    str(
+                        resolved_project
+                        / ".pio/build"
+                        / self.environment
+                        / "firmware.bin"
+                    ),
                 ),
             )
             allowed = recognized_generated_sdkconfigs(

@@ -146,6 +146,12 @@ PIOARDUINO_BOOTSTRAP_PACKAGES = {
     "tool-ninja",
     "toolchain-xtensa-esp-elf",
 }
+ESP32_S3_FLASH_LAYOUT = (
+    ("0x0", "bootloader.bin"),
+    ("0x8000", "partitions.bin"),
+    ("0xe000", "boot_app0.bin"),
+    ("0x10000", "firmware.bin"),
+)
 PLATFORMIO_CORE_SCONS_PIOPM = json.dumps(
     {
         "type": "tool",
@@ -999,10 +1005,9 @@ def upload_firmware(
     environment: str,
     upload_port: str,
     *,
-    pio_command: str = "pio",
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
-    """Upload a verified build without weakening its source-identity gate."""
+    """Upload attested images directly without rebuilding the verified target."""
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
@@ -1029,20 +1034,6 @@ def upload_firmware(
         verified_config, platform_archive = _verified_platformio_project_config(
             project_dir
         )
-        command: Sequence[str] = (
-            pio_command,
-            "run",
-            "--project-conf",
-            str(verified_config),
-            "-e",
-            environment,
-            "-t",
-            "nobuild",
-            "-t",
-            "upload",
-            "--upload-port",
-            upload_port,
-        )
         with _deterministic_build_environment(
             project_dir,
             environment,
@@ -1057,6 +1048,74 @@ def upload_firmware(
                 )
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
+            core_attestation = manifest.get("coreAttestation")
+            if not isinstance(core_attestation, dict):
+                raise BuildError(
+                    "refusing AMOLED upload without attested PlatformIO core paths"
+                )
+            core_dir_value = core_attestation.get("coreDir")
+            packages_dir_value = core_attestation.get("packagesDir")
+            if not isinstance(core_dir_value, str) or not isinstance(
+                packages_dir_value, str
+            ):
+                raise BuildError(
+                    "refusing AMOLED upload without attested PlatformIO core paths"
+                )
+            core_dir = Path(core_dir_value)
+            packages_dir = Path(packages_dir_value)
+            esptool = core_dir / "penv" / "bin" / (
+                "esptool.exe" if os.name == "nt" else "esptool"
+            )
+            if esptool.is_symlink() or not esptool.is_file():
+                raise BuildError(
+                    "refusing AMOLED upload without the attested esptool executable: "
+                    f"{esptool}"
+                )
+
+            build_dir = project_dir / ".pio" / "build" / environment
+            boot_app0 = (
+                packages_dir
+                / "framework-arduinoespressif32"
+                / "tools"
+                / "partitions"
+                / "boot_app0.bin"
+            )
+            flash_images = {
+                "bootloader.bin": build_dir / "bootloader.bin",
+                "partitions.bin": build_dir / "partitions.bin",
+                "boot_app0.bin": boot_app0,
+                "firmware.bin": build_dir / "firmware.bin",
+            }
+            for image in flash_images.values():
+                if image.is_symlink() or not image.is_file():
+                    raise BuildError(
+                        "refusing AMOLED upload without an attested flash image: "
+                        f"{image}"
+                    )
+
+            command: list[str] = [
+                str(esptool),
+                "--chip",
+                "esp32s3",
+                "--port",
+                upload_port,
+                "--baud",
+                "460800",
+                "--before",
+                "default-reset",
+                "--after",
+                "hard-reset",
+                "write-flash",
+                "--compress",
+                "--flash-mode",
+                "dio",
+                "--flash-freq",
+                "80m",
+                "--flash-size",
+                "16MB",
+            ]
+            for offset, filename in ESP32_S3_FLASH_LAYOUT:
+                command.extend((offset, str(flash_images[filename])))
             _print_provenance(
                 "FIRMWARE_UPLOAD_PROVENANCE",
                 environment,
@@ -1066,10 +1125,10 @@ def upload_firmware(
             try:
                 result = runner(command, cwd=project_dir)
             except OSError as error:
-                raise BuildError(f"could not run {pio_command!r}: {error}") from error
+                raise BuildError(f"could not run attested esptool: {error}") from error
     if result.returncode != 0:
         raise BuildError(
-            f"PlatformIO exited with status {result.returncode} while uploading "
+            f"esptool exited with status {result.returncode} while uploading "
             f"{environment}"
         )
 
@@ -1107,7 +1166,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.project_dir,
                 args.environment,
                 args.upload_port,
-                pio_command=args.pio,
             )
     except BuildError as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)
