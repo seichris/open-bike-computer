@@ -167,7 +167,7 @@ public:
       return {};
     }
     const double depthScale = std::min(
-        config_.maximumDepthScale, focalDistance_ / denominator);
+        effectiveMaximumDepthScale(), focalDistance_ / denominator);
     return {config_.anchorX + ground.lateral * depthScale,
             config_.anchorY - ground.forward * depthScale, depthScale, true};
   }
@@ -181,6 +181,13 @@ public:
       return {screenX - config_.anchorX, config_.anchorY - screenY};
     }
     const double screenForward = config_.anchorY - screenY;
+    const double maximumDepthScale = effectiveMaximumDepthScale();
+    const double cappedScreenForward =
+        focalDistance_ * (1.0 - maximumDepthScale);
+    if (screenForward < cappedScreenForward) {
+      return {(screenX - config_.anchorX) / maximumDepthScale,
+              screenForward / maximumDepthScale};
+    }
     const double denominator = focalDistance_ - screenForward;
     if (!(denominator > 0.0)) {
       return {0.0, nearPlaneForward_};
@@ -249,8 +256,17 @@ public:
   }
 
 private:
+  double effectiveMaximumDepthScale() const {
+    return std::max(1.0, config_.maximumDepthScale);
+  }
+
   double inverseForward(double screenY) const {
     const double screenForward = config_.anchorY - screenY;
+    const double maximumDepthScale = effectiveMaximumDepthScale();
+    const double cappedScreenForward =
+        focalDistance_ * (1.0 - maximumDepthScale);
+    if (screenForward < cappedScreenForward)
+      return screenForward / maximumDepthScale;
     const double denominator = focalDistance_ - screenForward;
     return denominator > 0.0
                ? screenForward * focalDistance_ / denominator

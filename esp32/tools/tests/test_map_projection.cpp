@@ -187,6 +187,36 @@ void assertClippingAndInverseBounds() {
   }
 }
 
+void assertCappedInverseRoundTrip() {
+  using map_projection::BirdsEyePerspective;
+  for (const auto perspective : {
+           BirdsEyePerspective::Gentle, BirdsEyePerspective::Standard,
+           BirdsEyePerspective::Strong, BirdsEyePerspective::VeryStrong,
+           BirdsEyePerspective::Maximum}) {
+    const auto projection = makeProjection(map_projection::Mode::BirdsEye,
+                                           466, 466, 3, 0.0, perspective);
+    const double margin = projection.config().nearPlaneMarginPixels;
+    const double minX = -margin;
+    const double maxX = projection.config().viewportWidth + margin;
+    const double minY = -margin;
+    const double maxY = projection.config().viewportHeight + margin;
+    for (const double x : {minX, maxX}) {
+      for (const double y : {minY, maxY}) {
+        const auto ground = projection.groundForScreen(x, y);
+        const auto projected = projection.projectGround(ground);
+        assert(projected.valid);
+        assertNear(projected.x, x, 1e-7);
+        assertNear(projected.y, y, 1e-7);
+      }
+    }
+
+    const auto clippedBottom = projection.projectGround(
+        {0.0, projection.nearPlaneForward()});
+    assert(clippedBottom.valid);
+    assertNear(clippedBottom.y, maxY, 1e-7);
+  }
+}
+
 void assertRotationAndBlockBudget() {
   for (const auto &dimensions : {
            std::pair<uint16_t, uint16_t>{466, 366},
@@ -234,6 +264,7 @@ int main() {
   assertPerspectiveBehavior();
   assertPerspectivePresets();
   assertClippingAndInverseBounds();
+  assertCappedInverseRoundTrip();
   assertRotationAndBlockBudget();
   assertLineWidthScaling();
   return 0;
