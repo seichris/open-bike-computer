@@ -151,9 +151,11 @@ stamped `unverified-...` rather than advertising an exact Git SHA. AMOLED upload
 rechecks the clean source identity, generated state, managed components,
 profile-private library dependencies, isolated installed-core attestation, and
 the exact ELF and binary while holding the project-wide lock, then replays the
-complete PlatformIO-resolved esptool plan so it cannot relink different bytes or
-reconstruct offsets independently. Its final flash mode, frequency, and size
-are `keep`, preventing esptool from rewriting a bootloader after hashing. Keep the
+attested esptool plan so it cannot relink different bytes. The application offset
+comes from the built partition table, with any non-empty PlatformIO value required
+to match; other offsets remain PlatformIO-resolved. Its final flash mode,
+frequency, and size are `keep`, preventing esptool from rewriting a bootloader
+after hashing. Keep the
 structured `FIRMWARE_BUILD_PROVENANCE` and
 `FIRMWARE_UPLOAD_PROVENANCE` lines with test notes. The upload marker is a
 preflight record of the eligible USB-upload inputs: firmware binary/ELF,

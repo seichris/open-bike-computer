@@ -8,9 +8,10 @@ import tempfile
 from pathlib import Path
 
 
-FLASH_PLAN_SCHEMA = 1
+FLASH_PLAN_SCHEMA = 2
 FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
+FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
 
 
 def _direct_argument(token: object) -> str:
@@ -70,9 +71,8 @@ def record_flash_plan(environment) -> None:
         _direct_argument(plan_environment.subst(str(token)))
         for token in uploader_flags
     )
-    command.extend(
-        (plan_environment.subst("$ESP32_APP_OFFSET"), firmware)
-    )
+    platformio_app_offset = plan_environment.subst("$ESP32_APP_OFFSET")
+    command.extend((FLASH_PLAN_APP_OFFSET_PLACEHOLDER, firmware))
     platformio_flash_parameters = _normalize_flash_parameters(command)
 
     images: list[dict[str, str]] = []
@@ -93,7 +93,7 @@ def record_flash_plan(environment) -> None:
         )
     images.append(
         {
-            "offset": plan_environment.subst("$ESP32_APP_OFFSET"),
+            "offset": FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
             "path": firmware,
         }
     )
@@ -119,6 +119,7 @@ def record_flash_plan(environment) -> None:
         "uploader": uploader,
         "command": command,
         "platformioFlashParameters": platformio_flash_parameters,
+        "platformioAppOffset": platformio_app_offset,
         "images": images,
     }
     output = Path(environment.subst("$BUILD_DIR")) / FLASH_PLAN_FILENAME

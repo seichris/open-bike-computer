@@ -60,9 +60,12 @@ Use this helper rather than a raw Waveshare `pio run`. It verifies the tracked
 pioarduino platform and executable-package archive digests, keeps pioarduino's
 recursive custom-core build on the generated local config, isolates and attests
 PlatformIO-installed package/tool/nested-runtime and ESP-IDF component state,
-and records PlatformIO's complete resolved flash plan during the preceding
-build. Upload revalidates that plan, its exact uploader, and every referenced
-image before replaying it directly without another PlatformIO build. The final
+and records PlatformIO's resolved flash plan during the preceding build. The
+application offset is taken from the built, attested partition table because
+pioarduino can clear its corresponding environment value after custom-core reuse;
+any non-empty PlatformIO value must agree. Upload revalidates that plan, its exact
+uploader, and every referenced image before replaying it directly without another
+PlatformIO build. The final
 attested command uses esptool's `keep` values for flash mode, frequency, and
 size so esptool cannot rewrite a hashed bootloader image. The original resolved
 values remain in the plan provenance. The

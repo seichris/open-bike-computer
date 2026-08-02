@@ -26,6 +26,7 @@ from build_firmware import (
 )
 from firmware_build_identity import firmware_git_identity
 from generated_sdkconfig import (
+    FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
     FLASH_PLAN_FILENAME,
     FLASH_PLAN_PORT_PLACEHOLDER,
     FLASH_PLAN_SCHEMA,
@@ -154,7 +155,10 @@ class FirmwareBuildTests(unittest.TestCase):
             path.write_bytes(contents)
             images.append({"offset": offset, "path": str(path)})
         images.append(
-            {"offset": app_offset, "path": str(build_dir / "firmware.bin")}
+            {
+                "offset": FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
+                "path": str(build_dir / "firmware.bin"),
+            }
         )
         command = [
             str(uploader),
@@ -193,6 +197,7 @@ class FirmwareBuildTests(unittest.TestCase):
                 "frequency": "80m",
                 "size": "detect",
             },
+            "platformioAppOffset": app_offset,
             "images": images,
         }
         (build_dir / FLASH_PLAN_FILENAME).write_text(
@@ -206,6 +211,7 @@ class FirmwareBuildTests(unittest.TestCase):
         *,
         ota_data_offset=0xE000,
         app_offset=0x10000,
+        app_size=0x300000,
     ):
         environment = environment or self.environment
         build_dir = self.project_dir / ".pio/build" / environment
@@ -230,7 +236,7 @@ class FirmwareBuildTests(unittest.TestCase):
                     0x00,
                     0x10,
                     app_offset,
-                    0x300000,
+                    app_size,
                     b"app0",
                     0,
                 ),
@@ -374,7 +380,7 @@ class FirmwareBuildTests(unittest.TestCase):
                 "PROGNAME": "firmware",
                 "UPLOADER": f'"{uploader}"',
                 "UPLOAD_PORT": "/dev/ignored",
-                "ESP32_APP_OFFSET": "0x10000",
+                "ESP32_APP_OFFSET": "",
                 "FLASH_EXTRA_IMAGES": [
                     ("0x0", "$BUILD_DIR/bootloader.bin")
                 ],
@@ -416,6 +422,11 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertEqual(
             plan["platformioFlashParameters"],
             {"mode": "qio", "frequency": "80m", "size": "detect"},
+        )
+        self.assertEqual(plan["platformioAppOffset"], "")
+        self.assertEqual(
+            plan["images"][-1]["offset"],
+            FLASH_PLAN_APP_OFFSET_PLACEHOLDER,
         )
         for option in ("--flash-mode", "--flash-freq", "--flash-size"):
             self.assertEqual(
@@ -811,7 +822,7 @@ class FirmwareBuildTests(unittest.TestCase):
                     ),
                 )
 
-    def test_upload_replays_offsets_from_the_verified_platformio_plan(self):
+    def test_upload_derives_app_offset_from_verified_partition_table(self):
         core = self.write_core_attestation().resolve()
         project_dir = self.project_dir.resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
@@ -819,8 +830,12 @@ class FirmwareBuildTests(unittest.TestCase):
         self.write_firmware()
         self.write_flash_plan(
             ota_data_offset="0xf000",
-            app_offset="0x20000",
+            app_offset="",
             flash_mode="dio",
+        )
+        self.write_partition_table(
+            ota_data_offset=0xF000,
+            app_offset=0x20000,
         )
         calls = []
 
@@ -859,8 +874,45 @@ class FirmwareBuildTests(unittest.TestCase):
             manifest["flashPlan"]["platformioFlashParameters"]["mode"],
             "dio",
         )
+        self.assertEqual(manifest["flashPlan"]["platformioAppOffset"], "")
+        self.assertEqual(
+            manifest["flashPlan"]["applicationOffsetSource"],
+            "partition-table",
+        )
         self.assertNotIn("nobuild", command)
         self.assertNotIn("upload", command)
+
+    def test_attestation_rejects_platformio_app_offset_mismatch(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        self.write_flash_plan(app_offset="0x20000")
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError, "does not match the verified partition table"
+        ):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+
+    def test_attestation_rejects_firmware_larger_than_app_partition(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        self.write_partition_table(app_size=1)
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError, "exceeds its application partition"
+        ):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
 
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()
@@ -916,7 +968,7 @@ class FirmwareBuildTests(unittest.TestCase):
             record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
-            self.write_flash_plan(app_offset="0x20000")
+            self.write_flash_plan(flash_mode="dio")
             output = StringIO()
             with self.assertRaisesRegex(BuildError, "flash plan changed"), redirect_stdout(
                 output

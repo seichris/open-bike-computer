@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -19,11 +20,20 @@ from firmware_build_identity import FULL_GIT_SHA, firmware_git_identity
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GENERATED_BANNER = b"# Automatically generated file. DO NOT EDIT."
 GENERATED_DESCRIPTION = b"Project Configuration"
-CACHE_SCHEMA = 17
-FLASH_PLAN_SCHEMA = 1
+CACHE_SCHEMA = 18
+FLASH_PLAN_SCHEMA = 2
 FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
+FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
 FLASH_PLAN_MAX_BYTES = 1024 * 1024
+ESP_PARTITION_TABLE_MAX_BYTES = 0xC00
+ESP_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
+ESP_PARTITION_MAGIC = 0x50AA
+ESP_PARTITION_MD5_MAGIC = 0xEBEB
+ESP_PARTITION_END_MAGIC = 0xFFFF
+ESP_PARTITION_TYPE_APP = 0x00
+ESP_PARTITION_SUBTYPE_FACTORY = 0x00
+ESP_PARTITION_SUBTYPE_OTA_0 = 0x10
 WAVESHARE_MCU = "esp32s3"
 WAVESHARE_MEMORY_TYPE = "qio_opi"
 WAVESHARE_PLATFORM_URL = (
@@ -530,6 +540,71 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _application_partition_from_partition_table(path: Path) -> tuple[int, int]:
+    """Return the slot PlatformIO must use for the application image."""
+    if path.is_symlink() or not path.is_file():
+        raise GeneratedSdkconfigError(
+            f"verified partition table is missing or unsafe: {path}"
+        )
+    try:
+        table = path.read_bytes()
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not read verified partition table: {error}"
+        ) from error
+    if (
+        not table
+        or len(table) > ESP_PARTITION_TABLE_MAX_BYTES
+        or len(table) % ESP_PARTITION_ENTRY.size != 0
+    ):
+        raise GeneratedSdkconfigError(
+            "verified partition table has an invalid size"
+        )
+
+    factory_partitions: list[tuple[int, int]] = []
+    ota_0_partitions: list[tuple[int, int]] = []
+    found_end = False
+    for entry_start in range(0, len(table), ESP_PARTITION_ENTRY.size):
+        magic, kind, subtype, offset, size, _, _ = ESP_PARTITION_ENTRY.unpack_from(
+            table, entry_start
+        )
+        if magic == ESP_PARTITION_END_MAGIC:
+            found_end = True
+            break
+        if magic == ESP_PARTITION_MD5_MAGIC:
+            continue
+        if magic != ESP_PARTITION_MAGIC:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains an invalid entry"
+            )
+        if offset == 0 or size == 0 or offset + size > 0x1_0000_0000:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains an invalid range"
+            )
+        if kind != ESP_PARTITION_TYPE_APP:
+            continue
+        if offset % 0x10000 != 0:
+            raise GeneratedSdkconfigError(
+                "verified partition table contains a misaligned application slot"
+            )
+        if subtype == ESP_PARTITION_SUBTYPE_FACTORY:
+            factory_partitions.append((offset, size))
+        elif subtype == ESP_PARTITION_SUBTYPE_OTA_0:
+            ota_0_partitions.append((offset, size))
+
+    if not found_end:
+        raise GeneratedSdkconfigError(
+            "verified partition table has no end marker"
+        )
+    selected_partitions = ota_0_partitions or factory_partitions
+    if len(selected_partitions) != 1:
+        raise GeneratedSdkconfigError(
+            "verified partition table does not identify exactly one bootable "
+            "application slot"
+        )
+    return selected_partitions[0]
+
+
 def _parse_esptool_options(
     tokens: tuple[str, ...],
     *,
@@ -575,9 +650,8 @@ def _validated_flash_plan(
     core_attestation: dict[str, object],
 ) -> dict[str, object]:
     """Validate and normalize PlatformIO's resolved esptool command."""
-    plan_path = (
-        project_dir / ".pio" / "build" / environment / FLASH_PLAN_FILENAME
-    )
+    build_dir = project_dir / ".pio" / "build" / environment
+    plan_path = build_dir / FLASH_PLAN_FILENAME
     if plan_path.is_symlink() or not plan_path.is_file():
         raise GeneratedSdkconfigError(
             f"verified PlatformIO flash plan is missing or unsafe: {plan_path}"
@@ -671,6 +745,11 @@ def _validated_flash_plan(
         raise GeneratedSdkconfigError(
             "verified PlatformIO flash command has an invalid port placeholder"
         )
+    if command.count(FLASH_PLAN_APP_OFFSET_PLACEHOLDER) != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash command has an invalid application-offset "
+            "placeholder"
+        )
     if command.count("--port") != 1:
         raise GeneratedSdkconfigError(
             "verified PlatformIO flash command has an invalid port option"
@@ -703,6 +782,35 @@ def _validated_flash_plan(
         raise GeneratedSdkconfigError(
             "verified PlatformIO flash plan has invalid resolved flash parameters"
         )
+    raw_platformio_app_offset = raw_plan.get("platformioAppOffset")
+    if (
+        not isinstance(raw_platformio_app_offset, str)
+        or "\0" in raw_platformio_app_offset
+        or len(raw_platformio_app_offset) > 64
+    ):
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan has an invalid resolved application "
+            "offset"
+        )
+
+    application_offset, application_partition_size = (
+        _application_partition_from_partition_table(
+            build_dir / "partitions.bin"
+        )
+    )
+    if raw_platformio_app_offset:
+        try:
+            reported_application_offset = int(raw_platformio_app_offset, 0)
+        except ValueError as error:
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO flash plan has an invalid resolved application "
+                "offset"
+            ) from error
+        if reported_application_offset != application_offset:
+            raise GeneratedSdkconfigError(
+                "PlatformIO's resolved application offset does not match the "
+                "verified partition table"
+            )
 
     raw_images = raw_plan.get("images")
     if not isinstance(raw_images, list) or not 1 <= len(raw_images) <= 32:
@@ -711,9 +819,11 @@ def _validated_flash_plan(
         )
     project_root = project_dir.resolve()
     normalized_images: list[dict[str, object]] = []
-    command_tail: list[str] = []
+    raw_command_tail: list[str] = []
+    normalized_command_tail: list[str] = []
     offsets: set[int] = set()
     image_ranges: list[tuple[int, int, Path]] = []
+    application_images = 0
     for raw_image in raw_images:
         if not isinstance(raw_image, dict):
             raise GeneratedSdkconfigError(
@@ -725,12 +835,19 @@ def _validated_flash_plan(
             raise GeneratedSdkconfigError(
                 "verified PlatformIO flash plan contains invalid image fields"
             )
-        try:
-            offset = int(offset_token, 0)
-        except ValueError as error:
-            raise GeneratedSdkconfigError(
-                "verified PlatformIO flash plan contains an invalid image offset"
-            ) from error
+        raw_command_tail.extend((offset_token, path_value))
+        if offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER:
+            application_images += 1
+            offset = application_offset
+            normalized_offset_token = hex(application_offset)
+        else:
+            try:
+                offset = int(offset_token, 0)
+            except ValueError as error:
+                raise GeneratedSdkconfigError(
+                    "verified PlatformIO flash plan contains an invalid image offset"
+                ) from error
+            normalized_offset_token = offset_token
         if offset < 0 or offset > 0xFFFFFFFF or offset in offsets:
             raise GeneratedSdkconfigError(
                 "verified PlatformIO flash plan contains a duplicate or out-of-range "
@@ -751,6 +868,14 @@ def _validated_flash_plan(
             raise GeneratedSdkconfigError(
                 f"verified PlatformIO flash image is missing or unsafe: {image}"
             )
+        if (
+            offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
+            and image != (build_dir / "firmware.bin").resolve()
+        ):
+            raise GeneratedSdkconfigError(
+                "verified PlatformIO application-offset placeholder does not "
+                "reference the firmware image"
+            )
         try:
             size = image.stat().st_size
         except OSError as error:
@@ -761,6 +886,13 @@ def _validated_flash_plan(
             raise GeneratedSdkconfigError(
                 f"verified PlatformIO flash image is empty: {image}"
             )
+        if (
+            offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
+            and size > application_partition_size
+        ):
+            raise GeneratedSdkconfigError(
+                "verified firmware image exceeds its application partition"
+            )
         if offset + size > 0x1_0000_0000:
             raise GeneratedSdkconfigError(
                 "verified PlatformIO flash image exceeds the address space"
@@ -768,13 +900,19 @@ def _validated_flash_plan(
         image_ranges.append((offset, offset + size, image))
         normalized_images.append(
             {
-                "offset": offset_token,
+                "offset": normalized_offset_token,
                 "path": str(image),
                 "size": size,
                 "sha256": _file_sha256(image),
             }
         )
-        command_tail.extend((offset_token, str(image)))
+        normalized_command_tail.extend((normalized_offset_token, str(image)))
+
+    if application_images != 1:
+        raise GeneratedSdkconfigError(
+            "verified PlatformIO flash plan does not identify exactly one "
+            "application image"
+        )
 
     for previous, current in zip(
         sorted(image_ranges), sorted(image_ranges)[1:]
@@ -785,11 +923,12 @@ def _validated_flash_plan(
                 f"{previous[2]} and {current[2]}"
             )
 
-    if list(command[-len(command_tail) :]) != command_tail:
+    if list(command[-len(raw_command_tail) :]) != raw_command_tail:
         raise GeneratedSdkconfigError(
             "verified PlatformIO flash command does not exactly match its image set"
         )
-    image_boundary = len(command) - len(command_tail)
+    image_boundary = len(command) - len(raw_command_tail)
+    command = command[:image_boundary] + tuple(normalized_command_tail)
     write_flash_index = command.index("write-flash")
     if write_flash_index >= image_boundary:
         raise GeneratedSdkconfigError(
@@ -856,6 +995,8 @@ def _validated_flash_plan(
         "uploader": str(uploader),
         "command": list(command),
         "platformioFlashParameters": dict(raw_platformio_parameters),
+        "platformioAppOffset": raw_platformio_app_offset,
+        "applicationOffsetSource": "partition-table",
         "images": normalized_images,
     }
 

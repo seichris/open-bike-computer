@@ -36,8 +36,11 @@ workflow.
 After confirming the connected hardware profile, use the same helper for
 upload. It revalidates the exact Git identity, toolchain, and image hashes, then
 replays the esptool plan captured from PlatformIO during that build. The plan
-includes PlatformIO's chip, reset, speed, resolved flash settings, every offset,
-and every referenced image. Before attestation, the helper normalizes only
+includes PlatformIO's chip, reset, speed, resolved flash settings, non-application
+offsets, and every referenced image. Because pioarduino can clear its application
+offset after custom-core reuse, the helper resolves that one offset from the built,
+attested partition table and rejects any non-empty PlatformIO value that disagrees.
+Before attestation, the helper normalizes only
 esptool's flash-mode, frequency, and size arguments to `keep`; otherwise esptool
 can rewrite the bootloader header after it was hashed. This avoids a second
 PlatformIO build and keeps the bytes and flash layout crossing the upload
