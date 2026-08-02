@@ -52,8 +52,18 @@ Upload ESP32 firmware:
 
 ```sh
 cd esp32
-python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
-  --upload-port /dev/cu.usbmodemXXXX
+pio device list
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+```
+
+Retry an already verified build after a transient connection failure without
+recompiling:
+
+```sh
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --upload-only \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
 ```
 
 Use this helper rather than a raw Waveshare `pio run`. It verifies the tracked
@@ -69,6 +79,12 @@ PlatformIO build. The final
 attested command uses esptool's `keep` values for flash mode, frequency, and
 size so esptool cannot rewrite a hashed bootloader image. The original resolved
 values remain in the plan provenance. The
+hardware-serial selector resolves the current OS port immediately before
+esptool runs and waits 60 seconds by default. USB port numbers are transient and
+must not be used to distinguish multiple attached boards. The upload subprocess
+also suppresses Python bytecode writes inside the attested private environment,
+keeping an unchanged build eligible for upload-only retry after a connection
+failure. The
 host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
 online Python dependency resolver (including its registries, external `uv`,
 private `penv`, and ESP-IDF venv before their resulting trees are attested)
@@ -77,8 +93,12 @@ included in the later core attestation, but this is not a pre-execution Python
 dependency lock. Command success is not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
-If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then retry. For the
-2.06 board, use the `WAVESHARE_AMOLED_206` environment.
+If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then use the
+upload-only command. For the 2.06 board, use the `WAVESHARE_AMOLED_206`
+environment. Confirm the expected target/profile/Git identity from `BOOT_META`
+before reporting a physical installation as complete. Pass the same stable
+hardware identity to `tools/capture_boot.py --device-serial ...`; this prevents
+boot verification from following a different board after USB re-enumeration.
 
 View ESP32 serial logs:
 

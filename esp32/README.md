@@ -47,9 +47,34 @@ PlatformIO build and keeps the bytes and flash layout crossing the upload
 boundary identical to the verified build:
 
 ```sh
-python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
-  --upload-port /dev/cu.usbmodemXXXX
+pio device list
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
 ```
+
+USB port names can change whenever an ESP32-S3 resets or reconnects. Prefer the
+hardware serial reported by `pio device list`, especially when multiple boards
+are attached. The helper resolves that serial immediately before flashing and
+waits up to 60 seconds for it to appear; use `--device-timeout` to change the
+wait. `--upload-port` remains available when stable serial metadata is not.
+
+If the verified build succeeded but the upload failed because the selected
+device disappeared, entered the wrong USB mode, or needed a cable reconnect,
+retry the same attested build without compiling again:
+
+```sh
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --upload-only \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+```
+
+Upload-only still rechecks the clean Git/profile identity, generated SDK state,
+installed toolchain, flash plan, and every image hash. Any change fails closed
+and requires a new full build. Successful esptool completion is not enough to
+identify the running firmware; confirm the expected target, profile, and Git SHA
+from `BOOT_META` after reset. Use the same stable hardware identity with
+`tools/capture_boot.py --device-serial ...` so verification cannot follow a
+different attached board after USB re-enumeration.
 
 Archive the emitted `FIRMWARE_BUILD_PROVENANCE` and
 `FIRMWARE_UPLOAD_PROVENANCE` lines with physical test results. They bind the
@@ -62,6 +87,9 @@ also isolates ESP-IDF Component Manager state, rejects or scrubs ambient source
 overrides, and requires strict component checksums. This is upload-input
 preflight evidence, not flash readback: a later `BOOT_META` confirms the
 embedded Git/profile independently but does not contain the artifact SHA-256s.
+The upload subprocess suppresses Python bytecode writes inside the attested
+private environment so a missing-port failure remains eligible for an unchanged
+upload-only retry.
 The host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
 online Python dependency resolver (its registries, external `uv`, private
 `penv`, and ESP-IDF venv before their resulting trees are attested) are part of

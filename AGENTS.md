@@ -34,10 +34,29 @@ cd esp32
 python3 tools/build_firmware.py WAVESHARE_AMOLED_175
 python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 pio device list
-python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
-  --upload-port /dev/cu.usbmodemXXXX
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
+  --upload-only \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
 pio device monitor -b 115200
 ```
+
+Treat `/dev/cu.usbmodem*` and equivalent port names as transient. When more than
+one ESP32 is attached, record the hardware serial for each physical board before
+building or uploading and never infer the board from a port number. Prefer
+`--device-serial`: the helper resolves that stable USB identity immediately
+before esptool starts and waits up to 60 seconds for a disconnected board to
+reappear. `--device-timeout` changes that wait. Keep `--upload-port` only for a
+deliberately selected explicit port when stable serial metadata is unavailable.
+
+The normal upload command builds and attests first. If that exact build already
+completed and upload then failed because the cable, port, or bootloader was
+temporarily unavailable, retry with `--upload-only`; it revalidates the clean Git
+identity, generated state, toolchain, flash plan, and every image without
+compiling again. A commit/profile/source/generated-state/toolchain/artifact
+change must fail closed and requires a new full build. Never bypass a failed
+upload-only validation with raw esptool or PlatformIO.
 
 Use `tools/build_firmware.py` for build-only checks, upload, and CI. A clean
 pioarduino installation first converts content-pinned tool wrappers into the
@@ -51,7 +70,9 @@ PlatformIO reruns prebuild before upload. The helper instead records the fully
 resolved esptool command during the verified build, attests its uploader and
 every referenced image, normalizes the three header-mutating flash parameters
 to `keep`, and replays that immutable plan without asking PlatformIO to
-configure or build again.
+configure or build again. The uploader and hardware-serial resolver suppress
+Python bytecode writes inside the attested private environment so a connection
+failure cannot invalidate an otherwise unchanged retry.
 
 Use the matching `WAVESHARE_AMOLED_206` environment for a 2.06-inch board. If
 upload fails, hold BOOT (`GPIO0`) while reconnecting USB and retry.
@@ -64,7 +85,7 @@ hold the ESP32-S3 in reset:
 ```sh
 cd esp32
 python3 tools/capture_boot.py \
-  --port '/dev/cu.usbmodem*' \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST \
   --duration 40 \
   --expected-target WAVESHARE_AMOLED_175 \
   --expected-profile WAVESHARE_AMOLED_175 \
@@ -161,8 +182,8 @@ structured `FIRMWARE_BUILD_PROVENANCE` and
 preflight record of the eligible USB-upload inputs: firmware binary/ELF,
 bootloader, partition table, OTA bootstrap, platform/package archives,
 library dependencies, and managed components. A successful command means the
-attested esptool process completed the upload. A later `BOOT_META`
-independently confirms the
+attested esptool process completed the upload. Do not report a physical device
+as flashed until a later `BOOT_META` independently confirms the
 embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
