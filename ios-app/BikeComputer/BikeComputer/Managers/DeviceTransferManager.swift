@@ -40,12 +40,11 @@ final class DeviceTransferManager {
         guard bleManager.requestMapTransferMode(enabled: true) else {
             throw OfflineMapPlatformError.missingTransferBaseURL
         }
-        guard bleManager.requestMapTransferStatus() else {
-            throw OfflineMapPlatformError.missingTransferBaseURL
-        }
-        // MSTS carries map/install state, while the shared DSTS response owns
-        // the short-lived HTTP credential. Both notifications can arrive in
-        // either order, so do not construct a usable session until they agree.
+        // MSTS carries map/install state for the UI and is refreshed elsewhere.
+        // The shared DSTS response atomically owns transfer readiness and the
+        // short-lived HTTP credential, so it is the only status requested by
+        // this handshake. Requesting the larger, independently chunked MSTS
+        // response here competes with DSTS and can delay a ready HTTP session.
         guard bleManager.requestDeviceTransferStatus() else {
             throw OfflineMapPlatformError.transferCommandNotSent
         }
@@ -54,15 +53,12 @@ final class DeviceTransferManager {
         }
 
         for attempt in 0..<32 {
-            if bleManager.deviceHasSDCard == false {
-                throw OfflineMapPlatformError.deviceSDCardUnavailable
-            }
-            if bleManager.mapTransferModeEnabled,
-               bleManager.deviceTransferStatusRevision !=
-                   initialDeviceTransferStatusRevision,
+            let hasFreshDeviceStatus =
+                bleManager.deviceTransferStatusRevision !=
+                initialDeviceTransferStatusRevision
+            if hasFreshDeviceStatus,
                bleManager.deviceTransferMode == DeviceTransferSession.Mode.map.rawValue,
-               let baseURL = bleManager.mapTransferBaseURL,
-               bleManager.deviceTransferBaseURL == baseURL,
+               let baseURL = bleManager.deviceTransferBaseURL,
                let token = bleManager.deviceTransferSessionToken,
                !token.isEmpty {
                 let session = DeviceTransferSession(
@@ -79,10 +75,23 @@ final class DeviceTransferManager {
                 return session
             }
             if attempt % 4 == 3 {
-                bleManager.requestMapTransferStatus()
                 bleManager.requestDeviceTransferStatus()
             }
             try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        // The device retains its last transfer error for diagnostics, so only
+        // surface it after the full readiness window. A successful session
+        // always wins over a stale error from an earlier transfer.
+        if bleManager.deviceTransferStatusRevision !=
+               initialDeviceTransferStatusRevision,
+           let errorCode = bleManager.deviceTransferLastErrorCode,
+           !errorCode.isEmpty {
+            if errorCode == "sd_unavailable" {
+                throw OfflineMapPlatformError.deviceSDCardUnavailable
+            }
+            let message = bleManager.deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 } ?? errorCode
+            throw OfflineMapPlatformError.deviceMapTransferRejected(message)
         }
         throw OfflineMapPlatformError.missingTransferBaseURL
     }

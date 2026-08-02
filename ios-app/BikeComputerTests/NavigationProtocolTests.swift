@@ -643,6 +643,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         await testDeviceTransferManagerWaitsForMapToken()
+        await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -12115,17 +12116,15 @@ struct NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.count < 3 {
+        for _ in 0..<100 where sentPackets.count < 2 {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        assertEqual(sentPackets.count, 3,
-                    "map transfer handshake requests map and credential status")
-        if sentPackets.count == 3 {
+        assertEqual(sentPackets.count, 2,
+                    "map transfer handshake requests only its authoritative status")
+        if sentPackets.count == 2 {
             assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter",
                         "map transfer handshake enables map mode")
-            assertEqual(String(data: sentPackets[1], encoding: .utf8), "MSTS",
-                        "map transfer handshake requests map status")
-            assertEqual(String(data: sentPackets[2], encoding: .utf8), "DSTS",
+            assertEqual(String(data: sentPackets[1], encoding: .utf8), "DSTS",
                         "map transfer handshake requests its HTTP credential")
         }
 
@@ -12158,6 +12157,53 @@ struct NavigationProtocolTests {
                         "map transfer handshake waits for the fresh token")
         } catch {
             assert(false, "map transfer handshake should succeed: \(error)")
+        }
+    }
+
+    static func testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let transferTask = Task {
+            try await DeviceTransferManager().enterMapTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+
+        for _ in 0..<100 where sentPackets.count < 2 {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(sentPackets.count, 2,
+                    "map transfer handshake does not request chunked map status")
+
+        // DSTS is the atomic transfer-session response. A dropped MSTC chunk
+        // must not make an otherwise ready authenticated HTTP server unusable.
+        let deviceStatus = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
+        )
+
+        do {
+            let session = try await transferTask.value
+            assertEqual(session.mode, .map,
+                        "fresh device status opens a map session")
+            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+                        "device status owns the transfer server origin")
+            assertEqual(session.sessionToken, "fresh-map-token",
+                        "device status owns the transfer credential")
+        } catch {
+            assert(false, "fresh device status should not require map status: \(error)")
         }
     }
 
@@ -12256,7 +12302,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -12265,6 +12311,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
+        assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
+        assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
         assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")

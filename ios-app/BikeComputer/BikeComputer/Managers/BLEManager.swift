@@ -630,6 +630,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
     @Published var deviceTransferSessionToken: String?
+    @Published private(set) var deviceTransferLastErrorCode: String?
+    @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
@@ -3206,6 +3208,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
         deviceTransferSessionToken = nil
+        deviceTransferLastErrorCode = nil
+        deviceTransferLastErrorMessage = nil
         deviceTransferStatusRevision = 0
         firmwareUpdateStatus = "unknown"
         firmwareTarget = ""
@@ -5468,6 +5472,13 @@ extension BLEManager: CBPeripheralDelegate {
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
+        if let lastError = object["lastError"] as? [String: Any] {
+            deviceTransferLastErrorCode = lastError["code"] as? String
+            deviceTransferLastErrorMessage = lastError["message"] as? String
+        } else {
+            deviceTransferLastErrorCode = nil
+            deviceTransferLastErrorMessage = nil
+        }
         deviceTransferStatusRevision &+= 1
 
         if let firmware = object["firmware"] as? [String: Any] {

@@ -652,6 +652,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
+    case deviceMapTransferRejected(String)
     case firmwareMapStreamUnsupported
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
@@ -675,6 +676,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
+        case .deviceMapTransferRejected(let message):
+            return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:
             return "This saved map needs newer device firmware, and no compatible legacy map artifact is available."
         case .backgroundMapUploadInProgress:
