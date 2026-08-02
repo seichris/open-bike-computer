@@ -73,6 +73,22 @@ class FontAssetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rle_decode(encoded[:-1], len(values))
 
+    def test_rle_literal_run_never_crosses_128_byte_boundary(self):
+        values = [index % 16 for index in range(127)] + [7, 7, 8, 9]
+
+        encoded = rle_encode(values)
+
+        self.assertEqual(encoded[0], 127)
+        self.assertEqual(rle_decode(encoded, len(values)), values)
+
+    def test_rle_round_trips_long_literal_sequences(self):
+        for length in (128, 129, 255, 256, 257, 1024):
+            with self.subTest(length=length):
+                values = [index % 16 for index in range(length)]
+                encoded = rle_encode(values)
+
+                self.assertEqual(rle_decode(encoded, length), values)
+
 
 if __name__ == "__main__":
     unittest.main()

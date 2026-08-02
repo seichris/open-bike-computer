@@ -416,6 +416,10 @@ def rle_encode(values) -> bytes:
                 next_repeat += 1
             if next_repeat >= 3:
                 break
+            literal_capacity = 128 - (index - literal_start)
+            if next_repeat > literal_capacity:
+                index += literal_capacity
+                break
             index += next_repeat
         literal = values[literal_start:index]
         output.append(len(literal) - 1)
