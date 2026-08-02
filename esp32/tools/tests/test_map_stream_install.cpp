@@ -346,6 +346,8 @@ void testDirectWriteCheckpointAndReady() {
   assert(selected.mapId == "multi");
   assert(selected.sessionId == "session-1");
   assert(selected.root == "/VECTMAP/.maps/session-1");
+  assert(selected.target.renderer == "esp32-fmb");
+  assert(selected.target.formatVersion == 1);
   assert(selected.manifestReceipt == manifest.manifestReceipt);
   assert(selected.signedManifestReceipt == manifest.signedManifestReceipt);
   assert(activationProgress.size() == 3);
@@ -568,6 +570,8 @@ void testRecoveryCompletesReadyPointerTransaction() {
   assert(installer.readActiveMap(selected).ok);
   assert(selected.sessionId == "new-session");
   assert(selected.previousSessionId == "old-session");
+  assert(selected.target.renderer == "esp32-fmb");
+  assert(selected.target.formatVersion == 1);
   assert(selected.signedManifestReceipt == manifest.signedManifestReceipt);
   assert(readFile(root + "/VECTMAP/.maps/old-session/old.fmb") == "old");
   assert(!exists(root + "/VECTMAP/.activation-transaction.json"));

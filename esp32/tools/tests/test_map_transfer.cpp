@@ -251,6 +251,19 @@ static void testTargetTwoLabelContractValidation() {
   assert(parsed.formatVersion == 2);
   assert(parsed.labelProfileVersion == 1);
   assert(parsed.labelLanguages == std::vector<std::string>{"en"});
+  assert(installer.activateStagedMap(session, parsed).ok);
+  ActiveMapSelection activeSelection;
+  assert(installer.readActiveMap(activeSelection).ok);
+  assert(activeSelection.target.renderer == "esp32-fmb");
+  assert(activeSelection.target.formatVersion == 2);
+  assert(activeSelection.target.labelProfileVersion == 1);
+  assert(activeSelection.target.labelLanguages ==
+         std::vector<std::string>{"en"});
+  assert(activeSelection.target.internationalFallback == "en");
+  const std::string activePointer =
+      readFile(root + "/VECTMAP/active-map.json");
+  assert(activePointer.find("\"formatVersion\":2") != std::string::npos);
+  assert(activePointer.find("\"files\"") == std::string::npos);
 
   const std::string mismatchSession = "session-labels-mismatch";
   const std::string mismatchDirectory = installer.stagingRoot(mismatchSession);
@@ -363,6 +376,22 @@ static void testRejectsUnsafeManifestPath() {
   assert(status.code == "manifest_path");
 }
 
+static void testRejectsMalformedActiveTargetMetadata() {
+  const std::string root = tempRoot();
+  assert(::system((std::string("mkdir -p ") + root + "/VECTMAP").c_str()) ==
+         0);
+  writeFile(root + "/VECTMAP/active-map.json",
+            "{\"mapId\":\"map-1\",\"root\":\"/VECTMAP\","
+            "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+            "\"labelProfileVersion\":1,\"labelLanguages\":\"en\","
+            "\"internationalFallback\":\"en\"}\n");
+  MapTransferInstaller installer(root);
+  ActiveMapSelection selection;
+  const auto active = installer.readActiveMap(selection);
+  assert(!active.ok);
+  assert(active.code == "active_invalid");
+}
+
 static void testRejectsPathOutsideMapNamespace() {
   MapTransferInstaller installer("/tmp/root");
   MapManifest manifest;
@@ -439,6 +468,8 @@ static void testValidatesStagedMapAndActivates() {
   assert(selection.mapId == "map-1");
   assert(selection.sessionId == session);
   assert(selection.root == "/VECTMAP/.maps/session-1");
+  assert(selection.target.renderer == "esp32-fmb");
+  assert(selection.target.formatVersion == 1);
   assert(selection.previousRoot.empty());
   assert(!exists(root + "/VECTMAP/.staging/" + session));
   assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
@@ -466,7 +497,10 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   writeFile(oldDir + "/old.fmb", "old-map-block");
   writeFile(root + "/VECTMAP/active-map.json",
             "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
-            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+            "\"root\":\"/VECTMAP/.maps/session-old\","
+            "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+            "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+            "\"internationalFallback\":\"en\"}\n");
 
   const std::string blockData = validFmb(2);
   writeFile(stagedDir + "/123_456.fmb", blockData);
@@ -495,6 +529,9 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   assert(selection.root == "/VECTMAP/.maps/session-replace");
   assert(selection.previousMapId == "map-old");
   assert(selection.previousRoot == "/VECTMAP/.maps/session-old");
+  assert(selection.previousTarget.formatVersion == 2);
+  assert(selection.previousTarget.labelLanguages ==
+         std::vector<std::string>{"en"});
 
   const auto rolledBack = installer.rollbackActiveMap(session);
   assert(rolledBack.ok);
@@ -502,6 +539,9 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   assert(selection.mapId == "map-old");
   assert(selection.sessionId == "session-old");
   assert(selection.root == "/VECTMAP/.maps/session-old");
+  assert(selection.target.formatVersion == 2);
+  assert(selection.target.labelLanguages ==
+         std::vector<std::string>{"en"});
 }
 
 static void testSameSessionRetryRepairsDamagedInstalledVersion() {
@@ -1170,6 +1210,7 @@ int main() {
   testTargetTwoLabelContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+  testRejectsMalformedActiveTargetMetadata();
   testRejectsPathOutsideMapNamespace();
   testRejectsMapBlockOutsideRendererBudget();
   testValidatesStagedMapAndActivates();

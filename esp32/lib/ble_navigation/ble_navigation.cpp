@@ -1370,10 +1370,6 @@ static std::string mapTransferStatusJson() {
   map_transfer::MapTransferInstaller installer("/sdcard");
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
-  map_transfer::MapManifest activeManifest;
-  const map_transfer::InstallStatus manifestStatus =
-      activeStatus.ok ? installer.readActiveManifest(activeManifest)
-                      : map_transfer::InstallStatus{};
   const bool streamSupported = mapTransferHttp.streamInstallSupported();
 
   std::string body = std::string("{\"configured\":") +
@@ -1418,20 +1414,21 @@ static std::string mapTransferStatusJson() {
       body += ",\"activeManifestReceipt\":\"" +
               jsonEscape(activeMap.manifestReceipt) + "\"";
     }
-    if (manifestStatus.ok) {
+    if (activeMap.target.formatVersion != 0) {
       body += ",\"activeRendererFormat\":" +
-              std::to_string(activeManifest.formatVersion) +
+              std::to_string(activeMap.target.formatVersion) +
               ",\"labelProfileVersion\":" +
-              std::to_string(activeManifest.labelProfileVersion) +
+              std::to_string(activeMap.target.labelProfileVersion) +
               ",\"labelLanguages\":[";
-      for (size_t index = 0; index < activeManifest.labelLanguages.size();
+      for (size_t index = 0; index < activeMap.target.labelLanguages.size();
            ++index) {
         if (index != 0)
           body += ",";
-        body += "\"" + jsonEscape(activeManifest.labelLanguages[index]) + "\"";
+        body +=
+            "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
-      body += activeManifest.formatVersion == 2 &&
+      body += activeMap.target.formatVersion == 2 &&
                       mapView.debugStreetLabelFontHealthy()
                   ? "true"
                   : "false";

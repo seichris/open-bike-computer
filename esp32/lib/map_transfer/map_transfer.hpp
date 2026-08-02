@@ -44,13 +44,23 @@ struct ActivationProgress {
 using ActivationProgressCallback =
     std::function<void(const ActivationProgress &progress)>;
 
+struct MapTargetMetadata {
+  std::string renderer;
+  uint32_t formatVersion = 0;
+  uint32_t labelProfileVersion = 0;
+  std::vector<std::string> labelLanguages;
+  std::string internationalFallback;
+};
+
 struct ActiveMapSelection {
   std::string mapId;
   std::string sessionId;
   std::string root;
+  MapTargetMetadata target;
   std::string previousMapId;
   std::string previousSessionId;
   std::string previousRoot;
+  MapTargetMetadata previousTarget;
   std::string previousManifestReceipt;
   std::string previousSignedManifestReceipt;
   std::string manifestReceipt;
