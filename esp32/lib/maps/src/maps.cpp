@@ -11,6 +11,7 @@
 #include "mapBlockFormat.hpp"
 #include "mapLineStyle.hpp"
 #include "mapTransform.hpp"
+#include "map_projection.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 #include "../../power_management/power_management.hpp"
@@ -113,6 +114,30 @@ bool validateMapBlockCooperatively(const std::string &path,
     offset += chunkSize;
   }
   return validator.finish();
+}
+
+map_projection::Projection makeMapProjection(
+    double rasterOriginX, double rasterOriginY, int32_t rasterCellOffsetX,
+    int32_t rasterCellOffsetY, uint8_t zoom, double rotation,
+    uint16_t viewportWidth, uint16_t viewportHeight,
+    map_projection::Mode mode,
+    map_projection::BirdsEyePerspective birdsEyePerspective =
+        map_projection::BirdsEyePerspective::Standard) {
+  map_projection::Config config;
+  config.viewportWidth = viewportWidth;
+  config.viewportHeight = viewportHeight;
+  config.worldOrigin = {rasterOriginX, rasterOriginY};
+  config.zoom = zoom;
+  config.rotationRad = rotation;
+  config.anchorX = gui_layout::mapAnchorX(viewportWidth);
+  config.anchorY = mode == map_projection::Mode::BirdsEye
+                       ? map_projection::birdsEyeAnchorY(viewportHeight)
+                       : gui_layout::mapAnchorY(viewportHeight);
+  config.rasterCellOffset = {rasterCellOffsetX, rasterCellOffsetY};
+  config.mode = mode;
+  config.topEdgeScale =
+      map_projection::birdsEyeTopEdgeScale(birdsEyePerspective);
+  return map_projection::Projection(config);
 }
 
 } // namespace
@@ -1640,21 +1665,24 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
   // 1. Identify all required block offsets for the current viewport
   std::vector<Point32> requiredOffsets;
-  for (Point32 point : {bbox.min, bbox.max, Point32(bbox.min.x, bbox.max.y),
-                        Point32(bbox.max.x, bbox.min.y)}) {
-    int32_t blockMinX = point.x & (~MAPBLOCK_MASK);
-    int32_t blockMinY = point.y & (~MAPBLOCK_MASK);
-    Point32 offset(blockMinX, blockMinY);
-
-    bool alreadyListed = false;
-    for (const auto &req : requiredOffsets) {
-      if (req.x == offset.x && req.y == offset.y) {
-        alreadyListed = true;
-        break;
+  const int32_t minBlockX = bbox.min.x & (~MAPBLOCK_MASK);
+  const int32_t maxBlockX = bbox.max.x & (~MAPBLOCK_MASK);
+  const int32_t minBlockY = bbox.min.y & (~MAPBLOCK_MASK);
+  const int32_t maxBlockY = bbox.max.y & (~MAPBLOCK_MASK);
+  for (int64_t blockY = minBlockY; blockY <= maxBlockY;
+       blockY += (1 << MAPBLOCK_SIZE_BITS)) {
+    for (int64_t blockX = minBlockX; blockX <= maxBlockX;
+         blockX += (1 << MAPBLOCK_SIZE_BITS)) {
+      if (requiredOffsets.size() >= MAPBLOCKS_MAX) {
+        ESP_LOGE(TAG,
+                 "Viewport needs more than %u map blocks: bbox[(%d,%d),"
+                 "(%d,%d)]",
+                 (unsigned)MAPBLOCKS_MAX, bbox.min.x, bbox.min.y, bbox.max.x,
+                 bbox.max.y);
+        return false;
       }
-    }
-    if (!alreadyListed) {
-      requiredOffsets.push_back(offset);
+      requiredOffsets.emplace_back(static_cast<int32_t>(blockX),
+                                   static_cast<int32_t>(blockY));
     }
   }
 
@@ -1777,24 +1805,20 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
  * @param zoom -> Zoom Level
  */
 bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
-                         lv_obj_t *canvas, uint8_t zoom, double rotation) {
+                         lv_obj_t *canvas, uint8_t zoom, double rotation,
+                         const map_projection::Projection &projection) {
+  (void)rotation;
   Polygon newPolygon;
+  std::vector<map_projection::GroundPoint> groundPolygon;
+  std::vector<map_projection::GroundPoint> clippedGroundPolygon;
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const bool mapNavigationActive = isMapGuidanceScreenActive();
+  uint32_t projectionClippedCount = 0;
+  uint32_t projectionRejectedCount = 0;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
   const uint32_t fillStartMs = MAPIO_TIME_MS();
   lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
   const uint32_t fillMs = MAPIO_TIME_MS() - fillStartMs;
-
-  // Use the actual canvas dimensions, not mapScrHeight which may differ from
-  // canvas height in fullscreen mode.
-  lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
-  int16_t screenAnchorX =
-      mapAnchorXForWidth(draw_buf ? draw_buf->header.w : Maps::mapScrWidth);
-  int16_t screenAnchorY = mapAnchorYForHeight(
-      draw_buf ? draw_buf->header.h
-               : (mapSet.mapFullScreen ? Maps::mapScrFull
-                                        : Maps::mapScrHeight));
 
   uint32_t totalTime = millis();
   log_i("readVectorMap: Draw start. isMapFound=%d, Blocks=%d", Maps::isMapFound,
@@ -1849,18 +1873,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       // if it spans multiple cells)
       std::vector<bool> visited(poly_total, false);
 
-      // Define transform lambda once, outside the loop
-      auto transformPoint = [&](Point16 p) -> Point16 {
-        const auto screen = map_transform::rasterCellPixel(
-            {static_cast<double>(p.x) + mblock->offset.x,
-             static_cast<double>(p.y) + mblock->offset.y},
-            {viewPort.rasterOriginX, viewPort.rasterOriginY},
-            {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
-            rotation);
-        int16_t sx = screen.x + screenAnchorX;
-        int16_t sy = screen.y + screenAnchorY;
-
-        return Point16(sx, sy);
+      auto worldPoint = [&](Point16 p) -> map_transform::WorldPoint {
+        return {static_cast<double>(p.x) + mblock->offset.x,
+                static_cast<double>(p.y) + mblock->offset.y};
+      };
+      auto projectedPoint = [&](map_projection::GroundPoint ground) -> Point16 {
+        const auto projected = projection.projectGround(ground);
+        return Point16(
+            static_cast<int16_t>(map_transform::quantizePixel(projected.x)),
+            static_cast<int16_t>(map_transform::quantizePixel(projected.y)));
       };
 
       // Iterate only through cells that overlap the viewport
@@ -1902,8 +1923,26 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             newPolygon.points.clear();
             int16_t minX = 32000, maxX = -32000, minY = 32000, maxY = -32000;
 
-            for (const auto &p : polygon.points) {
-              Point16 tp = transformPoint(p);
+            groundPolygon.clear();
+            groundPolygon.reserve(polygon.points.size());
+            for (const auto &p : polygon.points)
+              groundPolygon.push_back(projection.groundForWorld(worldPoint(p)));
+            const auto *projectedPolygon = &groundPolygon;
+            if (projection.isBirdsEye()) {
+              map_projection::clipPolygonToNearPlane(
+                  projection, groundPolygon, clippedGroundPolygon);
+              projectedPolygon = &clippedGroundPolygon;
+              if (clippedGroundPolygon.size() != groundPolygon.size())
+                projectionClippedCount++;
+            }
+            if (projectedPolygon->size() < 3) {
+              projectionRejectedCount++;
+              poly_drawn--;
+              continue;
+            }
+
+            for (const auto &ground : *projectedPolygon) {
+              Point16 tp = projectedPoint(ground);
               newPolygon.points.push_back(tp);
               if (tp.x < minX)
                 minX = tp.x;
@@ -1966,34 +2005,44 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         const uint16_t color_swapped = map_line_style::displayColor(
             line.typeId, line.color, line.width, mapNavigationActive);
 
-        // Transform first point
-        auto transformPoint = [&](Point16 p) -> Point16 {
-          const auto screen = map_transform::rasterCellPixel(
-              {static_cast<double>(p.x) + mblock->offset.x,
-               static_cast<double>(p.y) + mblock->offset.y},
-              {viewPort.rasterOriginX, viewPort.rasterOriginY},
-              {viewPort.rasterCellOffsetX, viewPort.rasterCellOffsetY}, zoom,
-              rotation);
-          int16_t sx = screen.x + screenAnchorX;
-          int16_t sy = screen.y + screenAnchorY;
-          return Point16(sx, sy);
-        };
-
-        Point16 p1 = transformPoint(line.points[0]);
-        uint8_t lineWidth = shouldBoostLineWidth(line.typeId, line.width)
-                                ? blockStyle.streetLineWidth
-                                : static_cast<uint8_t>(
-                                      std::max<int32_t>(line.width, 1));
+        const uint8_t baseLineWidth =
+            shouldBoostLineWidth(line.typeId, line.width)
+                ? blockStyle.streetLineWidth
+                : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
 
         for (int i = 0; i < (int)line.points.size() - 1; i++) {
           if ((i & 0x0F) == 0 &&
               shouldInterruptMapRenderForScreenCycle()) {
             return false;
           }
-          Point16 p2 = transformPoint(line.points[i + 1]);
-          Maps::drawLine(canvas, p1.x, p1.y, p2.x, p2.y, color_swapped,
-                         lineWidth);
-          p1 = p2;
+          auto ground1 = projection.groundForWorld(worldPoint(line.points[i]));
+          auto ground2 =
+              projection.groundForWorld(worldPoint(line.points[i + 1]));
+          if (!projection.clipSegmentToNearPlane(ground1, ground2)) {
+            projectionRejectedCount++;
+            continue;
+          }
+          if (projection.isBirdsEye() &&
+              (ground1.forward == projection.nearPlaneForward() ||
+               ground2.forward == projection.nearPlaneForward())) {
+            projectionClippedCount++;
+          }
+          const auto projected1 = projection.projectGround(ground1);
+          const auto projected2 = projection.projectGround(ground2);
+          if (!projected1.valid || !projected2.valid) {
+            projectionRejectedCount++;
+            continue;
+          }
+          const uint8_t lineWidth = projection.scaledLineWidth(
+              baseLineWidth,
+              (projected1.depthScale + projected2.depthScale) / 2.0, 24);
+          Maps::drawLine(
+              canvas,
+              static_cast<int16_t>(map_transform::quantizePixel(projected1.x)),
+              static_cast<int16_t>(map_transform::quantizePixel(projected1.y)),
+              static_cast<int16_t>(map_transform::quantizePixel(projected2.x)),
+              static_cast<int16_t>(map_transform::quantizePixel(projected2.y)),
+              color_swapped, lineWidth);
         }
       }
       const uint32_t lineMs = millis() - lineStartMs;
@@ -2052,7 +2101,11 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         uint16_t x, y, x2, y2;
       }
     }
-    MAPIO_LOG("MAPIO: canvas-draw ok=1 blocks=%u fillMs=%lu totalMs=%lu\n",
+    MAPIO_LOG("MAPIO: canvas-draw ok=1 mode=%s clipped=%lu rejected=%lu "
+              "blocks=%u fillMs=%lu totalMs=%lu\n",
+              projection.isBirdsEye() ? "birds-eye" : "flat",
+              (unsigned long)projectionClippedCount,
+              (unsigned long)projectionRejectedCount,
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
   } else {
@@ -2455,6 +2508,7 @@ void Maps::deleteMapScrSprites() {
   cancelPinchPreview();
   pinchZoomOutBackdrop = {};
   invalidateRollingRasterWindow();
+  hasVisibleProjection = false;
   // Maps::arrowSprite.deleteSprite();
   // Maps::mapSprite.deleteSprite();
   if (Maps::canvasArrow)
@@ -2475,6 +2529,7 @@ void Maps::deleteMapScrSprites() {
  */
 void Maps::createMapScrSprites() {
   ESP_LOGI(TAG, "createMapScrSprites start");
+  hasVisibleProjection = false;
   // Map Sprite
   // Map Sprite (Canvas)
   uint16_t w = Maps::mapScrWidth;
@@ -2690,9 +2745,15 @@ bool Maps::renderRollingRasterCell(double rasterOriginX,
   cellViewPort.rasterOriginY = rasterOriginY;
   cellViewPort.rasterCellOffsetX = cellOffsetX;
   cellViewPort.rasterCellOffsetY = cellOffsetY;
+  const auto cellProjection = makeMapProjection(
+      cellViewPort.rasterOriginX, cellViewPort.rasterOriginY,
+      cellViewPort.rasterCellOffsetX, cellViewPort.rasterCellOffsetY,
+      requestedZoom, rotation, tileWidth, tileHeight,
+      map_projection::Mode::Flat);
   if (!Maps::getMapBlocks(cellViewPort.bbox, Maps::memCache) ||
       !Maps::readVectorMap(cellViewPort, Maps::memCache,
-                           Maps::canvasMapTemp, requestedZoom, rotation)) {
+                           Maps::canvasMapTemp, requestedZoom, rotation,
+                           cellProjection)) {
     restoreVisibleState();
     return false;
   }
@@ -2703,13 +2764,7 @@ bool Maps::renderRollingRasterCell(double rasterOriginX,
   }
 
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(
-        Maps::canvasMapTemp, cellViewPort.rasterOriginX,
-        cellViewPort.rasterOriginY,
-        requestedZoom, tileWidth, tileHeight, rotation,
-        mapAnchorXForWidth(tileWidth), mapAnchorYForHeight(tileHeight),
-        cellViewPort.rasterCellOffsetX,
-        cellViewPort.rasterCellOffsetY);
+    routeOverlay.drawRoute(Maps::canvasMapTemp, cellProjection);
   }
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -3221,6 +3276,11 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   ViewPort backdropViewPort;
   backdropViewPort.zoom = backdropZoom;
   backdropViewPort.setCenter(Maps::point);
+  const auto backdropProjection = makeMapProjection(
+      backdropViewPort.rasterOriginX, backdropViewPort.rasterOriginY,
+      backdropViewPort.rasterCellOffsetX,
+      backdropViewPort.rasterCellOffsetY, backdropZoom, backdropRotation,
+      Maps::mapScrWidth, canvasHeight, map_projection::Mode::Flat);
 
   const bool previousMapFound = Maps::isMapFound;
   const tileBounds previousBounds = Maps::totalBounds;
@@ -3238,7 +3298,7 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   if (!Maps::getMapBlocks(backdropViewPort.bbox, Maps::memCache) ||
       !Maps::readVectorMap(backdropViewPort, Maps::memCache,
                            Maps::canvasMapTemp, backdropZoom,
-                           backdropRotation)) {
+                           backdropRotation, backdropProjection)) {
     restoreVisibleMapState();
     ESP_LOGI(TAG, "Pinch backdrop preparation interrupted");
     return false;
@@ -3251,13 +3311,7 @@ bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
   }
 
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(Maps::canvasMapTemp,
-                           backdropViewPort.rasterOriginX,
-                           backdropViewPort.rasterOriginY, backdropZoom,
-                           Maps::mapScrWidth, canvasHeight,
-                           backdropRotation,
-                           mapAnchorXForWidth(Maps::mapScrWidth),
-                           mapAnchorYForHeight(canvasHeight));
+    routeOverlay.drawRoute(Maps::canvasMapTemp, backdropProjection);
   }
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -4052,8 +4106,18 @@ void Maps::updatePositionOverlay() {
         gui_layout::centeredViewportOrigin(containerWidth, Maps::mapScrWidth);
     const int16_t mapOriginY =
         gui_layout::centeredViewportOrigin(containerHeight, h);
-    const int16_t anchorX = mapAnchorXForWidth(Maps::mapScrWidth);
-    const int16_t anchorY = mapAnchorYForHeight(h);
+    const bool useSharedProjection =
+        isMapGuidanceScreenActive() && hasVisibleProjection;
+    const int16_t anchorX = useSharedProjection
+                                ? static_cast<int16_t>(
+                                      map_transform::quantizePixel(
+                                          visibleProjection.anchorX()))
+                                : mapAnchorXForWidth(Maps::mapScrWidth);
+    const int16_t anchorY = useSharedProjection
+                                ? static_cast<int16_t>(
+                                      map_transform::quantizePixel(
+                                          visibleProjection.anchorY()))
+                                : mapAnchorYForHeight(h);
     updateCurrentPositionMarker(Maps::canvasArrow);
     const int16_t markerVisualHalf = currentMarkerSize() / 2;
     int16_t x, y;
@@ -4074,14 +4138,25 @@ void Maps::updatePositionOverlay() {
       int32_t gpsX = lon2x(gps.gpsData.longitude);
       int32_t gpsY = lat2y(gps.gpsData.latitude);
 
-      const auto markerDelta = map_transform::worldToScreen(
-          {static_cast<double>(gpsX - Maps::viewPort.center.x),
-           static_cast<double>(gpsY - Maps::viewPort.center.y)},
-          zoom, visibleMapRotation());
-
-      // 3. Translate to screen center (centered on arrow)
-      x = mapOriginX + round(markerDelta.x) + anchorX - markerVisualHalf;
-      y = mapOriginY + round(markerDelta.y) + anchorY - markerVisualHalf;
+      if (useSharedProjection) {
+        const auto markerPoint = visibleProjection.projectWorld(
+            {static_cast<double>(gpsX), static_cast<double>(gpsY)});
+        if (!markerPoint.valid) {
+          lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+          return;
+        }
+        x = mapOriginX + map_transform::quantizePixel(markerPoint.x) -
+            markerVisualHalf;
+        y = mapOriginY + map_transform::quantizePixel(markerPoint.y) -
+            markerVisualHalf;
+      } else {
+        const auto markerDelta = map_transform::worldToScreen(
+            {static_cast<double>(gpsX - Maps::viewPort.center.x),
+             static_cast<double>(gpsY - Maps::viewPort.center.y)},
+            zoom, visibleMapRotation());
+        x = mapOriginX + round(markerDelta.x) + anchorX - markerVisualHalf;
+        y = mapOriginY + round(markerDelta.y) + anchorY - markerVisualHalf;
+      }
 
       ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
                zoom);
@@ -4236,6 +4311,26 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   Maps::viewPort.zoom = zoom;
   Maps::viewPort.setCenterForCanvas(Maps::point, renderExtent.width,
                                     renderExtent.height, rotationRad);
+  const bool birdsEyeActive = isMapGuidanceScreenActive() &&
+                              mapRenderSettings.mapNavigationBirdsEyeEnabled &&
+                              routeOverlay.hasRoute();
+  const auto frameProjection = makeMapProjection(
+      Maps::viewPort.rasterOriginX, Maps::viewPort.rasterOriginY,
+      Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY, zoom,
+      rotationRad, renderExtent.width, renderExtent.height,
+      birdsEyeActive ? map_projection::Mode::BirdsEye
+                     : map_projection::Mode::Flat,
+      map_projection::birdsEyePerspectiveForValue(
+          mapRenderSettings.mapNavigationBirdsEyePerspective));
+  if (frameProjection.isBirdsEye()) {
+    const auto bounds = frameProjection.worldBounds(4.0);
+    Maps::viewPort.bbox.min =
+        Point32(static_cast<int32_t>(std::floor(bounds.min.x)),
+                static_cast<int32_t>(std::floor(bounds.min.y)));
+    Maps::viewPort.bbox.max =
+        Point32(static_cast<int32_t>(std::ceil(bounds.max.x)),
+                static_cast<int32_t>(std::ceil(bounds.max.y)));
+  }
 
   // Get Map Blocks
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
@@ -4270,7 +4365,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   const uint32_t powerDrawStartUs = micros();
 #endif
   if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
-                           zoom, rotationRad)) {
+                           zoom, rotationRad, frameProjection)) {
 #if POWER_METRICS
     powerDrawUs = micros() - powerDrawStartUs;
     powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
@@ -4302,12 +4397,7 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
-    routeOverlay.drawRoute(Maps::canvasMapTemp,
-                           Maps::viewPort.rasterOriginX,
-                           Maps::viewPort.rasterOriginY, zoom, renderExtent.width,
-                           renderExtent.height, rotationRad,
-                           mapAnchorXForWidth(renderExtent.width),
-                           mapAnchorYForHeight(renderExtent.height));
+    routeOverlay.drawRoute(Maps::canvasMapTemp, frameProjection);
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
              rotationRad, renderExtent.height);
   } else if (routeOverlay.hasRoute()) {
@@ -4341,6 +4431,8 @@ bool Maps::generateVectorMap(uint8_t zoom) {
                        renderExtent.height, LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMap);
   lv_obj_center(Maps::canvasMapTemp);
+  visibleProjection = frameProjection;
+  hasVisibleProjection = true;
   if (isPinchSettlementPending()) {
     pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
     pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
@@ -4351,9 +4443,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   finishDragSettlement();
   finishPinchSettlement();
 
-  MAPIO_LOG("MAPIO: generate zoom=%u blocksMs=%lu drawMs=%lu "
+  MAPIO_LOG("MAPIO: generate zoom=%u mode=%s blocksMs=%lu drawMs=%lu "
             "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
-            zoom, (unsigned long)blocksMs, (unsigned long)drawMs,
+            zoom, frameProjection.isBirdsEye() ? "birds-eye" : "flat",
+            (unsigned long)blocksMs, (unsigned long)drawMs,
             (unsigned long)routeMs,
             (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
             (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());

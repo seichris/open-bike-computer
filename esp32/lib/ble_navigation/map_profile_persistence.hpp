@@ -6,6 +6,34 @@
 
 namespace map_profile_persistence {
 
+template <typename Store>
+inline bool loadBirdsEyeEnabled(Store &store) {
+  return store.getBool("navBirdEye", true);
+}
+
+template <typename Store>
+inline void persistBirdsEyeEnabled(Store &store, bool enabled) {
+  store.putBool("navBirdEye", enabled);
+}
+
+template <typename Store>
+inline uint8_t loadBirdsEyePerspective(Store &store) {
+  return static_cast<uint8_t>(map_profile_protocol::clampValue(
+      map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID,
+      store.getUChar(
+          "navBirdTilt",
+          map_profile_protocol::MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE)));
+}
+
+template <typename Store>
+inline void persistBirdsEyePerspective(Store &store, uint8_t perspective) {
+  store.putUChar(
+      "navBirdTilt",
+      static_cast<uint8_t>(map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID,
+          perspective)));
+}
+
 template <typename Store, typename Profile>
 inline void load(Store &store, Profile &mapStyle,
                  Profile &mapNavigationStyle) {

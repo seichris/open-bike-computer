@@ -17,6 +17,37 @@ int main() {
   assert(clientSupportsIndependentProfiles(3));
   assert(!clientSupportsExtendedVisibility(2));
   assert(clientSupportsExtendedVisibility(3));
+  assert(BIRDS_EYE_EXTENDED_CAPABILITY_MASK == (1 << 0));
+  assert(BIRDS_EYE_CLIENT_VERSION == 7);
+  assert(BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK == (1 << 1));
+  assert(BIRDS_EYE_PERSPECTIVE_CLIENT_VERSION == 8);
+  assert(BIRDS_EYE_STRONGER_PERSPECTIVE_EXTENDED_CAPABILITY_MASK == (1 << 2));
+  assert(BIRDS_EYE_STRONGER_PERSPECTIVE_CLIENT_VERSION == 9);
+  assert(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID == 25);
+  assert(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID == 26);
+  assert(MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE == 1);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, -1) ==
+         0);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, 4) ==
+         4);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, 5) ==
+         4);
+  assert(!clientSupportsBirdsEyeProjection(6));
+  assert(clientSupportsBirdsEyeProjection(7));
+  assert(!clientSupportsBirdsEyePerspective(7));
+  assert(clientSupportsBirdsEyePerspective(8));
+  assert(!clientSupportsStrongerBirdsEyePerspective(8));
+  assert(clientSupportsStrongerBirdsEyePerspective(9));
+  assert(extendedCapabilityFlagsForClient(6) == 0);
+  assert(extendedCapabilityFlagsForClient(7) ==
+         BIRDS_EYE_EXTENDED_CAPABILITY_MASK);
+  assert(extendedCapabilityFlagsForClient(8) ==
+         (BIRDS_EYE_EXTENDED_CAPABILITY_MASK |
+          BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK));
+  assert(extendedCapabilityFlagsForClient(9) ==
+         (BIRDS_EYE_EXTENDED_CAPABILITY_MASK |
+          BIRDS_EYE_PERSPECTIVE_EXTENDED_CAPABILITY_MASK |
+          BIRDS_EYE_STRONGER_PERSPECTIVE_EXTENDED_CAPABILITY_MASK));
   assert(DEFAULT_STREET_WIDTH == 4);
   assert(MAP_DEFAULT_DETAIL_LEVEL == 2);
   assert(MAP_DEFAULT_ROUTE_LINE_WIDTH == 4);
@@ -93,6 +124,14 @@ int main() {
   assert(clampValue(21, -4) == -3);
   assert(clampValue(10, 0) == 1);
   assert(clampValue(22, 6) == 5);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID, -1) == 0);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_SETTING_ID, 2) == 1);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, -1) ==
+         0);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, 1) ==
+         1);
+  assert(clampValue(MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID, 3) ==
+         3);
   assert(absoluteStreetWidthFromLegacyBoost(-3) == 1);
   assert(absoluteStreetWidthFromLegacyBoost(0) == 4);
   assert(absoluteStreetWidthFromLegacyBoost(4) == 8);

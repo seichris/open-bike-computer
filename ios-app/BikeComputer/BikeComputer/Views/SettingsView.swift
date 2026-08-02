@@ -991,6 +991,40 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
     }
 
+    private var birdsEyeFooter: String {
+        if !bleManager.hasReceivedDeviceCapabilities {
+            return "Connect to the Bike Computer to check bird's-eye view support."
+        }
+        if !bleManager.supportsBirdsEyeMapNavigation {
+            return "Update the Bike Computer firmware to enable bird's-eye view."
+        }
+        if !bleManager.supportsBirdsEyeMapNavigationPerspective {
+            return "Tilts the map during active navigation. Update the Bike Computer firmware to adjust the perspective."
+        }
+        if !bleManager.supportsBirdsEyeMapNavigationStrongerPerspective {
+            return "Choose how strongly the map tilts during active navigation. Update the Bike Computer firmware for Very Strong and Maximum."
+        }
+        return "Choose how strongly the map tilts during active navigation. The ordinary Map screen stays flat."
+    }
+
+    private var birdsEyePerspectiveOptions: [MapNavigationBirdsEyePerspective] {
+        bleManager.supportsBirdsEyeMapNavigationStrongerPerspective
+            ? MapNavigationBirdsEyePerspective.allCases
+            : MapNavigationBirdsEyePerspective.baselineCases
+    }
+
+    private var birdsEyePerspectiveSelection: Binding<MapNavigationBirdsEyePerspective> {
+        Binding(
+            get: {
+                bleManager.mapPlusNavigationBirdsEyePerspective.supportedValue(
+                    supportsStrongerPerspectives:
+                        bleManager.supportsBirdsEyeMapNavigationStrongerPerspective
+                )
+            },
+            set: { bleManager.mapPlusNavigationBirdsEyePerspective = $0 }
+        )
+    }
+
     var body: some View {
         Form {
             if screen == .map {
@@ -1002,6 +1036,48 @@ private struct MapStyleSettingsView: View {
                     .pickerStyle(.segmented)
                     .onChange(of: bleManager.mapRotationMode) { newValue in
                         bleManager.sendSetting(id: 6, value: Int32(newValue))
+                    }
+                }
+            }
+
+            if screen == .mapPlusNavigation {
+                Section(header: Text("View"), footer: Text(birdsEyeFooter)) {
+                    Toggle(
+                        "Bird's-Eye View",
+                        isOn: $bleManager.mapPlusNavigationBirdsEyeViewEnabled
+                    )
+                    .onChange(
+                        of: bleManager.mapPlusNavigationBirdsEyeViewEnabled
+                    ) { enabled in
+                        bleManager.sendSetting(
+                            id: DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID,
+                            value: enabled ? 1 : 0
+                        )
+                    }
+                    .disabled(
+                        !bleManager.hasReceivedDeviceCapabilities ||
+                            !bleManager.supportsBirdsEyeMapNavigation
+                    )
+
+                    if bleManager.supportsBirdsEyeMapNavigationPerspective {
+                        Picker(
+                            "Perspective",
+                            selection: birdsEyePerspectiveSelection
+                        ) {
+                            ForEach(birdsEyePerspectiveOptions) { perspective in
+                                Text(perspective.title).tag(perspective)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(
+                            of: bleManager.mapPlusNavigationBirdsEyePerspective
+                        ) { perspective in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
+                                value: Int32(perspective.rawValue)
+                            )
+                        }
+                        .disabled(!bleManager.mapPlusNavigationBirdsEyeViewEnabled)
                     }
                 }
             }

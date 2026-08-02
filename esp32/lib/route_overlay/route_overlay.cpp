@@ -24,17 +24,6 @@
 // Global instance
 RouteOverlay routeOverlay;
 
-// Screen center (466x466 display)
-static constexpr int16_t SCREEN_CENTER_X = 233;
-static constexpr int16_t SCREEN_CENTER_Y = 233;
-
-// Meters per microdegree at mid-latitudes (approximate)
-// At equator: 1° lat ≈ 111km, 1 microdegree ≈ 0.111m
-// At 45°: 1° lon ≈ 78km, so we use an average
-static constexpr double METERS_PER_MICRODEGREE_LAT = 0.000111; // ~0.111m
-static constexpr double METERS_PER_MICRODEGREE_LON =
-    0.000085; // ~0.085m at 40° lat
-
 void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
   points.clear();
   revisionCounter++;
@@ -130,39 +119,6 @@ bool RouteOverlay::headingNear(double lat, double lon,
 #define DEG2RAD(a) ((a) / (180.0 / M_PI))
 #endif
 
-double RouteOverlay::geoToScreenX(int32_t lonMicro, double centerMercatorX,
-                                  uint8_t zoom, int16_t screenWidth,
-                                  int16_t anchorX) {
-  (void)screenWidth;
-
-  // Convert microdegrees to degrees
-  double lon = lonMicro / 1000000.0;
-
-  // Use the exact same projection as maps.cpp: lon2x(lon) = DEG2RAD(lon) *
-  // EARTH_RADIUS
-  double worldX = DEG2RAD(lon) * EARTH_RADIUS;
-  return ((worldX - centerMercatorX) *
-          map_transform::worldToScreenScale(zoom)) +
-         anchorX;
-}
-
-double RouteOverlay::geoToScreenY(int32_t latMicro, double centerMercatorY,
-                                  uint8_t zoom, int16_t screenHeight,
-                                  int16_t screenWidth, int16_t anchorY) {
-  (void)screenHeight;
-  (void)screenWidth;
-
-  // Convert microdegrees to degrees
-  double lat = latMicro / 1000000.0;
-
-  // Use the exact same projection as maps.cpp: lat2y(lat) =
-  // log(tan(DEG2RAD(lat) / 2 + M_PI / 4)) * EARTH_RADIUS
-  double worldY = log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS;
-  return (-(worldY - centerMercatorY) *
-          map_transform::worldToScreenScale(zoom)) +
-         anchorY;
-}
-
 void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
                                  uint32_t stride, int16_t x1, int16_t y1,
                                  int16_t x2, int16_t y2, uint16_t color,
@@ -173,23 +129,19 @@ void RouteOverlay::drawThickLine(uint16_t *buf, int32_t bufW, int32_t bufH,
                                   color, lineWidth);
 }
 
-void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
-                             double centerMercatorY, uint8_t zoom,
-                             uint16_t mapScrWidth, uint16_t mapScrHeight,
-                             double rotationRad, int16_t anchorX,
-                             int16_t anchorY, int32_t rasterCellOffsetX,
-                             int32_t rasterCellOffsetY) {
-  (void)mapScrWidth;
-  (void)mapScrHeight;
-
+void RouteOverlay::drawRoute(
+    lv_obj_t *canvas, const map_projection::Projection &projection) {
   if (points.size() < 2) {
     Serial.println("RouteOverlay: Not enough points to draw (need >= 2)");
     return; // Need at least 2 points to draw a line
   }
 
 #if FIRMWARE_DIAGNOSTICS
-  Serial.printf("RouteOverlay::drawRoute: zoom=%d points=%d rot=%.2frad\n",
-                zoom, points.size(), rotationRad);
+  Serial.printf("RouteOverlay::drawRoute: zoom=%d points=%d rot=%.2frad "
+                "mode=%s\n",
+                projection.config().zoom, points.size(),
+                projection.config().rotationRad,
+                projection.isBirdsEye() ? "birds-eye" : "flat");
 #endif
 
   // Get canvas buffer
@@ -204,57 +156,33 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
   int32_t bufH = draw_buf->header.h;
   uint32_t stride =
       draw_buf->header.stride / 2; // stride is in bytes, we need pixels
-  if (anchorX < 0) {
-    anchorX = bufW / 2;
-  }
-  if (anchorY < 0) {
-    anchorY = bufH / 2;
-  }
-
 #if FIRMWARE_DIAGNOSTICS
   Serial.printf("RouteOverlay: Canvas buffer W=%d H=%d stride=%d\n", bufW, bufH,
                 stride);
 #endif
 
-  // Pre-calculate rotation values
-  double cosA = cos(rotationRad);
-  double sinA = sin(rotationRad);
-
   int drawnCount = 0;
   // Draw route segments
   for (size_t i = 0; i < points.size() - 1; i++) {
-    // Convert geographic coordinates to screen pixels
-    double x1 =
-        geoToScreenX(points[i].lon, centerMercatorX, zoom, bufW, anchorX);
-    double y1 = geoToScreenY(points[i].lat, centerMercatorY, zoom, bufH, bufW,
-                             anchorY);
-    double x2 =
-        geoToScreenX(points[i + 1].lon, centerMercatorX, zoom, bufW, anchorX);
-    double y2 = geoToScreenY(points[i + 1].lat, centerMercatorY, zoom, bufH,
-                             bufW, anchorY);
-
-    // Apply rotation transform if rotationRad is non-zero
-    if (rotationRad != 0.0) {
-      // Transform point 1
-      double dx1 = x1 - anchorX;
-      double dy1 = y1 - anchorY;
-      x1 = dx1 * cosA - dy1 * sinA + anchorX;
-      y1 = dx1 * sinA + dy1 * cosA + anchorY;
-
-      // Transform point 2
-      double dx2 = x2 - anchorX;
-      double dy2 = y2 - anchorY;
-      x2 = dx2 * cosA - dy2 * sinA + anchorX;
-      y2 = dx2 * sinA + dy2 * cosA + anchorY;
-    }
-
-    // Rolling cells share one raster origin. Translate the already-rotated
-    // common-raster coordinate by the exact integer cell offset so route
-    // segments keep the same pixel phase as vector features at every seam.
-    x1 -= rasterCellOffsetX;
-    y1 -= rasterCellOffsetY;
-    x2 -= rasterCellOffsetX;
-    y2 -= rasterCellOffsetY;
+    auto worldPoint = [](const GeoPoint &point) {
+      const double lon = point.lon / 1000000.0;
+      const double lat = point.lat / 1000000.0;
+      return map_transform::WorldPoint{
+          DEG2RAD(lon) * EARTH_RADIUS,
+          log(tan(DEG2RAD(lat) / 2.0 + M_PI / 4.0)) * EARTH_RADIUS};
+    };
+    auto ground1 = projection.groundForWorld(worldPoint(points[i]));
+    auto ground2 = projection.groundForWorld(worldPoint(points[i + 1]));
+    if (!projection.clipSegmentToNearPlane(ground1, ground2))
+      continue;
+    const auto projected1 = projection.projectGround(ground1);
+    const auto projected2 = projection.projectGround(ground2);
+    if (!projected1.valid || !projected2.valid)
+      continue;
+    const double x1 = projected1.x;
+    const double y1 = projected1.y;
+    const double x2 = projected2.x;
+    const double y2 = projected2.y;
 
     // LOGGING: Debug Center Offset for the first segment
     if (i == 0) {
@@ -262,7 +190,10 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
           "RouteOverlay",
           "DEBUG_OFFSET: Center(%d,%d) StartPixel(%.1f,%.1f) "
           "Diff(%.1f,%.1f) Rot(%.2f)",
-          anchorX, anchorY, x1, y1, x1 - anchorX, y1 - anchorY, rotationRad);
+          static_cast<int>(projection.anchorX()),
+          static_cast<int>(projection.anchorY()), x1, y1,
+          x1 - projection.anchorX(), y1 - projection.anchorY(),
+          projection.config().rotationRad);
     }
 
     // Skip if both endpoints are far off-screen
@@ -275,10 +206,13 @@ void RouteOverlay::drawRoute(lv_obj_t *canvas, double centerMercatorX,
     }
 
     // Draw thick line segment
-    int16_t routeLineWidth = std::min<int16_t>(
+    const uint8_t baseRouteLineWidth = static_cast<uint8_t>(std::min<int16_t>(
         std::max<int16_t>(
             1, (int16_t)currentMapStyleSettings().routeLineWidth),
-        48);
+        48));
+    const uint8_t routeLineWidth = projection.scaledLineWidth(
+        baseRouteLineWidth,
+        (projected1.depthScale + projected2.depthScale) / 2.0, 48);
     drawThickLine(buf, bufW, bufH, stride,
                   static_cast<int16_t>(map_transform::quantizePixel(x1)),
                   static_cast<int16_t>(map_transform::quantizePixel(y1)),

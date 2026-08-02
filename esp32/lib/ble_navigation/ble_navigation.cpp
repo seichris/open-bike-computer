@@ -1665,7 +1665,8 @@ static void processPendingTransferControl() {
 }
 
 static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
-                                     bool includePowerButtonConfig) {
+                                     bool includePowerButtonConfig,
+                                     uint8_t clientVersion) {
   if (pChar == nullptr) {
     pChar = mapTransferStatusCharacteristic;
   }
@@ -1676,7 +1677,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   const bool speakerAvailable = waveshare_board::speaker::isAvailable();
   const bool powerButtonHonkAvailable =
       waveshare_board::speaker::isPowerButtonHonkAvailable();
-  uint8_t response[8] = {
+  uint8_t response[9] = {
       'C', 'A', 'P', 'S',
       static_cast<uint8_t>(
           waveshare_board::speaker::capabilityFlags(
@@ -1700,12 +1701,19 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     }
     responseSize += waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE;
   }
+  const uint8_t extendedCapabilityFlags =
+      map_profile_protocol::extendedCapabilityFlagsForClient(clientVersion);
+  if (extendedCapabilityFlags != 0) {
+    response[responseSize++] = extendedCapabilityFlags;
+  }
   if (!notifyAuthenticatedNavigation(pChar, response, responseSize)) {
     Serial.println("BLE Capabilities: protected notification failed");
     return;
   }
-  Serial.printf("BLE Capabilities: notified flags=0x%02X config=%d\n",
-                response[4], responseSize > 5 ? 1 : 0);
+  Serial.printf(
+      "BLE Capabilities: notified flags=0x%02X config=%d extended=0x%02X\n",
+      response[4], includePowerButtonConfig && powerButtonHonkAvailable ? 1 : 0,
+      extendedCapabilityFlags);
 }
 
 static void notifyPowerButtonHonkStatus(
@@ -1745,7 +1753,7 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         value.length() == 5 ? static_cast<uint8_t>(value[4]) : 0;
     const bool includePowerButtonConfig =
         clientVersion >= 1;
-    notifyDeviceCapabilities(pChar, includePowerButtonConfig);
+    notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
 }
@@ -2381,6 +2389,29 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: phoneBatteryCharging = %s\n",
                   phoneBatteryCharging ? "yes" : "no");
     return;
+  case map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_SETTING_ID:
+    mapRenderSettings.mapNavigationBirdsEyeEnabled =
+        map_profile_protocol::clampValue(settingId, settingValue) != 0;
+    settingsPrefs.begin("mapSettings", false);
+    map_profile_persistence::persistBirdsEyeEnabled(
+        settingsPrefs, mapRenderSettings.mapNavigationBirdsEyeEnabled);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: mapNavigationBirdsEye = %s (saved)\n",
+                  mapRenderSettings.mapNavigationBirdsEyeEnabled ? "on"
+                                                                  : "off");
+    break;
+  case map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID:
+    mapRenderSettings.mapNavigationBirdsEyePerspective =
+        static_cast<uint8_t>(
+            map_profile_protocol::clampValue(settingId, settingValue));
+    settingsPrefs.begin("mapSettings", false);
+    map_profile_persistence::persistBirdsEyePerspective(
+        settingsPrefs, mapRenderSettings.mapNavigationBirdsEyePerspective);
+    settingsPrefs.end();
+    Serial.printf("BLE Settings: mapNavigationBirdsEyePerspective = %u "
+                  "(saved)\n",
+                  mapRenderSettings.mapNavigationBirdsEyePerspective);
+    break;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -2959,6 +2990,10 @@ static void loadSettingsFromNVS() {
 
   map_profile_persistence::load(prefs, mapRenderSettings.mapStyle,
                                 mapRenderSettings.mapNavigationStyle);
+  mapRenderSettings.mapNavigationBirdsEyeEnabled =
+      map_profile_persistence::loadBirdsEyeEnabled(prefs);
+  mapRenderSettings.mapNavigationBirdsEyePerspective =
+      map_profile_persistence::loadBirdsEyePerspective(prefs);
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   uint8_t storedScreenMask =
@@ -2984,13 +3019,15 @@ static void loadSettingsFromNVS() {
 
   Serial.printf("BLE: Loaded settings from NVS - minPolySize=%d, "
                 "detailLevel=%d, routeWidth=%d, streetWidth=%d, "
-                "markerScale=%d, tapSwitch=%d, "
+                "markerScale=%d, navBirdEye=%d, navBirdTilt=%d, tapSwitch=%d, "
                 "screenMask=0x%02X, defaultScreen=%d, discSleepSec=%lu\n",
                 mapRenderSettings.mapStyle.minPolygonSize,
                 mapRenderSettings.mapStyle.detailLevel,
                 mapRenderSettings.mapStyle.routeLineWidth,
                 mapRenderSettings.mapStyle.streetLineWidth,
                 mapRenderSettings.mapStyle.positionMarkerScale,
+                mapRenderSettings.mapNavigationBirdsEyeEnabled ? 1 : 0,
+                mapRenderSettings.mapNavigationBirdsEyePerspective,
                 mapRenderSettings.tapToSwitchScreens,
                 mapRenderSettings.enabledScreensMask,
                 mapRenderSettings.defaultScreen,

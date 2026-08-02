@@ -144,7 +144,10 @@ enum DeviceBLEProtocol {
     static let batteryStatusScreenCapabilityMask: UInt8 = 1 << 5
     static let destinationPickerCapabilityMask: UInt8 = 1 << 6
     static let workoutTelemetryCapabilityMask: UInt8 = 1 << 7
-    static let deviceCapabilitiesVersion: UInt8 = 6
+    static let birdsEyeMapNavigationExtendedCapabilityMask: UInt8 = 1 << 0
+    static let birdsEyeMapNavigationPerspectiveExtendedCapabilityMask: UInt8 = 1 << 1
+    static let birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask: UInt8 = 1 << 2
+    static let deviceCapabilitiesVersion: UInt8 = 9
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
     static let workoutTelemetryExtendedCoalescingKey =
@@ -173,6 +176,8 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationPositionMarkerScaleSettingID: UInt8 = 22
     static let phoneBatteryLevelSettingID: UInt8 = 23
     static let phoneBatteryChargingSettingID: UInt8 = 24
+    static let mapPlusNavigationBirdsEyeViewSettingID: UInt8 = 25
+    static let mapPlusNavigationBirdsEyePerspectiveSettingID: UInt8 = 26
     static let currentScreenMaskMarker: Int32 = 1 << 30
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
@@ -497,6 +502,38 @@ private extension CBCharacteristicProperties {
     }
 }
 
+enum MapNavigationBirdsEyePerspective: Int, CaseIterable, Identifiable {
+    case gentle = 0
+    case standard = 1
+    case strong = 2
+    case veryStrong = 3
+    case maximum = 4
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .gentle: return "Gentle"
+        case .standard: return "Standard"
+        case .strong: return "Strong"
+        case .veryStrong: return "Very Strong"
+        case .maximum: return "Maximum"
+        }
+    }
+
+    static let baselineCases: [Self] = [.gentle, .standard, .strong]
+
+    func supportedValue(supportsStrongerPerspectives: Bool) -> Self {
+        supportsStrongerPerspectives || rawValue <= Self.strong.rawValue
+            ? self
+            : .strong
+    }
+
+    static func normalized(rawValue: Int) -> Self {
+        Self(rawValue: rawValue) ?? .standard
+    }
+}
+
 private enum MapPlusNavigationDefaults {
     static let minPolygonSize: Double = 0
     static let detailLevel = 0
@@ -527,6 +564,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
     @Published private(set) var supportsIndependentMapProfiles: Bool = false
     @Published private(set) var supportsExtendedMapVisibility: Bool = false
+    @Published private(set) var supportsBirdsEyeMapNavigation: Bool = false
+    @Published private(set) var supportsBirdsEyeMapNavigationPerspective: Bool = false
+    @Published private(set) var supportsBirdsEyeMapNavigationStrongerPerspective: Bool = false
     @Published private(set) var supportsBatteryStatusScreen: Bool = false
     @Published private(set) var supportsDestinationPicker: Bool = false
     @Published private(set) var supportsWorkoutTelemetry: Bool = false
@@ -598,6 +638,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationStreetLineWidth = MapPlusNavigationDefaults.streetLineWidth
     @Published var mapPlusNavigationPositionMarkerScale = MapPlusNavigationDefaults.positionMarkerScale
     @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
+    @Published var mapPlusNavigationBirdsEyeViewEnabled = true
+    @Published var mapPlusNavigationBirdsEyePerspective: MapNavigationBirdsEyePerspective = .standard
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
@@ -765,6 +807,8 @@ class BLEManager: NSObject, ObservableObject {
         static let legacyMapPlusNavigationStreetLineWidthBoost = "mapPlusNavigationSettings.streetLineWidthBoost"
         static let mapPlusNavigationPositionMarkerScale = "mapPlusNavigationSettings.positionMarkerScale"
         static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
+        static let mapPlusNavigationBirdsEyeViewEnabled = "mapPlusNavigationSettings.birdsEyeViewEnabled"
+        static let mapPlusNavigationBirdsEyePerspective = "mapPlusNavigationSettings.birdsEyePerspective"
         static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
         static let mapPlusNavigationShowGreenSpace = "mapPlusNavigationSettings.showGreenSpace"
         static let mapPlusNavigationShowPaths = "mapPlusNavigationSettings.showPaths"
@@ -1057,6 +1101,14 @@ class BLEManager: NSObject, ObservableObject {
                 forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
             ) as? Bool ?? MapPlusNavigationDefaults.showOtherAreas
         }
+        mapPlusNavigationBirdsEyeViewEnabled = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled
+        ) as? Bool ?? true
+        mapPlusNavigationBirdsEyePerspective = .normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective
+            ) as? Int ?? MapNavigationBirdsEyePerspective.standard.rawValue
+        )
         let shouldMigrateRecommendedDefaults = !defaults.bool(
             forKey: SettingsKeys.recommendedMapDefaultsMigrated
         )
@@ -1158,6 +1210,8 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationStreetLineWidth, forKey: SettingsKeys.mapPlusNavigationStreetLineWidth)
         defaults.set(mapPlusNavigationPositionMarkerScale, forKey: SettingsKeys.mapPlusNavigationPositionMarkerScale)
         defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
+        defaults.set(mapPlusNavigationBirdsEyeViewEnabled, forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled)
+        defaults.set(mapPlusNavigationBirdsEyePerspective.rawValue, forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
@@ -2116,9 +2170,24 @@ class BLEManager: NSObject, ObservableObject {
             log("Independent map setting id=\(id) not sent: connected firmware does not advertise support")
             return
         }
+        if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID,
+           (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigation) {
+            log("Bird's-eye map setting not sent: connected firmware does not advertise support")
+            return
+        }
+        if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
+           (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigationPerspective) {
+            log("Bird's-eye perspective setting not sent: connected firmware does not advertise support")
+            return
+        }
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
+            let maximum = supportsBirdsEyeMapNavigationStrongerPerspective
+                ? MapNavigationBirdsEyePerspective.maximum.rawValue
+                : MapNavigationBirdsEyePerspective.strong.rawValue
+            deviceValue = min(max(value, 0), Int32(maximum))
         } else if id == 9 || id == DeviceBLEProtocol.mapPlusNavigationStreetLineWidthSettingID {
             deviceValue = DeviceBLEProtocol.legacyStreetWidthBoost(
                 fromAbsoluteWidth: value
@@ -2263,6 +2332,18 @@ class BLEManager: NSObject, ObservableObject {
                         value: Int32(mapPlusNavigationPositionMarkerScale))
             sendSetting(id: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID,
                         value: Int32(mapPlusNavigationZoomLevel))
+            if supportsBirdsEyeMapNavigation {
+                sendSetting(
+                    id: DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID,
+                    value: mapPlusNavigationBirdsEyeViewEnabled ? 1 : 0
+                )
+            }
+            if supportsBirdsEyeMapNavigationPerspective {
+                sendSetting(
+                    id: DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
+                    value: Int32(mapPlusNavigationBirdsEyePerspective.rawValue)
+                )
+            }
         }
 
         if shouldSendMap {
@@ -2281,6 +2362,9 @@ class BLEManager: NSObject, ObservableObject {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
+        supportsBirdsEyeMapNavigation = false
+        supportsBirdsEyeMapNavigationPerspective = false
+        supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         updateWorkoutTelemetryCapability(false)
@@ -3047,6 +3131,9 @@ class BLEManager: NSObject, ObservableObject {
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
+        supportsBirdsEyeMapNavigation = false
+        supportsBirdsEyeMapNavigationPerspective = false
+        supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         updateWorkoutTelemetryCapability(false)
@@ -4944,12 +5031,16 @@ extension BLEManager: CBPeripheralDelegate {
             return false
         }
 
-        guard data.count == 5 || data.count == 8 else {
+        guard data.count == 5 || data.count == 6 ||
+                data.count == 8 || data.count == 9 else {
             supportsDeviceSounds = false
             supportsPowerButtonHonk = false
             supportsPowerButtonHonkAcknowledgement = false
             supportsIndependentMapProfiles = false
             supportsExtendedMapVisibility = false
+            supportsBirdsEyeMapNavigation = false
+            supportsBirdsEyeMapNavigationPerspective = false
+            supportsBirdsEyeMapNavigationStrongerPerspective = false
             supportsBatteryStatusScreen = false
             supportsDestinationPicker = false
             updateWorkoutTelemetryCapability(false)
@@ -4976,7 +5067,24 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.destinationPickerCapabilityMask != 0
         let hasWorkoutTelemetry =
             flags & DeviceBLEProtocol.workoutTelemetryCapabilityMask != 0
-        let hasDevicePowerButtonConfig = data.count == 8
+        let extendedFlags: UInt8
+        if data.count == 6 {
+            extendedFlags = data[5]
+        } else if data.count == 9 {
+            extendedFlags = data[8]
+        } else {
+            extendedFlags = 0
+        }
+        let hasBirdsEyeMapNavigation =
+            extendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask != 0
+        let hasBirdsEyeMapNavigationPerspective =
+            hasBirdsEyeMapNavigation && extendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask != 0
+        let hasBirdsEyeMapNavigationStrongerPerspective =
+            hasBirdsEyeMapNavigationPerspective && extendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask != 0
+        let hasDevicePowerButtonConfig = data.count == 8 || data.count == 9
         if hasDevicePowerButtonConfig {
             guard hasPowerButtonHonk,
                   data[5] <= 1,
@@ -4987,6 +5095,9 @@ extension BLEManager: CBPeripheralDelegate {
                 supportsPowerButtonHonkAcknowledgement = false
                 supportsIndependentMapProfiles = false
                 supportsExtendedMapVisibility = false
+                supportsBirdsEyeMapNavigation = false
+                supportsBirdsEyeMapNavigationPerspective = false
+                supportsBirdsEyeMapNavigationStrongerPerspective = false
                 supportsBatteryStatusScreen = false
                 supportsDestinationPicker = false
                 updateWorkoutTelemetryCapability(false)
@@ -5015,8 +5126,17 @@ extension BLEManager: CBPeripheralDelegate {
             hasReceivedDeviceCapabilities &&
             !supportsExtendedMapVisibility &&
             hasExtendedMapVisibility
+        let shouldResendMapNavigationForBirdsEye =
+            hasReceivedDeviceCapabilities &&
+            ((!supportsBirdsEyeMapNavigation && hasBirdsEyeMapNavigation) ||
+             (!supportsBirdsEyeMapNavigationPerspective &&
+              hasBirdsEyeMapNavigationPerspective) ||
+             (!supportsBirdsEyeMapNavigationStrongerPerspective &&
+              hasBirdsEyeMapNavigationStrongerPerspective))
         if shouldResendMapProfilesForExtendedVisibility {
             hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        } else if shouldResendMapNavigationForBirdsEye {
             hasSentMapNavigationProfileForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
@@ -5028,6 +5148,10 @@ extension BLEManager: CBPeripheralDelegate {
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles
         supportsExtendedMapVisibility = hasExtendedMapVisibility
+        supportsBirdsEyeMapNavigation = hasBirdsEyeMapNavigation
+        supportsBirdsEyeMapNavigationPerspective = hasBirdsEyeMapNavigationPerspective
+        supportsBirdsEyeMapNavigationStrongerPerspective =
+            hasBirdsEyeMapNavigationStrongerPerspective
         supportsBatteryStatusScreen = hasBatteryStatusScreen
         supportsDestinationPicker = hasDestinationPicker
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
@@ -5035,7 +5159,7 @@ extension BLEManager: CBPeripheralDelegate {
             clearPendingPowerButtonHonkConfiguration()
         }
         hasReceivedDeviceCapabilities = true
-        log("Device capabilities: flags=0x\(String(format: "%02X", flags))")
+        log("Device capabilities: flags=0x\(String(format: "%02X", flags)) extended=0x\(String(format: "%02X", extendedFlags))")
         sendScreenSettingsAfterCapabilityNegotiation()
         sendMapProfilesAfterCapabilityNegotiation()
         if shouldSynchronizePowerButtonHonk {

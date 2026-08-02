@@ -202,6 +202,12 @@ jobs:
             tools/tests/test_map_pinch_zoom.cpp \
             -o /tmp/test_map_pinch_zoom
           /tmp/test_map_pinch_zoom
+      - name: Map projection host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_projection.cpp \
+            -o /tmp/test_map_projection
+          /tmp/test_map_projection
       - name: Map profile protocol host tests
         run: |
           g++ -std=c++17 \
