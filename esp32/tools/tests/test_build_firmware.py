@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -104,12 +105,51 @@ class FirmwareBuildTests(unittest.TestCase):
         firmware.write_bytes(b"real firmware")
         firmware.with_suffix(".bin").write_bytes(b"real flash image")
         (firmware.parent / "bootloader.bin").write_bytes(b"real bootloader")
-        (firmware.parent / "partitions.bin").write_bytes(b"real partition table")
+        self.write_partition_table(environment)
         if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1":
             defaults = self.project_dir / "sdkconfig.defaults"
             if not defaults.exists():
                 defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
             self.write_core_attestation(environment)
+
+    def write_partition_table(
+        self,
+        environment=None,
+        *,
+        ota_data_offset=0xE000,
+        app_offset=0x10000,
+    ):
+        environment = environment or self.environment
+        build_dir = self.project_dir / ".pio/build" / environment
+        build_dir.mkdir(parents=True, exist_ok=True)
+        partition_entry = struct.Struct("<HBBII16sI")
+        partition_table = b"".join(
+            (
+                partition_entry.pack(
+                    0x50AA, 0x01, 0x02, 0x9000, 0x5000, b"nvs", 0
+                ),
+                partition_entry.pack(
+                    0x50AA,
+                    0x01,
+                    0x00,
+                    ota_data_offset,
+                    0x2000,
+                    b"otadata",
+                    0,
+                ),
+                partition_entry.pack(
+                    0x50AA,
+                    0x00,
+                    0x10,
+                    app_offset,
+                    0x300000,
+                    b"app0",
+                    0,
+                ),
+                b"\xff" * partition_entry.size,
+            )
+        )
+        (build_dir / "partitions.bin").write_bytes(partition_table)
 
     def write_core_attestation(self, environment=None):
         environment = environment or self.environment
@@ -152,9 +192,11 @@ class FirmwareBuildTests(unittest.TestCase):
         for path in (
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
+            core / "penv/bin/esptool",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
+            path.chmod(0o755)
         (core / "lib").mkdir(exist_ok=True)
         (core / "globallib").mkdir(exist_ok=True)
         (core / "boards").mkdir(exist_ok=True)
@@ -476,9 +518,10 @@ class FirmwareBuildTests(unittest.TestCase):
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             build_firmware(self.project_dir, self.environment, runner=second_runner)
 
-    def test_upload_preserves_exact_identity_through_prebuild(self):
+    def test_upload_preserves_exact_identity_through_direct_flash(self):
         full_sha = self.initialize_git_repo()
-        core = self.write_core_attestation()
+        core = self.write_core_attestation().resolve()
+        project_dir = self.project_dir.resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
         current = self.project_dir / f"sdkconfig.{self.environment}"
         defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
@@ -497,18 +540,52 @@ class FirmwareBuildTests(unittest.TestCase):
             self.assertEqual(
                 tuple(command),
                 (
-                    "pio",
-                    "run",
-                    "--project-conf",
-                    str(self.project_dir / "platformio.ini"),
-                    "-e",
-                    self.environment,
-                    "-t",
-                    "nobuild",
-                    "-t",
-                    "upload",
-                    "--upload-port",
+                    str(core / "penv/bin/esptool"),
+                    "--chip",
+                    "esp32s3",
+                    "--port",
                     "/dev/cu.test",
+                    "--baud",
+                    "460800",
+                    "--before",
+                    "default-reset",
+                    "--after",
+                    "hard-reset",
+                    "write-flash",
+                    "-z",
+                    "--flash-mode",
+                    "keep",
+                    "--flash-freq",
+                    "keep",
+                    "--flash-size",
+                    "keep",
+                    "0x0",
+                    str(
+                        project_dir
+                        / ".pio/build"
+                        / self.environment
+                        / "bootloader.bin"
+                    ),
+                    "0x8000",
+                    str(
+                        project_dir
+                        / ".pio/build"
+                        / self.environment
+                        / "partitions.bin"
+                    ),
+                    "0xe000",
+                    str(
+                        core
+                        / "packages/framework-arduinoespressif32/tools/partitions"
+                        / "boot_app0.bin"
+                    ),
+                    "0x10000",
+                    str(
+                        project_dir
+                        / ".pio/build"
+                        / self.environment
+                        / "firmware.bin"
+                    ),
                 ),
             )
             allowed = recognized_generated_sdkconfigs(
@@ -561,6 +638,74 @@ class FirmwareBuildTests(unittest.TestCase):
                     "/dev/cu.test",
                     runner=lambda command, cwd: subprocess.CompletedProcess(
                         command, 2
+                    ),
+                )
+
+    def test_upload_uses_offsets_from_the_verified_partition_image(self):
+        core = self.write_core_attestation().resolve()
+        project_dir = self.project_dir.resolve()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        self.write_partition_table(ota_data_offset=0xF000, app_offset=0x20000)
+        calls = []
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+            upload_firmware(
+                self.project_dir,
+                self.environment,
+                "/dev/cu.test",
+                runner=lambda command, cwd: (
+                    calls.append(tuple(command))
+                    or subprocess.CompletedProcess(command, 0)
+                ),
+            )
+
+        self.assertEqual(len(calls), 1)
+        command = calls[0]
+        boot_app0 = str(
+            core
+            / "packages/framework-arduinoespressif32/tools/partitions"
+            / "boot_app0.bin"
+        )
+        firmware = str(
+            project_dir
+            / ".pio/build"
+            / self.environment
+            / "firmware.bin"
+        )
+        self.assertEqual(command[command.index(boot_app0) - 1], "0xf000")
+        self.assertEqual(command[command.index(firmware) - 1], "0x20000")
+        self.assertNotIn("nobuild", command)
+        self.assertNotIn("upload", command)
+
+    def test_upload_refuses_a_malformed_verified_partition_image(self):
+        core = self.write_core_attestation()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        partitions = (
+            self.project_dir
+            / ".pio/build"
+            / self.environment
+            / "partitions.bin"
+        )
+        partitions.write_bytes(b"not an ESP32 partition image")
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+            with self.assertRaisesRegex(BuildError, "truncated entry"):
+                upload_firmware(
+                    self.project_dir,
+                    self.environment,
+                    "/dev/cu.test",
+                    runner=lambda command, cwd: self.fail(
+                        "runner must not be called"
                     ),
                 )
 

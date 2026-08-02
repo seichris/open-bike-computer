@@ -34,8 +34,10 @@ remain available through the manual **Speaker firmware builds** GitHub Actions
 workflow.
 
 After confirming the connected hardware profile, use the same helper for
-upload so the exact Git identity remains active through PlatformIO's upload
-prebuild:
+upload. It revalidates the exact Git identity, toolchain, and image hashes, then
+invokes the attested esptool runtime directly with the ESP32-S3 bootloader and
+partition-derived OTA offsets. This avoids a second PlatformIO build and keeps
+the bytes crossing the upload boundary identical to the verified build:
 
 ```sh
 python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
