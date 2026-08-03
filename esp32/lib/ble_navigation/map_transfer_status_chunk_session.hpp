@@ -1,9 +1,25 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
 namespace map_transfer_status_protocol {
+
+// ATT notifications reserve three bytes for the protocol header. Each
+// authenticated notification then adds a 22-byte envelope, and chunked map
+// status payloads carry a seven-byte MSTC header. Size the body portion from
+// the peer's negotiated MTU so modern centrals receive a status snapshot in as
+// few notifications as possible without exceeding the transport limit.
+constexpr size_t chunkPayloadBytes(uint16_t peerMtu) {
+  constexpr size_t kAttNotificationOverhead = 3;
+  constexpr size_t kAuthenticatedEnvelopeOverhead = 22;
+  constexpr size_t kChunkHeaderBytes = 7;
+  constexpr size_t kTotalOverhead = kAttNotificationOverhead +
+                                    kAuthenticatedEnvelopeOverhead +
+                                    kChunkHeaderBytes;
+  return peerMtu > kTotalOverhead ? peerMtu - kTotalOverhead : 0;
+}
 
 // Repeated status requests must retransmit the same logical chunk stream.
 // Keeping the transfer ID stable while the body is unchanged lets a central

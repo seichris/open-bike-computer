@@ -4,6 +4,13 @@
 #include <iostream>
 
 int main() {
+  assert(map_transfer_status_protocol::chunkPayloadBytes(23) == 0);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(32) == 0);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(33) == 1);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(45) == 13);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(185) == 153);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(512) == 480);
+
   map_transfer_status_protocol::ChunkSession session;
 
   const uint8_t initial = session.transferIdFor("{\"status\":\"idle\"}");

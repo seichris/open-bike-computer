@@ -1506,10 +1506,6 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  // Notifications must fit even when the central keeps the minimum ATT MTU
-  // (23 bytes, 20-byte value). Frame the JSON into independently valid chunks
-  // instead of relying on the requested 512-byte MTU being negotiated.
-  constexpr size_t kChunkBytes = 13;
   static map_transfer_status_protocol::ChunkSession chunkSession;
   const std::string body = mapTransferStatusJson();
   const std::string legacy = "MSTS" + body;
@@ -1527,7 +1523,15 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
                   (unsigned)legacy.size(), (unsigned)peerMtu);
     return;
   }
-  const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
+  const size_t chunkBytes =
+      map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
+  if (chunkBytes == 0) {
+    Serial.printf(
+        "BLE Map Transfer: MTU %u cannot carry authenticated status chunks\n",
+        static_cast<unsigned>(peerMtu));
+    return;
+  }
+  const size_t chunkCount = (body.size() + chunkBytes - 1) / chunkBytes;
   if (chunkCount == 0 || chunkCount > 255) {
     Serial.printf("BLE Map Transfer: status too large (%u bytes)\n",
                   (unsigned)body.size());
@@ -1535,8 +1539,8 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   }
   const uint8_t transferId = chunkSession.transferIdFor(body);
   for (size_t index = 0; index < chunkCount; index++) {
-    const size_t offset = index * kChunkBytes;
-    const size_t length = std::min(kChunkBytes, body.size() - offset);
+    const size_t offset = index * chunkBytes;
+    const size_t length = std::min(chunkBytes, body.size() - offset);
     std::string frame = "MSTC";
     frame.push_back(static_cast<char>(transferId));
     frame.push_back(static_cast<char>(index));
