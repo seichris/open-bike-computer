@@ -8727,8 +8727,8 @@ struct NavigationProtocolTests {
             protectionOverhead: 22,
             withResponseMaximum: 512,
             withoutResponseMaximum: 512
-        ), .nativeWithoutResponse,
-                    "replaceable native GPS prefers write-without-response")
+        ), .nativeWithResponse,
+                    "map-driving GPS prefers acknowledged native delivery")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: false,
@@ -8752,10 +8752,10 @@ struct NavigationProtocolTests {
             hasNativeWriteWithoutResponse: true,
             payloadLength: 30,
             protectionOverhead: 22,
-            withResponseMaximum: 512,
-            withoutResponseMaximum: 20
-        ), .nativeWithResponse,
-                    "insufficient unacknowledged MTU falls back to acknowledged native GPS")
+            withResponseMaximum: 20,
+            withoutResponseMaximum: 512
+        ), .nativeWithoutResponse,
+                    "GPS uses native write-without-response only when acknowledgment is unavailable")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,

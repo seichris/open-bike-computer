@@ -287,13 +287,14 @@ The iOS sender treats GPS as replaceable state, not an ordered history. At most
 one unsent native or `GPSP` position is retained; a newer position replaces only
 that pending position and never route, settings, transfer, destination, auth, or
 workout traffic. A complete maneuver snapshot uses the bounded priority lane so
-it is delivered ahead of a GPS backlog. Native `2A72` prefers
-write-without-response only when the characteristic advertises it and the
-protected payload fits CoreBluetooth's current maximum. CoreBluetooth
-backpressure pauses dequeue without discarding the latest position. If the
-unacknowledged maximum is too small, iOS uses acknowledged native `2A72`; if no
-native write fits, it uses the authenticated navigation fallback. Route and
-catalog batches remain atomic and ordered.
+it is delivered ahead of a GPS backlog. Native `2A72` prefers acknowledged
+delivery when the characteristic advertises it and the protected payload fits
+CoreBluetooth's current maximum. This prevents a missing write-without-response
+readiness callback from head-of-line blocking the GPS state that opens the map.
+Firmware that exposes only write-without-response still uses that native path
+with CoreBluetooth flow control. If no native write fits, iOS uses the
+authenticated navigation fallback. Route and catalog batches remain atomic and
+ordered.
 
 ## Watch Workout Telemetry (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003`)
 
@@ -868,6 +869,12 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
+
+When the settings characteristic advertises acknowledged writes, iOS uses them
+for transfer control and status requests. These commands establish or inspect a
+session and must not depend on a later write-without-response readiness callback
+to leave the shared command queue. Firmware exposing only
+write-without-response remains supported through CoreBluetooth flow control.
 
 When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
 continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification

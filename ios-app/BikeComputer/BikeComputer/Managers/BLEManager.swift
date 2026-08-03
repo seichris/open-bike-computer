@@ -66,13 +66,13 @@ enum GPSPositionWriteRouting {
         withoutResponseMaximum: Int
     ) -> GPSPositionWriteRoute {
         let protectedLength = payloadLength + protectionOverhead
-        if hasNativeWriteWithoutResponse,
-           protectedLength <= withoutResponseMaximum {
-            return .nativeWithoutResponse
-        }
         if hasNativeWriteWithResponse,
            protectedLength <= withResponseMaximum {
             return .nativeWithResponse
+        }
+        if hasNativeWriteWithoutResponse,
+           protectedLength <= withoutResponseMaximum {
+            return .nativeWithoutResponse
         }
         return .navigationFallback
     }
@@ -3406,13 +3406,8 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func preferredWriteType(
-        for characteristic: CBCharacteristic,
-        preferWriteWithoutResponse: Bool = false
+        for characteristic: CBCharacteristic
     ) -> CBCharacteristicWriteType? {
-        if preferWriteWithoutResponse,
-           characteristic.properties.contains(.writeWithoutResponse) {
-            return .withoutResponse
-        }
         if characteristic.properties.contains(.write) { return .withResponse }
         if characteristic.properties.contains(.writeWithoutResponse) { return .withoutResponse }
         return nil
@@ -4269,8 +4264,7 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
-                    prioritized: true,
-                    preferWriteWithoutResponse: true
+                    prioritized: true
                 )
             },
             fallback: {
@@ -4291,18 +4285,14 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
-        prioritized: Bool = false,
-        preferWriteWithoutResponse: Bool = false
+        prioritized: Bool = false
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
               let endpoint = navigationWriteEndpoint,
-              let writeType = preferredWriteType(
-                for: characteristic,
-                preferWriteWithoutResponse: preferWriteWithoutResponse
-              ) else {
+              let writeType = preferredWriteType(for: characteristic) else {
             return false
         }
 
