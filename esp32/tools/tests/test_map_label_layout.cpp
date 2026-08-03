@@ -57,6 +57,28 @@ int main() {
   assert(capped.size() == 96);
   assert(capacityDiagnostics.capacityRejected == 4);
 
+  // A position-marker reservation consumes virtually an entire 128 px rolling
+  // raster cell: with Balanced padding, no standard-height label can fit in
+  // the remaining strips. Labels must therefore be laid out on the composed
+  // viewport instead of independently in every rolling scratch cell.
+  std::vector<Option> rollingCandidate = {
+      {101, 101, 0, 0, 0, 100, 32, 16, 0, 40, 21},
+  };
+  const std::vector<map_label_layout::ReservedRegion> cellMarker = {
+      {64, 64, 96, 96},
+  };
+  assert(map_label_layout::place(rollingCandidate, Bounds{128, 128}, 2,
+                                 cellMarker)
+             .empty());
+  const std::vector<map_label_layout::ReservedRegion> viewportMarker = {
+      {233, 208, 96, 96},
+  };
+  rollingCandidate[0].centerX = 90;
+  rollingCandidate[0].centerY = 80;
+  assert(map_label_layout::place(rollingCandidate, Bounds{466, 416}, 2,
+                                 viewportMarker)
+             .size() == 1);
+
   std::cout << "map label layout tests passed\n";
   return 0;
 }

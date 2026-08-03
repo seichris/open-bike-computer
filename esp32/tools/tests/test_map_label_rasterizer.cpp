@@ -43,5 +43,46 @@ int main() {
   const uint32_t checksum = fnv1a(pixels.data(), pixels.size());
   std::cout << "label raster checksum=" << checksum << "\n";
   assert(checksum == 2180876963U);
+
+  uint16_t transparentBlendColor = 0;
+  uint8_t transparentBlendAlpha = 0;
+  blendRgb565A8(transparentBlendColor, transparentBlendAlpha, 0xffff, 8);
+  assert(transparentBlendColor == 0xffff);
+  assert(transparentBlendAlpha == 136);
+  uint16_t opaqueBlendColor = 0x001f;
+  const uint16_t expectedOpaqueBlend =
+      blendRgb565(opaqueBlendColor, 0xffff, 8);
+  uint8_t opaqueBlendAlpha = 255;
+  blendRgb565A8(opaqueBlendColor, opaqueBlendAlpha, 0xffff, 8);
+  assert(opaqueBlendColor == expectedOpaqueBlend);
+  assert(opaqueBlendAlpha == 255);
+
+  std::array<uint16_t, 81> overlayColors{};
+  std::array<uint8_t, 81> overlayAlpha{};
+  assert(drawGlyphPassRgb565A8(
+      overlayColors.data(), overlayAlpha.data(), 9, 9, 9, 9, fill.data(),
+      distance.data(), 3, 3, -64, -64, identity, 0, 0x0000, 0xffff));
+  assert(drawGlyphPassRgb565A8(
+      overlayColors.data(), overlayAlpha.data(), 9, 9, 9, 9, fill.data(),
+      distance.data(), 3, 3, -64, -64, identity, 1, 0x0000, 0xffff));
+  for (int y = 3; y <= 5; ++y) {
+    for (int x = 3; x <= 5; ++x) {
+      const size_t index = static_cast<size_t>(y) * 9 + x;
+      assert(overlayAlpha[index] == 255);
+      assert(overlayColors[index] ==
+             (x == 4 && y == 4 ? 0x0000 : 0xffff));
+    }
+  }
+  overlayColors[0] = 0x1234;
+  overlayColors[1] = 0x4321;
+  overlayColors[2] = 0x1234;
+  overlayAlpha[0] = 0;
+  overlayAlpha[1] = 7;
+  overlayAlpha[2] = 12;
+  assert(makeColorOpaque(overlayColors.data(), overlayAlpha.data(), 3, 1, 3,
+                         3, 0x1234) == 2);
+  assert(overlayAlpha[0] == 255);
+  assert(overlayAlpha[1] == 7);
+  assert(overlayAlpha[2] == 255);
   return 0;
 }

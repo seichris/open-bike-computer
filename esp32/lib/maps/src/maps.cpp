@@ -156,7 +156,9 @@ bool Maps::LabelLayoutCacheKey::operator==(
          blockSignature == other.blockSignature && zoom == other.zoom &&
          density == other.density && languageMode == other.languageMode &&
          textSize == other.textSize && orientation == other.orientation &&
-         markerScale == other.markerScale && guidance == other.guidance;
+         markerX == other.markerX && markerY == other.markerY &&
+         markerScale == other.markerScale &&
+         markerVisible == other.markerVisible && guidance == other.guidance;
 }
 
 enum class VisibilityClass : uint8_t {
@@ -335,8 +337,10 @@ static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
 
 static void *bufMapScreen = nullptr;
 static void *bufMapTemp = nullptr;
+static void *bufMapForeground = nullptr;
 static size_t bufMapScreenSize = 0;
 static size_t bufMapTempSize = 0;
+static size_t bufMapForegroundSize = 0;
 static void *bufMapIcon = nullptr;
 
 static bool ensureMapBuffer(void *&buffer, size_t &capacity,
@@ -369,6 +373,31 @@ static bool ensureMapScreenBuffer(size_t requiredSize) {
 static bool ensureMapTempBuffer(size_t requiredSize) {
   return ensureMapBuffer(bufMapTemp, bufMapTempSize, requiredSize, "scratch");
 }
+
+static size_t rgb565A8BufferSize(uint16_t width, uint16_t height) {
+  const uint32_t stride =
+      lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_RGB565A8);
+  return static_cast<size_t>(stride) * height +
+         static_cast<size_t>(stride / sizeof(uint16_t)) * height;
+}
+
+static bool ensureMapForegroundBuffer(uint16_t width, uint16_t height) {
+  return ensureMapBuffer(bufMapForeground, bufMapForegroundSize,
+                         rgb565A8BufferSize(width, height), "foreground");
+}
+
+static void bindMapForegroundCanvas(lv_obj_t *canvas, uint16_t width,
+                                    uint16_t height) {
+  lv_canvas_set_buffer(canvas, bufMapForeground, width, height,
+                       LV_COLOR_FORMAT_RGB565A8);
+  // LVGL 9.2's canvas convenience API records only the RGB565 plane size for
+  // RGB565A8. The backing allocation also contains the trailing A8 plane, so
+  // retain its real extent for decoders and diagnostics that inspect it.
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
+  if (drawBuffer != nullptr)
+    drawBuffer->data_size = rgb565A8BufferSize(width, height);
+}
+
 static uint8_t lineClipOutCode(float x, float y, float minX, float minY,
                                float maxX, float maxY) {
   uint8_t code = 0;
@@ -1838,11 +1867,35 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
   if (drawBuffer == nullptr || drawBuffer->data == nullptr)
     return true;
+  const bool transparentSurface =
+      drawBuffer->header.cf == LV_COLOR_FORMAT_RGB565A8;
+  if (!transparentSurface &&
+      drawBuffer->header.cf != LV_COLOR_FORMAT_RGB565) {
+    ESP_LOGE(TAG, "Street labels require an RGB565 or RGB565A8 surface");
+    return true;
+  }
 
   const int32_t screenWidth = drawBuffer->header.w;
   const int32_t screenHeight = drawBuffer->header.h;
   const int16_t screenAnchorX = mapAnchorXForWidth(screenWidth);
   const int16_t screenAnchorY = mapAnchorYForHeight(screenHeight);
+  float markerX = screenAnchorX;
+  float markerY = screenAnchorY;
+  bool markerVisible = false;
+  if (isCurrentPositionVisible(mapRenderSettings)) {
+    if (!followGps) {
+      const auto markerDelta = map_transform::worldToScreen(
+          {lon2x(gps.gpsData.longitude) - viewPort.center.x,
+           lat2y(gps.gpsData.latitude) - viewPort.center.y},
+          zoom, rotation);
+      markerX += markerDelta.x;
+      markerY += markerDelta.y;
+    }
+    const float markerHalf = currentMarkerSize() * 0.5F;
+    markerVisible = markerX + markerHalf >= 0 && markerY + markerHalf >= 0 &&
+                    markerX - markerHalf < screenWidth &&
+                    markerY - markerHalf < screenHeight;
+  }
   constexpr float LABEL_PI = 3.14159265358979323846F;
   constexpr size_t MAX_GATHERED_CANDIDATES = 4096;
   // Half-degree rotation buckets move an edge-of-screen label by at most two
@@ -1894,7 +1947,10 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
       style.labelLanguageMode,
       sizeId,
       style.labelOrientation,
+      markerVisible ? static_cast<int16_t>(std::lround(markerX)) : 0,
+      markerVisible ? static_cast<int16_t>(std::lround(markerY)) : 0,
       style.positionMarkerScale,
+      markerVisible,
       guidance};
 
   struct RenderItem {
@@ -2043,13 +2099,10 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   if (options.empty())
     return true;
   std::vector<map_label_layout::ReservedRegion> reserved;
-  const float markerSize = 48.0F *
-                           std::min<uint8_t>(
-                               std::max<uint8_t>(style.positionMarkerScale, 1),
-                               5);
-  reserved.push_back({static_cast<float>(screenAnchorX),
-                      static_cast<float>(screenAnchorY), markerSize,
-                      markerSize});
+  if (markerVisible) {
+    const float markerSize = static_cast<float>(currentMarkerSize());
+    reserved.push_back({markerX, markerY, markerSize, markerSize});
+  }
   if (guidance)
     reserved.push_back(
         {screenWidth * 0.5F, 34.0F, static_cast<float>(screenWidth), 68.0F});
@@ -2077,6 +2130,27 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
 
   uint16_t *pixels = reinterpret_cast<uint16_t *>(drawBuffer->data);
   const uint32_t stride = drawBuffer->header.stride / sizeof(uint16_t);
+  uint8_t *alphaPixels =
+      transparentSurface
+          ? static_cast<uint8_t *>(drawBuffer->data) +
+                static_cast<size_t>(drawBuffer->header.stride) * screenHeight
+          : nullptr;
+  const uint32_t alphaStride = transparentSurface ? stride : 0;
+  const lv_draw_buf_t *contrastBuffer = nullptr;
+  int32_t contrastOffsetX = 0;
+  int32_t contrastOffsetY = 0;
+  if (transparentSurface && Maps::canvasMap != nullptr) {
+    contrastBuffer = lv_canvas_get_draw_buf(Maps::canvasMap);
+    if (contrastBuffer == nullptr || contrastBuffer->data == nullptr ||
+        contrastBuffer->header.cf != LV_COLOR_FORMAT_RGB565) {
+      contrastBuffer = nullptr;
+    } else {
+      contrastOffsetX = lv_obj_get_x_aligned(canvas) -
+                        lv_obj_get_x_aligned(Maps::canvasMap);
+      contrastOffsetY = lv_obj_get_y_aligned(canvas) -
+                        lv_obj_get_y_aligned(Maps::canvasMap);
+    }
+  }
   for (const auto &placement : placements) {
     if (shouldInterruptMapRenderForScreenCycle())
       return false;
@@ -2089,14 +2163,36 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     if (centerX < 0 || centerX >= screenWidth || centerY < 0 ||
         centerY >= screenHeight)
       continue;
-    const uint16_t background = pixels[centerY * stride + centerX];
-    const uint32_t luminance = ((background >> 11U) & 0x1fU) * 299U * 255U /
-                                   31U +
-                               ((background >> 5U) & 0x3fU) * 587U * 255U /
-                                   63U +
-                               (background & 0x1fU) * 114U * 255U / 31U;
-    const uint16_t fillColor = luminance > 128000U ? 0x0000U : 0xffffU;
-    const uint16_t haloColor = luminance > 128000U ? 0xffffU : 0x0000U;
+    uint16_t fillColor = 0x0000U;
+    uint16_t haloColor = 0xffffU;
+    uint16_t background = 0;
+    bool hasBackgroundSample = false;
+    if (!transparentSurface) {
+      background = pixels[centerY * stride + centerX];
+      hasBackgroundSample = true;
+    } else if (contrastBuffer != nullptr) {
+      const int32_t contrastX = centerX + contrastOffsetX;
+      const int32_t contrastY = centerY + contrastOffsetY;
+      if (contrastX >= 0 && contrastY >= 0 &&
+          contrastX < contrastBuffer->header.w &&
+          contrastY < contrastBuffer->header.h) {
+        const auto *contrastPixels =
+            reinterpret_cast<const uint16_t *>(contrastBuffer->data);
+        const uint32_t contrastStride =
+            contrastBuffer->header.stride / sizeof(uint16_t);
+        background =
+            contrastPixels[contrastY * contrastStride + contrastX];
+        hasBackgroundSample = true;
+      }
+    }
+    if (hasBackgroundSample) {
+      const uint32_t luminance =
+          ((background >> 11U) & 0x1fU) * 299U * 255U / 31U +
+          ((background >> 5U) & 0x3fU) * 587U * 255U / 63U +
+          (background & 0x1fU) * 114U * 255U / 31U;
+      fillColor = luminance > 128000U ? 0x0000U : 0xffffU;
+      haloColor = luminance > 128000U ? 0xffffU : 0x0000U;
+    }
     const map_label_rasterizer::TransformQ15 transform{
         centerX,
         centerY,
@@ -2140,11 +2236,20 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                                      bitmap.bearingX * 64;
           const int32_t glyphY26_6 = baselineY26_6 - glyph.yOffset26_6 -
                                      bitmap.bearingY * 64;
-          if (!map_label_rasterizer::drawGlyphPass(
-                  pixels, screenWidth, screenHeight, stride, bitmap.fill,
-                  bitmap.distance, bitmap.width, bitmap.height, glyphX26_6,
-                  glyphY26_6, transform, pass, fillColor, haloColor,
-                  shouldInterruptMapRenderForScreenCycle))
+          const bool drawn =
+              transparentSurface
+                  ? map_label_rasterizer::drawGlyphPassRgb565A8(
+                        pixels, alphaPixels, screenWidth, screenHeight,
+                        stride, alphaStride, bitmap.fill, bitmap.distance,
+                        bitmap.width, bitmap.height, glyphX26_6, glyphY26_6,
+                        transform, pass, fillColor, haloColor,
+                        shouldInterruptMapRenderForScreenCycle)
+                  : map_label_rasterizer::drawGlyphPass(
+                        pixels, screenWidth, screenHeight, stride, bitmap.fill,
+                        bitmap.distance, bitmap.width, bitmap.height,
+                        glyphX26_6, glyphY26_6, transform, pass, fillColor,
+                        haloColor, shouldInterruptMapRenderForScreenCycle);
+          if (!drawn)
             return false;
           penX26_6 += glyph.xAdvance26_6;
         }
@@ -2185,7 +2290,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
  */
 bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation,
-                         const map_projection::Projection &projection) {
+                         const map_projection::Projection &projection,
+                         bool drawLabels) {
   (void)rotation;
   Polygon newPolygon;
   std::vector<map_projection::GroundPoint> groundPolygon;
@@ -2434,7 +2540,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 (unsigned long)polygonMs, (unsigned long)lineMs,
                 (unsigned long)(MAPIO_TIME_MS() - blockTime));
     }
-    if (!drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
+    if (drawLabels &&
+        !drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
       return false;
     ESP_LOGI(TAG, "Total %i ms", millis() - totalTime);
 
@@ -2933,10 +3040,14 @@ void Maps::deleteMapScrSprites() {
     lv_obj_delete(Maps::canvasMap);
   if (Maps::canvasMapTemp)
     lv_obj_delete(Maps::canvasMapTemp);
+  if (Maps::canvasForeground)
+    lv_obj_delete(Maps::canvasForeground);
 
   Maps::canvasArrow = nullptr;
   Maps::canvasMap = nullptr;
   Maps::canvasMapTemp = nullptr;
+  Maps::canvasForeground = nullptr;
+  rollingForegroundReady = false;
 }
 
 /**
@@ -2996,11 +3107,14 @@ void Maps::createMapScrSprites() {
   // a runtime zoom. Map + Navigation therefore does not pay the rolling
   // grid's PSRAM cost merely by creating the shared map canvases.
   if (!ensureMapScreenBuffer(maximumNormalFrameSize) ||
-      !ensureMapTempBuffer(requiredTempSize)) {
+      !ensureMapTempBuffer(requiredTempSize) ||
+      !ensureMapForegroundBuffer(Maps::mapScrWidth, Maps::mapScrFull)) {
     return;
   }
   memset(bufMapScreen, 0, maximumNormalFrameSize);
   memset(bufMapTemp, 0, requiredTempSize);
+  memset(bufMapForeground, 0,
+         rgb565A8BufferSize(Maps::mapScrWidth, Maps::mapScrFull));
   invalidateRollingRasterWindow();
 
   Maps::canvasMap = lv_canvas_create(mapTile);
@@ -3017,6 +3131,16 @@ void Maps::createMapScrSprites() {
   lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, w, h,
                        LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMapTemp);
+
+  // Standalone Map uses a rolling base raster. Street labels and the route are
+  // composed once in viewport coordinates on this transparent foreground so
+  // labels are neither clipped nor collision-tested independently per cell.
+  Maps::canvasForeground = lv_canvas_create(mapTile);
+  lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
+  bindMapForegroundCanvas(Maps::canvasForeground, w, h);
+  lv_obj_center(Maps::canvasForeground);
 
   // Draw the current-position marker as native LVGL geometry at its final
   // on-screen size. This avoids magnifying a fixed 48x48 bitmap.
@@ -3058,12 +3182,9 @@ uint64_t Maps::rollingRasterSignature() const {
   };
   mix(style.minPolygonSize);
   mix(style.detailLevel);
-  mix(style.routeLineWidth);
   mix(style.streetLineWidth);
   mix(style.zoomLevel);
   mix(style.visibilityMask);
-  mix(mapRenderSettings.navigationOverlayVisibilityMask);
-  mix(routeOverlay.revision());
   mix(static_cast<uint8_t>(rotationMode));
   return signature;
 }
@@ -3087,7 +3208,21 @@ bool Maps::rollingRasterCompatible(uint8_t requestedZoom,
              rollingRasterWindow.rotation, Maps::rotationRad);
 }
 
-void Maps::invalidateRollingRasterWindow() { rollingRasterWindow = {}; }
+void Maps::hideRollingForeground() {
+  if (Maps::canvasForeground != nullptr)
+    lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Maps::restoreRollingForeground() {
+  if (rollingForegroundReady && Maps::canvasForeground != nullptr)
+    lv_obj_clear_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Maps::invalidateRollingRasterWindow() {
+  rollingRasterWindow = {};
+  rollingForegroundReady = false;
+  hideRollingForeground();
+}
 
 double Maps::visibleMapRotation() const {
   // Course-up headings can move within the five-degree raster reuse window.
@@ -3169,18 +3304,9 @@ bool Maps::renderRollingRasterCell(double rasterOriginX,
   if (!Maps::getMapBlocks(cellViewPort.bbox, Maps::memCache) ||
       !Maps::readVectorMap(cellViewPort, Maps::memCache,
                            Maps::canvasMapTemp, requestedZoom, rotation,
-                           cellProjection)) {
+                           cellProjection, false)) {
     restoreVisibleState();
     return false;
-  }
-
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    restoreVisibleState();
-    return false;
-  }
-
-  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(Maps::canvasMapTemp, cellProjection);
   }
 
   if (shouldInterruptMapRenderForScreenCycle()) {
@@ -3355,6 +3481,74 @@ void Maps::updateVisibleVectorViewport() {
   Maps::totalBounds.lat_max = Maps::mercatorY2lat(Maps::viewPort.bbox.max.y);
   Maps::totalBounds.lon_min = Maps::mercatorX2lon(Maps::viewPort.bbox.min.x);
   Maps::totalBounds.lon_max = Maps::mercatorX2lon(Maps::viewPort.bbox.max.x);
+}
+
+bool Maps::renderRollingForeground() {
+  if (!rollingRasterWindow.valid || Maps::canvasForeground == nullptr ||
+      bufMapForeground == nullptr) {
+    rollingForegroundReady = false;
+    hideRollingForeground();
+    return false;
+  }
+
+  const uint16_t width = rollingRasterWindow.viewportWidth;
+  const uint16_t height = rollingRasterWindow.viewportHeight;
+  const size_t requiredSize = rgb565A8BufferSize(width, height);
+  if (width == 0 || height == 0 ||
+      !ensureMapForegroundBuffer(width, height) ||
+      requiredSize > bufMapForegroundSize) {
+    rollingForegroundReady = false;
+    hideRollingForeground();
+    return false;
+  }
+
+  memset(bufMapForeground, 0, requiredSize);
+  lv_anim_delete(Maps::canvasForeground, setPinchCanvasScale);
+  lv_image_set_scale(Maps::canvasForeground, LV_SCALE_NONE);
+  lv_image_set_pivot(Maps::canvasForeground, 0, 0);
+  bindMapForegroundCanvas(Maps::canvasForeground, width, height);
+  lv_obj_center(Maps::canvasForeground);
+
+  const ScreenMapRenderSettings &style = currentMapStyleSettings();
+  if (style.labelDensity != 0 && labelFontAsset.healthy()) {
+    if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache) ||
+        !drawStreetLabels(Maps::viewPort, Maps::memCache,
+                          Maps::canvasForeground, rollingRasterWindow.zoom,
+                          rollingRasterWindow.rotation, style)) {
+      rollingForegroundReady = false;
+      hideRollingForeground();
+      return false;
+    }
+  }
+
+  const auto foregroundProjection = makeMapProjection(
+      Maps::viewPort.rasterOriginX, Maps::viewPort.rasterOriginY,
+      Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY,
+      rollingRasterWindow.zoom, rollingRasterWindow.rotation, width, height,
+      map_projection::Mode::Flat);
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
+    routeOverlay.drawRoute(Maps::canvasForeground, foregroundProjection);
+    lv_draw_buf_t *drawBuffer =
+        lv_canvas_get_draw_buf(Maps::canvasForeground);
+    if (drawBuffer != nullptr && drawBuffer->data != nullptr &&
+        drawBuffer->header.cf == LV_COLOR_FORMAT_RGB565A8) {
+      const uint32_t colorStride =
+          drawBuffer->header.stride / sizeof(uint16_t);
+      auto *colors = reinterpret_cast<uint16_t *>(drawBuffer->data);
+      auto *alpha = static_cast<uint8_t *>(drawBuffer->data) +
+                    static_cast<size_t>(drawBuffer->header.stride) * height;
+      map_label_rasterizer::makeColorOpaque(
+          colors, alpha, width, height, colorStride, colorStride,
+          navigation_visual_style::ROUTE_BLUE_RGB565);
+    }
+  }
+
+  rollingForegroundReady = true;
+  lv_obj_clear_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_invalidate(Maps::canvasForeground);
+  if (Maps::canvasArrow != nullptr)
+    lv_obj_move_foreground(Maps::canvasArrow);
+  return true;
 }
 
 map_transform::PixelOffset
@@ -3896,6 +4090,7 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!dragPreviewController.begin())
     return false;
 
+  hideRollingForeground();
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
   if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
     const uint16_t height =
@@ -4033,6 +4228,7 @@ void Maps::cancelDragPreview() {
   }
   dragPreviewController.reset();
   dragPresentation = {};
+  restoreRollingForeground();
 }
 
 void Maps::finishDragSettlement() {
@@ -4052,6 +4248,7 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   }
 
   pinchPresentation.active = true;
+  hideRollingForeground();
   pinchPresentation.capturedFollowGps = Maps::followGps;
   pinchPresentation.baseZoom = map_transform::clampRuntimeZoom(baseZoom);
   pinchPresentation.baseCenter = Maps::point;
@@ -4257,6 +4454,7 @@ void Maps::cancelPinchPreview() {
     resetPinchPresentationVisuals();
   }
   pinchPresentation = {};
+  restoreRollingForeground();
 }
 
 void Maps::commitPinchZoom(uint8_t targetZoom, double finalPreviewRatio,
@@ -4683,6 +4881,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     }
     finishDragSettlement();
     finishPinchSettlement();
+    if (!renderRollingForeground()) {
+      MAPIO_LOG("MAPIO: rolling-foreground ok=0 zoom=%u\n", zoom);
+      return false;
+    }
     MAPIO_LOG("MAPIO: rolling-generate zoom=%u totalMs=%lu cache=%u "
               "hasRoute=%d\n",
               zoom, (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
