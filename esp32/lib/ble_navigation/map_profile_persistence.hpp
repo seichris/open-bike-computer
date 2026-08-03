@@ -121,7 +121,9 @@ inline void load(Store &store, Profile &mapStyle,
   mapNavigationStyle.labelDensity = static_cast<uint8_t>(
       map_profile_protocol::clampValue(
           map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID,
-          store.getUChar("navLabelDen", mapStyle.labelDensity)));
+          store.getUChar(
+              "navLabelDen",
+              map_profile_protocol::MAP_NAVIGATION_DEFAULT_LABEL_DENSITY)));
   mapNavigationStyle.labelLanguageMode = static_cast<uint8_t>(
       map_profile_protocol::clampValue(
           map_profile_protocol::MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID,

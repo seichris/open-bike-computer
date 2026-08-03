@@ -188,6 +188,12 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
     static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
     static let currentScreenMaskMarker: Int32 = 1 << 30
+    static let defaultMapStreetLabelsEnabled = true
+    static let defaultMapPlusNavigationStreetLabelsEnabled = false
+    static let defaultStreetLabelDensity = 2
+    static let defaultStreetLabelLanguageMode = 2
+    static let defaultStreetLabelTextSize = 0
+    static let defaultStreetLabelOrientation = 1
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -211,6 +217,17 @@ enum DeviceBLEProtocol {
 
     static func phoneBatteryChargingValue(isCharging: Bool) -> Int32 {
         isCharging ? 1 : 0
+    }
+
+    static func normalizedStreetLabelDensity(_ density: Int) -> Int {
+        (1...3).contains(density) ? density : defaultStreetLabelDensity
+    }
+
+    static func effectiveStreetLabelDensity(
+        enabled: Bool,
+        density: Int
+    ) -> Int32 {
+        enabled ? Int32(normalizedStreetLabelDensity(density)) : 0
     }
 
     static func absoluteStreetWidth(fromLegacyBoost boost: Double) -> Double {
@@ -649,10 +666,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var positionMarkerScale: Double = 2
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up
     @Published var zoomLevel: Int = 3 // 0-5: 0=closest, 5=farthest
-    @Published var mapLabelDensity = 2
-    @Published var mapLabelLanguageMode = 0
-    @Published var mapLabelTextSize = 1
-    @Published var mapLabelOrientation = 0
+    @Published var mapLabelsEnabled = DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+    @Published var mapLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+    @Published var mapLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+    @Published var mapLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+    @Published var mapLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var mapPlusNavigationMinPolygonSize = MapPlusNavigationDefaults.minPolygonSize
     @Published var mapPlusNavigationDetailLevel = MapPlusNavigationDefaults.detailLevel
     @Published var mapPlusNavigationRouteLineWidth = MapPlusNavigationDefaults.routeLineWidth
@@ -661,10 +679,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
     @Published var mapPlusNavigationBirdsEyeViewEnabled = true
     @Published var mapPlusNavigationBirdsEyePerspective: MapNavigationBirdsEyePerspective = .standard
-    @Published var mapPlusNavigationLabelDensity = 2
-    @Published var mapPlusNavigationLabelLanguageMode = 0
-    @Published var mapPlusNavigationLabelTextSize = 1
-    @Published var mapPlusNavigationLabelOrientation = 0
+    @Published var mapPlusNavigationLabelsEnabled =
+        DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+    @Published var mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+    @Published var mapPlusNavigationLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+    @Published var mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+    @Published var mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
@@ -835,6 +855,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
+        static let mapLabelsEnabled = "mapSettings.labelsEnabled"
         static let mapLabelDensity = "mapSettings.labelDensity"
         static let mapLabelLanguageMode = "mapSettings.labelLanguageMode"
         static let mapLabelTextSize = "mapSettings.labelTextSize"
@@ -848,6 +869,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
         static let mapPlusNavigationBirdsEyeViewEnabled = "mapPlusNavigationSettings.birdsEyeViewEnabled"
         static let mapPlusNavigationBirdsEyePerspective = "mapPlusNavigationSettings.birdsEyePerspective"
+        static let mapPlusNavigationLabelsEnabled = "mapPlusNavigationSettings.labelsEnabled"
         static let mapPlusNavigationLabelDensity = "mapPlusNavigationSettings.labelDensity"
         static let mapPlusNavigationLabelLanguageMode = "mapPlusNavigationSettings.labelLanguageMode"
         static let mapPlusNavigationLabelTextSize = "mapPlusNavigationSettings.labelTextSize"
@@ -864,6 +886,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
+        static let streetLabelDefaultsMigrated = "streetLabels.defaults.v1"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
@@ -989,14 +1012,72 @@ class BLEManager: NSObject, ObservableObject {
             defaults.set(true, forKey: SettingsKeys.resetMapRotationModeToNorthUp)
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 3
-        mapLabelDensity = min(max(defaults.object(forKey: SettingsKeys.mapLabelDensity) as? Int ?? 2, 0), 3)
-        mapLabelLanguageMode = min(max(defaults.object(forKey: SettingsKeys.mapLabelLanguageMode) as? Int ?? 0, 0), 2)
-        mapLabelTextSize = min(max(defaults.object(forKey: SettingsKeys.mapLabelTextSize) as? Int ?? 1, 0), 2)
-        mapLabelOrientation = min(max(defaults.object(forKey: SettingsKeys.mapLabelOrientation) as? Int ?? 0, 0), 1)
-        mapPlusNavigationLabelDensity = min(max(defaults.object(forKey: SettingsKeys.mapPlusNavigationLabelDensity) as? Int ?? 2, 0), 3)
-        mapPlusNavigationLabelLanguageMode = min(max(defaults.object(forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode) as? Int ?? 0, 0), 2)
-        mapPlusNavigationLabelTextSize = min(max(defaults.object(forKey: SettingsKeys.mapPlusNavigationLabelTextSize) as? Int ?? 1, 0), 2)
-        mapPlusNavigationLabelOrientation = min(max(defaults.object(forKey: SettingsKeys.mapPlusNavigationLabelOrientation) as? Int ?? 0, 0), 1)
+        let shouldMigrateStreetLabelDefaults = !defaults.bool(
+            forKey: SettingsKeys.streetLabelDefaultsMigrated
+        )
+        if shouldMigrateStreetLabelDefaults {
+            mapLabelsEnabled = DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+            mapLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+            mapLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+            mapLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+            mapLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
+            mapPlusNavigationLabelsEnabled =
+                DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+            mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+            mapPlusNavigationLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+            mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+            mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
+            defaults.set(true, forKey: SettingsKeys.streetLabelDefaultsMigrated)
+        } else {
+            mapLabelsEnabled = defaults.object(
+                forKey: SettingsKeys.mapLabelsEnabled
+            ) as? Bool ?? DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+            mapLabelDensity = DeviceBLEProtocol.normalizedStreetLabelDensity(
+                defaults.object(forKey: SettingsKeys.mapLabelDensity) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelDensity
+            )
+            mapLabelLanguageMode = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelLanguageMode) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelLanguageMode,
+                0
+            ), 2)
+            mapLabelTextSize = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelTextSize) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelTextSize,
+                0
+            ), 2)
+            mapLabelOrientation = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelOrientation) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelOrientation,
+                0
+            ), 1)
+            mapPlusNavigationLabelsEnabled = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationLabelsEnabled
+            ) as? Bool ?? DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+            mapPlusNavigationLabelDensity = DeviceBLEProtocol.normalizedStreetLabelDensity(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelDensity
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelDensity
+            )
+            mapPlusNavigationLabelLanguageMode = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelLanguageMode,
+                0
+            ), 2)
+            mapPlusNavigationLabelTextSize = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelTextSize
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelTextSize,
+                0
+            ), 2)
+            mapPlusNavigationLabelOrientation = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelOrientation
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelOrientation,
+                0
+            ), 1)
+        }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
             ?? DeviceScreen.allScreensMask
@@ -1195,6 +1276,7 @@ class BLEManager: NSObject, ObservableObject {
         showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
         showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true
         if shouldMigrateMapPlusNavigationProfile ||
+            shouldMigrateStreetLabelDefaults ||
             shouldMigrateRecommendedDefaults ||
             defaults.object(forKey: SettingsKeys.streetLineWidth) == nil ||
             defaults.object(forKey: SettingsKeys.mapPlusNavigationStreetLineWidth) == nil {
@@ -1255,6 +1337,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(positionMarkerScale, forKey: SettingsKeys.positionMarkerScale)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
+        defaults.set(mapLabelsEnabled, forKey: SettingsKeys.mapLabelsEnabled)
         defaults.set(mapLabelDensity, forKey: SettingsKeys.mapLabelDensity)
         defaults.set(mapLabelLanguageMode, forKey: SettingsKeys.mapLabelLanguageMode)
         defaults.set(mapLabelTextSize, forKey: SettingsKeys.mapLabelTextSize)
@@ -1267,6 +1350,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
         defaults.set(mapPlusNavigationBirdsEyeViewEnabled, forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled)
         defaults.set(mapPlusNavigationBirdsEyePerspective.rawValue, forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective)
+        defaults.set(mapPlusNavigationLabelsEnabled, forKey: SettingsKeys.mapPlusNavigationLabelsEnabled)
         defaults.set(mapPlusNavigationLabelDensity, forKey: SettingsKeys.mapPlusNavigationLabelDensity)
         defaults.set(mapPlusNavigationLabelLanguageMode, forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode)
         defaults.set(mapPlusNavigationLabelTextSize, forKey: SettingsKeys.mapPlusNavigationLabelTextSize)
@@ -2263,6 +2347,31 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    func sendStreetLabelDensity(for screen: DeviceScreen) {
+        let settingID: UInt8
+        let enabled: Bool
+        let density: Int
+        switch screen {
+        case .map:
+            settingID = DeviceBLEProtocol.mapLabelDensitySettingID
+            enabled = mapLabelsEnabled
+            density = mapLabelDensity
+        case .mapPlusNavigation:
+            settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
+            enabled = mapPlusNavigationLabelsEnabled
+            density = mapPlusNavigationLabelDensity
+        case .navigation, .rideStats, .batteryStatus:
+            return
+        }
+        sendSetting(
+            id: settingID,
+            value: DeviceBLEProtocol.effectiveStreetLabelDensity(
+                enabled: enabled,
+                density: density
+            )
+        )
+    }
+
     @discardableResult
     private func sendSettingPacket(id: UInt8, value: Int32, label: String) -> Bool {
         guard isConnected, isNavigationReady else { return false }
@@ -2414,8 +2523,7 @@ class BLEManager: NSObject, ObservableObject {
                 )
             }
             if supportsStreetLabels {
-                sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID,
-                            value: Int32(mapPlusNavigationLabelDensity))
+                sendStreetLabelDensity(for: .mapPlusNavigation)
                 sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID,
                             value: Int32(mapPlusNavigationLabelLanguageMode))
                 sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID,
@@ -2435,8 +2543,7 @@ class BLEManager: NSObject, ObservableObject {
             sendSetting(id: 10, value: Int32(positionMarkerScale))
             sendSetting(id: 7, value: Int32(zoomLevel))
             if supportsStreetLabels {
-                sendSetting(id: DeviceBLEProtocol.mapLabelDensitySettingID,
-                            value: Int32(mapLabelDensity))
+                sendStreetLabelDensity(for: .map)
                 sendSetting(id: DeviceBLEProtocol.mapLabelLanguageModeSettingID,
                             value: Int32(mapLabelLanguageMode))
                 sendSetting(id: DeviceBLEProtocol.mapLabelTextSizeSettingID,

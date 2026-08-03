@@ -923,6 +923,9 @@ private struct MapStyleSettingsView: View {
         if labelLanguagesNeedUpdate {
             return "Your iPhone language preferences changed after this map was built. Update the map to use the current language list."
         }
+        if !labelsEnabled.wrappedValue {
+            return "Street names are hidden on this screen."
+        }
         return "Follow Roads and Keep Upright are rendered on the device and apply immediately. Changing the iPhone language list may require updating map languages."
     }
 
@@ -970,6 +973,11 @@ private struct MapStyleSettingsView: View {
     private var labelDensity: Binding<Int> {
         binding(map: \.mapLabelDensity,
                 mapPlusNavigation: \.mapPlusNavigationLabelDensity)
+    }
+
+    private var labelsEnabled: Binding<Bool> {
+        binding(map: \.mapLabelsEnabled,
+                mapPlusNavigation: \.mapPlusNavigationLabelsEnabled)
     }
 
     private var labelLanguageMode: Binding<Int> {
@@ -1212,18 +1220,23 @@ private struct MapStyleSettingsView: View {
                     header: Text("Street Labels"),
                     footer: Text(streetLabelsFooter)
                 ) {
+                    Toggle("Show Street Labels", isOn: labelsEnabled)
+                        .onChange(of: labelsEnabled.wrappedValue) { _ in
+                            bleManager.sendStreetLabelDensity(
+                                for: screen.deviceScreen
+                            )
+                        }
+                        .disabled(!labelsAvailable)
+
                     Group {
                         Picker("Density", selection: labelDensity) {
-                            Text("Off").tag(0)
                             Text("Major Roads").tag(1)
                             Text("Balanced").tag(2)
                             Text("All Roads").tag(3)
                         }
-                        .onChange(of: labelDensity.wrappedValue) { newValue in
-                            sendSetting(
-                                mapID: DeviceBLEProtocol.mapLabelDensitySettingID,
-                                mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID,
-                                value: Int32(newValue)
+                        .onChange(of: labelDensity.wrappedValue) { _ in
+                            bleManager.sendStreetLabelDensity(
+                                for: screen.deviceScreen
                             )
                         }
 
@@ -1267,7 +1280,7 @@ private struct MapStyleSettingsView: View {
                             )
                         }
                     }
-                    .disabled(!labelsAvailable)
+                    .disabled(!labelsAvailable || !labelsEnabled.wrappedValue)
                     if !labelsAvailable || labelLanguagesNeedUpdate {
                         Button(labelLanguagesNeedUpdate
                                ? "Update Map Languages"

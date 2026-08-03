@@ -84,7 +84,7 @@ points, or bidi override controls. Total string bodies are at most 256 KiB.
 runCount                    u16, maximum 12,288
 runs[runCount]
   stringId                  u16
-  sizeId                    u8; 0=12px, 1=15px, 2=18px
+  sizeId                    u8; 0=18px, 1=22px, 2=26px
   glyphCount                u8; 1...192
   glyphs[glyphCount]
     glyphId                 u16; one-based FMA1 map glyph ID

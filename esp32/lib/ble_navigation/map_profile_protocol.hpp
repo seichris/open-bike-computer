@@ -33,9 +33,10 @@ constexpr uint8_t MAP_DEFAULT_ZOOM_LEVEL = 3;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH = 15;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL = 3;
 constexpr uint8_t DEFAULT_LABEL_DENSITY = 2;
-constexpr uint8_t DEFAULT_LABEL_LANGUAGE_MODE = 0;
-constexpr uint8_t DEFAULT_LABEL_TEXT_SIZE = 1;
-constexpr uint8_t DEFAULT_LABEL_ORIENTATION = 0;
+constexpr uint8_t MAP_NAVIGATION_DEFAULT_LABEL_DENSITY = 0;
+constexpr uint8_t DEFAULT_LABEL_LANGUAGE_MODE = 2;
+constexpr uint8_t DEFAULT_LABEL_TEXT_SIZE = 0;
+constexpr uint8_t DEFAULT_LABEL_ORIENTATION = 1;
 
 constexpr uint32_t VISIBILITY_BUILDINGS = 1u << 0;
 constexpr uint32_t VISIBILITY_GREEN_SPACE = 1u << 1;

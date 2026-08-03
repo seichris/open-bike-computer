@@ -119,6 +119,8 @@ struct MapRenderSettings {
     settings.zoomLevel = map_profile_protocol::MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL;
     settings.visibilityMask =
         map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK;
+    settings.labelDensity =
+        map_profile_protocol::MAP_NAVIGATION_DEFAULT_LABEL_DENSITY;
     return settings;
   }();
   bool mapNavigationBirdsEyeEnabled = true;

@@ -488,14 +488,20 @@ Current setting IDs:
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
 | `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
 | `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong, `3` Very Strong, `4` Maximum; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. At extreme zoom/viewport combinations, firmware eases the requested strength only as much as needed to stay within the four-block renderer budget. |
-| `27` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads |
-| `28` | Map street-label language | `0` local, `1` preferred, `2` local + preferred |
-| `29` | Map street-label size | `0` small, `1` standard, `2` large |
-| `30` | Map street-label orientation | `0` follow roads, `1` keep upright |
+| `27` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads; defaults to balanced |
+| `28` | Map street-label language | `0` local, `1` preferred, `2` local + preferred; defaults to local + preferred |
+| `29` | Map street-label size | `0` small (18 px), `1` standard (22 px), `2` large (26 px); defaults to small |
+| `30` | Map street-label orientation | `0` follow roads, `1` keep upright; defaults to keep upright |
 | `31` | Map + Navigation street-label density | Same values as ID `27` |
 | `32` | Map + Navigation street-label language | Same values as ID `28` |
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
+
+The app presents label visibility as a separate switch from density. It keeps
+the selected `1...3` density in the screen profile and sends density `0` while
+that switch is off. Map defaults to labels on; Map + Navigation defaults to
+labels off while retaining balanced density, local + preferred language, small
+text, and keep-upright orientation for use if labels are enabled later.
 
 The settings list and the device's tap/PWR-button cycle use this screen order:
 Map + Navigation, Ride Stats, Map, Navigation, then Battery Status.

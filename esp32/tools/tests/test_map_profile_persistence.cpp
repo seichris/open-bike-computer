@@ -106,6 +106,11 @@ int main() {
   assert(loadedMap.labelLanguageMode == DEFAULT_LABEL_LANGUAGE_MODE);
   assert(loadedMap.labelTextSize == DEFAULT_LABEL_TEXT_SIZE);
   assert(loadedMap.labelOrientation == DEFAULT_LABEL_ORIENTATION);
+  assert(loadedNavigation.labelDensity ==
+         MAP_NAVIGATION_DEFAULT_LABEL_DENSITY);
+  assert(loadedNavigation.labelLanguageMode == DEFAULT_LABEL_LANGUAGE_MODE);
+  assert(loadedNavigation.labelTextSize == DEFAULT_LABEL_TEXT_SIZE);
+  assert(loadedNavigation.labelOrientation == DEFAULT_LABEL_ORIENTATION);
 
   FakeStore legacyStore;
   const TestProfile legacyMap = profile(1, VISIBILITY_LEGACY_FEATURE_MASK);
@@ -123,6 +128,8 @@ int main() {
   assert(loadedNavigation.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
   assert(loadedNavigation.streetLineWidth == 8);
   assert(loadedNavigation.zoomLevel == legacyMap.zoomLevel);
+  assert(loadedNavigation.labelDensity ==
+         MAP_NAVIGATION_DEFAULT_LABEL_DENSITY);
 
   FakeStore mirroredStore;
   const TestProfile mirrored = profile(2, VISIBILITY_EXTENDED_FEATURE_MASK);

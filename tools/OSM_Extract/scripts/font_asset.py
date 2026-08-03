@@ -19,7 +19,7 @@ from label_pipeline import normalize_preferred_languages
 
 FMA_MAGIC = b"FMA1"
 FMA_VERSION = 1
-FONT_SIZES = (12, 15, 18)
+FONT_SIZES = (18, 22, 26)
 MAX_DISTINCT_GLYPHS = 8192
 MAX_GLYPH_RECORDS = MAX_DISTINCT_GLYPHS * len(FONT_SIZES)
 MAX_FONT_ASSET_BYTES = 16 * 1024 * 1024

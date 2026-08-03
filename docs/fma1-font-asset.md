@@ -65,7 +65,7 @@ Records are sorted by `(glyphId, sizeId)` and are exactly 32 bytes:
 ```text
 glyphId                     u16, one-based map-wide ID
 faceId                      u8
-sizeId                      u8; 0=12px, 1=15px, 2=18px
+sizeId                      u8; 0=18px, 1=22px, 2=26px
 bearingX                    i16, pixels including halo padding
 bearingY                    i16, pixels including halo padding
 advance26_6                 i16

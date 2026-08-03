@@ -58,7 +58,8 @@ The missing pieces are:
 - Draw labels along sufficiently straight road spans.
 - Normalize rotation so text is never upside down.
 - Use an adaptive high-contrast halo selected by the firmware map theme.
-- Show a balanced set of labels by default on both map screens.
+- Show a balanced set of labels by default on Map; keep labels off by default
+  on Map + Navigation to protect navigation glanceability.
 - Prefer road names; use a route reference only when no usable name exists.
 - Avoid navigation banners, controls, the position marker, and other declared
   screen occlusion regions.
@@ -70,10 +71,15 @@ Expose these controls separately under **Map** and **Map + Navigation**:
 
 | Setting | Values | Default |
 | --- | --- | --- |
-| Street labels | Off, Major roads, Balanced, All roads | Balanced |
-| Language | Local, Preferred, Local + Preferred | Local |
-| Text size | Small, Standard, Large | Standard |
-| Orientation | Follow roads, Keep upright | Follow roads |
+| Street labels | On, Off | Map: On; Map + Navigation: Off |
+| Density | Major roads, Balanced, All roads | Balanced |
+| Language | Local, Preferred, Local + Preferred | Local + Preferred |
+| Text size | Small (18 px), Standard (22 px), Large (26 px) | Small |
+| Orientation | Follow roads, Keep upright | Keep upright |
+
+Visibility is a distinct persisted UI setting. The existing BLE density value
+remains backward compatible: the app sends `0` while labels are disabled and
+otherwise sends the persisted `1...3` density.
 
 `Keep upright` draws horizontal text at the candidate midpoint. It is an
 accessibility and glanceability option, not a different map download.
@@ -603,7 +609,8 @@ from a local download alone.
 
 ## iPhone UI behavior
 
-Add a **Street Labels** subsection inside each existing map-style editor.
+Add a **Street Labels** subsection inside each existing map-style editor, with
+a visibility switch above the density, language, size, and orientation controls.
 
 - Capability unavailable: show current map controls without label controls.
 - Firmware supports labels but active map is v1/v2: show the controls disabled

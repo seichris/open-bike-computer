@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from font_asset import (
     FMA_MAGIC,
     FMA_VERSION,
+    FONT_SIZES,
     FontFaceSpec,
     FontPackBuilder,
     rle_decode,
@@ -19,6 +20,11 @@ from font_asset import (
 
 
 FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+
+
+class FontAssetPolicyTests(unittest.TestCase):
+    def test_font_tiers_start_at_the_previous_large_size(self):
+        self.assertEqual(FONT_SIZES, (18, 22, 26))
 
 
 @unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")

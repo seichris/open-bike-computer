@@ -1917,7 +1917,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   labelCenter.x = quantize(labelCenter.x, centerQuantum);
   labelCenter.y = quantize(labelCenter.y, centerQuantum);
   const uint8_t sizeId = std::min<uint8_t>(style.labelTextSize, 2);
-  const float fontPixels[3] = {12.0F, 15.0F, 18.0F};
+  const float fontPixels[3] = {18.0F, 22.0F, 26.0F};
 
   uint64_t blockSignature = 1469598103934665603ULL;
   const auto mixSignature = [&](uint32_t value) {

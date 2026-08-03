@@ -9071,6 +9071,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID, 32, "Map + Navigation street-label language uses setting ID 32")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID, 33, "Map + Navigation street-label size uses setting ID 33")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
+        assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
+        assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelLanguageMode, 2, "street labels default to Local + Preferred language")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelTextSize, 0, "street labels default to the new Small tier")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelOrientation, 1, "street labels default to Keep Upright")
+        assertEqual(DeviceBLEProtocol.effectiveStreetLabelDensity(enabled: true, density: 2), 2, "enabled labels send their selected density")
+        assertEqual(DeviceBLEProtocol.effectiveStreetLabelDensity(enabled: false, density: 2), 0, "disabled labels preserve density locally and send wire value zero")
+        assertEqual(DeviceBLEProtocol.normalizedStreetLabelDensity(0), 2, "legacy Off density restores Balanced when labels are enabled")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: -1), .standard, "unknown bird's-eye perspectives use Standard")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 0), .gentle, "perspective zero is Gentle")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 2), .strong, "perspective two is Strong")
@@ -12593,6 +12602,11 @@ struct NavigationProtocolTests {
             "mapSettings.positionMarkerScale",
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
+            "mapSettings.labelsEnabled",
+            "mapSettings.labelDensity",
+            "mapSettings.labelLanguageMode",
+            "mapSettings.labelTextSize",
+            "mapSettings.labelOrientation",
             "mapSettings.showBuildings",
             "mapSettings.showGreenSpace",
             "mapSettings.showPaths",
@@ -12612,6 +12626,11 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.streetLineWidthBoost",
             "mapPlusNavigationSettings.positionMarkerScale",
             "mapPlusNavigationSettings.zoomLevel",
+            "mapPlusNavigationSettings.labelsEnabled",
+            "mapPlusNavigationSettings.labelDensity",
+            "mapPlusNavigationSettings.labelLanguageMode",
+            "mapPlusNavigationSettings.labelTextSize",
+            "mapPlusNavigationSettings.labelOrientation",
             "mapPlusNavigationSettings.showBuildings",
             "mapPlusNavigationSettings.showGreenSpace",
             "mapPlusNavigationSettings.showPaths",
@@ -12624,6 +12643,7 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.showOtherAreas",
             "mapPlusNavigationSettings.migrated.v1",
             "mapSettings.recommendedDefaults.v2",
+            "streetLabels.defaults.v1",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
@@ -12638,6 +12658,16 @@ struct NavigationProtocolTests {
         assertEqual(freshManager.zoomLevel, 3, "fresh Map profiles default to zoom level 3")
         assertEqual(freshManager.routeLineWidth, 4, "fresh Map profiles default to a 4 px route")
         assertEqual(freshManager.streetLineWidth, 4, "fresh Map profiles default to 4 px streets")
+        assert(freshManager.mapLabelsEnabled,
+               "fresh Map profiles show street labels")
+        assertEqual(freshManager.mapLabelDensity, 2,
+                    "fresh Map profiles use Balanced label density")
+        assertEqual(freshManager.mapLabelLanguageMode, 2,
+                    "fresh Map profiles use Local + Preferred labels")
+        assertEqual(freshManager.mapLabelTextSize, 0,
+                    "fresh Map profiles use the new Small label tier")
+        assertEqual(freshManager.mapLabelOrientation, 1,
+                    "fresh Map profiles keep labels upright")
         assertEqual(freshManager.mapPlusNavigationDetailLevel, 0,
                     "fresh Map + Navigation profiles default to low detail")
         assertEqual(freshManager.mapPlusNavigationZoomLevel, 3,
@@ -12668,6 +12698,30 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation profiles hide railways")
         assert(!freshManager.mapPlusNavigationShowOtherAreas,
                "fresh Map + Navigation profiles hide other areas")
+        assert(!freshManager.mapPlusNavigationLabelsEnabled,
+               "fresh Map + Navigation profiles hide street labels")
+        assertEqual(freshManager.mapPlusNavigationLabelDensity, 2,
+                    "fresh Map + Navigation profiles retain Balanced as the dormant label density")
+
+        defaults.set(0, forKey: "mapSettings.labelDensity")
+        defaults.set(0, forKey: "mapSettings.labelLanguageMode")
+        defaults.set(1, forKey: "mapSettings.labelTextSize")
+        defaults.set(0, forKey: "mapSettings.labelOrientation")
+        defaults.set(2, forKey: "mapPlusNavigationSettings.labelDensity")
+        defaults.removeObject(forKey: "streetLabels.defaults.v1")
+        let migratedStreetLabelsManager = BLEManager()
+        assert(migratedStreetLabelsManager.mapLabelsEnabled,
+               "pre-release street-label profiles migrate Map labels on")
+        assertEqual(migratedStreetLabelsManager.mapLabelDensity, 2,
+                    "pre-release street-label profiles migrate to Balanced")
+        assertEqual(migratedStreetLabelsManager.mapLabelLanguageMode, 2,
+                    "pre-release street-label profiles migrate to Local + Preferred")
+        assertEqual(migratedStreetLabelsManager.mapLabelTextSize, 0,
+                    "pre-release street-label profiles migrate to the new Small tier")
+        assertEqual(migratedStreetLabelsManager.mapLabelOrientation, 1,
+                    "pre-release street-label profiles migrate to Keep Upright")
+        assert(!migratedStreetLabelsManager.mapPlusNavigationLabelsEnabled,
+               "pre-release street-label profiles migrate Map + Navigation labels off")
 
         defaults.set(0x0F, forKey: "deviceSettings.enabledScreensMask")
         defaults.removeObject(forKey: "deviceSettings.enabledScreensMask.batteryStatus.v1")
@@ -12789,6 +12843,13 @@ struct NavigationProtocolTests {
         manager.showServiceRoads = false
         manager.mapPlusNavigationShowTracks = false
         manager.mapPlusNavigationShowServiceRoads = false
+        manager.mapLabelsEnabled = false
+        manager.mapLabelDensity = 1
+        manager.mapLabelLanguageMode = 0
+        manager.mapLabelTextSize = 2
+        manager.mapLabelOrientation = 0
+        manager.mapPlusNavigationLabelsEnabled = true
+        manager.mapPlusNavigationLabelDensity = 3
         manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
         manager.defaultDeviceScreen = .mapPlusNavigation
         manager.disconnectedSleepTimeout = .tenMinutes
@@ -12809,6 +12870,20 @@ struct NavigationProtocolTests {
                "Map + Navigation track visibility should persist independently")
         assert(!reloaded.mapPlusNavigationShowServiceRoads,
                "Map + Navigation service-road visibility should persist independently")
+        assert(!reloaded.mapLabelsEnabled,
+               "Map street-label visibility should persist")
+        assertEqual(reloaded.mapLabelDensity, 1,
+                    "Map street-label density should persist independently from visibility")
+        assertEqual(reloaded.mapLabelLanguageMode, 0,
+                    "Map street-label language should persist")
+        assertEqual(reloaded.mapLabelTextSize, 2,
+                    "Map street-label text size should persist")
+        assertEqual(reloaded.mapLabelOrientation, 0,
+                    "Map street-label orientation should persist")
+        assert(reloaded.mapPlusNavigationLabelsEnabled,
+               "Map + Navigation street-label visibility should persist")
+        assertEqual(reloaded.mapPlusNavigationLabelDensity, 3,
+                    "Map + Navigation street-label density should persist independently")
         assertEqual(reloaded.enabledDeviceScreensMask,
                     DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
                     "enabled device screens should persist across BLEManager reloads")
