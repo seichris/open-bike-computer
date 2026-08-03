@@ -38,6 +38,39 @@ enum DeviceTransferHandshakePolicy {
     }
 }
 
+enum DeviceNetworkJoinPolicy {
+    static let applyAttemptCount = 2
+    static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    static let reachabilityTimeout: TimeInterval = 8
+    static let reachabilityRetryNanoseconds: UInt64 = 250_000_000
+    static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
+
+    static func isAlreadyAssociated(
+        domain: String,
+        code: Int,
+        message: String
+    ) -> Bool {
+        (domain == hotspotErrorDomain && code == 13) ||
+            message.localizedCaseInsensitiveContains("already")
+    }
+
+    static func shouldRetry(domain: String, code: Int) -> Bool {
+        guard domain == hotspotErrorDomain else { return true }
+        // Internal, pending, and unknown are the only transient errors in the
+        // public NEHotspotConfiguration error contract. User/policy/validation
+        // failures require intervention and must not show a second join prompt.
+        return code == 8 || code == 9 || code == 11
+    }
+
+    static func diagnosticMessage(
+        domain: String,
+        code: Int,
+        message: String
+    ) -> String {
+        "\(message) [\(domain) \(code)]"
+    }
+}
+
 @MainActor
 final class DeviceTransferManager {
     private var joinedAccessPointSSID: String?
@@ -78,10 +111,17 @@ final class DeviceTransferManager {
                         bleManager.mapTransferAccessPointSSID,
                     sessionToken: token
                 )
-                await joinDeviceNetworkIfNeeded(session: session,
-                                                statusPath: "map-transfer/status",
-                                                sessionToken: session.sessionToken,
-                                                status: status)
+                do {
+                    try await joinDeviceNetworkIfNeeded(
+                        session: session,
+                        statusPath: "map-transfer/status",
+                        sessionToken: session.sessionToken,
+                        status: status
+                    )
+                } catch {
+                    await exitMapTransfer(bleManager: bleManager)
+                    throw error
+                }
                 return session
             }
             if DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(
@@ -155,10 +195,17 @@ final class DeviceTransferManager {
                     accessPointSSID: bleManager.deviceTransferAccessPointSSID,
                     sessionToken: token
                 )
-                await joinDeviceNetworkIfNeeded(session: session,
-                                                statusPath: "firmware-update/status",
-                                                sessionToken: session.sessionToken,
-                                                status: status)
+                do {
+                    try await joinDeviceNetworkIfNeeded(
+                        session: session,
+                        statusPath: "firmware-update/status",
+                        sessionToken: session.sessionToken,
+                        status: status
+                    )
+                } catch {
+                    exitFirmwareTransfer(bleManager: bleManager)
+                    throw error
+                }
                 return session
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(
@@ -184,7 +231,7 @@ final class DeviceTransferManager {
         statusPath: String,
         sessionToken: String?,
         status: @escaping @MainActor (String) -> Void
-    ) async {
+    ) async throws {
         guard session.baseURL.host == "192.168.4.1",
               let ssid = session.accessPointSSID,
               !ssid.isEmpty else {
@@ -192,51 +239,126 @@ final class DeviceTransferManager {
         }
 
 #if os(iOS)
-        status("joining device Wi-Fi")
-        let configuration = NEHotspotConfiguration(ssid: ssid)
-        // A join-once network is disconnected by iOS when the screen sleeps or
-        // the app remains backgrounded for 15 seconds. Keep this accessory AP
-        // configured for the duration of the background URLSession upload and
-        // remove it explicitly when transfer mode exits.
-        configuration.joinOnce = false
-        configuration.lifeTimeInDays = 1
+        if await isTransferServerReachable(
+            baseURL: session.baseURL,
+            statusPath: statusPath,
+            sessionToken: sessionToken
+        ) {
+            joinedAccessPointSSID = ssid
+            return
+        }
 
-        do {
-            try await withCheckedThrowingContinuation { continuation in
-                NEHotspotConfigurationManager.shared.apply(configuration) { error in
-                    if let error = error as NSError? {
-                        let message = error.localizedDescription
-                        if message.localizedCaseInsensitiveContains("already") {
-                            continuation.resume()
-                        } else {
-                            continuation.resume(throwing: error)
-                        }
-                        return
-                    }
-                    continuation.resume()
+        status("joining device Wi-Fi")
+        var lastApplyError: NSError?
+
+        for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
+            // A failed apply can still leave a saved configuration behind.
+            // Starting from a known-empty configuration avoids repeating a
+            // stale association on every Upload tap.
+            Self.removeAccessoryNetworkConfiguration(ssid: ssid)
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+            )
+
+            let configuration = NEHotspotConfiguration(ssid: ssid)
+            // A join-once network is disconnected by iOS when the screen sleeps
+            // or the app remains backgrounded for 15 seconds. Keep this
+            // accessory AP configured for the background URLSession upload and
+            // remove it explicitly when transfer mode exits.
+            configuration.joinOnce = false
+            configuration.lifeTimeInDays = 1
+
+            let applyError = await apply(configuration: configuration)
+            lastApplyError = applyError
+            if let applyError {
+                print(
+                    "Device Wi-Fi apply failed: " +
+                    DeviceNetworkJoinPolicy.diagnosticMessage(
+                        domain: applyError.domain,
+                        code: applyError.code,
+                        message: applyError.localizedDescription
+                    )
+                )
+                let alreadyAssociated =
+                    DeviceNetworkJoinPolicy.isAlreadyAssociated(
+                        domain: applyError.domain,
+                        code: applyError.code,
+                        message: applyError.localizedDescription
+                    )
+                if !alreadyAssociated,
+                   !DeviceNetworkJoinPolicy.shouldRetry(
+                       domain: applyError.domain,
+                       code: applyError.code
+                   ) {
+                    break
                 }
             }
-            joinedAccessPointSSID = ssid
-        } catch {
-            if await isTransferServerReachable(baseURL: session.baseURL,
-                                               statusPath: statusPath,
-                                               sessionToken: sessionToken) {
+
+            if try await waitForTransferServer(
+                baseURL: session.baseURL,
+                statusPath: statusPath,
+                sessionToken: sessionToken
+            ) {
                 joinedAccessPointSSID = ssid
+                print("Device Wi-Fi ready: \(ssid)")
                 return
             }
-            status("using device Wi-Fi")
-            return
+
+            if attempt + 1 < DeviceNetworkJoinPolicy.applyAttemptCount {
+                status("retrying device Wi-Fi")
+            }
         }
 
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        if await isTransferServerReachable(baseURL: session.baseURL,
-                                           statusPath: statusPath,
-                                           sessionToken: sessionToken) {
-            joinedAccessPointSSID = ssid
-            return
-        }
-        status("using device Wi-Fi")
+        Self.removeAccessoryNetworkConfiguration(ssid: ssid)
+        let diagnostic = lastApplyError.map {
+            DeviceNetworkJoinPolicy.diagnosticMessage(
+                domain: $0.domain,
+                code: $0.code,
+                message: $0.localizedDescription
+            )
+        } ?? "accessory network joined but its transfer server was unreachable"
+        print("Device Wi-Fi unavailable: \(ssid): \(diagnostic)")
+        throw OfflineMapPlatformError.transferWiFiJoinFailed(ssid, diagnostic)
 #endif
+    }
+
+#if os(iOS)
+    private func apply(
+        configuration: NEHotspotConfiguration
+    ) async -> NSError? {
+        await withCheckedContinuation { continuation in
+            NEHotspotConfigurationManager.shared.apply(configuration) { error in
+                continuation.resume(returning: error as NSError?)
+            }
+        }
+    }
+#endif
+
+    private func waitForTransferServer(
+        baseURL: URL,
+        statusPath: String,
+        sessionToken: String?
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(
+            DeviceNetworkJoinPolicy.reachabilityTimeout
+        )
+        while true {
+            if await isTransferServerReachable(
+                baseURL: baseURL,
+                statusPath: statusPath,
+                sessionToken: sessionToken
+            ) {
+                return true
+            }
+            guard Date() < deadline else {
+                return false
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceNetworkJoinPolicy.reachabilityRetryNanoseconds
+            )
+        }
     }
 
     private func removeJoinedAccessPointIfNeeded() {
@@ -260,7 +382,7 @@ final class DeviceTransferManager {
         let url = baseURL.appendingPathComponent(statusPath)
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
+        request.timeoutInterval = 1
         if let sessionToken, !sessionToken.isEmpty {
             request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
         }

@@ -876,6 +876,14 @@ session and must not depend on a later write-without-response readiness callback
 to leave the shared command queue. Firmware exposing only
 write-without-response remains supported through CoreBluetooth flow control.
 
+For an accessory AP session (`baseUrl` host `192.168.4.1`), iOS clears any
+failed saved configuration for the advertised `apSsid`, waits for the AP to
+settle, applies one persistent background-transfer configuration, and verifies
+the token-authenticated HTTP status endpoint. Only transient NetworkExtension
+errors receive one bounded retry. A failed or unreachable join removes the
+configuration, exits transfer mode, and surfaces the exact error domain and
+code; bulk upload never starts on an unverified network path.
+
 When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
 continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk

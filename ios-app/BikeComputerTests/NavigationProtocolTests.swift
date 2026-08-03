@@ -10476,6 +10476,25 @@ struct NavigationProtocolTests {
                "generic DTRN gets the full compatibility grace period")
         assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 9),
                "legacy map entry is sent only once")
+        assert(DeviceNetworkJoinPolicy.isAlreadyAssociated(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 13,
+            message: "associated"
+        ), "the public already-associated hotspot code is accepted")
+        assert(DeviceNetworkJoinPolicy.shouldRetry(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 8
+        ), "an internal hotspot error receives one bounded retry")
+        assert(!DeviceNetworkJoinPolicy.shouldRetry(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 7
+        ), "user denial never triggers a second join prompt")
+        assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 17,
+            message: "System denied configuration"
+        ), "System denied configuration [NEHotspotConfigurationErrorDomain 17]",
+                    "join failures retain their actionable domain and code")
     }
 
     static func testDeviceCapabilitiesProtocol() {
