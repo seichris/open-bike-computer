@@ -42,6 +42,20 @@ class FontAssetTests(unittest.TestCase):
             [glyph.glyph_id for glyph in latin[1].glyphs],
         )
 
+    def test_measurement_matches_runtime_advance_and_reuses_shaping(self):
+        builder = self.builder()
+
+        widths = builder.measure_widths("Main Street", "en")
+        shaped = builder.shape("Main Street", "en")
+
+        expected = tuple(
+            abs(sum(glyph.x_advance for glyph in run.glyphs)) / 64.0
+            for run in shaped
+        )
+        self.assertEqual(widths, expected)
+        self.assertEqual(builder.shape_calls, 2)
+        self.assertEqual(builder.shape_cache_hits, 1)
+
     def test_fma1_output_is_deterministic_and_self_describing(self):
         def generate(path):
             builder = self.builder()

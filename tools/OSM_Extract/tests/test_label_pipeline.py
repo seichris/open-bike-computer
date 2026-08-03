@@ -87,6 +87,22 @@ class LabelPipelineTests(unittest.TestCase):
         bend = LineString([(0, 0), (30, 0), (30, 30)])
         self.assertEqual(generate_candidates(bend, variants, rank=1), [])
 
+    def test_candidates_fit_shaped_text_at_the_farthest_supported_zoom(self):
+        line = LineString([(0, 0), (2000, 0)])
+        variants = label_variants({"name": "Measured Road"})
+
+        candidates = generate_candidates(
+            line,
+            variants,
+            rank=2,
+            text_width_pixels=54.0,
+        )
+
+        self.assertTrue(candidates)
+        for candidate in candidates:
+            chord = LineString([candidate["start"], candidate["end"]]).length
+            self.assertGreaterEqual(chord / 4.0, 54.0 + 12.0)
+
     def test_compatible_named_fragments_join_before_candidate_generation(self):
         base = {
             "type": "highway.residential",
@@ -107,6 +123,27 @@ class LabelPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(prepared[0]["geom"].length, 100)
         self.assertEqual(prepared[0]["type_id"], 7)
         self.assertTrue(prepared[0]["label_candidates"])
+
+    def test_preparation_uses_largest_measured_runtime_width(self):
+        feature = {
+            "type": "highway.primary",
+            "geom_type": "line",
+            "label_tags": {"name": "Measured Road"},
+            "label_join": {},
+            "z_order": 0,
+            "id": "1",
+            "geom": LineString([(0, 0), (2000, 0)]),
+        }
+
+        prepared = prepare_road_labels(
+            [feature],
+            measure_text=lambda text, language: (32.0, 43.0, 54.0),
+        )
+
+        self.assertTrue(prepared[0]["label_candidates"])
+        candidate = prepared[0]["label_candidates"][0]
+        chord = LineString([candidate["start"], candidate["end"]]).length
+        self.assertGreaterEqual(chord / 4.0, 54.0 + 12.0)
 
     def test_diagnostics_are_aggregate_and_do_not_include_street_text(self):
         diagnostics = {}
@@ -133,7 +170,7 @@ class LabelPipelineTests(unittest.TestCase):
         self.assertGreater(
             diagnostics["candidatesByRoadClass"]["highway.residential"], 0
         )
-        self.assertGreater(diagnostics["candidatesByZoomBand"]["0-3"], 0)
+        self.assertGreater(diagnostics["candidatesByZoomBand"]["0-5"], 0)
         self.assertEqual(diagnostics["rejectedText"]["invalidLanguageTag"], 1)
         self.assertEqual(diagnostics["rejectedText"]["unsafeControl"], 1)
         self.assertNotIn("Test Street", repr(diagnostics))

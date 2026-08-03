@@ -2,6 +2,7 @@ import struct
 import zlib
 
 from feature_types import get_type_id
+from label_pipeline import label_max_zoom
 
 
 FMB_V3_SECTION_STRINGS = 1
@@ -185,7 +186,7 @@ def _label_sections(polylines, min_x, min_y, font_builder):
         primary = variants[0]["text"].encode("utf-8")
         repeat_group = zlib.crc32(primary) & 0xFFFF or 1
         rank = int(feature.get("label_rank", 6))
-        max_zoom = (5, 5, 5, 5, 4, 3, 3)[min(max(rank, 0), 6)]
+        max_zoom = label_max_zoom(rank)
         encoded_candidates = []
         for candidate in candidates:
             coordinates = (*candidate["start"], *candidate["end"])

@@ -77,6 +77,7 @@ label_totals = {
 label_phase_timings = {"labelNormalization": normalization_seconds}
 if args.renderer_format == 2:
     preferred_languages = normalize_preferred_languages(args.preferred_language)
+    font_builder = FontPackBuilder(preferred_languages=preferred_languages)
     joining_started = time.perf_counter()
     lines = join_named_roads(lines, diagnostics=label_diagnostics)
     label_phase_timings["labelRoadJoining"] = time.perf_counter() - joining_started
@@ -86,9 +87,9 @@ if args.renderer_format == 2:
         preferred_languages=preferred_languages,
         international_fallback=args.international_fallback,
         diagnostics=label_diagnostics,
+        measure_text=font_builder.measure_widths,
     )
     label_phase_timings["labelCandidateGeneration"] = time.perf_counter() - candidate_started
-    font_builder = FontPackBuilder(preferred_languages=preferred_languages)
 # polygons = make_all_convex( polygons)
 
 x_positions = range(area_min_x, area_max_x, 4096)

@@ -154,7 +154,11 @@ class FontPackBuilder:
             hashlib.sha256(profile).digest()[:4], "little"
         )
         self._asset_id_by_key: dict[tuple[int, int], int] = {}
+        self._shape_cache: dict[
+            tuple[str, str | None], tuple[ShapedRun, ...]
+        ] = {}
         self.shape_calls = 0
+        self.shape_cache_hits = 0
         self.shaping_failures = 0
         self.fallback_selections = 0
         self.shaping_seconds = 0.0
@@ -196,6 +200,11 @@ class FontPackBuilder:
 
     def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
         self.shape_calls += 1
+        cache_key = (text, language)
+        cached = self._shape_cache.get(cache_key)
+        if cached is not None:
+            self.shape_cache_hits += 1
+            return cached
         started = time.perf_counter()
         try:
             face = self._face_for(text, language)
@@ -224,12 +233,24 @@ class FontPackBuilder:
                         raise FontAssetError("shaped glyph metrics exceed FMB v3 limits")
                     placements.append(GlyphPlacement(asset_id, *values))
                 runs.append(ShapedRun(size_id, tuple(placements)))
-            return tuple(runs)
+            result = tuple(runs)
+            self._shape_cache[cache_key] = result
+            return result
         except Exception:
             self.shaping_failures += 1
             raise
         finally:
             self.shaping_seconds += time.perf_counter() - started
+
+    def measure_widths(
+        self, text: str, language: str | None = None
+    ) -> tuple[float, ...]:
+        """Return firmware-equivalent advance widths for every runtime size."""
+
+        return tuple(
+            abs(sum(glyph.x_advance for glyph in run.glyphs)) / 64.0
+            for run in self.shape(text, language)
+        )
 
     @property
     def glyph_count(self) -> int:
@@ -380,6 +401,7 @@ class FontPackBuilder:
                 len(payload) / max(1, uncompressed_bitmap_bytes), 6
             ),
             "shapeCalls": self.shape_calls,
+            "shapeCacheHits": self.shape_cache_hits,
             "shapingFailures": self.shaping_failures,
             "fallbackSelections": self.fallback_selections,
         }
