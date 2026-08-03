@@ -10072,22 +10072,19 @@ struct NavigationProtocolTests {
 
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: true,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: true
+            hasNativeWriteWithoutResponse: true
         ), .nativeWithResponse,
                     "an acknowledged native workout characteristic is preferred")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: true
-        ), .navigationFallback,
-                    "current firmware uses acknowledged WTLM despite native write-without-response")
+            hasNativeWriteWithoutResponse: true
+        ), .nativeWithoutResponse,
+                    "the dedicated workout characteristic does not inherit navigation backpressure")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: false
-        ), .nativeWithoutResponse,
-                    "native write-without-response remains available for unacknowledged navigation transports")
+            hasNativeWriteWithoutResponse: false
+        ), .navigationFallback,
+                    "firmware without a dedicated workout transport uses navigation fallback")
 
         let unauthenticated = BLEManager()
         assert(unauthenticated.handleDeviceCapabilitiesNotification(capability),
@@ -10185,19 +10182,12 @@ struct NavigationProtocolTests {
         atomicPairManager.isNavigationReady = true
         var atomicTransportReady = false
         var atomicPairWrites: [Data] = []
-        var unexpectedAtomicNativeWrites: [Data] = []
         atomicPairManager.installNavigationWriteEndpoint(
             NavigationWriteEndpoint(
                 maximumWriteLength: 20,
                 expectsWriteResponse: true,
                 canSend: { atomicTransportReady },
                 write: { atomicPairWrites.append($0) }
-            )
-        )
-        atomicPairManager.installWorkoutTelemetryWriteEndpoint(
-            WorkoutTelemetryWriteEndpoint(
-                maximumWriteLength: 20,
-                write: { unexpectedAtomicNativeWrites.append($0) }
             )
         )
         assert(atomicPairManager.requestDeviceCapabilities(),
@@ -10223,8 +10213,6 @@ struct NavigationProtocolTests {
                     "the response callback drains the paired extended frame")
         assertEqual(Data(atomicPairWrites[1].dropFirst(4)), extendedFrame,
                     "the correlated extended frame remains adjacent to its core")
-        assert(unexpectedAtomicNativeWrites.isEmpty,
-               "an acknowledged navigation endpoint bypasses native write-without-response")
         atomicPairManager.completeNavigationWriteForTesting(error: nil)
         assertEqual(
             atomicPairWrites[2],
@@ -11744,6 +11732,32 @@ struct NavigationProtocolTests {
         stalledManager.completeNavigationWriteForTesting(error: nil)
         assertEqual(recoveredPackets, ["3|80|Turn right"],
                     "transport recovery sends only the newest complete maneuver snapshot")
+
+        let watchdogManager = BLEManager()
+        watchdogManager.isConnected = true
+        watchdogManager.isNavigationReady = true
+        var watchdogWrites: [Data] = []
+        var watchdogRecoveries = 0
+        watchdogManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { watchdogWrites.append($0) }
+            )
+        )
+        watchdogManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { watchdogRecoveries += 1 }
+        )
+        assert(watchdogManager.requestDeviceCapabilities(),
+               "watchdog fixture sends one acknowledged write")
+        assertEqual(watchdogWrites.count, 1,
+                    "watchdog starts only after the write reaches its transport")
+        assert(waitForMainLoop(timeout: 1) { watchdogRecoveries == 1 },
+               "missing acknowledged completion triggers bounded recovery")
+        assert(!watchdogManager.isNavigationReady,
+               "stall recovery closes the unusable navigation session")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {

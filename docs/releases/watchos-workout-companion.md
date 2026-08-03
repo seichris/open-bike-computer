@@ -75,11 +75,11 @@ BLE capability bit 7.
   installation or install ownership-v2 firmware through the supported flow.
 - Old app + ownership-v2 firmware: authentication is intentionally rejected;
   update the app before installing the firmware.
-- New app + new firmware: the app prefers acknowledged workout delivery. With
-  current firmware it uses the documented 20-byte plaintext `WTLM` fallback
-  over acknowledged `2A6E` (42 bytes after ownership-v2 wire protection) so
-  each core-plus-extended pair is serialized; native delivery remains available
-  for compatible transport combinations.
+- New app + new firmware: the app uses the dedicated workout characteristic.
+  Current firmware's native write-without-response transport is protected by
+  CoreBluetooth flow control and the app's atomic, convergent correlated-pair
+  queue. The documented 20-byte plaintext `WTLM` fallback is retained only for
+  a cached or older GATT table without the dedicated characteristic.
 
 Do not advertise capability bit 7 in any firmware release that lacks the frame
 parser, RAM-only workout state, staleness handling, and Ride Stats UI.

@@ -87,14 +87,10 @@ enum WorkoutTelemetryWriteRoute: Equatable {
 enum WorkoutTelemetryWriteRouting {
     static func route(
         hasNativeWriteWithResponse: Bool,
-        hasNativeWriteWithoutResponse: Bool,
-        navigationExpectsWriteResponse: Bool
+        hasNativeWriteWithoutResponse: Bool
     ) -> WorkoutTelemetryWriteRoute {
         if hasNativeWriteWithResponse {
             return .nativeWithResponse
-        }
-        if navigationExpectsWriteResponse {
-            return .navigationFallback
         }
         if hasNativeWriteWithoutResponse {
             return .nativeWithoutResponse
@@ -792,6 +788,15 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
+    private var navigationWriteWithResponseLabel: String?
+    private var navigationWriteResponseTimeoutTimer: Timer?
+    private var navigationWriteResponseGeneration: UInt64 = 0
+#if HOST_TESTING
+    private var navigationWriteResponseTimeout: TimeInterval = 60
+#else
+    private var navigationWriteResponseTimeout: TimeInterval = 3
+#endif
+    private var navigationWriteStallRecoveryForTesting: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var pendingScannedConnectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
@@ -2109,9 +2114,7 @@ class BLEManager: NSObject, ObservableObject {
                 characteristic?.properties.contains(.write) == true,
             hasNativeWriteWithoutResponse:
                 testEndpoint != nil ||
-                characteristic?.properties.contains(.writeWithoutResponse) == true,
-            navigationExpectsWriteResponse:
-                navigationEndpoint.expectsWriteResponse
+                characteristic?.properties.contains(.writeWithoutResponse) == true
         )
 
         switch route {
@@ -3061,8 +3064,7 @@ class BLEManager: NSObject, ObservableObject {
         authInfoAttempts = 0
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -3114,8 +3116,7 @@ class BLEManager: NSObject, ObservableObject {
         workoutTelemetryCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         pendingAuthNonce = nil
         authFlowState = .idle
         authenticatedWriteSession = nil
@@ -3275,6 +3276,14 @@ class BLEManager: NSObject, ObservableObject {
             maxCount: maxCount,
             priorityMaxCount: priorityMaxCount
         )
+    }
+
+    func installNavigationWriteStallRecoveryForTesting(
+        timeout: TimeInterval,
+        recovery: @escaping () -> Void
+    ) {
+        navigationWriteResponseTimeout = timeout
+        navigationWriteStallRecoveryForTesting = recovery
     }
 
     @discardableResult
@@ -4365,8 +4374,7 @@ class BLEManager: NSObject, ObservableObject {
             let expectsWriteResponse = write.transportExpectsWriteResponse
                 ?? endpoint.expectsWriteResponse
             if expectsWriteResponse {
-                writeWithResponseInFlight = true
-                navigationWriteWithResponseFailureHandler = write.onWriteFailure
+                beginNavigationWriteResponseWait(for: write)
             }
             write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
@@ -4414,15 +4422,63 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func completeNavigationWrite(error: Error?) {
-        writeWithResponseInFlight = false
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         if error != nil {
             writeFailureHandler?()
         }
-        if let endpoint = navigationWriteEndpoint {
+        if isNavigationReady, let endpoint = navigationWriteEndpoint {
             flushPendingNavigationWrites(endpoint: endpoint)
             scheduleNavigationFlushRetryIfNeeded()
+        }
+    }
+
+    private func beginNavigationWriteResponseWait(for write: NavigationWrite) {
+        writeWithResponseInFlight = true
+        navigationWriteWithResponseFailureHandler = write.onWriteFailure
+        navigationWriteWithResponseLabel = write.label
+        navigationWriteResponseGeneration &+= 1
+        let generation = navigationWriteResponseGeneration
+        navigationWriteResponseTimeoutTimer?.invalidate()
+        navigationWriteResponseTimeoutTimer = Timer.scheduledTimer(
+            withTimeInterval: navigationWriteResponseTimeout,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self,
+                  self.writeWithResponseInFlight,
+                  self.navigationWriteResponseGeneration == generation else {
+                return
+            }
+            self.recoverFromNavigationWriteStall()
+        }
+    }
+
+    private func resetNavigationWriteResponseWait() {
+        navigationWriteResponseTimeoutTimer?.invalidate()
+        navigationWriteResponseTimeoutTimer = nil
+        navigationWriteResponseGeneration &+= 1
+        writeWithResponseInFlight = false
+        navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseLabel = nil
+    }
+
+    private func recoverFromNavigationWriteStall() {
+        guard writeWithResponseInFlight else { return }
+        let label = navigationWriteWithResponseLabel ?? "unknown write"
+        let failureHandler = navigationWriteWithResponseFailureHandler
+        log("Acknowledged BLE write timed out: \(label); reconnecting")
+        resetNavigationWriteResponseWait()
+        navigationFlushRetryTimer?.invalidate()
+        navigationFlushRetryTimer = nil
+        isNavigationReady = false
+        failureHandler?()
+
+        if let navigationWriteStallRecoveryForTesting {
+            navigationWriteStallRecoveryForTesting()
+            return
+        }
+        if let peripheral = connectedPeripheral {
+            centralManager.cancelPeripheralConnection(peripheral)
         }
     }
 
@@ -4449,9 +4505,6 @@ class BLEManager: NSObject, ObservableObject {
         ) else {
             log("Cannot protect write for characteristic \(characteristic.uuid)")
             return
-        }
-        if writeType == .withResponse {
-            writeWithResponseInFlight = true
         }
         peripheral.writeValue(payload, for: characteristic, type: writeType)
     }
@@ -4775,8 +4828,7 @@ extension BLEManager: CBCentralManagerDelegate {
         authInfoAttempts = 0
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
