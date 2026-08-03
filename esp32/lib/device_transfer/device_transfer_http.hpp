@@ -41,6 +41,8 @@ public:
   virtual ~HttpRequestHandler() = default;
   virtual bool handleRequest(const HttpRequest &request,
                              WiFiClient &client) = 0;
+  virtual void responseDidComplete(const HttpRequest &request,
+                                   bool peerClosedCleanly) {}
 };
 
 class HttpTransferServer {
@@ -96,10 +98,10 @@ private:
   void unlockState() const;
 };
 
-void sendHttpHead(WiFiClient &client, int status,
+bool sendHttpHead(WiFiClient &client, int status,
                   uint64_t contentLength = 0);
-void sendHttpJson(WiFiClient &client, int status, const std::string &body);
-void sendHttpError(WiFiClient &client, int status, const std::string &code,
+bool sendHttpJson(WiFiClient &client, int status, const std::string &body);
+bool sendHttpError(WiFiClient &client, int status, const std::string &code,
                    const std::string &message);
 bool readHttpBody(WiFiClient &client, uint64_t contentLength,
                   uint64_t maxLength, std::string &body,

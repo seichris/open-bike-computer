@@ -21,6 +21,18 @@ inline bool isHttpTransferGenerationCurrent(bool enabled, uint32_t current,
   return enabled && current != 0 && current == request;
 }
 
+struct HttpResponseCompletionToken {
+  uint32_t transferGeneration = 0;
+  std::string method;
+  std::string path;
+
+  bool matches(uint32_t generation, const std::string &requestMethod,
+               const std::string &requestPath) const {
+    return transferGeneration != 0 && transferGeneration == generation &&
+           method == requestMethod && path == requestPath;
+  }
+};
+
 inline bool validHttpHeaderName(const std::string &name) {
   if (name.empty())
     return false;

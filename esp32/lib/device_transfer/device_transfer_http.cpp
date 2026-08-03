@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <esp_system.h>
+#include <sys/socket.h>
 #include <sstream>
 
 namespace device_transfer {
@@ -112,6 +114,41 @@ static std::string jsonEscape(const std::string &value) {
     }
   }
   return out;
+}
+
+constexpr uint32_t kHttpResponseCloseTimeoutMs = 5000;
+
+static bool writeHttpResponse(WiFiClient &client,
+                              const std::string &response) {
+  if (response.empty())
+    return false;
+  return client.write(reinterpret_cast<const uint8_t *>(response.data()),
+                      response.size()) == response.size();
+}
+
+// HTTP responses use Connection: close. A write only hands bytes to lwIP; it
+// does not prove the peer received them. Half-closing the write side queues a
+// FIN after the response, then waiting for the peer's close provides a real
+// response-consumption boundary before a handler may tear down the AP.
+static bool finishHttpResponse(WiFiClient &client) {
+  const int socket = client.fd();
+  if (socket < 0 || ::shutdown(socket, SHUT_WR) != 0)
+    return false;
+
+  const uint32_t started = millis();
+  while (millis() - started < kHttpResponseCloseTimeoutMs) {
+    uint8_t byte = 0;
+    errno = 0;
+    const int received =
+        ::recv(socket, &byte, sizeof(byte), MSG_DONTWAIT);
+    if (received == 0)
+      return true;
+    if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != EINTR)
+      return false;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  return false;
 }
 
 } // namespace
@@ -497,8 +534,18 @@ void HttpTransferServer::handleClient(WiFiClient &client) {
   unlockState();
 
   HttpRequestHandler *handler = handlerForPath(request.path);
-  if (handler != nullptr && handler->handleRequest(request, client))
+  if (handler != nullptr && handler->handleRequest(request, client)) {
+    lockState();
+    const bool authorized = currentRequestAuthorized_;
+    unlockState();
+    // An unauthenticated client must not occupy the single transfer worker for
+    // the graceful-close deadline. Authenticated requests receive the durable
+    // response boundary needed before a handler may change transfer state.
+    const bool peerClosedCleanly = authorized && finishHttpResponse(client);
+    client.stop();
+    handler->responseDidComplete(request, peerClosedCleanly);
     return;
+  }
 
   sendError(client, 404, "not_found", "device transfer endpoint not found");
 }
@@ -558,28 +605,29 @@ void HttpTransferServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-void sendHttpHead(WiFiClient &client, int status, uint64_t contentLength) {
-  client.printf("HTTP/1.1 %d %s\r\n", status, httpReason(status));
-  client.print("Connection: close\r\n");
-  client.printf("Content-Length: %llu\r\n\r\n",
-                static_cast<unsigned long long>(contentLength));
+bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength) {
+  const std::string response =
+      std::string("HTTP/1.1 ") + std::to_string(status) + " " +
+      httpReason(status) + "\r\nConnection: close\r\nContent-Length: " +
+      std::to_string(contentLength) + "\r\n\r\n";
+  return writeHttpResponse(client, response);
 }
 
-void sendHttpJson(WiFiClient &client, int status, const std::string &body) {
-  client.printf("HTTP/1.1 %d %s\r\n", status, httpReason(status));
-  client.print("Content-Type: application/json\r\n");
-  client.print("Connection: close\r\n");
-  client.printf("Content-Length: %u\r\n\r\n",
-                static_cast<unsigned>(body.size()));
-  client.print(body.c_str());
+bool sendHttpJson(WiFiClient &client, int status, const std::string &body) {
+  const std::string response =
+      std::string("HTTP/1.1 ") + std::to_string(status) + " " +
+      httpReason(status) +
+      "\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+      std::to_string(body.size()) + "\r\n\r\n" + body;
+  return writeHttpResponse(client, response);
 }
 
-void sendHttpError(WiFiClient &client, int status, const std::string &code,
+bool sendHttpError(WiFiClient &client, int status, const std::string &code,
                    const std::string &message) {
-  sendHttpJson(client, status,
-               std::string("{\"ok\":false,\"error\":{\"code\":\"") +
-                   jsonEscape(code) + "\",\"message\":\"" +
-                   jsonEscape(message) + "\"}}");
+  return sendHttpJson(
+      client, status,
+      std::string("{\"ok\":false,\"error\":{\"code\":\"") + jsonEscape(code) +
+          "\",\"message\":\"" + jsonEscape(message) + "\"}}");
 }
 
 bool readHttpBody(WiFiClient &client, uint64_t contentLength,
