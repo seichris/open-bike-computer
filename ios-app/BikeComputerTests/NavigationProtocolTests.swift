@@ -606,6 +606,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
+        testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerResendsBrightnessAfterAuthentication()
@@ -12417,6 +12418,43 @@ struct NavigationProtocolTests {
                     "chunk reassembly exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 9,
                     "chunk reassembly exposes activation sequence")
+    }
+
+    static func testBLEManagerCompletesRetransmittedChunkedMapTransferStatus() {
+        let manager = BLEManager()
+        let body = Data("""
+        {"enabled":false,"activeMapId":"shanghai-v2","activeSessionId":"session-v2","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["zh-Hans","en"],"fontAssetHealthy":true,"activation":{"status":"installed","sequence":10,"sessionId":"session-v2","mapId":"shanghai-v2","step":3,"steps":3,"progress":100}}
+        """.utf8)
+        let chunkSize = 13
+        let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
+
+        func frame(index: UInt8) -> Data {
+            let start = Int(index) * chunkSize
+            let end = min(start + chunkSize, body.count)
+            var result = Data(DeviceBLEProtocol.mapTransferStatusChunkPrefix.utf8)
+            result.append(contentsOf: [42, index, chunkCount])
+            result.append(body.subdata(in: start..<end))
+            return result
+        }
+
+        let missingIndex = chunkCount / 2
+        for index in UInt8(0)..<chunkCount where index != missingIndex {
+            assert(manager.handleMapTransferStatusNotification(frame(index: index)),
+                   "first lossy status response should retain received chunks")
+        }
+        assertEqual(manager.mapTransferActiveMapId, "",
+                    "an incomplete response must not publish partial state")
+
+        for index in UInt8(0)..<chunkCount {
+            assert(manager.handleMapTransferStatusNotification(frame(index: index)),
+                   "same-ID retransmission should be consumed")
+        }
+        assertEqual(manager.mapTransferActiveMapId, "shanghai-v2",
+                    "same-ID retransmission fills a missing chunk")
+        assertEqual(manager.mapTransferActivationStatus, "installed",
+                    "retransmission publishes the terminal activation state")
+        assert(manager.activeMapFontAssetHealthy,
+               "retransmission unlocks street-label settings")
     }
 
     static func testBLEManagerParsesDeviceTransferStatus() {

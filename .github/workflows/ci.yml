@@ -366,6 +366,10 @@ jobs:
             tools/tests/test_transfer_control_dispatch.cpp \
             -o /tmp/test_transfer_control_dispatch
           /tmp/test_transfer_control_dispatch
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_transfer_status_chunk_session.cpp \
+            -o /tmp/test_map_transfer_status_chunk_session
+          /tmp/test_map_transfer_status_chunk_session
       - name: Device transfer HTTP limit host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

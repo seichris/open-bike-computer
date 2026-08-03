@@ -19,6 +19,7 @@
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "device_capabilities_protocol.hpp"
+#include "map_transfer_status_chunk_session.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -1509,7 +1510,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   // (23 bytes, 20-byte value). Frame the JSON into independently valid chunks
   // instead of relying on the requested 512-byte MTU being negotiated.
   constexpr size_t kChunkBytes = 13;
-  static uint8_t transferId = 0;
+  static map_transfer_status_protocol::ChunkSession chunkSession;
   const std::string body = mapTransferStatusJson();
   const std::string legacy = "MSTS" + body;
   uint16_t peerMtu = 23;
@@ -1532,7 +1533,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
                   (unsigned)body.size());
     return;
   }
-  transferId++;
+  const uint8_t transferId = chunkSession.transferIdFor(body);
   for (size_t index = 0; index < chunkCount; index++) {
     const size_t offset = index * kChunkBytes;
     const size_t length = std::min(kChunkBytes, body.size() - offset);
