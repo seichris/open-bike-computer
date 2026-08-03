@@ -5,6 +5,12 @@ from map_format import write_fmb
 from font_asset import FontPackBuilder
 from label_pipeline import join_named_roads, normalize_preferred_languages, prepare_road_labels
 from block_progress import BlockProgressReporter
+from building_pipeline import (
+    clip_buildings,
+    load_relation_index,
+    load_rules,
+    prepare_buildings,
+)
 from itertools import product
 from shapely import box
 import argparse, json, yaml
@@ -17,7 +23,7 @@ parser.add_argument("max_lon")
 parser.add_argument("max_lat")
 parser.add_argument("geojson_prefix")
 parser.add_argument("map_folder", nargs="?", default="../maps/shanghai_v2")
-parser.add_argument("--renderer-format", type=int, choices=(1, 2), default=1)
+parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3), default=1)
 parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
 args = parser.parse_args()
@@ -45,6 +51,18 @@ lines = json.load( open( LINES_INPUT_FILE, "r"))
 print("  Step 2/5 reading polygons files")
 polygons = json.load( open( POLYGONS_INPUT_FILE, "r"))
 
+buildings = []
+building_report = {}
+flat_outline_keys = set()
+building_rules_sha256 = None
+if args.renderer_format == 3:
+    rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
+    building_rules, building_rules_sha256 = load_rules(rules_path)
+    relation_index = load_relation_index(f"{args.geojson_prefix}_building_relations.json")
+    buildings, building_report, flat_outline_keys = prepare_buildings(
+        polygons["features"], building_rules, relation_index
+    )
+
 # extract relevant features
 print("Extracting features")
 label_diagnostics = {}
@@ -58,6 +76,13 @@ print("Applying styles")
 # apply styles
 lines = style_features( lines, styles) # styled_lines
 polygons = style_features( polygons, styles) # styled_polygons
+if args.renderer_format == 3:
+    polygons = [
+        feature
+        for feature in polygons
+        if not feature["type"].startswith("building.")
+        or feature.get("osm_key") in flat_outline_keys
+    ]
 font_builder = None
 label_totals = {
     "blocks": 0,
@@ -75,7 +100,7 @@ label_totals = {
     "maximumBlockCandidates": 0,
 }
 label_phase_timings = {"labelNormalization": normalization_seconds}
-if args.renderer_format == 2:
+if args.renderer_format >= 2:
     preferred_languages = normalize_preferred_languages(args.preferred_language)
     font_builder = FontPackBuilder(preferred_languages=preferred_languages)
     joining_started = time.perf_counter()
@@ -97,6 +122,21 @@ y_positions = range(area_min_y, area_max_y, 4096)
 total = len(x_positions) * len(y_positions)
 progress = BlockProgressReporter(total)
 fmb_writing_seconds = 0.0
+building_totals = {
+    "blocks": 0,
+    "blockBytes": 0,
+    "recordCount": 0,
+    "pointCount": 0,
+    "emittedWallCount": 0,
+    "suppressedWallCount": 0,
+    "maximumBlockRecords": 0,
+    "maximumBlockPoints": 0,
+    "explicitHeightCount": 0,
+    "levelsHeightCount": 0,
+    "inheritedHeightCount": 0,
+    "localMedianHeightCount": 0,
+    "classDefaultHeightCount": 0,
+}
 
 for init_x, init_y in progress.track(product(x_positions, y_positions)):
         # print("--------------------")
@@ -104,6 +144,7 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
         min_x = init_x & (~mapblock_mask)
         min_y = init_y & (~mapblock_mask)
         mapblock_bbox = box( min_x, min_y, min_x + mapblock_mask, min_y + mapblock_mask + 1) # we add 1 in max_y to compensate rounding errors when rendering
+        building_block_bbox = box(min_x, min_y, min_x + 4096, min_y + 4096)
 
         # clip features to the block area
         clipped_lines = clip_lines(
@@ -112,7 +153,17 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
             label_diagnostics=label_diagnostics if font_builder is not None else None,
         )
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
-        if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
+        clipped_buildings = []
+        building_block_stats = {}
+        if args.renderer_format == 3:
+            clipped_buildings, building_block_stats = clip_buildings(
+                buildings, building_block_bbox, min_x, min_y
+            )
+        if (
+            len(clipped_lines) == 0
+            and len(clipped_polygons) == 0
+            and len(clipped_buildings) == 0
+        ):
             continue
 
         # export map files
@@ -179,6 +230,7 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
             min_x,
             min_y,
             font_builder=font_builder,
+            building_records=clipped_buildings if args.renderer_format == 3 else None,
         )
         fmb_writing_seconds += time.perf_counter() - block_write_started
         if font_builder is not None:
@@ -193,6 +245,23 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
                 label_totals[maximum_key] = max(
                     label_totals[maximum_key], block_metadata[key]
                 )
+        if args.renderer_format == 3:
+            building_totals["blocks"] += 1
+            building_totals["blockBytes"] += block_metadata["buildingBytes"]
+            for key in (
+                "recordCount", "pointCount", "emittedWallCount", "suppressedWallCount",
+                "explicitHeightCount", "levelsHeightCount", "inheritedHeightCount",
+                "localMedianHeightCount", "classDefaultHeightCount",
+            ):
+                building_totals[key] += building_block_stats[key]
+            building_totals["maximumBlockRecords"] = max(
+                building_totals["maximumBlockRecords"],
+                building_block_stats["recordCount"],
+            )
+            building_totals["maximumBlockPoints"] = max(
+                building_totals["maximumBlockPoints"],
+                building_block_stats["pointCount"],
+            )
 
 if font_builder is not None:
     label_phase_timings["labelShaping"] = font_builder.shaping_seconds
@@ -210,3 +279,10 @@ if font_builder is not None:
         key: round(value, 6) for key, value in label_phase_timings.items()
     }
     print("LABEL_STATS:" + json.dumps(label_totals, sort_keys=True, separators=(",", ":")))
+
+if args.renderer_format == 3:
+    for key, value in building_report.items():
+        if key not in building_totals:
+            building_totals[key] = value
+    building_totals["rulesSha256"] = building_rules_sha256
+    print("BUILDING_STATS:" + json.dumps(building_totals, sort_keys=True, separators=(",", ":")))

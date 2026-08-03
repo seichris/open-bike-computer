@@ -225,6 +225,59 @@ class BinaryMapFormatTests(unittest.TestCase):
         second_variant_runs = struct.unpack_from("<HHH", labels, 6 + 9 + 10 + 4)
         self.assertNotEqual(first_variant_runs, second_variant_runs)
 
+    def test_fmb_v4_retains_labels_and_adds_canonical_building_section(self):
+        class EmptyBuilder:
+            languages = []
+            profile_fingerprint = 0x12345678
+
+            @staticmethod
+            def shape(_text, _language):
+                return ()
+
+        building = {
+            "type_id": 100,
+            "flags": 0,
+            "provenance": 0,
+            "height_dm": 125,
+            "minimum_height_dm": 0,
+            "bbox": (0, 0, 10, 10),
+            "rings": [
+                {
+                    "flags": 0,
+                    "points": [(0, 0), (10, 0), (10, 10), (0, 10)],
+                    "walls": [True, True, False, True],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "0_0.fmb"
+            metadata = write_fmb(
+                path,
+                [],
+                [],
+                min_x=0,
+                min_y=0,
+                font_builder=EmptyBuilder(),
+                building_records=[building],
+            )
+            data = path.read_bytes()
+
+        self.assertEqual(data[:4], b"FMB\x04")
+        self.assertEqual(metadata["buildings"], 1)
+        self.assertEqual(metadata["buildingPoints"], 4)
+        directory_offset = 8
+        self.assertEqual(data[directory_offset:directory_offset + 4], b"EXT4")
+        self.assertEqual(data[directory_offset + 4], 4)
+        entry = directory_offset + 8 + 3 * 16
+        section_type, flags, reserved, offset, length, crc = struct.unpack_from(
+            "<BBHIII", data, entry
+        )
+        self.assertEqual((section_type, flags, reserved), (4, 1, 0))
+        body = data[offset:offset + length]
+        self.assertEqual(zlib.crc32(body) & 0xFFFFFFFF, crc)
+        self.assertEqual(struct.unpack_from("<HHI", body, 0), (1, 0, 4))
+        self.assertEqual(body[-1], 0b00001011)
+
 
 if __name__ == "__main__":
     unittest.main()

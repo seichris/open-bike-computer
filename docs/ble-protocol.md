@@ -496,6 +496,7 @@ Current setting IDs:
 | `32` | Map + Navigation street-label language | Same values as ID `28` |
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
+| `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in active bird's-eye navigation; defaults to enabled and is persisted as `nav3DBuild` |
 
 The app presents label visibility as a separate switch from density. It keeps
 the selected `1...3` density in the screen profile and sends density `0` while
@@ -709,8 +710,9 @@ TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
 ```
 
 Schema `1` assigns feature bit `8` to street-label profiles, bit `9` to the
-bird's-eye projection, bit `10` to its first three perspective presets, and bit
-`11` to the Very Strong and Maximum presets. Bits `0...7` retain their legacy
+bird's-eye projection, bit `10` to its first three perspective presets, bit
+`11` to the Very Strong and Maximum presets, and bit `12` to OSM 3D buildings
+and renderer target 3. Bits `0...7` retain their legacy
 meanings above. TLV type `1` carries the persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
@@ -721,8 +723,8 @@ clients accept either envelope.
 Golden vectors:
 
 ```text
-CAP2 schema 1, flags 0x00000fff, PWR enabled/sound 4/volume 80:
-43 41 50 32 01 ff 0f 00 00 01 03 01 04 50
+CAP2 schema 1, flags 0x00001fff, PWR enabled/sound 4/volume 80:
+43 41 50 32 01 ff 1f 00 00 01 03 01 04 50
 
 CAP2 schema 1, flags 0, no TLVs:
 43 41 50 32 01 00 00 00 00
@@ -732,6 +734,12 @@ IDs `27...34` are sent only after a valid `CAP2` response advertises bit `8`.
 Older sessions therefore never receive label-only setting IDs. Missing NVS
 values migrate to balanced density, local language, standard text, and Follow
 roads independently for Map and Map + Navigation.
+
+ID `35` is sent only after a valid `CAP2` response advertises bit `12`.
+Firmware without that bit is never offered renderer target 3 and never receives
+the new setting. The setting has no effect unless Buildings is visible, Map +
+Navigation has an active route, bird's-eye projection is active, and an FMB v4
+block supplies building records.
 
 ## Destination Picker
 
@@ -923,12 +931,12 @@ Status responses should include:
 - `activeManifestReceipt`: SHA-256 identity of the exact installed manifest;
   the app binds the following label-health fields to this receipt.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
-  `2` FMB v3 + FMA1 street labels).
-- `labelProfileVersion`: `1` for the current target-2 label profile, otherwise
+  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings).
+- `labelProfileVersion`: `1` for the current target-2/3 label profile, otherwise
   `0`.
 - `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
   active pack.
-- `fontAssetHealthy`: `true` only when the target-2 FMA1 asset passed activation
+- `fontAssetHealthy`: `true` only when the target-2/3 FMA1 asset passed activation
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.

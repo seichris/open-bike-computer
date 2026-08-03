@@ -34,6 +34,16 @@ inline void persistBirdsEyePerspective(Store &store, uint8_t perspective) {
           perspective)));
 }
 
+template <typename Store>
+inline bool load3DBuildingsEnabled(Store &store) {
+  return store.getBool("nav3DBuild", true);
+}
+
+template <typename Store>
+inline void persist3DBuildingsEnabled(Store &store, bool enabled) {
+  store.putBool("nav3DBuild", enabled);
+}
+
 template <typename Store, typename Profile>
 inline void load(Store &store, Profile &mapStyle,
                  Profile &mapNavigationStyle) {

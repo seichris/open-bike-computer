@@ -40,7 +40,7 @@ bool take(size_t amount, size_t size, size_t &offset) {
 
 bool baseEnd(const uint8_t *data, size_t size, size_t &offset,
              uint16_t &actualPolylineCount) {
-  if (size < 6 || data[3] != 3)
+  if (size < 6 || (data[3] != 3 && data[3] != 4))
     return false;
   offset = 4;
   const uint16_t polygonCount = le16(data + offset);
@@ -72,9 +72,13 @@ struct Section {
 
 bool sections(const uint8_t *data, size_t size, size_t directoryOffset,
               std::array<Section, 3> &result) {
-  if (directoryOffset > size || size - directoryOffset < 56 ||
-      !std::equal(data + directoryOffset, data + directoryOffset + 4,
-                  std::array<uint8_t, 4>{'E', 'X', 'T', '3'}.begin()))
+  const uint8_t version = data[3];
+  const size_t directoryBytes = 8U + static_cast<size_t>(version) * 16U;
+  if (directoryOffset > size || size - directoryOffset < directoryBytes ||
+      data[directoryOffset] != 'E' || data[directoryOffset + 1] != 'X' ||
+      data[directoryOffset + 2] != 'T' ||
+      data[directoryOffset + 3] != static_cast<uint8_t>('0' + version) ||
+      data[directoryOffset + 4] != version)
     return false;
   size_t cursor = directoryOffset + 8;
   for (uint8_t index = 0; index < 3; ++index) {
@@ -145,8 +149,9 @@ bool decode(const uint8_t *data, size_t size, uint16_t polylineCount,
     return fail(error, "invalid FMB header");
   if (data[3] < 3)
     return true;
-  if (data[3] != 3 || !map_block_format::validate(data, size))
-    return fail(error, "invalid FMB v3 block");
+  if ((data[3] != 3 && data[3] != 4) ||
+      !map_block_format::validate(data, size))
+    return fail(error, "invalid label-aware FMB block");
 
   size_t directoryOffset = 0;
   uint16_t decodedPolylineCount = 0;

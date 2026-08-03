@@ -148,6 +148,7 @@ enum DeviceBLEProtocol {
     static let birdsEyeMapNavigationCapabilityMask: UInt32 = 1 << 9
     static let birdsEyeMapNavigationPerspectiveCapabilityMask: UInt32 = 1 << 10
     static let birdsEyeMapNavigationStrongerPerspectiveCapabilityMask: UInt32 = 1 << 11
+    static let osm3DBuildingsCapabilityMask: UInt32 = 1 << 12
     static let deviceCapabilitiesVersion: UInt8 = 10
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -187,6 +188,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationLabelLanguageModeSettingID: UInt8 = 32
     static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
     static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
+    static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -567,7 +569,7 @@ private enum MapPlusNavigationDefaults {
     static let streetLineWidth: Double = 4
     static let positionMarkerScale: Double = 2
     static let zoomLevel = 3
-    static let showBuildings = false
+    static let showBuildings = true
     static let showGreenSpace = false
     static let showPaths = false
     static let showTracks = false
@@ -597,6 +599,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsDestinationPicker: Bool = false
     @Published private(set) var supportsWorkoutTelemetry: Bool = false
     @Published private(set) var supportsStreetLabels: Bool = false
+    @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -679,6 +682,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
     @Published var mapPlusNavigationBirdsEyeViewEnabled = true
     @Published var mapPlusNavigationBirdsEyePerspective: MapNavigationBirdsEyePerspective = .standard
+    @Published var mapPlusNavigation3DBuildingsEnabled = true
     @Published var mapPlusNavigationLabelsEnabled =
         DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
     @Published var mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
@@ -869,6 +873,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
         static let mapPlusNavigationBirdsEyeViewEnabled = "mapPlusNavigationSettings.birdsEyeViewEnabled"
         static let mapPlusNavigationBirdsEyePerspective = "mapPlusNavigationSettings.birdsEyePerspective"
+        static let mapPlusNavigation3DBuildingsEnabled = "mapPlusNavigationSettings.3dBuildingsEnabled"
         static let mapPlusNavigationLabelsEnabled = "mapPlusNavigationSettings.labelsEnabled"
         static let mapPlusNavigationLabelDensity = "mapPlusNavigationSettings.labelDensity"
         static let mapPlusNavigationLabelLanguageMode = "mapPlusNavigationSettings.labelLanguageMode"
@@ -1241,6 +1246,9 @@ class BLEManager: NSObject, ObservableObject {
                 forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective
             ) as? Int ?? MapNavigationBirdsEyePerspective.standard.rawValue
         )
+        mapPlusNavigation3DBuildingsEnabled = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigation3DBuildingsEnabled
+        ) as? Bool ?? true
         let shouldMigrateRecommendedDefaults = !defaults.bool(
             forKey: SettingsKeys.recommendedMapDefaultsMigrated
         )
@@ -1350,6 +1358,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
         defaults.set(mapPlusNavigationBirdsEyeViewEnabled, forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled)
         defaults.set(mapPlusNavigationBirdsEyePerspective.rawValue, forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective)
+        defaults.set(mapPlusNavigation3DBuildingsEnabled, forKey: SettingsKeys.mapPlusNavigation3DBuildingsEnabled)
         defaults.set(mapPlusNavigationLabelsEnabled, forKey: SettingsKeys.mapPlusNavigationLabelsEnabled)
         defaults.set(mapPlusNavigationLabelDensity, forKey: SettingsKeys.mapPlusNavigationLabelDensity)
         defaults.set(mapPlusNavigationLabelLanguageMode, forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode)
@@ -2321,6 +2330,11 @@ class BLEManager: NSObject, ObservableObject {
             log("Bird's-eye perspective setting not sent: connected firmware does not advertise support")
             return
         }
+        if id == DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID,
+           (!hasReceivedDeviceCapabilities || !supports3DBuildings) {
+            log("3D buildings setting not sent: connected firmware does not advertise support")
+            return
+        }
         if Self.isStreetLabelSetting(id),
            (!hasReceivedDeviceCapabilities || !supportsStreetLabels) {
             log("Street-label setting id=\(id) not sent: connected firmware does not advertise support")
@@ -2531,6 +2545,12 @@ class BLEManager: NSObject, ObservableObject {
                 sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID,
                             value: Int32(mapPlusNavigationLabelOrientation))
             }
+            if supports3DBuildings {
+                sendSetting(
+                    id: DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID,
+                    value: mapPlusNavigation3DBuildingsEnabled ? 1 : 0
+                )
+            }
         }
 
         if shouldSendMap {
@@ -2564,6 +2584,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         supportsStreetLabels = false
+        supports3DBuildings = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -3312,6 +3333,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         supportsStreetLabels = false
+        supports3DBuildings = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -5333,6 +5355,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
         supportsStreetLabels = false
+        supports3DBuildings = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -5442,6 +5465,8 @@ extension BLEManager: CBPeripheralDelegate {
              flags & DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask != 0)
         let hasStreetLabels =
             flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
+        let has3DBuildings =
+            flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
         if let powerButtonConfig {
             guard hasPowerButtonHonk,
                   powerButtonConfig[0] <= 1,
@@ -5486,6 +5511,9 @@ extension BLEManager: CBPeripheralDelegate {
             hasSentMapProfileForConnection = false
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities && !supports3DBuildings && has3DBuildings {
+            hasSentMapNavigationProfileForConnection = false
+        }
         if hasReceivedDeviceCapabilities &&
             supportsBatteryStatusScreen != hasBatteryStatusScreen {
             hasSentScreenSettingsForConnection = false
@@ -5502,6 +5530,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsBatteryStatusScreen = hasBatteryStatusScreen
         supportsDestinationPicker = hasDestinationPicker
         supportsStreetLabels = hasStreetLabels
+        supports3DBuildings = has3DBuildings
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()

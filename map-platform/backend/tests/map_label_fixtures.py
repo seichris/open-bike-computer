@@ -55,6 +55,55 @@ def empty_fma1(
     ) + language_table + face_table
 
 
+def one_building_fmb4(
+    profile_fingerprint: int = 0x12345678,
+    provenance: int = 0,
+) -> bytes:
+    data = bytearray(b"FMB\x04\0\0\0\0")
+    building = bytearray(struct.pack("<HHI", 1, 0, 4))
+    building.extend(
+        struct.pack(
+            "<BBBBHHhhhhH",
+            100,
+            1,
+            provenance,
+            0,
+            123,
+            20,
+            0,
+            0,
+            100,
+            100,
+            1,
+        )
+    )
+    building.extend(struct.pack("<HBBhhhhhhhhB", 4, 0, 0, 0, 0, 100, 0, 100, 100, 0, 100, 0x0F))
+    sections = (
+        b"\0\0",
+        b"\0\0",
+        struct.pack("<IH", profile_fingerprint, 0),
+        bytes(building),
+    )
+    data.extend(b"EXT4\x04\0\0\0")
+    offset = len(data) + len(sections) * 16
+    for section_type, section in enumerate(sections, 1):
+        data.extend(
+            struct.pack(
+                "<BBHIII",
+                section_type,
+                1,
+                0,
+                offset,
+                len(section),
+                zlib.crc32(section) & 0xFFFFFFFF,
+            )
+        )
+        offset += len(section)
+    for section in sections:
+        data.extend(section)
+    return bytes(data)
+
+
 def one_label_fma1(profile_fingerprint: int = 0x12345678) -> bytes:
     language_table = b"\x02en"
     face_name = b"test"

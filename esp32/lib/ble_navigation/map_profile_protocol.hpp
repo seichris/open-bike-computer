@@ -25,6 +25,7 @@ constexpr uint8_t MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID = 31;
 constexpr uint8_t MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID = 32;
 constexpr uint8_t MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID = 33;
 constexpr uint8_t MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID = 34;
+constexpr uint8_t MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID = 35;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE = 1;
 constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
@@ -59,7 +60,8 @@ constexpr uint32_t VISIBILITY_OVERLAY_MASK =
     VISIBILITY_ROUTE_OVERLAY | VISIBILITY_POSITION_MARKER;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL = 0;
 constexpr uint32_t MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK =
-    VISIBILITY_MAJOR_ROADS | VISIBILITY_LOCAL_STREETS | VISIBILITY_WATER;
+    VISIBILITY_BUILDINGS | VISIBILITY_MAJOR_ROADS | VISIBILITY_LOCAL_STREETS |
+    VISIBILITY_WATER;
 
 inline bool clientSupportsIndependentProfiles(uint8_t clientVersion) {
   return clientVersion >= CLIENT_VERSION;
@@ -139,7 +141,8 @@ inline bool isLocalStreetTypeId(uint8_t typeId) {
 inline bool isIndependentSetting(uint8_t settingId) {
   return (settingId >= 16 && settingId <= 22) ||
          (settingId >= MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID &&
-          settingId <= MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID);
+          settingId <= MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID) ||
+         settingId == MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID;
 }
 
 inline bool isLabelSetting(uint8_t settingId) {
@@ -212,6 +215,7 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     break;
   case MAP_LABEL_ORIENTATION_SETTING_ID:
   case MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
+  case MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID:
     maximum = 1;
     break;
   default:

@@ -1,4 +1,5 @@
 #include "../../lib/maps/src/mapBlockFormat.hpp"
+#include "../../lib/maps/src/mapBuildingBlock.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -14,6 +15,12 @@ static void append16(std::vector<uint8_t> &data, uint16_t value) {
 static void append32(std::vector<uint8_t> &data, uint32_t value) {
   for (uint8_t shift = 0; shift < 32; shift += 8)
     data.push_back(static_cast<uint8_t>(value >> shift));
+}
+
+static void write32(std::vector<uint8_t> &data, size_t offset,
+                    uint32_t value) {
+  for (uint8_t shift = 0; shift < 32; shift += 8)
+    data[offset++] = static_cast<uint8_t>(value >> shift);
 }
 
 static uint32_t crc32(const std::vector<uint8_t> &data) {
@@ -35,6 +42,47 @@ static std::vector<uint8_t> emptyV3() {
       {0x78, 0x56, 0x34, 0x12, 0, 0}, // profile + zero labels
   };
   uint32_t offset = static_cast<uint32_t>(data.size() + 3U * 16U);
+  for (uint8_t index = 0; index < sections.size(); ++index) {
+    data.push_back(index + 1);
+    data.push_back(1);
+    append16(data, 0);
+    append32(data, offset);
+    append32(data, static_cast<uint32_t>(sections[index].size()));
+    append32(data, crc32(sections[index]));
+    offset += sections[index].size();
+  }
+  for (const auto &section : sections)
+    data.insert(data.end(), section.begin(), section.end());
+  return data;
+}
+
+static std::vector<uint8_t> oneBuildingV4() {
+  std::vector<uint8_t> data = {'F', 'M', 'B', 4, 0, 0, 0, 0,
+                               'E', 'X', 'T', '4', 4, 0, 0, 0};
+  std::vector<uint8_t> buildings;
+  append16(buildings, 1); // one building
+  append16(buildings, 0); // reserved
+  append32(buildings, 4); // four declared points
+  buildings.insert(buildings.end(), {
+      100, 1, 0, 0,       // type, flags, provenance, reserved
+      123, 0, 20, 0,      // height 12.3 m, minimum height 2.0 m
+      0, 0, 0, 0,         // minimum x/y
+      100, 0, 100, 0,     // maximum x/y
+      1, 0,                // one ring
+      4, 0, 0, 0,         // four-point outer ring
+      0, 0, 0, 0,
+      100, 0, 0, 0,
+      100, 0, 100, 0,
+      0, 0, 100, 0,
+      0x0f,                // every source edge may render a wall
+  });
+  const std::vector<std::vector<uint8_t>> sections = {
+      {0, 0},
+      {0, 0},
+      {0x78, 0x56, 0x34, 0x12, 0, 0},
+      buildings,
+  };
+  uint32_t offset = static_cast<uint32_t>(data.size() + 4U * 16U);
   for (uint8_t index = 0; index < sections.size(); ++index) {
     data.push_back(index + 1);
     data.push_back(1);
@@ -80,6 +128,31 @@ int main() {
   changed = validV3;
   changed.push_back(0);
   assert(!map_block_format::validate(changed.data(), changed.size()));
+
+  const std::vector<uint8_t> validV4 = oneBuildingV4();
+  assert(map_block_format::validate(validV4.data(), validV4.size()));
+  map_building_block::Block buildingBlock;
+  std::string buildingError;
+  assert(map_building_block::decode(validV4.data(), validV4.size(),
+                                    buildingBlock, &buildingError));
+  assert(buildingBlock.buildings.size() == 1);
+  assert(buildingBlock.buildings[0].heightDm == 123);
+  assert(buildingBlock.buildings[0].minimumHeightDm == 20);
+  assert(buildingBlock.buildings[0].rings.size() == 1);
+  assert(buildingBlock.buildings[0].rings[0].points.size() == 4);
+  assert(buildingBlock.buildings[0].rings[0].walls.size() == 4);
+  for (const uint8_t wall : buildingBlock.buildings[0].rings[0].walls)
+    assert(wall == 1);
+  for (size_t size = 0; size < validV4.size(); ++size)
+    assert(!map_block_format::validate(validV4.data(), size));
+
+  changed = validV4;
+  changed.back() = 0x8f; // non-canonical wall-mask padding
+  write32(changed, 76,
+          crc32(std::vector<uint8_t>(changed.begin() + 90, changed.end())));
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+  assert(!map_building_block::decode(changed.data(), changed.size(),
+                                     buildingBlock, &buildingError));
 
   changed = valid;
   changed.push_back(0);

@@ -20,6 +20,7 @@
 #include "lvgl.h"
 #include "mapFontAsset.hpp"
 #include "mapLabelBlock.hpp"
+#include "mapBuildingBlock.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -86,11 +87,13 @@ private:
                   // one single map file.
   {
     Point32 offset;
+    double mercatorScale = 1.0;
     bool inView = false;
     uint8_t formatVersion = 1;
     std::vector<Polyline, PsramAllocator<Polyline>> polylines;
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
     map_label_block::Block labelData;
+    map_building_block::Block buildingData;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices

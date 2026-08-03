@@ -1124,11 +1124,13 @@ class MapJobService:
         limits: JobLimits | None = None,
         *,
         label_target2_enabled: bool = False,
+        building_target3_enabled: bool = False,
     ):
         self.source_index = source_index
         self.store = store
         self.limits = limits or JobLimits()
         self.label_target2_enabled = label_target2_enabled
+        self.building_target3_enabled = building_target3_enabled
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1192,13 +1194,20 @@ class MapJobService:
     ) -> tuple[str | None, str | None, MapJob | None]:
         """Validate idempotency fields and return an existing matching request."""
         _validate_map_job_fields(request)
+        from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
         from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 
+        requested_format = renderer_format_version(request)
         if (
-            renderer_format_version(request) == LABEL_RENDERER_FORMAT_VERSION
+            requested_format == LABEL_RENDERER_FORMAT_VERSION
             and not self.label_target2_enabled
         ):
             raise ValueError("renderer format 2 generation is not enabled")
+        if (
+            requested_format == BUILDING_RENDERER_FORMAT_VERSION
+            and not self.building_target3_enabled
+        ):
+            raise ValueError("renderer format 3 generation is not enabled")
         client_installation_id = _client_identifier(request, "clientInstallationId")
         client_request_id = _client_identifier(request, "clientRequestId")
         if bool(client_installation_id) != bool(client_request_id):
@@ -1375,6 +1384,7 @@ def _client_identifier(request: dict[str, Any], key: str) -> str | None:
 
 
 def _validate_map_job_fields(request: dict[str, Any]) -> None:
+    from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
     from .map_labels import (
         LABEL_PROFILE_VERSION,
         LABEL_RENDERER_FORMAT_VERSION,
@@ -1407,9 +1417,13 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             renderer_format_version = target["rendererFormatVersion"]
             if (
                 isinstance(renderer_format_version, bool)
-                or renderer_format_version not in {1, LABEL_RENDERER_FORMAT_VERSION}
+                or renderer_format_version not in {
+                    1,
+                    LABEL_RENDERER_FORMAT_VERSION,
+                    BUILDING_RENDERER_FORMAT_VERSION,
+                }
             ):
-                raise ValueError("target rendererFormatVersion must be 1 or 2")
+                raise ValueError("target rendererFormatVersion must be 1, 2, or 3")
             normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
@@ -1421,10 +1435,13 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             normalized_target["firmwareVersion"] = firmware_version
         request["target"] = normalized_target
     renderer_format_version = request.get("target", {}).get("rendererFormatVersion", 1)
-    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION and request.get(
-        "target", {}
-    ).get("renderer") != "esp32-fmb":
-        raise ValueError("renderer format 2 requires explicit esp32-fmb target")
+    if renderer_format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    } and request.get("target", {}).get("renderer") != "esp32-fmb":
+        raise ValueError(
+            f"renderer format {renderer_format_version} requires explicit esp32-fmb target"
+        )
     if "labels" in request:
         labels = request["labels"]
         if not isinstance(labels, dict):
@@ -1454,11 +1471,16 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             "preferredLanguages": normalized_languages,
             "internationalFallback": fallback,
         }
-    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION:
+    if renderer_format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    }:
         if "labels" not in request:
-            raise ValueError("renderer format 2 requires labels")
+            raise ValueError(
+                f"renderer format {renderer_format_version} requires labels"
+            )
     elif "labels" in request:
-        raise ValueError("labels require renderer format 2")
+        raise ValueError("labels require renderer format 2 or 3")
 
 
 def _validate_identifier(value: str, key: str) -> str:

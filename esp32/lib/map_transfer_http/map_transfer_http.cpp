@@ -936,7 +936,7 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
             "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion == 2 ? "true" : "false";
+      body += activeMap.target.formatVersion >= 2 ? "true" : "false";
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +

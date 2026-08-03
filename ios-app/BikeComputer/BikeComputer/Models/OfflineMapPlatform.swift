@@ -223,6 +223,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
 
     func forDevice(
         supportsStreetLabels: Bool,
+        supports3DBuildings: Bool = false,
         firmwareVersion: String
     ) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -234,7 +235,13 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: clientInstallationId,
             clientRequestId: clientRequestId,
             installOnDevice: installOnDevice,
-            target: supportsStreetLabels
+            target: supports3DBuildings
+                ? RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 3,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                )
+                : supportsStreetLabels
                 ? RendererTarget(
                     renderer: "esp32-fmb",
                     rendererFormatVersion: 2,
@@ -245,7 +252,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                     rendererFormatVersion: 1,
                     firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
                 ),
-            labels: supportsStreetLabels ? labels ?? Self.defaultLabelProfile : nil
+            labels: (supportsStreetLabels || supports3DBuildings)
+                ? labels ?? Self.defaultLabelProfile
+                : nil
         )
     }
 }
@@ -836,9 +845,15 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         let dataBase64: String?
     }
 
+    struct Target: Decodable, Equatable {
+        let renderer: String?
+        let formatVersion: Int?
+    }
+
     let mapId: String?
     let displayName: String?
     let source: Source?
+    let target: Target?
     let preview: Preview?
     let files: [File]?
     let bounds: [Double]?
@@ -858,6 +873,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case mapId
         case displayName
         case source
+        case target
         case preview
         case files
         case bounds
@@ -869,6 +885,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         mapId = try container.decodeIfPresent(String.self, forKey: .mapId)
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
         source = try container.decodeIfPresent(Source.self, forKey: .source)
+        target = try container.decodeIfPresent(Target.self, forKey: .target)
         preview = try? container.decode(Preview.self, forKey: .preview)
         files = try container.decodeIfPresent([File].self, forKey: .files)
         bounds = try? container.decode([Double].self, forKey: .bounds)

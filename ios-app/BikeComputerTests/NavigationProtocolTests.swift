@@ -639,6 +639,7 @@ struct NavigationProtocolTests {
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
         testSavedMapArtifactMetadataRoundTrip()
+        testSavedMapRendererCompatibilityPolicy()
         testBackgroundMapUploadRestorationState()
         testBackgroundMapUploadArbitration()
         testPausedMapUploadResumePolicy()
@@ -1298,6 +1299,7 @@ struct NavigationProtocolTests {
                 displayName: nil,
                 localArtifactFilename: "map.bmap",
                 streamFormatVersion: 1,
+                rendererFormatVersion: nil,
                 jobID: "job",
                 serverURLString: "https://maps.example.com",
                 clientInstallationID: "inst_v2_1234567890abcdef1234567890abcdef",
@@ -1698,6 +1700,7 @@ struct NavigationProtocolTests {
             displayName: "China",
             localArtifactFilename: artifactURL.lastPathComponent,
             streamFormatVersion: 1,
+            rendererFormatVersion: 2,
             jobID: "job-id",
             serverURLString: "https://maps.example.com",
             clientInstallationID: "inst_v2_1234567890abcdef1234567890abcdef",
@@ -4225,6 +4228,22 @@ struct NavigationProtocolTests {
         assert((labels["preferredLanguages"] as? [String])?.count ?? 0 <= 3,
                "label-aware requests cap preferred languages")
 
+        let targetThree = request.forDevice(
+            supportsStreetLabels: true,
+            supports3DBuildings: true,
+            firmwareVersion: "0.5.0"
+        )
+        let targetThreeJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(targetThree)
+        ) as! [String: Any]
+        assertEqual(
+            (targetThreeJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
+            3,
+            "3D-building devices request renderer target 3"
+        )
+        assert(targetThreeJSON["labels"] != nil,
+               "renderer target 3 retains the street-label profile")
+
         let legacy = request.forDevice(
             supportsStreetLabels: false,
             firmwareVersion: "0.3.0"
@@ -4236,6 +4255,57 @@ struct NavigationProtocolTests {
                     1, "legacy devices request renderer target 1")
         assert(legacyJSON["labels"] == nil,
                "legacy requests omit unsupported label metadata")
+    }
+
+    static func testSavedMapRendererCompatibilityPolicy() {
+        assert(
+            SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 1,
+                supportsStreetLabels: false,
+                supports3DBuildings: false
+            ),
+            "renderer target 1 remains compatible with legacy firmware"
+        )
+        assert(
+            SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 2,
+                supportsStreetLabels: true,
+                supports3DBuildings: false
+            ),
+            "renderer target 2 requires street-label support"
+        )
+        assert(
+            !SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 2,
+                supportsStreetLabels: false,
+                supports3DBuildings: false
+            ),
+            "renderer target 2 is refused on legacy firmware"
+        )
+        assert(
+            SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 3,
+                supportsStreetLabels: true,
+                supports3DBuildings: true
+            ),
+            "renderer target 3 requires 3D-building support"
+        )
+        assert(
+            !SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 3,
+                supportsStreetLabels: true,
+                supports3DBuildings: false
+            ),
+            "renderer target 3 is refused before transfer to label-only firmware"
+        )
+        assert(
+            !SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 4,
+                supportsStreetLabels: true,
+                supports3DBuildings: true
+            ),
+            "unknown renderer targets fail closed"
+        )
     }
 
     static func testStreetLabelMapContract() {
@@ -4271,6 +4341,40 @@ struct NavigationProtocolTests {
             assert(false, "valid target-2 manifest is accepted: \(error)")
         }
 
+        let buildingManifest = Data((
+            "{\"buildings\":{" +
+            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1," +
+            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0," +
+            "\"localMedianHeightCount\":0,\"recordCount\":1}," +
+            "\"files\":[" +
+            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
+            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
+            "\"mapId\":\"building-map\"," +
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
+            "\"schemaVersion\":1," +
+            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":3," +
+            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"]," +
+            "\"labelProfileVersion\":1,\"renderer\":\"esp32-fmb\"}}"
+        ).utf8)
+        do {
+            let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                buildingManifest,
+                expectedMapID: "building-map",
+                header: BikeMapStreamFormat.Header(
+                    formatVersion: 1,
+                    flags: 0,
+                    manifestBytes: UInt32(buildingManifest.count),
+                    signatureEnvelopeBytes: 80,
+                    fileCount: 2,
+                    payloadBytes: 8
+                )
+            )
+            assertEqual(decoded.target.formatVersion, 3,
+                        "target-3 manifest with exact building summary is accepted")
+        } catch {
+            assert(false, "valid target-3 manifest is accepted: \(error)")
+        }
+
         let nonCanonicalLanguage = Data(
             String(data: manifest, encoding: .utf8)!
                 .replacingOccurrences(of: "zh-Hant", with: "ZH-hant").utf8
@@ -4297,6 +4401,8 @@ struct NavigationProtocolTests {
         }
 
         for (prefix, target, accepted, message) in [
+            (Data([0x46, 0x4d, 0x42, 4]), 3, true, "target 3 accepts FMB v4"),
+            (Data([0x46, 0x4d, 0x42, 3]), 3, false, "target 3 rejects FMB v3"),
             (Data([0x46, 0x4d, 0x42, 3]), 2, true, "target 2 accepts FMB v3"),
             (Data([0x46, 0x4d, 0x42, 2]), 2, false, "target 2 rejects FMB v2"),
             (Data([0x46, 0x4d, 0x42, 3]), 1, false, "target 1 rejects FMB v3"),
@@ -5556,6 +5662,7 @@ struct NavigationProtocolTests {
                         displayName: userDefinedName,
                         localArtifactFilename: legacyURL.lastPathComponent,
                         streamFormatVersion: nil,
+                        rendererFormatVersion: nil,
                         jobID: "older-job",
                         serverURLString: serverURL,
                         clientInstallationID: credential.clientInstallationId,
@@ -7437,6 +7544,7 @@ struct NavigationProtocolTests {
                 displayName: "Map 1",
                 localArtifactFilename: streamURL.lastPathComponent,
                 streamFormatVersion: 1,
+                rendererFormatVersion: nil,
                 jobID: "job-1",
                 serverURLString: "https://maps.example",
                 clientInstallationID: "installation",
@@ -9030,6 +9138,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationCapabilityMask, 1 << 9, "CAP2 bit 9 advertises bird's-eye Map + Navigation")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveCapabilityMask, 1 << 10, "CAP2 bit 10 advertises bird's-eye perspective")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask, 1 << 11, "CAP2 bit 11 advertises stronger bird's-eye perspectives")
+        assertEqual(DeviceBLEProtocol.osm3DBuildingsCapabilityMask, 1 << 12, "CAP2 bit 12 advertises OSM 3D buildings")
         assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 10, "capability version switches to CAP2 without colliding with legacy versions 7 through 9")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
@@ -10658,7 +10767,7 @@ struct NavigationProtocolTests {
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0, 0x0F, 0, 0])
+            Data([1, 0, 0x1F, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2),
                "CAP2 notification should be consumed")
         assert(manager.supportsStreetLabels,
@@ -10669,6 +10778,8 @@ struct NavigationProtocolTests {
                "CAP2 bit 10 preserves bird's-eye perspective support")
         assert(manager.supportsBirdsEyeMapNavigationStrongerPerspective,
                "CAP2 bit 11 preserves stronger bird's-eye perspective support")
+        assert(manager.supports3DBuildings,
+               "CAP2 bit 12 enables OSM 3D-building maps and controls")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 
@@ -12678,8 +12789,8 @@ struct NavigationProtocolTests {
                     "fresh Map + Navigation profiles default to 4 px streets")
         assertEqual(freshManager.mapPlusNavigationPositionMarkerScale, 2,
                     "fresh Map + Navigation profiles keep a 2x position marker")
-        assert(!freshManager.mapPlusNavigationShowBuildings,
-               "fresh Map + Navigation profiles hide buildings")
+        assert(freshManager.mapPlusNavigationShowBuildings,
+               "fresh Map + Navigation profiles show buildings")
         assert(!freshManager.mapPlusNavigationShowGreenSpace,
                "fresh Map + Navigation profiles hide green space")
         assert(!freshManager.mapPlusNavigationShowPaths,
@@ -12761,8 +12872,8 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation visibility is sent after capability negotiation")
         assert(freshDetailPacket != nil,
                "fresh Map + Navigation detail is sent after capability negotiation")
-        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x1038,
-                    "fresh Map + Navigation sends only major roads, local roads, and water")
+        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x1039,
+                    "fresh Map + Navigation sends buildings, major roads, local roads, and water")
         assertEqual(readInt32LE(freshDetailPacket!, offset: 5), 0,
                     "fresh Map + Navigation sends low detail")
         assertEqual(readInt32LE(freshRoutePacket!, offset: 5), 15,

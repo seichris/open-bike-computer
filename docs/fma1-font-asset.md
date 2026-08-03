@@ -1,6 +1,6 @@
 # FMA1 Map Font Asset Format
 
-FMA1 stores the map-specific glyph subset referenced by FMB v3 blocks. A
+FMA1 stores the map-specific glyph subset referenced by FMB v3/v4 blocks. A
 renderer-target-2 map contains exactly one signed asset at:
 
 ```text
@@ -102,7 +102,7 @@ chooses halo radius/opacity at runtime before drawing fill over the halo.
 
 - At most 8,192 distinct glyph IDs and 24,576 glyph/size records.
 - Glyph bitmaps are decoded into a 512-KiB bounded LRU, never all at once.
-- The shared profile fingerprint in every FMB v3 road-label section must match.
+- The shared profile fingerprint in every FMB v3/v4 road-label section must match.
 - Every shaped-run glyph ID/size pair must resolve.
 - The signed map manifest SHA-256 authenticates the complete FMA file, but the
   device still performs all structural and cross-file validation before atomic

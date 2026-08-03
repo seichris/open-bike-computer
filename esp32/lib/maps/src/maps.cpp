@@ -51,6 +51,7 @@ const char *TAG PROGMEM = "Maps";
 #include <dirent.h>
 #include <limits>
 #include <new>
+#include <numeric>
 #include <sys/stat.h>
 #include <unordered_map>
 
@@ -1467,6 +1468,18 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
   }
+  if (version >= 4) {
+    std::string buildingError;
+    if (!map_building_block::decode(
+            reinterpret_cast<const uint8_t *>(file), fileSize,
+            mblock->buildingData, &buildingError)) {
+      ESP_LOGE(TAG, "Could not decode FMB v4 buildings: %s",
+               buildingError.c_str());
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
+  }
 
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
@@ -1817,6 +1830,9 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     if (Maps::isMapFound) {
       newBlock->inView = true;
       newBlock->offset = req;
+      newBlock->mercatorScale = map_projection::mercatorScaleForLatitude(
+          Maps::mercatorY2lat(static_cast<double>(req.y) +
+                              (1 << (MAPBLOCK_SIZE_BITS - 1))));
       memCache.blocks.push_back(newBlock);
       loadedBlocks++;
 
@@ -2540,6 +2556,237 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 (unsigned long)polygonMs, (unsigned long)lineMs,
                 (unsigned long)(MAPIO_TIME_MS() - blockTime));
     }
+    struct BuildingRenderItem {
+      MapBlock *block = nullptr;
+      const map_building_block::Building *building = nullptr;
+      double depth = 0.0;
+      uint16_t recordIndex = 0;
+    };
+    std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
+        buildingQueue;
+    const bool buildingsVisible =
+        (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
+    bool extrudeBuildings =
+        buildingsVisible && mapNavigationActive && projection.isBirdsEye() &&
+        mapRenderSettings.mapNavigation3DBuildingsEnabled;
+    size_t buildingPointCount = 0;
+    bool buildingBudgetFallback = false;
+    if (buildingsVisible) {
+      for (MapBlock *block : memCache.blocks) {
+        if (!block->inView || block->formatVersion < 4)
+          continue;
+        for (size_t recordIndex = 0;
+             recordIndex < block->buildingData.buildings.size();
+             ++recordIndex) {
+          const auto &building = block->buildingData.buildings[recordIndex];
+          for (const auto &ring : building.rings)
+            buildingPointCount += ring.points.size();
+          const map_transform::WorldPoint center{
+              static_cast<double>(block->offset.x) +
+                  (static_cast<double>(building.minX) + building.maxX) / 2.0,
+              static_cast<double>(block->offset.y) +
+                  (static_cast<double>(building.minY) + building.maxY) / 2.0};
+          buildingQueue.push_back(
+              {block, &building, projection.groundForWorld(center).forward,
+               static_cast<uint16_t>(recordIndex)});
+        }
+      }
+      std::sort(
+          buildingQueue.begin(), buildingQueue.end(),
+          [](const BuildingRenderItem &left, const BuildingRenderItem &right) {
+            if (left.depth != right.depth)
+              return left.depth > right.depth;
+            if (left.block->offset.y != right.block->offset.y)
+              return left.block->offset.y < right.block->offset.y;
+            if (left.block->offset.x != right.block->offset.x)
+              return left.block->offset.x < right.block->offset.x;
+            return left.recordIndex < right.recordIndex;
+          });
+      constexpr size_t kMaximumExtrudedBuildingRecords = 1024;
+      constexpr size_t kMaximumExtrudedBuildingPoints = 24576;
+      buildingBudgetFallback =
+          extrudeBuildings &&
+          (buildingQueue.size() > kMaximumExtrudedBuildingRecords ||
+           buildingPointCount > kMaximumExtrudedBuildingPoints);
+      if (buildingBudgetFallback)
+        extrudeBuildings = false;
+    }
+
+    const uint16_t roofColor = lv_color_to_u16(lv_color_hex(0xB9B2A8));
+    const uint16_t wallLight = lv_color_to_u16(lv_color_hex(0x958E84));
+    const uint16_t wallMiddle = lv_color_to_u16(lv_color_hex(0x827B72));
+    const uint16_t wallDark = lv_color_to_u16(lv_color_hex(0x6D665E));
+    const uint16_t courtyardColor =
+        lv_color_to_u16(lv_color_hex(BACKGROUND_COLOR));
+    Polygon buildingPolygon;
+    const auto fillScreenPolygon = [&](const auto &points,
+                                       uint16_t color) -> bool {
+      if (points.size() < 3)
+        return true;
+      buildingPolygon.points.clear();
+      buildingPolygon.color = color;
+      int16_t minX = 32767, minY = 32767, maxX = -32768, maxY = -32768;
+      for (const Point16 &point : points) {
+        buildingPolygon.points.push_back(point);
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+      }
+      buildingPolygon.points.push_back(points.front());
+      buildingPolygon.bbox.min = Point16(minX, minY);
+      buildingPolygon.bbox.max = Point16(maxX, maxY);
+      return Maps::fillPolygon(buildingPolygon, canvas);
+    };
+    std::vector<Point16, PsramAllocator<Point16>> screenRing;
+    uint32_t renderedBuildings = 0;
+    for (const auto &item : buildingQueue) {
+      if (shouldInterruptMapRenderForScreenCycle())
+        return false;
+      const double minimumHeight =
+          extrudeBuildings ? item.building->minimumHeightDm / 10.0 : 0.0;
+      const double height =
+          extrudeBuildings ? item.building->heightDm / 10.0 : 0.0;
+      if (extrudeBuildings) {
+        for (const auto &ring : item.building->rings) {
+          for (size_t index = 0; index < ring.points.size(); ++index) {
+            if (index >= ring.walls.size() || ring.walls[index] == 0)
+              continue;
+            const auto &start = ring.points[index];
+            const auto &end = ring.points[(index + 1U) % ring.points.size()];
+            auto startGround = projection.groundForWorld(
+                {static_cast<double>(item.block->offset.x + start.x),
+                 static_cast<double>(item.block->offset.y + start.y)});
+            auto endGround = projection.groundForWorld(
+                {static_cast<double>(item.block->offset.x + end.x),
+                 static_cast<double>(item.block->offset.y + end.y)});
+            if (!projection.clipSegmentToNearPlane(startGround, endGround))
+              continue;
+            const auto startBase =
+                projection.projectElevatedGround(
+                    startGround, minimumHeight, item.block->mercatorScale);
+            const auto endBase =
+                projection.projectElevatedGround(
+                    endGround, minimumHeight, item.block->mercatorScale);
+            const auto endTop = projection.projectElevatedGround(
+                endGround, height, item.block->mercatorScale);
+            const auto startTop =
+                projection.projectElevatedGround(
+                    startGround, height, item.block->mercatorScale);
+            if (!startBase.valid || !endBase.valid || !endTop.valid ||
+                !startTop.valid)
+              continue;
+            screenRing = {
+                Point16(map_transform::quantizePixel(startBase.x),
+                        map_transform::quantizePixel(startBase.y)),
+                Point16(map_transform::quantizePixel(endBase.x),
+                        map_transform::quantizePixel(endBase.y)),
+                Point16(map_transform::quantizePixel(endTop.x),
+                        map_transform::quantizePixel(endTop.y)),
+                Point16(map_transform::quantizePixel(startTop.x),
+                        map_transform::quantizePixel(startTop.y))};
+            const double edgeX = endBase.x - startBase.x;
+            const double edgeY = endBase.y - startBase.y;
+            const uint16_t wallColor =
+                std::fabs(edgeX) <= std::fabs(edgeY)
+                    ? wallMiddle
+                    : (edgeX > 0.0 ? wallLight : wallDark);
+            if (!fillScreenPolygon(screenRing, wallColor))
+              return false;
+          }
+        }
+      }
+      for (const auto &ring : item.building->rings) {
+        std::vector<map_projection::GroundPoint,
+                    PsramAllocator<map_projection::GroundPoint>>
+            ground;
+        std::vector<map_projection::GroundPoint,
+                    PsramAllocator<map_projection::GroundPoint>>
+            clipped;
+        ground.reserve(ring.points.size());
+        for (const auto &point : ring.points)
+          ground.push_back(projection.groundForWorld(
+              {static_cast<double>(item.block->offset.x + point.x),
+               static_cast<double>(item.block->offset.y + point.y)}));
+        const auto *roof = &ground;
+        if (projection.isBirdsEye()) {
+          map_projection::clipPolygonToNearPlane(projection, ground, clipped);
+          roof = &clipped;
+        }
+        screenRing.clear();
+        for (const auto &point : *roof) {
+          const auto projected = projection.projectElevatedGround(
+              point, height, item.block->mercatorScale);
+          if (projected.valid)
+            screenRing.push_back(
+                Point16(map_transform::quantizePixel(projected.x),
+                        map_transform::quantizePixel(projected.y)));
+        }
+        if (!fillScreenPolygon(screenRing,
+                               ring.hole ? courtyardColor : roofColor))
+          return false;
+      }
+      ++renderedBuildings;
+    }
+
+    // Building roofs and walls are composed across all loaded blocks. Redraw
+    // roads once above them so navigation-relevant geometry remains legible.
+    if (renderedBuildings != 0) {
+      for (MapBlock *block : memCache.blocks) {
+        if (!block->inView)
+          continue;
+        ScreenMapRenderSettings blockStyle = style;
+        blockStyle.visibilityMask =
+            map_profile_protocol::visibilityMaskForMapVersion(
+                style.visibilityMask, block->formatVersion);
+        const BBox screenBbox = viewPort.bbox - block->offset;
+        for (const auto &line : block->polylines) {
+          if (zoom > line.maxZoom || !line.bbox.intersects(screenBbox) ||
+              line.points.size() < 2 ||
+              !isLineVisible(line.typeId, line.color, line.width, blockStyle))
+            continue;
+          const uint16_t color = map_line_style::displayColor(
+              line.typeId, line.color, line.width, mapNavigationActive);
+          const uint8_t baseWidth =
+              shouldBoostLineWidth(line.typeId, line.width)
+                  ? blockStyle.streetLineWidth
+                  : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
+          for (size_t index = 1; index < line.points.size(); ++index) {
+            auto start = projection.groundForWorld(
+                {static_cast<double>(block->offset.x + line.points[index - 1].x),
+                 static_cast<double>(block->offset.y + line.points[index - 1].y)});
+            auto end = projection.groundForWorld(
+                {static_cast<double>(block->offset.x + line.points[index].x),
+                 static_cast<double>(block->offset.y + line.points[index].y)});
+            if (!projection.clipSegmentToNearPlane(start, end))
+              continue;
+            const auto p1 = projection.projectGround(start);
+            const auto p2 = projection.projectGround(end);
+            if (!p1.valid || !p2.valid)
+              continue;
+            Maps::drawLine(
+                canvas, map_transform::quantizePixel(p1.x),
+                map_transform::quantizePixel(p1.y),
+                map_transform::quantizePixel(p2.x),
+                map_transform::quantizePixel(p2.y), color,
+                projection.scaledLineWidth(
+                    baseWidth, (p1.depthScale + p2.depthScale) / 2.0, 24));
+          }
+        }
+      }
+    }
+    MAPIO_LOG("MAPIO: buildings records=%u points=%u extruded=%u "
+              "budgetFallback=%u decodedBytes=%u\n",
+              (unsigned)buildingQueue.size(),
+              (unsigned)buildingPointCount,
+              extrudeBuildings ? (unsigned)renderedBuildings : 0U,
+              buildingBudgetFallback ? 1U : 0U,
+              (unsigned)std::accumulate(
+                  memCache.blocks.begin(), memCache.blocks.end(), size_t{0},
+                  [](size_t total, const MapBlock *block) {
+                    return total + block->buildingData.decodedBytes();
+                  }));
+
     if (drawLabels &&
         !drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
       return false;

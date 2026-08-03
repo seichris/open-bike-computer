@@ -21,6 +21,11 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     osmium-tool \
     software-properties-common \
     build-essential \
+    cmake \
+    libbz2-dev \
+    libexpat1-dev \
+    python3-dev \
+    zlib1g-dev \
     gdal-bin \
-  && pip install pillow shapely "matplotlib<3.6" pyyaml uharfbuzz freetype-py \
+  && pip install pillow shapely "matplotlib<3.6" pyyaml uharfbuzz freetype-py "osmium==4.3.1" \
   && rm -rf /var/lib/apt/lists/*

@@ -14,6 +14,7 @@ from .models import Bounds, GeometryMode, MapJob
 MAP_BLOCK_SIZE_METERS = 1 << 12
 MAP_FOLDER_BLOCKS = 1 << 4
 MAP_REUSE_SCHEMA_VERSION = 2
+BUILDING_SOURCE_HALO_METERS = 8192
 EARTH_RADIUS_METERS = 6_378_137
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -133,6 +134,20 @@ def aligned_processing_bounds(job: MapJob) -> Bounds:
     if job.geometry.mode != GeometryMode.CUSTOM_BBOX:
         return job.geometry.bounds
     min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
+    return Bounds(
+        _x_to_lon(min_x),
+        _y_to_lat(min_y),
+        _x_to_lon(max_x),
+        _y_to_lat(max_y),
+    )
+
+
+def expanded_building_source_bounds(bounds: Bounds) -> Bounds:
+    """Expand final block bounds for complete boundary buildings and local medians."""
+    min_x = _lon_to_x(bounds.min_lon) - BUILDING_SOURCE_HALO_METERS
+    min_y = _lat_to_y(bounds.min_lat) - BUILDING_SOURCE_HALO_METERS
+    max_x = _lon_to_x(bounds.max_lon) + BUILDING_SOURCE_HALO_METERS
+    max_y = _lat_to_y(bounds.max_lat) + BUILDING_SOURCE_HALO_METERS
     return Bounds(
         _x_to_lon(min_x),
         _y_to_lat(min_y),

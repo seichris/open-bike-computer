@@ -86,6 +86,7 @@ int main() {
   TestProfile loadedNavigation;
   map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
   assert(map_profile_persistence::loadBirdsEyeEnabled(freshStore));
+  assert(map_profile_persistence::load3DBuildingsEnabled(freshStore));
   assert(map_profile_persistence::loadBirdsEyePerspective(freshStore) ==
          MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE);
   assert(loadedMap.detailLevel == MAP_DEFAULT_DETAIL_LEVEL);
@@ -181,6 +182,10 @@ int main() {
   assert(!map_profile_persistence::loadBirdsEyeEnabled(independentStore));
   map_profile_persistence::persistBirdsEyeEnabled(independentStore, true);
   assert(map_profile_persistence::loadBirdsEyeEnabled(independentStore));
+  map_profile_persistence::persist3DBuildingsEnabled(independentStore, false);
+  assert(!map_profile_persistence::load3DBuildingsEnabled(independentStore));
+  map_profile_persistence::persist3DBuildingsEnabled(independentStore, true);
+  assert(map_profile_persistence::load3DBuildingsEnabled(independentStore));
   map_profile_persistence::persistBirdsEyePerspective(independentStore, 0);
   assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
          0);

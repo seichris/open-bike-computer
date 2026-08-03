@@ -5,9 +5,10 @@ from pathlib import Path
 from map_platform.map_artifact_validation import (
     validate_fma1,
     validate_fmb3,
+    validate_fmb4,
     validate_renderer_artifacts,
 )
-from tests.map_label_fixtures import one_label_fma1, one_label_fmb3
+from tests.map_label_fixtures import one_building_fmb4, one_label_fma1, one_label_fmb3
 
 
 class MapArtifactValidationTests(unittest.TestCase):
@@ -61,6 +62,35 @@ class MapArtifactValidationTests(unittest.TestCase):
                     [{"path": block_relative}, {"path": font_relative}],
                     2,
                 )
+
+    def test_fmb4_building_contract_and_target_three_composition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_id = "fixture-map"
+            block_relative = f"VECTMAP/{map_id}/+0000+0000/1.fmb"
+            font_relative = f"VECTMAP/{map_id}/assets/street-labels.fma"
+            block = root / block_relative
+            font = root / font_relative
+            block.parent.mkdir(parents=True)
+            font.parent.mkdir(parents=True)
+            block.write_bytes(one_building_fmb4())
+            font.write_bytes(one_label_fma1())
+
+            metadata = validate_fmb4(block)
+            self.assertEqual(metadata.building_records, 1)
+            self.assertEqual(metadata.building_provenance, (1, 0, 0, 0, 0))
+            validate_renderer_artifacts(
+                root,
+                map_id,
+                [{"path": block_relative}, {"path": font_relative}],
+                3,
+            )
+
+            corrupted = bytearray(block.read_bytes())
+            corrupted[-1] = 0x8F
+            block.write_bytes(corrupted)
+            with self.assertRaisesRegex(ValueError, "padding|CRC"):
+                validate_fmb4(block)
 
 
 if __name__ == "__main__":

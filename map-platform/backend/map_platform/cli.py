@@ -9,6 +9,7 @@ from pathlib import Path
 from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
+from .map_buildings import building_target3_generation_enabled
 from .map_labels import label_target2_generation_enabled
 from .map_signing import load_map_artifact_signer_from_environment
 from .map_stream_build_identity import (
@@ -342,6 +343,7 @@ def main() -> int:
         source_index,
         store,
         label_target2_enabled=label_target2_generation_enabled(),
+        building_target3_enabled=building_target3_generation_enabled(),
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 

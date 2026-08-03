@@ -1218,6 +1218,7 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var displayName: String?
     let localArtifactFilename: String
     let streamFormatVersion: Int?
+    let rendererFormatVersion: Int?
     let jobID: String?
     let serverURLString: String?
     let clientInstallationID: String?
@@ -1237,6 +1238,25 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var lastTransferOutcome: String?
     var userDefinedDisplayName: Bool? = nil
     var downloadReceiptID: String? = nil
+}
+
+nonisolated enum SavedMapRendererCompatibilityPolicy {
+    static func isCompatible(
+        rendererFormatVersion: Int?,
+        supportsStreetLabels: Bool,
+        supports3DBuildings: Bool
+    ) -> Bool {
+        switch rendererFormatVersion {
+        case nil, 1:
+            return true
+        case 2:
+            return supportsStreetLabels
+        case 3:
+            return supports3DBuildings
+        default:
+            return false
+        }
+    }
 }
 
 nonisolated enum SavedMapArtifactMetadataStore {
@@ -1697,6 +1717,7 @@ final class OfflineMapManager: ObservableObject {
                 .customBBox(bounds)
                 .forDevice(
                     supportsStreetLabels: bleManager.supportsStreetLabels,
+                    supports3DBuildings: bleManager.supports3DBuildings,
                     firmwareVersion: bleManager.firmwareVersion
                 )
                 .identified(
@@ -2761,6 +2782,7 @@ final class OfflineMapManager: ObservableObject {
         downloadByteProgress = nil
         var temporaryURL: URL?
         var artifactDisplayName: String?
+        var rendererFormatVersion: Int?
         let trustStore = mapStreamTrustStore
         do {
             let constraints = try OfflineMapDownloadConstraints.mapArtifact(primaryArtifact)
@@ -2771,15 +2793,16 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             let validationTask = Task.detached(priority: .userInitiated) {
-                () throws -> String? in
+                () throws -> (String?, Int?) in
                 switch choice {
                 case .bikeMapStream(let artifact, _):
-                    return try BikeMapStreamArtifactValidator.validate(
+                    let verified = try BikeMapStreamArtifactValidator.validate(
                         url: downloadedURL,
                         artifact: artifact,
                         expectedMapID: mapId,
                         trustStore: trustStore
-                    ).displayName
+                    )
+                    return (verified.displayName, verified.rendererFormatVersion)
                 case .legacyZip(let artifact):
                     if let artifact {
                         try OfflineMapArtifactFileValidator.validate(
@@ -2789,14 +2812,17 @@ final class OfflineMapManager: ObservableObject {
                     }
                     let archive = try OfflineMapPackArchive(url: downloadedURL)
                     try archive.validate(expectedMapId: mapId)
-                    return try archive.manifest().displayName
+                    let manifest = try archive.manifest()
+                    return (manifest.displayName, manifest.target?.formatVersion)
                 }
             }
-            artifactDisplayName = try await withTaskCancellationHandler {
+            let validation = try await withTaskCancellationHandler {
                 try await validationTask.value
             } onCancel: {
                 validationTask.cancel()
             }
+            artifactDisplayName = validation.0
+            rendererFormatVersion = validation.1
             try Task.checkCancellation()
         } catch {
             if let temporaryURL {
@@ -2841,6 +2867,7 @@ final class OfflineMapManager: ObservableObject {
             displayName: displayName,
             localArtifactFilename: destination.lastPathComponent,
             streamFormatVersion: fileExtension == "bmap" ? 1 : nil,
+            rendererFormatVersion: rendererFormatVersion,
             jobID: job.jobId,
             serverURLString: client.baseURL.absoluteString,
             clientInstallationID: client.clientInstallationId,
@@ -3178,6 +3205,16 @@ final class OfflineMapManager: ObservableObject {
             resumeProgressFloor = min(max(lastVisibleProgress, 0), 100)
         } else {
             resumeProgressFloor = 0
+        }
+        if let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+           !SavedMapRendererCompatibilityPolicy.isCompatible(
+               rendererFormatVersion: metadata.rendererFormatVersion,
+               supportsStreetLabels: bleManager.supportsStreetLabels,
+               supports3DBuildings: bleManager.supports3DBuildings
+           ) {
+            throw OfflineMapPlatformError.invalidPack(
+                "This saved map is not compatible with the connected device. Regenerate it for this firmware."
+            )
         }
         statusMessage = "preparing transfer"
         transferProgress = 0
@@ -3673,6 +3710,7 @@ final class OfflineMapManager: ObservableObject {
                 displayName: metadata.displayName,
                 localArtifactFilename: destination.lastPathComponent,
                 streamFormatVersion: nil,
+                rendererFormatVersion: metadata.rendererFormatVersion,
                 jobID: jobID,
                 serverURLString: serverURLString,
                 clientInstallationID: ownerInstallationID,
