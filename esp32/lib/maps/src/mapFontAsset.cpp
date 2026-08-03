@@ -3,9 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <sys/stat.h>
+
+#if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
+#include <esp_heap_caps.h>
+#endif
 
 namespace map_font_asset {
 namespace {
@@ -28,6 +34,27 @@ uint32_t le32(const uint8_t *bytes) {
 
 bool readExact(FILE *file, void *buffer, size_t size) {
   return size == 0 || std::fread(buffer, 1, size, file) == size;
+}
+
+constexpr size_t kValidationBufferBytes = 16U * 1024U;
+
+uint8_t *allocateValidationBuffer() {
+#if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
+  return static_cast<uint8_t *>(heap_caps_malloc(
+      kValidationBufferBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+  return static_cast<uint8_t *>(std::malloc(kValidationBufferBytes));
+#endif
+}
+
+void freeValidationBuffer(uint8_t *buffer) {
+  if (buffer == nullptr)
+    return;
+#if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
+  heap_caps_free(buffer);
+#else
+  std::free(buffer);
+#endif
 }
 
 } // namespace
@@ -109,14 +136,19 @@ bool Asset::open(const std::string &path) {
     return false;
 
   map_font_asset_format::StreamValidator validator;
-  std::array<uint8_t, 16U * 1024U> validationBuffer{};
+  std::unique_ptr<uint8_t, decltype(&freeValidationBuffer)> validationBuffer(
+      allocateValidationBuffer(), &freeValidationBuffer);
+  if (!validationBuffer) {
+    std::fclose(candidate);
+    return false;
+  }
   bool valid = true;
   while (valid) {
-    const size_t bytes =
-        std::fread(validationBuffer.data(), 1, validationBuffer.size(), candidate);
-    if (bytes != 0 && !validator.feed(validationBuffer.data(), bytes))
+    const size_t bytes = std::fread(validationBuffer.get(), 1,
+                                    kValidationBufferBytes, candidate);
+    if (bytes != 0 && !validator.feed(validationBuffer.get(), bytes))
       valid = false;
-    if (bytes < validationBuffer.size()) {
+    if (bytes < kValidationBufferBytes) {
       if (std::ferror(candidate) != 0)
         valid = false;
       break;

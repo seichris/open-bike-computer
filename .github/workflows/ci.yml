@@ -295,7 +295,7 @@ jobs:
             tools/tests/test_map_label_block.cpp \
             -o /tmp/test_map_label_block
           /tmp/test_map_label_block
-          g++ -std=c++17 -Wall -Wextra -Werror \
+          g++ -std=c++17 -Wall -Wextra -Werror -Wframe-larger-than=4096 \
             lib/maps/src/mapFontAssetFormat.cpp \
             lib/maps/src/mapFontAsset.cpp \
             tools/tests/test_map_font_asset.cpp \
