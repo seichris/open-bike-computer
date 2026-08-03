@@ -1064,6 +1064,7 @@ def _cached_defaults_match(
         return False
     return (
         manifest.get("schema") == CACHE_SCHEMA
+        and manifest.get("environment") == environment
         and "environmentSdkconfigSha256" in manifest
         and "managedComponentsSha256" in manifest
         and "libraryDependenciesSha256" in manifest
@@ -1294,6 +1295,7 @@ def record_generated_sdkconfig_defaults(
     firmware_artifacts = _firmware_artifact_hashes(project_dir, environment)
     manifest = {
         "schema": CACHE_SCHEMA,
+        "environment": environment,
         "sourceIdentity": source_identity,
         "sourceDateEpoch": source_date_epoch,
         "buildTimestamp": build_timestamp,

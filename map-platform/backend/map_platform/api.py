@@ -23,6 +23,7 @@ from .geofabrik_sources import GeofabrikSourceProvider
 from .installations import InstallationCredentialError, InstallationCredentialStore
 from .jobs import JobClaimError, JobStore, MapJobService
 from .limits import JobLimits
+from .map_labels import label_target2_generation_enabled
 from .map_signing import map_stream_generation_enabled
 from .map_stream_hardware_requirements import load_hardware_requirements
 from .map_stream_rollout import (
@@ -181,6 +182,7 @@ def create_app():
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         JobStore(data_root / "jobs"),
         limits=limits,
+        label_target2_enabled=label_target2_generation_enabled(),
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(

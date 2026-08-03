@@ -152,6 +152,12 @@ path passes the rollout acceptance gate. When it is set to `1`, missing or
 invalid signing configuration fails closed; the backend never emits an unsigned
 stream artifact.
 
+Street-label target-2 job creation has an independent fail-closed gate:
+`MAP_PLATFORM_LABEL_TARGET2_ENABLED=0` is the default. Enable it only in the
+hardware-validation environment, then for approved production identities after
+both Waveshare targets pass the target-2 acceptance matrix. Disabling the gate
+does not remove or invalidate existing artifacts; it prevents new target-2 jobs.
+
 Signed artifact generation and client delivery are separate controls. The API
 defaults `MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE` to `disabled`. Use `allowlist`
 with `MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST` for exact registered hardware

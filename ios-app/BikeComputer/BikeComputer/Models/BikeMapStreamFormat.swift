@@ -344,11 +344,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
     private static let maximumPathComponentBytes = 64
     private static let maximumRelativePathBytes = 202
     private static let maximumBlockBytes = 2 * 1024 * 1024
+    private static let maximumFontAssetBytes = 16 * 1024 * 1024
     private static let ioChunkBytes = 64 * 1024
     private static let lowercaseSHA256Pattern = "^[0-9a-f]{64}$"
     private static let safeMapIDPattern = "^[A-Za-z0-9._-]+$"
     private static let mapPathPattern =
-        "^VECTMAP/[A-Za-z0-9._-]+/[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]$"
+        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]|assets/street-labels\\.fma)$"
 
     struct Manifest: Decodable {
         struct Producer: Decodable {
@@ -359,6 +360,9 @@ nonisolated enum BikeMapStreamArtifactValidator {
         struct Target: Decodable {
             let renderer: String
             let formatVersion: Int
+            let labelProfileVersion: Int?
+            let labelLanguages: [String]?
+            let internationalFallback: String?
         }
 
         struct File: Decodable {
@@ -552,15 +556,24 @@ nonisolated enum BikeMapStreamArtifactValidator {
         for file in manifest.files {
             var fileHasher = SHA256()
             var remaining = file.bytes
+            var filePrefix = Data()
             while remaining > 0 {
                 let chunkBytes = Int(min(Int64(ioChunkBytes), remaining))
                 let chunk = try readExactly(chunkBytes)
+                if filePrefix.count < 4 {
+                    filePrefix.append(chunk.prefix(4 - filePrefix.count))
+                }
                 fileHasher.update(data: chunk)
                 remaining -= Int64(chunk.count)
             }
             guard hex(fileHasher.finalize()) == file.sha256 else {
                 throw BikeMapStreamFormatError.fileHashMismatch(file.path)
             }
+            try validateFileHeader(
+                filePrefix,
+                path: file.path,
+                rendererFormatVersion: manifest.target.formatVersion
+            )
         }
         guard consumedBytes == artifact.bytes else {
             throw BikeMapStreamFormatError.invalidContentLength
@@ -620,7 +633,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
         guard isSafeMapID(manifest.mapId), manifest.mapId == expectedMapID else {
             throw BikeMapStreamFormatError.invalidManifest("map ID does not match")
         }
-        guard manifest.target.renderer == renderer, manifest.target.formatVersion == 1 else {
+        guard manifest.target.renderer == renderer,
+              manifest.target.formatVersion == 1 || manifest.target.formatVersion == 2 else {
             throw BikeMapStreamFormatError.invalidManifest("renderer target is unsupported")
         }
         guard !manifest.files.isEmpty,
@@ -629,6 +643,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
         }
 
         var payloadBytes: Int64 = 0
+        var fontAssetCount = 0
+        var legacyTextBlockCount = 0
         var previousPath: String?
         for file in manifest.files {
             guard isSafeMapPath(file.path, mapID: manifest.mapId) else {
@@ -638,9 +654,14 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 throw BikeMapStreamFormatError.invalidManifest("map file paths are not unique and sorted")
             }
             previousPath = file.path
-            guard file.bytes > 0, file.bytes <= Int64(maximumBlockBytes) else {
+            let isFontAsset = file.path ==
+                "VECTMAP/\(manifest.mapId)/assets/street-labels.fma"
+            guard file.bytes > 0,
+                  file.bytes <= Int64(isFontAsset ? maximumFontAssetBytes : maximumBlockBytes) else {
                 throw BikeMapStreamFormatError.invalidManifest("map file size is invalid")
             }
+            if isFontAsset { fontAssetCount += 1 }
+            if file.path.hasSuffix(".fmp") { legacyTextBlockCount += 1 }
             let (sum, overflow) = payloadBytes.addingReportingOverflow(file.bytes)
             guard !overflow, sum <= Int64(BikeMapStreamFormat.maximumPayloadBytes) else {
                 throw BikeMapStreamFormatError.invalidManifest("payload size overflows limits")
@@ -649,6 +670,27 @@ nonisolated enum BikeMapStreamArtifactValidator {
             guard isLowercaseSHA256(file.sha256) else {
                 throw BikeMapStreamFormatError.invalidManifest("map file SHA-256 is invalid")
             }
+        }
+        if manifest.target.formatVersion == 2 {
+            guard fontAssetCount == 1, legacyTextBlockCount == 0,
+                  manifest.target.labelProfileVersion == 1,
+                  let languages = manifest.target.labelLanguages,
+                  languages.count <= 3,
+                  Set(languages).count == languages.count,
+                  languages.allSatisfy(isCanonicalLanguageTag),
+                  let fallback = manifest.target.internationalFallback,
+                  isCanonicalLanguageTag(fallback) else {
+                throw BikeMapStreamFormatError.invalidManifest(
+                    "renderer target 2 label metadata is invalid"
+                )
+            }
+        } else if fontAssetCount != 0 ||
+                    manifest.target.labelProfileVersion != nil ||
+                    manifest.target.labelLanguages != nil ||
+                    manifest.target.internationalFallback != nil {
+            throw BikeMapStreamFormatError.invalidManifest(
+                "renderer target 1 contains label data"
+            )
         }
         guard UInt64(payloadBytes) == header.payloadBytes else {
             throw BikeMapStreamFormatError.invalidManifest("payload size does not match")
@@ -678,6 +720,59 @@ nonisolated enum BikeMapStreamArtifactValidator {
 
     private static func isLowercaseSHA256(_ value: String) -> Bool {
         value.range(of: lowercaseSHA256Pattern, options: .regularExpression) != nil
+    }
+
+    static func validateFileHeader(
+        _ prefix: Data,
+        path: String,
+        rendererFormatVersion: Int
+    ) throws {
+        if path.hasSuffix(".fmb") {
+            guard prefix.count == 4,
+                  prefix.prefix(3) == Data("FMB".utf8) else {
+                throw BikeMapStreamFormatError.invalidManifest(
+                    "binary map block header does not match its target"
+                )
+            }
+            let expectedVersions: Set<UInt8> =
+                rendererFormatVersion == 2 ? [3] : [1, 2]
+            guard expectedVersions.contains(prefix[3]) else {
+                throw BikeMapStreamFormatError.invalidManifest(
+                    "binary map block version does not match its target"
+                )
+            }
+        } else if path.hasSuffix(".fma") && prefix != Data("FMA1".utf8) {
+            throw BikeMapStreamFormatError.invalidManifest(
+                "street-label font asset header is invalid"
+            )
+        }
+    }
+
+    private static func isCanonicalLanguageTag(_ value: String) -> Bool {
+        guard let ascii = value.data(using: .ascii),
+              !ascii.isEmpty, ascii.count <= 35 else { return false }
+        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+        guard (1...4).contains(parts.count),
+              (2...8).contains(parts[0].count),
+              parts[0].allSatisfy({ $0.isASCII && $0.isLowercase }) else {
+            return false
+        }
+        for part in parts.dropFirst() {
+            guard (1...8).contains(part.count),
+                  part.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+                return false
+            }
+            if part.count == 4 && part.allSatisfy(\.isLetter) {
+                guard part.first?.isUppercase == true,
+                      part.dropFirst().allSatisfy(\.isLowercase) else { return false }
+            } else if part.count == 2 && part.allSatisfy(\.isLetter) {
+                guard part.allSatisfy(\.isUppercase) else { return false }
+            } else if part.contains(where: \.isLetter) &&
+                        !part.allSatisfy({ !$0.isLetter || $0.isLowercase }) {
+                return false
+            }
+        }
+        return true
     }
 
     private static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 {

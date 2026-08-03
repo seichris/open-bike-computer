@@ -38,8 +38,9 @@ struct NavigationData {
  * Map + Navigation. IDs 6,11-15 configure shared/device behavior, and IDs
  * 23-24 carry the connected phone's transient battery percentage and charging
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
- * perspective. Legacy ID 4 is ignored because display rotation is selected by
- * the hardware target.
+ * perspective. IDs 27-34 configure street labels for Map and Map + Navigation.
+ * Legacy ID 4 is ignored because display rotation is selected by the hardware
+ * target.
  */
 enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_MAP = 0,
@@ -97,6 +98,12 @@ struct ScreenMapRenderSettings {
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
   uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+  uint8_t labelDensity = map_profile_protocol::DEFAULT_LABEL_DENSITY;
+  uint8_t labelLanguageMode =
+      map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE;
+  uint8_t labelTextSize = map_profile_protocol::DEFAULT_LABEL_TEXT_SIZE;
+  uint8_t labelOrientation =
+      map_profile_protocol::DEFAULT_LABEL_ORIENTATION;
 };
 
 struct MapRenderSettings {
@@ -112,6 +119,8 @@ struct MapRenderSettings {
     settings.zoomLevel = map_profile_protocol::MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL;
     settings.visibilityMask =
         map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK;
+    settings.labelDensity =
+        map_profile_protocol::MAP_NAVIGATION_DEFAULT_LABEL_DENSITY;
     return settings;
   }();
   bool mapNavigationBirdsEyeEnabled = true;

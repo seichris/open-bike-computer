@@ -6,6 +6,49 @@
 #include <string>
 #include <vector>
 
+static void append16(std::vector<uint8_t> &data, uint16_t value) {
+  data.push_back(static_cast<uint8_t>(value));
+  data.push_back(static_cast<uint8_t>(value >> 8U));
+}
+
+static void append32(std::vector<uint8_t> &data, uint32_t value) {
+  for (uint8_t shift = 0; shift < 32; shift += 8)
+    data.push_back(static_cast<uint8_t>(value >> shift));
+}
+
+static uint32_t crc32(const std::vector<uint8_t> &data) {
+  uint32_t crc = 0xFFFFFFFFU;
+  for (const uint8_t byte : data) {
+    crc ^= byte;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+static std::vector<uint8_t> emptyV3() {
+  std::vector<uint8_t> data = {'F', 'M', 'B', 3, 0, 0, 0, 0,
+                               'E', 'X', 'T', '3', 3, 0, 0, 0};
+  const std::vector<std::vector<uint8_t>> sections = {
+      {0, 0},             // zero strings
+      {0, 0},             // zero shaped runs
+      {0x78, 0x56, 0x34, 0x12, 0, 0}, // profile + zero labels
+  };
+  uint32_t offset = static_cast<uint32_t>(data.size() + 3U * 16U);
+  for (uint8_t index = 0; index < sections.size(); ++index) {
+    data.push_back(index + 1);
+    data.push_back(1);
+    append16(data, 0);
+    append32(data, offset);
+    append32(data, static_cast<uint32_t>(sections[index].size()));
+    append32(data, crc32(sections[index]));
+    offset += sections[index].size();
+  }
+  for (const auto &section : sections)
+    data.insert(data.end(), section.begin(), section.end());
+  return data;
+}
+
 int main() {
   const std::vector<uint8_t> emptyV1 = {'F', 'M', 'B', 1, 0, 0, 0, 0};
   assert(map_block_format::validate(emptyV1.data(), emptyV1.size()));
@@ -23,9 +66,21 @@ int main() {
   for (size_t size = 0; size < valid.size(); ++size)
     assert(!map_block_format::validate(valid.data(), size));
 
-  auto changed = valid;
-  changed[3] = 3;
+  const std::vector<uint8_t> validV3 = emptyV3();
+  assert(map_block_format::validate(validV3.data(), validV3.size()));
+  for (size_t size = 0; size < validV3.size(); ++size)
+    assert(!map_block_format::validate(validV3.data(), size));
+
+  auto changed = validV3;
+  changed.back() ^= 1;
   assert(!map_block_format::validate(changed.data(), changed.size()));
+  changed = validV3;
+  changed[20] += 1; // first section offset is no longer contiguous
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+  changed = validV3;
+  changed.push_back(0);
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+
   changed = valid;
   changed.push_back(0);
   assert(!map_block_format::validate(changed.data(), changed.size()));

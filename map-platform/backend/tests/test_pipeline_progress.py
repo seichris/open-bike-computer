@@ -5,7 +5,14 @@ from pathlib import Path
 
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.models import Bounds, SourceRegion
-from map_platform.pipeline import CommandRunner, MapBuildPipeline, PipelinePaths, ProgressCoalescer, parse_map_progress
+from map_platform.pipeline import (
+    CommandRunner,
+    MapBuildPipeline,
+    PipelinePaths,
+    ProgressCoalescer,
+    parse_label_stats,
+    parse_map_progress,
+)
 from map_platform.sources import SourceIndex
 
 
@@ -32,6 +39,15 @@ class PipelineProgressTests(unittest.TestCase):
         self.assertEqual(parse_map_progress("building\rMAP_PROGRESS:100:100\n"), (100, 100))
         self.assertIsNone(parse_map_progress("MAP_PROGRESS:101:100\n"))
         self.assertIsNone(parse_map_progress("unrelated output\n"))
+
+    def test_parse_label_stats(self):
+        self.assertEqual(
+            parse_label_stats(
+                'progress LABEL_STATS:{"blocks":2,"phaseTimings":{"labelFmbWriting":0.75}}\n'
+            ),
+            {"blocks": 2, "phaseTimings": {"labelFmbWriting": 0.75}},
+        )
+        self.assertIsNone(parse_label_stats("LABEL_STATS:not-json\n"))
 
     def test_streaming_runner_reports_output_before_completion(self):
         lines = []

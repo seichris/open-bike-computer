@@ -9,7 +9,9 @@ description = "Offline map generation backend for Open Bike Computer"
 requires-python = ">=3.10"
 dependencies = [
   "cryptography>=43,<49",
-  "Pillow>=10"
+  "freetype-py>=2.5,<3",
+  "Pillow>=10",
+  "uharfbuzz>=0.55,<1"
 ]
 
 [project.optional-dependencies]

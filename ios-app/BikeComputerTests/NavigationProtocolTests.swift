@@ -583,6 +583,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
         testDevicePacketRouting()
+        testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
         testBatteryStatusScreenCapabilityNegotiation()
@@ -605,6 +606,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
+        testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerResendsBrightnessAfterAuthentication()
@@ -632,6 +634,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
+        testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
@@ -642,6 +645,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         await testDeviceTransferManagerWaitsForMapToken()
+        await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -1533,6 +1537,26 @@ struct NavigationProtocolTests {
             ),
             .streamV2,
             "an exact reviewed predecessor artifact can resume after an app update"
+        )
+        let streetLabelPredecessor = MapStreamAppArtifactCompatibilityPolicy
+            .resumablePredecessorIdentities[1]
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: streetLabelPredecessor.build,
+                requiredIosGitSha: streetLabelPredecessor.gitSha,
+                requiredIosBuildSha256: streetLabelPredecessor.componentSha256,
+                currentIosBuild: "7",
+                currentIosGitSha: String(repeating: "d", count: 40),
+                currentIosBuildSha256: String(repeating: "e", count: 64),
+                compatibleArtifactAppIdentities:
+                    MapStreamAppArtifactCompatibilityPolicy
+                        .resumablePredecessorIdentities,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "the exact street-label artifact identity survives transport-only app repairs"
         )
         assertEqual(
             MapInstallProtocolSelector.select(
@@ -4085,6 +4109,43 @@ struct NavigationProtocolTests {
         assert(statusRetryWrites.dropFirst().allSatisfy {
             $0 == statusRetryWrites.first
         }, "status retries preserve the exact terminal response")
+
+        let concurrentManager = BLEManager()
+        concurrentManager.isConnected = true
+        concurrentManager.isNavigationReady = true
+        var concurrentTransportReady = true
+        var concurrentStatusWrites: [Data] = []
+        var concurrentTransferWrites: [Data] = []
+        concurrentManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 64,
+                expectsWriteResponse: true,
+                canSend: { concurrentTransportReady },
+                write: { data in
+                    concurrentStatusWrites.append(data)
+                    concurrentTransportReady = false
+                }
+            )
+        )
+        assert(concurrentManager.sendDestinationStatus(
+            generation: 17,
+            token: 3,
+            status: .failed,
+            message: "Could not start navigation"
+        ), "acknowledged status starts the concurrent transport fixture")
+        assert(concurrentManager.enqueueUnacknowledgedTransferWriteForTesting(
+            Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8),
+            write: { concurrentTransferWrites.append($0) }
+        ), "unacknowledged transfer control is admitted during an acknowledged write")
+        assertEqual(concurrentTransferWrites.count, 1,
+                    "transfer control bypasses an unrelated response callback")
+        concurrentTransportReady = true
+        concurrentManager.completeNavigationWriteForTesting(
+            error: simulatedWriteError
+        )
+        assert(waitForMainLoop(timeout: 3) {
+            concurrentStatusWrites.count == 2
+        }, "concurrent transfer control preserves the acknowledged write failure callback")
     }
 
     static func testRouteInitialLocationUsesResolvedSource() {
@@ -4145,6 +4206,126 @@ struct NavigationProtocolTests {
         assertEqual(identified.clientInstallationId, "installation-test", "request includes installation identity")
         assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
         assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
+
+        let targetTwo = request.forDevice(
+            supportsStreetLabels: true,
+            firmwareVersion: "0.4.0"
+        )
+        let targetTwoJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(targetTwo)
+        ) as! [String: Any]
+        let target = targetTwoJSON["target"] as! [String: Any]
+        let labels = targetTwoJSON["labels"] as! [String: Any]
+        assertEqual(target["renderer"] as? String, "esp32-fmb",
+                    "label-aware requests name the renderer explicitly")
+        assertEqual(target["rendererFormatVersion"] as? Int, 2,
+                    "label-aware requests select renderer target 2")
+        assertEqual(labels["profileVersion"] as? Int, 1,
+                    "label-aware requests carry label profile 1")
+        assert((labels["preferredLanguages"] as? [String])?.count ?? 0 <= 3,
+               "label-aware requests cap preferred languages")
+
+        let legacy = request.forDevice(
+            supportsStreetLabels: false,
+            firmwareVersion: "0.3.0"
+        )
+        let legacyJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(legacy)
+        ) as! [String: Any]
+        assertEqual((legacyJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
+                    1, "legacy devices request renderer target 1")
+        assert(legacyJSON["labels"] == nil,
+               "legacy requests omit unsupported label metadata")
+    }
+
+    static func testStreetLabelMapContract() {
+        let sha = String(repeating: "1", count: 64)
+        let manifest = Data((
+            "{\"files\":[" +
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
+            "\"mapId\":\"label-map\"," +
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
+            "\"schemaVersion\":1," +
+            "\"target\":{\"formatVersion\":2,\"internationalFallback\":\"en\"," +
+            "\"labelLanguages\":[\"zh-Hant\",\"en\"],\"labelProfileVersion\":1," +
+            "\"renderer\":\"esp32-fmb\"}}"
+        ).utf8)
+        let header = BikeMapStreamFormat.Header(
+            formatVersion: 1,
+            flags: 0,
+            manifestBytes: UInt32(manifest.count),
+            signatureEnvelopeBytes: 80,
+            fileCount: 2,
+            payloadBytes: 8
+        )
+        do {
+            let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                manifest,
+                expectedMapID: "label-map",
+                header: header
+            )
+            assertEqual(decoded.target.formatVersion, 2,
+                        "target-2 manifest with exact FMA path is accepted")
+        } catch {
+            assert(false, "valid target-2 manifest is accepted: \(error)")
+        }
+
+        let nonCanonicalLanguage = Data(
+            String(data: manifest, encoding: .utf8)!
+                .replacingOccurrences(of: "zh-Hant", with: "ZH-hant").utf8
+        )
+        do {
+            _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                nonCanonicalLanguage,
+                expectedMapID: "label-map",
+                header: BikeMapStreamFormat.Header(
+                    formatVersion: 1,
+                    flags: 0,
+                    manifestBytes: UInt32(nonCanonicalLanguage.count),
+                    signatureEnvelopeBytes: 80,
+                    fileCount: 2,
+                    payloadBytes: 8
+                )
+            )
+            assert(false, "non-canonical label languages are rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "invalid label language reports a manifest failure")
+                return
+            }
+        }
+
+        for (prefix, target, accepted, message) in [
+            (Data([0x46, 0x4d, 0x42, 3]), 2, true, "target 2 accepts FMB v3"),
+            (Data([0x46, 0x4d, 0x42, 2]), 2, false, "target 2 rejects FMB v2"),
+            (Data([0x46, 0x4d, 0x42, 3]), 1, false, "target 1 rejects FMB v3"),
+            (Data([0x46, 0x4d, 0x42, 2]), 1, true, "target 1 accepts FMB v2"),
+        ] {
+            do {
+                try BikeMapStreamArtifactValidator.validateFileHeader(
+                    prefix,
+                    path: "VECTMAP/label-map/+0000+0000/0_0.fmb",
+                    rendererFormatVersion: target
+                )
+                assert(accepted, message)
+            } catch {
+                assert(!accepted, message)
+            }
+        }
+        do {
+            try BikeMapStreamArtifactValidator.validateFileHeader(
+                Data("BAD1".utf8),
+                path: "VECTMAP/label-map/assets/street-labels.fma",
+                rendererFormatVersion: 2
+            )
+            assert(false, "invalid FMA1 header is rejected")
+        } catch {
+            guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                assert(false, "invalid FMA1 header reports a manifest failure")
+                return
+            }
+        }
     }
 
     static func testOfflineMapOnboardingPolicy() {
@@ -8567,8 +8748,8 @@ struct NavigationProtocolTests {
             protectionOverhead: 22,
             withResponseMaximum: 512,
             withoutResponseMaximum: 512
-        ), .nativeWithoutResponse,
-                    "replaceable native GPS prefers write-without-response")
+        ), .nativeWithResponse,
+                    "map-driving GPS prefers acknowledged native delivery")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: false,
@@ -8592,10 +8773,10 @@ struct NavigationProtocolTests {
             hasNativeWriteWithoutResponse: true,
             payloadLength: 30,
             protectionOverhead: 22,
-            withResponseMaximum: 512,
-            withoutResponseMaximum: 20
-        ), .nativeWithResponse,
-                    "insufficient unacknowledged MTU falls back to acknowledged native GPS")
+            withResponseMaximum: 20,
+            withoutResponseMaximum: 512
+        ), .nativeWithoutResponse,
+                    "GPS uses native write-without-response only when acknowledgment is unavailable")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
@@ -8702,7 +8883,7 @@ struct NavigationProtocolTests {
 
         var priorityCapacityQueue = NavigationWriteQueue(
             maxCount: 1,
-            priorityMaxCount: 4
+            priorityMaxCount: 6
         )
         assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
             NavigationWrite(
@@ -8732,18 +8913,30 @@ struct NavigationProtocolTests {
             writeClass: .navigationSnapshot,
             coalescingKey: DeviceBLEProtocol.navigationSnapshotCoalescingKey
         ), prioritized: true), "maneuver has a dedicated fourth priority slot")
-        assertEqual(priorityCapacityQueue.count, 4,
-                    "workout, destination, and maneuver priority traffic coexist")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([24]),
+            label: "transfer-control",
+            writeClass: .transfer,
+            coalescingKey: "transfer.map.control"
+        ), prioritized: true), "transfer control has a dedicated fifth priority slot")
+        assert(priorityCapacityQueue.enqueueCoalescing(NavigationWrite(
+            data: Data([25]),
+            label: "transfer-status",
+            writeClass: .transfer,
+            coalescingKey: "transfer.device.status"
+        ), prioritized: true), "transfer status has a dedicated sixth priority slot")
+        assertEqual(priorityCapacityQueue.count, 6,
+                    "workout, navigation, and transfer priority traffic coexist")
         assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
             NavigationWrite(
-                data: Data([24]),
+                data: Data([26]),
                 label: "new-workout-core",
                 writeClass: .workoutTelemetry,
                 coalescingKey:
                     DeviceBLEProtocol.workoutTelemetryCoreCoalescingKey
             ),
             NavigationWrite(
-                data: Data([25]),
+                data: Data([27]),
                 label: "new-workout-extended",
                 writeClass: .workoutTelemetry,
                 coalescingKey:
@@ -8756,8 +8949,11 @@ struct NavigationProtocolTests {
         }
         assertEqual(
             priorityCapacityWrites,
-            [Data([22]), Data([23]), Data([24]), Data([25])],
-            "workout replacement preserves destination and maneuver priority state"
+            [
+                Data([22]), Data([23]), Data([24]), Data([25]),
+                Data([26]), Data([27])
+            ],
+            "workout replacement preserves navigation and transfer priority state"
         )
         assertEqual(
             priorityCapacityQueue.metrics.coalescedFrames(
@@ -8830,7 +9026,11 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask, 1, "bird's-eye Map + Navigation uses extended capability bit 0")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask, 2, "bird's-eye perspective uses extended capability bit 1")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask, 4, "stronger bird's-eye perspectives use extended capability bit 2")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 9, "capability version advertises five bird's-eye perspective levels")
+        assertEqual(DeviceBLEProtocol.streetLabelsCapabilityMask, 1 << 8, "CAP2 bit 8 advertises street-label profiles")
+        assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationCapabilityMask, 1 << 9, "CAP2 bit 9 advertises bird's-eye Map + Navigation")
+        assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveCapabilityMask, 1 << 10, "CAP2 bit 10 advertises bird's-eye perspective")
+        assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask, 1 << 11, "CAP2 bit 11 advertises stronger bird's-eye perspectives")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 10, "capability version switches to CAP2 without colliding with legacy versions 7 through 9")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -8863,6 +9063,23 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.phoneBatteryChargingSettingID, 24, "phone charging state uses firmware setting ID 24")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID, 25, "bird's-eye Map + Navigation uses setting ID 25")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID, 26, "bird's-eye perspective uses setting ID 26")
+        assertEqual(DeviceBLEProtocol.mapLabelDensitySettingID, 27, "Map street-label density uses setting ID 27")
+        assertEqual(DeviceBLEProtocol.mapLabelLanguageModeSettingID, 28, "Map street-label language uses setting ID 28")
+        assertEqual(DeviceBLEProtocol.mapLabelTextSizeSettingID, 29, "Map street-label size uses setting ID 29")
+        assertEqual(DeviceBLEProtocol.mapLabelOrientationSettingID, 30, "Map street-label orientation uses setting ID 30")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID, 31, "Map + Navigation street-label density uses setting ID 31")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID, 32, "Map + Navigation street-label language uses setting ID 32")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID, 33, "Map + Navigation street-label size uses setting ID 33")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
+        assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
+        assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelLanguageMode, 2, "street labels default to Local + Preferred language")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelTextSize, 0, "street labels default to the new Small tier")
+        assertEqual(DeviceBLEProtocol.defaultStreetLabelOrientation, 1, "street labels default to Keep Upright")
+        assertEqual(DeviceBLEProtocol.effectiveStreetLabelDensity(enabled: true, density: 2), 2, "enabled labels send their selected density")
+        assertEqual(DeviceBLEProtocol.effectiveStreetLabelDensity(enabled: false, density: 2), 0, "disabled labels preserve density locally and send wire value zero")
+        assertEqual(DeviceBLEProtocol.normalizedStreetLabelDensity(0), 2, "legacy Off density restores Balanced when labels are enabled")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: -1), .standard, "unknown bird's-eye perspectives use Standard")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 0), .gentle, "perspective zero is Gentle")
         assertEqual(MapNavigationBirdsEyePerspective.normalized(rawValue: 2), .strong, "perspective two is Strong")
@@ -9885,22 +10102,19 @@ struct NavigationProtocolTests {
 
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: true,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: true
+            hasNativeWriteWithoutResponse: true
         ), .nativeWithResponse,
                     "an acknowledged native workout characteristic is preferred")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: true
-        ), .navigationFallback,
-                    "current firmware uses acknowledged WTLM despite native write-without-response")
+            hasNativeWriteWithoutResponse: true
+        ), .nativeWithoutResponse,
+                    "the dedicated workout characteristic does not inherit navigation backpressure")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true,
-            navigationExpectsWriteResponse: false
-        ), .nativeWithoutResponse,
-                    "native write-without-response remains available for unacknowledged navigation transports")
+            hasNativeWriteWithoutResponse: false
+        ), .navigationFallback,
+                    "firmware without a dedicated workout transport uses navigation fallback")
 
         let unauthenticated = BLEManager()
         assert(unauthenticated.handleDeviceCapabilitiesNotification(capability),
@@ -9998,19 +10212,12 @@ struct NavigationProtocolTests {
         atomicPairManager.isNavigationReady = true
         var atomicTransportReady = false
         var atomicPairWrites: [Data] = []
-        var unexpectedAtomicNativeWrites: [Data] = []
         atomicPairManager.installNavigationWriteEndpoint(
             NavigationWriteEndpoint(
                 maximumWriteLength: 20,
                 expectsWriteResponse: true,
                 canSend: { atomicTransportReady },
                 write: { atomicPairWrites.append($0) }
-            )
-        )
-        atomicPairManager.installWorkoutTelemetryWriteEndpoint(
-            WorkoutTelemetryWriteEndpoint(
-                maximumWriteLength: 20,
-                write: { unexpectedAtomicNativeWrites.append($0) }
             )
         )
         assert(atomicPairManager.requestDeviceCapabilities(),
@@ -10036,8 +10243,6 @@ struct NavigationProtocolTests {
                     "the response callback drains the paired extended frame")
         assertEqual(Data(atomicPairWrites[1].dropFirst(4)), extendedFrame,
                     "the correlated extended frame remains adjacent to its core")
-        assert(unexpectedAtomicNativeWrites.isEmpty,
-               "an acknowledged navigation endpoint bypasses native write-without-response")
         atomicPairManager.completeNavigationWriteForTesting(error: nil)
         assertEqual(
             atomicPairWrites[2],
@@ -10288,6 +10493,40 @@ struct NavigationProtocolTests {
                     "route failure still attempts each route exactly once")
     }
 
+    static func testDeviceTransferHandshakePolicy() {
+        assertEqual(DeviceTransferHandshakePolicy.attemptCount, 32,
+                    "transfer handshake retains its eight-second readiness window")
+        assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
+               "transfer handshake refreshes status after one second")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
+               "transfer handshake does not flood status between refreshes")
+        assert(DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 8),
+               "legacy map entry is attempted after two seconds without DSTS")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 7),
+               "generic DTRN gets the full compatibility grace period")
+        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 9),
+               "legacy map entry is sent only once")
+        assert(DeviceNetworkJoinPolicy.isAlreadyAssociated(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 13,
+            message: "associated"
+        ), "the public already-associated hotspot code is accepted")
+        assert(DeviceNetworkJoinPolicy.shouldRetry(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 8
+        ), "an internal hotspot error receives one bounded retry")
+        assert(!DeviceNetworkJoinPolicy.shouldRetry(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 7
+        ), "user denial never triggers a second join prompt")
+        assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
+            domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            code: 17,
+            message: "System denied configuration"
+        ), "System denied configuration [NEHotspotConfigurationErrorDomain 17]",
+                    "join failures retain their actionable domain and code")
+    }
+
     static func testDeviceCapabilitiesProtocol() {
         let manager = BLEManager()
         let supportedFlags = DeviceBLEProtocol.deviceSoundsCapabilityMask |
@@ -10417,6 +10656,35 @@ struct NavigationProtocolTests {
         assert(!manager.supportsBirdsEyeMapNavigationStrongerPerspective,
                "malformed CAPS clears stronger bird's-eye perspective support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
+
+        let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x0F, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2),
+               "CAP2 notification should be consumed")
+        assert(manager.supportsStreetLabels,
+               "CAP2 bit 8 enables street-label map controls")
+        assert(manager.supportsBirdsEyeMapNavigation,
+               "CAP2 bit 9 preserves bird's-eye Map + Navigation support")
+        assert(manager.supportsBirdsEyeMapNavigationPerspective,
+               "CAP2 bit 10 preserves bird's-eye perspective support")
+        assert(manager.supportsBirdsEyeMapNavigationStrongerPerspective,
+               "CAP2 bit 11 preserves stronger bird's-eye perspective support")
+        assert(manager.hasReceivedDeviceCapabilities,
+               "valid CAP2 completes capability negotiation")
+
+        let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
+                  DeviceSound.rotatingBicycleBell.rawValue, 65])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithConfig),
+               "CAP2 power configuration TLV is consumed")
+        assert(manager.supportsStreetLabels,
+               "CAP2 preserves the extended street-label capability")
+
+        let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
+        assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
+               "malformed CAP2 is consumed for retry")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "duplicate CAP2 TLVs are rejected")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -11513,6 +11781,32 @@ struct NavigationProtocolTests {
         stalledManager.completeNavigationWriteForTesting(error: nil)
         assertEqual(recoveredPackets, ["3|80|Turn right"],
                     "transport recovery sends only the newest complete maneuver snapshot")
+
+        let watchdogManager = BLEManager()
+        watchdogManager.isConnected = true
+        watchdogManager.isNavigationReady = true
+        var watchdogWrites: [Data] = []
+        var watchdogRecoveries = 0
+        watchdogManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { watchdogWrites.append($0) }
+            )
+        )
+        watchdogManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { watchdogRecoveries += 1 }
+        )
+        assert(watchdogManager.requestDeviceCapabilities(),
+               "watchdog fixture sends one acknowledged write")
+        assertEqual(watchdogWrites.count, 1,
+                    "watchdog starts only after the write reaches its transport")
+        assert(waitForMainLoop(timeout: 1) { watchdogRecoveries == 1 },
+               "missing acknowledged completion triggers bounded recovery")
+        assert(!watchdogManager.isNavigationReady,
+               "stall recovery closes the unusable navigation session")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
@@ -11953,18 +12247,15 @@ struct NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.count < 3 {
+        for _ in 0..<100 where sentPackets.isEmpty {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        assertEqual(sentPackets.count, 3,
-                    "map transfer handshake requests map and credential status")
-        if sentPackets.count == 3 {
-            assertEqual(String(data: sentPackets[0], encoding: .utf8), "MTRNenter",
-                        "map transfer handshake enables map mode")
-            assertEqual(String(data: sentPackets[1], encoding: .utf8), "MSTS",
-                        "map transfer handshake requests map status")
-            assertEqual(String(data: sentPackets[2], encoding: .utf8), "DSTS",
-                        "map transfer handshake requests its HTTP credential")
+        assertEqual(sentPackets.count, 1,
+                    "map transfer handshake starts with one authoritative command")
+        if sentPackets.count == 1 {
+            assertEqual(String(data: sentPackets[0], encoding: .utf8),
+                        "DTRNenter|map",
+                        "generic map entry requests mode and fresh HTTP credential atomically")
         }
 
         let mapStatus = """
@@ -11999,6 +12290,53 @@ struct NavigationProtocolTests {
         }
     }
 
+    static func testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let transferTask = Task {
+            try await DeviceTransferManager().enterMapTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(sentPackets.count, 1,
+                    "map transfer handshake does not need a separate status command")
+
+        // DSTS is the atomic transfer-session response. A dropped MSTC chunk
+        // must not make an otherwise ready authenticated HTTP server unusable.
+        let deviceStatus = """
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
+        )
+
+        do {
+            let session = try await transferTask.value
+            assertEqual(session.mode, .map,
+                        "fresh device status opens a map session")
+            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+                        "device status owns the transfer server origin")
+            assertEqual(session.sessionToken, "fresh-map-token",
+                        "device status owns the transfer credential")
+        } catch {
+            assert(false, "fresh device status should not require map status: \(error)")
+        }
+    }
+
     static func testBLEManagerSendsDisconnectedSleepTimeoutSetting() {
         let manager = BLEManager()
         manager.isConnected = true
@@ -12030,7 +12368,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -12039,6 +12377,17 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferBaseURL?.absoluteString, "http://192.168.4.20:8080", "status parser exposes base URL")
         assertEqual(manager.mapTransferActiveMapId, "kyoto-v1", "status parser exposes active map id")
         assertEqual(manager.mapTransferActiveSessionId, "kyoto-v1-session", "status parser exposes active session id")
+        assertEqual(manager.activeMapManifestReceipt,
+                    String(repeating: "a", count: 64),
+                    "status parser associates label health with the active receipt")
+        assertEqual(manager.activeMapRendererFormat, 2,
+                    "status parser exposes active renderer target")
+        assertEqual(manager.activeMapLabelProfileVersion, 1,
+                    "status parser exposes active label profile")
+        assertEqual(manager.activeMapLabelLanguages, ["ja", "en"],
+                    "status parser exposes active label languages")
+        assert(manager.activeMapFontAssetHealthy,
+               "status parser exposes live FMA1 health")
         assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
@@ -12080,10 +12429,47 @@ struct NavigationProtocolTests {
                     "chunk reassembly exposes activation sequence")
     }
 
+    static func testBLEManagerCompletesRetransmittedChunkedMapTransferStatus() {
+        let manager = BLEManager()
+        let body = Data("""
+        {"enabled":false,"activeMapId":"shanghai-v2","activeSessionId":"session-v2","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["zh-Hans","en"],"fontAssetHealthy":true,"activation":{"status":"installed","sequence":10,"sessionId":"session-v2","mapId":"shanghai-v2","step":3,"steps":3,"progress":100}}
+        """.utf8)
+        let chunkSize = 13
+        let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
+
+        func frame(index: UInt8) -> Data {
+            let start = Int(index) * chunkSize
+            let end = min(start + chunkSize, body.count)
+            var result = Data(DeviceBLEProtocol.mapTransferStatusChunkPrefix.utf8)
+            result.append(contentsOf: [42, index, chunkCount])
+            result.append(body.subdata(in: start..<end))
+            return result
+        }
+
+        let missingIndex = chunkCount / 2
+        for index in UInt8(0)..<chunkCount where index != missingIndex {
+            assert(manager.handleMapTransferStatusNotification(frame(index: index)),
+                   "first lossy status response should retain received chunks")
+        }
+        assertEqual(manager.mapTransferActiveMapId, "",
+                    "an incomplete response must not publish partial state")
+
+        for index in UInt8(0)..<chunkCount {
+            assert(manager.handleMapTransferStatusNotification(frame(index: index)),
+                   "same-ID retransmission should be consumed")
+        }
+        assertEqual(manager.mapTransferActiveMapId, "shanghai-v2",
+                    "same-ID retransmission fills a missing chunk")
+        assertEqual(manager.mapTransferActivationStatus, "installed",
+                    "retransmission publishes the terminal activation state")
+        assert(manager.activeMapFontAssetHealthy,
+               "retransmission unlocks street-label settings")
+    }
+
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -12092,6 +12478,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
+        assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
+        assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
         assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
@@ -12214,6 +12602,11 @@ struct NavigationProtocolTests {
             "mapSettings.positionMarkerScale",
             "mapSettings.mapRotationMode",
             "mapSettings.zoomLevel",
+            "mapSettings.labelsEnabled",
+            "mapSettings.labelDensity",
+            "mapSettings.labelLanguageMode",
+            "mapSettings.labelTextSize",
+            "mapSettings.labelOrientation",
             "mapSettings.showBuildings",
             "mapSettings.showGreenSpace",
             "mapSettings.showPaths",
@@ -12233,6 +12626,11 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.streetLineWidthBoost",
             "mapPlusNavigationSettings.positionMarkerScale",
             "mapPlusNavigationSettings.zoomLevel",
+            "mapPlusNavigationSettings.labelsEnabled",
+            "mapPlusNavigationSettings.labelDensity",
+            "mapPlusNavigationSettings.labelLanguageMode",
+            "mapPlusNavigationSettings.labelTextSize",
+            "mapPlusNavigationSettings.labelOrientation",
             "mapPlusNavigationSettings.showBuildings",
             "mapPlusNavigationSettings.showGreenSpace",
             "mapPlusNavigationSettings.showPaths",
@@ -12245,6 +12643,7 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.showOtherAreas",
             "mapPlusNavigationSettings.migrated.v1",
             "mapSettings.recommendedDefaults.v2",
+            "streetLabels.defaults.v1",
             "deviceSettings.enabledScreensMask",
             "deviceSettings.defaultScreen",
             "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1",
@@ -12259,6 +12658,16 @@ struct NavigationProtocolTests {
         assertEqual(freshManager.zoomLevel, 3, "fresh Map profiles default to zoom level 3")
         assertEqual(freshManager.routeLineWidth, 4, "fresh Map profiles default to a 4 px route")
         assertEqual(freshManager.streetLineWidth, 4, "fresh Map profiles default to 4 px streets")
+        assert(freshManager.mapLabelsEnabled,
+               "fresh Map profiles show street labels")
+        assertEqual(freshManager.mapLabelDensity, 2,
+                    "fresh Map profiles use Balanced label density")
+        assertEqual(freshManager.mapLabelLanguageMode, 2,
+                    "fresh Map profiles use Local + Preferred labels")
+        assertEqual(freshManager.mapLabelTextSize, 0,
+                    "fresh Map profiles use the new Small label tier")
+        assertEqual(freshManager.mapLabelOrientation, 1,
+                    "fresh Map profiles keep labels upright")
         assertEqual(freshManager.mapPlusNavigationDetailLevel, 0,
                     "fresh Map + Navigation profiles default to low detail")
         assertEqual(freshManager.mapPlusNavigationZoomLevel, 3,
@@ -12289,6 +12698,30 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation profiles hide railways")
         assert(!freshManager.mapPlusNavigationShowOtherAreas,
                "fresh Map + Navigation profiles hide other areas")
+        assert(!freshManager.mapPlusNavigationLabelsEnabled,
+               "fresh Map + Navigation profiles hide street labels")
+        assertEqual(freshManager.mapPlusNavigationLabelDensity, 2,
+                    "fresh Map + Navigation profiles retain Balanced as the dormant label density")
+
+        defaults.set(0, forKey: "mapSettings.labelDensity")
+        defaults.set(0, forKey: "mapSettings.labelLanguageMode")
+        defaults.set(1, forKey: "mapSettings.labelTextSize")
+        defaults.set(0, forKey: "mapSettings.labelOrientation")
+        defaults.set(2, forKey: "mapPlusNavigationSettings.labelDensity")
+        defaults.removeObject(forKey: "streetLabels.defaults.v1")
+        let migratedStreetLabelsManager = BLEManager()
+        assert(migratedStreetLabelsManager.mapLabelsEnabled,
+               "pre-release street-label profiles migrate Map labels on")
+        assertEqual(migratedStreetLabelsManager.mapLabelDensity, 2,
+                    "pre-release street-label profiles migrate to Balanced")
+        assertEqual(migratedStreetLabelsManager.mapLabelLanguageMode, 2,
+                    "pre-release street-label profiles migrate to Local + Preferred")
+        assertEqual(migratedStreetLabelsManager.mapLabelTextSize, 0,
+                    "pre-release street-label profiles migrate to the new Small tier")
+        assertEqual(migratedStreetLabelsManager.mapLabelOrientation, 1,
+                    "pre-release street-label profiles migrate to Keep Upright")
+        assert(!migratedStreetLabelsManager.mapPlusNavigationLabelsEnabled,
+               "pre-release street-label profiles migrate Map + Navigation labels off")
 
         defaults.set(0x0F, forKey: "deviceSettings.enabledScreensMask")
         defaults.removeObject(forKey: "deviceSettings.enabledScreensMask.batteryStatus.v1")
@@ -12410,6 +12843,13 @@ struct NavigationProtocolTests {
         manager.showServiceRoads = false
         manager.mapPlusNavigationShowTracks = false
         manager.mapPlusNavigationShowServiceRoads = false
+        manager.mapLabelsEnabled = false
+        manager.mapLabelDensity = 1
+        manager.mapLabelLanguageMode = 0
+        manager.mapLabelTextSize = 2
+        manager.mapLabelOrientation = 0
+        manager.mapPlusNavigationLabelsEnabled = true
+        manager.mapPlusNavigationLabelDensity = 3
         manager.enabledDeviceScreensMask = DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit
         manager.defaultDeviceScreen = .mapPlusNavigation
         manager.disconnectedSleepTimeout = .tenMinutes
@@ -12430,6 +12870,20 @@ struct NavigationProtocolTests {
                "Map + Navigation track visibility should persist independently")
         assert(!reloaded.mapPlusNavigationShowServiceRoads,
                "Map + Navigation service-road visibility should persist independently")
+        assert(!reloaded.mapLabelsEnabled,
+               "Map street-label visibility should persist")
+        assertEqual(reloaded.mapLabelDensity, 1,
+                    "Map street-label density should persist independently from visibility")
+        assertEqual(reloaded.mapLabelLanguageMode, 0,
+                    "Map street-label language should persist")
+        assertEqual(reloaded.mapLabelTextSize, 2,
+                    "Map street-label text size should persist")
+        assertEqual(reloaded.mapLabelOrientation, 0,
+                    "Map street-label orientation should persist")
+        assert(reloaded.mapPlusNavigationLabelsEnabled,
+               "Map + Navigation street-label visibility should persist")
+        assertEqual(reloaded.mapPlusNavigationLabelDensity, 3,
+                    "Map + Navigation street-label density should persist independently")
         assertEqual(reloaded.enabledDeviceScreensMask,
                     DeviceScreen.navigation.bit | DeviceScreen.mapPlusNavigation.bit,
                     "enabled device screens should persist across BLEManager reloads")

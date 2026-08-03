@@ -21,6 +21,9 @@ struct MapManifest {
   std::string mapId;
   std::string renderer;
   uint32_t formatVersion = 0;
+  uint32_t labelProfileVersion = 0;
+  std::vector<std::string> labelLanguages;
+  std::string internationalFallback;
   std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
@@ -41,13 +44,23 @@ struct ActivationProgress {
 using ActivationProgressCallback =
     std::function<void(const ActivationProgress &progress)>;
 
+struct MapTargetMetadata {
+  std::string renderer;
+  uint32_t formatVersion = 0;
+  uint32_t labelProfileVersion = 0;
+  std::vector<std::string> labelLanguages;
+  std::string internationalFallback;
+};
+
 struct ActiveMapSelection {
   std::string mapId;
   std::string sessionId;
   std::string root;
+  MapTargetMetadata target;
   std::string previousMapId;
   std::string previousSessionId;
   std::string previousRoot;
+  MapTargetMetadata previousTarget;
   std::string previousManifestReceipt;
   std::string previousSignedManifestReceipt;
   std::string manifestReceipt;
@@ -150,6 +163,7 @@ public:
       const ActivationProgressCallback &onProgress = {}) const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
+  InstallStatus readActiveManifest(MapManifest &manifest) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(
@@ -219,6 +233,9 @@ private:
   bool writeTextFile(const std::string &path, const std::string &text) const;
   bool readTextFile(const std::string &path, std::string &text,
                     size_t maxBytes) const;
+  InstallStatus validateLabelContracts(const std::string &root,
+                                       const MapManifest &manifest,
+                                       bool useManifestPaths) const;
 };
 
 std::string sha256Hex(const uint8_t *data, size_t len);

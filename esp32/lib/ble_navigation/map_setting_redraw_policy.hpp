@@ -1,5 +1,7 @@
 #pragma once
 
+#include "map_profile_protocol.hpp"
+
 #include <cstdint>
 
 namespace map_setting_redraw_policy {
@@ -21,8 +23,16 @@ constexpr bool invalidatesMap(uint8_t settingId) {
   case 20:
   case 21:
   case 22:
-  case 25:
-  case 26:
+  case map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID:
+  case map_profile_protocol::MAP_LABEL_DENSITY_SETTING_ID:
+  case map_profile_protocol::MAP_LABEL_LANGUAGE_MODE_SETTING_ID:
+  case map_profile_protocol::MAP_LABEL_TEXT_SIZE_SETTING_ID:
+  case map_profile_protocol::MAP_LABEL_ORIENTATION_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
     return true;
   default:
     return false;

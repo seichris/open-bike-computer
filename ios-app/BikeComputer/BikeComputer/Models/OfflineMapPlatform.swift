@@ -51,6 +51,16 @@ nonisolated enum MapStreamAppArtifactCompatibilityPolicy {
             build: "202607132210",
             gitSha: "4ee3aa43dd3026917ceca52c4779438867ee0e7a",
             componentSha256: "271c2d9d17d4430548a46d5ea9ae677862ecf08c57b8e62f5a48c22ae8656002"
+        ),
+        // Street-label artifacts generated before the BLE/Wi-Fi transport
+        // repairs remain byte-for-byte valid and signed by the same reviewed
+        // production map key. Keep this exception bound to the exact app
+        // component that requested those artifacts.
+        MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "7",
+            gitSha: "c0ccb990dde3205fc35cd5e8f6fb6894b087e577",
+            componentSha256: "e74587bd57299d5748e2e630bdbed7737395b8a56ddbf428bc9ceb14f9dbb446"
         )
     ]
 }
@@ -87,6 +97,18 @@ struct OfflineMapBounds: Codable, Equatable {
 }
 
 struct OfflineMapJobRequest: Encodable, Equatable {
+    struct RendererTarget: Encodable, Equatable {
+        let renderer: String
+        let rendererFormatVersion: Int
+        let firmwareVersion: String?
+    }
+
+    struct LabelProfile: Encodable, Equatable {
+        let profileVersion: Int
+        let preferredLanguages: [String]
+        let internationalFallback: String
+    }
+
     let mode: String
     let bbox: [Double]?
     let geometry: GeoJSONGeometry?
@@ -95,6 +117,45 @@ struct OfflineMapJobRequest: Encodable, Equatable {
     let clientInstallationId: String?
     let clientRequestId: String?
     let installOnDevice: Bool?
+    let target: RendererTarget?
+    let labels: LabelProfile?
+
+    static var preferredLabelLanguages: [String] {
+        var languages: [String] = []
+        for raw in Locale.preferredLanguages {
+            let tag = raw.replacingOccurrences(of: "_", with: "-")
+            let parts = tag.split(separator: "-").prefix(4)
+            guard let first = parts.first, (2...8).contains(first.count) else { continue }
+            let normalized = parts.enumerated().map { index, part -> String in
+                if index == 0 { return part.lowercased() }
+                if part.count == 4 { return part.prefix(1).uppercased() + part.dropFirst().lowercased() }
+                if part.count == 2 { return part.uppercased() }
+                return part.lowercased()
+            }.joined(separator: "-")
+            guard normalized.utf8.count <= 35,
+                  normalized.utf8.allSatisfy({ $0 < 0x80 }) else { continue }
+            if !languages.contains(normalized) { languages.append(normalized) }
+            if languages.count == 3 { break }
+        }
+        if languages.isEmpty { languages = ["en"] }
+        return languages
+    }
+
+    private static var defaultLabelProfile: LabelProfile {
+        return LabelProfile(
+            profileVersion: 1,
+            preferredLanguages: preferredLabelLanguages,
+            internationalFallback: "en"
+        )
+    }
+
+    private static var targetTwo: RendererTarget {
+        RendererTarget(
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 2,
+            firmwareVersion: nil
+        )
+    }
 
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -105,7 +166,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: nil,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -118,7 +181,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: nil,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -131,7 +196,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: widthMeters,
             clientInstallationId: nil,
             clientRequestId: nil,
-            installOnDevice: nil
+            installOnDevice: nil,
+            target: targetTwo,
+            labels: defaultLabelProfile
         )
     }
 
@@ -148,7 +215,37 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             corridorWidthM: corridorWidthM,
             clientInstallationId: clientInstallationId,
             clientRequestId: clientRequestId,
-            installOnDevice: installOnDevice
+            installOnDevice: installOnDevice,
+            target: target,
+            labels: labels
+        )
+    }
+
+    func forDevice(
+        supportsStreetLabels: Bool,
+        firmwareVersion: String
+    ) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: supportsStreetLabels
+                ? RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 2,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                )
+                : RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                ),
+            labels: supportsStreetLabels ? labels ?? Self.defaultLabelProfile : nil
         )
     }
 }
@@ -565,6 +662,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case transferCommandNotSent
     case missingTransferBaseURL
     case deviceSDCardUnavailable
+    case deviceMapTransferRejected(String)
     case firmwareMapStreamUnsupported
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
@@ -588,6 +686,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
             return "Device SD card is not mounted"
+        case .deviceMapTransferRejected(let message):
+            return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:
             return "This saved map needs newer device firmware, and no compatible legacy map artifact is available."
         case .backgroundMapUploadInProgress:

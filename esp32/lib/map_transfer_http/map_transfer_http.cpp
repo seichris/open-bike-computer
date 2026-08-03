@@ -328,6 +328,34 @@ bool MapTransferHttpServer::handleRequest(
   return false;
 }
 
+void MapTransferHttpServer::responseDidComplete(
+    const device_transfer::HttpRequest &request, bool peerClosedCleanly) {
+  DeferredActivation deferred;
+  lockState();
+  if (deferredActivation_.pending() &&
+      deferredActivation_.response.matches(
+          request.transferGeneration, request.method, request.path)) {
+    deferred = std::move(deferredActivation_);
+    deferredActivation_ = {};
+  }
+  unlockState();
+  if (!deferred.pending())
+    return;
+  if (!transferServer_->isRequestAuthorized(request)) {
+    Serial.printf("MAP_TRANSFER_HTTP: deferred activation revoked session=%s\n",
+                  deferred.sessionId.c_str());
+    return;
+  }
+
+  Serial.printf("MAP_TRANSFER_HTTP: response complete session=%s peer_closed=%d\n",
+                deferred.sessionId.c_str(), peerClosedCleanly ? 1 : 0);
+  // If the peer did not complete the close handshake, keep the AP available.
+  // The iPhone can still reconcile the durable activation over HTTP/BLE and
+  // explicitly exit transfer mode; the ordinary inactivity timeout remains a
+  // bounded fallback.
+  beginDeferredActivation(deferred, peerClosedCleanly);
+}
+
 bool MapTransferHttpServer::handleHead(const std::string &path,
                                        WiFiClient &client) {
   std::string sessionId;
@@ -562,33 +590,25 @@ bool MapTransferHttpServer::handleInstallStream(
   }
 
   const MapStreamInstallSnapshot completed = receiver->snapshot();
-  sendJson(client, 200,
-           std::string("{\"ok\":true,\"status\":\"ready\",\"sessionId\":\"") +
-               jsonEscape(sessionId) + "\",\"mapId\":\"" +
-               jsonEscape(completed.mapId) + "\",\"manifestReceipt\":\"" +
-               completed.manifestReceipt +
-               "\",\"signedManifestReceipt\":\"" +
-               completed.signedManifestReceipt + "\"}");
-
-  lockState();
   const uint32_t minimumActivationSequence =
       completed.sequence == UINT32_MAX ? UINT32_MAX : completed.sequence + 1;
-  const ActivationBeginResult beginResult =
-      activationState_.begin(sessionId, 3, minimumActivationSequence);
-  if (beginResult == ActivationBeginResult::Started)
-    activationState_.updateProgress({3, 3, 0, 1});
-  streamStatusActive_ = false;
-  unlockState();
-  if (beginResult == ActivationBeginResult::Started) {
-    startActivationTask(sessionId, true, true);
-  } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
-    const InstallStatus cleaned = installer_.activateReadyStreamMap(sessionId);
-    if (!cleaned.ok)
-      setLastError(cleaned.code, cleaned.message);
-    requestAutomaticExit();
-  } else if (beginResult == ActivationBeginResult::Busy) {
-    setLastError("activation_busy",
-                 "another map activation started after stream completion");
+  const bool responseQueued =
+      sendJson(client, 200,
+               std::string("{\"ok\":true,\"status\":\"ready\",\"sessionId\":\"") +
+                   jsonEscape(sessionId) + "\",\"mapId\":\"" +
+                   jsonEscape(completed.mapId) +
+                   "\",\"manifestReceipt\":\"" + completed.manifestReceipt +
+                   "\",\"signedManifestReceipt\":\"" +
+                   completed.signedManifestReceipt + "\"}");
+  if (!responseQueued) {
+    setLastError("http_response_write",
+                 "verified map stream response could not be written");
+    return true;
+  }
+  if (!deferActivationUntilResponse(request, sessionId, true,
+                                    minimumActivationSequence)) {
+    setLastError("activation_handoff",
+                 "verified map stream activation could not be deferred");
   }
   return true;
 }
@@ -780,28 +800,21 @@ bool MapTransferHttpServer::handlePut(
   Serial.printf("MAP_TRANSFER_HTTP: staged session=%s path=%s bytes=%llu\n",
                 sessionId.c_str(), relativePath.c_str(),
                 static_cast<unsigned long long>(contentLength));
-  sendJson(client, 200,
-           std::string("{\"ok\":true,\"sessionId\":\"") +
-               jsonEscape(sessionId) + "\",\"path\":\"" +
-               jsonEscape(relativePath) + "\"}");
+  const bool responseQueued =
+      sendJson(client, 200,
+               std::string("{\"ok\":true,\"sessionId\":\"") +
+                   jsonEscape(sessionId) + "\",\"path\":\"" +
+                   jsonEscape(relativePath) + "\"}");
   if (isArchive) {
     // A background URLSession upload can outlive the iOS process that started
-    // it. Once the complete archive is durably closed on SD, activation must
-    // therefore be device-owned instead of depending on a follow-up request.
-    lockState();
-    const ActivationBeginResult beginResult = activationState_.begin(sessionId);
-    if (beginResult == ActivationBeginResult::Started)
-      streamStatusActive_ = false;
-    unlockState();
-    if (beginResult == ActivationBeginResult::Started) {
-      startActivationTask(sessionId, true);
-    } else if (beginResult == ActivationBeginResult::AlreadyInstalled) {
-      if (!installer_.discardStagedSession(sessionId) ||
-          !installer_.clearPendingArchiveActivation()) {
-        setLastError("staging_cleanup",
-                     "could not remove redundant installed archive");
-      }
-      requestAutomaticExit();
+    // it. Activation remains device-owned, but starts only after the response
+    // has crossed the graceful HTTP-close boundary.
+    if (!responseQueued) {
+      setLastError("http_response_write",
+                   "verified map archive response could not be written");
+    } else if (!deferActivationUntilResponse(request, sessionId, false)) {
+      setLastError("activation_handoff",
+                   "verified map archive activation could not be deferred");
     }
   }
   return true;
@@ -905,6 +918,26 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
       body += ",\"activeSessionId\":\"" +
               jsonEscape(activeMap.sessionId) + "\"";
     }
+    if (!activeMap.manifestReceipt.empty()) {
+      body += ",\"activeManifestReceipt\":\"" +
+              jsonEscape(activeMap.manifestReceipt) + "\"";
+    }
+    if (activeMap.target.formatVersion != 0) {
+      body += ",\"activeRendererFormat\":" +
+              std::to_string(activeMap.target.formatVersion) +
+              ",\"labelProfileVersion\":" +
+              std::to_string(activeMap.target.labelProfileVersion) +
+              ",\"labelLanguages\":[";
+      for (size_t index = 0; index < activeMap.target.labelLanguages.size();
+           ++index) {
+        if (index != 0)
+          body += ",";
+        body +=
+            "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
+      }
+      body += "],\"fontAssetHealthy\":";
+      body += activeMap.target.formatVersion == 2 ? "true" : "false";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +
             "\",\"message\":\"" + jsonEscape(active.message) + "\"}";
@@ -924,9 +957,9 @@ void MapTransferHttpServer::sendHead(WiFiClient &client, int status,
   device_transfer::sendHttpHead(client, status, contentLength);
 }
 
-void MapTransferHttpServer::sendJson(WiFiClient &client, int status,
+bool MapTransferHttpServer::sendJson(WiFiClient &client, int status,
                                      const std::string &body) {
-  device_transfer::sendHttpJson(client, status, body);
+  return device_transfer::sendHttpJson(client, status, body);
 }
 
 void MapTransferHttpServer::sendError(WiFiClient &client, int status,
@@ -1206,6 +1239,64 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
                 "protocol=%d\n",
                 sessionId.c_str(), automaticExit, streamProtocol ? 2 : 1);
   return true;
+}
+
+bool MapTransferHttpServer::deferActivationUntilResponse(
+    const device_transfer::HttpRequest &request, const std::string &sessionId,
+    bool streamProtocol, uint32_t minimumSequence) {
+  lockState();
+  if (deferredActivation_.pending()) {
+    unlockState();
+    return false;
+  }
+  deferredActivation_.response = {
+      request.transferGeneration, request.method, request.path};
+  deferredActivation_.sessionId = sessionId;
+  deferredActivation_.minimumSequence = minimumSequence;
+  deferredActivation_.streamProtocol = streamProtocol;
+  unlockState();
+  return true;
+}
+
+void MapTransferHttpServer::beginDeferredActivation(
+    const DeferredActivation &activation, bool automaticExit) {
+  lockState();
+  const ActivationBeginResult beginResult =
+      activation.streamProtocol
+          ? activationState_.begin(activation.sessionId, 3,
+                                   activation.minimumSequence)
+          : activationState_.begin(activation.sessionId);
+  if (beginResult == ActivationBeginResult::Started) {
+    if (activation.streamProtocol)
+      activationState_.updateProgress({3, 3, 0, 1});
+    streamStatusActive_ = false;
+  }
+  unlockState();
+
+  if (beginResult == ActivationBeginResult::Started) {
+    startActivationTask(activation.sessionId, automaticExit,
+                        activation.streamProtocol);
+    return;
+  }
+  if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+    if (activation.streamProtocol) {
+      const InstallStatus cleaned =
+          installer_.activateReadyStreamMap(activation.sessionId);
+      if (!cleaned.ok)
+        setLastError(cleaned.code, cleaned.message);
+    } else if (!installer_.discardStagedSession(activation.sessionId) ||
+               !installer_.clearPendingArchiveActivation()) {
+      setLastError("staging_cleanup",
+                   "could not remove redundant installed archive");
+    }
+    if (automaticExit)
+      requestAutomaticExit();
+    return;
+  }
+  if (beginResult == ActivationBeginResult::Busy) {
+    setLastError("activation_busy",
+                 "another map activation started after upload completion");
+  }
 }
 
 bool MapTransferHttpServer::runStreamActivationTask(

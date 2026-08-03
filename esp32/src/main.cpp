@@ -1448,6 +1448,31 @@ void loop() {
                           mapView.setVectorMapFolder(rendererRoot);
       mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
     }
+    std::string labelRuntimeFailure;
+    if (mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure)) {
+      map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+      map_transfer::ActiveMapSelection failedSelection;
+      const map_transfer::InstallStatus activeStatus =
+          mapInstaller.readActiveMap(failedSelection);
+      map_transfer::InstallStatus rollbackStatus{
+          false, "active_rollback_unavailable", "active map is unavailable"};
+      bool restoredLoaded = false;
+      if (activeStatus.ok && !failedSelection.sessionId.empty()) {
+        rollbackStatus =
+            mapInstaller.rollbackActiveMap(failedSelection.sessionId);
+        map_transfer::ActiveMapSelection restored;
+        if (rollbackStatus.ok && mapInstaller.readActiveMap(restored).ok) {
+          const std::string restoredRoot =
+              std::string("/sdcard") + restored.root;
+          restoredLoaded = mapView.probeVectorMapFolder(restoredRoot) &&
+                           mapView.setVectorMapFolder(restoredRoot);
+        }
+      }
+      Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
+                    "restored=%d\n",
+                    labelRuntimeFailure.c_str(), rollbackStatus.code.c_str(),
+                    restoredLoaded);
+    }
     if (mapTransferHttp.takeAutomaticExitRequest()) {
       const bool disabled = mapTransferHttp.setEnabled(false);
       Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",

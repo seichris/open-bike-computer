@@ -291,6 +291,9 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     project, "WAVESHARE_AMOLED_175"
                 )
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    manifest["environment"], "WAVESHARE_AMOLED_175"
+                )
                 manifest.pop("environmentSdkconfigSha256")
                 manifest_path.write_text(
                     json.dumps(manifest) + "\n", encoding="utf-8"

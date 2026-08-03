@@ -1,5 +1,7 @@
 #include "map_transfer.hpp"
-#include "../maps/src/mapBlockFormat.hpp"
+#include "../maps/src/mapRendererFileValidator.hpp"
+#include "../maps/src/mapFontAsset.hpp"
+#include "../maps/src/mapLabelBlock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -40,6 +43,12 @@ constexpr size_t kMaxManifestBytes = 2 * 1024 * 1024;
 constexpr uint32_t kZipLocalHeaderSignature = 0x04034b50;
 constexpr uint32_t kZipCentralHeaderSignature = 0x02014b50;
 constexpr uint32_t kZipEndSignature = 0x06054b50;
+
+static bool isFontAssetPath(const std::string &path,
+                            const std::string &mapId) {
+  return path == std::string(kVectMapPrefix) + mapId +
+                     "/assets/street-labels.fma";
+}
 
 static uint16_t readLe16(const uint8_t *data) {
   return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
@@ -145,6 +154,220 @@ static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
     pos++;
   }
   return value;
+}
+
+static std::vector<std::string>
+jsonStringArrayValue(const std::string &json, const std::string &key,
+                     bool *valid = nullptr) {
+  if (valid != nullptr)
+    *valid = false;
+  std::vector<std::string> values;
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return values;
+  cursor = json.find('[', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return values;
+  cursor++;
+  bool requireValue = false;
+  while (cursor < json.size()) {
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    if (cursor < json.size() && json[cursor] == ']') {
+      if (requireValue)
+        return {};
+      if (valid != nullptr)
+        *valid = true;
+      return values;
+    }
+    if (cursor >= json.size())
+      return {};
+    if (json[cursor++] != '"')
+      return {};
+    std::string value;
+    bool complete = false;
+    while (cursor < json.size()) {
+      const char character = json[cursor++];
+      if (character == '"') {
+        complete = true;
+        break;
+      }
+      if (character == '\\' ||
+          static_cast<unsigned char>(character) < 0x20)
+        return {};
+      value.push_back(character);
+    }
+    if (!complete)
+      return {};
+    values.push_back(value);
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    if (cursor < json.size() && json[cursor] == ',') {
+      cursor++;
+      requireValue = true;
+      continue;
+    }
+    requireValue = false;
+    if (cursor >= json.size() || json[cursor] != ']')
+      return {};
+  }
+  return {};
+}
+
+static bool safeLanguageTag(const std::string &value) {
+  if (value.size() < 2 || value.size() > 35)
+    return false;
+  size_t subtagStart = 0;
+  size_t subtagIndex = 0;
+  while (subtagStart < value.size()) {
+    const size_t separator = value.find('-', subtagStart);
+    const size_t subtagEnd =
+        separator == std::string::npos ? value.size() : separator;
+    const size_t subtagLength = subtagEnd - subtagStart;
+    if (subtagLength == 0 || subtagLength > 8)
+      return false;
+    for (size_t index = subtagStart; index < subtagEnd; ++index) {
+      const unsigned char character = value[index];
+      if ((subtagIndex == 0 && !std::islower(character)) ||
+          (subtagIndex == 0 && !std::isalpha(character)) ||
+          (subtagIndex != 0 && !std::isalnum(character)))
+        return false;
+    }
+    if (subtagIndex == 0 && subtagLength < 2)
+      return false;
+    if (separator == std::string::npos)
+      return true;
+    subtagStart = separator + 1;
+    subtagIndex++;
+    if (subtagIndex >= 4)
+      return false;
+  }
+  return false;
+}
+
+static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
+  MapTargetMetadata target;
+  target.renderer = manifest.renderer;
+  target.formatVersion = manifest.formatVersion;
+  target.labelProfileVersion = manifest.labelProfileVersion;
+  target.labelLanguages = manifest.labelLanguages;
+  target.internationalFallback = manifest.internationalFallback;
+  return target;
+}
+
+static bool targetMetadataEmpty(const MapTargetMetadata &target) {
+  return target.renderer.empty() && target.formatVersion == 0 &&
+         target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
+         target.internationalFallback.empty();
+}
+
+static bool targetMetadataValid(const MapTargetMetadata &target) {
+  if (targetMetadataEmpty(target))
+    return true;
+  if (target.renderer != "esp32-fmb" ||
+      (target.formatVersion != 1 && target.formatVersion != 2)) {
+    return false;
+  }
+  if (target.formatVersion == 1) {
+    return target.labelProfileVersion == 0 &&
+           target.labelLanguages.empty() &&
+           target.internationalFallback.empty();
+  }
+  if (target.labelProfileVersion != 1 ||
+      target.labelLanguages.size() > 3 ||
+      !safeLanguageTag(target.internationalFallback) ||
+      !std::all_of(target.labelLanguages.begin(),
+                   target.labelLanguages.end(), safeLanguageTag)) {
+    return false;
+  }
+  for (size_t index = 0; index < target.labelLanguages.size(); ++index) {
+    for (size_t other = index + 1; other < target.labelLanguages.size();
+         ++other) {
+      if (target.labelLanguages[index] == target.labelLanguages[other])
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool targetMetadataMatches(const MapTargetMetadata &left,
+                                  const MapTargetMetadata &right) {
+  return left.renderer == right.renderer &&
+         left.formatVersion == right.formatVersion &&
+         left.labelProfileVersion == right.labelProfileVersion &&
+         left.labelLanguages == right.labelLanguages &&
+         left.internationalFallback == right.internationalFallback;
+}
+
+static MapTargetMetadata targetMetadataFromJson(const std::string &json,
+                                                const std::string &prefix,
+                                                bool *valid = nullptr) {
+  MapTargetMetadata target;
+  const auto key = [&](const char *name) {
+    if (!prefix.empty())
+      return prefix + name;
+    std::string value = name;
+    value.front() = static_cast<char>(std::tolower(value.front()));
+    return value;
+  };
+  const std::string rendererKey = key("Renderer");
+  const std::string formatKey = key("FormatVersion");
+  const std::string profileKey = key("LabelProfileVersion");
+  const std::string languagesKey = key("LabelLanguages");
+  const std::string fallbackKey = key("InternationalFallback");
+  const auto hasKey = [&](const std::string &name) {
+    return json.find("\"" + name + "\"") != std::string::npos;
+  };
+  target.renderer = jsonStringValue(json, rendererKey);
+  const uint64_t formatVersion = jsonUintValue(json, formatKey);
+  const uint64_t labelProfileVersion = jsonUintValue(json, profileKey);
+  target.formatVersion = static_cast<uint32_t>(formatVersion);
+  target.labelProfileVersion = static_cast<uint32_t>(labelProfileVersion);
+  bool languagesValid = false;
+  target.labelLanguages =
+      jsonStringArrayValue(json, languagesKey, &languagesValid);
+  target.internationalFallback =
+      jsonStringValue(json, fallbackKey);
+  const bool metadataPresent =
+      hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
+      hasKey(languagesKey) || hasKey(fallbackKey);
+  if (valid != nullptr) {
+    *valid = (!metadataPresent || languagesValid) &&
+             formatVersion <= UINT32_MAX &&
+             labelProfileVersion <= UINT32_MAX;
+  }
+  return target;
+}
+
+static std::string targetMetadataJson(const MapTargetMetadata &target,
+                                      const std::string &prefix) {
+  if (targetMetadataEmpty(target))
+    return "";
+  const auto key = [&](const char *name) {
+    if (!prefix.empty())
+      return prefix + name;
+    std::string value = name;
+    value.front() = static_cast<char>(std::tolower(value.front()));
+    return value;
+  };
+  std::string json = ",\"" + key("Renderer") + "\":\"" +
+                     jsonEscape(target.renderer) + "\",\"" +
+                     key("FormatVersion") + "\":" +
+                     std::to_string(target.formatVersion) + ",\"" +
+                     key("LabelProfileVersion") + "\":" +
+                     std::to_string(target.labelProfileVersion) + ",\"" +
+                     key("LabelLanguages") + "\":[";
+  for (size_t index = 0; index < target.labelLanguages.size(); ++index) {
+    if (index != 0)
+      json += ",";
+    json += "\"" + jsonEscape(target.labelLanguages[index]) + "\"";
+  }
+  json += "],\"" + key("InternationalFallback") + "\":\"" +
+          jsonEscape(target.internationalFallback) + "\"";
+  return json;
 }
 
 static std::vector<std::string> fileObjects(const std::string &json) {
@@ -434,11 +657,29 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   manifest.schemaVersion =
       static_cast<uint32_t>(jsonUintValue(manifestText, "schemaVersion"));
   manifest.mapId = jsonStringValue(manifestText, "mapId");
+  manifest.renderer = jsonStringValue(manifestText, "renderer");
+  manifest.formatVersion =
+      static_cast<uint32_t>(jsonUintValue(manifestText, "formatVersion"));
+  manifest.labelProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "labelProfileVersion"));
+  bool labelLanguagesValid = false;
+  manifest.labelLanguages =
+      jsonStringArrayValue(manifestText, "labelLanguages", &labelLanguagesValid);
+  manifest.internationalFallback =
+      jsonStringValue(manifestText, "internationalFallback");
+  manifest.minimumFirmwareVersion =
+      jsonStringValue(manifestText, "minFirmwareVersion");
+  if (manifest.renderer.empty() && manifest.formatVersion == 0) {
+    manifest.renderer = "esp32-fmb";
+    manifest.formatVersion = 1;
+  }
   if (manifest.schemaVersion != 1)
     return fail("manifest_schema", "unsupported manifest schema version");
   if (!safeMapId(manifest.mapId))
     return fail("manifest_map_id", "mapId contains unsafe characters");
 
+  uint32_t fontAssetCount = 0;
+  uint32_t legacyTextBlockCount = 0;
   for (const std::string &object : fileObjects(manifestText)) {
     ManifestFile file;
     file.path = jsonStringValue(object, "path");
@@ -456,19 +697,53 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       return fail("manifest_path", "map files may not use hidden folders");
     if (file.publishPath == std::string(kActiveMapFile).substr(1))
       return fail("manifest_path", "manifest may not overwrite active map");
-    if (!(file.path.size() >= 4 &&
-          (file.path.rfind(".fmb") == file.path.size() - 4 ||
-           file.path.rfind(".fmp") == file.path.size() - 4)))
-      return fail("manifest_path", "map files must be .fmb or .fmp");
+    const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
+    const bool isBlock = file.path.size() >= 4 &&
+                         (file.path.rfind(".fmb") == file.path.size() - 4 ||
+                          file.path.rfind(".fmp") == file.path.size() - 4);
+    if (!isBlock && !isFontAsset)
+      return fail("manifest_path", "manifest contains an unsupported map file");
     if (file.bytes == 0 ||
-        file.bytes > map_block_format::kMaximumBlockBytes)
+        file.bytes > (isFontAsset
+                          ? map_font_asset_format::kMaximumFontAssetBytes
+                          : map_block_format::kMaximumBlockBytes))
       return fail("manifest_bytes", "map file byte count is invalid");
     if (!isHexSha256(file.sha256))
       return fail("manifest_sha256", "map file sha256 is invalid");
     manifest.files.push_back(file);
+    if (isFontAsset)
+      fontAssetCount++;
+    if (file.path.rfind(".fmp") == file.path.size() - 4)
+      legacyTextBlockCount++;
   }
   if (manifest.files.empty())
     return fail("manifest_files", "manifest contains no map files");
+  if (manifest.renderer != "esp32-fmb" ||
+      (manifest.formatVersion != 1 && manifest.formatVersion != 2))
+    return fail("manifest_target", "manifest renderer target is unsupported");
+  if ((manifest.formatVersion == 2 &&
+       (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
+      (manifest.formatVersion == 1 && fontAssetCount != 0))
+    return fail("manifest_target", "manifest files do not match renderer target");
+  if (manifest.formatVersion == 2) {
+    bool uniqueLanguages = true;
+    for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
+      for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
+        if (manifest.labelLanguages[index] == manifest.labelLanguages[other])
+          uniqueLanguages = false;
+    if (manifest.labelProfileVersion != 1 ||
+        !labelLanguagesValid ||
+        manifest.labelLanguages.size() > 3 ||
+        !uniqueLanguages ||
+        !std::all_of(manifest.labelLanguages.begin(),
+                     manifest.labelLanguages.end(), safeLanguageTag) ||
+        !safeLanguageTag(manifest.internationalFallback))
+      return fail("manifest_labels", "manifest label profile is invalid");
+  } else if (manifest.labelProfileVersion != 0 ||
+             !manifest.labelLanguages.empty() ||
+             !manifest.internationalFallback.empty()) {
+    return fail("manifest_labels", "legacy manifest contains label metadata");
+  }
   return {true, "ok", ""};
 }
 
@@ -513,7 +788,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
         return fail("file_sha256", "could not read staged map file: " +
                                        file.path);
       Sha256Hasher hasher;
-      map_block_format::StreamValidator rendererValidator(file.path);
+      map_renderer_format::StreamValidator rendererValidator(file.path);
       std::array<uint8_t, 4096> buffer = {};
       while (input) {
         input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
@@ -548,6 +823,10 @@ InstallStatus MapTransferInstaller::validateStagedMap(
     if (onProgress)
       onProgress({3, 5, completed, total});
   }
+  const InstallStatus labels =
+      validateLabelContracts(stagingRoot(sessionId), manifest, true);
+  if (!labels.ok)
+    return labels;
   return {true, "ok", ""};
 }
 
@@ -644,8 +923,9 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isManifest = path == "manifest.json";
     const bool isMapFile =
         startsWith(path, kVectMapPrefix) && safeRelativePath(path) &&
-        (path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
-                              path.rfind(".fmp") == path.size() - 4));
+        ((path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
+                               path.rfind(".fmp") == path.size() - 4)) ||
+         map_renderer_format::isFontAssetPath(path));
     const bool isMetadata =
         path == "ATTRIBUTION.txt" || startsWith(path, "LICENSES/");
     if (!isManifest && !isMapFile && !isMetadata && path.back() != '/') {
@@ -764,7 +1044,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
                            safeRelativePath(path) && path.size() >= 4 &&
                            (path.rfind(".fmb") == path.size() - 4 ||
-                            path.rfind(".fmp") == path.size() - 4);
+                            path.rfind(".fmp") == path.size() - 4 ||
+                            isFontAssetPath(path, manifest.mapId));
     if (isMapFile) {
       if (manifestFileIndex >= manifest.files.size() ||
           manifest.files[manifestFileIndex].path != path)
@@ -792,7 +1073,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         return fail("archive_write", "could not create extracted map file");
       input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
       Sha256Hasher hasher;
-      map_block_format::StreamValidator rendererValidator(path);
+      map_renderer_format::StreamValidator rendererValidator(path);
       remaining = compressedSize;
       while (remaining > 0) {
         const size_t count =
@@ -948,14 +1229,17 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     root = previous.root == repairRoot ? baseRoot : repairRoot;
   }
   const std::string destinationRoot = joinPath(storageRoot_, root);
+  const MapTargetMetadata selectedTarget = targetMetadata(manifest);
 
   const auto transactionJson = [&](const char *phase) {
     return std::string("{\"sessionId\":\"") + sessionId + "\",\"mapId\":\"" +
-           manifest.mapId + "\",\"root\":\"" + root +
-           "\",\"previousMapId\":\"" + jsonEscape(previous.mapId) +
+           manifest.mapId + "\",\"root\":\"" + root + "\"" +
+           targetMetadataJson(selectedTarget, "") +
+           ",\"previousMapId\":\"" + jsonEscape(previous.mapId) +
            "\",\"previousSessionId\":\"" + jsonEscape(previous.sessionId) +
-           "\",\"previousRoot\":\"" + jsonEscape(previous.root) +
-           "\",\"previousManifestReceipt\":\"" +
+           "\",\"previousRoot\":\"" + jsonEscape(previous.root) + "\"" +
+           targetMetadataJson(previous.target, "previous") +
+           ",\"previousManifestReceipt\":\"" +
            jsonEscape(previous.manifestReceipt) +
            "\",\"previousSignedManifestReceipt\":\"" +
            jsonEscape(previous.signedManifestReceipt) + "\",\"phase\":\"" +
@@ -985,6 +1269,12 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("publish_metadata",
                 "could not publish map verification metadata");
   }
+  const InstallStatus labelStatus =
+      validateLabelContracts(destinationRoot, manifest, false);
+  if (!labelStatus.ok) {
+    abandonNewRoot();
+    return labelStatus;
+  }
   if (!writeTextFileAtomic(transactionPath, transactionJson("ready"))) {
     abandonNewRoot();
     return fail("transaction", "could not prepare map activation switch");
@@ -997,10 +1287,12 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   selected.mapId = manifest.mapId;
   selected.sessionId = sessionId;
   selected.root = root;
+  selected.target = selectedTarget;
   if (previousStatus.ok) {
     selected.previousMapId = previous.mapId;
     selected.previousSessionId = previous.sessionId;
     selected.previousRoot = previous.root;
+    selected.previousTarget = previous.target;
     selected.previousManifestReceipt = previous.manifestReceipt;
     selected.previousSignedManifestReceipt = previous.signedManifestReceipt;
   }
@@ -1176,6 +1468,16 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
   if (!readyStatus.ok)
     return readyStatus;
+  MapManifest readyManifest;
+  const InstallStatus manifestStatus =
+      readInstalledManifest(ready.root, readyManifest);
+  if (!manifestStatus.ok)
+    return manifestStatus;
+  const InstallStatus labelStatus = validateLabelContracts(
+      joinPath(storageRoot_, ready.root), readyManifest, false);
+  if (!labelStatus.ok)
+    return labelStatus;
+  const MapTargetMetadata selectedTarget = targetMetadata(readyManifest);
   ActiveMapSelection previous;
   InstallStatus previousStatus = readActiveMap(previous);
   if (!previousStatus.ok && previousStatus.code != "active_missing")
@@ -1185,6 +1487,12 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
         previous.signedManifestReceipt != ready.signedManifestReceipt) {
       return fail("stream_active_conflict",
                   "active stream root has a different identity");
+    }
+    if (!targetMetadataMatches(previous.target, selectedTarget)) {
+      previous.target = selectedTarget;
+      if (!writeActiveMap(previous))
+        return fail("stream_active_write",
+                    "could not refresh active map target metadata");
     }
     const bool cleaned = markStreamActivationConsumed(ready) &&
                          clearPendingStreamActivation(sessionId) &&
@@ -1218,12 +1526,14 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
     std::string value =
         std::string("{\"protocolVersion\":2,\"sessionId\":\"") +
         ready.sessionId + "\",\"mapId\":\"" + ready.mapId + "\",\"root\":\"" +
-        ready.root + "\",\"manifestReceipt\":\"" + ready.manifestReceipt +
+        ready.root + "\"" + targetMetadataJson(selectedTarget, "") +
+        ",\"manifestReceipt\":\"" + ready.manifestReceipt +
         "\",\"signedManifestReceipt\":\"" + ready.signedManifestReceipt +
         "\",\"previousMapId\":\"" + jsonEscape(previous.mapId) +
         "\",\"previousSessionId\":\"" + jsonEscape(previous.sessionId) +
         "\",\"previousRoot\":\"" + jsonEscape(previous.root) +
-        "\",\"previousManifestReceipt\":\"" +
+        "\"" + targetMetadataJson(previous.target, "previous") +
+        ",\"previousManifestReceipt\":\"" +
         jsonEscape(previous.manifestReceipt) +
         "\",\"previousSignedManifestReceipt\":\"" +
         jsonEscape(previous.signedManifestReceipt) + "\",\"phase\":\"" + phase +
@@ -1239,12 +1549,14 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
   selected.mapId = ready.mapId;
   selected.sessionId = ready.sessionId;
   selected.root = ready.root;
+  selected.target = selectedTarget;
   selected.manifestReceipt = ready.manifestReceipt;
   selected.signedManifestReceipt = ready.signedManifestReceipt;
   if (previousStatus.ok) {
     selected.previousMapId = previous.mapId;
     selected.previousSessionId = previous.sessionId;
     selected.previousRoot = previous.root;
+    selected.previousTarget = previous.target;
     selected.previousManifestReceipt = previous.manifestReceipt;
     selected.previousSignedManifestReceipt = previous.signedManifestReceipt;
   }
@@ -1347,6 +1659,9 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   const std::string sessionId = jsonStringValue(transaction, "sessionId");
   const std::string mapId = jsonStringValue(transaction, "mapId");
   const std::string root = jsonStringValue(transaction, "root");
+  bool transactionTargetParsed = false;
+  const MapTargetMetadata transactionTarget =
+      targetMetadataFromJson(transaction, "", &transactionTargetParsed);
   const std::string manifestReceipt =
       jsonStringValue(transaction, "manifestReceipt");
   const std::string signedManifestReceipt =
@@ -1360,22 +1675,29 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
       jsonStringValue(transaction, "previousManifestReceipt");
   const std::string previousSignedManifestReceipt =
       jsonStringValue(transaction, "previousSignedManifestReceipt");
+  bool previousTargetParsed = false;
+  const MapTargetMetadata previousTarget = targetMetadataFromJson(
+      transaction, "previous", &previousTargetParsed);
   const std::string phase = jsonStringValue(transaction, "phase");
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
   if (!safeId(sessionId) || !safeMapId(mapId) ||
       root != std::string("/VECTMAP/.maps/") + sessionId ||
       !isHexSha256(manifestReceipt) || !isHexSha256(signedManifestReceipt) ||
+      !transactionTargetParsed || !targetMetadataValid(transactionTarget) ||
       (!previousRoot.empty() &&
        (!safeActiveRoot(previousRoot) || !safeMapId(previousMapId) ||
         (!previousSessionId.empty() && !safeId(previousSessionId)) ||
         (previousManifestReceipt.empty() !=
          previousSignedManifestReceipt.empty()) ||
-        (!previousManifestReceipt.empty() &&
-         (!isHexSha256(previousManifestReceipt) ||
-          !isHexSha256(previousSignedManifestReceipt))))) ||
+         (!previousManifestReceipt.empty() &&
+          (!isHexSha256(previousManifestReceipt) ||
+          !isHexSha256(previousSignedManifestReceipt))) ||
+        (!previousTargetParsed || !targetMetadataValid(previousTarget)))) ||
       (previousRoot.empty() &&
        (!previousMapId.empty() || !previousSessionId.empty() ||
+        !previousTargetParsed ||
+        !targetMetadataEmpty(previousTarget) ||
         !previousManifestReceipt.empty() ||
         !previousSignedManifestReceipt.empty())) ||
       (phase != "ready" && phase != "committed")) {
@@ -1384,9 +1706,17 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   }
   ReadyStreamMap ready;
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
-  if (!readyStatus.ok || ready.mapId != mapId || ready.root != root ||
+  MapManifest installedManifest;
+  const InstallStatus installedStatus =
+      readyStatus.ok ? readInstalledManifest(root, installedManifest)
+                     : InstallStatus{};
+  const MapTargetMetadata installedTarget = targetMetadata(installedManifest);
+  if (!readyStatus.ok || !installedStatus.ok || ready.mapId != mapId ||
+      ready.root != root || installedManifest.mapId != mapId ||
       ready.manifestReceipt != manifestReceipt ||
-      ready.signedManifestReceipt != signedManifestReceipt) {
+      ready.signedManifestReceipt != signedManifestReceipt ||
+      (!targetMetadataEmpty(transactionTarget) &&
+       !targetMetadataMatches(transactionTarget, installedTarget))) {
     ActiveMapSelection active;
     InstallStatus activeStatus = readActiveMap(active);
     if (activeStatus.ok && active.root == root) {
@@ -1398,6 +1728,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
         rollback.mapId = previousMapId;
         rollback.sessionId = previousSessionId;
         rollback.root = previousRoot;
+        rollback.target = previousTarget;
         rollback.manifestReceipt = previousManifestReceipt;
         rollback.signedManifestReceipt = previousSignedManifestReceipt;
         if (!writeActiveMap(rollback))
@@ -1422,24 +1753,41 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   selected.mapId = mapId;
   selected.sessionId = sessionId;
   selected.root = root;
+  selected.target = installedTarget;
   selected.manifestReceipt = manifestReceipt;
   selected.signedManifestReceipt = signedManifestReceipt;
   if (!previousRoot.empty()) {
     selected.previousMapId = previousMapId;
     selected.previousSessionId = previousSessionId;
     selected.previousRoot = previousRoot;
+    selected.previousTarget = previousTarget;
     selected.previousManifestReceipt = previousManifestReceipt;
     selected.previousSignedManifestReceipt = previousSignedManifestReceipt;
   }
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
+  if (!previousRoot.empty() && targetMetadataEmpty(selected.previousTarget) &&
+      activeStatus.ok) {
+    if (active.root == previousRoot)
+      selected.previousTarget = active.target;
+    else if (active.root == root)
+      selected.previousTarget = active.previousTarget;
+  }
   const bool alreadySelected =
       activeStatus.ok && active.root == root &&
       active.signedManifestReceipt == signedManifestReceipt;
   const bool previousStillSelected =
       (!activeStatus.ok && activeStatus.code == "active_missing") ||
       (activeStatus.ok && active.root == previousRoot);
-  if (!alreadySelected) {
+  if (alreadySelected) {
+    if (!targetMetadataMatches(active.target, selected.target) ||
+        !targetMetadataMatches(active.previousTarget,
+                               selected.previousTarget)) {
+      if (!writeActiveMap(selected))
+        return fail("stream_transaction_recovery",
+                    "could not refresh stream pointer metadata");
+    }
+  } else {
     if (!previousStillSelected)
       return fail("stream_transaction_conflict",
                   "another active map replaced the stream transaction");
@@ -1466,7 +1814,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       joinPath(storageRoot_, kActivationTransactionFile);
   const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
   std::string transaction;
-  if (!readTextFile(transactionPath, transaction, 1024)) {
+  if (!readTextFile(transactionPath, transaction, 2048)) {
     const std::string backupPath = transactionPath + ".bak";
     if (!fileExists(backupPath)) {
       removeTree(transactionPath + ".tmp");
@@ -1504,6 +1852,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
         rollback.mapId = selected.previousMapId;
         rollback.sessionId = selected.previousSessionId;
         rollback.root = selected.previousRoot;
+        rollback.target = selected.previousTarget;
         rollback.manifestReceipt = selected.previousManifestReceipt;
         rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
         if (!writeActiveMap(rollback))
@@ -1520,7 +1869,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
               "cleared missing active map selection"};
     }
     if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
-        !readTextFile(transactionPath, transaction, 1024)) {
+        !readTextFile(transactionPath, transaction, 2048)) {
       return fail("transaction_recovery",
                   "could not recover map activation journal");
     }
@@ -1532,6 +1881,9 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string sessionId = jsonStringValue(transaction, "sessionId");
   const std::string mapId = jsonStringValue(transaction, "mapId");
   const std::string root = jsonStringValue(transaction, "root");
+  bool transactionTargetParsed = false;
+  const MapTargetMetadata transactionTarget =
+      targetMetadataFromJson(transaction, "", &transactionTargetParsed);
   const std::string previousMapId =
       jsonStringValue(transaction, "previousMapId");
   const std::string previousSessionId =
@@ -1541,16 +1893,23 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       jsonStringValue(transaction, "previousManifestReceipt");
   const std::string previousSignedManifestReceipt =
       jsonStringValue(transaction, "previousSignedManifestReceipt");
+  bool previousTargetParsed = false;
+  const MapTargetMetadata previousTarget = targetMetadataFromJson(
+      transaction, "previous", &previousTargetParsed);
   const std::string phase = jsonStringValue(transaction, "phase");
   if (!safeId(sessionId) || !safeMapId(mapId) || !safeActiveRoot(root) ||
+      !transactionTargetParsed || !targetMetadataValid(transactionTarget) ||
       (!previousRoot.empty() &&
        (!safeActiveRoot(previousRoot) || !safeMapId(previousMapId) ||
         (!previousSessionId.empty() && !safeId(previousSessionId)) ||
         (previousManifestReceipt.empty() !=
          previousSignedManifestReceipt.empty()) ||
-        (!previousManifestReceipt.empty() &&
-         (!isHexSha256(previousManifestReceipt) ||
-          !isHexSha256(previousSignedManifestReceipt))))) ||
+         (!previousManifestReceipt.empty() &&
+          (!isHexSha256(previousManifestReceipt) ||
+          !isHexSha256(previousSignedManifestReceipt))) ||
+        (!previousTargetParsed || !targetMetadataValid(previousTarget)))) ||
+      (previousRoot.empty() &&
+       (!previousTargetParsed || !targetMetadataEmpty(previousTarget))) ||
       (phase != "publishing" && phase != "ready" && phase != "committed")) {
     const auto clearInvalidTransaction = [&]() {
       return removeTree(transactionPath) &&
@@ -1578,6 +1937,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
         rollback.mapId = selected.previousMapId;
         rollback.sessionId = selected.previousSessionId;
         rollback.root = selected.previousRoot;
+        rollback.target = selected.previousTarget;
         rollback.manifestReceipt = selected.previousManifestReceipt;
         rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
         if (!writeActiveMap(rollback))
@@ -1631,9 +1991,23 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const bool selectedRootVerified =
       selectedNewRoot && readInstalledManifest(root, installedManifest).ok &&
       installedManifest.mapId == mapId &&
-      installedMapContentsMatch(root, installedManifest);
+      installedMapContentsMatch(root, installedManifest) &&
+      (targetMetadataEmpty(transactionTarget) ||
+       targetMetadataMatches(transactionTarget,
+                             targetMetadata(installedManifest)));
   if (selectedRootVerified) {
+    const MapTargetMetadata installedTarget = targetMetadata(installedManifest);
+    bool pointerUpdated = true;
+    if (!targetMetadataMatches(active.target, installedTarget) ||
+        (targetMetadataEmpty(active.previousTarget) &&
+         !targetMetadataEmpty(previousTarget))) {
+      active.target = installedTarget;
+      if (targetMetadataEmpty(active.previousTarget))
+        active.previousTarget = previousTarget;
+      pointerUpdated = writeActiveMap(active);
+    }
     const bool cleanupComplete =
+        pointerUpdated &&
         (preserveStagedArchive || removeTree(stagingRoot(sessionId))) &&
         removeTree(activePath + ".bak") && removeTree(activePath + ".tmp") &&
         removeTree(transactionPath + ".bak") &&
@@ -1651,6 +2025,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     rollback.mapId = previousMapId;
     rollback.sessionId = previousSessionId;
     rollback.root = previousRoot;
+    rollback.target = previousTarget;
     rollback.manifestReceipt = previousManifestReceipt;
     rollback.signedManifestReceipt = previousSignedManifestReceipt;
     if (!writeActiveMap(rollback))
@@ -1710,6 +2085,7 @@ MapTransferInstaller::rollbackActiveMap(const std::string &sessionId) const {
   rollback.mapId = selected.previousMapId;
   rollback.sessionId = selected.previousSessionId;
   rollback.root = selected.previousRoot;
+  rollback.target = selected.previousTarget;
   rollback.manifestReceipt = selected.previousManifestReceipt;
   rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
   if (!writeActiveMap(rollback))
@@ -1851,9 +2227,14 @@ MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
   selection.mapId = jsonStringValue(text, "mapId");
   selection.sessionId = jsonStringValue(text, "sessionId");
   selection.root = jsonStringValue(text, "root");
+  bool targetParsed = false;
+  selection.target = targetMetadataFromJson(text, "", &targetParsed);
   selection.previousMapId = jsonStringValue(text, "previousMapId");
   selection.previousSessionId = jsonStringValue(text, "previousSessionId");
   selection.previousRoot = jsonStringValue(text, "previousRoot");
+  bool previousTargetParsed = false;
+  selection.previousTarget =
+      targetMetadataFromJson(text, "previous", &previousTargetParsed);
   selection.previousManifestReceipt =
       jsonStringValue(text, "previousManifestReceipt");
   selection.previousSignedManifestReceipt =
@@ -1865,6 +2246,7 @@ MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
     selection.root = "/VECTMAP";
   if (!safeMapId(selection.mapId) || !safeActiveRoot(selection.root) ||
       (!selection.sessionId.empty() && !safeId(selection.sessionId)) ||
+      !targetParsed || !targetMetadataValid(selection.target) ||
       (!selection.previousRoot.empty() &&
        (!safeActiveRoot(selection.previousRoot) ||
         !safeMapId(selection.previousMapId) ||
@@ -1872,12 +2254,16 @@ MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
          !safeId(selection.previousSessionId)) ||
         (selection.previousManifestReceipt.empty() !=
          selection.previousSignedManifestReceipt.empty()) ||
-        (!selection.previousManifestReceipt.empty() &&
-         (!isHexSha256(selection.previousManifestReceipt) ||
-          !isHexSha256(selection.previousSignedManifestReceipt))))) ||
+         (!selection.previousManifestReceipt.empty() &&
+          (!isHexSha256(selection.previousManifestReceipt) ||
+          !isHexSha256(selection.previousSignedManifestReceipt))) ||
+        (!previousTargetParsed ||
+         !targetMetadataValid(selection.previousTarget)))) ||
       (selection.previousRoot.empty() &&
        (!selection.previousMapId.empty() ||
         !selection.previousSessionId.empty() ||
+        !previousTargetParsed ||
+        !targetMetadataEmpty(selection.previousTarget) ||
         !selection.previousManifestReceipt.empty() ||
         !selection.previousSignedManifestReceipt.empty())) ||
       (selection.manifestReceipt.empty() !=
@@ -1896,6 +2282,15 @@ InstallStatus MapTransferInstaller::readActiveMapId(std::string &mapId) const {
   if (status.ok)
     mapId = selection.mapId;
   return status;
+}
+
+InstallStatus
+MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
+  ActiveMapSelection selection;
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  return readInstalledManifest(selection.root, manifest);
 }
 
 bool MapTransferInstaller::pruneStagingSessions(
@@ -2259,7 +2654,13 @@ bool MapTransferInstaller::publishInstalledMetadata(
 std::string
 MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
   std::string value =
-      std::to_string(manifest.schemaVersion) + "\n" + manifest.mapId + "\n";
+      std::to_string(manifest.schemaVersion) + "\n" + manifest.mapId + "\n" +
+      manifest.renderer + "\n" + std::to_string(manifest.formatVersion) + "\n" +
+      std::to_string(manifest.labelProfileVersion) + "\n";
+  for (const std::string &language : manifest.labelLanguages)
+    value += language + "\n";
+  value += manifest.internationalFallback + "\n" +
+           manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
     value += file.path + "\n" + file.publishPath + "\n" +
              std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
@@ -2280,6 +2681,71 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
     return fail("installed_manifest", "installed map manifest is missing");
   }
   return validateManifestText(text, manifest);
+}
+
+InstallStatus MapTransferInstaller::validateLabelContracts(
+    const std::string &root, const MapManifest &manifest,
+    bool useManifestPaths) const {
+  if (manifest.formatVersion != 2)
+    return {true, "ok", ""};
+  const auto resolvedPath = [&](const ManifestFile &file) {
+    if (useManifestPaths)
+      return joinPath(root, file.path);
+    const std::string prefix = kVectMapPrefix;
+    if (!startsWith(file.publishPath, prefix))
+      return std::string();
+    return joinPath(root, file.publishPath.substr(prefix.size()));
+  };
+
+  const ManifestFile *fontFile = nullptr;
+  for (const ManifestFile &file : manifest.files) {
+    if (isFontAssetPath(file.path, manifest.mapId)) {
+      fontFile = &file;
+      break;
+    }
+  }
+  if (fontFile == nullptr)
+    return fail("label_font_missing", "target-2 map has no FMA1 asset");
+  map_font_asset::Asset font;
+  if (!font.open(resolvedPath(*fontFile)))
+    return fail("label_font_invalid", "target-2 FMA1 asset is invalid");
+  if (font.languageCount() != manifest.labelLanguages.size())
+    return fail("label_languages", "FMA1 languages do not match manifest");
+  for (uint8_t index = 0; index < font.languageCount(); ++index)
+    if (font.language(index) != manifest.labelLanguages[index])
+      return fail("label_languages", "FMA1 languages do not match manifest");
+
+  for (const ManifestFile &file : manifest.files) {
+    if (file.path.size() < 4 ||
+        file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
+      continue;
+    const std::string path = resolvedPath(file);
+    if (path.empty())
+      return fail("label_block_path", "target-2 block path is invalid");
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() <= 0 ||
+        static_cast<uint64_t>(input.tellg()) >
+            map_block_format::kMaximumBlockBytes)
+      return fail("label_block_open", "could not read target-2 FMB block");
+    const size_t size = static_cast<size_t>(input.tellg());
+    input.seekg(0, std::ios::beg);
+    std::vector<uint8_t> bytes(size);
+    input.read(reinterpret_cast<char *>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (!input || bytes.size() < 4 || bytes[3] != 3)
+      return fail("label_block_version", "target-2 map contains a non-v3 block");
+    map_label_block::Block labels;
+    std::string error;
+    if (!map_label_block::decode(bytes.data(), bytes.size(),
+                                 std::numeric_limits<uint16_t>::max(), labels,
+                                 &error) ||
+        labels.profileFingerprint != font.profileFingerprint() ||
+        !labels.referencesResolve(font.glyphCount(), font.languageCount())) {
+      return fail("label_block_contract",
+                  "FMB v3 label references do not match FMA1");
+    }
+  }
+  return {true, "ok", ""};
 }
 
 bool MapTransferInstaller::installedMapReceiptMatches(
@@ -2336,6 +2802,7 @@ bool MapTransferInstaller::writeActiveMap(
     const ActiveMapSelection &selection) const {
   if (!safeMapId(selection.mapId) || !safeActiveRoot(selection.root) ||
       (!selection.sessionId.empty() && !safeId(selection.sessionId)) ||
+      !targetMetadataValid(selection.target) ||
       (!selection.previousRoot.empty() &&
        (!safeActiveRoot(selection.previousRoot) ||
         !safeMapId(selection.previousMapId) ||
@@ -2343,12 +2810,14 @@ bool MapTransferInstaller::writeActiveMap(
          !safeId(selection.previousSessionId)) ||
         (selection.previousManifestReceipt.empty() !=
          selection.previousSignedManifestReceipt.empty()) ||
-        (!selection.previousManifestReceipt.empty() &&
-         (!isHexSha256(selection.previousManifestReceipt) ||
-          !isHexSha256(selection.previousSignedManifestReceipt))))) ||
+         (!selection.previousManifestReceipt.empty() &&
+          (!isHexSha256(selection.previousManifestReceipt) ||
+          !isHexSha256(selection.previousSignedManifestReceipt))) ||
+        !targetMetadataValid(selection.previousTarget))) ||
       (selection.previousRoot.empty() &&
        (!selection.previousMapId.empty() ||
         !selection.previousSessionId.empty() ||
+        !targetMetadataEmpty(selection.previousTarget) ||
         !selection.previousManifestReceipt.empty() ||
         !selection.previousSignedManifestReceipt.empty())) ||
       (selection.manifestReceipt.empty() !=
@@ -2361,12 +2830,14 @@ bool MapTransferInstaller::writeActiveMap(
   std::string json = std::string("{\"mapId\":\"") +
                      jsonEscape(selection.mapId) + "\",\"sessionId\":\"" +
                      jsonEscape(selection.sessionId) + "\",\"root\":\"" +
-                     jsonEscape(selection.root) + "\"";
+                     jsonEscape(selection.root) + "\"" +
+                     targetMetadataJson(selection.target, "");
   if (!selection.previousRoot.empty()) {
     json += ",\"previousMapId\":\"" + jsonEscape(selection.previousMapId) +
             "\",\"previousSessionId\":\"" +
             jsonEscape(selection.previousSessionId) + "\",\"previousRoot\":\"" +
-            jsonEscape(selection.previousRoot) + "\"";
+            jsonEscape(selection.previousRoot) + "\"" +
+            targetMetadataJson(selection.previousTarget, "previous");
     if (!selection.previousManifestReceipt.empty()) {
       json += ",\"previousManifestReceipt\":\"" +
               selection.previousManifestReceipt +

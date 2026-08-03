@@ -18,6 +18,8 @@
 #include "map_setting_packet.hpp"
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
+#include "device_capabilities_protocol.hpp"
+#include "map_transfer_status_chunk_session.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -92,6 +94,7 @@ static volatile int16_t phoneBatteryLevelPercent = -1;
 static volatile bool phoneBatteryCharging = false;
 static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
+static bool bleSessionSupportsStreetLabels = false;
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
@@ -1186,6 +1189,7 @@ static void handleAuthPayload(const std::string &frame) {
     char response[112];
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsStreetLabels = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -1407,6 +1411,29 @@ static std::string mapTransferStatusJson() {
       body += ",\"activeSessionId\":\"" +
               jsonEscape(activeMap.sessionId) + "\"";
     }
+    if (!activeMap.manifestReceipt.empty()) {
+      body += ",\"activeManifestReceipt\":\"" +
+              jsonEscape(activeMap.manifestReceipt) + "\"";
+    }
+    if (activeMap.target.formatVersion != 0) {
+      body += ",\"activeRendererFormat\":" +
+              std::to_string(activeMap.target.formatVersion) +
+              ",\"labelProfileVersion\":" +
+              std::to_string(activeMap.target.labelProfileVersion) +
+              ",\"labelLanguages\":[";
+      for (size_t index = 0; index < activeMap.target.labelLanguages.size();
+           ++index) {
+        if (index != 0)
+          body += ",";
+        body +=
+            "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
+      }
+      body += "],\"fontAssetHealthy\":";
+      body += activeMap.target.formatVersion == 2 &&
+                      mapView.debugStreetLabelFontHealthy()
+                  ? "true"
+                  : "false";
+    }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
             "\"}";
@@ -1479,11 +1506,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  // Notifications must fit even when the central keeps the minimum ATT MTU
-  // (23 bytes, 20-byte value). Frame the JSON into independently valid chunks
-  // instead of relying on the requested 512-byte MTU being negotiated.
-  constexpr size_t kChunkBytes = 13;
-  static uint8_t transferId = 0;
+  static map_transfer_status_protocol::ChunkSession chunkSession;
   const std::string body = mapTransferStatusJson();
   const std::string legacy = "MSTS" + body;
   uint16_t peerMtu = 23;
@@ -1500,16 +1523,24 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
                   (unsigned)legacy.size(), (unsigned)peerMtu);
     return;
   }
-  const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
+  const size_t chunkBytes =
+      map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
+  if (chunkBytes == 0) {
+    Serial.printf(
+        "BLE Map Transfer: MTU %u cannot carry authenticated status chunks\n",
+        static_cast<unsigned>(peerMtu));
+    return;
+  }
+  const size_t chunkCount = (body.size() + chunkBytes - 1) / chunkBytes;
   if (chunkCount == 0 || chunkCount > 255) {
     Serial.printf("BLE Map Transfer: status too large (%u bytes)\n",
                   (unsigned)body.size());
     return;
   }
-  transferId++;
+  const uint8_t transferId = chunkSession.transferIdFor(body);
   for (size_t index = 0; index < chunkCount; index++) {
-    const size_t offset = index * kChunkBytes;
-    const size_t length = std::min(kChunkBytes, body.size() - offset);
+    const size_t offset = index * chunkBytes;
+    const size_t length = std::min(chunkBytes, body.size() - offset);
     std::string frame = "MSTC";
     frame.push_back(static_cast<char>(transferId));
     frame.push_back(static_cast<char>(index));
@@ -1677,7 +1708,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   const bool speakerAvailable = waveshare_board::speaker::isAvailable();
   const bool powerButtonHonkAvailable =
       waveshare_board::speaker::isPowerButtonHonkAvailable();
-  uint8_t response[9] = {
+  uint8_t response[device_capabilities_protocol::CAP2_MAX_BYTES] = {
       'C', 'A', 'P', 'S',
       static_cast<uint8_t>(
           waveshare_board::speaker::capabilityFlags(
@@ -1691,29 +1722,54 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   };
   size_t responseSize = 5;
   waveshare_board::speaker::PowerButtonHonkConfig config{};
+  uint8_t powerPayload[
+      waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE]{};
   if (includePowerButtonConfig && powerButtonHonkAvailable) {
     if (!waveshare_board::speaker::getPowerButtonHonkConfig(config) ||
         !waveshare_board::speaker::encodePowerButtonHonkPayload(
-            config, response + responseSize,
+            config, powerPayload,
             waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE)) {
       Serial.println("BLE Capabilities: PWR config unavailable; retry required");
       return;
     }
-    responseSize += waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE;
   }
+  const bool useCap2 =
+      clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
   const uint8_t extendedCapabilityFlags =
       map_profile_protocol::extendedCapabilityFlagsForClient(clientVersion);
-  if (extendedCapabilityFlags != 0) {
-    response[responseSize++] = extendedCapabilityFlags;
+  if (useCap2) {
+    const uint32_t featureFlags =
+        static_cast<uint32_t>(response[4]) |
+        device_capabilities_protocol::STREET_LABELS_FEATURE |
+        device_capabilities_protocol::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
+        device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
+        device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE;
+    responseSize = device_capabilities_protocol::encodeCap2(
+        featureFlags, powerPayload,
+        includePowerButtonConfig && powerButtonHonkAvailable, response,
+        sizeof(response));
+    if (responseSize == 0) {
+      Serial.println("BLE Capabilities: CAP2 encoding failed");
+      return;
+    }
+  } else {
+    if (includePowerButtonConfig && powerButtonHonkAvailable) {
+      memcpy(response + responseSize, powerPayload, sizeof(powerPayload));
+      responseSize += sizeof(powerPayload);
+    }
+    if (extendedCapabilityFlags != 0) {
+      response[responseSize++] = extendedCapabilityFlags;
+    }
   }
   if (!notifyAuthenticatedNavigation(pChar, response, responseSize)) {
     Serial.println("BLE Capabilities: protected notification failed");
     return;
   }
   Serial.printf(
-      "BLE Capabilities: notified flags=0x%02X config=%d extended=0x%02X\n",
-      response[4], includePowerButtonConfig && powerButtonHonkAvailable ? 1 : 0,
-      extendedCapabilityFlags);
+      "BLE Capabilities: notified schema=%s config=%d extended=0x%02X\n",
+      useCap2 ? "CAP2" : "CAPS",
+      includePowerButtonConfig && powerButtonHonkAvailable ? 1 : 0,
+      useCap2 ? 0 : extendedCapabilityFlags);
 }
 
 static void notifyPowerButtonHonkStatus(
@@ -1753,6 +1809,8 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         value.length() == 5 ? static_cast<uint8_t>(value[4]) : 0;
     const bool includePowerButtonConfig =
         clientVersion >= 1;
+    bleSessionSupportsStreetLabels =
+        clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
@@ -2140,6 +2198,12 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
   bleDebugStats.settingsPacketCount++;
   bleDebugStats.lastSettingsPacketMs = millis();
+  if (map_profile_protocol::isLabelSetting(settingId) &&
+      !bleSessionSupportsStreetLabels) {
+    Serial.printf("BLE Settings: ignored unnegotiated label setting %u\n",
+                  settingId);
+    return;
+  }
   if (map_profile_protocol::isIndependentSetting(settingId)) {
     bleSessionUsesIndependentMapProfiles = true;
   }
@@ -2412,6 +2476,48 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                   "(saved)\n",
                   mapRenderSettings.mapNavigationBirdsEyePerspective);
     break;
+  case map_profile_protocol::MAP_LABEL_DENSITY_SETTING_ID:
+    mapRenderSettings.mapStyle.labelDensity = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_LABEL_LANGUAGE_MODE_SETTING_ID:
+    mapRenderSettings.mapStyle.labelLanguageMode = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_LABEL_TEXT_SIZE_SETTING_ID:
+    mapRenderSettings.mapStyle.labelTextSize = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_LABEL_ORIENTATION_SETTING_ID:
+    mapRenderSettings.mapStyle.labelOrientation = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID:
+    mapRenderSettings.mapNavigationStyle.labelDensity = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID:
+    mapRenderSettings.mapNavigationStyle.labelLanguageMode =
+        static_cast<uint8_t>(
+            map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID:
+    mapRenderSettings.mapNavigationStyle.labelTextSize = static_cast<uint8_t>(
+        map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
+    mapRenderSettings.mapNavigationStyle.labelOrientation =
+        static_cast<uint8_t>(
+            map_profile_protocol::clampValue(settingId, settingValue));
+    persistMapProfileSetting();
+    break;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -2585,6 +2691,7 @@ public:
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsStreetLabels = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -2641,6 +2748,7 @@ public:
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
+    bleSessionSupportsStreetLabels = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;

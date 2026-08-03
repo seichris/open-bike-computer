@@ -75,6 +75,66 @@ static std::string validFmb(uint8_t version = 1) {
 
 static std::string validFmp() { return "Polygons:0\nPolylines:0\n"; }
 
+static void appendLe16(std::vector<uint8_t> &data, uint16_t value) {
+  data.push_back(static_cast<uint8_t>(value));
+  data.push_back(static_cast<uint8_t>(value >> 8U));
+}
+
+static void appendLe32(std::vector<uint8_t> &data, uint32_t value) {
+  for (uint8_t shift = 0; shift < 32; shift += 8)
+    data.push_back(static_cast<uint8_t>(value >> shift));
+}
+
+static uint32_t crc32(const std::vector<uint8_t> &data) {
+  uint32_t crc = 0xFFFFFFFFU;
+  for (const uint8_t byte : data) {
+    crc ^= byte;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+static std::string emptyLabelFmb(uint32_t fingerprint) {
+  std::vector<uint8_t> data = {'F', 'M', 'B', 3, 0, 0, 0, 0,
+                               'E', 'X', 'T', '3', 3, 0, 0, 0};
+  std::vector<uint8_t> labels;
+  appendLe32(labels, fingerprint);
+  appendLe16(labels, 0);
+  const std::vector<std::vector<uint8_t>> sections = {{0, 0}, {0, 0}, labels};
+  uint32_t offset = static_cast<uint32_t>(data.size() + 3U * 16U);
+  for (uint8_t index = 0; index < sections.size(); ++index) {
+    data.push_back(index + 1);
+    data.push_back(1);
+    appendLe16(data, 0);
+    appendLe32(data, offset);
+    appendLe32(data, static_cast<uint32_t>(sections[index].size()));
+    appendLe32(data, crc32(sections[index]));
+    offset += sections[index].size();
+  }
+  for (const auto &section : sections)
+    data.insert(data.end(), section.begin(), section.end());
+  return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static std::string emptyFontAsset(uint32_t fingerprint) {
+  const std::vector<uint8_t> language = {2, 'e', 'n'};
+  std::vector<uint8_t> face = {1, 0};
+  appendLe16(face, 5);
+  face.insert(face.end(), 32, 0x5a);
+  face.insert(face.end(), {'l', 'a', 't', 'i', 'n'});
+  std::vector<uint8_t> data = {'F', 'M', 'A', '1', 1, 3, 1, 1};
+  appendLe32(data, fingerprint);
+  appendLe32(data, 0);
+  appendLe32(data, static_cast<uint32_t>(language.size()));
+  appendLe32(data, static_cast<uint32_t>(face.size()));
+  appendLe32(data, 0);
+  appendLe32(data, 0);
+  data.insert(data.end(), language.begin(), language.end());
+  data.insert(data.end(), face.begin(), face.end());
+  return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
 static void writeLe16(std::ofstream &out, uint16_t value) {
   const uint8_t bytes[] = {static_cast<uint8_t>(value & 0xff),
                            static_cast<uint8_t>((value >> 8) & 0xff)};
@@ -157,6 +217,76 @@ static void testSha256KnownVector() {
   streaming.update(reinterpret_cast<const uint8_t *>("bc"), 2);
   assert(streaming.finalHex() ==
          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+static void testTargetTwoLabelContractValidation() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-labels";
+  const std::string blockPath = "VECTMAP/map-labels/+0000+0000/0_0.fmb";
+  const std::string fontPath =
+      "VECTMAP/map-labels/assets/street-labels.fma";
+  const std::string block = emptyLabelFmb(0x12345678);
+  const std::string font = emptyFontAsset(0x12345678);
+  const std::string directory = installer.stagingRoot(session);
+  assert(::system((std::string("mkdir -p ") + directory +
+                   "/VECTMAP/map-labels/+0000+0000 " + directory +
+                   "/VECTMAP/map-labels/assets")
+                      .c_str()) == 0);
+  writeFile(directory + "/" + blockPath, block);
+  writeFile(directory + "/" + fontPath, font);
+  const std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-labels\",\"target\":{"
+      "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+      "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+      "\"internationalFallback\":\"en\"},\"files\":[{\"path\":\"" +
+      blockPath + "\",\"bytes\":" + std::to_string(block.size()) +
+      ",\"sha256\":\"" + sha(block) + "\"},{\"path\":\"" + fontPath +
+      "\",\"bytes\":" + std::to_string(font.size()) +
+      ",\"sha256\":\"" + sha(font) + "\"}]}\n";
+  writeFile(directory + "/manifest.json", manifest);
+  MapManifest parsed;
+  const auto valid = installer.validateStagedMap(session, parsed);
+  assert(valid.ok);
+  assert(parsed.formatVersion == 2);
+  assert(parsed.labelProfileVersion == 1);
+  assert(parsed.labelLanguages == std::vector<std::string>{"en"});
+  assert(installer.activateStagedMap(session, parsed).ok);
+  ActiveMapSelection activeSelection;
+  assert(installer.readActiveMap(activeSelection).ok);
+  assert(activeSelection.target.renderer == "esp32-fmb");
+  assert(activeSelection.target.formatVersion == 2);
+  assert(activeSelection.target.labelProfileVersion == 1);
+  assert(activeSelection.target.labelLanguages ==
+         std::vector<std::string>{"en"});
+  assert(activeSelection.target.internationalFallback == "en");
+  const std::string activePointer =
+      readFile(root + "/VECTMAP/active-map.json");
+  assert(activePointer.find("\"formatVersion\":2") != std::string::npos);
+  assert(activePointer.find("\"files\"") == std::string::npos);
+
+  const std::string mismatchSession = "session-labels-mismatch";
+  const std::string mismatchDirectory = installer.stagingRoot(mismatchSession);
+  assert(::system((std::string("mkdir -p ") + mismatchDirectory +
+                   "/VECTMAP/map-labels/+0000+0000 " + mismatchDirectory +
+                   "/VECTMAP/map-labels/assets")
+                      .c_str()) == 0);
+  const std::string mismatchedBlock = emptyLabelFmb(0x87654321);
+  writeFile(mismatchDirectory + "/" + blockPath, mismatchedBlock);
+  writeFile(mismatchDirectory + "/" + fontPath, font);
+  std::string mismatchManifest = manifest;
+  const std::string oldSize = "\"bytes\":" + std::to_string(block.size());
+  const std::string newSize =
+      "\"bytes\":" + std::to_string(mismatchedBlock.size());
+  mismatchManifest.replace(mismatchManifest.find(oldSize), oldSize.size(),
+                           newSize);
+  mismatchManifest.replace(mismatchManifest.find(sha(block)), 64,
+                           sha(mismatchedBlock));
+  writeFile(mismatchDirectory + "/manifest.json", mismatchManifest);
+  const auto mismatch =
+      installer.validateStagedMap(mismatchSession, parsed);
+  assert(!mismatch.ok);
+  assert(mismatch.code == "label_block_contract");
 }
 
 static void testActivationStateTracksAttemptsAndCompactStatus() {
@@ -246,6 +376,22 @@ static void testRejectsUnsafeManifestPath() {
   assert(status.code == "manifest_path");
 }
 
+static void testRejectsMalformedActiveTargetMetadata() {
+  const std::string root = tempRoot();
+  assert(::system((std::string("mkdir -p ") + root + "/VECTMAP").c_str()) ==
+         0);
+  writeFile(root + "/VECTMAP/active-map.json",
+            "{\"mapId\":\"map-1\",\"root\":\"/VECTMAP\","
+            "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+            "\"labelProfileVersion\":1,\"labelLanguages\":\"en\","
+            "\"internationalFallback\":\"en\"}\n");
+  MapTransferInstaller installer(root);
+  ActiveMapSelection selection;
+  const auto active = installer.readActiveMap(selection);
+  assert(!active.ok);
+  assert(active.code == "active_invalid");
+}
+
 static void testRejectsPathOutsideMapNamespace() {
   MapTransferInstaller installer("/tmp/root");
   MapManifest manifest;
@@ -322,6 +468,8 @@ static void testValidatesStagedMapAndActivates() {
   assert(selection.mapId == "map-1");
   assert(selection.sessionId == session);
   assert(selection.root == "/VECTMAP/.maps/session-1");
+  assert(selection.target.renderer == "esp32-fmb");
+  assert(selection.target.formatVersion == 1);
   assert(selection.previousRoot.empty());
   assert(!exists(root + "/VECTMAP/.staging/" + session));
   assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
@@ -349,7 +497,10 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   writeFile(oldDir + "/old.fmb", "old-map-block");
   writeFile(root + "/VECTMAP/active-map.json",
             "{\"mapId\":\"map-old\",\"sessionId\":\"session-old\","
-            "\"root\":\"/VECTMAP/.maps/session-old\"}\n");
+            "\"root\":\"/VECTMAP/.maps/session-old\","
+            "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+            "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+            "\"internationalFallback\":\"en\"}\n");
 
   const std::string blockData = validFmb(2);
   writeFile(stagedDir + "/123_456.fmb", blockData);
@@ -378,6 +529,9 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   assert(selection.root == "/VECTMAP/.maps/session-replace");
   assert(selection.previousMapId == "map-old");
   assert(selection.previousRoot == "/VECTMAP/.maps/session-old");
+  assert(selection.previousTarget.formatVersion == 2);
+  assert(selection.previousTarget.labelLanguages ==
+         std::vector<std::string>{"en"});
 
   const auto rolledBack = installer.rollbackActiveMap(session);
   assert(rolledBack.ok);
@@ -385,6 +539,9 @@ static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
   assert(selection.mapId == "map-old");
   assert(selection.sessionId == "session-old");
   assert(selection.root == "/VECTMAP/.maps/session-old");
+  assert(selection.target.formatVersion == 2);
+  assert(selection.target.labelLanguages ==
+         std::vector<std::string>{"en"});
 }
 
 static void testSameSessionRetryRepairsDamagedInstalledVersion() {
@@ -1050,8 +1207,10 @@ static void testPendingArchiveActivationSurvivesRestart() {
 
 int main() {
   testSha256KnownVector();
+  testTargetTwoLabelContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+  testRejectsMalformedActiveTargetMetadata();
   testRejectsPathOutsideMapNamespace();
   testRejectsMapBlockOutsideRendererBudget();
   testValidatesStagedMapAndActivates();

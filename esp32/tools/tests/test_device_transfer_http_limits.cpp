@@ -36,6 +36,18 @@ int main() {
   assert(!device_transfer::isHttpTransferGenerationCurrent(false, generation,
                                                             generation));
   assert(device_transfer::nextHttpTransferGeneration(UINT32_MAX) == 1);
+  const device_transfer::HttpResponseCompletionToken responseToken{
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"};
+  assert(responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"));
+  assert(!responseToken.matches(
+      generation + 1, "PUT",
+      "/map-transfer/sessions/session-1/install-stream"));
+  assert(!responseToken.matches(
+      generation, "POST",
+      "/map-transfer/sessions/session-1/install-stream"));
+  assert(!responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-2/install-stream"));
   assert(device_transfer::validHttpHeaderName("Content-Length"));
   assert(device_transfer::validHttpHeaderName("x-bike_token.v2"));
   assert(!device_transfer::validHttpHeaderName("Content Length"));

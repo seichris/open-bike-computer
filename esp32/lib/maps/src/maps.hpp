@@ -18,11 +18,15 @@
 #include "../../utils/src/mapDragPreview.hpp"
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
+#include "mapFontAsset.hpp"
+#include "mapLabelBlock.hpp"
+#include "mapLabelLayout.hpp"
 #include "mapVars.h"
 #include <Arduino.h>
 
 // Forward declarations
 struct MapSettings;
+struct ScreenMapRenderSettings;
 
 class Maps {
 private:
@@ -86,6 +90,7 @@ private:
     uint8_t formatVersion = 1;
     std::vector<Polyline, PsramAllocator<Polyline>> polylines;
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
+    map_label_block::Block labelData;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
@@ -121,6 +126,43 @@ private:
   };
   MemCache memCache;               // Memory Cache
   String vectorMapFolder = "/sdcard/VECTMAP/";
+  map_font_asset::Asset labelFontAsset;
+  bool streetLabelRuntimeFailurePending = false;
+  std::string streetLabelRuntimeFailureCode;
+  struct LabelLayoutCacheKey {
+    int32_t centerX = 0;
+    int32_t centerY = 0;
+    int16_t rotationBucket = 0;
+    uint16_t screenWidth = 0;
+    uint16_t screenHeight = 0;
+    uint32_t fontFingerprint = 0;
+    uint32_t visibilityMask = 0;
+    uint64_t blockSignature = 0;
+    uint8_t zoom = 0;
+    uint8_t density = 0;
+    uint8_t languageMode = 0;
+    uint8_t textSize = 0;
+    uint8_t orientation = 0;
+    int16_t markerX = 0;
+    int16_t markerY = 0;
+    uint8_t markerScale = 0;
+    bool markerVisible = false;
+    bool guidance = false;
+
+    bool operator==(const LabelLayoutCacheKey &other) const;
+  };
+  struct LabelLayoutCache {
+    bool valid = false;
+    LabelLayoutCacheKey key;
+    MapLabelLayoutVector<map_label_layout::Placement> placements;
+    map_label_layout::Diagnostics diagnostics;
+
+    void clear() {
+      valid = false;
+      placements.clear();
+      diagnostics = {};
+    }
+  } labelLayoutCache;
   Point32 point = viewPort.center; // Vector map GPS position point
   double lat2y(double lat);
   double lon2x(double lon);
@@ -143,7 +185,8 @@ private:
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation,
-                     const map_projection::Projection &projection);
+                     const map_projection::Projection &projection,
+                     bool drawLabels = true);
   bool renderRollingRasterCell(double rasterOriginX, double rasterOriginY,
                                int32_t cellOffsetX, int32_t cellOffsetY,
                                uint8_t zoom, double rotation,
@@ -169,12 +212,18 @@ private:
   void positionRollingRasterCanvas(Point32 center);
   void updateVisibleVectorViewport();
   void invalidateRollingRasterWindow();
+  bool renderRollingForeground();
+  void hideRollingForeground();
+  void restoreRollingForeground();
   bool rollingRasterCompatible(uint8_t zoom, uint16_t viewportWidth,
                                uint16_t viewportHeight,
                                uint64_t signature) const;
   bool shouldUseRollingRasterWindow(uint8_t zoom) const;
   uint64_t rollingRasterSignature() const;
   double visibleMapRotation() const;
+  bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
+                        lv_obj_t *canvas, uint8_t zoom, double rotation,
+                        const ScreenMapRenderSettings &style);
   void getPosition(double lat, double lon);
 
   // Common
@@ -188,6 +237,7 @@ private:
   uint16_t mapTileSize;      // Actual map tile size (render or vector map)
   uint16_t wptPosX, wptPosY; // Waypoint position on screen map
   lv_obj_t *canvasArrow;     // Canvas for Navigation Arrow in map
+  lv_obj_t *canvasForeground; // Viewport labels/route above rolling map cells
   lv_obj_t *canvasMapTemp;   // Full map canvas (not showed)
   lv_obj_t *canvasMap;       // Screen map canvas (showed)
   double prevLat, prevLon;   // Previous Latitude and Longitude
@@ -271,6 +321,7 @@ private:
     int32_t originPhaseOffsetY = 0;
     uint64_t signature = 0;
   } rollingRasterWindow;
+  bool rollingForegroundReady = false;
 
   map_drag_preview::Controller dragPreviewController;
   map_projection::Projection visibleProjection;
@@ -387,4 +438,6 @@ public:
   void updateArrowColor();
   bool debugIsMapFound() const { return isMapFound; }
   size_t debugCachedBlockCount() const { return memCache.blocks.size(); }
+  bool debugStreetLabelFontHealthy() const { return labelFontAsset.healthy(); }
+  bool takeStreetLabelRuntimeFailure(std::string &code);
 };

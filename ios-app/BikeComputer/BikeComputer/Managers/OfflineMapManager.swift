@@ -1640,6 +1640,45 @@ final class OfflineMapManager: ObservableObject {
         centerLatitude = String(format: "%.6f", location.coordinate.latitude)
         centerLongitude = String(format: "%.6f", location.coordinate.longitude)
 
+        installBoundsMap(
+            OfflineMapBounds(
+                center: location.coordinate,
+                sideLengthKm: Double(sideLengthKm) ?? 25
+            ),
+            bleManager: bleManager
+        )
+    }
+
+    func regenerateActiveMap(bleManager: BLEManager) {
+        guard canStartNewMapJob(),
+              !bleManager.mapTransferActiveMapId.isEmpty,
+              let packURL = cachedPackURLs.first(where: {
+                  savedMapID(for: $0) == bleManager.mapTransferActiveMapId
+              }),
+              let archive = try? OfflineMapPackArchive(url: packURL),
+              let manifest = try? archive.manifest(),
+              let coordinates = manifest.bounds,
+              coordinates.count == 4 else {
+            errorMessage = "The active map area is unavailable. Choose the area again in Saved Maps."
+            return
+        }
+        installBoundsMap(
+            OfflineMapBounds(
+                minLon: coordinates[0],
+                minLat: coordinates[1],
+                maxLon: coordinates[2],
+                maxLat: coordinates[3]
+            ),
+            bleManager: bleManager
+        )
+    }
+
+    private func installBoundsMap(
+        _ bounds: OfflineMapBounds,
+        bleManager: BLEManager
+    ) {
+        guard canStartNewMapJob() else { return }
+
         startMapJobTask { manager in
             var client = try manager.makeClient()
             if client.clientInstallationToken?.isEmpty == false {
@@ -1655,10 +1694,11 @@ final class OfflineMapManager: ObservableObject {
                 client = try await manager.ensureRegisteredInstallation(client: client)
             }
             let request = OfflineMapJobRequest
-                .customBBox(OfflineMapBounds(
-                    center: location.coordinate,
-                    sideLengthKm: Double(manager.sideLengthKm) ?? 25
-                ))
+                .customBBox(bounds)
+                .forDevice(
+                    supportsStreetLabels: bleManager.supportsStreetLabels,
+                    firmwareVersion: bleManager.firmwareVersion
+                )
                 .identified(
                     clientInstallationId: client.clientInstallationId,
                     clientRequestId: UUID().uuidString.lowercased(),

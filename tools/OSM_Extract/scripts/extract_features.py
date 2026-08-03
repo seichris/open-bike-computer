@@ -2,24 +2,31 @@
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
 from map_format import write_fmb
+from font_asset import FontPackBuilder
+from label_pipeline import join_named_roads, normalize_preferred_languages, prepare_road_labels
 from block_progress import BlockProgressReporter
 from itertools import product
 from shapely import box
-import json, yaml
-import os, sys
+import argparse, json, yaml
+import os, sys, time
 
-if len( sys.argv ) < 2: 
-    print(" No arguments provided.")
-    print(" Usage:")
-    print("      {} <min_lon> <min_lat> <max_lon> <max_lat> <geojson prefix name>".format( sys.argv[0]))
-    print("")
-    sys.exit()
+parser = argparse.ArgumentParser()
+parser.add_argument("min_lon")
+parser.add_argument("min_lat")
+parser.add_argument("max_lon")
+parser.add_argument("max_lat")
+parser.add_argument("geojson_prefix")
+parser.add_argument("map_folder", nargs="?", default="../maps/shanghai_v2")
+parser.add_argument("--renderer-format", type=int, choices=(1, 2), default=1)
+parser.add_argument("--preferred-language", action="append", default=[])
+parser.add_argument("--international-fallback", default="en")
+args = parser.parse_args()
 
-LINES_INPUT_FILE = "{}_lines.geojson".format( sys.argv[5] )
-POLYGONS_INPUT_FILE = "{}_polygons.geojson".format( sys.argv[5] )
+LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
+POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
 CONF_FEATURES = '../conf/conf_extract.yaml'
 CONF_STYLES = '../conf/conf_styles.yaml'
-MAP_FOLDER = sys.argv[6] if len(sys.argv) > 6 else '../maps/shanghai_v2'
+MAP_FOLDER = args.map_folder
 
 MAPBLOCK_SIZE_BITS = 12     # 4096 x 4096 coords (~meters) per block  
 MAPFOLDER_SIZE_BITS = 4     # 16 x 16 map blocks per folder
@@ -29,7 +36,7 @@ mapfolder_mask = pow( 2, MAPFOLDER_SIZE_BITS) - 1    # ...00001111
 conf = yaml.safe_load( open( CONF_FEATURES, "r"))
 styles = yaml.safe_load( open(CONF_STYLES, "r"))
 
-min_lon, min_lat, max_lon, max_lat = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+min_lon, min_lat, max_lon, max_lat = args.min_lon, args.min_lat, args.max_lon, args.max_lat
 area_min_x, area_min_y = lon2x( float( min_lon)), lat2y( float( min_lat))
 area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
 
@@ -40,18 +47,56 @@ polygons = json.load( open( POLYGONS_INPUT_FILE, "r"))
 
 # extract relevant features
 print("Extracting features")
-lines = process_features( lines['features'], conf['lines']) # extracted_lines
+label_diagnostics = {}
+normalization_started = time.perf_counter()
+lines = process_features(
+    lines['features'], conf['lines'], label_diagnostics=label_diagnostics
+) # extracted_lines
 polygons = process_features( polygons['features'], conf['polygons']) # extracted_polygons
+normalization_seconds = time.perf_counter() - normalization_started
 print("Applying styles")
 # apply styles
 lines = style_features( lines, styles) # styled_lines
 polygons = style_features( polygons, styles) # styled_polygons
+font_builder = None
+label_totals = {
+    "blocks": 0,
+    "blockBytes": 0,
+    "maximumBlockBytes": 0,
+    "strings": 0,
+    "maximumBlockStrings": 0,
+    "stringBytes": 0,
+    "maximumBlockStringBytes": 0,
+    "runs": 0,
+    "maximumBlockRuns": 0,
+    "labels": 0,
+    "maximumBlockLabels": 0,
+    "candidates": 0,
+    "maximumBlockCandidates": 0,
+}
+label_phase_timings = {"labelNormalization": normalization_seconds}
+if args.renderer_format == 2:
+    preferred_languages = normalize_preferred_languages(args.preferred_language)
+    font_builder = FontPackBuilder(preferred_languages=preferred_languages)
+    joining_started = time.perf_counter()
+    lines = join_named_roads(lines, diagnostics=label_diagnostics)
+    label_phase_timings["labelRoadJoining"] = time.perf_counter() - joining_started
+    candidate_started = time.perf_counter()
+    lines = prepare_road_labels(
+        lines,
+        preferred_languages=preferred_languages,
+        international_fallback=args.international_fallback,
+        diagnostics=label_diagnostics,
+        measure_text=font_builder.measure_widths,
+    )
+    label_phase_timings["labelCandidateGeneration"] = time.perf_counter() - candidate_started
 # polygons = make_all_convex( polygons)
 
 x_positions = range(area_min_x, area_max_x, 4096)
 y_positions = range(area_min_y, area_max_y, 4096)
 total = len(x_positions) * len(y_positions)
 progress = BlockProgressReporter(total)
+fmb_writing_seconds = 0.0
 
 for init_x, init_y in progress.track(product(x_positions, y_positions)):
         # print("--------------------")
@@ -61,7 +106,11 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
         mapblock_bbox = box( min_x, min_y, min_x + mapblock_mask, min_y + mapblock_mask + 1) # we add 1 in max_y to compensate rounding errors when rendering
 
         # clip features to the block area
-        clipped_lines = clip_lines( lines, mapblock_bbox)
+        clipped_lines = clip_lines(
+            lines,
+            mapblock_bbox,
+            label_diagnostics=label_diagnostics if font_builder is not None else None,
+        )
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         if len(clipped_lines) == 0 and len( clipped_polygons) == 0:
             continue
@@ -78,7 +127,7 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
         file_name = f"{folder_name}/{block_x}_{block_y}"
         
         # SKIP if file already exists (RESUME feature)
-        if os.path.exists(f"{file_name}.fmb"):
+        if args.renderer_format == 1 and os.path.exists(f"{file_name}.fmb"):
             print(f"  Step 5/5 Skipping existing block {block_x}_{block_y}      ", end='\r')
             continue
 
@@ -94,7 +143,8 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
         # TODO: order features by z_order, first the ones to be drawn below the others
         
         # ASCII VERSION (.fmp)
-        with open( f"{file_name}.fmp", "w", encoding='ascii') as file:
+        if args.renderer_format == 1:
+          with open( f"{file_name}.fmp", "w", encoding='ascii') as file:
             file.write( f"Polygons:{len(clipped_polygons)}\n")
             for feat in clipped_polygons:
                 file.write( f"{feat['color']}\n")
@@ -121,10 +171,42 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
                 file.write('\n')
 
         # BINARY VERSION (.fmb)
-        write_fmb(
+        block_write_started = time.perf_counter()
+        block_metadata = write_fmb(
             f"{file_name}.fmb",
             clipped_polygons,
             clipped_lines,
             min_x,
             min_y,
+            font_builder=font_builder,
         )
+        fmb_writing_seconds += time.perf_counter() - block_write_started
+        if font_builder is not None:
+            label_totals["blocks"] += 1
+            label_totals["blockBytes"] += block_metadata["bytes"]
+            label_totals["maximumBlockBytes"] = max(
+                label_totals["maximumBlockBytes"], block_metadata["bytes"]
+            )
+            for key in ("strings", "stringBytes", "runs", "labels", "candidates"):
+                label_totals[key] += block_metadata[key]
+                maximum_key = f"maximumBlock{key[0].upper()}{key[1:]}"
+                label_totals[maximum_key] = max(
+                    label_totals[maximum_key], block_metadata[key]
+                )
+
+if font_builder is not None:
+    label_phase_timings["labelShaping"] = font_builder.shaping_seconds
+    label_phase_timings["labelFmbWriting"] = max(
+        0.0, fmb_writing_seconds - font_builder.shaping_seconds
+    )
+    font_write_started = time.perf_counter()
+    font_metadata = font_builder.write(
+        os.path.join(MAP_FOLDER, "assets", "street-labels.fma")
+    )
+    label_phase_timings["labelFontWriting"] = time.perf_counter() - font_write_started
+    label_totals.update({f"font{key[0].upper()}{key[1:]}": value for key, value in font_metadata.items()})
+    label_totals["diagnostics"] = label_diagnostics
+    label_totals["phaseTimings"] = {
+        key: round(value, 6) for key, value in label_phase_timings.items()
+    }
+    print("LABEL_STATS:" + json.dumps(label_totals, sort_keys=True, separators=(",", ":")))

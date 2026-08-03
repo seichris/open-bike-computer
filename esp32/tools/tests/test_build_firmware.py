@@ -1363,6 +1363,9 @@ class FirmwareBuildTests(unittest.TestCase):
                 )
 
         mocked_resolver.assert_called_once()
+        self.assertEqual(
+            mocked_resolver.call_args.args[1]["environment"], self.environment
+        )
         self.assertEqual(len(calls), 1)
         self.assertIn("/dev/cu.renumbered", calls[0])
         self.assertNotIn(FLASH_PLAN_PORT_PLACEHOLDER, calls[0])

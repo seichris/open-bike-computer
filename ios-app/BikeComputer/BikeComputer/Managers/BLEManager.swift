@@ -66,13 +66,13 @@ enum GPSPositionWriteRouting {
         withoutResponseMaximum: Int
     ) -> GPSPositionWriteRoute {
         let protectedLength = payloadLength + protectionOverhead
-        if hasNativeWriteWithoutResponse,
-           protectedLength <= withoutResponseMaximum {
-            return .nativeWithoutResponse
-        }
         if hasNativeWriteWithResponse,
            protectedLength <= withResponseMaximum {
             return .nativeWithResponse
+        }
+        if hasNativeWriteWithoutResponse,
+           protectedLength <= withoutResponseMaximum {
+            return .nativeWithoutResponse
         }
         return .navigationFallback
     }
@@ -87,14 +87,10 @@ enum WorkoutTelemetryWriteRoute: Equatable {
 enum WorkoutTelemetryWriteRouting {
     static func route(
         hasNativeWriteWithResponse: Bool,
-        hasNativeWriteWithoutResponse: Bool,
-        navigationExpectsWriteResponse: Bool
+        hasNativeWriteWithoutResponse: Bool
     ) -> WorkoutTelemetryWriteRoute {
         if hasNativeWriteWithResponse {
             return .nativeWithResponse
-        }
-        if navigationExpectsWriteResponse {
-            return .navigationFallback
         }
         if hasNativeWriteWithoutResponse {
             return .nativeWithoutResponse
@@ -129,6 +125,7 @@ enum DeviceBLEProtocol {
     static let deviceTransferStatusPrefix = "DSTS"
     static let deviceTransferStatusChunkPrefix = "DSTC"
     static let deviceCapabilitiesPrefix = "CAPS"
+    static let deviceCapabilitiesV2Prefix = "CAP2"
     static let soundPlayPrefix = "SNDP"
     static let powerButtonHonkPrefix = "SNDH"
     static let powerButtonHonkStatusPrefix = "SNHA"
@@ -147,7 +144,11 @@ enum DeviceBLEProtocol {
     static let birdsEyeMapNavigationExtendedCapabilityMask: UInt8 = 1 << 0
     static let birdsEyeMapNavigationPerspectiveExtendedCapabilityMask: UInt8 = 1 << 1
     static let birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask: UInt8 = 1 << 2
-    static let deviceCapabilitiesVersion: UInt8 = 9
+    static let streetLabelsCapabilityMask: UInt32 = 1 << 8
+    static let birdsEyeMapNavigationCapabilityMask: UInt32 = 1 << 9
+    static let birdsEyeMapNavigationPerspectiveCapabilityMask: UInt32 = 1 << 10
+    static let birdsEyeMapNavigationStrongerPerspectiveCapabilityMask: UInt32 = 1 << 11
+    static let deviceCapabilitiesVersion: UInt8 = 10
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
     static let workoutTelemetryExtendedCoalescingKey =
@@ -178,7 +179,21 @@ enum DeviceBLEProtocol {
     static let phoneBatteryChargingSettingID: UInt8 = 24
     static let mapPlusNavigationBirdsEyeViewSettingID: UInt8 = 25
     static let mapPlusNavigationBirdsEyePerspectiveSettingID: UInt8 = 26
+    static let mapLabelDensitySettingID: UInt8 = 27
+    static let mapLabelLanguageModeSettingID: UInt8 = 28
+    static let mapLabelTextSizeSettingID: UInt8 = 29
+    static let mapLabelOrientationSettingID: UInt8 = 30
+    static let mapPlusNavigationLabelDensitySettingID: UInt8 = 31
+    static let mapPlusNavigationLabelLanguageModeSettingID: UInt8 = 32
+    static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
+    static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
     static let currentScreenMaskMarker: Int32 = 1 << 30
+    static let defaultMapStreetLabelsEnabled = true
+    static let defaultMapPlusNavigationStreetLabelsEnabled = false
+    static let defaultStreetLabelDensity = 2
+    static let defaultStreetLabelLanguageMode = 2
+    static let defaultStreetLabelTextSize = 0
+    static let defaultStreetLabelOrientation = 1
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -202,6 +217,17 @@ enum DeviceBLEProtocol {
 
     static func phoneBatteryChargingValue(isCharging: Bool) -> Int32 {
         isCharging ? 1 : 0
+    }
+
+    static func normalizedStreetLabelDensity(_ density: Int) -> Int {
+        (1...3).contains(density) ? density : defaultStreetLabelDensity
+    }
+
+    static func effectiveStreetLabelDensity(
+        enabled: Bool,
+        density: Int
+    ) -> Int32 {
+        enabled ? Int32(normalizedStreetLabelDensity(density)) : 0
     }
 
     static func absoluteStreetWidth(fromLegacyBoost boost: Double) -> Double {
@@ -570,6 +596,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsBatteryStatusScreen: Bool = false
     @Published private(set) var supportsDestinationPicker: Bool = false
     @Published private(set) var supportsWorkoutTelemetry: Bool = false
+    @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -597,6 +624,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActiveSessionId: String = ""
+    @Published private(set) var activeMapManifestReceipt: String = ""
+    @Published private(set) var activeMapRendererFormat: Int?
+    @Published private(set) var activeMapLabelProfileVersion: Int?
+    @Published private(set) var activeMapLabelLanguages: [String] = []
+    @Published private(set) var activeMapFontAssetHealthy: Bool = false
     @Published var mapTransferActivationStatus: String = "idle"
     @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
@@ -611,6 +643,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
     @Published var deviceTransferSessionToken: String?
+    @Published private(set) var deviceTransferLastErrorCode: String?
+    @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
@@ -632,6 +666,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var positionMarkerScale: Double = 2
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up
     @Published var zoomLevel: Int = 3 // 0-5: 0=closest, 5=farthest
+    @Published var mapLabelsEnabled = DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+    @Published var mapLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+    @Published var mapLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+    @Published var mapLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+    @Published var mapLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var mapPlusNavigationMinPolygonSize = MapPlusNavigationDefaults.minPolygonSize
     @Published var mapPlusNavigationDetailLevel = MapPlusNavigationDefaults.detailLevel
     @Published var mapPlusNavigationRouteLineWidth = MapPlusNavigationDefaults.routeLineWidth
@@ -640,6 +679,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationZoomLevel = MapPlusNavigationDefaults.zoomLevel
     @Published var mapPlusNavigationBirdsEyeViewEnabled = true
     @Published var mapPlusNavigationBirdsEyePerspective: MapNavigationBirdsEyePerspective = .standard
+    @Published var mapPlusNavigationLabelsEnabled =
+        DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+    @Published var mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+    @Published var mapPlusNavigationLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+    @Published var mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+    @Published var mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var tapToSwitchScreens: Bool = false
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
@@ -702,9 +747,10 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
         maxCount: DeviceBLEProtocol.fallbackWriteQueueCapacity,
-        // One complete workout pair plus the latest destination status and
-        // maneuver snapshot must coexist while an acknowledged write is in flight.
-        priorityMaxCount: 4
+        // One complete workout pair plus the latest destination status,
+        // maneuver snapshot, transfer control, and transfer status must
+        // coexist while an acknowledged write is in flight.
+        priorityMaxCount: 6
     )
     private var lastNavigationQueuePendingLogAt = Date.distantPast
 #if DEBUG
@@ -762,6 +808,15 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
+    private var navigationWriteWithResponseLabel: String?
+    private var navigationWriteResponseTimeoutTimer: Timer?
+    private var navigationWriteResponseGeneration: UInt64 = 0
+#if HOST_TESTING
+    private var navigationWriteResponseTimeout: TimeInterval = 60
+#else
+    private var navigationWriteResponseTimeout: TimeInterval = 3
+#endif
+    private var navigationWriteStallRecoveryForTesting: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var pendingScannedConnectionTimeoutTimer: Timer?
     private var authRetryTimer: Timer?
@@ -800,6 +855,11 @@ class BLEManager: NSObject, ObservableObject {
         static let mapRotationMode = "mapSettings.mapRotationMode"
         static let resetMapRotationModeToNorthUp = "mapSettings.resetMapRotationModeToNorthUp.v1"
         static let zoomLevel = "mapSettings.zoomLevel"
+        static let mapLabelsEnabled = "mapSettings.labelsEnabled"
+        static let mapLabelDensity = "mapSettings.labelDensity"
+        static let mapLabelLanguageMode = "mapSettings.labelLanguageMode"
+        static let mapLabelTextSize = "mapSettings.labelTextSize"
+        static let mapLabelOrientation = "mapSettings.labelOrientation"
         static let mapPlusNavigationMinPolygonSize = "mapPlusNavigationSettings.minPolygonSize"
         static let mapPlusNavigationDetailLevel = "mapPlusNavigationSettings.detailLevel"
         static let mapPlusNavigationRouteLineWidth = "mapPlusNavigationSettings.routeLineWidth"
@@ -809,6 +869,11 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationZoomLevel = "mapPlusNavigationSettings.zoomLevel"
         static let mapPlusNavigationBirdsEyeViewEnabled = "mapPlusNavigationSettings.birdsEyeViewEnabled"
         static let mapPlusNavigationBirdsEyePerspective = "mapPlusNavigationSettings.birdsEyePerspective"
+        static let mapPlusNavigationLabelsEnabled = "mapPlusNavigationSettings.labelsEnabled"
+        static let mapPlusNavigationLabelDensity = "mapPlusNavigationSettings.labelDensity"
+        static let mapPlusNavigationLabelLanguageMode = "mapPlusNavigationSettings.labelLanguageMode"
+        static let mapPlusNavigationLabelTextSize = "mapPlusNavigationSettings.labelTextSize"
+        static let mapPlusNavigationLabelOrientation = "mapPlusNavigationSettings.labelOrientation"
         static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
         static let mapPlusNavigationShowGreenSpace = "mapPlusNavigationSettings.showGreenSpace"
         static let mapPlusNavigationShowPaths = "mapPlusNavigationSettings.showPaths"
@@ -821,6 +886,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
+        static let streetLabelDefaultsMigrated = "streetLabels.defaults.v1"
         static let tapToSwitchScreens = "deviceSettings.tapToSwitchScreens"
         static let enabledDeviceScreensMask = "deviceSettings.enabledScreensMask"
         static let defaultDeviceScreen = "deviceSettings.defaultScreen"
@@ -946,6 +1012,72 @@ class BLEManager: NSObject, ObservableObject {
             defaults.set(true, forKey: SettingsKeys.resetMapRotationModeToNorthUp)
         }
         zoomLevel = defaults.object(forKey: SettingsKeys.zoomLevel) as? Int ?? 3
+        let shouldMigrateStreetLabelDefaults = !defaults.bool(
+            forKey: SettingsKeys.streetLabelDefaultsMigrated
+        )
+        if shouldMigrateStreetLabelDefaults {
+            mapLabelsEnabled = DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+            mapLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+            mapLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+            mapLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+            mapLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
+            mapPlusNavigationLabelsEnabled =
+                DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+            mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
+            mapPlusNavigationLabelLanguageMode = DeviceBLEProtocol.defaultStreetLabelLanguageMode
+            mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
+            mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
+            defaults.set(true, forKey: SettingsKeys.streetLabelDefaultsMigrated)
+        } else {
+            mapLabelsEnabled = defaults.object(
+                forKey: SettingsKeys.mapLabelsEnabled
+            ) as? Bool ?? DeviceBLEProtocol.defaultMapStreetLabelsEnabled
+            mapLabelDensity = DeviceBLEProtocol.normalizedStreetLabelDensity(
+                defaults.object(forKey: SettingsKeys.mapLabelDensity) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelDensity
+            )
+            mapLabelLanguageMode = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelLanguageMode) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelLanguageMode,
+                0
+            ), 2)
+            mapLabelTextSize = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelTextSize) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelTextSize,
+                0
+            ), 2)
+            mapLabelOrientation = min(max(
+                defaults.object(forKey: SettingsKeys.mapLabelOrientation) as? Int
+                    ?? DeviceBLEProtocol.defaultStreetLabelOrientation,
+                0
+            ), 1)
+            mapPlusNavigationLabelsEnabled = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationLabelsEnabled
+            ) as? Bool ?? DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
+            mapPlusNavigationLabelDensity = DeviceBLEProtocol.normalizedStreetLabelDensity(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelDensity
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelDensity
+            )
+            mapPlusNavigationLabelLanguageMode = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelLanguageMode,
+                0
+            ), 2)
+            mapPlusNavigationLabelTextSize = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelTextSize
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelTextSize,
+                0
+            ), 2)
+            mapPlusNavigationLabelOrientation = min(max(
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationLabelOrientation
+                ) as? Int ?? DeviceBLEProtocol.defaultStreetLabelOrientation,
+                0
+            ), 1)
+        }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
             ?? DeviceScreen.allScreensMask
@@ -1144,6 +1276,7 @@ class BLEManager: NSObject, ObservableObject {
         showRouteOverlay = defaults.object(forKey: SettingsKeys.showRouteOverlay) as? Bool ?? true
         showCurrentPosition = defaults.object(forKey: SettingsKeys.showCurrentPosition) as? Bool ?? true
         if shouldMigrateMapPlusNavigationProfile ||
+            shouldMigrateStreetLabelDefaults ||
             shouldMigrateRecommendedDefaults ||
             defaults.object(forKey: SettingsKeys.streetLineWidth) == nil ||
             defaults.object(forKey: SettingsKeys.mapPlusNavigationStreetLineWidth) == nil {
@@ -1204,6 +1337,11 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(positionMarkerScale, forKey: SettingsKeys.positionMarkerScale)
         defaults.set(mapRotationMode, forKey: SettingsKeys.mapRotationMode)
         defaults.set(zoomLevel, forKey: SettingsKeys.zoomLevel)
+        defaults.set(mapLabelsEnabled, forKey: SettingsKeys.mapLabelsEnabled)
+        defaults.set(mapLabelDensity, forKey: SettingsKeys.mapLabelDensity)
+        defaults.set(mapLabelLanguageMode, forKey: SettingsKeys.mapLabelLanguageMode)
+        defaults.set(mapLabelTextSize, forKey: SettingsKeys.mapLabelTextSize)
+        defaults.set(mapLabelOrientation, forKey: SettingsKeys.mapLabelOrientation)
         defaults.set(mapPlusNavigationMinPolygonSize, forKey: SettingsKeys.mapPlusNavigationMinPolygonSize)
         defaults.set(mapPlusNavigationDetailLevel, forKey: SettingsKeys.mapPlusNavigationDetailLevel)
         defaults.set(mapPlusNavigationRouteLineWidth, forKey: SettingsKeys.mapPlusNavigationRouteLineWidth)
@@ -1212,6 +1350,11 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationZoomLevel, forKey: SettingsKeys.mapPlusNavigationZoomLevel)
         defaults.set(mapPlusNavigationBirdsEyeViewEnabled, forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled)
         defaults.set(mapPlusNavigationBirdsEyePerspective.rawValue, forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective)
+        defaults.set(mapPlusNavigationLabelsEnabled, forKey: SettingsKeys.mapPlusNavigationLabelsEnabled)
+        defaults.set(mapPlusNavigationLabelDensity, forKey: SettingsKeys.mapPlusNavigationLabelDensity)
+        defaults.set(mapPlusNavigationLabelLanguageMode, forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode)
+        defaults.set(mapPlusNavigationLabelTextSize, forKey: SettingsKeys.mapPlusNavigationLabelTextSize)
+        defaults.set(mapPlusNavigationLabelOrientation, forKey: SettingsKeys.mapPlusNavigationLabelOrientation)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
@@ -2055,9 +2198,7 @@ class BLEManager: NSObject, ObservableObject {
                 characteristic?.properties.contains(.write) == true,
             hasNativeWriteWithoutResponse:
                 testEndpoint != nil ||
-                characteristic?.properties.contains(.writeWithoutResponse) == true,
-            navigationExpectsWriteResponse:
-                navigationEndpoint.expectsWriteResponse
+                characteristic?.properties.contains(.writeWithoutResponse) == true
         )
 
         switch route {
@@ -2180,6 +2321,11 @@ class BLEManager: NSObject, ObservableObject {
             log("Bird's-eye perspective setting not sent: connected firmware does not advertise support")
             return
         }
+        if Self.isStreetLabelSetting(id),
+           (!hasReceivedDeviceCapabilities || !supportsStreetLabels) {
+            log("Street-label setting id=\(id) not sent: connected firmware does not advertise support")
+            return
+        }
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
@@ -2199,6 +2345,31 @@ class BLEManager: NSObject, ObservableObject {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
             return
         }
+    }
+
+    func sendStreetLabelDensity(for screen: DeviceScreen) {
+        let settingID: UInt8
+        let enabled: Bool
+        let density: Int
+        switch screen {
+        case .map:
+            settingID = DeviceBLEProtocol.mapLabelDensitySettingID
+            enabled = mapLabelsEnabled
+            density = mapLabelDensity
+        case .mapPlusNavigation:
+            settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
+            enabled = mapPlusNavigationLabelsEnabled
+            density = mapPlusNavigationLabelDensity
+        case .navigation, .rideStats, .batteryStatus:
+            return
+        }
+        sendSetting(
+            id: settingID,
+            value: DeviceBLEProtocol.effectiveStreetLabelDensity(
+                enabled: enabled,
+                density: density
+            )
+        )
     }
 
     @discardableResult
@@ -2268,8 +2439,15 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private static func isIndependentMapProfileSetting(_ id: UInt8) -> Bool {
-        id >= DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID &&
-            id <= DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID
+        (id >= DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID &&
+            id <= DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID) ||
+            (id >= DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID &&
+                id <= DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID)
+    }
+
+    private static func isStreetLabelSetting(_ id: UInt8) -> Bool {
+        id >= DeviceBLEProtocol.mapLabelDensitySettingID &&
+            id <= DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID
     }
 
     private func synchronizeMapPlusNavigationProfileWithMap(for settingID: UInt8) {
@@ -2344,6 +2522,15 @@ class BLEManager: NSObject, ObservableObject {
                     value: Int32(mapPlusNavigationBirdsEyePerspective.rawValue)
                 )
             }
+            if supportsStreetLabels {
+                sendStreetLabelDensity(for: .mapPlusNavigation)
+                sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID,
+                            value: Int32(mapPlusNavigationLabelLanguageMode))
+                sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID,
+                            value: Int32(mapPlusNavigationLabelTextSize))
+                sendSetting(id: DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID,
+                            value: Int32(mapPlusNavigationLabelOrientation))
+            }
         }
 
         if shouldSendMap {
@@ -2355,6 +2542,15 @@ class BLEManager: NSObject, ObservableObject {
             sendSetting(id: 9, value: Int32(streetLineWidth))
             sendSetting(id: 10, value: Int32(positionMarkerScale))
             sendSetting(id: 7, value: Int32(zoomLevel))
+            if supportsStreetLabels {
+                sendStreetLabelDensity(for: .map)
+                sendSetting(id: DeviceBLEProtocol.mapLabelLanguageModeSettingID,
+                            value: Int32(mapLabelLanguageMode))
+                sendSetting(id: DeviceBLEProtocol.mapLabelTextSizeSettingID,
+                            value: Int32(mapLabelTextSize))
+                sendSetting(id: DeviceBLEProtocol.mapLabelOrientationSettingID,
+                            value: Int32(mapLabelOrientation))
+            }
         }
     }
 
@@ -2367,6 +2563,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
+        supportsStreetLabels = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -2690,33 +2887,21 @@ class BLEManager: NSObject, ObservableObject {
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
         let label = enabled ? "map transfer enter" : "map transfer exit"
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: label,
-            writeClass: .transfer
+            coalescingKey: "transfer.map.control"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: label,
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "map transfer status",
-            writeClass: .transfer
+            coalescingKey: "transfer.map.status"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "map transfer status",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     func resetMapTransferActivationObservation() {
@@ -2734,50 +2919,35 @@ class BLEManager: NSObject, ObservableObject {
     func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("enter|\(mode.rawValue)".utf8))
-        let sentNative = sendNativeMapTransferPacket(
+        let coalescingKey = mode == .map
+            ? "transfer.map.control"
+            : "transfer.device.control"
+        return sendTransferControlPacket(
             packet,
             label: "\(mode.rawValue) transfer enter",
-            writeClass: .transfer
+            coalescingKey: coalescingKey
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "\(mode.rawValue) transfer enter",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestDeviceTransferExit() -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("exit".utf8))
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "device transfer exit",
-            writeClass: .transfer
+            coalescingKey: "transfer.device.control"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "device transfer exit",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
     func requestDeviceTransferStatus() -> Bool {
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
-        let sentNative = sendNativeMapTransferPacket(
+        return sendTransferControlPacket(
             packet,
             label: "device transfer status",
-            writeClass: .transfer
+            coalescingKey: "transfer.device.status"
         )
-        let sentFallback = sendFallbackMapPacket(
-            packet,
-            label: "device transfer status",
-            writeClass: .transfer
-        )
-        return sentNative || sentFallback
     }
 
     @discardableResult
@@ -3001,8 +3171,7 @@ class BLEManager: NSObject, ObservableObject {
         authInfoAttempts = 0
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -3054,8 +3223,7 @@ class BLEManager: NSObject, ObservableObject {
         workoutTelemetryCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         pendingAuthNonce = nil
         authFlowState = .idle
         authenticatedWriteSession = nil
@@ -3097,6 +3265,11 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferAccessPointSSID = nil
         mapTransferActiveMapId = ""
         mapTransferActiveSessionId = ""
+        activeMapManifestReceipt = ""
+        activeMapRendererFormat = nil
+        activeMapLabelProfileVersion = nil
+        activeMapLabelLanguages = []
+        activeMapFontAssetHealthy = false
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
@@ -3117,6 +3290,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
         deviceTransferSessionToken = nil
+        deviceTransferLastErrorCode = nil
+        deviceTransferLastErrorMessage = nil
         deviceTransferStatusRevision = 0
         firmwareUpdateStatus = "unknown"
         firmwareTarget = ""
@@ -3136,6 +3311,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsBirdsEyeMapNavigationStrongerPerspective = false
         supportsBatteryStatusScreen = false
         supportsDestinationPicker = false
+        supportsStreetLabels = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -3201,11 +3377,38 @@ class BLEManager: NSObject, ObservableObject {
 
     func installNavigationWriteQueueForTesting(
         maxCount: Int,
-        priorityMaxCount: Int = 4
+        priorityMaxCount: Int = 6
     ) {
         navigationWriteQueue = NavigationWriteQueue(
             maxCount: maxCount,
             priorityMaxCount: priorityMaxCount
+        )
+    }
+
+    func installNavigationWriteStallRecoveryForTesting(
+        timeout: TimeInterval,
+        recovery: @escaping () -> Void
+    ) {
+        navigationWriteResponseTimeout = timeout
+        navigationWriteStallRecoveryForTesting = recovery
+    }
+
+    @discardableResult
+    func enqueueUnacknowledgedTransferWriteForTesting(
+        _ data: Data,
+        write: @escaping (Data) -> Void
+    ) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "test unacknowledged transfer",
+            writeClass: .transfer,
+            coalescingKey: "test.transfer.control",
+            prioritized: true,
+            transportWrite: write,
+            transportCanSend: { true },
+            transportExpectsWriteResponse: false
         )
     }
 
@@ -4156,29 +4359,82 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    private func sendTransferControlPacket(
+        _ data: Data,
+        label: String,
+        coalescingKey: String
+    ) -> Bool {
+        DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    data,
+                    label: label,
+                    writeClass: .transfer,
+                    coalescingKey: coalescingKey,
+                    prioritized: true
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    data,
+                    label: label,
+                    writeClass: .transfer,
+                    coalescingKey: coalescingKey,
+                    prioritized: true
+                )
+            }
+        )
+    }
+
+    @discardableResult
     private func sendNativeMapTransferPacket(
         _ data: Data,
         label: String,
-        writeClass: NavigationWriteClass = .settingsControl
+        writeClass: NavigationWriteClass = .settingsControl,
+        coalescingKey: String? = nil,
+        prioritized: Bool = false
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
               let peripheral = connectedPeripheral,
               let characteristic = settingsCharacteristic,
               let endpoint = navigationWriteEndpoint,
-              data.count <= endpoint.maximumWriteLength else {
+              let writeType = preferredWriteType(for: characteristic) else {
             return false
         }
+
+        let protectedLength = data.count + (authenticatedWriteSession == nil
+            ? 0
+            : AuthenticatedBLEWriteSession.frameOverhead)
+        guard data.count <= endpoint.maximumWriteLength,
+              protectedLength <= peripheral.maximumWriteValueLength(
+                for: writeType
+              ) else { return false }
+        let expectsWriteResponse = writeType == .withResponse
 
         guard enqueueNavigationWrite(
             data,
             endpoint: endpoint,
             label: "native \(label)",
             writeClass: writeClass,
+            coalescingKey: coalescingKey,
+            prioritized: prioritized,
             transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
                 guard let self, let peripheral, let characteristic else { return }
-                self.writeDeviceData(payload, to: characteristic, on: peripheral)
-            }
+                self.writeDeviceData(
+                    payload,
+                    to: characteristic,
+                    on: peripheral,
+                    type: writeType
+                )
+            },
+            transportCanSend: { [weak self, weak peripheral] in
+                guard let self, let peripheral else { return false }
+                return expectsWriteResponse
+                    ? !self.writeWithResponseInFlight
+                    : peripheral.canSendWriteWithoutResponse
+            },
+            transportExpectsWriteResponse: expectsWriteResponse
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -4204,7 +4460,10 @@ class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         navigationWriteQueue.flush(canSend: { [weak self] write in
-            guard let self, !self.writeWithResponseInFlight else {
+            guard let self else { return false }
+            let expectsWriteResponse = write.transportExpectsWriteResponse
+                ?? endpoint.expectsWriteResponse
+            if expectsWriteResponse && self.writeWithResponseInFlight {
                 return false
             }
             return write.transportCanSend?() ?? endpoint.canSend()
@@ -4212,15 +4471,9 @@ class BLEManager: NSObject, ObservableObject {
             let expectsWriteResponse = write.transportExpectsWriteResponse
                 ?? endpoint.expectsWriteResponse
             if expectsWriteResponse {
-                writeWithResponseInFlight = true
-                navigationWriteWithResponseFailureHandler = write.onWriteFailure
-            } else {
-                navigationWriteWithResponseFailureHandler = nil
+                beginNavigationWriteResponseWait(for: write)
             }
             write.perform(using: endpoint.write)
-            if !writeWithResponseInFlight {
-                navigationWriteWithResponseFailureHandler = nil
-            }
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         if navigationWriteQueue.count == 0 {
@@ -4266,15 +4519,63 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func completeNavigationWrite(error: Error?) {
-        writeWithResponseInFlight = false
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         if error != nil {
             writeFailureHandler?()
         }
-        if let endpoint = navigationWriteEndpoint {
+        if isNavigationReady, let endpoint = navigationWriteEndpoint {
             flushPendingNavigationWrites(endpoint: endpoint)
             scheduleNavigationFlushRetryIfNeeded()
+        }
+    }
+
+    private func beginNavigationWriteResponseWait(for write: NavigationWrite) {
+        writeWithResponseInFlight = true
+        navigationWriteWithResponseFailureHandler = write.onWriteFailure
+        navigationWriteWithResponseLabel = write.label
+        navigationWriteResponseGeneration &+= 1
+        let generation = navigationWriteResponseGeneration
+        navigationWriteResponseTimeoutTimer?.invalidate()
+        navigationWriteResponseTimeoutTimer = Timer.scheduledTimer(
+            withTimeInterval: navigationWriteResponseTimeout,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self,
+                  self.writeWithResponseInFlight,
+                  self.navigationWriteResponseGeneration == generation else {
+                return
+            }
+            self.recoverFromNavigationWriteStall()
+        }
+    }
+
+    private func resetNavigationWriteResponseWait() {
+        navigationWriteResponseTimeoutTimer?.invalidate()
+        navigationWriteResponseTimeoutTimer = nil
+        navigationWriteResponseGeneration &+= 1
+        writeWithResponseInFlight = false
+        navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseLabel = nil
+    }
+
+    private func recoverFromNavigationWriteStall() {
+        guard writeWithResponseInFlight else { return }
+        let label = navigationWriteWithResponseLabel ?? "unknown write"
+        let failureHandler = navigationWriteWithResponseFailureHandler
+        log("Acknowledged BLE write timed out: \(label); reconnecting")
+        resetNavigationWriteResponseWait()
+        navigationFlushRetryTimer?.invalidate()
+        navigationFlushRetryTimer = nil
+        isNavigationReady = false
+        failureHandler?()
+
+        if let navigationWriteStallRecoveryForTesting {
+            navigationWriteStallRecoveryForTesting()
+            return
+        }
+        if let peripheral = connectedPeripheral {
+            centralManager.cancelPeripheralConnection(peripheral)
         }
     }
 
@@ -4301,9 +4602,6 @@ class BLEManager: NSObject, ObservableObject {
         ) else {
             log("Cannot protect write for characteristic \(characteristic.uuid)")
             return
-        }
-        if writeType == .withResponse {
-            writeWithResponseInFlight = true
         }
         peripheral.writeValue(payload, for: characteristic, type: writeType)
     }
@@ -4627,8 +4925,7 @@ extension BLEManager: CBCentralManagerDelegate {
         authInfoAttempts = 0
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
-        writeWithResponseInFlight = false
-        navigationWriteWithResponseFailureHandler = nil
+        resetNavigationWriteResponseWait()
         navigationWriteQueue.removeAll()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
@@ -5024,95 +5321,141 @@ extension BLEManager: CBPeripheralDelegate {
         supportsWorkoutTelemetry = supported
     }
 
+    private func rejectDeviceCapabilities(_ message: String) {
+        supportsDeviceSounds = false
+        supportsPowerButtonHonk = false
+        supportsPowerButtonHonkAcknowledgement = false
+        supportsIndependentMapProfiles = false
+        supportsExtendedMapVisibility = false
+        supportsBirdsEyeMapNavigation = false
+        supportsBirdsEyeMapNavigationPerspective = false
+        supportsBirdsEyeMapNavigationStrongerPerspective = false
+        supportsBatteryStatusScreen = false
+        supportsDestinationPicker = false
+        supportsStreetLabels = false
+        updateWorkoutTelemetryCapability(false)
+        hasReceivedDeviceCapabilities = false
+        hasSentScreenSettingsForConnection = false
+        hasSentMapProfileForConnection = false
+        hasSentMapNavigationProfileForConnection = false
+        clearPendingPowerButtonHonkConfiguration()
+        log(message)
+    }
+
     @discardableResult
     func handleDeviceCapabilitiesNotification(_ data: Data) -> Bool {
         guard data.count >= 4,
-              String(data: data.prefix(4), encoding: .utf8) == DeviceBLEProtocol.deviceCapabilitiesPrefix else {
+              let prefix = String(data: data.prefix(4), encoding: .utf8),
+              prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix ||
+                prefix == DeviceBLEProtocol.deviceCapabilitiesV2Prefix else {
             return false
         }
 
-        guard data.count == 5 || data.count == 6 ||
-                data.count == 8 || data.count == 9 else {
-            supportsDeviceSounds = false
-            supportsPowerButtonHonk = false
-            supportsPowerButtonHonkAcknowledgement = false
-            supportsIndependentMapProfiles = false
-            supportsExtendedMapVisibility = false
-            supportsBirdsEyeMapNavigation = false
-            supportsBirdsEyeMapNavigationPerspective = false
-            supportsBirdsEyeMapNavigationStrongerPerspective = false
-            supportsBatteryStatusScreen = false
-            supportsDestinationPicker = false
-            updateWorkoutTelemetryCapability(false)
-            hasReceivedDeviceCapabilities = false
-            hasSentScreenSettingsForConnection = false
-            clearPendingPowerButtonHonkConfiguration()
-            log("Received invalid device capabilities payload")
-            return true
+        let flags: UInt32
+        let legacyExtendedFlags: UInt8
+        let powerButtonConfig: Data?
+        if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
+            guard data.count == 5 || data.count == 6 ||
+                    data.count == 8 || data.count == 9 else {
+                rejectDeviceCapabilities("Received invalid device capabilities payload")
+                return true
+            }
+            flags = UInt32(data[4])
+            legacyExtendedFlags = data.count == 6
+                ? data[5]
+                : (data.count == 9 ? data[8] : 0)
+            powerButtonConfig = data.count >= 8
+                ? data.subdata(in: 5..<8)
+                : nil
+        } else {
+            guard data.count >= 9, data[4] == 1 else {
+                rejectDeviceCapabilities("Received invalid CAP2 header")
+                return true
+            }
+            flags = UInt32(data[5]) |
+                (UInt32(data[6]) << 8) |
+                (UInt32(data[7]) << 16) |
+                (UInt32(data[8]) << 24)
+            var offset = 9
+            var seenTypes = Set<UInt8>()
+            var parsedPowerConfig: Data?
+            var valid = true
+            while offset < data.count {
+                guard offset + 2 <= data.count else {
+                    valid = false
+                    break
+                }
+                let type = data[offset]
+                let length = Int(data[offset + 1])
+                offset += 2
+                guard !seenTypes.contains(type), offset + length <= data.count else {
+                    valid = false
+                    break
+                }
+                seenTypes.insert(type)
+                if type == 1 {
+                    guard length == 3 else {
+                        valid = false
+                        break
+                    }
+                    parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                }
+                offset += length
+            }
+            guard valid, offset == data.count else {
+                rejectDeviceCapabilities("Received invalid CAP2 TLV payload")
+                return true
+            }
+            legacyExtendedFlags = 0
+            powerButtonConfig = parsedPowerConfig
         }
 
-        let flags = data[4]
-        let hasDeviceSounds = flags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
+        let legacyFlags = UInt8(truncatingIfNeeded: flags)
+        let hasDeviceSounds = legacyFlags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
         let hasPowerButtonHonk = hasDeviceSounds &&
-            flags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.powerButtonHonkCapabilityMask != 0
         let hasPowerButtonHonkAcknowledgement = hasPowerButtonHonk &&
-            flags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.powerButtonHonkAcknowledgementCapabilityMask != 0
         let hasIndependentMapProfiles =
-            flags & DeviceBLEProtocol.independentMapProfilesCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.independentMapProfilesCapabilityMask != 0
         let hasExtendedMapVisibility =
-            flags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.extendedMapVisibilityCapabilityMask != 0
         let hasBatteryStatusScreen =
-            flags & DeviceBLEProtocol.batteryStatusScreenCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.batteryStatusScreenCapabilityMask != 0
         let hasDestinationPicker =
-            flags & DeviceBLEProtocol.destinationPickerCapabilityMask != 0
+            legacyFlags & DeviceBLEProtocol.destinationPickerCapabilityMask != 0
         let hasWorkoutTelemetry =
-            flags & DeviceBLEProtocol.workoutTelemetryCapabilityMask != 0
-        let extendedFlags: UInt8
-        if data.count == 6 {
-            extendedFlags = data[5]
-        } else if data.count == 9 {
-            extendedFlags = data[8]
-        } else {
-            extendedFlags = 0
-        }
+            legacyFlags & DeviceBLEProtocol.workoutTelemetryCapabilityMask != 0
         let hasBirdsEyeMapNavigation =
-            extendedFlags &
-                DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask != 0
+            legacyExtendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationExtendedCapabilityMask != 0 ||
+            flags & DeviceBLEProtocol.birdsEyeMapNavigationCapabilityMask != 0
         let hasBirdsEyeMapNavigationPerspective =
-            hasBirdsEyeMapNavigation && extendedFlags &
-                DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask != 0
+            hasBirdsEyeMapNavigation &&
+            (legacyExtendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveExtendedCapabilityMask != 0 ||
+             flags & DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveCapabilityMask != 0)
         let hasBirdsEyeMapNavigationStrongerPerspective =
-            hasBirdsEyeMapNavigationPerspective && extendedFlags &
-                DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask != 0
-        let hasDevicePowerButtonConfig = data.count == 8 || data.count == 9
-        if hasDevicePowerButtonConfig {
+            hasBirdsEyeMapNavigationPerspective &&
+            (legacyExtendedFlags &
+                DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveExtendedCapabilityMask != 0 ||
+             flags & DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask != 0)
+        let hasStreetLabels =
+            flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
+        if let powerButtonConfig {
             guard hasPowerButtonHonk,
-                  data[5] <= 1,
-                  let deviceSound = DeviceSound(rawValue: data[6]),
-                  data[7] <= 100 else {
-                supportsDeviceSounds = false
-                supportsPowerButtonHonk = false
-                supportsPowerButtonHonkAcknowledgement = false
-                supportsIndependentMapProfiles = false
-                supportsExtendedMapVisibility = false
-                supportsBirdsEyeMapNavigation = false
-                supportsBirdsEyeMapNavigationPerspective = false
-                supportsBirdsEyeMapNavigationStrongerPerspective = false
-                supportsBatteryStatusScreen = false
-                supportsDestinationPicker = false
-                updateWorkoutTelemetryCapability(false)
-                hasReceivedDeviceCapabilities = false
-                hasSentScreenSettingsForConnection = false
-                clearPendingPowerButtonHonkConfiguration()
-                log("Received invalid device capabilities configuration")
+                  powerButtonConfig[0] <= 1,
+                  let deviceSound = DeviceSound(rawValue: powerButtonConfig[1]),
+                  powerButtonConfig[2] <= 100 else {
+                rejectDeviceCapabilities("Received invalid device capabilities configuration")
                 return true
             }
             if pendingPowerButtonHonkPacket == nil {
-                let deviceHonkEnabled = data[5] == 1
+                let deviceHonkEnabled = powerButtonConfig[0] == 1
                 isPowerButtonHonkEnabled = deviceHonkEnabled
                 if deviceHonkEnabled {
                     selectedDeviceSound = deviceSound
-                    deviceSoundVolumePercent = Double(data[7])
+                    deviceSoundVolumePercent = Double(powerButtonConfig[2])
                 }
                 saveSettings()
             } else {
@@ -5120,7 +5463,7 @@ extension BLEManager: CBPeripheralDelegate {
             }
         }
         let shouldSynchronizePowerButtonHonk = hasPowerButtonHonk &&
-            !hasDevicePowerButtonConfig &&
+            powerButtonConfig == nil &&
             (!hasReceivedDeviceCapabilities || !supportsPowerButtonHonk)
         let shouldResendMapProfilesForExtendedVisibility =
             hasReceivedDeviceCapabilities &&
@@ -5139,6 +5482,10 @@ extension BLEManager: CBPeripheralDelegate {
         } else if shouldResendMapNavigationForBirdsEye {
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities && !supportsStreetLabels && hasStreetLabels {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
         if hasReceivedDeviceCapabilities &&
             supportsBatteryStatusScreen != hasBatteryStatusScreen {
             hasSentScreenSettingsForConnection = false
@@ -5154,12 +5501,13 @@ extension BLEManager: CBPeripheralDelegate {
             hasBirdsEyeMapNavigationStrongerPerspective
         supportsBatteryStatusScreen = hasBatteryStatusScreen
         supportsDestinationPicker = hasDestinationPicker
+        supportsStreetLabels = hasStreetLabels
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
         }
         hasReceivedDeviceCapabilities = true
-        log("Device capabilities: flags=0x\(String(format: "%02X", flags)) extended=0x\(String(format: "%02X", extendedFlags))")
+        log("Device capabilities: schema=\(prefix) flags=0x\(String(format: "%08X", flags)) legacyExtended=0x\(String(format: "%02X", legacyExtendedFlags))")
         sendScreenSettingsAfterCapabilityNegotiation()
         sendMapProfilesAfterCapabilityNegotiation()
         if shouldSynchronizePowerButtonHonk {
@@ -5327,6 +5675,13 @@ extension BLEManager: CBPeripheralDelegate {
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
+        if let lastError = object["lastError"] as? [String: Any] {
+            deviceTransferLastErrorCode = lastError["code"] as? String
+            deviceTransferLastErrorMessage = lastError["message"] as? String
+        } else {
+            deviceTransferLastErrorCode = nil
+            deviceTransferLastErrorMessage = nil
+        }
         deviceTransferStatusRevision &+= 1
 
         if let firmware = object["firmware"] as? [String: Any] {
@@ -5411,6 +5766,13 @@ extension BLEManager: CBPeripheralDelegate {
         mapTransferAccessPointSSID = object["apSsid"] as? String
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
+        activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
+        activeMapRendererFormat =
+            (object["activeRendererFormat"] as? NSNumber)?.intValue
+        activeMapLabelProfileVersion =
+            (object["labelProfileVersion"] as? NSNumber)?.intValue
+        activeMapLabelLanguages = object["labelLanguages"] as? [String] ?? []
+        activeMapFontAssetHealthy = object["fontAssetHealthy"] as? Bool ?? false
         if let activation = object["activation"] as? [String: Any] {
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
             mapTransferActivationSequence =

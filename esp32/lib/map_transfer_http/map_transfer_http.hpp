@@ -7,6 +7,7 @@
 #include <functional>
 
 #include "../device_transfer/device_transfer_http.hpp"
+#include "../device_transfer/device_transfer_http_limits.hpp"
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
 
@@ -57,9 +58,20 @@ private:
   bool pendingRendererStreamProtocol_ = false;
   bool pendingAutomaticExit_ = false;
   bool recoveryBlocked_ = false;
+  struct DeferredActivation {
+    device_transfer::HttpResponseCompletionToken response;
+    std::string sessionId;
+    uint32_t minimumSequence = 0;
+    bool streamProtocol = false;
+
+    bool pending() const { return !sessionId.empty(); }
+  };
+  DeferredActivation deferredActivation_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      WiFiClient &client) override;
+  void responseDidComplete(const device_transfer::HttpRequest &request,
+                           bool peerClosedCleanly) override;
   bool handlePut(const device_transfer::HttpRequest &request,
                  WiFiClient &client);
   bool handleInstallStream(const device_transfer::HttpRequest &request,
@@ -68,7 +80,7 @@ private:
   bool handleActivate(const std::string &path, WiFiClient &client);
   void handleStatus(WiFiClient &client);
   void sendHead(WiFiClient &client, int status, uint64_t contentLength = 0);
-  void sendJson(WiFiClient &client, int status, const std::string &body);
+  bool sendJson(WiFiClient &client, int status, const std::string &body);
   void sendError(WiFiClient &client, int status, const std::string &code,
                  const std::string &message);
   void lockState() const;
@@ -79,6 +91,11 @@ private:
   void updateActivationProgress(const ActivationProgress &progress);
   bool startActivationTask(const std::string &sessionId, bool automaticExit,
                            bool streamProtocol = false);
+  bool deferActivationUntilResponse(
+      const device_transfer::HttpRequest &request, const std::string &sessionId,
+      bool streamProtocol, uint32_t minimumSequence = 0);
+  void beginDeferredActivation(const DeferredActivation &activation,
+                               bool automaticExit);
   void requestAutomaticExit();
   bool runActivationTask(const std::string &sessionId, bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,

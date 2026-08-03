@@ -17,6 +17,14 @@ constexpr uint8_t BIRDS_EYE_STRONGER_PERSPECTIVE_EXTENDED_CAPABILITY_MASK =
 constexpr uint8_t BIRDS_EYE_STRONGER_PERSPECTIVE_CLIENT_VERSION = 9;
 constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_SETTING_ID = 25;
 constexpr uint8_t MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID = 26;
+constexpr uint8_t MAP_LABEL_DENSITY_SETTING_ID = 27;
+constexpr uint8_t MAP_LABEL_LANGUAGE_MODE_SETTING_ID = 28;
+constexpr uint8_t MAP_LABEL_TEXT_SIZE_SETTING_ID = 29;
+constexpr uint8_t MAP_LABEL_ORIENTATION_SETTING_ID = 30;
+constexpr uint8_t MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID = 31;
+constexpr uint8_t MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID = 32;
+constexpr uint8_t MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID = 33;
+constexpr uint8_t MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID = 34;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE = 1;
 constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
@@ -24,6 +32,11 @@ constexpr uint8_t MAP_DEFAULT_ROUTE_LINE_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_ZOOM_LEVEL = 3;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ROUTE_LINE_WIDTH = 15;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL = 3;
+constexpr uint8_t DEFAULT_LABEL_DENSITY = 2;
+constexpr uint8_t MAP_NAVIGATION_DEFAULT_LABEL_DENSITY = 0;
+constexpr uint8_t DEFAULT_LABEL_LANGUAGE_MODE = 2;
+constexpr uint8_t DEFAULT_LABEL_TEXT_SIZE = 0;
+constexpr uint8_t DEFAULT_LABEL_ORIENTATION = 1;
 
 constexpr uint32_t VISIBILITY_BUILDINGS = 1u << 0;
 constexpr uint32_t VISIBILITY_GREEN_SPACE = 1u << 1;
@@ -124,7 +137,14 @@ inline bool isLocalStreetTypeId(uint8_t typeId) {
 }
 
 inline bool isIndependentSetting(uint8_t settingId) {
-  return settingId >= 16 && settingId <= 22;
+  return (settingId >= 16 && settingId <= 22) ||
+         (settingId >= MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID &&
+          settingId <= MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID);
+}
+
+inline bool isLabelSetting(uint8_t settingId) {
+  return settingId >= MAP_LABEL_DENSITY_SETTING_ID &&
+         settingId <= MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID;
 }
 
 inline bool isLegacySetting(uint8_t settingId) {
@@ -179,6 +199,20 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
     break;
   case MAP_NAVIGATION_BIRDS_EYE_PERSPECTIVE_SETTING_ID:
     maximum = 4;
+    break;
+  case MAP_LABEL_DENSITY_SETTING_ID:
+  case MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID:
+    maximum = 3;
+    break;
+  case MAP_LABEL_LANGUAGE_MODE_SETTING_ID:
+  case MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID:
+  case MAP_LABEL_TEXT_SIZE_SETTING_ID:
+  case MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID:
+    maximum = 2;
+    break;
+  case MAP_LABEL_ORIENTATION_SETTING_ID:
+  case MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
+    maximum = 1;
     break;
   default:
     return value;

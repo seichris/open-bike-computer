@@ -144,6 +144,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_ARTIFACT_STORE": "filesystem",
                 "MAP_PLATFORM_ARTIFACT_ROOT": str(Path(self.tmp.name) / "artifacts"),
                 "MAP_PLATFORM_MAP_STREAM_ENABLED": "0",
+                "MAP_PLATFORM_LABEL_TARGET2_ENABLED": "0",
                 "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "all",
                 "MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST": "",
                 "MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS": "0",
@@ -184,6 +185,40 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
+
+    def test_target_two_generation_requires_explicit_rollout_enablement(self):
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "target": {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 2,
+                "firmwareVersion": "1.2.3",
+            },
+            "labels": {
+                "profileVersion": 1,
+                "preferredLanguages": ["en"],
+                "internationalFallback": "en",
+            },
+        }
+        blocked = self.client.post("/v1/map-jobs", json=payload)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(
+            blocked.json()["detail"],
+            "renderer format 2 generation is not enabled",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_LABEL_TARGET2_ENABLED": "1"},
+            clear=False,
+        ):
+            enabled_client = TestClient(create_app())
+            try:
+                enabled = enabled_client.post("/v1/map-jobs", json=payload)
+            finally:
+                enabled_client.close()
+        self.assertEqual(enabled.status_code, 200)
 
     def update_job(self, job_id: str, **values) -> None:
         job_path = Path(self.tmp.name) / "jobs" / f"{job_id}.json"

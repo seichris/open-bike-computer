@@ -61,6 +61,24 @@ inline void load(Store &store, Profile &mapStyle,
   const uint32_t storedMapVisibility = store.getUInt("visMask", 0x3FF);
   mapStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(storedMapVisibility);
+  mapStyle.labelDensity = static_cast<uint8_t>(map_profile_protocol::clampValue(
+      map_profile_protocol::MAP_LABEL_DENSITY_SETTING_ID,
+      store.getUChar("labelDensity",
+                     map_profile_protocol::DEFAULT_LABEL_DENSITY)));
+  mapStyle.labelLanguageMode = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_LABEL_LANGUAGE_MODE_SETTING_ID,
+          store.getUChar("labelLang",
+                         map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE)));
+  mapStyle.labelTextSize = static_cast<uint8_t>(map_profile_protocol::clampValue(
+      map_profile_protocol::MAP_LABEL_TEXT_SIZE_SETTING_ID,
+      store.getUChar("labelSize",
+                     map_profile_protocol::DEFAULT_LABEL_TEXT_SIZE)));
+  mapStyle.labelOrientation = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_LABEL_ORIENTATION_SETTING_ID,
+          store.getUChar("labelOrient",
+                         map_profile_protocol::DEFAULT_LABEL_ORIENTATION)));
 
   mapNavigationStyle.minPolygonSize =
       store.getUChar("navMinPoly", mapStyle.minPolygonSize);
@@ -100,6 +118,24 @@ inline void load(Store &store, Profile &mapStyle,
                ? mapStyle.visibilityMask
                : map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK) |
               map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
+  mapNavigationStyle.labelDensity = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID,
+          store.getUChar(
+              "navLabelDen",
+              map_profile_protocol::MAP_NAVIGATION_DEFAULT_LABEL_DENSITY)));
+  mapNavigationStyle.labelLanguageMode = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID,
+          store.getUChar("navLabelLng", mapStyle.labelLanguageMode)));
+  mapNavigationStyle.labelTextSize = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID,
+          store.getUChar("navLabelSiz", mapStyle.labelTextSize)));
+  mapNavigationStyle.labelOrientation = static_cast<uint8_t>(
+      map_profile_protocol::clampValue(
+          map_profile_protocol::MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID,
+          store.getUChar("navLabelOri", mapStyle.labelOrientation)));
 
   if (!store.isKey("streetWidth"))
     store.putUChar("streetWidth", mapStyle.streetLineWidth);
@@ -197,6 +233,30 @@ inline bool persistSetting(Store &store, const Profile &mapStyle,
     return true;
   case 22:
     store.putUChar("navMarkerS", mapNavigationStyle.positionMarkerScale);
+    return true;
+  case map_profile_protocol::MAP_LABEL_DENSITY_SETTING_ID:
+    store.putUChar("labelDensity", mapStyle.labelDensity);
+    return true;
+  case map_profile_protocol::MAP_LABEL_LANGUAGE_MODE_SETTING_ID:
+    store.putUChar("labelLang", mapStyle.labelLanguageMode);
+    return true;
+  case map_profile_protocol::MAP_LABEL_TEXT_SIZE_SETTING_ID:
+    store.putUChar("labelSize", mapStyle.labelTextSize);
+    return true;
+  case map_profile_protocol::MAP_LABEL_ORIENTATION_SETTING_ID:
+    store.putUChar("labelOrient", mapStyle.labelOrientation);
+    return true;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID:
+    store.putUChar("navLabelDen", mapNavigationStyle.labelDensity);
+    return true;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID:
+    store.putUChar("navLabelLng", mapNavigationStyle.labelLanguageMode);
+    return true;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID:
+    store.putUChar("navLabelSiz", mapNavigationStyle.labelTextSize);
+    return true;
+  case map_profile_protocol::MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
+    store.putUChar("navLabelOri", mapNavigationStyle.labelOrientation);
     return true;
   default:
     return false;
