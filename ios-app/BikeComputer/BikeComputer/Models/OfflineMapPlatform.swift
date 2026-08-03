@@ -51,6 +51,16 @@ nonisolated enum MapStreamAppArtifactCompatibilityPolicy {
             build: "202607132210",
             gitSha: "4ee3aa43dd3026917ceca52c4779438867ee0e7a",
             componentSha256: "271c2d9d17d4430548a46d5ea9ae677862ecf08c57b8e62f5a48c22ae8656002"
+        ),
+        // Street-label artifacts generated before the BLE/Wi-Fi transport
+        // repairs remain byte-for-byte valid and signed by the same reviewed
+        // production map key. Keep this exception bound to the exact app
+        // component that requested those artifacts.
+        MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "7",
+            gitSha: "c0ccb990dde3205fc35cd5e8f6fb6894b087e577",
+            componentSha256: "e74587bd57299d5748e2e630bdbed7737395b8a56ddbf428bc9ceb14f9dbb446"
         )
     ]
 }

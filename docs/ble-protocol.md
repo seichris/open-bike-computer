@@ -884,6 +884,13 @@ errors receive one bounded retry. A failed or unreachable join removes the
 configuration, exits transfer mode, and surfaces the exact error domain and
 code; bulk upload never starts on an unverified network path.
 
+Map stream app-build attestation remains fail closed. A transport-only app
+update may resume an already downloaded stream only when its complete prior
+identity tuple (bundle build, Git SHA, and component SHA-256) appears in the
+reviewed predecessor allowlist. Matching only a build number or Git revision is
+insufficient, and arbitrary older artifacts continue to require the compatible
+legacy archive path.
+
 When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
 continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk

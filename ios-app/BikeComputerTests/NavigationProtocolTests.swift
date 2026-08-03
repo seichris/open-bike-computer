@@ -1537,6 +1537,26 @@ struct NavigationProtocolTests {
             .streamV2,
             "an exact reviewed predecessor artifact can resume after an app update"
         )
+        let streetLabelPredecessor = MapStreamAppArtifactCompatibilityPolicy
+            .resumablePredecessorIdentities[1]
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: streetLabelPredecessor.build,
+                requiredIosGitSha: streetLabelPredecessor.gitSha,
+                requiredIosBuildSha256: streetLabelPredecessor.componentSha256,
+                currentIosBuild: "7",
+                currentIosGitSha: String(repeating: "d", count: 40),
+                currentIosBuildSha256: String(repeating: "e", count: 64),
+                compatibleArtifactAppIdentities:
+                    MapStreamAppArtifactCompatibilityPolicy
+                        .resumablePredecessorIdentities,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "the exact street-label artifact identity survives transport-only app repairs"
+        )
         assertEqual(
             MapInstallProtocolSelector.select(
                 isBikeMapStream: true,
