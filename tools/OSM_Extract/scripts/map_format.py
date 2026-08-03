@@ -112,7 +112,7 @@ def _label_sections(polylines, min_x, min_y, font_builder):
     string_ids: dict[str, int] = {}
     string_bytes = 0
     runs: list[dict] = []
-    run_ids: dict[tuple[int, int], int] = {}
+    run_ids: dict[tuple[int, str | None, int], int] = {}
     labels: list[dict] = []
     candidate_total = 0
 
@@ -136,7 +136,11 @@ def _label_sections(polylines, min_x, min_y, font_builder):
         shaped = font_builder.shape(text, language)
         identifiers = []
         for shaped_run in shaped:
-            key = (text_id, shaped_run.size_id)
+            # The same Unicode spelling can require different glyph forms or
+            # shaping rules in different languages (notably CJK). Keep the
+            # semantic string deduplicated, but do not alias its language-
+            # specific shaped runs.
+            key = (text_id, language, shaped_run.size_id)
             identifier = run_ids.get(key)
             if identifier is None:
                 if len(runs) >= MAX_BLOCK_RUNS:
