@@ -2351,9 +2351,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     mixBuildingContext(block->buildingData.stats.records);
     mixBuildingContext(block->buildingData.stats.points);
   }
+  const map_building_renderer::RenderRegion buildingRenderRegion{
+      viewPort.bbox.min.x, viewPort.bbox.min.y, viewPort.bbox.max.x,
+      viewPort.bbox.max.y};
   const bool buildingsSuppressed =
       suppressBuildings || buildingFailureRetryCooldown.shouldSuppress(
-                               millis(), buildingContextSignature);
+                               millis(), buildingContextSignature,
+                               buildingRenderRegion);
   uint32_t projectionClippedCount = 0;
   uint32_t projectionRejectedCount = 0;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
@@ -3223,7 +3227,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned)buildingFailurePsramLargest,
             buildingFailurePsramSamplePostCleanup ? 1U : 0U);
         buildingFailureRetryCooldown.recordFailure(
-            millis(), buildingContextSignature);
+            millis(), buildingContextSignature, buildingRenderRegion);
         releaseBuildingFailureWorkspace();
         const bool screenCycleInterrupted =
             shouldInterruptMapRenderForScreenCycle();

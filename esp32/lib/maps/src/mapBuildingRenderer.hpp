@@ -28,18 +28,34 @@ constexpr double kMinimumBuildingExtrusionAreaPixels = 6.0;
 constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
 constexpr uint32_t kBuildingFailureRetryCooldownMs = 5U * 60U * 1000U;
 
+struct RenderRegion {
+  int32_t minX = 0;
+  int32_t minY = 0;
+  int32_t maxX = 0;
+  int32_t maxY = 0;
+
+  constexpr bool intersects(const RenderRegion &other) const {
+    return minX <= other.maxX && maxX >= other.minX &&
+           minY <= other.maxY && maxY >= other.minY;
+  }
+};
+
 class FailureRetryCooldown {
 public:
-  constexpr void recordFailure(uint32_t nowMs, uint64_t contextSignature) {
+  constexpr void recordFailure(uint32_t nowMs, uint64_t contextSignature,
+                               RenderRegion region) {
     failureStartedMs_ = nowMs;
     contextSignature_ = contextSignature;
+    region_ = region;
     active_ = true;
   }
 
-  constexpr bool shouldSuppress(uint32_t nowMs, uint64_t contextSignature) {
+  constexpr bool shouldSuppress(uint32_t nowMs, uint64_t contextSignature,
+                                RenderRegion region) {
     if (!active_)
       return false;
     if (contextSignature != contextSignature_ ||
+        !region_.intersects(region) ||
         static_cast<uint32_t>(nowMs - failureStartedMs_) >=
             kBuildingFailureRetryCooldownMs) {
       clear();
@@ -52,11 +68,13 @@ public:
     active_ = false;
     failureStartedMs_ = 0;
     contextSignature_ = 0;
+    region_ = {};
   }
 
 private:
   uint32_t failureStartedMs_ = 0;
   uint64_t contextSignature_ = 0;
+  RenderRegion region_;
   bool active_ = false;
 };
 

@@ -418,21 +418,30 @@ void assertFailureRetryCooldown() {
   map_building_renderer::FailureRetryCooldown cooldown;
   constexpr uint64_t denseContext = 0x1234ULL;
   constexpr uint64_t changedContext = 0x5678ULL;
+  constexpr map_building_renderer::RenderRegion denseRegion{0, 0, 100, 100};
+  constexpr map_building_renderer::RenderRegion nearbyRegion{8, 0, 108, 100};
+  constexpr map_building_renderer::RenderRegion disjointRegion{200, 0, 300,
+                                                                100};
 
-  assert(!cooldown.shouldSuppress(1000, denseContext));
-  cooldown.recordFailure(1000, denseContext);
-  assert(cooldown.shouldSuppress(1000, denseContext));
+  assert(!cooldown.shouldSuppress(1000, denseContext, denseRegion));
+  cooldown.recordFailure(1000, denseContext, denseRegion);
+  assert(cooldown.shouldSuppress(1000, denseContext, denseRegion));
+  assert(cooldown.shouldSuppress(1008, denseContext, nearbyRegion));
   assert(cooldown.shouldSuppress(
       1000 + map_building_renderer::kBuildingFailureRetryCooldownMs - 1,
-      denseContext));
+      denseContext, denseRegion));
   assert(!cooldown.shouldSuppress(
       1000 + map_building_renderer::kBuildingFailureRetryCooldownMs,
-      denseContext));
+      denseContext, denseRegion));
 
-  cooldown.recordFailure(UINT32_MAX - 10U, denseContext);
-  assert(cooldown.shouldSuppress(5, denseContext));
-  assert(!cooldown.shouldSuppress(5, changedContext));
-  assert(!cooldown.shouldSuppress(6, denseContext));
+  cooldown.recordFailure(UINT32_MAX - 10U, denseContext, denseRegion);
+  assert(cooldown.shouldSuppress(5, denseContext, denseRegion));
+  assert(!cooldown.shouldSuppress(5, changedContext, denseRegion));
+  assert(!cooldown.shouldSuppress(6, denseContext, denseRegion));
+
+  cooldown.recordFailure(2000, denseContext, denseRegion);
+  assert(!cooldown.shouldSuppress(2001, denseContext, disjointRegion));
+  assert(!cooldown.shouldSuppress(2002, denseContext, denseRegion));
 }
 
 } // namespace
