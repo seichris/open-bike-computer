@@ -26,6 +26,39 @@ constexpr size_t kMaximumRenderedBuildingPointsPerRecord = 1024;
 constexpr uint8_t kMaximumBuildingExtrusionZoom = 4;
 constexpr double kMinimumBuildingExtrusionAreaPixels = 6.0;
 constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
+constexpr uint32_t kBuildingFailureRetryCooldownMs = 5U * 60U * 1000U;
+
+class FailureRetryCooldown {
+public:
+  constexpr void recordFailure(uint32_t nowMs, uint64_t contextSignature) {
+    failureStartedMs_ = nowMs;
+    contextSignature_ = contextSignature;
+    active_ = true;
+  }
+
+  constexpr bool shouldSuppress(uint32_t nowMs, uint64_t contextSignature) {
+    if (!active_)
+      return false;
+    if (contextSignature != contextSignature_ ||
+        static_cast<uint32_t>(nowMs - failureStartedMs_) >=
+            kBuildingFailureRetryCooldownMs) {
+      clear();
+      return false;
+    }
+    return true;
+  }
+
+  constexpr void clear() {
+    active_ = false;
+    failureStartedMs_ = 0;
+    contextSignature_ = 0;
+  }
+
+private:
+  uint32_t failureStartedMs_ = 0;
+  uint64_t contextSignature_ = 0;
+  bool active_ = false;
+};
 
 struct NeverStop {
   constexpr bool operator()() const { return false; }

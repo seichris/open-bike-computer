@@ -63,6 +63,22 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertGreater(stats["emittedWallCount"], 0)
         self.assertGreater(stats["suppressedWallCount"], 0)
 
+    def test_fractional_mercator_coordinates_preserve_facade_walls(self):
+        geometry = box(10.051, 10.051, 20.051, 20.051)
+        buildings, _report, _flat = prepare_buildings(
+            [feature(2, geometry, '"height"=>"12"')],
+            self.rules,
+        )
+
+        records, stats = clip_buildings(
+            buildings, box(0, 0, 100, 100), 0, 0
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["rings"][0]["walls"], [True] * 4)
+        self.assertEqual(stats["emittedWallCount"], 4)
+        self.assertEqual(stats["suppressedWallCount"], 0)
+
     def test_partial_parts_do_not_flatten_the_remaining_outline(self):
         outline = feature(
             10,

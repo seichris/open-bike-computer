@@ -19,6 +19,7 @@
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
 #include "mapFontAsset.hpp"
+#include "mapBuildingRenderer.hpp"
 #include "mapLabelBlock.hpp"
 #include "mapBuildingBlock.hpp"
 #include "mapLabelLayout.hpp"
@@ -130,6 +131,7 @@ private:
   MemCache memCache;               // Memory Cache
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
+  map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;
   bool streetLabelRuntimeFailurePending = false;
   std::string streetLabelRuntimeFailureCode;
   struct LabelLayoutCacheKey {

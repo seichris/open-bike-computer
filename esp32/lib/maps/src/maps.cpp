@@ -2331,6 +2331,29 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   std::vector<map_projection::GroundPoint> clippedGroundPolygon;
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const bool mapNavigationActive = isMapGuidanceScreenActive();
+  uint64_t buildingContextSignature = 1469598103934665603ULL;
+  const auto mixBuildingContext = [&](uint64_t value) {
+    buildingContextSignature ^= value;
+    buildingContextSignature *= 1099511628211ULL;
+  };
+  mixBuildingContext(zoom);
+  mixBuildingContext(projection.isBirdsEye() ? 1U : 0U);
+  mixBuildingContext(style.visibilityMask);
+  mixBuildingContext(mapRenderSettings.mapNavigation3DBuildingsEnabled ? 1U
+                                                                      : 0U);
+  mixBuildingContext(mapRenderSettings.mapNavigationBirdsEyePerspective);
+  for (const MapBlock *block : memCache.blocks) {
+    if (!block->inView || block->formatVersion < 4)
+      continue;
+    mixBuildingContext(static_cast<uint32_t>(block->offset.x));
+    mixBuildingContext(static_cast<uint32_t>(block->offset.y));
+    mixBuildingContext(block->formatVersion);
+    mixBuildingContext(block->buildingData.stats.records);
+    mixBuildingContext(block->buildingData.stats.points);
+  }
+  const bool buildingsSuppressed =
+      suppressBuildings || buildingFailureRetryCooldown.shouldSuppress(
+                               millis(), buildingContextSignature);
   uint32_t projectionClippedCount = 0;
   uint32_t projectionRejectedCount = 0;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
@@ -2597,6 +2620,38 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint32_t buildingProjectionMs = 0;
     uint32_t buildingSortMs = 0;
     uint32_t buildingDrawMs = 0;
+    uint32_t buildingFailurePsramUsed = 0;
+    uint32_t buildingFailurePsramFree = 0;
+    uint32_t buildingFailurePsramLargest = 0;
+    bool buildingFailurePsramSamplePostCleanup = false;
+    const auto captureBuildingFailureMemory = [&]() {
+      buildingFailurePsramFree =
+          heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+      buildingFailurePsramLargest =
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+      buildingFailurePsramUsed =
+          ESP.getPsramSize() - buildingFailurePsramFree;
+    };
+    std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
+        buildingQueue;
+    map_building_renderer::RenderSelection renderSelection;
+    map_building_renderer::ExtrusionSelection buildingSelection;
+    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityGround;
+    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityClipped;
+    Polygon buildingPolygon;
+    std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
+    std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
+    std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    map_building_renderer::SurfaceStats buildingSurfaceStats;
+    const auto releaseBuildingFailureWorkspace = [&]() {
+      decltype(buildingQueue){}.swap(buildingQueue);
+      decltype(buildingEligibilityGround){}.swap(buildingEligibilityGround);
+      decltype(buildingEligibilityClipped){}.swap(buildingEligibilityClipped);
+      decltype(buildingPolygon.points){}.swap(buildingPolygon.points);
+      decltype(buildingSurfacePoints){}.swap(buildingSurfacePoints);
+      decltype(courtyardUnderlay){}.swap(courtyardUnderlay);
+      decltype(courtyardScanlineNodes){}.swap(courtyardScanlineNodes);
+    };
     static uint64_t renderTimeOverflowTotal = 0;
     map_building_block::Stats loadedBuildingStats;
     for (const MapBlock *block : memCache.blocks) {
@@ -2635,8 +2690,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     const bool buildingPassCompleted =
         map_building_renderer::runAllocationSafe(
             [&]() -> bool {
-    std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
-        buildingQueue;
     const auto buildingRendersBefore =
         [](const BuildingRenderItem &left, const BuildingRenderItem &right) {
           return map_building_renderer::rendersBefore(
@@ -2646,7 +2699,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                right.recordIndex});
         };
     const bool buildingsVisible =
-        !suppressBuildings &&
+        !buildingsSuppressed &&
         (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
     bool extrudeBuildings =
         navigation_content_mode::extrudesMapGuidanceBuildings(
@@ -2659,10 +2712,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     bool buildingBudgetFallback = false;
     bool buildingDeadlineExceeded = false;
     bool buildingScreenInterrupted = false;
-    map_building_renderer::RenderSelection renderSelection;
-    map_building_renderer::ExtrusionSelection buildingSelection;
-    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityGround;
-    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityClipped;
     static uint64_t renderRecordOverflowTotal = 0;
     static uint64_t renderPointOverflowTotal = 0;
     static uint64_t renderOversizedOverflowTotal = 0;
@@ -2686,6 +2735,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     const auto abortStoppedBuildingWork = [&](size_t timeOverflow) -> bool {
       finishBuildingPhaseTiming();
       if (buildingDeadlineExceeded) {
+        captureBuildingFailureMemory();
         buildingDeadlineAborted = true;
         const size_t countedOverflow = std::max<size_t>(1, timeOverflow);
         renderTimeOverflow += countedOverflow;
@@ -2847,7 +2897,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     const uint16_t wallLight = lv_color_to_u16(lv_color_hex(0x958E84));
     const uint16_t wallMiddle = lv_color_to_u16(lv_color_hex(0x827B72));
     const uint16_t wallDark = lv_color_to_u16(lv_color_hex(0x6D665E));
-    Polygon buildingPolygon;
     const auto fillScreenPolygon = [&](const auto &points,
                                        uint16_t color) -> bool {
       if (points.size() < 3)
@@ -2872,10 +2921,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         shouldStopBuildingWork();
       return completed;
     };
-    std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
-    std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
-    std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
-    map_building_renderer::SurfaceStats buildingSurfaceStats;
     const auto countRenderTimeOverflowFrom = [&](size_t itemIndex) {
       size_t overflow = 0;
       for (size_t remaining = itemIndex; remaining < buildingQueue.size();
@@ -3095,7 +3140,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned)loadedBuildingStats.provenance[2],
               (unsigned)loadedBuildingStats.provenance[3],
               (unsigned)loadedBuildingStats.provenance[4],
-              suppressBuildings ? 1U : 0U, (unsigned)visibleBuildingCount,
+              buildingsSuppressed ? 1U : 0U, (unsigned)visibleBuildingCount,
               (unsigned long long)buildingPointCount,
               (unsigned)buildingQueue.size(),
               (unsigned)renderedBuildings,
@@ -3137,6 +3182,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             [&]() {
               finishBuildingPhaseTiming();
               buildingAllocationFailed = true;
+              // The large render workspaces live outside the guarded callable,
+              // so this catch samples them before the fallback releases them.
+              captureBuildingFailureMemory();
             });
     if (!buildingPassCompleted) {
       const char *failureReason = buildingAllocationFailed
@@ -3153,7 +3201,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
             "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
             "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
-            "psramLargest=%u\n",
+            "psramLargest=%u psramSamplePostCleanup=%u\n",
             failureReason, (unsigned)loadedBuildingStats.records,
             (unsigned)loadedBuildingStats.rings,
             (unsigned)loadedBuildingStats.points,
@@ -3170,14 +3218,17 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned long)buildingProjectionMs,
             (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
             buildingPrepassDeadlineExceeded ? 1U : 0U,
-            (unsigned)(ESP.getPsramSize() -
-                       heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
-            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+            (unsigned)buildingFailurePsramUsed,
+            (unsigned)buildingFailurePsramFree,
+            (unsigned)buildingFailurePsramLargest,
+            buildingFailurePsramSamplePostCleanup ? 1U : 0U);
+        buildingFailureRetryCooldown.recordFailure(
+            millis(), buildingContextSignature);
+        releaseBuildingFailureWorkspace();
         const bool screenCycleInterrupted =
             shouldInterruptMapRenderForScreenCycle();
         if (map_building_renderer::shouldRetryWithoutBuildings(
-                suppressBuildings, buildingAllocationFailed,
+                buildingsSuppressed, buildingAllocationFailed,
                 buildingDeadlineAborted, screenCycleInterrupted)) {
           return Maps::readVectorMap(viewPort, memCache, canvas, zoom, rotation,
                                      projection, drawLabels, true);
@@ -3577,6 +3628,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   Maps::navArrowPosition = {0, 0}; // Map Arrow position
 
   Maps::totalBounds = {90.0, -90.0, 180.0, -180.0};
+  buildingFailureRetryCooldown.clear();
 }
 
 bool Maps::setVectorMapFolder(const std::string &folder) {
@@ -3611,6 +3663,7 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
   labelLayoutCache.clear();
   streetLabelRuntimeFailurePending = false;
   streetLabelRuntimeFailureCode.clear();
+  buildingFailureRetryCooldown.clear();
   vectorMapFolder = normalized;
   invalidateRollingRasterWindow();
   isMapFound = false;

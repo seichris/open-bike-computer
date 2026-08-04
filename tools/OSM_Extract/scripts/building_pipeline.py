@@ -230,44 +230,41 @@ def clip_buildings(
         if not source.geometry.intersects(block) or source.geometry.touches(block):
             continue
         clipped = source.geometry.intersection(block)
+        original_boundary = (
+            source.wall_boundary
+            if source.wall_boundary is not None
+            else source.geometry.boundary
+        )
+        prepared_wall_region = (
+            None
+            if source.flat_base
+            else prep(
+                original_boundary.buffer(
+                    tolerance, cap_style=2, join_style=2
+                )
+            )
+        )
         for fragment in _polygons(clipped):
             if fragment.is_empty or not fragment.is_valid:
                 continue
             oriented = orient(fragment, sign=1.0)
-            original_boundary = (
-                source.wall_boundary
-                if source.wall_boundary is not None
-                else source.geometry.boundary
-            )
             ring_candidates: list[tuple[float, dict[str, Any], int, int]] = []
             for ring_index, ring in enumerate([oriented.exterior, *oriented.interiors]):
                 coordinates = list(ring.coords)
                 if len(coordinates) > 1 and coordinates[0] == coordinates[-1]:
                     coordinates.pop()
-                local = _rounded_ring(coordinates, min_x, min_y)
+                local, walls = _rounded_ring_with_walls(
+                    coordinates,
+                    min_x,
+                    min_y,
+                    prepared_wall_region,
+                )
                 if len(local) < 3:
                     continue
-                local, _rotation = _canonical_rotation(local)
-                source_coordinates = [
-                    (point[0] + min_x, point[1] + min_y) for point in local
-                ]
-                walls: list[bool] = []
-                ring_emitted_walls = 0
-                ring_suppressed_walls = 0
-                for index, start in enumerate(source_coordinates):
-                    end = source_coordinates[(index + 1) % len(source_coordinates)]
-                    if source.flat_base:
-                        walls.append(False)
-                        continue
-                    segment = LineString((start, end))
-                    is_original = original_boundary.buffer(
-                        tolerance, cap_style=2, join_style=2
-                    ).covers(segment)
-                    walls.append(bool(is_original))
-                    if is_original:
-                        ring_emitted_walls += 1
-                    else:
-                        ring_suppressed_walls += 1
+                local, rotation = _canonical_rotation(local)
+                walls = walls[rotation:] + walls[:rotation]
+                ring_emitted_walls = sum(walls)
+                ring_suppressed_walls = len(walls) - ring_emitted_walls
                 ring_record = {
                         "flags": RING_FLAG_HOLE if ring_index > 0 else 0,
                         "points": local,
@@ -482,19 +479,42 @@ def _polygons(geometry) -> list[Polygon]:
     return []
 
 
-def _rounded_ring(
-    coordinates: Iterable[tuple[float, float]], min_x: int, min_y: int
-) -> list[tuple[int, int]]:
-    result: list[tuple[int, int]] = []
-    for x, y in coordinates:
-        point = (int(math.floor(x - min_x + 0.5)), int(math.floor(y - min_y + 0.5)))
-        if not result or result[-1] != point:
-            result.append(point)
-    if len(result) > 1 and result[0] == result[-1]:
-        result.pop()
-    if any(not -32768 <= value <= 32767 for point in result for value in point):
+def _rounded_ring_with_walls(
+    coordinates: list[tuple[float, float]],
+    min_x: int,
+    min_y: int,
+    prepared_wall_region,
+) -> tuple[list[tuple[int, int]], list[bool]]:
+    """Quantize a ring while retaining pre-quantization edge provenance.
+
+    Testing rounded segments against the source boundary loses ordinary OSM
+    facades whenever Mercator coordinates are more than the wall tolerance
+    from an integer meter. Evaluate each clipped edge first, then discard only
+    edges whose endpoints collapse to the same encoded point.
+    """
+    points: list[tuple[int, int]] = []
+    walls: list[bool] = []
+    for index, start in enumerate(coordinates):
+        end = coordinates[(index + 1) % len(coordinates)]
+        rounded_start = (
+            int(math.floor(start[0] - min_x + 0.5)),
+            int(math.floor(start[1] - min_y + 0.5)),
+        )
+        rounded_end = (
+            int(math.floor(end[0] - min_x + 0.5)),
+            int(math.floor(end[1] - min_y + 0.5)),
+        )
+        if rounded_start == rounded_end:
+            continue
+        points.append(rounded_start)
+        walls.append(
+            False
+            if prepared_wall_region is None
+            else bool(prepared_wall_region.covers(LineString((start, end))))
+        )
+    if any(not -32768 <= value <= 32767 for point in points for value in point):
         raise ValueError("building coordinate exceeds int16")
-    return result
+    return points, walls
 
 
 def _canonical_rotation(

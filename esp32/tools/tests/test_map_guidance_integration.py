@@ -163,6 +163,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("projectionMs=%lu sortMs=%lu buildingDrawMs=%lu", render_body)
         self.assertIn("psramUsed=%u psramFree=%u", render_body)
         self.assertIn("shouldRetryWithoutBuildings", render_body)
+        self.assertIn("buildingFailureRetryCooldown.recordFailure", render_body)
+        self.assertIn("psramSamplePostCleanup", render_body)
         self.assertIn(
             "projection, drawLabels, true)",
             render_body,

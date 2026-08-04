@@ -414,6 +414,27 @@ void assertAllocationFailureFailsClosed() {
       false, false, false, false));
 }
 
+void assertFailureRetryCooldown() {
+  map_building_renderer::FailureRetryCooldown cooldown;
+  constexpr uint64_t denseContext = 0x1234ULL;
+  constexpr uint64_t changedContext = 0x5678ULL;
+
+  assert(!cooldown.shouldSuppress(1000, denseContext));
+  cooldown.recordFailure(1000, denseContext);
+  assert(cooldown.shouldSuppress(1000, denseContext));
+  assert(cooldown.shouldSuppress(
+      1000 + map_building_renderer::kBuildingFailureRetryCooldownMs - 1,
+      denseContext));
+  assert(!cooldown.shouldSuppress(
+      1000 + map_building_renderer::kBuildingFailureRetryCooldownMs,
+      denseContext));
+
+  cooldown.recordFailure(UINT32_MAX - 10U, denseContext);
+  assert(cooldown.shouldSuppress(5, denseContext));
+  assert(!cooldown.shouldSuppress(5, changedContext));
+  assert(!cooldown.shouldSuppress(6, denseContext));
+}
+
 } // namespace
 
 int main() {
@@ -426,5 +447,6 @@ int main() {
   assertCourtyardRestoresRealUnderlay();
   assertInterruptionPropagates();
   assertAllocationFailureFailsClosed();
+  assertFailureRetryCooldown();
   return 0;
 }
