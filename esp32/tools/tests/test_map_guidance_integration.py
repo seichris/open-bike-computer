@@ -165,6 +165,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("shouldRetryWithoutBuildings", render_body)
         self.assertIn("buildingFailureRetryCooldown.recordFailure", render_body)
         self.assertIn("psramSamplePostCleanup", render_body)
+        self.assertGreaterEqual(render_body.count("releaseBuildingFailureWorkspace();"), 2)
+        self.assertLess(
+            render_body.rindex("releaseBuildingFailureWorkspace();"),
+            render_body.index("drawStreetLabels"),
+        )
         self.assertIn(
             "projection, drawLabels, true)",
             render_body,

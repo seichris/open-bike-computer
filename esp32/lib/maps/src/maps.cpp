@@ -3237,6 +3237,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       return false;
     }
 
+    // Failure diagnostics need the live allocations, but labels do not. Drop
+    // the building workspace at the phase boundary so dense geometry and the
+    // label candidate/layout reserves never overlap on a successful frame.
+    releaseBuildingFailureWorkspace();
     if (drawLabels &&
         !drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
       return false;
