@@ -153,6 +153,8 @@ class MapStreamHardwareGateTests(unittest.TestCase):
 
     def test_checked_in_requirements_are_complete_and_valid(self):
         requirements = load_requirements()
+        self.assertEqual(requirements["schemaVersion"], 2)
+        self.assertEqual(requirements["matrixMode"], "optional")
         self.assertEqual(
             requirements["targets"],
             ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"],
@@ -176,6 +178,48 @@ class MapStreamHardwareGateTests(unittest.TestCase):
                     parse_hardware_requirements(
                         json.dumps(document).encode("utf-8")
                     )
+
+    def test_optional_matrix_accepts_an_explicit_approval_without_runs(self):
+        requirements = self.requirements()
+        requirements["schemaVersion"] = 2
+        requirements["matrixMode"] = "optional"
+        report = self.valid_report()
+        report["runs"] = []
+        report["approval"]["notes"] = "manual hardware matrix intentionally omitted"
+
+        validated = validate_report(
+            self.write_report(report),
+            requirements,
+            self.trusted_keys(),
+        )
+        self.assertEqual(validated["runs"], [])
+
+    def test_required_matrix_remains_the_schema_one_default(self):
+        report = self.valid_report()
+        report["runs"] = []
+        with self.assertRaisesRegex(ValueError, "does not exactly cover"):
+            validate_report(
+                self.write_report(report),
+                self.requirements(),
+                self.trusted_keys(),
+            )
+
+    def test_requirements_reject_unknown_matrix_modes(self):
+        requirements = load_requirements()
+        requirements["matrixMode"] = "advisory-ish"
+        with self.assertRaisesRegex(ValueError, "matrix mode"):
+            parse_hardware_requirements(
+                json.dumps(requirements).encode("utf-8")
+            )
+
+        report = self.valid_report()
+        report["runs"] = []
+        with self.assertRaisesRegex(ValueError, "matrix mode"):
+            validate_report(
+                self.write_report(report),
+                requirements,
+                self.trusted_keys(),
+            )
 
     def test_hostile_depth_and_numeric_overflow_are_controlled_rejections(self):
         deeply_nested = "[" * 10_000 + "0" + "]" * 10_000

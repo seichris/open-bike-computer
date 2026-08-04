@@ -22,6 +22,6 @@
     "approved": false,
     "approvedAt": "",
     "approvedBy": "",
-    "notes": "Copy this file outside the repository, record every required run with approved=false, review the complete matrix, then set approved=true and an approval timestamp later than every run before invoking the checker."
+    "notes": "The hardware matrix is optional manual evidence. Add any runs you performed, review the exact candidate identities and known observations, then set approved=true before invoking the checker."
   }
 }

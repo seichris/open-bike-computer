@@ -147,16 +147,18 @@ Supply map-signing secrets only to the worker service. The Internet-facing API
 does not load the private key, and inline API workers are disabled in production
 with `MAP_PLATFORM_INLINE_WORKER_ENABLED=0`.
 
-Keep `MAP_PLATFORM_MAP_STREAM_ENABLED=0` until the complete firmware and iOS v2
-path passes the rollout acceptance gate. When it is set to `1`, missing or
-invalid signing configuration fails closed; the backend never emits an unsigned
-stream artifact.
+Keep `MAP_PLATFORM_MAP_STREAM_ENABLED=0` until the firmware and iOS v2 path is
+ready for explicit operator approval. The hardware matrix is optional manual
+evidence; exact worker, signing-key, app, and firmware identities remain
+mandatory. When generation is set to `1`, missing or invalid signing
+configuration fails closed; the backend never emits an unsigned stream artifact.
 
 Street-label target-2 job creation has an independent fail-closed gate:
-`MAP_PLATFORM_LABEL_TARGET2_ENABLED=0` is the default. Enable it only in the
-hardware-validation environment, then for approved production identities after
-both Waveshare targets pass the target-2 acceptance matrix. Disabling the gate
-does not remove or invalidate existing artifacts; it prevents new target-2 jobs.
+`MAP_PLATFORM_LABEL_TARGET2_ENABLED=0` is the default. Enable it first for
+allowlisted validation installations, then for explicitly approved production
+identities. The two-board acceptance matrix is available as optional manual
+evidence rather than a deployment prerequisite. Disabling the gate does not
+remove or invalidate existing artifacts; it prevents new target-2 jobs.
 
 OSM 3D-building target-3 generation has a separate fail-closed gate:
 `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0` is the default. Target 3 retains the

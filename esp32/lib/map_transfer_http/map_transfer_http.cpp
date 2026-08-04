@@ -323,7 +323,7 @@ bool MapTransferHttpServer::handleRequest(
   if (request.method == "PUT" &&
       handlePut(request, client))
     return true;
-  if (request.method == "POST" && handleActivate(request.path, client))
+  if (request.method == "POST" && handleActivate(request, client))
     return true;
   return false;
 }
@@ -344,6 +344,11 @@ void MapTransferHttpServer::responseDidComplete(
   if (!transferServer_->isRequestAuthorized(request)) {
     Serial.printf("MAP_TRANSFER_HTTP: deferred activation revoked session=%s\n",
                   deferred.sessionId.c_str());
+    if (deferred.activationAlreadyBegun) {
+      finishActivation("failed", "", "transfer_cancelled",
+                       "activation authorization was revoked before the "
+                       "response completed");
+    }
     return;
   }
 
@@ -820,11 +825,11 @@ bool MapTransferHttpServer::handlePut(
   return true;
 }
 
-bool MapTransferHttpServer::handleActivate(const std::string &path,
-                                           WiFiClient &client) {
+bool MapTransferHttpServer::handleActivate(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
   std::string sessionId;
   std::string action;
-  if (!parseSessionPath(path, sessionId, action))
+  if (!parseSessionPath(request.path, sessionId, action))
     return false;
   if (action != "activate")
     return false;
@@ -857,9 +862,13 @@ bool MapTransferHttpServer::handleActivate(const std::string &path,
     return true;
   }
 
-  if (!startActivationTask(sessionId, false)) {
-    sendError(client, 500, "activation_task",
-              "could not start activation task");
+  if (!deferActivationUntilResponse(request, sessionId, false,
+                                    activationSequence, true, false)) {
+    finishActivation("failed", "", "activation_handoff",
+                     "activation could not be deferred until the response "
+                     "completed");
+    sendError(client, 500, "activation_handoff",
+              "activation could not be deferred until the response completed");
     return true;
   }
   sendJson(client, 202, activatingResponse());
@@ -1243,7 +1252,8 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
 
 bool MapTransferHttpServer::deferActivationUntilResponse(
     const device_transfer::HttpRequest &request, const std::string &sessionId,
-    bool streamProtocol, uint32_t minimumSequence) {
+    bool streamProtocol, uint32_t minimumSequence,
+    bool activationAlreadyBegun, bool automaticExitOnCleanResponse) {
   lockState();
   if (deferredActivation_.pending()) {
     unlockState();
@@ -1254,18 +1264,23 @@ bool MapTransferHttpServer::deferActivationUntilResponse(
   deferredActivation_.sessionId = sessionId;
   deferredActivation_.minimumSequence = minimumSequence;
   deferredActivation_.streamProtocol = streamProtocol;
+  deferredActivation_.activationAlreadyBegun = activationAlreadyBegun;
+  deferredActivation_.automaticExitOnCleanResponse =
+      automaticExitOnCleanResponse;
   unlockState();
   return true;
 }
 
 void MapTransferHttpServer::beginDeferredActivation(
-    const DeferredActivation &activation, bool automaticExit) {
+    const DeferredActivation &activation, bool peerClosedCleanly) {
   lockState();
-  const ActivationBeginResult beginResult =
-      activation.streamProtocol
-          ? activationState_.begin(activation.sessionId, 3,
-                                   activation.minimumSequence)
-          : activationState_.begin(activation.sessionId);
+  ActivationBeginResult beginResult = ActivationBeginResult::Started;
+  if (!activation.activationAlreadyBegun) {
+    beginResult = activation.streamProtocol
+                      ? activationState_.begin(activation.sessionId, 3,
+                                               activation.minimumSequence)
+                      : activationState_.begin(activation.sessionId);
+  }
   if (beginResult == ActivationBeginResult::Started) {
     if (activation.streamProtocol)
       activationState_.updateProgress({3, 3, 0, 1});
@@ -1274,8 +1289,14 @@ void MapTransferHttpServer::beginDeferredActivation(
   unlockState();
 
   if (beginResult == ActivationBeginResult::Started) {
-    startActivationTask(activation.sessionId, automaticExit,
-                        activation.streamProtocol);
+    // responseDidComplete runs on the existing 16 KiB transfer worker after
+    // the upload handler and stream parser have unwound. Activation needs the
+    // same stack budget, so execute it here instead of allocating a second
+    // 16 KiB task at the firmware's peak map-transfer memory watermark.
+    const bool automaticExit = activation.automaticExitOnCleanResponse &&
+                               peerClosedCleanly;
+    executeActivation(activation.sessionId, automaticExit,
+                      activation.streamProtocol);
     return;
   }
   if (beginResult == ActivationBeginResult::AlreadyInstalled) {
@@ -1289,7 +1310,7 @@ void MapTransferHttpServer::beginDeferredActivation(
       setLastError("staging_cleanup",
                    "could not remove redundant installed archive");
     }
-    if (automaticExit)
+    if (activation.automaticExitOnCleanResponse && peerClosedCleanly)
       requestAutomaticExit();
     return;
   }
@@ -1297,6 +1318,24 @@ void MapTransferHttpServer::beginDeferredActivation(
     setLastError("activation_busy",
                  "another map activation started after upload completion");
   }
+}
+
+void MapTransferHttpServer::executeActivation(const std::string &sessionId,
+                                              bool automaticExit,
+                                              bool streamProtocol) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Transfer);
+  const bool waitingForRenderer =
+      streamProtocol ? runStreamActivationTask(sessionId, automaticExit)
+                     : runActivationTask(sessionId, automaticExit);
+  if (waitingForRenderer)
+    return;
+  if (!streamProtocol && !installer_.clearPendingArchiveActivation()) {
+    setLastError("activation_marker",
+                 "could not clear pending archive activation");
+  }
+  if (automaticExit)
+    requestAutomaticExit();
 }
 
 bool MapTransferHttpServer::runStreamActivationTask(
@@ -1408,35 +1447,16 @@ bool MapTransferHttpServer::runActivationTask(const std::string &sessionId,
 }
 
 void MapTransferHttpServer::activationTaskThunk(void *arg) {
-  {
-    power_management::ScopedLock powerLock(
-        power_management::LockDomain::Transfer);
-    auto *context = static_cast<ActivationTaskContext *>(arg);
-    if (context != nullptr && context->server != nullptr) {
-      MapTransferHttpServer *server = context->server;
-      std::string sessionId = context->sessionId;
-      const bool automaticExit = context->automaticExit;
-      const bool streamProtocol = context->streamProtocol;
-      delete context;
-      bool waitingForRenderer = false;
-      if (streamProtocol)
-        waitingForRenderer =
-            server->runStreamActivationTask(sessionId, automaticExit);
-      else
-        waitingForRenderer =
-            server->runActivationTask(sessionId, automaticExit);
-      if (!waitingForRenderer) {
-        if (!streamProtocol &&
-            !server->installer_.clearPendingArchiveActivation()) {
-          server->setLastError("activation_marker",
-                               "could not clear pending archive activation");
-        }
-        if (automaticExit)
-          server->requestAutomaticExit();
-      }
-    } else {
-      delete context;
-    }
+  auto *context = static_cast<ActivationTaskContext *>(arg);
+  if (context != nullptr && context->server != nullptr) {
+    MapTransferHttpServer *server = context->server;
+    std::string sessionId = context->sessionId;
+    const bool automaticExit = context->automaticExit;
+    const bool streamProtocol = context->streamProtocol;
+    delete context;
+    server->executeActivation(sessionId, automaticExit, streamProtocol);
+  } else {
+    delete context;
   }
   vTaskDelete(nullptr);
 }

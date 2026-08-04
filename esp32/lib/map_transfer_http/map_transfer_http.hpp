@@ -63,6 +63,8 @@ private:
     std::string sessionId;
     uint32_t minimumSequence = 0;
     bool streamProtocol = false;
+    bool activationAlreadyBegun = false;
+    bool automaticExitOnCleanResponse = true;
 
     bool pending() const { return !sessionId.empty(); }
   };
@@ -77,7 +79,8 @@ private:
   bool handleInstallStream(const device_transfer::HttpRequest &request,
                            WiFiClient &client);
   bool handleHead(const std::string &path, WiFiClient &client);
-  bool handleActivate(const std::string &path, WiFiClient &client);
+  bool handleActivate(const device_transfer::HttpRequest &request,
+                      WiFiClient &client);
   void handleStatus(WiFiClient &client);
   void sendHead(WiFiClient &client, int status, uint64_t contentLength = 0);
   bool sendJson(WiFiClient &client, int status, const std::string &body);
@@ -93,10 +96,14 @@ private:
                            bool streamProtocol = false);
   bool deferActivationUntilResponse(
       const device_transfer::HttpRequest &request, const std::string &sessionId,
-      bool streamProtocol, uint32_t minimumSequence = 0);
+      bool streamProtocol, uint32_t minimumSequence = 0,
+      bool activationAlreadyBegun = false,
+      bool automaticExitOnCleanResponse = true);
   void beginDeferredActivation(const DeferredActivation &activation,
-                               bool automaticExit);
+                               bool peerClosedCleanly);
   void requestAutomaticExit();
+  void executeActivation(const std::string &sessionId, bool automaticExit,
+                         bool streamProtocol);
   bool runActivationTask(const std::string &sessionId, bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
                                bool automaticExit);

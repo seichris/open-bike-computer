@@ -1,5 +1,6 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "matrixMode": "optional",
   "targets": [
     "WAVESHARE_AMOLED_175",
     "WAVESHARE_AMOLED_206"

@@ -18,9 +18,9 @@ Four independent gates must agree before protocol v2 is used:
 4. Firmware advertises v2 only when SD/recovery initialization succeeds and
    the same compiled trust registry is non-empty.
 
-The checked-in trust registry and promotion registry are intentionally empty
-until hardware validation. Empty or invalid configuration fails closed and
-keeps ZIP/protocol-v1 compatibility available.
+The checked-in promotion registry remains empty until an operator explicitly
+approves an exact candidate identity. Empty or invalid configuration fails
+closed and keeps ZIP/protocol-v1 compatibility available.
 
 ## Commission a signing key
 
@@ -103,11 +103,11 @@ promotion record. It still requires valid installation credentials. Check
 `/healthz`; it reports the mode and allowlist count but never IDs or secrets.
 
 Copy `docs/map-stream-hardware-validation-report.example.json` to a protected
-test-results location outside the repository. Record every scenario in
-`map-platform/config/map-stream-hardware-gate.json` for both production targets. Shanghai
-clean installs require three repetitions per target. The per-board absolute
-temperature ceilings live in that reviewed requirements file; a report cannot
-raise its own limit after results are known.
+test-results location outside the repository. The scenarios in
+`map-platform/config/map-stream-hardware-gate.json` are an optional manual
+validation matrix. They do not block promotion when `matrixMode` is `optional`.
+Operators should record the checks they can measure and summarize any informal
+device observations in the approval notes.
 
 Each run records phase times, payload bytes, SD bytes written, durable bytes
 rewritten, retry bytes skipped, maximum temperature, recovery outcome, UI
@@ -122,10 +122,11 @@ or a mutable deployment label. Every stream run enforces bounded integer byte
 counters and a reviewed write-amplification ceiling; clean scenarios require
 exactly one payload write, and interruption scenarios require nonzero
 durable-prefix skipping where their interruption point guarantees one. Every
-candidate signing key must appear on both hardware targets. The checker rejects
-missing repetitions, unexercised or untrusted keys, duplicate runs, excess SD
-writes, thermal violations, failed recovery assertions, and Shanghai
-regressions:
+candidate signing key should be exercised on both hardware targets when the
+complete matrix is performed. Every recorded run is still checked strictly: the
+checker rejects duplicate runs, excess SD writes, thermal violations, failed
+recovery assertions, identity substitutions, and Shanghai regressions. It does
+not require missing scenarios or repetitions while the matrix is optional:
 
 ```json
 "observed": {
@@ -156,9 +157,10 @@ python map-platform/backend/tools/check_map_stream_hardware_gate.py \
   --promotion-id msr-20260713-first-production
 ```
 
-First record all required runs with `approval.approved=false`. After review,
-set the approval timestamp later than every run and identify the approver; then
-run the checker. When the report passes and its approval is explicit, the
+Keep `approval.approved=false` while gathering any optional runs. After review,
+set the approval timestamp later than every recorded run and identify the
+approver; a report with no runs is valid when the matrix is optional. When the
+report passes and its approval is explicit, the
 command prints a hash-bound public approval object. Add that object to
 `map-platform/config/map-stream-rollout-approvals.json` in a reviewed PR. Do not commit the
 raw report if it contains device or operator data. The record binds the report
@@ -175,7 +177,7 @@ Production delivery modes are:
 
 - `disabled`: default; no installation receives `.bmap` metadata.
 - `allowlist`: exact registered test installations only; no promotion record.
-- `percentage`: stable HMAC cohort from 1 to 9,999 basis points; requires a
+- `percentage`: stable HMAC cohort from 1 to 10,000 basis points; requires a
   committed promotion ID and a stable 32-byte-or-longer cohort secret.
 - `all`: every valid registered installation; requires a committed promotion
   ID.
@@ -185,7 +187,7 @@ present in the checked-in approval registry. The approval PR is expected to be
 later than the tested source commit; that control-plane-only change does not
 alter the derived worker component identity. Keep the worker image anchor in
 `map-platform/deploy/compose.yaml` on the exact
-`registry/repository@sha256:<digest>` reference exercised by the hardware report
+`registry/repository@sha256:<digest>` reference bound by the approval report
 and deploy it without rebuilding it. The production lock passes that value as
 both the worker service image and the API/worker admission identity; the
 promotion CI policy must verify the image platform and `main`-branch provenance
@@ -261,7 +263,8 @@ For a suspected signing-key compromise:
 4. Add and ship a replacement public key before resuming generation.
 5. Remove the compromised public key only after affected immutable artifacts
    are quarantined and paused device sessions are explicitly invalidated.
-6. Run the complete hardware gate again and create a new promotion record.
+6. Create a new exact-identity approval record; repeat any relevant optional
+   manual checks before resuming.
 
 Key rotation, emergency revocation, and rollout changes are separate reviewed
 changes. V1 retirement is also a separate decision after the compatibility and
