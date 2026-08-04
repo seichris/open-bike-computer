@@ -58,6 +58,10 @@ class MapActivationHandoffTests(unittest.TestCase):
         )
         self.assertIn("executeActivation(", method_body("activationTaskThunk"))
 
+    def test_activation_progress_yields_to_the_idle_task(self):
+        body = method_body("updateActivationProgress")
+        self.assertIn("vTaskDelay(pdMS_TO_TICKS(1));", body)
+
     def test_deferred_state_records_response_semantics(self):
         self.assertIn("bool activationAlreadyBegun = false;", HEADER)
         self.assertIn("bool automaticExitOnCleanResponse = true;", HEADER)
