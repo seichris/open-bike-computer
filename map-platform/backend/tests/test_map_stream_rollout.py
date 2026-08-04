@@ -140,6 +140,23 @@ class MapStreamRolloutPolicyTests(unittest.TestCase):
         self.assertLess(len(first), len(expanded))
         self.assertNotIn(secret, repr(low))
 
+    def test_percentage_at_100_percent_includes_every_valid_installation(self):
+        promotion_id = "msr-20260713-percentage-full"
+        policy = self.policy(
+            approved_promotions={promotion_id: approval(promotion_id)},
+            MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE="percentage",
+            MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS="10000",
+            MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET=(
+                "stable-map-stream-rollout-secret-32-bytes"
+            ),
+            MAP_PLATFORM_MAP_STREAM_PROMOTION_ID=promotion_id,
+        )
+
+        self.assertTrue(policy.includes(INSTALLATION_A))
+        self.assertTrue(policy.includes(INSTALLATION_B))
+        self.assertFalse(policy.includes("bad"))
+        self.assertEqual(policy.public_summary()["basisPoints"], 10_000)
+
     def test_all_mode_requires_a_valid_registered_installation_shape(self):
         policy = self.policy(
             approved_promotions={

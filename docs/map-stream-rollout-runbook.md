@@ -177,7 +177,7 @@ Production delivery modes are:
 
 - `disabled`: default; no installation receives `.bmap` metadata.
 - `allowlist`: exact registered test installations only; no promotion record.
-- `percentage`: stable HMAC cohort from 1 to 9,999 basis points; requires a
+- `percentage`: stable HMAC cohort from 1 to 10,000 basis points; requires a
   committed promotion ID and a stable 32-byte-or-longer cohort secret.
 - `all`: every valid registered installation; requires a committed promotion
   ID.
