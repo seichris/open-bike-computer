@@ -196,9 +196,9 @@ class MapStreamRolloutPolicy:
         if mode == MapStreamRolloutMode.ALLOWLIST and not allowlist_values:
             raise ValueError("allowlist rollout mode requires at least one installation ID")
         if mode == MapStreamRolloutMode.PERCENTAGE:
-            if not 1 <= basis_points < ROLLOUT_BUCKETS:
+            if not 1 <= basis_points <= ROLLOUT_BUCKETS:
                 raise ValueError(
-                    "percentage rollout mode requires basis points between 1 and 9999"
+                    "percentage rollout mode requires basis points between 1 and 10000"
                 )
             if len(cohort_secret) < 32:
                 raise ValueError(
