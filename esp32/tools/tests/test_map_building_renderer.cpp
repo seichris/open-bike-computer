@@ -254,8 +254,8 @@ map_building_block::Building buildingCrossingNearPlane(
   map_building_block::Ring ring;
   const double near = projection.nearPlaneForward();
   for (const auto &ground :
-       {map_projection::GroundPoint{-45.0, near - 30.0},
-        map_projection::GroundPoint{45.0, near - 30.0},
+       {map_projection::GroundPoint{-45.0, near - 105.0},
+        map_projection::GroundPoint{45.0, near - 105.0},
         map_projection::GroundPoint{45.0, near + 45.0},
         map_projection::GroundPoint{-45.0, near + 45.0}}) {
     const auto world = projection.worldForGround(ground);
@@ -298,6 +298,13 @@ void assertNearPlaneMatrix() {
               perspective);
           const auto building =
               buildingCrossingNearPlane(projection, 100000, 200000);
+          const map_transform::WorldPoint center{
+              100000.0 +
+                  (static_cast<double>(building.minX) + building.maxX) / 2.0,
+              200000.0 +
+                  (static_cast<double>(building.minY) + building.maxY) / 2.0};
+          assert(!projection.projectGround(projection.groundForWorld(center))
+                      .valid);
           std::vector<map_projection::GroundPoint> ground;
           std::vector<map_projection::GroundPoint> clipped;
           const double projectedArea =
@@ -394,6 +401,17 @@ void assertAllocationFailureFailsClosed() {
       []() { return true; }, [&]() { allocationFailureObserved = true; });
   assert(successful);
   assert(!allocationFailureObserved);
+
+  assert(map_building_renderer::shouldRetryWithoutBuildings(false, true, false,
+                                                             false));
+  assert(map_building_renderer::shouldRetryWithoutBuildings(false, false, true,
+                                                             false));
+  assert(!map_building_renderer::shouldRetryWithoutBuildings(true, true, false,
+                                                              false));
+  assert(!map_building_renderer::shouldRetryWithoutBuildings(false, true, false,
+                                                              true));
+  assert(!map_building_renderer::shouldRetryWithoutBuildings(
+      false, false, false, false));
 }
 
 } // namespace

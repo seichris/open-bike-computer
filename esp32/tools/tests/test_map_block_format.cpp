@@ -146,6 +146,11 @@ int main() {
   assert(buildingBlock.buildings[0].rings.size() == 1);
   assert(buildingBlock.buildings[0].rings[0].points.size() == 4);
   assert(buildingBlock.buildings[0].rings[0].walls.size() == 4);
+  assert(buildingBlock.stats.records == 1);
+  assert(buildingBlock.stats.rings == 1);
+  assert(buildingBlock.stats.points == 4);
+  assert(buildingBlock.stats.provenance[0] == 1);
+  assert(buildingBlock.stats.provenance[1] == 0);
   for (const uint8_t wall : buildingBlock.buildings[0].rings[0].walls)
     assert(wall == 1);
   for (size_t size = 0; size < validV4.size(); ++size)

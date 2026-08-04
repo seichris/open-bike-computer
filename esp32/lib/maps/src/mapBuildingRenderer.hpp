@@ -46,6 +46,14 @@ constexpr bool eligibleExtrusionZoom(uint8_t zoom) {
          zoom <= kMaximumBuildingExtrusionZoom;
 }
 
+constexpr bool shouldRetryWithoutBuildings(bool buildingsAlreadySuppressed,
+                                           bool allocationFailed,
+                                           bool deadlineAborted,
+                                           bool screenCycleInterrupted) {
+  return !buildingsAlreadySuppressed && !screenCycleInterrupted &&
+         (allocationFailed || deadlineAborted);
+}
+
 struct OrderKey {
   double depth = 0.0;
   int32_t blockX = 0;

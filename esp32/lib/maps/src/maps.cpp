@@ -1497,9 +1497,20 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   Maps::isMapFound = true;
   const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
   MAPIO_LOG("MAPIO: vector-parse format=binary size=%u version=%u "
-            "polygons=%u lines=%u parseMs=%lu gridMs=%lu totalMs=%lu\n",
+            "polygons=%u lines=%u buildingRecords=%u buildingRings=%u "
+            "buildingPoints=%u heightExplicit=%u heightLevels=%u "
+            "heightInherited=%u heightLocalMedian=%u heightClassDefault=%u "
+            "parseMs=%lu gridMs=%lu totalMs=%lu\n",
             (unsigned)fileSize, version, (unsigned)mblock->polygons.size(),
             (unsigned)mblock->polylines.size(),
+            (unsigned)mblock->buildingData.stats.records,
+            (unsigned)mblock->buildingData.stats.rings,
+            (unsigned)mblock->buildingData.stats.points,
+            (unsigned)mblock->buildingData.stats.provenance[0],
+            (unsigned)mblock->buildingData.stats.provenance[1],
+            (unsigned)mblock->buildingData.stats.provenance[2],
+            (unsigned)mblock->buildingData.stats.provenance[3],
+            (unsigned)mblock->buildingData.stats.provenance[4],
             (unsigned long)(gridStartMs - parseStartMs),
             (unsigned long)gridMs,
             (unsigned long)(MAPIO_TIME_MS() - parseStartMs));
@@ -2313,7 +2324,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
 bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                          lv_obj_t *canvas, uint8_t zoom, double rotation,
                          const map_projection::Projection &projection,
-                         bool drawLabels) {
+                         bool drawLabels, bool suppressBuildings) {
   (void)rotation;
   Polygon newPolygon;
   std::vector<map_projection::GroundPoint> groundPolygon;
@@ -2577,6 +2588,50 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     };
     bool buildingAllocationFailed = false;
     bool buildingDeadlineAborted = false;
+    bool buildingPrepassDeadlineExceeded = false;
+    size_t visibleBuildingCount = 0;
+    uint64_t buildingPointCount = 0;
+    size_t renderTimeOverflow = 0;
+    uint32_t renderedBuildings = 0;
+    uint32_t extrudedBuildings = 0;
+    uint32_t buildingProjectionMs = 0;
+    uint32_t buildingSortMs = 0;
+    uint32_t buildingDrawMs = 0;
+    static uint64_t renderTimeOverflowTotal = 0;
+    map_building_block::Stats loadedBuildingStats;
+    for (const MapBlock *block : memCache.blocks) {
+      if (!block->inView || block->formatVersion < 4)
+        continue;
+      loadedBuildingStats.records += block->buildingData.stats.records;
+      loadedBuildingStats.rings += block->buildingData.stats.rings;
+      loadedBuildingStats.points += block->buildingData.stats.points;
+      for (size_t index = 0; index < loadedBuildingStats.provenance.size();
+           ++index) {
+        loadedBuildingStats.provenance[index] +=
+            block->buildingData.stats.provenance[index];
+      }
+    }
+    enum class BuildingPassPhase : uint8_t { Projection, Sort, Draw, Complete };
+    BuildingPassPhase buildingPassPhase = BuildingPassPhase::Projection;
+    uint32_t buildingPhaseStartMs = millis();
+    const uint32_t buildingPassStartMs = buildingPhaseStartMs;
+    const auto finishBuildingPhaseTiming = [&]() {
+      const uint32_t elapsed = millis() - buildingPhaseStartMs;
+      switch (buildingPassPhase) {
+      case BuildingPassPhase::Projection:
+        buildingProjectionMs = elapsed;
+        break;
+      case BuildingPassPhase::Sort:
+        buildingSortMs = elapsed;
+        break;
+      case BuildingPassPhase::Draw:
+        buildingDrawMs = elapsed;
+        break;
+      case BuildingPassPhase::Complete:
+        break;
+      }
+      buildingPassPhase = BuildingPassPhase::Complete;
+    };
     const bool buildingPassCompleted =
         map_building_renderer::runAllocationSafe(
             [&]() -> bool {
@@ -2591,23 +2646,18 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                right.recordIndex});
         };
     const bool buildingsVisible =
+        !suppressBuildings &&
         (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
     bool extrudeBuildings =
         navigation_content_mode::extrudesMapGuidanceBuildings(
             buildingsVisible, mapNavigationActive, projection.isBirdsEye(),
             mapRenderSettings.mapNavigation3DBuildingsEnabled);
-    size_t visibleBuildingCount = 0;
     size_t boundedBuildingCandidateCount = 0;
-    uint64_t buildingPointCount = 0;
     size_t oversizedBuildingCount = 0;
     size_t renderRecordLimitOverflow = 0;
-    size_t renderTimeOverflow = 0;
     uint64_t visibleWallCandidateCount = 0;
-    uint32_t buildingProjectionMs = 0;
-    uint32_t buildingSortMs = 0;
     bool buildingBudgetFallback = false;
     bool buildingDeadlineExceeded = false;
-    bool buildingPrepassDeadlineExceeded = false;
     bool buildingScreenInterrupted = false;
     map_building_renderer::RenderSelection renderSelection;
     map_building_renderer::ExtrusionSelection buildingSelection;
@@ -2616,10 +2666,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     static uint64_t renderRecordOverflowTotal = 0;
     static uint64_t renderPointOverflowTotal = 0;
     static uint64_t renderOversizedOverflowTotal = 0;
-    static uint64_t renderTimeOverflowTotal = 0;
     static uint64_t extrusionRecordOverflowTotal = 0;
     static uint64_t extrusionPointOverflowTotal = 0;
-    const uint32_t buildingPassStartMs = millis();
     const auto buildingDeadlineReached = [&]() {
       return millis() - buildingPassStartMs >=
              map_building_renderer::kMaximumBuildingRenderTimeMs;
@@ -2636,6 +2684,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       return false;
     };
     const auto abortStoppedBuildingWork = [&](size_t timeOverflow) -> bool {
+      finishBuildingPhaseTiming();
       if (buildingDeadlineExceeded) {
         buildingDeadlineAborted = true;
         const size_t countedOverflow = std::max<size_t>(1, timeOverflow);
@@ -2645,7 +2694,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       return false;
     };
     if (buildingsVisible) {
-      const uint32_t buildingProjectionStartMs = millis();
+      buildingPassPhase = BuildingPassPhase::Projection;
+      buildingPhaseStartMs = millis();
       bool stopBuildingPrepass = false;
       for (MapBlock *block : memCache.blocks) {
         if (shouldStopBuildingWork()) {
@@ -2749,14 +2799,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
         if (stopBuildingPrepass)
           break;
       }
-      buildingProjectionMs = millis() - buildingProjectionStartMs;
+      buildingProjectionMs = millis() - buildingPhaseStartMs;
+      buildingPassPhase = BuildingPassPhase::Sort;
+      buildingPhaseStartMs = millis();
       renderRecordLimitOverflow =
           boundedBuildingCandidateCount - buildingQueue.size();
       if (!stopBuildingPrepass) {
-        const uint32_t buildingSortStartMs = millis();
         std::sort(buildingQueue.begin(), buildingQueue.end(),
                   buildingRendersBefore);
-        buildingSortMs = millis() - buildingSortStartMs;
+        buildingSortMs = millis() - buildingPhaseStartMs;
         if (!shouldStopBuildingWork()) {
           renderSelection = map_building_renderer::selectNearestForRendering(
               buildingQueue.rbegin(), buildingQueue.rend(),
@@ -2790,6 +2841,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       renderOversizedOverflowTotal += oversizedBuildingCount;
     }
 
+    buildingPassPhase = BuildingPassPhase::Draw;
+    buildingPhaseStartMs = millis();
     const uint16_t roofColor = lv_color_to_u16(lv_color_hex(0xB9B2A8));
     const uint16_t wallLight = lv_color_to_u16(lv_color_hex(0x958E84));
     const uint16_t wallMiddle = lv_color_to_u16(lv_color_hex(0x827B72));
@@ -2823,9 +2876,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
     std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
     map_building_renderer::SurfaceStats buildingSurfaceStats;
-    uint32_t renderedBuildings = 0;
-    uint32_t extrudedBuildings = 0;
-    const uint32_t buildingDrawStartMs = millis();
     const auto countRenderTimeOverflowFrom = [&](size_t itemIndex) {
       size_t overflow = 0;
       for (size_t remaining = itemIndex; remaining < buildingQueue.size();
@@ -3017,8 +3067,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (shouldStopBuildingWork())
         return abortStoppedBuildingWork(1);
     }
-    const uint32_t buildingDrawMs = millis() - buildingDrawStartMs;
-    MAPIO_LOG("MAPIO: buildings visibleRecords=%u visiblePoints=%llu "
+    buildingDrawMs = millis() - buildingPhaseStartMs;
+    buildingPassPhase = BuildingPassPhase::Complete;
+    MAPIO_LOG("MAPIO: buildings parsedRecords=%u parsedRings=%u "
+              "parsedPoints=%u heightExplicit=%u heightLevels=%u "
+              "heightInherited=%u heightLocalMedian=%u heightClassDefault=%u "
+              "suppressed=%u visibleRecords=%u visiblePoints=%llu "
               "queuedRecords=%u rendered=%u extruded=%u flatOverflow=%u "
               "renderRecordOverflow=%u renderPointOverflow=%u "
               "renderOversizedOverflow=%u renderTimeOverflow=%u "
@@ -3033,7 +3087,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "renderOversizedOverflowTotal=%llu renderTimeOverflowTotal=%llu "
               "extrusionRecordOverflowTotal=%llu "
               "extrusionPointOverflowTotal=%llu decodedBytes=%u\n",
-              (unsigned)visibleBuildingCount,
+              (unsigned)loadedBuildingStats.records,
+              (unsigned)loadedBuildingStats.rings,
+              (unsigned)loadedBuildingStats.points,
+              (unsigned)loadedBuildingStats.provenance[0],
+              (unsigned)loadedBuildingStats.provenance[1],
+              (unsigned)loadedBuildingStats.provenance[2],
+              (unsigned)loadedBuildingStats.provenance[3],
+              (unsigned)loadedBuildingStats.provenance[4],
+              suppressBuildings ? 1U : 0U, (unsigned)visibleBuildingCount,
               (unsigned long long)buildingPointCount,
               (unsigned)buildingQueue.size(),
               (unsigned)renderedBuildings,
@@ -3072,12 +3134,54 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
 
               return true;
             },
-            [&]() { buildingAllocationFailed = true; });
+            [&]() {
+              finishBuildingPhaseTiming();
+              buildingAllocationFailed = true;
+            });
     if (!buildingPassCompleted) {
-      if (buildingAllocationFailed) {
-        MAPIO_LOG("MAPIO: buildings aborted reason=allocation\n");
-      } else if (buildingDeadlineAborted) {
-        MAPIO_LOG("MAPIO: buildings aborted reason=deadline\n");
+      const char *failureReason = buildingAllocationFailed
+                                      ? "allocation"
+                                      : (buildingDeadlineAborted ? "deadline"
+                                                                 : "interrupt");
+      if (buildingAllocationFailed || buildingDeadlineAborted) {
+        MAPIO_LOG(
+            "MAPIO: buildings aborted reason=%s fallback=buildings-hidden "
+            "parsedRecords=%u parsedRings=%u parsedPoints=%u "
+            "heightExplicit=%u heightLevels=%u heightInherited=%u "
+            "heightLocalMedian=%u heightClassDefault=%u "
+            "visibleRecords=%u visiblePoints=%llu rendered=%u extruded=%u "
+            "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
+            "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+            "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
+            "psramLargest=%u\n",
+            failureReason, (unsigned)loadedBuildingStats.records,
+            (unsigned)loadedBuildingStats.rings,
+            (unsigned)loadedBuildingStats.points,
+            (unsigned)loadedBuildingStats.provenance[0],
+            (unsigned)loadedBuildingStats.provenance[1],
+            (unsigned)loadedBuildingStats.provenance[2],
+            (unsigned)loadedBuildingStats.provenance[3],
+            (unsigned)loadedBuildingStats.provenance[4],
+            (unsigned)visibleBuildingCount,
+            (unsigned long long)buildingPointCount,
+            (unsigned)renderedBuildings, (unsigned)extrudedBuildings,
+            (unsigned)renderTimeOverflow,
+            (unsigned long long)renderTimeOverflowTotal,
+            (unsigned long)buildingProjectionMs,
+            (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
+            buildingPrepassDeadlineExceeded ? 1U : 0U,
+            (unsigned)(ESP.getPsramSize() -
+                       heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        const bool screenCycleInterrupted =
+            shouldInterruptMapRenderForScreenCycle();
+        if (map_building_renderer::shouldRetryWithoutBuildings(
+                suppressBuildings, buildingAllocationFailed,
+                buildingDeadlineAborted, screenCycleInterrupted)) {
+          return Maps::readVectorMap(viewPort, memCache, canvas, zoom, rotation,
+                                     projection, drawLabels, true);
+        }
       }
       return false;
     }

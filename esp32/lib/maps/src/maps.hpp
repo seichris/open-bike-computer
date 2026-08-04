@@ -191,7 +191,7 @@ private:
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation,
                      const map_projection::Projection &projection,
-                     bool drawLabels = true);
+                     bool drawLabels = true, bool suppressBuildings = false);
   bool renderRollingRasterCell(double rasterOriginX, double rasterOriginY,
                                int32_t cellOffsetX, int32_t cellOffsetY,
                                uint8_t zoom, double rotation,

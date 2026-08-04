@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -39,9 +40,20 @@ struct Building {
   MapBuildingVector<Ring> rings;
 };
 
+struct Stats {
+  uint32_t records = 0;
+  uint32_t rings = 0;
+  uint32_t points = 0;
+  std::array<uint32_t, 5> provenance = {};
+};
+
 struct Block {
   MapBuildingVector<Building> buildings;
-  void clear() { buildings.clear(); }
+  Stats stats;
+  void clear() {
+    buildings.clear();
+    stats = {};
+  }
   size_t decodedBytes() const;
 };
 

@@ -101,6 +101,12 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_total_building_work_is_bounded_before_surface_rendering(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn(
+            "buildingRecords=%u buildingRings=%u", MAP_RENDERER_SOURCE
+        )
+        self.assertIn(
+            "buildingPoints=%u heightExplicit=%u", MAP_RENDERER_SOURCE
+        )
         self.assertIn("kMaximumRenderedBuildingPointsPerRecord", render_body)
         self.assertIn("kMaximumRenderedBuildingRecords", render_body)
         self.assertIn("retainNearestCandidate", render_body)
@@ -119,6 +125,9 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("wallCandidates=%llu", render_body)
         self.assertIn("generatedWallFaces=%llu", render_body)
         self.assertIn("suppressedWallFaces=%llu", render_body)
+        self.assertIn("parsedRecords=%u parsedRings=%u", render_body)
+        self.assertIn("parsedPoints=%u heightExplicit=%u", render_body)
+        self.assertIn("heightClassDefault=%u", render_body)
         self.assertIn("psramLargest=%u", render_body)
         self.assertIn("if (!item.render)", render_body)
 
@@ -138,7 +147,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("stopRoadRepaint", repaint_body)
         self.assertLess(
             repaint_body.rindex("shouldStopBuildingWork()"),
-            repaint_body.index("const uint32_t buildingDrawMs"),
+            repaint_body.index("buildingDrawMs ="),
         )
 
     def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):
@@ -146,8 +155,18 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("runAllocationSafe", render_body)
         self.assertIn("buildingAllocationFailed", render_body)
         self.assertIn("buildingDeadlineAborted", render_body)
-        self.assertIn('reason=allocation', render_body)
-        self.assertIn('reason=deadline', render_body)
+        self.assertIn('reason=%s', render_body)
+        self.assertIn('"allocation"', render_body)
+        self.assertIn('"deadline"', render_body)
+        self.assertIn('fallback=buildings-hidden', render_body)
+        self.assertIn("renderTimeOverflowTotal=%llu", render_body)
+        self.assertIn("projectionMs=%lu sortMs=%lu buildingDrawMs=%lu", render_body)
+        self.assertIn("psramUsed=%u psramFree=%u", render_body)
+        self.assertIn("shouldRetryWithoutBuildings", render_body)
+        self.assertIn(
+            "projection, drawLabels, true)",
+            render_body,
+        )
         self.assertRegex(
             render_body,
             r"if \(!buildingPassCompleted\)\s*\{[\s\S]*?return false;\s*\}",

@@ -102,6 +102,7 @@ bool decode(const uint8_t *data, size_t size, Block &output,
   const uint16_t count = le16(data + cursor);
   cursor += 8;
   output.buildings.reserve(count);
+  output.stats.records = count;
   for (uint16_t index = 0; index < count; ++index) {
     if (cursor > end || end - cursor < 18)
       return fail(error, "truncated FMB v4 building");
@@ -116,12 +117,16 @@ bool decode(const uint8_t *data, size_t size, Block &output,
     building.maxX = sle16(data + cursor + 12);
     building.maxY = sle16(data + cursor + 14);
     const uint16_t ringCount = le16(data + cursor + 16);
+    output.stats.rings += ringCount;
+    if (building.provenance < output.stats.provenance.size())
+      ++output.stats.provenance[building.provenance];
     cursor += 18;
     building.rings.reserve(ringCount);
     for (uint16_t ringIndex = 0; ringIndex < ringCount; ++ringIndex) {
       if (cursor > end || end - cursor < 4)
         return fail(error, "truncated FMB v4 building ring");
       const uint16_t pointCount = le16(data + cursor);
+      output.stats.points += pointCount;
       Ring ring;
       ring.hole = (data[cursor + 2] & 1U) != 0;
       cursor += 4;
