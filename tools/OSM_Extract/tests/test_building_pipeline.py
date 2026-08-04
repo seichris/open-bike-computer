@@ -16,6 +16,7 @@ from building_pipeline import (
     prepare_buildings,
     projected_selection_geometry,
 )
+from map_format import MAX_BUILDING_RINGS
 
 
 def feature(identifier, geometry, other_tags):
@@ -120,6 +121,26 @@ class BuildingPipelineTests(unittest.TestCase):
             self.rules,
         )
         self.assertEqual(report["rejectedTags"]["heightMalformed"], 1)
+
+    def test_excess_holes_are_bounded_deterministically(self):
+        holes = []
+        for index in range(MAX_BUILDING_RINGS + 8):
+            x = 10 + (index % 8) * 20
+            y = 10 + (index // 8) * 20
+            size = 4 + (index % 3)
+            holes.append(list(box(x, y, x + size, y + size).exterior.coords))
+        geometry = Polygon(list(box(0, 0, 200, 200).exterior.coords), holes)
+        buildings, _report, _flat = prepare_buildings(
+            [feature(35, geometry, '"height"=>"20"')],
+            self.rules,
+        )
+
+        records, stats = clip_buildings(buildings, box(0, 0, 200, 200), 0, 0)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records[0]["rings"]), MAX_BUILDING_RINGS)
+        self.assertEqual(stats["droppedHoleCount"], 9)
+        self.assertTrue(all(ring["flags"] == 1 for ring in records[0]["rings"][1:]))
 
     def test_selection_excludes_halo_buildings_from_output(self):
         buildings, report, _flat = prepare_buildings(

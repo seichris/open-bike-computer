@@ -156,6 +156,7 @@ building_totals = {
     "pointCount": 0,
     "emittedWallCount": 0,
     "suppressedWallCount": 0,
+    "droppedHoleCount": 0,
     "maximumBlockRecords": 0,
     "maximumBlockPoints": 0,
     "explicitHeightCount": 0,
@@ -277,6 +278,7 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
             building_totals["blockBytes"] += block_metadata["buildingBytes"]
             for key in (
                 "recordCount", "pointCount", "emittedWallCount", "suppressedWallCount",
+                "droppedHoleCount",
                 "explicitHeightCount", "levelsHeightCount", "inheritedHeightCount",
                 "localMedianHeightCount", "classDefaultHeightCount",
             ):

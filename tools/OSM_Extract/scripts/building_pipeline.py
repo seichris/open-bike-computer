@@ -29,6 +29,7 @@ from building_height import (
 )
 from feature_types import get_type_id
 from funcs import parse_tags
+from map_format import MAX_BUILDING_RINGS
 
 
 BUILDING_PROFILE_VERSION = 1
@@ -221,6 +222,7 @@ def clip_buildings(
     suppressed_walls = 0
     emitted_walls = 0
     points = 0
+    dropped_holes = 0
     provenance_counts = {name + "Count": 0 for name in PROVENANCE_NAMES.values()}
     for source in buildings:
         if (not source.extrude and not source.flat_base) or source.resolved is None:
@@ -237,7 +239,7 @@ def clip_buildings(
                 if source.wall_boundary is not None
                 else source.geometry.boundary
             )
-            rings: list[dict[str, Any]] = []
+            ring_candidates: list[tuple[float, dict[str, Any], int, int]] = []
             for ring_index, ring in enumerate([oriented.exterior, *oriented.interiors]):
                 coordinates = list(ring.coords)
                 if len(coordinates) > 1 and coordinates[0] == coordinates[-1]:
@@ -250,6 +252,8 @@ def clip_buildings(
                     (point[0] + min_x, point[1] + min_y) for point in local
                 ]
                 walls: list[bool] = []
+                ring_emitted_walls = 0
+                ring_suppressed_walls = 0
                 for index, start in enumerate(source_coordinates):
                     end = source_coordinates[(index + 1) % len(source_coordinates)]
                     if source.flat_base:
@@ -261,17 +265,35 @@ def clip_buildings(
                     ).covers(segment)
                     walls.append(bool(is_original))
                     if is_original:
-                        emitted_walls += 1
+                        ring_emitted_walls += 1
                     else:
-                        suppressed_walls += 1
-                rings.append(
-                    {
+                        ring_suppressed_walls += 1
+                ring_record = {
                         "flags": RING_FLAG_HOLE if ring_index > 0 else 0,
                         "points": local,
                         "walls": walls,
                     }
+                ring_candidates.append(
+                    (
+                        abs(Polygon(ring).area),
+                        ring_record,
+                        ring_emitted_walls,
+                        ring_suppressed_walls,
+                    )
                 )
-                points += len(local)
+            if not ring_candidates or ring_candidates[0][1]["flags"] != 0:
+                continue
+            outer = ring_candidates[0]
+            holes = sorted(
+                ring_candidates[1:],
+                key=lambda item: (-item[0], tuple(item[1]["points"])),
+            )
+            selected = [outer, *holes[: MAX_BUILDING_RINGS - 1]]
+            dropped_holes += max(0, len(holes) - (MAX_BUILDING_RINGS - 1))
+            rings = [item[1] for item in selected]
+            emitted_walls += sum(item[2] for item in selected)
+            suppressed_walls += sum(item[3] for item in selected)
+            points += sum(len(item[1]["points"]) for item in selected)
             if not rings or rings[0]["flags"] != 0:
                 continue
             bounds = [coordinate for ring in rings for coordinate in ring["points"]]
@@ -308,6 +330,7 @@ def clip_buildings(
         "pointCount": points,
         "emittedWallCount": emitted_walls,
         "suppressedWallCount": suppressed_walls,
+        "droppedHoleCount": dropped_holes,
         **provenance_counts,
     }
 
