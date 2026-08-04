@@ -593,11 +593,12 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
       return true;
     v4RingsRemaining_ = littleEndian16(v3Record_ + 16);
     v4CurrentRingIndex_ = 0;
+    v4CurrentBuildingFlags_ = v3Record_[1];
     v4DeclaredBounds_[0] = littleEndianSigned16(v3Record_ + 8);
     v4DeclaredBounds_[1] = littleEndianSigned16(v3Record_ + 10);
     v4DeclaredBounds_[2] = littleEndianSigned16(v3Record_ + 12);
     v4DeclaredBounds_[3] = littleEndianSigned16(v3Record_ + 14);
-    if (v3Record_[0] != 100 || (v3Record_[1] & ~1U) != 0 ||
+    if (v3Record_[0] != 100 || v3Record_[1] > 2U ||
         v3Record_[2] > 4 || v3Record_[3] != 0 ||
         littleEndian16(v3Record_ + 6) >= littleEndian16(v3Record_ + 4) ||
         v4DeclaredBounds_[0] > v4DeclaredBounds_[2] ||
@@ -645,6 +646,8 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
     return true;
   case V3ParseState::BuildingWallMask:
     if (v4WallBytesRemaining_ == 0)
+      return false;
+    if ((v4CurrentBuildingFlags_ & 2U) != 0 && byte != 0)
       return false;
     if (v4WallBytesRemaining_ == 1 && (v4RingPointCount_ % 8U) != 0 &&
         (byte & ~((1U << (v4RingPointCount_ % 8U)) - 1U)) != 0)

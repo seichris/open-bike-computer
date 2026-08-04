@@ -2569,16 +2569,35 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     bool extrudeBuildings =
         buildingsVisible && mapNavigationActive && projection.isBirdsEye() &&
         mapRenderSettings.mapNavigation3DBuildingsEnabled;
+    constexpr uint8_t kBuildingFlagFlatBase = 1U << 1U;
     size_t buildingPointCount = 0;
     bool buildingBudgetFallback = false;
     if (buildingsVisible) {
       for (MapBlock *block : memCache.blocks) {
         if (!block->inView || block->formatVersion < 4)
           continue;
+        const BBox screenBbox = viewPort.bbox - block->offset;
         for (size_t recordIndex = 0;
              recordIndex < block->buildingData.buildings.size();
              ++recordIndex) {
           const auto &building = block->buildingData.buildings[recordIndex];
+          const bool mayExtrude =
+              extrudeBuildings &&
+              (building.flags & kBuildingFlagFlatBase) == 0;
+          // A roof can project into the frame even when its ground footprint is
+          // just outside it. Expand conservatively in world space before
+          // excluding the record from the queue and its geometry budget.
+          const int32_t elevationMargin = mayExtrude
+              ? static_cast<int32_t>(std::ceil(
+                    building.heightDm / 10.0 * block->mercatorScale))
+              : 0;
+          const BBox buildingBbox(
+              Point32(building.minX - elevationMargin,
+                      building.minY - elevationMargin),
+              Point32(building.maxX + elevationMargin,
+                      building.maxY + elevationMargin));
+          if (!buildingBbox.intersects(screenBbox))
+            continue;
           for (const auto &ring : building.rings)
             buildingPointCount += ring.points.size();
           const map_transform::WorldPoint center{
@@ -2643,11 +2662,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     for (const auto &item : buildingQueue) {
       if (shouldInterruptMapRenderForScreenCycle())
         return false;
+      const bool flatBase =
+          (item.building->flags & kBuildingFlagFlatBase) != 0;
       const double minimumHeight =
-          extrudeBuildings ? item.building->minimumHeightDm / 10.0 : 0.0;
+          extrudeBuildings && !flatBase
+              ? item.building->minimumHeightDm / 10.0
+              : 0.0;
       const double height =
-          extrudeBuildings ? item.building->heightDm / 10.0 : 0.0;
-      if (extrudeBuildings) {
+          extrudeBuildings && !flatBase ? item.building->heightDm / 10.0 : 0.0;
+      if (extrudeBuildings && !flatBase) {
         for (const auto &ring : item.building->rings) {
           for (size_t index = 0; index < ring.points.size(); ++index) {
             if (index >= ring.walls.size() || ring.walls[index] == 0)

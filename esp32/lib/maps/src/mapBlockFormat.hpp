@@ -143,6 +143,7 @@ private:
   uint16_t v4RingPointsRemaining_ = 0;
   uint16_t v4WallBytesRemaining_ = 0;
   uint16_t v4CurrentRingIndex_ = 0;
+  uint8_t v4CurrentBuildingFlags_ = 0;
   int16_t v4DeclaredBounds_[4] = {};
   int16_t v4ActualBounds_[4] = {};
   AsciiState asciiState_ = AsciiState::PolygonHeader;

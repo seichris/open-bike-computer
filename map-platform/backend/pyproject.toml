@@ -11,6 +11,7 @@ dependencies = [
   "cryptography>=43,<49",
   "freetype-py>=2.5,<3",
   "Pillow>=10",
+  "PyYAML>=6,<7",
   "uharfbuzz>=0.55,<1"
 ]
 

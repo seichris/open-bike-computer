@@ -46,7 +46,7 @@ Every building fragment has one fixed 18-byte record followed by its rings:
 
 ```text
 typeId                      u8 = 100
-flags                       u8; bit 0 marks building:part
+flags                       u8; bit 0 marks building:part, bit 1 a flat base
 heightProvenance            u8; 0...4
 reserved                    u8 = 0
 heightDecimeters            u16; greater than minimum height
@@ -56,6 +56,13 @@ maximumX, maximumY          2 * i16
 ringCount                   u16; 1...32
 rings[ringCount]
 ```
+
+A flat-base record preserves an outline (including courtyards) underneath a
+complete set of building parts. Its stored height and provenance remain
+auditable, but firmware projects its roof at ground level and never emits its
+walls. Every wall-mask bit in a flat-base record must be zero. The part and
+flat-base flags are mutually exclusive. All other flag bits are reserved and
+must be zero.
 
 The provenance values are:
 

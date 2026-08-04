@@ -13,7 +13,9 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
+from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
+from shapely.ops import transform, unary_union
 from shapely.prepared import prep
 
 from building_height import (
@@ -31,7 +33,9 @@ from funcs import parse_tags
 
 BUILDING_PROFILE_VERSION = 1
 BUILDING_FLAG_PART = 1 << 0
+BUILDING_FLAG_FLAT_BASE = 1 << 1
 RING_FLAG_HOLE = 1 << 0
+EARTH_RADIUS_METERS = 6_378_137
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ class SourceBuilding:
     association: str = "none"
     parent_key: str | None = None
     extrude: bool = True
+    flat_base: bool = False
+    wall_boundary: BaseGeometry | None = None
 
 
 def load_rules(path: str | Path) -> tuple[HeightRules, str]:
@@ -72,6 +78,7 @@ def prepare_buildings(
     features: Iterable[Mapping[str, Any]],
     rules: HeightRules,
     relation_index: Mapping[str, Any] | None = None,
+    selection_geometry: Polygon | MultiPolygon | None = None,
 ) -> tuple[list[SourceBuilding], dict[str, Any], set[str]]:
     diagnostics: dict[str, int] = {}
     sources: list[SourceBuilding] = []
@@ -104,10 +111,13 @@ def prepare_buildings(
     direct: dict[str, ResolvedHeight] = {}
     calibration: dict[tuple[int, int, str], list[float]] = defaultdict(list)
     for source in sources:
-        candidate = direct_height(source.tags, rules, diagnostics)
+        # The first pass only identifies eligible calibration samples and direct
+        # parents. Rejection diagnostics belong to the single resolving pass
+        # below, otherwise malformed tags are counted two or three times.
+        candidate = direct_height(source.tags, rules)
         if candidate is None:
             continue
-        resolved = resolve_height(source.tags, rules, diagnostics=diagnostics)
+        resolved = resolve_height(source.tags, rules)
         direct[source.object_key] = resolved
         cell_x, cell_y = _calibration_cell(source.geometry, rules.cell_size_meters)
         calibration[(cell_x, cell_y, source.building_class)].append(candidate[0])
@@ -125,21 +135,59 @@ def prepare_buildings(
         )
         resolved_sources.append(replace(source, resolved=resolved))
 
-    part_parent_keys = {
-        source.parent_key
+    parts_by_parent: dict[str, list[SourceBuilding]] = defaultdict(list)
+    for source in resolved_sources:
+        if source.is_part and source.parent_key is not None:
+            parts_by_parent[source.parent_key].append(source)
+    covered_outline_keys = {
+        source.object_key
         for source in resolved_sources
-        if source.is_part and source.parent_key is not None
+        if not source.is_part
+        and _parts_cover_outline(source, parts_by_parent.get(source.object_key, ()))
     }
-    resolved_sources = [
-        replace(source, extrude=source.object_key not in part_parent_keys)
-        for source in resolved_sources
-    ]
-    flat_outline_keys = {key for key in part_parent_keys if key is not None}
+    rendered_sources: list[SourceBuilding] = []
+    for source in resolved_sources:
+        if source.is_part:
+            rendered_sources.append(source)
+            continue
+        if source.object_key in covered_outline_keys:
+            rendered_sources.append(replace(source, extrude=False, flat_base=True))
+            continue
+        parts = parts_by_parent.get(source.object_key, ())
+        if not parts:
+            rendered_sources.append(source)
+            continue
+        remainder = _polygonal_geometry(
+            source.geometry.difference(unary_union([part.geometry for part in parts]))
+        )
+        if remainder is None:
+            # Numerical edge cases that leave no outline area are equivalent to
+            # complete part coverage and retain the outline only as a base.
+            rendered_sources.append(replace(source, extrude=False, flat_base=True))
+            covered_outline_keys.add(source.object_key)
+            continue
+        rendered_sources.append(
+            replace(
+                source,
+                geometry=remainder,
+                wall_boundary=source.geometry.boundary,
+            )
+        )
+    resolved_sources = rendered_sources
+    if selection_geometry is not None:
+        resolved_sources = [
+            source
+            for source in resolved_sources
+            if source.geometry.intersects(selection_geometry)
+        ]
+    flat_outline_keys = {
+        source.object_key for source in resolved_sources if source.flat_base
+    }
 
     provenance_counts = {name + "Count": 0 for name in PROVENANCE_NAMES.values()}
     holes = 0
     for source in resolved_sources:
-        if source.extrude and source.resolved is not None:
+        if (source.extrude or source.flat_base) and source.resolved is not None:
             provenance_counts[
                 PROVENANCE_NAMES[source.resolved.provenance] + "Count"
             ] += 1
@@ -175,7 +223,7 @@ def clip_buildings(
     points = 0
     provenance_counts = {name + "Count": 0 for name in PROVENANCE_NAMES.values()}
     for source in buildings:
-        if not source.extrude or source.resolved is None:
+        if (not source.extrude and not source.flat_base) or source.resolved is None:
             continue
         if not source.geometry.intersects(block) or source.geometry.touches(block):
             continue
@@ -184,7 +232,11 @@ def clip_buildings(
             if fragment.is_empty or not fragment.is_valid:
                 continue
             oriented = orient(fragment, sign=1.0)
-            original_boundary = source.geometry.boundary
+            original_boundary = (
+                source.wall_boundary
+                if source.wall_boundary is not None
+                else source.geometry.boundary
+            )
             rings: list[dict[str, Any]] = []
             for ring_index, ring in enumerate([oriented.exterior, *oriented.interiors]):
                 coordinates = list(ring.coords)
@@ -200,6 +252,9 @@ def clip_buildings(
                 walls: list[bool] = []
                 for index, start in enumerate(source_coordinates):
                     end = source_coordinates[(index + 1) % len(source_coordinates)]
+                    if source.flat_base:
+                        walls.append(False)
+                        continue
                     segment = LineString((start, end))
                     is_original = original_boundary.buffer(
                         tolerance, cap_style=2, join_style=2
@@ -223,7 +278,10 @@ def clip_buildings(
             records.append(
                 {
                     "type_id": get_type_id(f"building.{source.building_class}"),
-                    "flags": BUILDING_FLAG_PART if source.is_part else 0,
+                    "flags": (
+                        (BUILDING_FLAG_PART if source.is_part else 0)
+                        | (BUILDING_FLAG_FLAT_BASE if source.flat_base else 0)
+                    ),
                     "provenance": int(source.resolved.provenance),
                     "height_dm": source.resolved.height_dm,
                     "minimum_height_dm": source.resolved.minimum_height_dm,
@@ -313,6 +371,66 @@ def _containment_parent(part: SourceBuilding, outlines) -> str | None:
     if not candidates:
         return None
     return min(candidates, key=lambda item: (item.geometry.area, item.object_key)).object_key
+
+
+def _parts_cover_outline(
+    outline: SourceBuilding,
+    parts: Iterable[SourceBuilding],
+    tolerance: float = 0.05,
+) -> bool:
+    part_geometries = [part.geometry for part in parts]
+    if not part_geometries:
+        return False
+    target = outline.geometry.buffer(-tolerance)
+    if target.is_empty:
+        target = outline.geometry
+    coverage = unary_union(part_geometries).buffer(tolerance)
+    return prep(coverage).covers(target)
+
+
+def _polygonal_geometry(geometry: BaseGeometry) -> Polygon | MultiPolygon | None:
+    if isinstance(geometry, Polygon):
+        return geometry if not geometry.is_empty else None
+    if isinstance(geometry, MultiPolygon):
+        return geometry if not geometry.is_empty else None
+    polygons = [
+        item
+        for item in getattr(geometry, "geoms", ())
+        if isinstance(item, Polygon) and not item.is_empty
+    ]
+    if not polygons:
+        return None
+    merged = unary_union(polygons)
+    return merged if isinstance(merged, (Polygon, MultiPolygon)) else None
+
+
+def projected_selection_geometry(
+    value: Mapping[str, Any],
+    *,
+    buffer_meters: float = 0.0,
+) -> Polygon | MultiPolygon:
+    """Project a normalized WGS84 selection into the extractor's Mercator CRS."""
+    if not math.isfinite(buffer_meters) or buffer_meters < 0:
+        raise ValueError("selection buffer is invalid")
+    geometry = shape(value)
+    if geometry.is_empty or not geometry.is_valid:
+        raise ValueError("selection geometry is invalid")
+
+    def project(lon: float, lat: float, altitude=None):
+        del altitude
+        latitude = max(-85.05112878, min(85.05112878, lat))
+        return (
+            math.radians(lon) * EARTH_RADIUS_METERS,
+            math.log(math.tan(math.radians(latitude) / 2 + math.pi / 4))
+            * EARTH_RADIUS_METERS,
+        )
+
+    projected = transform(project, geometry)
+    if buffer_meters > 0:
+        projected = projected.buffer(buffer_meters)
+    if not isinstance(projected, (Polygon, MultiPolygon)) or projected.is_empty:
+        raise ValueError("selection geometry does not produce an area")
+    return projected
 
 
 def _calibration_cell(geometry: Polygon | MultiPolygon, size: int) -> tuple[int, int]:

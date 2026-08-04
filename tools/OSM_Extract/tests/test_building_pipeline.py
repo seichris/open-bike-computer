@@ -2,7 +2,7 @@ import pathlib
 import sys
 import unittest
 
-from shapely.geometry import box, mapping, Polygon
+from shapely.geometry import box, LineString, mapping, Polygon
 import yaml
 
 
@@ -10,7 +10,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from building_height import HeightRules
-from building_pipeline import clip_buildings, prepare_buildings
+from building_pipeline import (
+    BUILDING_FLAG_FLAT_BASE,
+    clip_buildings,
+    prepare_buildings,
+    projected_selection_geometry,
+)
 
 
 def feature(identifier, geometry, other_tags):
@@ -55,7 +60,7 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertGreater(stats["emittedWallCount"], 0)
         self.assertGreater(stats["suppressedWallCount"], 0)
 
-    def test_relation_parent_controls_inheritance_and_outline_base(self):
+    def test_partial_parts_do_not_flatten_the_remaining_outline(self):
         outline = feature(
             10,
             box(0, 0, 100, 100),
@@ -72,11 +77,77 @@ class BuildingPipelineTests(unittest.TestCase):
             {"partParents": {"w11": "w10"}},
         )
         by_key = {building.object_key: building for building in buildings}
-        self.assertFalse(by_key["w10"].extrude)
+        self.assertTrue(by_key["w10"].extrude)
         self.assertTrue(by_key["w11"].extrude)
         self.assertEqual(by_key["w11"].resolved.height_dm, 240)
-        self.assertEqual(flat, {"w10"})
+        self.assertEqual(by_key["w10"].geometry.area, 3_600)
+        self.assertIsNotNone(by_key["w10"].wall_boundary)
+        self.assertEqual(flat, set())
         self.assertEqual(report["relationAssociationCount"], 1)
+
+        records, _stats = clip_buildings(buildings, box(0, 0, 100, 100), 0, 0)
+        outline_record = next(record for record in records if record["source_key"] == "w10")
+        self.assertEqual(len(outline_record["rings"]), 2)
+        self.assertFalse(any(outline_record["rings"][1]["walls"]))
+
+    def test_complete_parts_keep_a_ring_preserving_flat_outline(self):
+        geometry = Polygon(
+            [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)],
+            [[(30, 30), (70, 30), (70, 70), (30, 70), (30, 30)]],
+        )
+        outline = feature(
+            20, geometry, '"height"=>"24","building"=>"apartments"'
+        )
+        part = feature(
+            21,
+            geometry,
+            '"height"=>"18","building:part"=>"apartments"',
+        )
+        buildings, _report, flat = prepare_buildings(
+            [outline, part], self.rules, {"partParents": {"w21": "w20"}}
+        )
+        self.assertEqual(flat, {"w20"})
+        records, _stats = clip_buildings(buildings, box(0, 0, 100, 100), 0, 0)
+        flat_record = next(
+            record for record in records if record["flags"] & BUILDING_FLAG_FLAT_BASE
+        )
+        self.assertEqual(len(flat_record["rings"]), 2)
+        self.assertFalse(any(any(ring["walls"]) for ring in flat_record["rings"]))
+
+    def test_rejection_diagnostics_count_each_source_once(self):
+        _buildings, report, _flat = prepare_buildings(
+            [feature(30, box(0, 0, 10, 10), '"height"=>"unknown"')],
+            self.rules,
+        )
+        self.assertEqual(report["rejectedTags"]["heightMalformed"], 1)
+
+    def test_selection_excludes_halo_buildings_from_output(self):
+        buildings, report, _flat = prepare_buildings(
+            [
+                feature(40, box(0, 0, 10, 10), '"height"=>"10"'),
+                feature(41, box(100, 100, 110, 110), '"height"=>"20"'),
+            ],
+            self.rules,
+            selection_geometry=box(-1, -1, 20, 20),
+        )
+        self.assertEqual([building.object_key for building in buildings], ["w40"])
+        self.assertEqual(report["sourceCount"], 1)
+
+    def test_projects_polygon_and_buffers_route_selection(self):
+        polygon = projected_selection_geometry(mapping(box(0, 0, 0.01, 0.01)))
+        self.assertGreater(polygon.area, 1_000_000)
+
+        route = projected_selection_geometry(
+            mapping(LineString([(0, 0), (0.01, 0)])), buffer_meters=50
+        )
+        self.assertGreater(route.area, 100_000)
+        self.assertLess(route.bounds[1], 0)
+        self.assertGreater(route.bounds[3], 0)
+        with self.assertRaisesRegex(ValueError, "buffer is invalid"):
+            projected_selection_geometry(
+                mapping(LineString([(0, 0), (0.01, 0)])),
+                buffer_meters=float("nan"),
+            )
 
 
 if __name__ == "__main__":

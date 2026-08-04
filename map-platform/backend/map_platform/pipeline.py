@@ -34,7 +34,10 @@ from .manifest import (
 )
 from .map_stream import write_map_stream_artifact
 from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
-from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
+from .map_buildings import (
+    BUILDING_RENDERER_FORMAT_VERSION,
+    load_building_calibration_window,
+)
 from .models import JobStatus, MapJob, SourceRegion
 from .reuse import (
     MapReuseKeys,
@@ -226,11 +229,17 @@ class MapBuildPipeline:
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
         processing_bounds = aligned_processing_bounds(job)
-        source_bounds = (
-            expanded_building_source_bounds(processing_bounds)
-            if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
-            else processing_bounds
-        )
+        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+            calibration = load_building_calibration_window(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            )
+            source_bounds = expanded_building_source_bounds(
+                processing_bounds,
+                cell_size_meters=calibration.cell_size_meters,
+                halo_cells=calibration.halo_cells,
+            )
+        else:
+            source_bounds = processing_bounds
 
         if job_dir.exists():
             shutil.rmtree(job_dir)
@@ -516,6 +525,8 @@ class MapBuildPipeline:
             str(clipped_pbf),
             "--overwrite",
         ]
+        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+            args.insert(3, "--option=types=multipolygon,building")
         if (
             not force_bounds
             and job.geometry.geometry
@@ -593,6 +604,25 @@ class MapBuildPipeline:
             args.extend(
                 ["--international-fallback", labels["internationalFallback"]]
             )
+        if (
+            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            and job.geometry.geometry is not None
+            and job.geometry.mode.value in {"custom_polygon", "route_corridor"}
+        ):
+            selection_path = geojson_prefix.parent / "feature-selection.geojson"
+            selection_path.write_text(
+                json.dumps(
+                    job.geometry.geometry,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            args.extend(["--selection-geometry", str(selection_path)])
+            if job.geometry.mode.value == "route_corridor":
+                args.extend(
+                    ["--selection-buffer-m", str(job.geometry.corridor_width_m)]
+                )
         progress_coalescer = ProgressCoalescer()
         label_stats: dict[str, Any] | None = None
         building_stats: dict[str, Any] | None = None

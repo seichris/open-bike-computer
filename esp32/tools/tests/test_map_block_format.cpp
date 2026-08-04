@@ -147,6 +147,30 @@ int main() {
     assert(!map_block_format::validate(validV4.data(), size));
 
   changed = validV4;
+  changed[99] = 2;   // flat outline base
+  changed.back() = 0; // flat bases have no walls
+  write32(changed, 76,
+          crc32(std::vector<uint8_t>(changed.begin() + 90, changed.end())));
+  assert(map_block_format::validate(changed.data(), changed.size()));
+  assert(map_building_block::decode(changed.data(), changed.size(),
+                                    buildingBlock, &buildingError));
+  assert(buildingBlock.buildings[0].flags == 2);
+  for (const uint8_t wall : buildingBlock.buildings[0].rings[0].walls)
+    assert(wall == 0);
+
+  changed = validV4;
+  changed[99] = 2; // flat outline with non-zero wall bits is non-canonical
+  write32(changed, 76,
+          crc32(std::vector<uint8_t>(changed.begin() + 90, changed.end())));
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+
+  changed = validV4;
+  changed[99] = 3; // a building part cannot also be an outline base
+  write32(changed, 76,
+          crc32(std::vector<uint8_t>(changed.begin() + 90, changed.end())));
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+
+  changed = validV4;
   changed.back() = 0x8f; // non-canonical wall-mask padding
   write32(changed, 76,
           crc32(std::vector<uint8_t>(changed.begin() + 90, changed.end())));

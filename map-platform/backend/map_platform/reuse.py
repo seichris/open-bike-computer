@@ -14,8 +14,8 @@ from .models import Bounds, GeometryMode, MapJob
 MAP_BLOCK_SIZE_METERS = 1 << 12
 MAP_FOLDER_BLOCKS = 1 << 4
 MAP_REUSE_SCHEMA_VERSION = 2
-BUILDING_SOURCE_HALO_METERS = 8192
 EARTH_RADIUS_METERS = 6_378_137
+WEB_MERCATOR_LIMIT_METERS = math.pi * EARTH_RADIUS_METERS
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _BLOCK_PATH_RE = re.compile(
@@ -142,12 +142,32 @@ def aligned_processing_bounds(job: MapJob) -> Bounds:
     )
 
 
-def expanded_building_source_bounds(bounds: Bounds) -> Bounds:
-    """Expand final block bounds for complete boundary buildings and local medians."""
-    min_x = _lon_to_x(bounds.min_lon) - BUILDING_SOURCE_HALO_METERS
-    min_y = _lat_to_y(bounds.min_lat) - BUILDING_SOURCE_HALO_METERS
-    max_x = _lon_to_x(bounds.max_lon) + BUILDING_SOURCE_HALO_METERS
-    max_y = _lat_to_y(bounds.max_lat) + BUILDING_SOURCE_HALO_METERS
+def expanded_building_source_bounds(
+    bounds: Bounds,
+    *,
+    cell_size_meters: int,
+    halo_cells: int,
+) -> Bounds:
+    """Cover complete calibration cells and their halo around final blocks."""
+    if (
+        isinstance(cell_size_meters, bool)
+        or not isinstance(cell_size_meters, int)
+        or cell_size_meters <= 0
+        or isinstance(halo_cells, bool)
+        or not isinstance(halo_cells, int)
+        or not 0 <= halo_cells <= 8
+    ):
+        raise ValueError("building calibration window is invalid")
+    cell = cell_size_meters
+    halo = halo_cells
+    min_x = (math.floor(_lon_to_x(bounds.min_lon) / cell) - halo) * cell
+    min_y = (math.floor(_lat_to_y(bounds.min_lat) / cell) - halo) * cell
+    max_x = (math.ceil(_lon_to_x(bounds.max_lon) / cell) + halo) * cell
+    max_y = (math.ceil(_lat_to_y(bounds.max_lat) / cell) + halo) * cell
+    min_x = max(-WEB_MERCATOR_LIMIT_METERS, min_x)
+    min_y = max(-WEB_MERCATOR_LIMIT_METERS, min_y)
+    max_x = min(WEB_MERCATOR_LIMIT_METERS, max_x)
+    max_y = min(WEB_MERCATOR_LIMIT_METERS, max_y)
     return Bounds(
         _x_to_lon(min_x),
         _y_to_lat(min_y),

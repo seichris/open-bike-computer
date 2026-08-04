@@ -58,6 +58,7 @@ def empty_fma1(
 def one_building_fmb4(
     profile_fingerprint: int = 0x12345678,
     provenance: int = 0,
+    flags: int = 1,
 ) -> bytes:
     data = bytearray(b"FMB\x04\0\0\0\0")
     building = bytearray(struct.pack("<HHI", 1, 0, 4))
@@ -65,7 +66,7 @@ def one_building_fmb4(
         struct.pack(
             "<BBBBHHhhhhH",
             100,
-            1,
+            flags,
             provenance,
             0,
             123,

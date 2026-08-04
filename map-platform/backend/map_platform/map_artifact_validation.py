@@ -399,7 +399,7 @@ def _validate_building_section(
         ) = struct.unpack("<BBBBHHhhhhH", fixed)
         if (
             type_id != 100
-            or flags & ~1
+            or flags not in {0, 1, 2}
             or provenance > 4
             or record_reserved != 0
             or not 0 <= minimum_height_dm < height_dm
@@ -436,6 +436,8 @@ def _validate_building_section(
             wall_mask, cursor = _take(
                 section, cursor, mask_bytes, "FMB v4 building wall mask"
             )
+            if flags & 2 and any(wall_mask):
+                raise ValueError("FMB v4 flat base contains wall bits")
             used_bits = point_count % 8
             if used_bits and wall_mask[-1] & ~((1 << used_bits) - 1):
                 raise ValueError("FMB v4 wall mask has non-canonical padding")

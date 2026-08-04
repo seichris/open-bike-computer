@@ -10,7 +10,7 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from map_format import write_fmb
+from map_format import MapFormatError, write_fmb
 from font_asset import FontFaceSpec, FontPackBuilder
 
 
@@ -236,7 +236,7 @@ class BinaryMapFormatTests(unittest.TestCase):
 
         building = {
             "type_id": 100,
-            "flags": 0,
+            "flags": 2,
             "provenance": 0,
             "height_dm": 125,
             "minimum_height_dm": 0,
@@ -245,7 +245,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                 {
                     "flags": 0,
                     "points": [(0, 0), (10, 0), (10, 10), (0, 10)],
-                    "walls": [True, True, False, True],
+                    "walls": [False, False, False, False],
                 }
             ],
         }
@@ -276,7 +276,21 @@ class BinaryMapFormatTests(unittest.TestCase):
         body = data[offset:offset + length]
         self.assertEqual(zlib.crc32(body) & 0xFFFFFFFF, crc)
         self.assertEqual(struct.unpack_from("<HHI", body, 0), (1, 0, 4))
-        self.assertEqual(body[-1], 0b00001011)
+        self.assertEqual(body[9], 2)
+        self.assertEqual(body[-1], 0)
+
+        building["flags"] = 3
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(MapFormatError, "metadata is invalid"):
+                write_fmb(
+                    pathlib.Path(directory) / "0_0.fmb",
+                    [],
+                    [],
+                    min_x=0,
+                    min_y=0,
+                    font_builder=EmptyBuilder(),
+                    building_records=[building],
+                )
 
 
 if __name__ == "__main__":

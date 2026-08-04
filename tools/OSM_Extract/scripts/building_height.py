@@ -177,6 +177,8 @@ def direct_height(
         if tags.get("roof:height") not in (None, ""):
             _reject(diagnostics, "roofHeightMalformed")
         roof_levels = parse_levels(tags.get("roof:levels"), rules.maximum_levels)
+        if roof_levels is None and tags.get("roof:levels") not in (None, ""):
+            _reject(diagnostics, "roofLevelsMalformed")
         roof = (roof_levels or 0.0) * rules.roof_level_height_meters
     result = levels * rules.floor_height_meters + roof
     if rules.minimum_meters <= result <= rules.maximum_meters:
@@ -198,10 +200,19 @@ def resolve_height(
     class_minimum, class_maximum = rules.class_ranges.get(
         building_class, rules.class_ranges["generic"]
     )
-    if resolved is None and parent is not None and parent.provenance in {
-        HeightProvenance.EXPLICIT_HEIGHT,
-        HeightProvenance.LEVELS,
-    }:
+    has_own_height_fields = any(
+        tags.get(key) not in (None, "")
+        for key in ("height", "building:levels", "roof:height", "roof:levels")
+    )
+    if (
+        resolved is None
+        and not has_own_height_fields
+        and parent is not None
+        and parent.provenance in {
+            HeightProvenance.EXPLICIT_HEIGHT,
+            HeightProvenance.LEVELS,
+        }
+    ):
         resolved = (parent.height_meters, HeightProvenance.PARENT_INHERITANCE)
     if resolved is None and local_median is not None and math.isfinite(local_median):
         resolved = (
@@ -220,6 +231,8 @@ def resolve_height(
         if tags.get("min_height") not in (None, ""):
             _reject(diagnostics, "minimumHeightMalformed")
         minimum_levels = parse_levels(tags.get("building:min_level"), rules.maximum_levels)
+        if minimum_levels is None and tags.get("building:min_level") not in (None, ""):
+            _reject(diagnostics, "minimumLevelsMalformed")
         minimum = (minimum_levels or 0.0) * rules.floor_height_meters
     minimum_dm = max(0, _decimeters(minimum))
     if minimum_dm >= height_dm:

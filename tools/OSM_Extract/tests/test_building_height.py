@@ -67,6 +67,30 @@ class BuildingHeightTests(unittest.TestCase):
         fallback = resolve_height({"building": "unknown"}, self.rules)
         self.assertEqual(fallback.provenance, HeightProvenance.CLASS_DEFAULT)
 
+    def test_invalid_own_height_does_not_inherit_parent(self):
+        parent = resolve_height({"height": "20", "building": "office"}, self.rules)
+        resolved = resolve_height(
+            {"building:part": "office", "height": "about ten"},
+            self.rules,
+            parent=parent,
+        )
+        self.assertEqual(resolved.provenance, HeightProvenance.CLASS_DEFAULT)
+
+    def test_reports_malformed_roof_and_minimum_levels(self):
+        diagnostics = {}
+        resolve_height(
+            {
+                "building": "house",
+                "building:levels": "2",
+                "roof:levels": "many",
+                "building:min_level": "ground",
+            },
+            self.rules,
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(diagnostics["roofLevelsMalformed"], 1)
+        self.assertEqual(diagnostics["minimumLevelsMalformed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

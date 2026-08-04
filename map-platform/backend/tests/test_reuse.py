@@ -15,10 +15,12 @@ from map_platform.reuse import (
     aligned_processing_bounds,
     block_from_pack_path,
     child_pack_path,
+    expanded_building_source_bounds,
     parent_contains_child_blocks,
     required_blocks,
     reuse_keys,
 )
+from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
 from map_platform.worker import MapWorker
 from tests.map_label_fixtures import empty_fma1, empty_fmb3
@@ -212,6 +214,23 @@ class MapReuseTests(unittest.TestCase):
             self.assertGreaterEqual(aligned.max_lat, child.geometry.bounds.max_lat)
             self.assertTrue(parent_contains_child_blocks(parent, child))
             self.assertTrue(required_blocks(child.geometry.bounds))
+
+    def test_building_source_bounds_cover_complete_calibration_halo_cells(self):
+        bounds = Bounds(
+            reuse_module._x_to_lon(4096),
+            reuse_module._y_to_lat(4096),
+            reuse_module._x_to_lon(8192),
+            reuse_module._y_to_lat(8192),
+        )
+        expanded = expanded_building_source_bounds(
+            bounds,
+            cell_size_meters=8192,
+            halo_cells=1,
+        )
+        self.assertEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
+        self.assertEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
+        self.assertEqual(reuse_module._lon_to_x(expanded.max_lon), 16384)
+        self.assertEqual(reuse_module._lat_to_y(expanded.max_lat), 16384)
 
     def test_worker_reuses_identical_ready_pack_without_building(self):
         with tempfile.TemporaryDirectory() as tmp:

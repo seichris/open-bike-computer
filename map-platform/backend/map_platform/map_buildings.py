@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 BUILDING_PROFILE_VERSION = 1
@@ -14,6 +18,32 @@ BUILDING_STATS_KEYS = {
     "localMedianHeightCount",
     "classDefaultHeightCount",
 }
+
+
+@dataclass(frozen=True)
+class BuildingCalibrationWindow:
+    cell_size_meters: int
+    halo_cells: int
+
+
+def load_building_calibration_window(path: Path) -> BuildingCalibrationWindow:
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        local = value["localMedian"]
+        cell_size = local["cellSizeMeters"]
+        halo_cells = local["haloCells"]
+    except (OSError, TypeError, KeyError, yaml.YAMLError) as exc:
+        raise ValueError("building height rules are invalid") from exc
+    if (
+        isinstance(cell_size, bool)
+        or not isinstance(cell_size, int)
+        or cell_size <= 0
+        or isinstance(halo_cells, bool)
+        or not isinstance(halo_cells, int)
+        or not 0 <= halo_cells <= 8
+    ):
+        raise ValueError("building calibration window is invalid")
+    return BuildingCalibrationWindow(cell_size, halo_cells)
 
 
 def building_target3_generation_enabled() -> bool:

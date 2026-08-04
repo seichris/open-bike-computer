@@ -313,7 +313,7 @@ Holes retain their original-boundary wall bits so courtyards can have inner wall
 
 ## FMB v4 format
 
-Add a normative byte-level specification at `docs/fmb-v4-building-format.md` before implementing writers or parsers.
+Add a normative byte-level specification at `docs/fmb-v4.md` before implementing writers or parsers.
 
 ### Compatibility shape
 
@@ -324,7 +324,7 @@ Add a normative byte-level specification at `docs/fmb-v4-building-format.md` bef
 - Generalize the merged `_DIRECTORY_HEADER`/`_DIRECTORY_ENTRY` serialization and validation into a shared helper used by v3 and v4. Do not copy a second directory implementation that can drift.
 - A renderer-format-3 pack retains exactly one `VECTMAP/<mapId>/assets/street-labels.fma` asset and the v3 street-label profile fingerprint; adding buildings must not drop or reinterpret FMA1.
 - In v4, extrudable building geometry is removed from the generic polygon collection and written to the dedicated building section.
-- Flat building footprints used as bases may remain generic polygons where required by the outline/part rules.
+- Flat building footprints used as bases remain in the dedicated building section with a canonical flat-base flag, preserved rings, and zero wall bits. This avoids the generic polygon path, which cannot preserve multipolygon holes.
 - The v4 parser knows the permitted section graph and validates the complete payload; no extension-by-unstructured-trailing-bytes convention is used.
 - There is no new ASCII FMP representation for v4 buildings. FMP remains a legacy/developer representation for old flat geometry; production v4 is binary-authoritative.
 
@@ -344,6 +344,8 @@ ring count
   block-relative int16 x/y points
   packed one-bit wall mask for each edge
 ```
+
+Flag bit 0 marks a `building:part`; bit 1 marks a flat outline base retained beneath a complete set of parts. The flags are mutually exclusive, all other bits are reserved, and flat-base wall masks must be zero.
 
 Use unsigned 16-bit decimetres for heights: 0.1-metre resolution and a range well beyond accepted building bounds. `height` must be greater than `min_height`. Unknown/invalid height is never encoded because the build resolver must have chosen a documented fallback.
 

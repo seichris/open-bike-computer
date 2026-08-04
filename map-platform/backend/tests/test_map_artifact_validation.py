@@ -92,6 +92,10 @@ class MapArtifactValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "padding|CRC"):
                 validate_fmb4(block)
 
+            block.write_bytes(one_building_fmb4(flags=3))
+            with self.assertRaisesRegex(ValueError, "record is invalid"):
+                validate_fmb4(block)
+
 
 if __name__ == "__main__":
     unittest.main()

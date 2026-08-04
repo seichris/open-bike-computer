@@ -10,9 +10,11 @@ from building_pipeline import (
     load_relation_index,
     load_rules,
     prepare_buildings,
+    projected_selection_geometry,
 )
 from itertools import product
 from shapely import box
+from shapely.geometry import shape
 import argparse, json, yaml
 import os, sys, time
 
@@ -26,6 +28,8 @@ parser.add_argument("map_folder", nargs="?", default="../maps/shanghai_v2")
 parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3), default=1)
 parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
+parser.add_argument("--selection-geometry")
+parser.add_argument("--selection-buffer-m", type=float, default=0.0)
 args = parser.parse_args()
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
@@ -51,16 +55,36 @@ lines = json.load( open( LINES_INPUT_FILE, "r"))
 print("  Step 2/5 reading polygons files")
 polygons = json.load( open( POLYGONS_INPUT_FILE, "r"))
 
+selection_geometry = None
+if args.selection_geometry:
+    with open(args.selection_geometry, "r", encoding="utf-8") as selection_file:
+        selection_geometry = projected_selection_geometry(
+            json.load(selection_file), buffer_meters=args.selection_buffer_m
+        )
+
+
+def selected_features(features):
+    if selection_geometry is None:
+        return features
+    selected = []
+    for feature in features:
+        try:
+            geometry = shape(feature.get("geometry"))
+        except (TypeError, ValueError):
+            continue
+        if not geometry.is_empty and geometry.is_valid and geometry.intersects(selection_geometry):
+            selected.append(feature)
+    return selected
+
 buildings = []
 building_report = {}
-flat_outline_keys = set()
 building_rules_sha256 = None
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
     relation_index = load_relation_index(f"{args.geojson_prefix}_building_relations.json")
-    buildings, building_report, flat_outline_keys = prepare_buildings(
-        polygons["features"], building_rules, relation_index
+    buildings, building_report, _ = prepare_buildings(
+        polygons["features"], building_rules, relation_index, selection_geometry
     )
 
 # extract relevant features
@@ -68,9 +92,13 @@ print("Extracting features")
 label_diagnostics = {}
 normalization_started = time.perf_counter()
 lines = process_features(
-    lines['features'], conf['lines'], label_diagnostics=label_diagnostics
+    selected_features(lines['features']),
+    conf['lines'],
+    label_diagnostics=label_diagnostics,
 ) # extracted_lines
-polygons = process_features( polygons['features'], conf['polygons']) # extracted_polygons
+polygons = process_features(
+    selected_features(polygons['features']), conf['polygons']
+) # extracted_polygons
 normalization_seconds = time.perf_counter() - normalization_started
 print("Applying styles")
 # apply styles
@@ -81,7 +109,6 @@ if args.renderer_format == 3:
         feature
         for feature in polygons
         if not feature["type"].startswith("building.")
-        or feature.get("osm_key") in flat_outline_keys
     ]
 font_builder = None
 label_totals = {

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,10 @@ from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id
-from map_platform.map_buildings import building_target3_generation_enabled
+from map_platform.map_buildings import (
+    building_target3_generation_enabled,
+    load_building_calibration_window,
+)
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
 from map_platform.sources import SourceIndex
@@ -85,6 +89,14 @@ class MapBuildingContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 building_target3_generation_enabled()
 
+    def test_calibration_window_comes_from_checked_in_height_rules(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        window = load_building_calibration_window(
+            repo_root / "tools" / "OSM_Extract" / "conf" / "building_height_rules.yaml"
+        )
+        self.assertEqual(window.cell_size_meters, 8192)
+        self.assertEqual(window.halo_cells, 1)
+
     def test_target_three_is_forwarded_and_requires_both_stats_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -97,6 +109,46 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertIn("3", runner.args)
             self.assertEqual(metrics["buildingBuild"]["recordCount"], 1)
             self.assertEqual(metrics["labelBuild"]["blocks"], 1)
+
+    def test_target_three_preserves_polygon_selection_and_completes_building_relations(self):
+        request = self._request()
+        request.pop("bbox")
+        request["mode"] = "custom_polygon"
+        request["geometry"] = {
+            "type": "Polygon",
+            "coordinates": [[
+                [103.75, 1.24],
+                [103.90, 1.24],
+                [103.90, 1.35],
+                [103.75, 1.24],
+            ]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+            runner = CapturingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner
+            )
+            pipeline._extract_features(job, root / "features", root / "raw")
+            self.assertIn("--selection-geometry", runner.args)
+            selection_path = Path(
+                runner.args[runner.args.index("--selection-geometry") + 1]
+            )
+            self.assertEqual(
+                json.loads(selection_path.read_text()),
+                request["geometry"],
+            )
+
+            pipeline._extract_pbf(
+                job,
+                root / "source.pbf",
+                root / "clipped.pbf",
+                bounds=job.geometry.bounds,
+                force_bounds=True,
+            )
+            self.assertIn("--option=types=multipolygon,building", runner.args)
+            self.assertIn("-b", runner.args)
 
     def test_manifest_derives_signed_building_summary_from_fmb4(self):
         with tempfile.TemporaryDirectory() as tmp:

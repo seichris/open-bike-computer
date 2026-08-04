@@ -298,8 +298,8 @@ def _building_section(records):
         provenance = int(record["provenance"])
         bbox = tuple(int(value) for value in record["bbox"])
         if (
-            not 0 <= int(record["type_id"]) <= 255
-            or not 0 <= int(record["flags"]) <= 255
+            int(record["type_id"]) != 100
+            or int(record["flags"]) not in {0, 1, 2}
             or not 0 <= provenance <= 4
             or not 0 <= minimum_height_dm < height_dm <= 65535
             or len(bbox) != 4
@@ -328,6 +328,7 @@ def _building_section(records):
                 not 3 <= len(points) <= 65535
                 or len(walls) != len(points)
                 or flags not in {0, 1}
+                or (int(record["flags"]) & 2 and any(walls))
                 or any(
                     value < -32768 or value > 32767
                     for point in points
