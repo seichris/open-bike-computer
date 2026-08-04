@@ -257,6 +257,41 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                 : nil
         )
     }
+
+    func compatibleFallback(
+        requestedRendererFormatVersion: Int,
+        supportedRendererFormatVersions: [Int]
+    ) -> OfflineMapJobRequest? {
+        guard requestedRendererFormatVersion == 3,
+              target?.renderer == "esp32-fmb",
+              target?.rendererFormatVersion == requestedRendererFormatVersion else {
+            return nil
+        }
+        let fallbackFormat: Int
+        if labels != nil && supportedRendererFormatVersions.contains(2) {
+            fallbackFormat = 2
+        } else if supportedRendererFormatVersions.contains(1) {
+            fallbackFormat = 1
+        } else {
+            return nil
+        }
+        return OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: RendererTarget(
+                renderer: "esp32-fmb",
+                rendererFormatVersion: fallbackFormat,
+                firmwareVersion: target?.firmwareVersion
+            ),
+            labels: fallbackFormat == 2 ? labels : nil
+        )
+    }
 }
 
 struct GeoJSONGeometry: Codable, Equatable {
@@ -679,6 +714,11 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
+    case unsupportedRendererTarget(
+        requestedRendererFormatVersion: Int,
+        supportedRendererFormatVersions: [Int],
+        message: String
+    )
     case serverStatus(Int, String)
 
     var errorDescription: String? {
@@ -711,10 +751,23 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Map pack entry is compressed and cannot be transferred: \(path)"
         case .invalidResponse:
             return "Map server returned an invalid response"
+        case .unsupportedRendererTarget(_, _, let message):
+            return message
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }
     }
+}
+
+private struct OfflineMapAPIErrorEnvelope: Decodable {
+    let detail: OfflineMapAPIErrorDetail
+}
+
+private struct OfflineMapAPIErrorDetail: Decodable {
+    let code: String
+    let message: String
+    let requestedRendererFormatVersion: Int?
+    let supportedRendererFormatVersions: [Int]?
 }
 
 struct OfflineMapPackEntry: Equatable {
@@ -2455,6 +2508,30 @@ struct OfflineMapPlatformClient {
         guard jobRequest.clientInstallationId == clientInstallationId else {
             throw OfflineMapPlatformError.invalidResponse
         }
+        do {
+            return try await createJobOnce(jobRequest)
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(
+            let requestedRendererFormatVersion,
+            let supportedRendererFormatVersions,
+            let message
+        ) {
+            guard let fallback = jobRequest.compatibleFallback(
+                requestedRendererFormatVersion: requestedRendererFormatVersion,
+                supportedRendererFormatVersions: supportedRendererFormatVersions
+            ) else {
+                throw OfflineMapPlatformError.unsupportedRendererTarget(
+                    requestedRendererFormatVersion: requestedRendererFormatVersion,
+                    supportedRendererFormatVersions: supportedRendererFormatVersions,
+                    message: message
+                )
+            }
+            return try await createJobOnce(fallback)
+        }
+    }
+
+    private func createJobOnce(
+        _ jobRequest: OfflineMapJobRequest
+    ) async throws -> OfflineMapJob {
         var request = try Self.makeCreateJobURLRequest(
             baseURL: baseURL,
             jobRequest: jobRequest
@@ -2534,8 +2611,7 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+            throw Self.platformError(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
     }
@@ -2740,10 +2816,32 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+            throw Self.platformError(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    private static func platformError(
+        statusCode: Int,
+        data: Data
+    ) -> OfflineMapPlatformError {
+        if let envelope = try? JSONDecoder().decode(
+            OfflineMapAPIErrorEnvelope.self,
+            from: data
+        ),
+           envelope.detail.code == "unsupported_renderer_target",
+           let requested = envelope.detail.requestedRendererFormatVersion,
+           let supported = envelope.detail.supportedRendererFormatVersions {
+            return .unsupportedRendererTarget(
+                requestedRendererFormatVersion: requested,
+                supportedRendererFormatVersions: supported,
+                message: envelope.detail.message
+            )
+        }
+        return .serverStatus(
+            statusCode,
+            String(data: data, encoding: .utf8) ?? ""
+        )
     }
 
     private func authorizeInstallation(_ request: inout URLRequest) {

@@ -3,13 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
 
+from .installations import INSTALLATION_ID_PREFIX
+
 
 BUILDING_PROFILE_VERSION = 1
 BUILDING_RENDERER_FORMAT_VERSION = 3
+INSTALLATION_ID_PATTERN = re.compile(
+    rf"{re.escape(INSTALLATION_ID_PREFIX)}[0-9a-f]{{32}}"
+)
 BUILDING_STATS_KEYS = {
     "recordCount",
     "explicitHeightCount",
@@ -56,6 +62,19 @@ def building_target3_generation_enabled() -> bool:
     if value in {"0", "false", "no"}:
         return False
     raise ValueError("MAP_PLATFORM_BUILDING_TARGET3_ENABLED must be a boolean")
+
+
+def building_target3_generation_allowlist() -> frozenset[str]:
+    raw_allowlist = os.environ.get(
+        "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST",
+        "",
+    )
+    values = [value.strip() for value in raw_allowlist.split(",") if value.strip()]
+    if len(values) != len(set(values)):
+        raise ValueError("building target 3 allowlist contains duplicates")
+    if any(not INSTALLATION_ID_PATTERN.fullmatch(value) for value in values):
+        raise ValueError("building target 3 allowlist contains an invalid installation ID")
+    return frozenset(values)
 
 
 def manifest_building_summary(stats: dict[str, Any] | None) -> dict[str, int]:

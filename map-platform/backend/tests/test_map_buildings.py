@@ -7,13 +7,14 @@ from unittest.mock import patch
 from map_platform.jobs import JobStore, MapJobService
 from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id
 from map_platform.map_buildings import (
+    building_target3_generation_allowlist,
     building_target3_generation_enabled,
     load_building_calibration_window,
 )
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
 from map_platform.sources import SourceIndex
-from tests.map_label_fixtures import empty_fma1, one_building_fmb4
+from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
 
 
 class CapturingRunner:
@@ -71,7 +72,10 @@ class MapBuildingContractTests(unittest.TestCase):
     def test_target_three_generation_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MapJobService(SourceIndex([self.source]), JobStore(tmp))
-            with self.assertRaisesRegex(ValueError, "format 3 generation is not enabled"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "format 3 generation is not available for this installation",
+            ):
                 service.create_job(self._request())
 
     def test_target_three_environment_gate_is_strict(self):
@@ -88,6 +92,68 @@ class MapBuildingContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 building_target3_generation_enabled()
+
+    def test_target_three_allowlist_is_strict(self):
+        installation_id = "inst_v2_" + "a" * 32
+        with patch.dict(
+            "os.environ",
+            {"MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": installation_id},
+            clear=True,
+        ):
+            self.assertEqual(
+                building_target3_generation_allowlist(),
+                frozenset({installation_id}),
+            )
+        with patch.dict(
+            "os.environ",
+            {"MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": f"{installation_id},{installation_id}"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "contains duplicates"):
+                building_target3_generation_allowlist()
+        with patch.dict(
+            "os.environ",
+            {"MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": "installation-invalid"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid installation ID"):
+                building_target3_generation_allowlist()
+
+    def test_target_three_allowlist_blocks_other_installations(self):
+        allowed_installation = "inst_v2_" + "a" * 32
+        blocked_installation = "inst_v2_" + "b" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(
+                SourceIndex([self.source]),
+                JobStore(tmp),
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+                building_target3_allowlist=frozenset({allowed_installation}),
+            )
+            request = self._request()
+            request.update(
+                {
+                    "clientInstallationId": blocked_installation,
+                    "clientRequestId": "request-blocked",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "format 3 generation is not available for this installation",
+            ):
+                service.create_job(request)
+
+            request.update(
+                {
+                    "clientInstallationId": allowed_installation,
+                    "clientRequestId": "request-allowed",
+                }
+            )
+            job = service.create_job(request)
+            self.assertEqual(
+                job.request["target"]["rendererFormatVersion"],
+                3,
+            )
 
     def test_calibration_window_comes_from_checked_in_height_rules(self):
         repo_root = Path(__file__).resolve().parents[3]
@@ -160,7 +226,7 @@ class MapBuildingContractTests(unittest.TestCase):
             block.parent.mkdir(parents=True)
             asset.parent.mkdir(parents=True)
             block.write_bytes(one_building_fmb4())
-            asset.write_bytes(empty_fma1())
+            asset.write_bytes(one_label_fma1())
             stats = {
                 "recordCount": 1,
                 "explicitHeightCount": 1,

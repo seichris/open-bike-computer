@@ -486,7 +486,7 @@ Current setting IDs:
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
-| `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
+| `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective whenever Map + Navigation is visible, including before a route starts. |
 | `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong, `3` Very Strong, `4` Maximum; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. At extreme zoom/viewport combinations, firmware eases the requested strength only as much as needed to stay within the four-block renderer budget. |
 | `27` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads; defaults to balanced |
 | `28` | Map street-label language | `0` local, `1` preferred, `2` local + preferred; defaults to local + preferred |
@@ -496,7 +496,7 @@ Current setting IDs:
 | `32` | Map + Navigation street-label language | Same values as ID `28` |
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
-| `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in active bird's-eye navigation; defaults to enabled and is persisted as `nav3DBuild` |
+| `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
 
 The app presents label visibility as a separate switch from density. It keeps
 the selected `1...3` density in the screen profile and sends density `0` while
@@ -526,9 +526,10 @@ overlay visibility remains shared by both profiles.
 
 Setting ID `25` is separately capability-gated and does not change the
 `16...22` independent-profile range. The ordinary Map screen and Map +
-Navigation without an active route remain flat. During active navigation the
-bird's-eye renderer uses one projection snapshot for vector features, route
-geometry, and the current-position marker so all three layers stay aligned.
+Navigation with bird's-eye disabled remain flat. When bird's-eye is enabled,
+Map + Navigation uses one projection snapshot before and during guidance for
+vector features, route geometry, and the current-position marker so all three
+layers stay aligned.
 
 Fresh Map profiles default to high detail, zoom level `3`, a `4` px route line,
 `4` px streets, and a `2x` position marker. Fresh Map + Navigation profiles
@@ -738,20 +739,20 @@ roads independently for Map and Map + Navigation.
 ID `35` is sent only after a valid `CAP2` response advertises bit `12`.
 Firmware without that bit is never offered renderer target 3 and never receives
 the new setting. The setting has no effect unless Buildings is visible, Map +
-Navigation has an active route, bird's-eye projection is active, and an FMB v4
-block supplies building records.
+Navigation is using bird's-eye projection, and an FMB v4 block supplies
+building records.
 
 ## Destination Picker
 
-The idle Map + Navigation overlay mirrors up to three favorites from the
-companion app. Recent searches are not sent or displayed. Labels are non-empty
-UTF-8 strings of at most 64 bytes, and an empty catalog is valid.
+The idle Navigation screen mirrors up to three favorites from the companion
+app. Recent searches are not sent or displayed. Labels are non-empty UTF-8
+strings of at most 64 bytes, and an empty catalog is valid.
 
-When idle, the picker expands the bottom overlay to two-thirds of the display.
-It shows large, transparent destination rows with a small yellow star before
-each label and no section heading. Tapping the exposed map or pressing the
-BOOT/forward button dismisses the picker and restores the normal one-third
-guidance strip; a later forward press resumes normal screen cycling.
+The picker fills the dedicated Navigation screen with large, transparent
+destination rows and a small yellow star before each label. Map + Navigation
+does not present the catalog: it always opens directly to its configured map,
+with no bottom overlay while idle and the one-third maneuver strip only while
+guidance is active.
 
 The logical catalog is versioned JSON:
 

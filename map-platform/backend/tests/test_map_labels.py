@@ -67,7 +67,10 @@ class MapLabelContractTests(unittest.TestCase):
     def test_target_two_generation_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MapJobService(SourceIndex([self.source]), JobStore(tmp))
-            with self.assertRaisesRegex(ValueError, "format 2 generation is not enabled"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "format 2 generation is not available for this installation",
+            ):
                 service.create_job(self._request())
 
     def test_target_two_environment_gate_is_strict(self):

@@ -1069,12 +1069,12 @@ private struct MapStyleSettingsView: View {
             return "Update the Bike Computer firmware to enable bird's-eye view."
         }
         if !bleManager.supportsBirdsEyeMapNavigationPerspective {
-            return "Tilts the map during active navigation. Update the Bike Computer firmware to adjust the perspective."
+            return "Tilts the Map + Navigation screen. Update the Bike Computer firmware to adjust the perspective."
         }
         if !bleManager.supportsBirdsEyeMapNavigationStrongerPerspective {
-            return "Choose how strongly the map tilts during active navigation. Update the Bike Computer firmware for Very Strong and Maximum."
+            return "Choose how strongly Map + Navigation tilts. Update the Bike Computer firmware for Very Strong and Maximum."
         }
-        return "Choose how strongly the map tilts during active navigation. The ordinary Map screen stays flat."
+        return "Choose how strongly Map + Navigation tilts. The ordinary Map screen stays flat."
     }
 
     private var birdsEyePerspectiveOptions: [MapNavigationBirdsEyePerspective] {

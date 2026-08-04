@@ -63,13 +63,13 @@ The target-3 physical-device matrix, timing/PSRAM capture, signed production pac
 3D extrusion is active only when all of the following are true:
 
 1. the device is showing Map + Navigation;
-2. an active route has enabled the existing bird's-eye presentation;
+2. the Map + Navigation bird's-eye presentation is enabled;
 3. Buildings are enabled in the map-feature visibility mask;
 4. the new **3D Buildings** setting is enabled;
 5. the loaded block is FMB v4 and contains building records; and
 6. the renderer remains inside its validated geometry and timing budgets.
 
-In every other state, buildings render as ordinary flat footprints. The normal non-navigation Map view remains flat. FMB v1/v2 behavior remains exactly as it is at the baseline, and the merged v3 street-label behavior remains intact.
+In every other state, buildings render as ordinary flat footprints. Map + Navigation keeps its configured bird's-eye perspective before and during guidance, while its maneuver strip appears only after navigation starts. The standalone Map view remains flat. FMB v1/v2 behavior remains exactly as it is at the baseline, and the merged v3 street-label behavior remains intact.
 
 ### User control
 

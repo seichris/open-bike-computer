@@ -51,6 +51,7 @@ jobs:
             scripts/map_format.py \
             tests/test_config.py \
             tests/test_building_height.py \
+            tests/test_building_relations.py \
             tests/test_building_pipeline.py \
             tests/test_feature_types.py \
             tests/test_font_asset.py \

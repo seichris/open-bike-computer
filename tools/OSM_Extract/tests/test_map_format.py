@@ -15,6 +15,23 @@ from font_asset import FontFaceSpec, FontPackBuilder
 
 
 FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+GOLDEN_FIXTURE_PATH = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "test-fixtures"
+    / "fmb"
+    / "golden_blocks.txt"
+)
+
+
+def golden_fmb_blocks():
+    fixtures = {}
+    for raw_line in GOLDEN_FIXTURE_PATH.read_text(encoding="ascii").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, encoded = line.split("=", 1)
+        fixtures[name] = bytes.fromhex(encoded)
+    return fixtures
 
 
 class PolygonGeometry:
@@ -26,6 +43,28 @@ class PolygonGeometry:
 class LineGeometry:
     def __init__(self, coordinates):
         self.coords = coordinates
+
+
+class GoldenFontBuilder:
+    languages = []
+    profile_fingerprint = 0x12345678
+
+    @staticmethod
+    def shape(_text, _language):
+        return tuple(
+            SimpleNamespace(
+                size_id=size_id,
+                glyphs=(
+                    SimpleNamespace(
+                        glyph_id=1,
+                        x_offset=0,
+                        y_offset=0,
+                        x_advance=640,
+                    ),
+                ),
+            )
+            for size_id in range(3)
+        )
 
 
 def feature(feature_type, geometry, width=None):
@@ -44,7 +83,87 @@ def skip_coordinates(data, offset):
     return offset + 2 + coordinate_count * 4
 
 
+def golden_features():
+    polygon = feature(
+        "building.residential",
+        PolygonGeometry([(0, 0), (10, 0), (10, 10), (0, 10)]),
+    )
+    road = feature(
+        "highway.residential",
+        LineGeometry([(0, 0), (10, 10)]),
+        2,
+    )
+    road.update(
+        {
+            "label_rank": 1,
+            "label_variants": [{"kind": "local", "text": "Main"}],
+            "label_candidates": [
+                {
+                    "start": (0, 0),
+                    "end": (10, 10),
+                    "quality": 240,
+                    "flags": 0,
+                }
+            ],
+        }
+    )
+    building = {
+        "type_id": 100,
+        "flags": 1,
+        "provenance": 0,
+        "height_dm": 123,
+        "minimum_height_dm": 20,
+        "bbox": (0, 0, 10, 10),
+        "rings": [
+            {
+                "flags": 0,
+                "points": [(0, 0), (10, 0), (10, 10), (0, 10)],
+                "walls": [True, True, True, True],
+            }
+        ],
+    }
+    return polygon, road, building
+
+
 class BinaryMapFormatTests(unittest.TestCase):
+    def test_shared_golden_blocks_match_producer_bytes(self):
+        fixtures = golden_fmb_blocks()
+        self.assertEqual(set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4"})
+        self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
+
+        polygon, road, building = golden_features()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            expected_versions = {
+                "fmb_v2": write_fmb(root / "v2.fmb", [polygon], [road], 0, 0),
+                "fmb_v3": write_fmb(
+                    root / "v3.fmb",
+                    [polygon],
+                    [road],
+                    0,
+                    0,
+                    font_builder=GoldenFontBuilder(),
+                ),
+                "fmb_v4": write_fmb(
+                    root / "v4.fmb",
+                    [polygon],
+                    [road],
+                    0,
+                    0,
+                    font_builder=GoldenFontBuilder(),
+                    building_records=[building],
+                ),
+            }
+            generated = {
+                "fmb_v2": (root / "v2.fmb").read_bytes(),
+                "fmb_v3": (root / "v3.fmb").read_bytes(),
+                "fmb_v4": (root / "v4.fmb").read_bytes(),
+            }
+
+        for name, version in (("fmb_v2", 2), ("fmb_v3", 3), ("fmb_v4", 4)):
+            self.assertEqual(expected_versions[name]["version"], version)
+            self.assertEqual(generated[name], fixtures[name])
+
     def test_fmb_records_use_classified_feature_type_bytes(self):
         polygon = feature(
             "building.residential",

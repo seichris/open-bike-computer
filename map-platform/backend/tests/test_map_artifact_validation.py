@@ -8,11 +8,31 @@ from map_platform.map_artifact_validation import (
     validate_fmb4,
     validate_renderer_artifacts,
 )
-from tests.map_label_fixtures import one_building_fmb4, one_label_fma1, one_label_fmb3
+from tests.map_label_fixtures import (
+    golden_fmb,
+    one_building_fmb4,
+    one_label_fma1,
+    one_label_fmb3,
+)
 
 
 class MapArtifactValidationTests(unittest.TestCase):
+    def test_shared_legacy_fmb_golden_blocks_remain_target_one_compatible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_id = "fixture-map"
+            files = []
+            for version in (1, 2):
+                relative = f"VECTMAP/{map_id}/+0000+0000/{version}.fmb"
+                block = root / relative
+                block.parent.mkdir(parents=True, exist_ok=True)
+                block.write_bytes(golden_fmb(f"fmb_v{version}"))
+                files.append({"path": relative})
+
+            validate_renderer_artifacts(root, map_id, files, 1)
+
     def test_nonempty_fmb3_and_fma1_cross_file_contract(self):
+        self.assertEqual(one_label_fmb3(), golden_fmb("fmb_v3"))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             map_id = "fixture-map"
@@ -64,6 +84,7 @@ class MapArtifactValidationTests(unittest.TestCase):
                 )
 
     def test_fmb4_building_contract_and_target_three_composition(self):
+        self.assertEqual(one_building_fmb4(), golden_fmb("fmb_v4"))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             map_id = "fixture-map"

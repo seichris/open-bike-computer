@@ -42,6 +42,34 @@ class JobRecordEnumerationError(RuntimeError):
         )
 
 
+class UnsupportedRendererTargetError(ValueError):
+    code = "unsupported_renderer_target"
+
+    def __init__(
+        self,
+        requested_renderer_format_version: int,
+        supported_renderer_format_versions: list[int],
+    ):
+        self.requested_renderer_format_version = requested_renderer_format_version
+        self.supported_renderer_format_versions = tuple(
+            supported_renderer_format_versions
+        )
+        super().__init__(
+            f"renderer format {requested_renderer_format_version} generation "
+            "is not available for this installation"
+        )
+
+    def response_detail(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "requestedRendererFormatVersion": self.requested_renderer_format_version,
+            "supportedRendererFormatVersions": list(
+                self.supported_renderer_format_versions
+            ),
+        }
+
+
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
@@ -1125,12 +1153,14 @@ class MapJobService:
         *,
         label_target2_enabled: bool = False,
         building_target3_enabled: bool = False,
+        building_target3_allowlist: frozenset[str] = frozenset(),
     ):
         self.source_index = source_index
         self.store = store
         self.limits = limits or JobLimits()
         self.label_target2_enabled = label_target2_enabled
         self.building_target3_enabled = building_target3_enabled
+        self.building_target3_allowlist = building_target3_allowlist
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1198,20 +1228,34 @@ class MapJobService:
         from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 
         requested_format = renderer_format_version(request)
+        client_installation_id = _client_identifier(request, "clientInstallationId")
+        client_request_id = _client_identifier(request, "clientRequestId")
+        if bool(client_installation_id) != bool(client_request_id):
+            raise ValueError(
+                "clientInstallationId and clientRequestId must be provided together"
+            )
         if (
             requested_format == LABEL_RENDERER_FORMAT_VERSION
             and not self.label_target2_enabled
         ):
-            raise ValueError("renderer format 2 generation is not enabled")
+            raise UnsupportedRendererTargetError(requested_format, [1])
         if (
             requested_format == BUILDING_RENDERER_FORMAT_VERSION
-            and not self.building_target3_enabled
+            and (
+                not self.building_target3_enabled
+                or (
+                    bool(self.building_target3_allowlist)
+                    and client_installation_id not in self.building_target3_allowlist
+                )
+            )
         ):
-            raise ValueError("renderer format 3 generation is not enabled")
-        client_installation_id = _client_identifier(request, "clientInstallationId")
-        client_request_id = _client_identifier(request, "clientRequestId")
-        if bool(client_installation_id) != bool(client_request_id):
-            raise ValueError("clientInstallationId and clientRequestId must be provided together")
+            supported_formats = [1]
+            if self.label_target2_enabled:
+                supported_formats.insert(0, LABEL_RENDERER_FORMAT_VERSION)
+            raise UnsupportedRendererTargetError(
+                requested_format,
+                supported_formats,
+            )
         if not client_installation_id or not client_request_id:
             return client_installation_id, client_request_id, None
         existing = self.find_by_client_request(

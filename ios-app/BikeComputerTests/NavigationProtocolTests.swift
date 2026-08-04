@@ -173,6 +173,29 @@ final class OfflineMapTestURLProtocol: URLProtocol {
         lock.unlock()
     }
 
+    static func bodyData(from request: URLRequest) -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: bufferSize)
+            if count <= 0 {
+                break
+            }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -634,6 +657,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
+        await testOfflineMapClientRetriesCompatibleRendererOnce()
         testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
         testBikeMapStreamArtifactValidation()
@@ -4244,6 +4268,36 @@ struct NavigationProtocolTests {
         assert(targetThreeJSON["labels"] != nil,
                "renderer target 3 retains the street-label profile")
 
+        let targetTwoFallback = targetThree.compatibleFallback(
+            requestedRendererFormatVersion: 3,
+            supportedRendererFormatVersions: [2, 1]
+        )
+        let targetTwoFallbackJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(targetTwoFallback)
+        ) as! [String: Any]
+        assertEqual(
+            (targetTwoFallbackJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
+            2,
+            "unsupported target 3 prefers the server-supported label target"
+        )
+        assert(targetTwoFallbackJSON["labels"] != nil,
+               "target 2 fallback preserves the requested label profile")
+
+        let targetOneFallback = targetThree.compatibleFallback(
+            requestedRendererFormatVersion: 3,
+            supportedRendererFormatVersions: [1]
+        )
+        let targetOneFallbackJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(targetOneFallback)
+        ) as! [String: Any]
+        assertEqual(
+            (targetOneFallbackJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
+            1,
+            "unsupported target 3 falls back to the legacy renderer when labels are unavailable"
+        )
+        assert(targetOneFallbackJSON["labels"] == nil,
+               "target 1 fallback removes unsupported label metadata")
+
         let legacy = request.forDevice(
             supportsStreetLabels: false,
             firmwareVersion: "0.3.0"
@@ -4255,6 +4309,114 @@ struct NavigationProtocolTests {
                     1, "legacy devices request renderer target 1")
         assert(legacyJSON["labels"] == nil,
                "legacy requests omit unsupported label metadata")
+    }
+
+    static func testOfflineMapClientRetriesCompatibleRendererOnce() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let installationID = "inst_v2_" + String(repeating: "a", count: 32)
+        let originalRequest = OfflineMapJobRequest
+            .customBBox(
+                OfflineMapBounds(minLon: 103.75, minLat: 1.24, maxLon: 103.93, maxLat: 1.37)
+            )
+            .forDevice(
+                supportsStreetLabels: true,
+                supports3DBuildings: true,
+                firmwareVersion: "0.5.0"
+            )
+            .identified(
+                clientInstallationId: installationID,
+                clientRequestId: "request-target3-fallback",
+                installOnDevice: true
+            )
+        let client = OfflineMapPlatformClient(
+            baseURL: URL(string: "https://maps.example.com")!,
+            clientInstallationId: installationID,
+            clientInstallationToken: "v1." + String(repeating: "A", count: 43),
+            session: session
+        )
+
+        func unsupportedResponse(
+            requested: Int,
+            supported: [Int]
+        ) -> Data {
+            try! JSONSerialization.data(withJSONObject: [
+                "detail": [
+                    "code": "unsupported_renderer_target",
+                    "message": "renderer format \(requested) generation is not available for this installation",
+                    "requestedRendererFormatVersion": requested,
+                    "supportedRendererFormatVersions": supported,
+                ]
+            ])
+        }
+
+        var submittedFormats: [Int] = []
+        var submittedRequestIDs: [String] = []
+        var submittedLabelProfiles: [Int?] = []
+        OfflineMapTestURLProtocol.configure { request in
+            let body = try! JSONSerialization.jsonObject(
+                with: OfflineMapTestURLProtocol.bodyData(from: request)
+            ) as! [String: Any]
+            submittedFormats.append(
+                (body["target"] as! [String: Any])["rendererFormatVersion"] as! Int
+            )
+            submittedRequestIDs.append(body["clientRequestId"] as! String)
+            submittedLabelProfiles.append(
+                (body["labels"] as? [String: Any])?["profileVersion"] as? Int
+            )
+            if submittedFormats.count == 1 {
+                return (400, unsupportedResponse(requested: 3, supported: [2, 1]))
+            }
+            return (200, Data(#"{"jobId":"job-target2","status":"queued"}"#.utf8))
+        }
+        let job = try? await client.createJob(originalRequest)
+        assertEqual(job?.jobId, "job-target2", "compatible fallback returns the created target 2 job")
+        assertEqual(submittedFormats, [3, 2], "target 3 is retried exactly once as target 2")
+        assertEqual(
+            submittedRequestIDs,
+            ["request-target3-fallback", "request-target3-fallback"],
+            "fallback preserves the idempotency identity"
+        )
+        assertEqual(
+            submittedLabelProfiles.compactMap { $0 },
+            [1, 1],
+            "fallback request keeps the target 2 label profile"
+        )
+
+        var rejectedRequestCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            rejectedRequestCount += 1
+            let body = try! JSONSerialization.jsonObject(
+                with: OfflineMapTestURLProtocol.bodyData(from: request)
+            ) as! [String: Any]
+            let requested = (body["target"] as! [String: Any])["rendererFormatVersion"] as! Int
+            return (
+                400,
+                unsupportedResponse(
+                    requested: requested,
+                    supported: requested == 3 ? [2, 1] : [1]
+                )
+            )
+        }
+        do {
+            _ = try await client.createJob(originalRequest)
+            assert(false, "a rejected fallback should remain an error")
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(
+            let requested,
+            let supported,
+            _
+        ) {
+            assertEqual(requested, 2, "the second rejection reports the fallback target accurately")
+            assertEqual(supported, [1], "the second rejection preserves the server contract")
+        } catch {
+            assert(false, "a rejected fallback should retain the typed renderer error")
+        }
+        assertEqual(rejectedRequestCount, 2, "renderer fallback never retries more than once")
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {

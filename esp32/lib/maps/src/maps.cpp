@@ -9,6 +9,7 @@
 
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
+#include "mapBuildingRenderer.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapLabelRasterizer.hpp"
 #include "mapLabelSelection.hpp"
@@ -17,6 +18,7 @@
 #include "map_projection.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
+#include "../../gui/src/navigationContentMode.hpp"
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
@@ -2567,9 +2569,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     const bool buildingsVisible =
         (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
     bool extrudeBuildings =
-        buildingsVisible && mapNavigationActive && projection.isBirdsEye() &&
-        mapRenderSettings.mapNavigation3DBuildingsEnabled;
-    constexpr uint8_t kBuildingFlagFlatBase = 1U << 1U;
+        navigation_content_mode::extrudesMapGuidanceBuildings(
+            buildingsVisible, mapNavigationActive, projection.isBirdsEye(),
+            mapRenderSettings.mapNavigation3DBuildingsEnabled);
     size_t buildingPointCount = 0;
     bool buildingBudgetFallback = false;
     if (buildingsVisible) {
@@ -2583,7 +2585,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           const auto &building = block->buildingData.buildings[recordIndex];
           const bool mayExtrude =
               extrudeBuildings &&
-              (building.flags & kBuildingFlagFlatBase) == 0;
+              map_building_renderer::usesExtrusion(true, building.flags);
           // A roof can project into the frame even when its ground footprint is
           // just outside it. Expand conservatively in world space before
           // excluding the record from the queue and its geometry budget.
@@ -2613,20 +2615,16 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       std::sort(
           buildingQueue.begin(), buildingQueue.end(),
           [](const BuildingRenderItem &left, const BuildingRenderItem &right) {
-            if (left.depth != right.depth)
-              return left.depth > right.depth;
-            if (left.block->offset.y != right.block->offset.y)
-              return left.block->offset.y < right.block->offset.y;
-            if (left.block->offset.x != right.block->offset.x)
-              return left.block->offset.x < right.block->offset.x;
-            return left.recordIndex < right.recordIndex;
+            return map_building_renderer::rendersBefore(
+                {left.depth, left.block->offset.x, left.block->offset.y,
+                 left.recordIndex},
+                {right.depth, right.block->offset.x, right.block->offset.y,
+                 right.recordIndex});
           });
-      constexpr size_t kMaximumExtrudedBuildingRecords = 1024;
-      constexpr size_t kMaximumExtrudedBuildingPoints = 24576;
       buildingBudgetFallback =
           extrudeBuildings &&
-          (buildingQueue.size() > kMaximumExtrudedBuildingRecords ||
-           buildingPointCount > kMaximumExtrudedBuildingPoints);
+          map_building_renderer::exceedsExtrusionBudget(
+              buildingQueue.size(), buildingPointCount);
       if (buildingBudgetFallback)
         extrudeBuildings = false;
     }
@@ -2657,98 +2655,40 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       buildingPolygon.bbox.max = Point16(maxX, maxY);
       return Maps::fillPolygon(buildingPolygon, canvas);
     };
-    std::vector<Point16, PsramAllocator<Point16>> screenRing;
+    std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     uint32_t renderedBuildings = 0;
     for (const auto &item : buildingQueue) {
       if (shouldInterruptMapRenderForScreenCycle())
         return false;
-      const bool flatBase =
-          (item.building->flags & kBuildingFlagFlatBase) != 0;
-      const double minimumHeight =
-          extrudeBuildings && !flatBase
-              ? item.building->minimumHeightDm / 10.0
-              : 0.0;
-      const double height =
-          extrudeBuildings && !flatBase ? item.building->heightDm / 10.0 : 0.0;
-      if (extrudeBuildings && !flatBase) {
-        for (const auto &ring : item.building->rings) {
-          for (size_t index = 0; index < ring.points.size(); ++index) {
-            if (index >= ring.walls.size() || ring.walls[index] == 0)
-              continue;
-            const auto &start = ring.points[index];
-            const auto &end = ring.points[(index + 1U) % ring.points.size()];
-            auto startGround = projection.groundForWorld(
-                {static_cast<double>(item.block->offset.x + start.x),
-                 static_cast<double>(item.block->offset.y + start.y)});
-            auto endGround = projection.groundForWorld(
-                {static_cast<double>(item.block->offset.x + end.x),
-                 static_cast<double>(item.block->offset.y + end.y)});
-            if (!projection.clipSegmentToNearPlane(startGround, endGround))
-              continue;
-            const auto startBase =
-                projection.projectElevatedGround(
-                    startGround, minimumHeight, item.block->mercatorScale);
-            const auto endBase =
-                projection.projectElevatedGround(
-                    endGround, minimumHeight, item.block->mercatorScale);
-            const auto endTop = projection.projectElevatedGround(
-                endGround, height, item.block->mercatorScale);
-            const auto startTop =
-                projection.projectElevatedGround(
-                    startGround, height, item.block->mercatorScale);
-            if (!startBase.valid || !endBase.valid || !endTop.valid ||
-                !startTop.valid)
-              continue;
-            screenRing = {
-                Point16(map_transform::quantizePixel(startBase.x),
-                        map_transform::quantizePixel(startBase.y)),
-                Point16(map_transform::quantizePixel(endBase.x),
-                        map_transform::quantizePixel(endBase.y)),
-                Point16(map_transform::quantizePixel(endTop.x),
-                        map_transform::quantizePixel(endTop.y)),
-                Point16(map_transform::quantizePixel(startTop.x),
-                        map_transform::quantizePixel(startTop.y))};
-            const double edgeX = endBase.x - startBase.x;
-            const double edgeY = endBase.y - startBase.y;
-            const uint16_t wallColor =
-                std::fabs(edgeX) <= std::fabs(edgeY)
-                    ? wallMiddle
-                    : (edgeX > 0.0 ? wallLight : wallDark);
-            if (!fillScreenPolygon(screenRing, wallColor))
-              return false;
-          }
-        }
-      }
-      for (const auto &ring : item.building->rings) {
-        std::vector<map_projection::GroundPoint,
-                    PsramAllocator<map_projection::GroundPoint>>
-            ground;
-        std::vector<map_projection::GroundPoint,
-                    PsramAllocator<map_projection::GroundPoint>>
-            clipped;
-        ground.reserve(ring.points.size());
-        for (const auto &point : ring.points)
-          ground.push_back(projection.groundForWorld(
-              {static_cast<double>(item.block->offset.x + point.x),
-               static_cast<double>(item.block->offset.y + point.y)}));
-        const auto *roof = &ground;
-        if (projection.isBirdsEye()) {
-          map_projection::clipPolygonToNearPlane(projection, ground, clipped);
-          roof = &clipped;
-        }
-        screenRing.clear();
-        for (const auto &point : *roof) {
-          const auto projected = projection.projectElevatedGround(
-              point, height, item.block->mercatorScale);
-          if (projected.valid)
-            screenRing.push_back(
-                Point16(map_transform::quantizePixel(projected.x),
-                        map_transform::quantizePixel(projected.y)));
-        }
-        if (!fillScreenPolygon(screenRing,
-                               ring.hole ? courtyardColor : roofColor))
-          return false;
-      }
+      const bool surfacesRendered = map_building_renderer::renderSurfaces(
+          *item.building, item.block->offset.x, item.block->offset.y,
+          item.block->mercatorScale, projection, extrudeBuildings,
+          [&](map_building_renderer::Surface surface,
+              const auto &points) -> bool {
+            uint16_t color = roofColor;
+            switch (surface) {
+            case map_building_renderer::Surface::WallLight:
+              color = wallLight;
+              break;
+            case map_building_renderer::Surface::WallMiddle:
+              color = wallMiddle;
+              break;
+            case map_building_renderer::Surface::WallDark:
+              color = wallDark;
+              break;
+            case map_building_renderer::Surface::Courtyard:
+              color = courtyardColor;
+              break;
+            case map_building_renderer::Surface::Roof:
+              break;
+            }
+            buildingSurfacePoints.clear();
+            for (const auto &point : points)
+              buildingSurfacePoints.push_back(Point16(point.x, point.y));
+            return fillScreenPolygon(buildingSurfacePoints, color);
+          });
+      if (!surfacesRendered)
+        return false;
       ++renderedBuildings;
     }
 
@@ -5199,9 +5139,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   Maps::viewPort.zoom = zoom;
   Maps::viewPort.setCenterForCanvas(Maps::point, renderExtent.width,
                                     renderExtent.height, rotationRad);
-  const bool birdsEyeActive = isMapGuidanceScreenActive() &&
-                              mapRenderSettings.mapNavigationBirdsEyeEnabled &&
-                              routeOverlay.hasRoute();
+  const bool birdsEyeActive =
+      navigation_content_mode::usesMapGuidanceBirdsEye(
+          isMapGuidanceScreenActive(),
+          mapRenderSettings.mapNavigationBirdsEyeEnabled);
   const auto frameProjection = makeMapProjection(
       Maps::viewPort.rasterOriginX, Maps::viewPort.rasterOriginY,
       Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY, zoom,

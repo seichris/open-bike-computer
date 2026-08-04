@@ -15,6 +15,24 @@ int main() {
                 navigation_content_mode::Mode::FavoriteDestinations);
   static_assert(navigation_content_mode::forNavigationState(true) ==
                 navigation_content_mode::Mode::ActiveGuidance);
+  static_assert(!navigation_content_mode::showsMapGuidanceOverlay(false));
+  static_assert(navigation_content_mode::showsMapGuidanceOverlay(true));
+  static_assert(navigation_content_mode::hidesMapGuidanceOverlay(false));
+  static_assert(!navigation_content_mode::hidesMapGuidanceOverlay(true));
+  static_assert(navigation_content_mode::usesMapGuidanceBirdsEye(true, true));
+  static_assert(!navigation_content_mode::usesMapGuidanceBirdsEye(true, false));
+  static_assert(!navigation_content_mode::usesMapGuidanceBirdsEye(false, true));
+  static_assert(!navigation_content_mode::usesMapGuidanceBirdsEye(false, false));
+  static_assert(navigation_content_mode::extrudesMapGuidanceBuildings(
+      true, true, true, true));
+  static_assert(!navigation_content_mode::extrudesMapGuidanceBuildings(
+      false, true, true, true));
+  static_assert(!navigation_content_mode::extrudesMapGuidanceBuildings(
+      true, false, true, true));
+  static_assert(!navigation_content_mode::extrudesMapGuidanceBuildings(
+      true, true, false, true));
+  static_assert(!navigation_content_mode::extrudesMapGuidanceBuildings(
+      true, true, true, false));
 
   map_tile_transition::State mapTransition;
   assert(!mapTransition.canReveal(false, false));

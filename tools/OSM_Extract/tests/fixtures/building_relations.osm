@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="open-bike-computer-tests">
+  <node id="1" lat="1.3000" lon="103.8000" version="1" />
+  <node id="2" lat="1.3000" lon="103.8010" version="1" />
+  <node id="3" lat="1.3010" lon="103.8010" version="1" />
+  <node id="4" lat="1.3010" lon="103.8000" version="1" />
+
+  <way id="10" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building" v="yes" />
+  </way>
+  <way id="11" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building" v="yes" />
+  </way>
+  <way id="20" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building:part" v="yes" />
+  </way>
+
+  <relation id="100" version="1">
+    <member type="way" ref="11" role="outline" />
+    <member type="way" ref="20" role="part" />
+    <tag k="type" v="building" />
+  </relation>
+  <relation id="101" version="1">
+    <member type="way" ref="10" role="outline" />
+    <member type="way" ref="20" role="part" />
+    <tag k="type" v="building" />
+  </relation>
+  <relation id="102" version="1">
+    <member type="way" ref="10" role="outer" />
+    <tag k="type" v="multipolygon" />
+  </relation>
+  <relation id="103" version="1">
+    <member type="way" ref="10" role="outline" />
+    <tag k="type" v="building" />
+  </relation>
+</osm>

@@ -165,8 +165,13 @@ OSM 3D-building target-3 generation has a separate fail-closed gate:
 target-2 label/FMA1 contract, emits FMB v4 building sections and a signed
 artifact-derived height-provenance summary, and uses an expanded source cut-out
 while keeping final blocks limited to the requested aligned extent. Enable this
-gate only for target-3 hardware validation and approved production identities;
-changing it does not affect renderer-format-1/2 requests or existing artifacts.
+gate only for target-3 hardware validation and approved production identities.
+Set `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` to a comma-separated list of exact
+registered installation IDs during the limited rollout; an empty allowlist makes
+the enabled gate global. Rejected clients receive a typed list of compatible
+renderer targets so they can retry without mislabeling the resulting artifact.
+Changing either setting does not affect renderer-format-1/2 requests or existing
+artifacts.
 
 Signed artifact generation and client delivery are separate controls. The API
 defaults `MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE` to `disabled`. Use `allowlist`
