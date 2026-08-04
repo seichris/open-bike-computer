@@ -90,7 +90,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         self.assertIn(
             "map_building_renderer::selectNearestForExtrusion(\n"
-            "                buildingQueue.rbegin(), buildingQueue.rend())",
+            "                    buildingQueue.rbegin(), buildingQueue.rend(),\n"
+            "                    shouldStopBuildingWork)",
             render_body,
         )
         self.assertIn("item.extrude", render_body)
@@ -105,6 +106,19 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("retainNearestCandidate", render_body)
         self.assertIn("selectNearestForRendering", render_body)
         self.assertIn("kMaximumBuildingRenderTimeMs", render_body)
+        self.assertLess(
+            render_body.index("const uint32_t buildingPassStartMs"),
+            render_body.index("for (MapBlock *block : memCache.blocks)"),
+        )
+        self.assertIn("projectedFootprintAreaPixels", render_body)
+        self.assertIn("shouldStopBuildingWork", render_body)
+        self.assertIn("eligibleExtrusionZoom(zoom)", render_body)
+        self.assertIn("deadlineExceeded=%u", render_body)
+        self.assertIn("prepassDeadlineExceeded=%u", render_body)
+        self.assertIn("wallCandidates=%llu", render_body)
+        self.assertIn("generatedWallFaces=%llu", render_body)
+        self.assertIn("suppressedWallFaces=%llu", render_body)
+        self.assertIn("psramLargest=%u", render_body)
         self.assertIn("if (!item.render)", render_body)
 
     def test_navigation_screen_retains_destination_picker(self):

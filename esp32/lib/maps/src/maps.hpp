@@ -182,7 +182,9 @@ private:
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
   bool buildPolygonGrid(
       MapBlock *mblock); // Build spatial grid for polygon culling
-  bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
+  bool fillPolygon(const Polygon &p, lv_obj_t *canvas,
+                   uint32_t deadlineStartMs = 0,
+                   uint32_t deadlineDurationMs = 0);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
   bool getMapBlocks(BBox &bbox, MemCache &memCache);

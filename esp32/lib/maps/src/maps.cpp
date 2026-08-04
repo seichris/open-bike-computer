@@ -1587,8 +1587,9 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
  * @param points
  * @param color
  */
-bool Maps::fillPolygon(const Polygon &p,
-                       lv_obj_t *canvas) // scanline fill algorithm
+bool Maps::fillPolygon(const Polygon &p, lv_obj_t *canvas,
+                       uint32_t deadlineStartMs,
+                       uint32_t deadlineDurationMs) // scanline fill algorithm
 {
   int16_t maxY = p.bbox.max.y;
   int16_t minY = p.bbox.min.y;
@@ -1622,9 +1623,12 @@ bool Maps::fillPolygon(const Polygon &p,
     return true;
 
   for (pixelY = minY; pixelY <= maxY; pixelY++) { //  Build a list of nodes.
-    if ((pixelY & 0x0F) == 0 &&
-        shouldInterruptMapRenderForScreenCycle()) {
-      return false;
+    if ((pixelY & 0x0F) == 0) {
+      if (shouldInterruptMapRenderForScreenCycle())
+        return false;
+      if (deadlineDurationMs != 0 &&
+          millis() - deadlineStartMs >= deadlineDurationMs)
+        return false;
     }
     nodes = 0;
     for (int i = 0; i < (int)p.points.size() - 1; i++) {
@@ -2593,23 +2597,57 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     size_t oversizedBuildingCount = 0;
     size_t renderRecordLimitOverflow = 0;
     size_t renderTimeOverflow = 0;
+    uint64_t visibleWallCandidateCount = 0;
+    uint32_t buildingProjectionMs = 0;
+    uint32_t buildingSortMs = 0;
     bool buildingBudgetFallback = false;
+    bool buildingDeadlineExceeded = false;
+    bool buildingPrepassDeadlineExceeded = false;
+    bool buildingScreenInterrupted = false;
     map_building_renderer::RenderSelection renderSelection;
     map_building_renderer::ExtrusionSelection buildingSelection;
+    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityGround;
+    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityClipped;
     static uint64_t renderRecordOverflowTotal = 0;
     static uint64_t renderPointOverflowTotal = 0;
     static uint64_t renderOversizedOverflowTotal = 0;
     static uint64_t renderTimeOverflowTotal = 0;
     static uint64_t extrusionRecordOverflowTotal = 0;
     static uint64_t extrusionPointOverflowTotal = 0;
+    const uint32_t buildingPassStartMs = millis();
+    const auto buildingDeadlineReached = [&]() {
+      return millis() - buildingPassStartMs >=
+             map_building_renderer::kMaximumBuildingRenderTimeMs;
+    };
+    const auto shouldStopBuildingWork = [&]() {
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        buildingScreenInterrupted = true;
+        return true;
+      }
+      if (buildingDeadlineReached()) {
+        buildingDeadlineExceeded = true;
+        return true;
+      }
+      return false;
+    };
     if (buildingsVisible) {
+      const uint32_t buildingProjectionStartMs = millis();
+      bool stopBuildingPrepass = false;
       for (MapBlock *block : memCache.blocks) {
+        if (shouldStopBuildingWork()) {
+          stopBuildingPrepass = true;
+          break;
+        }
         if (!block->inView || block->formatVersion < 4)
           continue;
         const BBox screenBbox = viewPort.bbox - block->offset;
         for (size_t recordIndex = 0;
              recordIndex < block->buildingData.buildings.size();
              ++recordIndex) {
+          if ((recordIndex & 0x1FU) == 0 && shouldStopBuildingWork()) {
+            stopBuildingPrepass = true;
+            break;
+          }
           const auto &building = block->buildingData.buildings[recordIndex];
           const bool mayExtrude =
               extrudeBuildings &&
@@ -2629,8 +2667,27 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           if (!buildingBbox.intersects(screenBbox))
             continue;
           size_t pointCount = 0;
-          for (const auto &ring : building.rings)
-            pointCount += ring.points.size();
+          bool stopBuildingRecord = false;
+          for (const auto &ring : building.rings) {
+            for (size_t pointIndex = 0; pointIndex < ring.points.size();
+                 ++pointIndex) {
+              if ((pointIndex & 0x1FU) == 0 && shouldStopBuildingWork()) {
+                stopBuildingRecord = true;
+                break;
+              }
+              ++pointCount;
+              if (mayExtrude && pointIndex < ring.walls.size() &&
+                  ring.walls[pointIndex] != 0) {
+                ++visibleWallCandidateCount;
+              }
+            }
+            if (stopBuildingRecord)
+              break;
+          }
+          if (stopBuildingRecord) {
+            stopBuildingPrepass = true;
+            break;
+          }
           ++visibleBuildingCount;
           buildingPointCount += pointCount;
           if (pointCount > map_building_renderer::
@@ -2645,15 +2702,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               static_cast<double>(block->offset.y) +
                   (static_cast<double>(building.minY) + building.maxY) / 2.0};
           const auto centerGround = projection.groundForWorld(center);
-          const auto projectedCenter = projection.projectGround(centerGround);
-          const double projectedScale =
-              map_transform::worldToScreenScale(zoom) *
-              (projectedCenter.valid ? projectedCenter.depthScale : 0.0);
           const double projectedArea =
-              std::fabs(static_cast<double>(building.maxX - building.minX) *
-                        projectedScale) *
-              std::fabs(static_cast<double>(building.maxY - building.minY) *
-                        projectedScale);
+              map_building_renderer::projectedFootprintAreaPixels(
+                  building, block->offset.x, block->offset.y, projection,
+                  buildingEligibilityGround, buildingEligibilityClipped,
+                  shouldStopBuildingWork);
+          if (buildingScreenInterrupted || buildingDeadlineExceeded) {
+            stopBuildingPrepass = true;
+            break;
+          }
           BuildingRenderItem candidate{
               block,
               &building,
@@ -2663,7 +2720,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               false,
               false,
               extrudeBuildings &&
-                  zoom <= map_building_renderer::kMaximumBuildingExtrusionZoom &&
+                  map_building_renderer::eligibleExtrusionZoom(zoom) &&
                   projectedArea >= map_building_renderer::
                                        kMinimumBuildingExtrusionAreaPixels};
           map_building_renderer::retainNearestCandidate(
@@ -2671,25 +2728,44 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               map_building_renderer::kMaximumRenderedBuildingRecords,
               buildingRendersBefore);
         }
+        if (stopBuildingPrepass)
+          break;
       }
+      buildingProjectionMs = millis() - buildingProjectionStartMs;
       renderRecordLimitOverflow =
           boundedBuildingCandidateCount - buildingQueue.size();
-      std::sort(buildingQueue.begin(), buildingQueue.end(),
-                buildingRendersBefore);
-      renderSelection = map_building_renderer::selectNearestForRendering(
-          buildingQueue.rbegin(), buildingQueue.rend());
-      if (extrudeBuildings) {
-        // The painter queue is far-to-near. Reserve in reverse so the geometry
-        // nearest the rider keeps its walls when a dense city exceeds the
-        // bounded extrusion workspace; overflow roofs remain visible and flat.
-        buildingSelection =
-            map_building_renderer::selectNearestForExtrusion(
-                buildingQueue.rbegin(), buildingQueue.rend());
-        buildingBudgetFallback = buildingSelection.usedFallback();
-        extrusionRecordOverflowTotal +=
-            buildingSelection.recordLimitOverflow;
-        extrusionPointOverflowTotal +=
-            buildingSelection.pointLimitOverflow;
+      if (!stopBuildingPrepass) {
+        const uint32_t buildingSortStartMs = millis();
+        std::sort(buildingQueue.begin(), buildingQueue.end(),
+                  buildingRendersBefore);
+        buildingSortMs = millis() - buildingSortStartMs;
+        if (!shouldStopBuildingWork()) {
+          renderSelection = map_building_renderer::selectNearestForRendering(
+              buildingQueue.rbegin(), buildingQueue.rend(),
+              shouldStopBuildingWork);
+          if (!buildingDeadlineExceeded && !buildingScreenInterrupted &&
+              extrudeBuildings) {
+            // The painter queue is far-to-near. Reserve in reverse so the
+            // geometry nearest the rider keeps its walls when a dense city
+            // exceeds the bounded extrusion workspace; overflow roofs remain
+            // visible and flat.
+            buildingSelection =
+                map_building_renderer::selectNearestForExtrusion(
+                    buildingQueue.rbegin(), buildingQueue.rend(),
+                    shouldStopBuildingWork);
+            buildingBudgetFallback = buildingSelection.usedFallback();
+            extrusionRecordOverflowTotal +=
+                buildingSelection.recordLimitOverflow;
+            extrusionPointOverflowTotal +=
+                buildingSelection.pointLimitOverflow;
+          }
+        }
+      }
+      if (buildingScreenInterrupted)
+        return false;
+      if (buildingDeadlineExceeded) {
+        buildingPrepassDeadlineExceeded = true;
+        renderTimeOverflow = std::max<size_t>(1, buildingQueue.size());
       }
       renderRecordOverflowTotal += renderRecordLimitOverflow;
       renderPointOverflowTotal += renderSelection.pointLimitOverflow;
@@ -2718,28 +2794,39 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       buildingPolygon.points.push_back(points.front());
       buildingPolygon.bbox.min = Point16(minX, minY);
       buildingPolygon.bbox.max = Point16(maxX, maxY);
-      return Maps::fillPolygon(buildingPolygon, canvas);
+      const bool completed = Maps::fillPolygon(
+          buildingPolygon, canvas, buildingPassStartMs,
+          map_building_renderer::kMaximumBuildingRenderTimeMs);
+      if (!completed)
+        shouldStopBuildingWork();
+      return completed;
     };
     std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
     std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    map_building_renderer::SurfaceStats buildingSurfaceStats;
     uint32_t renderedBuildings = 0;
     uint32_t extrudedBuildings = 0;
-    const uint32_t buildingRenderStartMs = millis();
-    for (size_t itemIndex = 0; itemIndex < buildingQueue.size(); ++itemIndex) {
+    const uint32_t buildingDrawStartMs = millis();
+    const auto countRenderTimeOverflowFrom = [&](size_t itemIndex) {
+      size_t overflow = 0;
+      for (size_t remaining = itemIndex; remaining < buildingQueue.size();
+           ++remaining) {
+        if (buildingQueue[remaining].render)
+          ++overflow;
+      }
+      return overflow;
+    };
+    for (size_t itemIndex = 0;
+         !buildingDeadlineExceeded && itemIndex < buildingQueue.size();
+         ++itemIndex) {
       const auto &item = buildingQueue[itemIndex];
       if (!item.render)
         continue;
-      if (shouldInterruptMapRenderForScreenCycle())
-        return false;
-      if (millis() - buildingRenderStartMs >=
-          map_building_renderer::kMaximumBuildingRenderTimeMs) {
-        for (size_t remaining = itemIndex; remaining < buildingQueue.size();
-             ++remaining) {
-          if (buildingQueue[remaining].render)
-            ++renderTimeOverflow;
-        }
-        renderTimeOverflowTotal += renderTimeOverflow;
+      if (shouldStopBuildingWork()) {
+        if (buildingScreenInterrupted)
+          return false;
+        renderTimeOverflow += countRenderTimeOverflowFrom(itemIndex);
         break;
       }
       bool courtyardUnderlayReady = false;
@@ -2750,8 +2837,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           [&](map_building_renderer::Surface surface,
               const auto &points) -> bool {
             buildingSurfacePoints.clear();
-            for (const auto &point : points)
+            for (size_t pointIndex = 0; pointIndex < points.size();
+                 ++pointIndex) {
+              if ((pointIndex & 0x1FU) == 0 && shouldStopBuildingWork())
+                return false;
+              const auto &point = points[pointIndex];
               buildingSurfacePoints.push_back(Point16(point.x, point.y));
+            }
 
             if (surface ==
                 map_building_renderer::Surface::CourtyardCapture) {
@@ -2786,6 +2878,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               }
               std::memcpy(courtyardUnderlay.data(), drawBuffer->data,
                           pixelCount * sizeof(uint16_t));
+              if (shouldStopBuildingWork())
+                return false;
               courtyardUnderlayReady = true;
               return true;
             }
@@ -2811,7 +2905,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                   drawBuffer->header.stride / 2U,
                   courtyardUnderlay.data(), courtyardUnderlay.size(),
                   courtyardScanlineNodes,
-                  []() { return shouldInterruptMapRenderForScreenCycle(); });
+                  shouldStopBuildingWork);
             }
 
             uint16_t color = roofColor;
@@ -2832,13 +2926,31 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               break;
             }
             return fillScreenPolygon(buildingSurfacePoints, color);
-          });
-      if (!surfacesRendered)
+          },
+          &buildingSurfaceStats, shouldStopBuildingWork);
+      if (!surfacesRendered) {
+        shouldStopBuildingWork();
+        if (buildingScreenInterrupted)
+          return false;
+        if (buildingDeadlineExceeded) {
+          renderTimeOverflow += countRenderTimeOverflowFrom(itemIndex);
+          break;
+        }
         return false;
+      }
       ++renderedBuildings;
       if (item.extrude)
         ++extrudedBuildings;
     }
+    if (renderTimeOverflow != 0)
+      renderTimeOverflowTotal += renderTimeOverflow;
+    const uint32_t buildingDrawMs = millis() - buildingDrawStartMs;
+    const uint64_t generatedWallFaces =
+        buildingSurfaceStats.generatedWallFaces;
+    const uint64_t suppressedWallFaces =
+        visibleWallCandidateCount > generatedWallFaces
+            ? visibleWallCandidateCount - generatedWallFaces
+            : 0;
 
     // Building roofs and walls are composed across all loaded blocks. Redraw
     // roads once above them so navigation-relevant geometry remains legible.
@@ -2891,6 +3003,11 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "renderRecordOverflow=%u renderPointOverflow=%u "
               "renderOversizedOverflow=%u renderTimeOverflow=%u "
               "extrusionRecordOverflow=%u extrusionPointOverflow=%u "
+              "wallCandidates=%llu generatedWallFaces=%llu "
+              "suppressedWallFaces=%llu "
+              "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+              "deadlineExceeded=%u prepassDeadlineExceeded=%u "
+              "psramUsed=%u psramFree=%u psramLargest=%u "
               "budgetFallback=%u renderRecordOverflowTotal=%llu "
               "renderPointOverflowTotal=%llu "
               "renderOversizedOverflowTotal=%llu renderTimeOverflowTotal=%llu "
@@ -2908,6 +3025,18 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned)renderTimeOverflow,
               (unsigned)buildingSelection.recordLimitOverflow,
               (unsigned)buildingSelection.pointLimitOverflow,
+              (unsigned long long)visibleWallCandidateCount,
+              (unsigned long long)generatedWallFaces,
+              (unsigned long long)suppressedWallFaces,
+              (unsigned long)buildingProjectionMs,
+              (unsigned long)buildingSortMs,
+              (unsigned long)buildingDrawMs,
+              buildingDeadlineExceeded ? 1U : 0U,
+              buildingPrepassDeadlineExceeded ? 1U : 0U,
+              (unsigned)(ESP.getPsramSize() -
+                         heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
               buildingBudgetFallback ? 1U : 0U,
               (unsigned long long)renderRecordOverflowTotal,
               (unsigned long long)renderPointOverflowTotal,

@@ -142,6 +142,10 @@ void assertOrderingAndBudget() {
   assert(budget.reserve(
              0, map_building_renderer::kMaximumExtrudedBuildingPoints) ==
          Admission::PointLimit);
+  assert(!map_building_renderer::eligibleExtrusionZoom(0));
+  assert(map_building_renderer::eligibleExtrusionZoom(1));
+  assert(map_building_renderer::eligibleExtrusionZoom(4));
+  assert(!map_building_renderer::eligibleExtrusionZoom(5));
 
   map_building_renderer::ExtrusionBudget recordBudget;
   for (size_t index = 0;
@@ -294,6 +298,13 @@ void assertNearPlaneMatrix() {
               perspective);
           const auto building =
               buildingCrossingNearPlane(projection, 100000, 200000);
+          std::vector<map_projection::GroundPoint> ground;
+          std::vector<map_projection::GroundPoint> clipped;
+          const double projectedArea =
+              map_building_renderer::projectedFootprintAreaPixels(
+                  building, 100000, 200000, projection, ground, clipped);
+          assert(projectedArea >= map_building_renderer::
+                                      kMinimumBuildingExtrusionAreaPixels);
           std::vector<Command> commands;
           const bool completed = map_building_renderer::renderSurfaces(
               building, 100000, 200000, 1.0, projection, true,
@@ -360,6 +371,14 @@ void assertInterruptionPropagates() {
       });
   assert(!completed);
   assert(emitted == 1);
+
+  size_t deadlineChecks = 0;
+  const bool deadlineCompleted = map_building_renderer::renderSurfaces(
+      building, 100000, 200000, 1.0, projection, true,
+      [](Surface, const auto &) { return true; }, nullptr,
+      [&]() { return ++deadlineChecks >= 2; });
+  assert(!deadlineCompleted);
+  assert(deadlineChecks >= 2);
 }
 
 } // namespace

@@ -1194,7 +1194,13 @@ class MapJobService:
                     client_request_id,
                 )
                 if existing is not None:
-                    if existing.request != job.request:
+                    if (
+                        existing.request != job.request
+                        and not _is_compatible_renderer_fallback_replay(
+                            job.request,
+                            existing.request,
+                        )
+                    ):
                         raise ValueError(
                             "clientRequestId was already used for a different map request"
                         )
@@ -1233,19 +1239,23 @@ class MapJobService:
             raise ValueError(
                 "clientInstallationId and clientRequestId must be provided together"
             )
+        existing = None
         if client_installation_id and client_request_id:
             existing = self.find_by_client_request(
                 client_installation_id,
                 client_request_id,
             )
-            if existing is not None:
-                if existing.request != request:
-                    raise ValueError(
-                        "clientRequestId was already used for a different map request"
-                    )
-                # Generation gates govern new work. An exact idempotent replay
-                # must keep returning the job created under the earlier gate
-                # state, including after an allowlist rollback.
+            if existing is not None and (
+                existing.request == request
+                or _is_compatible_renderer_fallback_replay(
+                    request,
+                    existing.request,
+                )
+            ):
+                # Generation gates govern new work. Exact replays keep
+                # returning jobs created under earlier gate states. A target-3
+                # retry also recovers a stored target-2/1 compatibility fallback
+                # after its response was lost, even if target 3 is now enabled.
                 return client_installation_id, client_request_id, existing
 
         requested_format = renderer_format_version(request)
@@ -1273,6 +1283,10 @@ class MapJobService:
             )
         if not client_installation_id or not client_request_id:
             return client_installation_id, client_request_id, None
+        if existing is not None:
+            raise ValueError(
+                "clientRequestId was already used for a different map request"
+            )
         return client_installation_id, client_request_id, None
 
     def get_job(self, job_id: str) -> MapJob:
@@ -1540,6 +1554,35 @@ def _validate_identifier(value: str, key: str) -> str:
     if not _CLIENT_IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"{key} must contain 8-128 letters, numbers, hyphens, or underscores")
     return value
+
+
+def _is_compatible_renderer_fallback_replay(
+    requested: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    """Recognize the exact target-3 to target-2/1 rollout fallback pair."""
+    requested_target = requested.get("target")
+    existing_target = existing.get("target")
+    if not isinstance(requested_target, dict) or not isinstance(
+        existing_target, dict
+    ):
+        return False
+    if (
+        requested_target.get("renderer") != "esp32-fmb"
+        or requested_target.get("rendererFormatVersion") != 3
+        or existing_target.get("renderer") != "esp32-fmb"
+        or existing_target.get("rendererFormatVersion") not in {1, 2}
+    ):
+        return False
+
+    expected = dict(requested)
+    expected_target = dict(requested_target)
+    fallback_format = existing_target["rendererFormatVersion"]
+    expected_target["rendererFormatVersion"] = fallback_format
+    expected["target"] = expected_target
+    if fallback_format == 1:
+        expected.pop("labels", None)
+    return expected == existing
 
 
 def _normalize_user_label(value: Any) -> str:

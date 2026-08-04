@@ -26,6 +26,15 @@ constexpr uint8_t kMaximumBuildingExtrusionZoom = 4;
 constexpr double kMinimumBuildingExtrusionAreaPixels = 6.0;
 constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
 
+struct NeverStop {
+  constexpr bool operator()() const { return false; }
+};
+
+constexpr bool eligibleExtrusionZoom(uint8_t zoom) {
+  return zoom >= map_transform::kMinimumRuntimeZoom &&
+         zoom <= kMaximumBuildingExtrusionZoom;
+}
+
 struct OrderKey {
   double depth = 0.0;
   int32_t blockX = 0;
@@ -94,12 +103,15 @@ struct ExtrusionSelection {
 // The candidate contract is intentionally tiny so this exact production
 // admission path stays host-testable: render, pointCount, extrude,
 // buildingFlags(), and eligibleForExtrusion().
-template <typename ReverseIterator>
+template <typename ReverseIterator, typename ShouldStop = NeverStop>
 ExtrusionSelection selectNearestForExtrusion(ReverseIterator nearest,
-                                             ReverseIterator farthest) {
+                                             ReverseIterator farthest,
+                                             ShouldStop shouldStop = {}) {
   ExtrusionBudget budget;
   ExtrusionSelection selection;
   for (auto item = nearest; item != farthest; ++item) {
+    if (shouldStop())
+      break;
     item->extrude = false;
     if (!item->render || !item->eligibleForExtrusion())
       continue;
@@ -159,11 +171,14 @@ bool retainNearestCandidate(
 // The record queue is already bounded and sorted far-to-near. Select its
 // nearest records within the total source-point budget, then let the caller
 // draw marked candidates in the unchanged far-to-near order.
-template <typename ReverseIterator>
+template <typename ReverseIterator, typename ShouldStop = NeverStop>
 RenderSelection selectNearestForRendering(ReverseIterator nearest,
-                                          ReverseIterator farthest) {
+                                          ReverseIterator farthest,
+                                          ShouldStop shouldStop = {}) {
   RenderSelection selection;
   for (auto item = nearest; item != farthest; ++item) {
+    if (shouldStop())
+      break;
     item->render = false;
     if (item->pointCount >
         kMaximumRenderedBuildingPoints - selection.selectedPoints) {
@@ -197,6 +212,67 @@ struct ScreenPoint {
   int32_t y = 0;
 };
 
+template <typename GroundPoints, typename ClippedPoints,
+          typename ShouldStop = NeverStop>
+double projectedFootprintAreaPixels(
+    const map_building_block::Building &building, int32_t blockOffsetX,
+    int32_t blockOffsetY, const map_projection::Projection &projection,
+    GroundPoints &ground, ClippedPoints &clipped,
+    ShouldStop shouldStop = {}) {
+  double area = 0.0;
+  for (const auto &ring : building.rings) {
+    if (shouldStop())
+      return 0.0;
+    ground.clear();
+    ground.reserve(ring.points.size());
+    for (size_t index = 0; index < ring.points.size(); ++index) {
+      if ((index & 0x1FU) == 0 && shouldStop())
+        return 0.0;
+      const auto &point = ring.points[index];
+      ground.push_back(projection.groundForWorld(
+          {static_cast<double>(blockOffsetX + point.x),
+           static_cast<double>(blockOffsetY + point.y)}));
+    }
+    const auto *footprint = &ground;
+    if (projection.isBirdsEye()) {
+      map_projection::clipPolygonToNearPlane(projection, ground, clipped);
+      footprint = &clipped;
+    }
+    if (footprint->size() < 3)
+      continue;
+
+    auto previous = projection.projectGround(footprint->back());
+    if (!previous.valid)
+      continue;
+    double twiceSignedArea = 0.0;
+    bool valid = true;
+    for (size_t index = 0; index < footprint->size(); ++index) {
+      if ((index & 0x1FU) == 0 && shouldStop())
+        return 0.0;
+      const auto &point = (*footprint)[index];
+      const auto projected = projection.projectGround(point);
+      if (!projected.valid) {
+        valid = false;
+        break;
+      }
+      twiceSignedArea +=
+          previous.x * projected.y - projected.x * previous.y;
+      previous = projected;
+    }
+    if (!valid)
+      continue;
+    const double ringArea = std::fabs(twiceSignedArea) * 0.5;
+    area += ring.hole ? -ringArea : ringArea;
+  }
+  return std::max(0.0, area);
+}
+
+struct SurfaceStats {
+  size_t wallCandidates = 0;
+  size_t generatedWallFaces = 0;
+  size_t suppressedWallFaces = 0;
+};
+
 // Restore the pixels under a projected courtyard after the outer roof has
 // been filled. The snapshot is captured after wall drawing but before roofs,
 // so land use, roads, farther buildings, and courtyard walls remain visible
@@ -219,8 +295,8 @@ bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
   int32_t minY = points.front().y;
   int32_t maxY = points.front().y;
   for (const auto &point : points) {
-    minY = std::min(minY, point.y);
-    maxY = std::max(maxY, point.y);
+    minY = std::min<int32_t>(minY, point.y);
+    maxY = std::max<int32_t>(maxY, point.y);
   }
   minY = std::max<int32_t>(0, minY);
   maxY = std::min<int32_t>(height - 1, maxY);
@@ -258,12 +334,14 @@ bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
 
 // Emits walls first, then roof/courtyard rings. The callback returns false to
 // interrupt rendering, matching the firmware polygon-fill contract.
-template <typename DrawSurface>
+template <typename DrawSurface, typename ShouldStop = NeverStop>
 bool renderSurfaces(const map_building_block::Building &building,
                     int32_t blockOffsetX, int32_t blockOffsetY,
                     double blockMercatorScale,
                     const map_projection::Projection &projection,
-                    bool extrusionRequested, DrawSurface &&drawSurface) {
+                    bool extrusionRequested, DrawSurface &&drawSurface,
+                    SurfaceStats *stats = nullptr,
+                    ShouldStop shouldStop = {}) {
   const bool extrude = usesExtrusion(extrusionRequested, building.flags);
   const double minimumHeight =
       extrude ? building.minimumHeightDm / 10.0 : 0.0;
@@ -273,8 +351,15 @@ bool renderSurfaces(const map_building_block::Building &building,
   if (extrude) {
     for (const auto &ring : building.rings) {
       for (size_t index = 0; index < ring.points.size(); ++index) {
-        if (index >= ring.walls.size() || ring.walls[index] == 0)
+        if ((index & 0x1FU) == 0 && shouldStop())
+          return false;
+        if (stats != nullptr)
+          ++stats->wallCandidates;
+        if (index >= ring.walls.size() || ring.walls[index] == 0) {
+          if (stats != nullptr)
+            ++stats->suppressedWallFaces;
           continue;
+        }
         const auto &start = ring.points[index];
         const auto &end = ring.points[(index + 1U) % ring.points.size()];
         auto startGround = projection.groundForWorld(
@@ -283,8 +368,11 @@ bool renderSurfaces(const map_building_block::Building &building,
         auto endGround = projection.groundForWorld(
             {static_cast<double>(blockOffsetX + end.x),
              static_cast<double>(blockOffsetY + end.y)});
-        if (!projection.clipSegmentToNearPlane(startGround, endGround))
+        if (!projection.clipSegmentToNearPlane(startGround, endGround)) {
+          if (stats != nullptr)
+            ++stats->suppressedWallFaces;
           continue;
+        }
         const auto startBase = projection.projectElevatedGround(
             startGround, minimumHeight, blockMercatorScale);
         const auto endBase = projection.projectElevatedGround(
@@ -294,8 +382,11 @@ bool renderSurfaces(const map_building_block::Building &building,
         const auto startTop = projection.projectElevatedGround(
             startGround, height, blockMercatorScale);
         if (!startBase.valid || !endBase.valid || !endTop.valid ||
-            !startTop.valid)
+            !startTop.valid) {
+          if (stats != nullptr)
+            ++stats->suppressedWallFaces;
           continue;
+        }
         screenRing = {
             {map_transform::quantizePixel(startBase.x),
              map_transform::quantizePixel(startBase.y)},
@@ -311,6 +402,8 @@ bool renderSurfaces(const map_building_block::Building &building,
                                    endBase.y - startBase.y),
                 screenRing))
           return false;
+        if (stats != nullptr)
+          ++stats->generatedWallFaces;
       }
     }
   }
@@ -320,10 +413,14 @@ bool renderSurfaces(const map_building_block::Building &building,
     MapBuildingVector<map_projection::GroundPoint> clipped;
     ground.clear();
     ground.reserve(ring.points.size());
-    for (const auto &point : ring.points)
+    for (size_t index = 0; index < ring.points.size(); ++index) {
+      if ((index & 0x1FU) == 0 && shouldStop())
+        return false;
+      const auto &point = ring.points[index];
       ground.push_back(projection.groundForWorld(
           {static_cast<double>(blockOffsetX + point.x),
            static_cast<double>(blockOffsetY + point.y)}));
+    }
     const auto *roof = &ground;
     if (projection.isBirdsEye()) {
       map_projection::clipPolygonToNearPlane(projection, ground, clipped);
@@ -342,10 +439,14 @@ bool renderSurfaces(const map_building_block::Building &building,
   // Let the compositor preserve real underlay pixels before the outer roof is
   // drawn. Hole rings are projected again for restoration after the roof.
   for (const auto &ring : building.rings) {
+    if (shouldStop())
+      return false;
     if (ring.hole && !emitRoofRing(ring, Surface::CourtyardCapture))
       return false;
   }
   for (const auto &ring : building.rings) {
+    if (shouldStop())
+      return false;
     if (!emitRoofRing(ring,
                       ring.hole ? Surface::Courtyard : Surface::Roof))
       return false;

@@ -184,7 +184,44 @@ class MapBuildingContractTests(unittest.TestCase):
 
             changed = {**request, "bbox": [103.76, 1.25, 103.94, 1.38]}
             with self.assertRaisesRegex(ValueError, "different map request"):
-                rolled_back.create_job(changed)
+                enabled.create_job(changed)
+
+    def test_target_three_retry_remains_eligible_for_target_two_fallback(self):
+        installation_id = "inst_v2_" + "d" * 32
+        target_three = {
+            **self._request(),
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-target3-fallback",
+        }
+        target_two = json.loads(json.dumps(target_three))
+        target_two["target"]["rendererFormatVersion"] = 2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            rolled_back = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=False,
+            )
+            with self.assertRaisesRegex(ValueError, "format 3 generation"):
+                rolled_back.create_job(target_three)
+
+            fallback = rolled_back.create_job(target_two)
+            recovered_while_rolled_back = rolled_back.create_job(target_three)
+            self.assertEqual(recovered_while_rolled_back.job_id, fallback.job_id)
+            replayed = rolled_back.create_job(dict(target_two))
+            self.assertEqual(replayed.job_id, fallback.job_id)
+
+            enabled = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+                building_target3_allowlist=frozenset({installation_id}),
+            )
+            recovered_after_promotion = enabled.create_job(dict(target_three))
+            self.assertEqual(recovered_after_promotion.job_id, fallback.job_id)
 
     def test_calibration_window_comes_from_checked_in_height_rules(self):
         repo_root = Path(__file__).resolve().parents[3]
