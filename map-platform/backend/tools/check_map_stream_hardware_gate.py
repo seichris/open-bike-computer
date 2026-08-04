@@ -175,6 +175,10 @@ def validate_report_bytes(
             "hardware report uses signing material absent from production trust"
         )
 
+    matrix_mode = requirements.get("matrixMode", "required")
+    if matrix_mode not in {"required", "optional"}:
+        raise ValueError("hardware matrix mode must be required or optional")
+    matrix_required = matrix_mode == "required"
     runs = report["runs"]
     if not isinstance(runs, list):
         raise ValueError("hardware report runs must be an array")
@@ -445,28 +449,29 @@ def validate_report_bytes(
                 + requirements["maximumShanghaiTemperatureRegressionC"]
             ):
                 raise ValueError(f"hardware run {index} misses the thermal comparison gate")
-    for target in requirements["targets"]:
-        for scenario, repetitions in requirements["scenarios"].items():
-            expected_identities = {
-                (target, scenario, repetition)
-                for repetition in range(1, repetitions + 1)
-            }
-            actual_identities = {
-                identity
-                for identity in identities
-                if identity[0] == target and identity[1] == scenario
-            }
-            if actual_identities != expected_identities:
+    if matrix_required:
+        for target in requirements["targets"]:
+            for scenario, repetitions in requirements["scenarios"].items():
+                expected_identities = {
+                    (target, scenario, repetition)
+                    for repetition in range(1, repetitions + 1)
+                }
+                actual_identities = {
+                    identity
+                    for identity in identities
+                    if identity[0] == target and identity[1] == scenario
+                }
+                if actual_identities != expected_identities:
+                    raise ValueError(
+                        f"hardware report does not exactly cover {target} {scenario} repetitions"
+                    )
+        required_targets = set(requirements["targets"])
+        for signing_key in signing_keys:
+            key = (signing_key["keyId"], signing_key["publicKeySha256"])
+            if signing_key_targets.get(key, set()) != required_targets:
                 raise ValueError(
-                    f"hardware report does not exactly cover {target} {scenario} repetitions"
+                    f"hardware report did not exercise signing key {signing_key['keyId']} on both targets"
                 )
-    required_targets = set(requirements["targets"])
-    for signing_key in signing_keys:
-        key = (signing_key["keyId"], signing_key["publicKeySha256"])
-        if signing_key_targets.get(key, set()) != required_targets:
-            raise ValueError(
-                f"hardware report did not exercise signing key {signing_key['keyId']} on both targets"
-            )
 
     approval = report["approval"]
     if not isinstance(approval, dict) or set(approval) != {

@@ -17,6 +17,7 @@ GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 IOS_BUILD_PATTERN = re.compile(r"[0-9]{1,18}(?:\.[0-9]{1,18}){0,2}")
 UINT32_MAX = (1 << 32) - 1
 MAXIMUM_SCENARIO_REPETITIONS = 10
+MATRIX_MODES = frozenset({"required", "optional"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,9 @@ def parse_hardware_requirements(data: bytes) -> HardwareRequirementsDocument:
         data,
         description="map stream hardware requirements",
     )
+    schema_version = (
+        document.get("schemaVersion") if isinstance(document, dict) else None
+    )
     expected_fields = {
         "schemaVersion",
         "targets",
@@ -58,13 +62,17 @@ def parse_hardware_requirements(data: bytes) -> HardwareRequirementsDocument:
         "maximumShanghaiTemperatureRegressionC",
         "maximumTemperatureCByTarget",
     }
+    if schema_version == 2:
+        expected_fields.add("matrixMode")
     if not isinstance(document, dict) or set(document) != expected_fields:
         raise ValueError("map stream hardware requirements have invalid fields")
     if (
         type(document["schemaVersion"]) is not int
-        or document["schemaVersion"] != 1
+        or document["schemaVersion"] not in {1, 2}
     ):
         raise ValueError("unsupported map stream hardware requirements schema")
+    if schema_version == 2 and document["matrixMode"] not in MATRIX_MODES:
+        raise ValueError("hardware matrix mode must be required or optional")
     if document["targets"] != list(PRODUCTION_TARGETS):
         raise ValueError("hardware requirements must cover both production targets")
     scenarios = document["scenarios"]
