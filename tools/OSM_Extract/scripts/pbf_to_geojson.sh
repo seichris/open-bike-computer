@@ -23,6 +23,6 @@ fi
 rm -f "${6}_lines.geojson"
 rm -f "${6}_polygons.geojson"
 rm -f "${6}_building_relations.json"
-ogr2ogr -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_lines.geojson" "$5" lines
-ogr2ogr -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_polygons.geojson" "$5" multipolygons
+ogr2ogr --config OGR_INTERLEAVED_READING YES -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_lines.geojson" "$5" lines
+ogr2ogr --config OGR_INTERLEAVED_READING YES -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_polygons.geojson" "$5" multipolygons
 python "$(dirname "$0")/extract_building_relations.py" "$5" "${6}_building_relations.json"
