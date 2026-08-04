@@ -10,6 +10,9 @@ MAIN_SCREEN_SOURCE = (
 MAP_RENDERER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.cpp"
 ).read_text(encoding="utf-8")
+LVGL_SETUP_SOURCE = (
+    ESP32_ROOT / "lib" / "lvgl" / "src" / "lvglSetup.cpp"
+).read_text(encoding="utf-8")
 
 
 def function_body(source: str, signature: str) -> str:
@@ -92,6 +95,15 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn(
             "renderDestinationPicker(navigationDestinationPicker)", update_body
         )
+
+    def test_main_screen_entry_defers_first_render_to_configured_screen(self):
+        load_body = function_body(LVGL_SETUP_SOURCE, "void loadMainScreen")
+        self.assertEqual(load_body.count("main_screen_entry_policy::enter("), 1)
+        self.assertEqual(load_body.count("showConfiguredDefaultMainScreen()"), 1)
+        self.assertNotIn("generateVectorMap", load_body)
+        self.assertNotIn("generateRenderMap", load_body)
+        self.assertNotIn("displayMap", load_body)
+        self.assertNotRegex(load_body, r"\bzoom\s*=\s*\d+")
 
 
 if __name__ == "__main__":

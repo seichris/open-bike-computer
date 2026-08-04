@@ -2563,6 +2563,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       const map_building_block::Building *building = nullptr;
       double depth = 0.0;
       uint16_t recordIndex = 0;
+      size_t pointCount = 0;
+      bool extrude = false;
     };
     std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
         buildingQueue;
@@ -2600,8 +2602,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                       building.maxY + elevationMargin));
           if (!buildingBbox.intersects(screenBbox))
             continue;
+          size_t pointCount = 0;
           for (const auto &ring : building.rings)
-            buildingPointCount += ring.points.size();
+            pointCount += ring.points.size();
+          buildingPointCount += pointCount;
           const map_transform::WorldPoint center{
               static_cast<double>(block->offset.x) +
                   (static_cast<double>(building.minX) + building.maxX) / 2.0,
@@ -2609,7 +2613,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                   (static_cast<double>(building.minY) + building.maxY) / 2.0};
           buildingQueue.push_back(
               {block, &building, projection.groundForWorld(center).forward,
-               static_cast<uint16_t>(recordIndex)});
+               static_cast<uint16_t>(recordIndex), pointCount, false});
         }
       }
       std::sort(
@@ -2621,12 +2625,24 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 {right.depth, right.block->offset.x, right.block->offset.y,
                  right.recordIndex});
           });
-      buildingBudgetFallback =
-          extrudeBuildings &&
-          map_building_renderer::exceedsExtrusionBudget(
-              buildingQueue.size(), buildingPointCount);
-      if (buildingBudgetFallback)
-        extrudeBuildings = false;
+      if (extrudeBuildings) {
+        map_building_renderer::ExtrusionBudget budget;
+        size_t eligibleBuildingCount = 0;
+        // The painter queue is far-to-near. Reserve in reverse so the geometry
+        // nearest the rider keeps its walls when a dense city exceeds the
+        // bounded extrusion workspace; overflow roofs remain visible and flat.
+        for (auto item = buildingQueue.rbegin(); item != buildingQueue.rend();
+             ++item) {
+          if (!map_building_renderer::usesExtrusion(
+                  true, item->building->flags)) {
+            continue;
+          }
+          ++eligibleBuildingCount;
+          item->extrude = budget.reserve(item->building->flags,
+                                         item->pointCount);
+        }
+        buildingBudgetFallback = budget.records < eligibleBuildingCount;
+      }
     }
 
     const uint16_t roofColor = lv_color_to_u16(lv_color_hex(0xB9B2A8));
@@ -2657,12 +2673,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     };
     std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     uint32_t renderedBuildings = 0;
+    uint32_t extrudedBuildings = 0;
     for (const auto &item : buildingQueue) {
       if (shouldInterruptMapRenderForScreenCycle())
         return false;
       const bool surfacesRendered = map_building_renderer::renderSurfaces(
           *item.building, item.block->offset.x, item.block->offset.y,
-          item.block->mercatorScale, projection, extrudeBuildings,
+          item.block->mercatorScale, projection, item.extrude,
           [&](map_building_renderer::Surface surface,
               const auto &points) -> bool {
             uint16_t color = roofColor;
@@ -2690,6 +2707,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (!surfacesRendered)
         return false;
       ++renderedBuildings;
+      if (item.extrude)
+        ++extrudedBuildings;
     }
 
     // Building roofs and walls are composed across all loaded blocks. Redraw
@@ -2742,7 +2761,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "budgetFallback=%u decodedBytes=%u\n",
               (unsigned)buildingQueue.size(),
               (unsigned)buildingPointCount,
-              extrudeBuildings ? (unsigned)renderedBuildings : 0U,
+              (unsigned)extrudedBuildings,
               buildingBudgetFallback ? 1U : 0U,
               (unsigned)std::accumulate(
                   memCache.blocks.begin(), memCache.blocks.end(), size_t{0},

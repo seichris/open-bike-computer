@@ -770,6 +770,10 @@ private struct OfflineMapAPIErrorDetail: Decodable {
     let supportedRendererFormatVersions: [Int]?
 }
 
+private struct OfflineMapAPILegacyErrorEnvelope: Decodable {
+    let detail: String
+}
+
 struct OfflineMapPackEntry: Equatable {
     let path: String
     let offset: UInt64
@@ -2836,6 +2840,22 @@ struct OfflineMapPlatformClient {
                 requestedRendererFormatVersion: requested,
                 supportedRendererFormatVersions: supported,
                 message: envelope.detail.message
+            )
+        }
+        // The renderer-format-2 control plane predates the typed target error
+        // envelope. Recognize only its exact target-3 rejection so an app can
+        // downgrade during a rolling deployment; arbitrary HTTP 400 responses
+        // must remain hard failures.
+        if statusCode == 400,
+           let legacy = try? JSONDecoder().decode(
+               OfflineMapAPILegacyErrorEnvelope.self,
+               from: data
+           ),
+           legacy.detail == "target rendererFormatVersion must be 1 or 2" {
+            return .unsupportedRendererTarget(
+                requestedRendererFormatVersion: 3,
+                supportedRendererFormatVersions: [2, 1],
+                message: legacy.detail
             )
         }
         return .serverStatus(

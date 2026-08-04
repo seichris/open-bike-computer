@@ -498,6 +498,11 @@ Current setting IDs:
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
 
+In a dense scene, firmware reserves its bounded extrusion workspace from the
+nearest eligible buildings outward, preserves global back-to-front drawing,
+and renders overflow records as flat roofs. One oversized viewport therefore
+does not flatten every otherwise-visible building.
+
 The app presents label visibility as a separate switch from density. It keeps
 the selected `1...3` density in the screen profile and sends density `0` while
 that switch is off. Map defaults to labels on; Map + Navigation defaults to
@@ -535,7 +540,7 @@ Fresh Map profiles default to high detail, zoom level `3`, a `4` px route line,
 `4` px streets, and a `2x` position marker. Fresh Map + Navigation profiles
 default to low detail, zoom level `3`, a `15` px route line, `4` px streets, a
 `2x` position marker, and only Major Roads, Residential & Local Roads, and
-Water visible. Existing customized profiles keep their saved values; profiles
+Water, and Buildings visible. Existing customized profiles keep their saved values; profiles
 that still exactly match the former recommendations migrate once.
 
 Apps that support the extended visibility classes set marker bit `12`. Without

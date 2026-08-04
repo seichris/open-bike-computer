@@ -136,7 +136,7 @@ jobs:
           -e MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum
           -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data
           open-bike-map-platform-ci
-          python -c "from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/map-platform/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
+          python -c "import osmium; from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/map-platform/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
       - name: Smoke worker heartbeat
         run: >-
           docker run --rm

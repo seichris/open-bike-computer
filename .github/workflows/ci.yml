@@ -119,6 +119,10 @@ jobs:
             tools/tests/test_map_building_renderer.cpp \
             -o /tmp/test_map_building_renderer
           /tmp/test_map_building_renderer
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_main_screen_entry_policy.cpp \
+            -o /tmp/test_main_screen_entry_policy
+          /tmp/test_main_screen_entry_policy
       - name: Power metrics host tests
         run: |
           PYTHONPATH=tools python -m unittest \

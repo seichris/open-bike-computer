@@ -4388,6 +4388,53 @@ struct NavigationProtocolTests {
             "fallback request keeps the target 2 label profile"
         )
 
+        var legacySubmittedFormats: [Int] = []
+        OfflineMapTestURLProtocol.configure { request in
+            let body = try! JSONSerialization.jsonObject(
+                with: OfflineMapTestURLProtocol.bodyData(from: request)
+            ) as! [String: Any]
+            legacySubmittedFormats.append(
+                (body["target"] as! [String: Any])["rendererFormatVersion"] as! Int
+            )
+            if legacySubmittedFormats.count == 1 {
+                return (
+                    400,
+                    Data(#"{"detail":"target rendererFormatVersion must be 1 or 2"}"#.utf8)
+                )
+            }
+            return (200, Data(#"{"jobId":"job-legacy-target2","status":"queued"}"#.utf8))
+        }
+        let legacyJob = try? await client.createJob(originalRequest)
+        assertEqual(
+            legacyJob?.jobId,
+            "job-legacy-target2",
+            "the exact legacy control-plane rejection safely downgrades target 3"
+        )
+        assertEqual(
+            legacySubmittedFormats,
+            [3, 2],
+            "the legacy compatibility path retries once with renderer target 2"
+        )
+
+        var genericBadRequestCount = 0
+        OfflineMapTestURLProtocol.configure { _ in
+            genericBadRequestCount += 1
+            return (400, Data(#"{"detail":"invalid map request"}"#.utf8))
+        }
+        do {
+            _ = try await client.createJob(originalRequest)
+            assert(false, "an unrelated HTTP 400 must not trigger target fallback")
+        } catch OfflineMapPlatformError.serverStatus(let status, _) {
+            assertEqual(status, 400, "generic bad requests retain their HTTP status")
+        } catch {
+            assert(false, "generic bad requests remain ordinary server errors")
+        }
+        assertEqual(
+            genericBadRequestCount,
+            1,
+            "generic bad requests are never retried as renderer downgrades"
+        )
+
         var rejectedRequestCount = 0
         OfflineMapTestURLProtocol.configure { request in
             rejectedRequestCount += 1

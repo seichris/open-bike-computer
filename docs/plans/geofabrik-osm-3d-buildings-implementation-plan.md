@@ -107,7 +107,7 @@ The pipeline must not query or merge any other building-height source. A build m
 8. **Retain OSM semantic provenance.** Explicit height, level-derived height, inherited height, local OSM median, and class default are distinguishable in reports and records.
 9. **Suppress artificial block-edge walls.** Clipping provenance is encoded per edge so block seams cannot become facade walls.
 10. **Sort buildings across all loaded blocks.** Rendering each block independently would create incorrect painter order at block boundaries.
-11. **Prefer a deterministic flat fallback to partial 3D.** If a validated runtime budget cannot be met, the affected frame uses flat footprints and records a diagnostic.
+11. **Degrade dense scenes deterministically.** Reserve the validated extrusion budget nearest-to-rider, preserve the global painter order, render overflow records as flat footprints, and record a diagnostic. Never choose a random or input-order subset.
 12. **Do not silently upgrade saved maps.** A renderer-format-1/2 artifact retains its target; the user regenerates/downloads a compatible renderer-format-3 artifact.
 
 ## Target architecture
@@ -530,7 +530,9 @@ Add hard budgets for visible building records, rings, points, generated wall fac
 
 When a frame exceeds a hard geometry budget:
 
-- draw all buildings as flat footprints for that frame;
+- reserve extrusion capacity nearest-to-rider using the stable depth order;
+- draw selected and overflow records in the original global back-to-front painter order;
+- draw overflow records as flat footprints instead of flattening the whole city;
 - do not render a random or input-order subset in 3D;
 - increment a reason-specific diagnostic counter; and
 - keep roads and route rendering unchanged.
@@ -619,7 +621,7 @@ The worker image must be rebuilt and promoted before enabling the target. Becaus
    - holes and multipolygons;
    - invalid tags; and
    - a building crossing both horizontal and vertical block boundaries.
-3. Recheck renderer-format-2 production gating/deployment and its physical-validation evidence; do not infer either from PR merge state.
+3. Record the supplied implementation assumption that renderer format 2 is deployed and physically validated; keep its rollout gate independent.
 4. Record renderer-format-1 and FMB v2 baselines plus renderer-format-2 and FMB v3/FMA1 baselines through the isolated hardware-validation stack: block/asset sizes, extraction time, peak worker memory, parse time, map-render time, PSRAM headroom, label behavior, and navigation responsiveness.
 5. Define physical ship budgets from those measurements before enabling renderer format 3 in production.
 
@@ -764,7 +766,7 @@ Exact filenames may follow the baseline module boundaries, but the separation of
 - both display aspect ratios;
 - roads above buildings on the base canvas and labels/route above the base through the foreground canvas;
 - unchanged label collision, asset-health, route-priority, and foreground-compositing behavior;
-- geometry-budget flat fallback;
+- nearest-first geometry-budget reservation with flat overflow;
 - corrupt-block rejection without reset or starvation; and
 - repeated block load/eviction under the four-block cache.
 
@@ -816,7 +818,7 @@ The implementation is complete only when all of the following are true:
 10. The new setting is capability-gated, persisted, acknowledged, and documented.
 11. Malformed or oversized building data fails closed without unbounded allocation, reset, or navigation starvation.
 12. Both Waveshare targets pass the agreed render-time, PSRAM, responsiveness, and soak-test budgets.
-13. The backend worker image is promoted, renderer-target reuse is separated, and a real signed renderer-format-3/FMB v4 pack is regenerated and transferred end to end.
+13. The target-3-aware control-plane/API and worker images are promoted, renderer-target reuse is separated, and a real signed renderer-format-3/FMB v4 pack is regenerated and transferred end to end.
 14. Format-3 gate-off, renderer-format-1/2 request, device setting-off, and saved-format-1/2 rollback paths are demonstrated.
 15. Exact source checksums, build identities, firmware/iOS revisions, device targets, metrics, and visual evidence are attached to the delivery record.
 
@@ -827,11 +829,12 @@ The implementation is complete only when all of the following are true:
 1. Merge format docs and fixture tests before enabling production generation.
 2. Record the supplied implementation assumption that renderer format 2 is deployed and physically validated; keep its rollout gate independent.
 3. Ship new firmware support while iOS still requests the current compatible renderer format 1 or 2.
-4. Ship iOS capability negotiation and transfer refusal.
-5. Promote the renderer-format-3/FMB-v4-capable worker with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`.
-6. Enable renderer format 3 for internal paired devices and regenerate packs from fresh requests.
-7. Compare production coverage/size/timing with the pinned validation artifacts.
-8. Widen the allowlist only after both hardware targets remain inside budgets.
+4. Promote the target-3-aware control-plane/API with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`; verify typed unsupported-target responses before any target-3-negotiating iOS release.
+5. Ship iOS capability negotiation and transfer refusal. Retain the exact legacy target-3 rejection fallback only for rolling deployment compatibility.
+6. Promote the renderer-format-3/FMB-v4-capable worker with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`.
+7. Enable renderer format 3 for internal paired devices and regenerate packs from fresh requests.
+8. Compare production coverage/size/timing with the pinned validation artifacts.
+9. Widen the allowlist only after both hardware targets remain inside budgets.
 
 ### Rollback
 

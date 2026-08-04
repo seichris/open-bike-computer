@@ -1,30 +1,32 @@
 import pathlib
 import sys
 import unittest
+from dataclasses import replace
 
-from shapely.geometry import box, LineString, mapping, Polygon
+from shapely.geometry import box, LineString, mapping, MultiPolygon, Polygon
+from shapely.ops import unary_union
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from building_height import HeightRules
+from building_height import HeightProvenance, HeightRules
 from building_pipeline import (
     BUILDING_FLAG_FLAT_BASE,
     clip_buildings,
     prepare_buildings,
     projected_selection_geometry,
 )
-from map_format import MAX_BUILDING_RINGS
+from map_format import MAX_BUILDING_RINGS, _building_section
 
 
-def feature(identifier, geometry, other_tags):
+def feature(identifier, geometry, other_tags, *, building="yes", relation=False):
     return {
         "type": "Feature",
         "properties": {
-            "osm_way_id": identifier,
-            "building": "yes",
+            "osm_id" if relation else "osm_way_id": identifier,
+            "building": building,
             "other_tags": other_tags,
         },
         "geometry": mapping(geometry),
@@ -121,6 +123,130 @@ class BuildingPipelineTests(unittest.TestCase):
             self.rules,
         )
         self.assertEqual(report["rejectedTags"]["heightMalformed"], 1)
+
+    def test_local_median_uses_direct_same_class_cell_halo_samples_only(self):
+        rules = replace(
+            self.rules,
+            cell_size_meters=100,
+            halo_cells=1,
+            minimum_samples=3,
+        )
+        two_direct_and_fallbacks = [
+            feature(100, box(10, 10, 20, 20), '"height"=>"10"', building="office"),
+            feature(101, box(30, 10, 40, 20), '"height"=>"20"', building="office"),
+            feature(102, box(50, 10, 60, 20), "", building="office"),
+            feature(103, box(70, 10, 80, 20), "", building="office"),
+            # A different class never calibrates office buildings.
+            feature(104, box(20, 30, 30, 40), '"height"=>"200"', building="commercial"),
+        ]
+        buildings, _report, _flat = prepare_buildings(
+            two_direct_and_fallbacks, rules
+        )
+        by_key = {item.object_key: item for item in buildings}
+        self.assertEqual(
+            by_key["w102"].resolved.provenance,
+            HeightProvenance.CLASS_DEFAULT,
+        )
+
+        # The third direct office sample sits across a cell boundary but inside
+        # the one-cell halo, meeting the threshold with median 20 m.
+        calibrated_input = [
+            *two_direct_and_fallbacks,
+            feature(105, box(140, 10, 150, 20), '"height"=>"30"', building="office"),
+            # Cell 2 is beyond the cell-0 target's halo and cannot affect it.
+            feature(106, box(240, 10, 250, 20), '"height"=>"90"', building="office"),
+            feature(107, box(250, 30, 260, 40), "", building="office"),
+        ]
+        first, first_report, _flat = prepare_buildings(calibrated_input, rules)
+        shuffled, shuffled_report, _flat = prepare_buildings(
+            list(reversed(calibrated_input)), rules
+        )
+        first_snapshot = [
+            (item.object_key, item.resolved.height_dm, item.resolved.provenance)
+            for item in first
+        ]
+        shuffled_snapshot = [
+            (item.object_key, item.resolved.height_dm, item.resolved.provenance)
+            for item in shuffled
+        ]
+        self.assertEqual(first_snapshot, shuffled_snapshot)
+        self.assertEqual(first_report, shuffled_report)
+        calibrated = {item.object_key: item for item in first}
+        self.assertEqual(calibrated["w102"].resolved.height_dm, 200)
+        self.assertEqual(
+            calibrated["w102"].resolved.provenance,
+            HeightProvenance.LOCAL_OSM_MEDIAN,
+        )
+        self.assertEqual(
+            calibrated["w107"].resolved.provenance,
+            HeightProvenance.CLASS_DEFAULT,
+        )
+
+    def test_cross_block_seams_multiple_outers_and_bytes_are_deterministic(self):
+        crossing = feature(
+            200,
+            box(50, 50, 150, 150),
+            '"height"=>"24"',
+            building="apartments",
+        )
+        multiple_outers = feature(
+            201,
+            MultiPolygon([box(10, 10, 30, 30), box(160, 160, 190, 190)]),
+            '"height"=>"12"',
+            building="commercial",
+            relation=True,
+        )
+        inputs = [crossing, multiple_outers]
+        buildings, _report, _flat = prepare_buildings(inputs, self.rules)
+        shuffled, _shuffled_report, _flat = prepare_buildings(
+            list(reversed(inputs)), self.rules
+        )
+
+        reconstructed = []
+        encoded = []
+        shuffled_encoded = []
+        for min_x, min_y in ((0, 0), (100, 0), (0, 100), (100, 100)):
+            block = box(min_x, min_y, min_x + 100, min_y + 100)
+            records, _stats = clip_buildings(buildings, block, min_x, min_y)
+            shuffled_records, _stats = clip_buildings(
+                shuffled, block, min_x, min_y
+            )
+            encoded.append(_building_section(records)[0])
+            shuffled_encoded.append(_building_section(shuffled_records)[0])
+            for record in records:
+                for ring in record["rings"]:
+                    global_points = [
+                        (x + min_x, y + min_y) for x, y in ring["points"]
+                    ]
+                    if ring["flags"] == 0:
+                        reconstructed.append(Polygon(global_points))
+                    for index, start in enumerate(global_points):
+                        end = global_points[(index + 1) % len(global_points)]
+                        if (
+                            (start[0] == end[0] == 100)
+                            or (start[1] == end[1] == 100)
+                        ):
+                            self.assertFalse(ring["walls"][index])
+
+        self.assertEqual(encoded, shuffled_encoded)
+        crossing_roofs = [
+            polygon
+            for polygon in reconstructed
+            if polygon.intersection(box(50, 50, 150, 150)).area > 0
+        ]
+        self.assertAlmostEqual(
+            unary_union(crossing_roofs).intersection(box(50, 50, 150, 150)).area,
+            10_000,
+        )
+        relation_records = sum(
+            1
+            for min_x, min_y in ((0, 0), (100, 0), (0, 100), (100, 100))
+            for record in clip_buildings(
+                buildings, box(min_x, min_y, min_x + 100, min_y + 100), min_x, min_y
+            )[0]
+            if record["source_key"] == "r201"
+        )
+        self.assertEqual(relation_records, 2)
 
     def test_excess_holes_are_bounded_deterministically(self):
         holes = []

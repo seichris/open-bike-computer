@@ -8,6 +8,7 @@
 
 #include "lvglSetup.hpp"
 #include "../../power/power.hpp"
+#include "../../gui/src/mainScreenEntryPolicy.hpp"
 
 #include <esp_timer.h>
 
@@ -430,30 +431,19 @@ void loadMainScreen() {
   gpxAction = WPT_NONE;
   lv_screen_load(mainScreen);
 
-  // SIMPLIFIED: No tileview, map is the only view
-  activeTile = 1; // MAP (for compatibility)
   isReady = true;
   mapView.redrawMap = true;
   lv_timer_resume(mainTimer); // MISTAKE FIXED: Timer was paused in
                               // createSearchSatScr and never resumed!
   mapView.createMapScrSprites();
 
-  // Center map on current GPS location (injected defaults)
-  mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-
-  // Generate Map Content
+  // The configured screen owns profile, zoom, projection, and the one initial
+  // render. This avoids flashing a hard-coded flat Map frame before the saved
+  // Map + Navigation bird's-eye screen is applied.
   mapSet.vectorMap = true;
-  zoom = 2;
-  log_i("Generating Map: Vector=%d, Zoom=%d", mapSet.vectorMap, zoom);
-
-  if (mapSet.vectorMap)
-    mapView.generateVectorMap(zoom);
-  else
-    mapView.generateRenderMap(zoom);
-
-  // Trigger display update
-  if (mapView.redrawMap)
-    mapView.displayMap();
-
-  showConfiguredDefaultMainScreen();
+  main_screen_entry_policy::enter(
+      [&]() {
+        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+      },
+      []() { showConfiguredDefaultMainScreen(); });
 }

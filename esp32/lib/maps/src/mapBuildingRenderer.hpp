@@ -35,15 +35,30 @@ inline bool rendersBefore(const OrderKey &left, const OrderKey &right) {
   return left.recordIndex < right.recordIndex;
 }
 
-constexpr bool exceedsExtrusionBudget(size_t recordCount,
-                                      size_t pointCount) {
-  return recordCount > kMaximumExtrudedBuildingRecords ||
-         pointCount > kMaximumExtrudedBuildingPoints;
-}
-
 constexpr bool usesExtrusion(bool requested, uint8_t buildingFlags) {
   return requested && (buildingFlags & kBuildingFlagFlatBase) == 0;
 }
+
+// Dense scenes are expected to contain more roofs than can be safely
+// extruded in one frame. Reserve the bounded wall/roof workspace per eligible
+// record so callers can keep the nearest buildings extruded while drawing
+// overflow records as flat roofs. Flat-base outlines never consume the
+// extrusion budget.
+struct ExtrusionBudget {
+  size_t records = 0;
+  size_t points = 0;
+
+  constexpr bool reserve(uint8_t buildingFlags, size_t pointCount) {
+    if (!usesExtrusion(true, buildingFlags) ||
+        records >= kMaximumExtrudedBuildingRecords ||
+        pointCount > kMaximumExtrudedBuildingPoints - points) {
+      return false;
+    }
+    ++records;
+    points += pointCount;
+    return true;
+  }
+};
 
 enum class Surface : uint8_t {
   WallLight,
