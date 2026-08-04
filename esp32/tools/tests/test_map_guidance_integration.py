@@ -121,6 +121,23 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("psramLargest=%u", render_body)
         self.assertIn("if (!item.render)", render_body)
 
+    def test_post_building_road_repaint_honors_building_deadline(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        repaint_start = render_body.index(
+            "// Building roofs and walls are composed across all loaded blocks."
+        )
+        repaint_end = render_body.index(
+            'MAPIO_LOG("MAPIO: buildings', repaint_start
+        )
+        repaint_body = render_body[repaint_start:repaint_end]
+        self.assertGreaterEqual(repaint_body.count("shouldStopBuildingWork()"), 3)
+        self.assertIn("buildingScreenInterrupted", repaint_body)
+        self.assertIn("stopRoadRepaint", repaint_body)
+        self.assertLess(
+            repaint_body.rindex("shouldStopBuildingWork()"),
+            repaint_body.index("const uint32_t buildingDrawMs"),
+        )
+
     def test_navigation_screen_retains_destination_picker(self):
         create_body = function_body(MAIN_SCREEN_SOURCE, "void createMainScr")
         update_body = function_body(MAIN_SCREEN_SOURCE, "void updateNavEvent")

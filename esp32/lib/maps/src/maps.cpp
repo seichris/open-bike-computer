@@ -2944,7 +2944,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     }
     if (renderTimeOverflow != 0)
       renderTimeOverflowTotal += renderTimeOverflow;
-    const uint32_t buildingDrawMs = millis() - buildingDrawStartMs;
     const uint64_t generatedWallFaces =
         buildingSurfaceStats.generatedWallFaces;
     const uint64_t suppressedWallFaces =
@@ -2955,7 +2954,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     // Building roofs and walls are composed across all loaded blocks. Redraw
     // roads once above them so navigation-relevant geometry remains legible.
     if (renderedBuildings != 0) {
+      bool stopRoadRepaint = false;
       for (MapBlock *block : memCache.blocks) {
+        if (shouldStopBuildingWork()) {
+          if (buildingScreenInterrupted)
+            return false;
+          break;
+        }
         if (!block->inView)
           continue;
         ScreenMapRenderSettings blockStyle = style;
@@ -2964,6 +2969,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 style.visibilityMask, block->formatVersion);
         const BBox screenBbox = viewPort.bbox - block->offset;
         for (const auto &line : block->polylines) {
+          if (shouldStopBuildingWork()) {
+            if (buildingScreenInterrupted)
+              return false;
+            stopRoadRepaint = true;
+            break;
+          }
           if (zoom > line.maxZoom || !line.bbox.intersects(screenBbox) ||
               line.points.size() < 2 ||
               !isLineVisible(line.typeId, line.color, line.width, blockStyle))
@@ -2975,6 +2986,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                   ? blockStyle.streetLineWidth
                   : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
           for (size_t index = 1; index < line.points.size(); ++index) {
+            if (((index - 1U) & 0x0FU) == 0 && shouldStopBuildingWork()) {
+              if (buildingScreenInterrupted)
+                return false;
+              stopRoadRepaint = true;
+              break;
+            }
             auto start = projection.groundForWorld(
                 {static_cast<double>(block->offset.x + line.points[index - 1].x),
                  static_cast<double>(block->offset.y + line.points[index - 1].y)});
@@ -2995,9 +3012,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 projection.scaledLineWidth(
                     baseWidth, (p1.depthScale + p2.depthScale) / 2.0, 24));
           }
+          if (stopRoadRepaint)
+            break;
         }
+        if (stopRoadRepaint)
+          break;
       }
     }
+    const uint32_t buildingDrawMs = millis() - buildingDrawStartMs;
     MAPIO_LOG("MAPIO: buildings visibleRecords=%u visiblePoints=%llu "
               "queuedRecords=%u rendered=%u extruded=%u flatOverflow=%u "
               "renderRecordOverflow=%u renderPointOverflow=%u "
