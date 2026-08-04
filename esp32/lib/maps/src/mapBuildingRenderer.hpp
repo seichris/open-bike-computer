@@ -8,15 +8,23 @@
 #include "mapBuildingBlock.hpp"
 #include "map_projection.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace map_building_renderer {
 
 constexpr uint8_t kBuildingFlagFlatBase = 1U << 1U;
 constexpr size_t kMaximumExtrudedBuildingRecords = 1024;
 constexpr size_t kMaximumExtrudedBuildingPoints = 24576;
+constexpr size_t kMaximumRenderedBuildingRecords = 6144;
+constexpr size_t kMaximumRenderedBuildingPoints = 49152;
+constexpr size_t kMaximumRenderedBuildingPointsPerRecord = 1024;
+constexpr uint8_t kMaximumBuildingExtrusionZoom = 4;
+constexpr double kMinimumBuildingExtrusionAreaPixels = 6.0;
+constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
 
 struct OrderKey {
   double depth = 0.0;
@@ -48,22 +56,132 @@ struct ExtrusionBudget {
   size_t records = 0;
   size_t points = 0;
 
-  constexpr bool reserve(uint8_t buildingFlags, size_t pointCount) {
-    if (!usesExtrusion(true, buildingFlags) ||
-        records >= kMaximumExtrudedBuildingRecords ||
-        pointCount > kMaximumExtrudedBuildingPoints - points) {
-      return false;
-    }
+  enum class Admission : uint8_t {
+    Selected,
+    IneligibleFlatBase,
+    RecordLimit,
+    PointLimit,
+  };
+
+  constexpr Admission reserve(uint8_t buildingFlags, size_t pointCount) {
+    if (!usesExtrusion(true, buildingFlags))
+      return Admission::IneligibleFlatBase;
+    if (records >= kMaximumExtrudedBuildingRecords)
+      return Admission::RecordLimit;
+    if (pointCount > kMaximumExtrudedBuildingPoints - points)
+      return Admission::PointLimit;
     ++records;
     points += pointCount;
-    return true;
+    return Admission::Selected;
   }
 };
+
+struct ExtrusionSelection {
+  size_t eligibleRecords = 0;
+  size_t selectedRecords = 0;
+  size_t selectedPoints = 0;
+  size_t recordLimitOverflow = 0;
+  size_t pointLimitOverflow = 0;
+
+  constexpr size_t flatOverflow() const {
+    return recordLimitOverflow + pointLimitOverflow;
+  }
+
+  constexpr bool usedFallback() const { return flatOverflow() != 0; }
+};
+
+// Candidates must already be in reverse painter order (nearest-to-farthest).
+// The candidate contract is intentionally tiny so this exact production
+// admission path stays host-testable: render, pointCount, extrude,
+// buildingFlags(), and eligibleForExtrusion().
+template <typename ReverseIterator>
+ExtrusionSelection selectNearestForExtrusion(ReverseIterator nearest,
+                                             ReverseIterator farthest) {
+  ExtrusionBudget budget;
+  ExtrusionSelection selection;
+  for (auto item = nearest; item != farthest; ++item) {
+    item->extrude = false;
+    if (!item->render || !item->eligibleForExtrusion())
+      continue;
+    const auto admission =
+        budget.reserve(item->buildingFlags(), item->pointCount);
+    switch (admission) {
+    case ExtrusionBudget::Admission::Selected:
+      item->extrude = true;
+      ++selection.eligibleRecords;
+      break;
+    case ExtrusionBudget::Admission::RecordLimit:
+      ++selection.eligibleRecords;
+      ++selection.recordLimitOverflow;
+      break;
+    case ExtrusionBudget::Admission::PointLimit:
+      ++selection.eligibleRecords;
+      ++selection.pointLimitOverflow;
+      break;
+    case ExtrusionBudget::Admission::IneligibleFlatBase:
+      break;
+    }
+  }
+  selection.selectedRecords = budget.records;
+  selection.selectedPoints = budget.points;
+  return selection;
+}
+
+struct RenderSelection {
+  size_t selectedRecords = 0;
+  size_t selectedPoints = 0;
+  size_t pointLimitOverflow = 0;
+};
+
+// Keep a bounded heap whose root is the farthest retained candidate. A nearer
+// candidate replaces that root, making the retained set independent of block
+// cache/input traversal order while bounding sort workspace.
+template <typename Container, typename RendersBefore>
+bool retainNearestCandidate(
+    Container &candidates, const typename Container::value_type &candidate,
+    size_t maximumRecords, RendersBefore rendersBefore) {
+  const auto nearerThan = [&](const auto &left, const auto &right) {
+    return rendersBefore(right, left);
+  };
+  if (candidates.size() < maximumRecords) {
+    candidates.push_back(candidate);
+    std::push_heap(candidates.begin(), candidates.end(), nearerThan);
+    return true;
+  }
+  if (candidates.empty() || !rendersBefore(candidates.front(), candidate))
+    return false;
+  std::pop_heap(candidates.begin(), candidates.end(), nearerThan);
+  candidates.back() = candidate;
+  std::push_heap(candidates.begin(), candidates.end(), nearerThan);
+  return true;
+}
+
+// The record queue is already bounded and sorted far-to-near. Select its
+// nearest records within the total source-point budget, then let the caller
+// draw marked candidates in the unchanged far-to-near order.
+template <typename ReverseIterator>
+RenderSelection selectNearestForRendering(ReverseIterator nearest,
+                                          ReverseIterator farthest) {
+  RenderSelection selection;
+  for (auto item = nearest; item != farthest; ++item) {
+    item->render = false;
+    if (item->pointCount >
+        kMaximumRenderedBuildingPoints - selection.selectedPoints) {
+      ++selection.pointLimitOverflow;
+      continue;
+    }
+    item->render = true;
+    ++selection.selectedRecords;
+    selection.selectedPoints += item->pointCount;
+  }
+  return selection;
+}
 
 enum class Surface : uint8_t {
   WallLight,
   WallMiddle,
   WallDark,
+  CourtyardCapture,
   Roof,
   Courtyard,
 };
@@ -78,6 +196,65 @@ struct ScreenPoint {
   int32_t x = 0;
   int32_t y = 0;
 };
+
+// Restore the pixels under a projected courtyard after the outer roof has
+// been filled. The snapshot is captured after wall drawing but before roofs,
+// so land use, roads, farther buildings, and courtyard walls remain visible
+// through the opening instead of being replaced by a fixed background color.
+template <typename Points, typename Nodes, typename ShouldInterrupt>
+bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
+                              int32_t width, int32_t height,
+                              size_t stridePixels, const uint16_t *underlay,
+                              size_t underlayPixels, Nodes &nodes,
+                              ShouldInterrupt &&shouldInterrupt) {
+  if (points.size() < 3)
+    return true;
+  if (canvas == nullptr || underlay == nullptr || width <= 0 || height <= 0 ||
+      stridePixels < static_cast<size_t>(width) ||
+      underlayPixels < stridePixels * static_cast<size_t>(height) ||
+      nodes.size() < points.size()) {
+    return false;
+  }
+
+  int32_t minY = points.front().y;
+  int32_t maxY = points.front().y;
+  for (const auto &point : points) {
+    minY = std::min(minY, point.y);
+    maxY = std::max(maxY, point.y);
+  }
+  minY = std::max<int32_t>(0, minY);
+  maxY = std::min<int32_t>(height - 1, maxY);
+  if (minY > maxY)
+    return true;
+
+  for (int32_t y = minY; y <= maxY; ++y) {
+    if ((y & 0x0F) == 0 && shouldInterrupt())
+      return false;
+    size_t count = 0;
+    for (size_t index = 0; index < points.size(); ++index) {
+      const auto &start = points[index];
+      const auto &end = points[(index + 1U) % points.size()];
+      if ((start.y < y && end.y >= y) ||
+          (start.y >= y && end.y < y)) {
+        nodes[count++] = static_cast<int32_t>(
+            start.x + static_cast<double>(y - start.y) /
+                          static_cast<double>(end.y - start.y) *
+                          static_cast<double>(end.x - start.x));
+      }
+    }
+    std::sort(nodes.begin(), nodes.begin() + count);
+    for (size_t index = 0; index + 1U < count; index += 2U) {
+      const int32_t startX = std::max<int32_t>(0, nodes[index]);
+      const int32_t endX = std::min<int32_t>(width, nodes[index + 1U]);
+      if (startX >= endX)
+        continue;
+      const size_t offset = static_cast<size_t>(y) * stridePixels + startX;
+      std::memcpy(canvas + offset, underlay + offset,
+                  static_cast<size_t>(endX - startX) * sizeof(uint16_t));
+    }
+  }
+  return true;
+}
 
 // Emits walls first, then roof/courtyard rings. The callback returns false to
 // interrupt rendering, matching the firmware polygon-fill contract.
@@ -138,9 +315,9 @@ bool renderSurfaces(const map_building_block::Building &building,
     }
   }
 
-  MapBuildingVector<map_projection::GroundPoint> ground;
-  MapBuildingVector<map_projection::GroundPoint> clipped;
-  for (const auto &ring : building.rings) {
+  const auto emitRoofRing = [&](const auto &ring, Surface surface) {
+    MapBuildingVector<map_projection::GroundPoint> ground;
+    MapBuildingVector<map_projection::GroundPoint> clipped;
     ground.clear();
     ground.reserve(ring.points.size());
     for (const auto &point : ring.points)
@@ -160,8 +337,17 @@ bool renderSurfaces(const map_building_block::Building &building,
         screenRing.push_back({map_transform::quantizePixel(projected.x),
                               map_transform::quantizePixel(projected.y)});
     }
-    if (!drawSurface(ring.hole ? Surface::Courtyard : Surface::Roof,
-                     screenRing))
+    return drawSurface(surface, screenRing);
+  };
+  // Let the compositor preserve real underlay pixels before the outer roof is
+  // drawn. Hole rings are projected again for restoration after the roof.
+  for (const auto &ring : building.rings) {
+    if (ring.hole && !emitRoofRing(ring, Surface::CourtyardCapture))
+      return false;
+  }
+  for (const auto &ring : building.rings) {
+    if (!emitRoofRing(ring,
+                      ring.hole ? Surface::Courtyard : Surface::Roof))
       return false;
   }
   return true;

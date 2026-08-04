@@ -511,6 +511,11 @@ For each visible fragment:
 - use view-relative, style-derived light/mid/dark RGB565 facade shades; and
 - use a stable depth key and source-order tie-breaker.
 
+Projected courtyard rings capture the actual RGB565 underlay after walls and
+before roofs. After the outer roof fill, the renderer restores those pixels
+through each hole, preserving land-use color, roads, farther buildings, and
+courtyard walls instead of painting holes with a fixed background color.
+
 No runtime heap growth may scale without an encoded/validated upper bound. Prefer reusable PSRAM-backed buffers allocated with the map cache.
 
 ### Navigation legibility
@@ -526,18 +531,21 @@ Building solids and road lines render on the base canvas; the already-merged for
 
 ### Runtime degradation policy
 
-Add hard budgets for visible building records, rings, points, generated wall faces, sort workspace, and render time. Exact ship values are locked after Phase 0 measurements on both reference boards.
+Add hard budgets for visible building records, rings, points, generated wall faces, sort workspace, and render time. The implemented candidate bounds are 6,144 queued records, 49,152 rendered source points, 1,024 source points in one rendered record, 1,024 extruded records, 24,576 extruded source points/wall candidates, and a 10-second emergency building-pass deadline. Both-board physical profiling remains the gate for retaining or lowering those values before production enablement.
 
 When a frame exceeds a hard geometry budget:
 
+- discard any individually oversized record before surface projection;
+- retain the nearest 6,144 candidates with a traversal-order-independent bounded heap;
+- select the nearest candidates inside the total rendered-point budget and omit farther total-work overflow;
 - reserve extrusion capacity nearest-to-rider using the stable depth order;
 - draw selected and overflow records in the original global back-to-front painter order;
-- draw overflow records as flat footprints instead of flattening the whole city;
+- draw extrusion overflow records as flat footprints instead of flattening the whole city;
 - do not render a random or input-order subset in 3D;
 - increment a reason-specific diagnostic counter; and
 - keep roads and route rendering unchanged.
 
-Use close-zoom eligibility and a projected-pixel-area threshold to avoid spending work on visually meaningless distant buildings. Those rules must be deterministic for a given camera state.
+Extrusion is limited to runtime zooms `1...4` and projected footprint area of at least 6 square pixels, avoiding wall work on visually meaningless distant buildings. Those rules are deterministic for a given camera state. Polygon filling already checks the cooperative screen-cycle interrupt every 16 scanlines; the per-record point bound prevents one otherwise-legal 65,535-point ring from monopolizing a render between those checks.
 
 ### Diagnostics
 
@@ -548,7 +556,8 @@ Extend map diagnostics/serial logging with:
 - provenance counts;
 - visible and extruded fragments;
 - generated and suppressed wall faces;
-- flat-fallback count and reason;
+- extrusion flat-overflow count plus record/point reasons and cumulative counters;
+- total-work record/point/per-record/time overflow counts and cumulative counters;
 - projection, sort, building-draw, and total map-draw timing;
 - current/free/largest PSRAM allocation; and
 - corrupt/unsupported block rejections.
@@ -829,9 +838,9 @@ The implementation is complete only when all of the following are true:
 1. Merge format docs and fixture tests before enabling production generation.
 2. Record the supplied implementation assumption that renderer format 2 is deployed and physically validated; keep its rollout gate independent.
 3. Ship new firmware support while iOS still requests the current compatible renderer format 1 or 2.
-4. Promote the target-3-aware control-plane/API with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`; verify typed unsupported-target responses before any target-3-negotiating iOS release.
-5. Ship iOS capability negotiation and transfer refusal. Retain the exact legacy target-3 rejection fallback only for rolling deployment compatibility.
-6. Promote the renderer-format-3/FMB-v4-capable worker with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`.
+4. Build the shared target-3-aware image and complete its worker/hardware gates before promotion. The repository detects worker-input changes and deliberately prevents a new-control-plane/old-worker promotion for this release.
+5. Co-promote the control-plane/API and worker digest with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`; verify typed unsupported-target responses and worker health while generation remains disabled.
+6. Ship iOS capability negotiation and transfer refusal. Retain the exact legacy target-3 rejection fallback only for clients that reach a pre-promotion control plane during rollout.
 7. Enable renderer format 3 for internal paired devices and regenerate packs from fresh requests.
 8. Compare production coverage/size/timing with the pinned validation artifacts.
 9. Widen the allowlist only after both hardware targets remain inside budgets.

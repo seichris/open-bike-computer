@@ -17,6 +17,11 @@ struct Command {
   std::vector<ScreenPoint> points;
 };
 
+bool isWall(Surface surface) {
+  return surface == Surface::WallLight ||
+         surface == Surface::WallMiddle || surface == Surface::WallDark;
+}
+
 map_projection::Projection makeProjection(uint16_t width, uint16_t height,
                                           map_projection::Mode mode,
                                           uint8_t zoom = 3,
@@ -82,36 +87,39 @@ std::vector<Command> render(const map_building_block::Building &building,
 void assertExtrudedCourtyard(uint16_t width, uint16_t height) {
   const auto commands = render(buildingWithCourtyard(), width, height,
                                map_projection::Mode::BirdsEye, true);
-  assert(commands.size() == 4);
-  assert(commands[0].surface != Surface::Roof &&
-         commands[0].surface != Surface::Courtyard);
-  assert(commands[1].surface != Surface::Roof &&
-         commands[1].surface != Surface::Courtyard);
-  assert(commands[2].surface == Surface::Roof);
-  assert(commands[3].surface == Surface::Courtyard);
+  assert(commands.size() == 5);
+  assert(isWall(commands[0].surface));
+  assert(isWall(commands[1].surface));
+  assert(commands[2].surface == Surface::CourtyardCapture);
+  assert(commands[3].surface == Surface::Roof);
+  assert(commands[4].surface == Surface::Courtyard);
   assert(commands[0].points.size() == 4);
   assert(commands[1].points.size() == 4);
   assert(commands[2].points.size() >= 3);
   assert(commands[3].points.size() >= 3);
+  assert(commands[4].points.size() >= 3);
 }
 
 void assertFlatFallbacks() {
   auto building = buildingWithCourtyard();
   auto commands = render(building, 466, 466, map_projection::Mode::Flat,
                          false);
-  assert(commands.size() == 2);
-  assert(commands[0].surface == Surface::Roof);
-  assert(commands[1].surface == Surface::Courtyard);
+  assert(commands.size() == 3);
+  assert(commands[0].surface == Surface::CourtyardCapture);
+  assert(commands[1].surface == Surface::Roof);
+  assert(commands[2].surface == Surface::Courtyard);
 
   building.flags = map_building_renderer::kBuildingFlagFlatBase;
   commands = render(building, 466, 466, map_projection::Mode::BirdsEye, true);
-  assert(commands.size() == 2);
-  assert(commands[0].surface == Surface::Roof);
-  assert(commands[1].surface == Surface::Courtyard);
+  assert(commands.size() == 3);
+  assert(commands[0].surface == Surface::CourtyardCapture);
+  assert(commands[1].surface == Surface::Roof);
+  assert(commands[2].surface == Surface::Courtyard);
 }
 
 void assertOrderingAndBudget() {
   using map_building_renderer::OrderKey;
+  using Admission = map_building_renderer::ExtrusionBudget::Admission;
   std::vector<OrderKey> keys = {
       {20.0, 10, 10, 1}, {30.0, 50, 50, 2}, {20.0, 5, 10, 3},
       {20.0, 5, 9, 4},   {20.0, 5, 9, 1},
@@ -126,44 +134,111 @@ void assertOrderingAndBudget() {
   assert(keys[4].blockY == 10 && keys[4].blockX == 10);
 
   map_building_renderer::ExtrusionBudget budget;
-  assert(budget.reserve(0, 12));
+  assert(budget.reserve(0, 12) == Admission::Selected);
   assert(budget.records == 1 && budget.points == 12);
-  assert(!budget.reserve(map_building_renderer::kBuildingFlagFlatBase, 12));
+  assert(budget.reserve(map_building_renderer::kBuildingFlagFlatBase, 12) ==
+         Admission::IneligibleFlatBase);
   assert(budget.records == 1 && budget.points == 12);
-  assert(!budget.reserve(
-      0, map_building_renderer::kMaximumExtrudedBuildingPoints));
+  assert(budget.reserve(
+             0, map_building_renderer::kMaximumExtrudedBuildingPoints) ==
+         Admission::PointLimit);
 
   map_building_renderer::ExtrusionBudget recordBudget;
   for (size_t index = 0;
        index < map_building_renderer::kMaximumExtrudedBuildingRecords;
        ++index) {
-    assert(recordBudget.reserve(0, 1));
+    assert(recordBudget.reserve(0, 1) == Admission::Selected);
   }
-  assert(!recordBudget.reserve(0, 1));
+  assert(recordBudget.reserve(0, 1) == Admission::RecordLimit);
 
   struct Candidate {
     OrderKey key;
-    size_t points;
-    bool selected = false;
+    size_t pointCount;
+    bool render = true;
+    bool extrude = false;
+
+    uint8_t buildingFlags() const { return 0; }
+    bool eligibleForExtrusion() const { return true; }
   };
   std::vector<Candidate> dense = {
-      {{40.0, 0, 0, 0}, 8192, false},
-      {{30.0, 0, 0, 1}, 8192, false},
-      {{20.0, 0, 0, 2}, 8192, false},
-      {{10.0, 0, 0, 3}, 8192, false},
+      {{40.0, 0, 0, 0}, 8192, true, false},
+      {{30.0, 0, 0, 1}, 8192, true, false},
+      {{20.0, 0, 0, 2}, 8192, true, false},
+      {{10.0, 0, 0, 3}, 8192, true, false},
   };
   std::sort(dense.begin(), dense.end(), [](const Candidate &left,
                                             const Candidate &right) {
     return map_building_renderer::rendersBefore(left.key, right.key);
   });
-  map_building_renderer::ExtrusionBudget denseBudget;
-  for (auto item = dense.rbegin(); item != dense.rend(); ++item)
-    item->selected = denseBudget.reserve(0, item->points);
-  assert(!dense[0].selected);
-  assert(dense[1].selected && dense[2].selected && dense[3].selected);
-  assert(denseBudget.records == 3);
-  assert(denseBudget.points ==
+  const auto selection = map_building_renderer::selectNearestForExtrusion(
+      dense.rbegin(), dense.rend());
+  assert(!dense[0].extrude);
+  assert(dense[1].extrude && dense[2].extrude && dense[3].extrude);
+  assert(selection.eligibleRecords == 4);
+  assert(selection.selectedRecords == 3);
+  assert(selection.selectedPoints ==
          map_building_renderer::kMaximumExtrudedBuildingPoints);
+  assert(selection.flatOverflow() == 1);
+  assert(selection.recordLimitOverflow == 0);
+  assert(selection.pointLimitOverflow == 1);
+
+  std::vector<Candidate> recordDense;
+  recordDense.reserve(
+      map_building_renderer::kMaximumExtrudedBuildingRecords + 2);
+  for (size_t index = 0;
+       index < map_building_renderer::kMaximumExtrudedBuildingRecords + 2;
+       ++index) {
+    recordDense.push_back(
+        {{static_cast<double>(index), 0, 0,
+          static_cast<uint16_t>(index)},
+         1, true, false});
+  }
+  const auto recordSelection =
+      map_building_renderer::selectNearestForExtrusion(
+          recordDense.rbegin(), recordDense.rend());
+  assert(recordSelection.selectedRecords ==
+         map_building_renderer::kMaximumExtrudedBuildingRecords);
+  assert(recordSelection.recordLimitOverflow == 2);
+  assert(recordSelection.pointLimitOverflow == 0);
+
+  std::vector<Candidate> renderDense = {
+      {{40.0, 0, 0, 0}, 16384, true, false},
+      {{30.0, 0, 0, 1}, 16384, true, false},
+      {{20.0, 0, 0, 2}, 16384, true, false},
+      {{10.0, 0, 0, 3}, 16384, true, false},
+  };
+  const auto renderSelection =
+      map_building_renderer::selectNearestForRendering(
+          renderDense.rbegin(), renderDense.rend());
+  assert(!renderDense[0].render);
+  assert(renderDense[1].render && renderDense[2].render &&
+         renderDense[3].render);
+  assert(renderSelection.selectedRecords == 3);
+  assert(renderSelection.selectedPoints ==
+         map_building_renderer::kMaximumRenderedBuildingPoints);
+  assert(renderSelection.pointLimitOverflow == 1);
+
+  std::vector<Candidate> retained;
+  for (const auto &candidate :
+       {Candidate{{50.0, 0, 0, 0}, 1, true, false},
+        Candidate{{10.0, 0, 0, 1}, 1, true, false},
+        Candidate{{40.0, 0, 0, 2}, 1, true, false},
+        Candidate{{20.0, 0, 0, 3}, 1, true, false},
+        Candidate{{30.0, 0, 0, 4}, 1, true, false}}) {
+    map_building_renderer::retainNearestCandidate(
+        retained, candidate, 3,
+        [](const Candidate &left, const Candidate &right) {
+          return map_building_renderer::rendersBefore(left.key, right.key);
+        });
+  }
+  std::sort(retained.begin(), retained.end(),
+            [](const Candidate &left, const Candidate &right) {
+              return map_building_renderer::rendersBefore(left.key, right.key);
+            });
+  assert(retained.size() == 3);
+  assert(retained[0].key.depth == 30.0);
+  assert(retained[1].key.depth == 20.0);
+  assert(retained[2].key.depth == 10.0);
 }
 
 map_building_block::Building buildingCrossingNearPlane(
@@ -232,11 +307,12 @@ void assertNearPlaneMatrix() {
                              [](const Command &command) {
                                return command.surface == Surface::Roof;
                              }));
-          assert(std::any_of(commands.begin(), commands.end(),
-                             [](const Command &command) {
-                               return command.surface != Surface::Roof &&
-                                      command.surface != Surface::Courtyard;
-                             }));
+          const auto wallCount = std::count_if(
+              commands.begin(), commands.end(),
+              [](const Command &command) { return isWall(command.surface); });
+          // One rear wall is wholly behind the near plane. Both crossing side
+          // walls and the ordinary front wall must survive.
+          assert(wallCount == 3);
           for (const auto &command : commands) {
             assert(command.points.size() >= 3);
             for (const auto &point : command.points) {
@@ -248,6 +324,27 @@ void assertNearPlaneMatrix() {
       }
     }
   }
+}
+
+void assertCourtyardRestoresRealUnderlay() {
+  constexpr int32_t width = 8;
+  constexpr int32_t height = 8;
+  std::vector<uint16_t> underlay(width * height);
+  for (size_t index = 0; index < underlay.size(); ++index)
+    underlay[index] = static_cast<uint16_t>(index + 1);
+  std::vector<uint16_t> canvas(width * height, 0xFFFF);
+  const std::vector<ScreenPoint> courtyard = {
+      {2, 2}, {6, 2}, {6, 6}, {2, 6},
+  };
+  std::vector<int32_t> nodes(courtyard.size());
+  const bool restored = map_building_renderer::restoreCourtyardUnderlay(
+      courtyard, canvas.data(), width, height, width, underlay.data(),
+      underlay.size(), nodes, []() { return false; });
+  assert(restored);
+  assert(canvas[3 * width + 3] == underlay[3 * width + 3]);
+  assert(canvas[5 * width + 5] == underlay[5 * width + 5]);
+  assert(canvas[0] == 0xFFFF);
+  assert(canvas[7 * width + 7] == 0xFFFF);
 }
 
 void assertInterruptionPropagates() {
@@ -274,6 +371,7 @@ int main() {
   assertFlatFallbacks();
   assertOrderingAndBudget();
   assertNearPlaneMatrix();
+  assertCourtyardRestoresRealUnderlay();
   assertInterruptionPropagates();
   return 0;
 }

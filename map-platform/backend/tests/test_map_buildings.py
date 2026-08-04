@@ -155,6 +155,37 @@ class MapBuildingContractTests(unittest.TestCase):
                 3,
             )
 
+    def test_target_three_idempotent_replay_survives_gate_rollback(self):
+        installation_id = "inst_v2_" + "c" * 32
+        request = {
+            **self._request(),
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-target3-idempotent",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            enabled = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+                building_target3_allowlist=frozenset({installation_id}),
+            )
+            created = enabled.create_job(request)
+
+            rolled_back = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=False,
+            )
+            replayed = rolled_back.create_job(dict(request))
+            self.assertEqual(replayed.job_id, created.job_id)
+
+            changed = {**request, "bbox": [103.76, 1.25, 103.94, 1.38]}
+            with self.assertRaisesRegex(ValueError, "different map request"):
+                rolled_back.create_job(changed)
+
     def test_calibration_window_comes_from_checked_in_height_rules(self):
         repo_root = Path(__file__).resolve().parents[3]
         window = load_building_calibration_window(

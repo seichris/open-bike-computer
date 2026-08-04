@@ -86,6 +86,27 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("mapNavigation3DBuildingsEnabled", expression)
         self.assertNotIn("hasRoute", expression)
 
+    def test_dense_scene_selection_uses_shared_nearest_first_policy(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn(
+            "map_building_renderer::selectNearestForExtrusion(\n"
+            "                buildingQueue.rbegin(), buildingQueue.rend())",
+            render_body,
+        )
+        self.assertIn("item.extrude", render_body)
+        self.assertIn("buildingSelection.flatOverflow()", render_body)
+        self.assertIn("buildingSelection.recordLimitOverflow", render_body)
+        self.assertIn("buildingSelection.pointLimitOverflow", render_body)
+
+    def test_total_building_work_is_bounded_before_surface_rendering(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn("kMaximumRenderedBuildingPointsPerRecord", render_body)
+        self.assertIn("kMaximumRenderedBuildingRecords", render_body)
+        self.assertIn("retainNearestCandidate", render_body)
+        self.assertIn("selectNearestForRendering", render_body)
+        self.assertIn("kMaximumBuildingRenderTimeMs", render_body)
+        self.assertIn("if (!item.render)", render_body)
+
     def test_navigation_screen_retains_destination_picker(self):
         create_body = function_body(MAIN_SCREEN_SOURCE, "void createMainScr")
         update_body = function_body(MAIN_SCREEN_SOURCE, "void updateNavEvent")

@@ -248,6 +248,49 @@ class BuildingPipelineTests(unittest.TestCase):
         )
         self.assertEqual(relation_records, 2)
 
+    def test_ring_winding_and_start_vertex_encode_canonically(self):
+        outer = [(0, 0), (80, 0), (80, 80), (0, 80)]
+        hole = [(20, 20), (20, 60), (60, 60), (60, 20)]
+
+        def closed_variant(points, rotation, reverse):
+            values = list(reversed(points)) if reverse else list(points)
+            values = values[rotation:] + values[:rotation]
+            return [*values, values[0]]
+
+        canonical = Polygon(
+            closed_variant(outer, 0, False),
+            [closed_variant(hole, 0, False)],
+        )
+        equivalent = Polygon(
+            closed_variant(outer, 2, True),
+            [closed_variant(hole, 1, True)],
+        )
+
+        encoded = []
+        records_by_variant = []
+        for geometry in (canonical, equivalent):
+            buildings, _report, _flat = prepare_buildings(
+                [feature(250, geometry, '"height"=>"18"')], self.rules
+            )
+            records, _stats = clip_buildings(
+                buildings, box(0, 0, 100, 100), 0, 0
+            )
+            records_by_variant.append(records)
+            encoded.append(_building_section(records)[0])
+
+        self.assertEqual(encoded[0], encoded[1])
+        self.assertEqual(records_by_variant[0], records_by_variant[1])
+
+        def signed_area(points):
+            return sum(
+                start[0] * end[1] - end[0] * start[1]
+                for start, end in zip(points, [*points[1:], points[0]])
+            )
+
+        rings = records_by_variant[0][0]["rings"]
+        self.assertGreater(signed_area(rings[0]["points"]), 0)
+        self.assertLess(signed_area(rings[1]["points"]), 0)
+
     def test_excess_holes_are_bounded_deterministically(self):
         holes = []
         for index in range(MAX_BUILDING_RINGS + 8):

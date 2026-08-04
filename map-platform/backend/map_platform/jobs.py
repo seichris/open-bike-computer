@@ -1227,13 +1227,28 @@ class MapJobService:
         from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
         from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 
-        requested_format = renderer_format_version(request)
         client_installation_id = _client_identifier(request, "clientInstallationId")
         client_request_id = _client_identifier(request, "clientRequestId")
         if bool(client_installation_id) != bool(client_request_id):
             raise ValueError(
                 "clientInstallationId and clientRequestId must be provided together"
             )
+        if client_installation_id and client_request_id:
+            existing = self.find_by_client_request(
+                client_installation_id,
+                client_request_id,
+            )
+            if existing is not None:
+                if existing.request != request:
+                    raise ValueError(
+                        "clientRequestId was already used for a different map request"
+                    )
+                # Generation gates govern new work. An exact idempotent replay
+                # must keep returning the job created under the earlier gate
+                # state, including after an allowlist rollback.
+                return client_installation_id, client_request_id, existing
+
+        requested_format = renderer_format_version(request)
         if (
             requested_format == LABEL_RENDERER_FORMAT_VERSION
             and not self.label_target2_enabled
@@ -1258,13 +1273,7 @@ class MapJobService:
             )
         if not client_installation_id or not client_request_id:
             return client_installation_id, client_request_id, None
-        existing = self.find_by_client_request(
-            client_installation_id,
-            client_request_id,
-        )
-        if existing is not None and existing.request != request:
-            raise ValueError("clientRequestId was already used for a different map request")
-        return client_installation_id, client_request_id, existing
+        return client_installation_id, client_request_id, None
 
     def get_job(self, job_id: str) -> MapJob:
         return self.store.get(job_id)
