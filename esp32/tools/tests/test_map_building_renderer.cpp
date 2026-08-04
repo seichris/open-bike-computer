@@ -381,6 +381,21 @@ void assertInterruptionPropagates() {
   assert(deadlineChecks >= 2);
 }
 
+void assertAllocationFailureFailsClosed() {
+  bool allocationFailureObserved = false;
+  const bool completed = map_building_renderer::runAllocationSafe(
+      []() -> bool { throw std::bad_alloc(); },
+      [&]() { allocationFailureObserved = true; });
+  assert(!completed);
+  assert(allocationFailureObserved);
+
+  allocationFailureObserved = false;
+  const bool successful = map_building_renderer::runAllocationSafe(
+      []() { return true; }, [&]() { allocationFailureObserved = true; });
+  assert(successful);
+  assert(!allocationFailureObserved);
+}
+
 } // namespace
 
 int main() {
@@ -392,5 +407,6 @@ int main() {
   assertNearPlaneMatrix();
   assertCourtyardRestoresRealUnderlay();
   assertInterruptionPropagates();
+  assertAllocationFailureFailsClosed();
   return 0;
 }

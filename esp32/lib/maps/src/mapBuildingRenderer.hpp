@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 namespace map_building_renderer {
 
@@ -29,6 +30,16 @@ constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
 struct NeverStop {
   constexpr bool operator()() const { return false; }
 };
+
+template <typename Work, typename OnAllocationFailure>
+bool runAllocationSafe(Work work, OnAllocationFailure onAllocationFailure) {
+  try {
+    return work();
+  } catch (const std::bad_alloc &) {
+    onAllocationFailure();
+    return false;
+  }
+}
 
 constexpr bool eligibleExtrusionZoom(uint8_t zoom) {
   return zoom >= map_transform::kMinimumRuntimeZoom &&

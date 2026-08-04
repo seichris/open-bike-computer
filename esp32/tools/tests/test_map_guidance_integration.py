@@ -111,6 +111,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             render_body.index("for (MapBlock *block : memCache.blocks)"),
         )
         self.assertIn("projectedFootprintAreaPixels", render_body)
+        self.assertIn("if (mayExtrude && extrusionZoomEligible)", render_body)
         self.assertIn("shouldStopBuildingWork", render_body)
         self.assertIn("eligibleExtrusionZoom(zoom)", render_body)
         self.assertIn("deadlineExceeded=%u", render_body)
@@ -131,11 +132,25 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         repaint_body = render_body[repaint_start:repaint_end]
         self.assertGreaterEqual(repaint_body.count("shouldStopBuildingWork()"), 3)
-        self.assertIn("buildingScreenInterrupted", repaint_body)
-        self.assertIn("stopRoadRepaint", repaint_body)
+        self.assertGreaterEqual(
+            repaint_body.count("return abortStoppedBuildingWork(1)"), 3
+        )
+        self.assertNotIn("stopRoadRepaint", repaint_body)
         self.assertLess(
             repaint_body.rindex("shouldStopBuildingWork()"),
             repaint_body.index("const uint32_t buildingDrawMs"),
+        )
+
+    def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn("runAllocationSafe", render_body)
+        self.assertIn("buildingAllocationFailed", render_body)
+        self.assertIn("buildingDeadlineAborted", render_body)
+        self.assertIn('reason=allocation', render_body)
+        self.assertIn('reason=deadline', render_body)
+        self.assertRegex(
+            render_body,
+            r"if \(!buildingPassCompleted\)\s*\{[\s\S]*?return false;\s*\}",
         )
 
     def test_navigation_screen_retains_destination_picker(self):

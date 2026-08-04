@@ -2575,6 +2575,11 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       uint8_t buildingFlags() const { return building->flags; }
       bool eligibleForExtrusion() const { return extrusionCandidate; }
     };
+    bool buildingAllocationFailed = false;
+    bool buildingDeadlineAborted = false;
+    const bool buildingPassCompleted =
+        map_building_renderer::runAllocationSafe(
+            [&]() -> bool {
     std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
         buildingQueue;
     const auto buildingRendersBefore =
@@ -2627,6 +2632,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (buildingDeadlineReached()) {
         buildingDeadlineExceeded = true;
         return true;
+      }
+      return false;
+    };
+    const auto abortStoppedBuildingWork = [&](size_t timeOverflow) -> bool {
+      if (buildingDeadlineExceeded) {
+        buildingDeadlineAborted = true;
+        const size_t countedOverflow = std::max<size_t>(1, timeOverflow);
+        renderTimeOverflow += countedOverflow;
+        renderTimeOverflowTotal += countedOverflow;
       }
       return false;
     };
@@ -2702,11 +2716,16 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               static_cast<double>(block->offset.y) +
                   (static_cast<double>(building.minY) + building.maxY) / 2.0};
           const auto centerGround = projection.groundForWorld(center);
-          const double projectedArea =
-              map_building_renderer::projectedFootprintAreaPixels(
-                  building, block->offset.x, block->offset.y, projection,
-                  buildingEligibilityGround, buildingEligibilityClipped,
-                  shouldStopBuildingWork);
+          const bool extrusionZoomEligible =
+              map_building_renderer::eligibleExtrusionZoom(zoom);
+          double projectedArea = 0.0;
+          if (mayExtrude && extrusionZoomEligible) {
+            projectedArea =
+                map_building_renderer::projectedFootprintAreaPixels(
+                    building, block->offset.x, block->offset.y, projection,
+                    buildingEligibilityGround, buildingEligibilityClipped,
+                    shouldStopBuildingWork);
+          }
           if (buildingScreenInterrupted || buildingDeadlineExceeded) {
             stopBuildingPrepass = true;
             break;
@@ -2719,8 +2738,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               pointCount,
               false,
               false,
-              extrudeBuildings &&
-                  map_building_renderer::eligibleExtrusionZoom(zoom) &&
+              mayExtrude && extrusionZoomEligible &&
                   projectedArea >= map_building_renderer::
                                        kMinimumBuildingExtrusionAreaPixels};
           map_building_renderer::retainNearestCandidate(
@@ -2761,12 +2779,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           }
         }
       }
-      if (buildingScreenInterrupted)
-        return false;
       if (buildingDeadlineExceeded) {
         buildingPrepassDeadlineExceeded = true;
-        renderTimeOverflow = std::max<size_t>(1, buildingQueue.size());
+        return abortStoppedBuildingWork(buildingQueue.size());
       }
+      if (buildingScreenInterrupted)
+        return false;
       renderRecordOverflowTotal += renderRecordLimitOverflow;
       renderPointOverflowTotal += renderSelection.pointLimitOverflow;
       renderOversizedOverflowTotal += oversizedBuildingCount;
@@ -2824,10 +2842,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (!item.render)
         continue;
       if (shouldStopBuildingWork()) {
-        if (buildingScreenInterrupted)
-          return false;
-        renderTimeOverflow += countRenderTimeOverflowFrom(itemIndex);
-        break;
+        return abortStoppedBuildingWork(
+            countRenderTimeOverflowFrom(itemIndex));
       }
       bool courtyardUnderlayReady = false;
       bool courtyardUnderlayUnavailable = false;
@@ -2930,11 +2946,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
           &buildingSurfaceStats, shouldStopBuildingWork);
       if (!surfacesRendered) {
         shouldStopBuildingWork();
-        if (buildingScreenInterrupted)
-          return false;
         if (buildingDeadlineExceeded) {
-          renderTimeOverflow += countRenderTimeOverflowFrom(itemIndex);
-          break;
+          return abortStoppedBuildingWork(
+              countRenderTimeOverflowFrom(itemIndex));
         }
         return false;
       }
@@ -2942,8 +2956,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       if (item.extrude)
         ++extrudedBuildings;
     }
-    if (renderTimeOverflow != 0)
-      renderTimeOverflowTotal += renderTimeOverflow;
     const uint64_t generatedWallFaces =
         buildingSurfaceStats.generatedWallFaces;
     const uint64_t suppressedWallFaces =
@@ -2954,13 +2966,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     // Building roofs and walls are composed across all loaded blocks. Redraw
     // roads once above them so navigation-relevant geometry remains legible.
     if (renderedBuildings != 0) {
-      bool stopRoadRepaint = false;
       for (MapBlock *block : memCache.blocks) {
-        if (shouldStopBuildingWork()) {
-          if (buildingScreenInterrupted)
-            return false;
-          break;
-        }
+        if (shouldStopBuildingWork())
+          return abortStoppedBuildingWork(1);
         if (!block->inView)
           continue;
         ScreenMapRenderSettings blockStyle = style;
@@ -2969,12 +2977,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 style.visibilityMask, block->formatVersion);
         const BBox screenBbox = viewPort.bbox - block->offset;
         for (const auto &line : block->polylines) {
-          if (shouldStopBuildingWork()) {
-            if (buildingScreenInterrupted)
-              return false;
-            stopRoadRepaint = true;
-            break;
-          }
+          if (shouldStopBuildingWork())
+            return abortStoppedBuildingWork(1);
           if (zoom > line.maxZoom || !line.bbox.intersects(screenBbox) ||
               line.points.size() < 2 ||
               !isLineVisible(line.typeId, line.color, line.width, blockStyle))
@@ -2986,12 +2990,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                   ? blockStyle.streetLineWidth
                   : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
           for (size_t index = 1; index < line.points.size(); ++index) {
-            if (((index - 1U) & 0x0FU) == 0 && shouldStopBuildingWork()) {
-              if (buildingScreenInterrupted)
-                return false;
-              stopRoadRepaint = true;
-              break;
-            }
+            if (((index - 1U) & 0x0FU) == 0 && shouldStopBuildingWork())
+              return abortStoppedBuildingWork(1);
             auto start = projection.groundForWorld(
                 {static_cast<double>(block->offset.x + line.points[index - 1].x),
                  static_cast<double>(block->offset.y + line.points[index - 1].y)});
@@ -3012,12 +3012,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 projection.scaledLineWidth(
                     baseWidth, (p1.depthScale + p2.depthScale) / 2.0, 24));
           }
-          if (stopRoadRepaint)
-            break;
         }
-        if (stopRoadRepaint)
-          break;
       }
+      if (shouldStopBuildingWork())
+        return abortStoppedBuildingWork(1);
     }
     const uint32_t buildingDrawMs = millis() - buildingDrawStartMs;
     MAPIO_LOG("MAPIO: buildings visibleRecords=%u visiblePoints=%llu "
@@ -3071,6 +3069,18 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                   [](size_t total, const MapBlock *block) {
                     return total + block->buildingData.decodedBytes();
                   }));
+
+              return true;
+            },
+            [&]() { buildingAllocationFailed = true; });
+    if (!buildingPassCompleted) {
+      if (buildingAllocationFailed) {
+        MAPIO_LOG("MAPIO: buildings aborted reason=allocation\n");
+      } else if (buildingDeadlineAborted) {
+        MAPIO_LOG("MAPIO: buildings aborted reason=deadline\n");
+      }
+      return false;
+    }
 
     if (drawLabels &&
         !drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
