@@ -245,6 +245,9 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     }
     server_.begin();
     server_.setNoDelay(true);
+    Serial.printf(
+        "DEVICE_TRANSFER_HTTP: listener started port=%u free_heap=%u\n",
+        static_cast<unsigned>(port_), static_cast<unsigned>(ESP.getFreeHeap()));
   }
   if (!enabled && wasEnabled) {
     // Revoke the request generation before stopping the listener/AP. Network
@@ -298,6 +301,11 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       powerLockHeld_ = acquiredPowerLock;
     }
     unlockState();
+    Serial.printf(
+        "DEVICE_TRANSFER_HTTP: worker create result=%ld handle=%p "
+        "free_heap=%u\n",
+        static_cast<long>(created), static_cast<void *>(worker),
+        static_cast<unsigned>(ESP.getFreeHeap()));
     if (created != pdPASS) {
       server_.stop();
       if (startedAp_) {
@@ -330,6 +338,11 @@ void HttpTransferServer::setLastError(const std::string &code,
 void HttpTransferServer::process() {}
 
 void HttpTransferServer::runWorker() {
+  Serial.printf(
+      "DEVICE_TRANSFER_HTTP: worker started core=%d free_heap=%u stack_words=%u\n",
+      xPortGetCoreID(), static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  uint32_t lastHealthLogMs = 0;
   while (true) {
     lockState();
     const bool enabled = enabled_;
@@ -351,6 +364,12 @@ void HttpTransferServer::runWorker() {
     }
     WiFiClient client = server_.accept();
     if (client) {
+      Serial.printf(
+          "DEVICE_TRANSFER_HTTP: accepted client stations=%u free_heap=%u "
+          "stack_words=%u\n",
+          static_cast<unsigned>(WiFi.softAPgetStationNum()),
+          static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
       lockState();
       requestInProgress_ = true;
       currentRequestAuthorized_ = false;
@@ -366,6 +385,17 @@ void HttpTransferServer::runWorker() {
       unlockState();
       ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
     } else {
+      const uint32_t now = millis();
+      if (now - lastHealthLogMs >= 1000) {
+        lastHealthLogMs = now;
+        Serial.printf(
+            "DEVICE_TRANSFER_HTTP: waiting stations=%u ip=%s free_heap=%u "
+            "stack_words=%u\n",
+            static_cast<unsigned>(WiFi.softAPgetStationNum()),
+            WiFi.softAPIP().toString().c_str(),
+            static_cast<unsigned>(ESP.getFreeHeap()),
+            static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+      }
       vTaskDelay(pdMS_TO_TICKS(2));
     }
   }
