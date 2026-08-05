@@ -1566,7 +1566,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         XCTAssertEqual(
             diagnostics.issueMessage,
             "Live Activity unavailable: iOS reports that Live Activities "
-                + "are disabled for BikeComputer."
+                + "are disabled for Bicino."
         )
     }
 
