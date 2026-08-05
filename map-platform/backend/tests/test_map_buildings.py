@@ -13,6 +13,8 @@ from map_platform.map_buildings import (
 )
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.reuse import aligned_projected_extent
+from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
 from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
 
@@ -283,6 +285,102 @@ class MapBuildingContractTests(unittest.TestCase):
             )
             self.assertIn("--option=types=multipolygon,building", runner.args)
             self.assertIn("-b", runner.args)
+
+    def test_target_three_build_aligns_polygon_output_to_complete_blocks(self):
+        request = self._request()
+        request.pop("bbox")
+        request["mode"] = "custom_polygon"
+        request["geometry"] = {
+            "type": "Polygon",
+            "coordinates": [[
+                [103.75, 1.24],
+                [103.90, 1.24],
+                [103.90, 1.35],
+                [103.75, 1.24],
+            ]],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+            repo_root = Path(__file__).resolve().parents[3]
+            pipeline = MapBuildPipeline(
+                PipelinePaths(repo_root, root / "work", root / "packs"),
+                runner=CapturingRunner(),
+            )
+            observed = {}
+
+            def capture_pbf(_job, _source, _output, *, bounds, force_bounds):
+                observed["source"] = bounds
+                self.assertTrue(force_bounds)
+
+            def capture_features(
+                _job,
+                _prefix,
+                _output,
+                *,
+                bounds,
+                on_progress,
+            ):
+                del on_progress
+                observed["output"] = bounds
+                return {}
+
+            with patch.object(
+                pipeline,
+                "_source_pbf_path",
+                return_value=root / "source.pbf",
+            ), patch.object(
+                pipeline,
+                "_extract_pbf",
+                side_effect=capture_pbf,
+            ), patch.object(
+                pipeline,
+                "_convert_to_geojson",
+            ), patch.object(
+                pipeline,
+                "_extract_features",
+                side_effect=capture_features,
+            ), patch.object(
+                pipeline,
+                "_stage_vectmap",
+            ), patch.object(
+                pipeline,
+                "_package_map",
+                return_value=object(),
+            ):
+                pipeline.build(job)
+
+            output_extent = aligned_projected_extent(observed["output"])
+            self.assertEqual(
+                output_extent,
+                aligned_projected_extent(job.geometry.bounds),
+            )
+            self.assertAlmostEqual(
+                reuse_module._lon_to_x(observed["output"].min_lon),
+                output_extent[0],
+            )
+            self.assertAlmostEqual(
+                reuse_module._lat_to_y(observed["output"].min_lat),
+                output_extent[1],
+            )
+            self.assertAlmostEqual(
+                reuse_module._lon_to_x(observed["output"].max_lon),
+                output_extent[2],
+            )
+            self.assertAlmostEqual(
+                reuse_module._lat_to_y(observed["output"].max_lat),
+                output_extent[3],
+            )
+            self.assertLessEqual(
+                observed["output"].min_lon,
+                job.geometry.bounds.min_lon,
+            )
+            self.assertGreaterEqual(
+                observed["output"].max_lon,
+                job.geometry.bounds.max_lon,
+            )
+            self.assertLess(observed["source"].min_lon, observed["output"].min_lon)
+            self.assertGreater(observed["source"].max_lon, observed["output"].max_lon)
 
     def test_manifest_derives_signed_building_summary_from_fmb4(self):
         with tempfile.TemporaryDirectory() as tmp:

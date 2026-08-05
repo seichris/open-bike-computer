@@ -569,7 +569,7 @@ private enum MapPlusNavigationDefaults {
     static let streetLineWidth: Double = 4
     static let positionMarkerScale: Double = 2
     static let zoomLevel = 3
-    static let showBuildings = true
+    static let showBuildings = false
     static let showGreenSpace = false
     static let showPaths = false
     static let showTracks = false
@@ -697,6 +697,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
     @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
     @Published var isPowerButtonHonkEnabled: Bool = false
+    private var isLoadingSettings = true
+    private var shouldApply3DBuildingVisibilityDefault = false
     
     // Feature Visibility
     @Published var showBuildings: Bool = true
@@ -709,7 +711,21 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
-    @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings
+    @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings {
+        didSet {
+            if !isLoadingSettings && oldValue != mapPlusNavigationShowBuildings {
+                shouldApply3DBuildingVisibilityDefault = false
+                UserDefaults.standard.set(
+                    mapPlusNavigationShowBuildings,
+                    forKey: SettingsKeys.mapPlusNavigationShowBuildings
+                )
+                UserDefaults.standard.set(
+                    false,
+                    forKey: SettingsKeys.mapPlusNavigationBuildingVisibilityDefaultPending
+                )
+            }
+        }
+    }
     @Published var mapPlusNavigationShowGreenSpace = MapPlusNavigationDefaults.showGreenSpace
     @Published var mapPlusNavigationShowPaths = MapPlusNavigationDefaults.showPaths
     @Published var mapPlusNavigationShowTracks = MapPlusNavigationDefaults.showTracks
@@ -880,6 +896,8 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationLabelTextSize = "mapPlusNavigationSettings.labelTextSize"
         static let mapPlusNavigationLabelOrientation = "mapPlusNavigationSettings.labelOrientation"
         static let mapPlusNavigationShowBuildings = "mapPlusNavigationSettings.showBuildings"
+        static let mapPlusNavigationBuildingVisibilityDefaultPending =
+            "mapPlusNavigationSettings.buildingVisibilityDefaultPending.v1"
         static let mapPlusNavigationShowGreenSpace = "mapPlusNavigationSettings.showGreenSpace"
         static let mapPlusNavigationShowPaths = "mapPlusNavigationSettings.showPaths"
         static let mapPlusNavigationShowTracks = "mapPlusNavigationSettings.showTracks"
@@ -938,6 +956,7 @@ class BLEManager: NSObject, ObservableObject {
         )
 #endif
         loadSettings()
+        isLoadingSettings = false
         loadLastPeripheralIdentifier()
         migrateLegacyPeripheralIfNeeded()
         refreshKnownDevices()
@@ -1159,6 +1178,21 @@ class BLEManager: NSObject, ObservableObject {
         let shouldMigrateMapPlusNavigationProfile = !defaults.bool(
             forKey: SettingsKeys.mapPlusNavigationProfileMigrated
         )
+        if let pendingDefault = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationBuildingVisibilityDefaultPending
+        ) as? Bool {
+            shouldApply3DBuildingVisibilityDefault = pendingDefault
+        } else {
+            shouldApply3DBuildingVisibilityDefault =
+                !hasPersistedMapProfile &&
+                defaults.object(
+                    forKey: SettingsKeys.mapPlusNavigationShowBuildings
+                ) == nil
+            defaults.set(
+                shouldApply3DBuildingVisibilityDefault,
+                forKey: SettingsKeys.mapPlusNavigationBuildingVisibilityDefaultPending
+            )
+        }
         if shouldMigrateMapPlusNavigationProfile && hasPersistedMapProfile {
             mapPlusNavigationMinPolygonSize = minPolygonSize
             mapPlusNavigationDetailLevel = detailLevel
@@ -5467,6 +5501,18 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
         let has3DBuildings =
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
+        if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
+            shouldApply3DBuildingVisibilityDefault = false
+            UserDefaults.standard.set(
+                true,
+                forKey: SettingsKeys.mapPlusNavigationShowBuildings
+            )
+            UserDefaults.standard.set(
+                false,
+                forKey: SettingsKeys.mapPlusNavigationBuildingVisibilityDefaultPending
+            )
+            mapPlusNavigationShowBuildings = true
+        }
         if let powerButtonConfig {
             guard hasPowerButtonHonk,
                   powerButtonConfig[0] <= 1,

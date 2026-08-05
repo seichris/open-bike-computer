@@ -15,6 +15,7 @@ from building_height import HeightProvenance, HeightRules
 from building_pipeline import (
     BUILDING_FLAG_FLAT_BASE,
     clip_buildings,
+    collect_building_features,
     prepare_buildings,
     projected_selection_geometry,
 )
@@ -62,6 +63,45 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(seam_edges, [False])
         self.assertGreater(stats["emittedWallCount"], 0)
         self.assertGreater(stats["suppressedWallCount"], 0)
+
+    def test_collects_closed_building_parts_from_the_gdal_line_layer(self):
+        outline = feature(
+            1,
+            box(0, 0, 100, 100),
+            '"height"=>"20","building"=>"yes"',
+        )
+        closed_part = feature(
+            2,
+            LineString([(10, 10), (90, 10), (90, 90), (10, 10)]),
+            '"building:part"=>"yes","height"=>"12"',
+            building=None,
+        )
+        closed_part["properties"]["osm_id"] = closed_part["properties"].pop(
+            "osm_way_id"
+        )
+        open_part = feature(
+            3,
+            LineString([(20, 20), (30, 30), (40, 20)]),
+            '"building:part"=>"yes"',
+            building=None,
+        )
+        open_part["properties"]["osm_id"] = open_part["properties"].pop(
+            "osm_way_id"
+        )
+
+        collected = collect_building_features(
+            [outline],
+            [closed_part, open_part],
+        )
+        buildings, report, _flat = prepare_buildings(
+            collected,
+            self.rules,
+            {"partParents": {"w2": "w1"}},
+        )
+
+        self.assertEqual([item.object_key for item in buildings], ["w1", "w2"])
+        self.assertEqual(report["partCount"], 1)
+        self.assertEqual(report["relationAssociationCount"], 1)
 
     def test_fractional_mercator_coordinates_preserve_facade_walls(self):
         geometry = box(10.051, 10.051, 20.051, 20.051)

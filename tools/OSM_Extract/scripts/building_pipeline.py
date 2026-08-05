@@ -12,7 +12,14 @@ import statistics
 from typing import Any, Iterable, Mapping
 
 import yaml
-from shapely.geometry import LineString, MultiPolygon, Polygon, shape
+from shapely.geometry import (
+    LineString,
+    MultiLineString,
+    MultiPolygon,
+    Polygon,
+    mapping,
+    shape,
+)
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 from shapely.ops import transform, unary_union
@@ -73,6 +80,70 @@ def load_relation_index(path: str | Path) -> dict[str, Any]:
     ):
         raise ValueError("building relation index is invalid")
     return value
+
+
+def collect_building_features(
+    polygon_features: Iterable[Mapping[str, Any]],
+    line_features: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return polygon buildings plus closed building parts from GDAL's line layer.
+
+    GDAL's OSM driver classifies a closed way tagged only with
+    ``building:part`` as a line. Convert those closed rings back to polygons
+    before the normal building validation and relation association pass.
+    """
+    collected = list(polygon_features)
+    known_keys = {
+        source_object_key(properties)
+        for feature in collected
+        if isinstance((properties := feature.get("properties")), Mapping)
+    }
+    for feature in line_features:
+        properties = feature.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        normalized_properties = dict(properties)
+        if (
+            normalized_properties.get("osm_way_id") in (None, "")
+            and normalized_properties.get("osm_id") not in (None, "")
+        ):
+            # The GDAL OSM lines layer stores way IDs in osm_id, while the
+            # multipolygons layer exposes closed-way IDs as osm_way_id.
+            normalized_properties["osm_way_id"] = normalized_properties["osm_id"]
+        tags = _building_tags(properties)
+        if tags.get("building:part") in (None, "", "no"):
+            continue
+        object_key = source_object_key(normalized_properties)
+        if not object_key or object_key in known_keys:
+            continue
+        try:
+            geometry = shape(feature.get("geometry"))
+        except (TypeError, ValueError):
+            continue
+        rings = (
+            [geometry]
+            if isinstance(geometry, LineString)
+            else list(geometry.geoms)
+            if isinstance(geometry, MultiLineString)
+            else []
+        )
+        polygons = [
+            Polygon(ring.coords)
+            for ring in rings
+            if len(ring.coords) >= 4 and ring.is_ring
+        ]
+        converted = _polygonal_geometry(unary_union(polygons)) if polygons else None
+        if converted is None or not converted.is_valid:
+            continue
+        collected.append(
+            {
+                **feature,
+                "properties": normalized_properties,
+                "geometry": mapping(converted),
+            }
+        )
+        known_keys.add(object_key)
+    return collected
 
 
 def prepare_buildings(
@@ -351,13 +422,7 @@ def _source_building(
     properties = feature.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    tags = parse_tags(properties.get("other_tags"))
-    for key in (
-        "building", "building:part", "height", "min_height",
-        "building:levels", "building:min_level", "roof:height", "roof:levels",
-    ):
-        if properties.get(key) not in (None, ""):
-            tags[key] = str(properties[key])
+    tags = _building_tags(properties)
     if tags.get("building") in (None, "no") and tags.get("building:part") in (None, "no"):
         return None
     object_key = source_object_key(properties)
@@ -379,6 +444,17 @@ def _source_building(
         geometry=geometry,
         tags=dict(sorted(tags.items())),
     )
+
+
+def _building_tags(properties: Mapping[str, Any]) -> dict[str, str]:
+    tags = parse_tags(properties.get("other_tags"))
+    for key in (
+        "building", "building:part", "height", "min_height",
+        "building:levels", "building:min_level", "roof:height", "roof:levels",
+    ):
+        if properties.get(key) not in (None, ""):
+            tags[key] = str(properties[key])
+    return tags
 
 
 def _containment_parent(part: SourceBuilding, outlines) -> str | None:

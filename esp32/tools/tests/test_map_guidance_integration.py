@@ -178,6 +178,15 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertRegex(
             render_body,
+            r"if\s*\(\s*map_building_renderer::shouldRetryWithoutBuildings\("
+            r"\s*buildingsSuppressed,\s*buildingAllocationFailed,"
+            r"\s*buildingDeadlineAborted,\s*screenCycleInterrupted\s*\)\s*\)"
+            r"\s*\{\s*return\s+Maps::readVectorMap\("
+            r"\s*viewPort,\s*memCache,\s*canvas,\s*zoom,\s*rotation,"
+            r"\s*projection,\s*drawLabels,\s*true\s*\);\s*\}",
+        )
+        self.assertRegex(
+            render_body,
             r"if \(!buildingPassCompleted\)\s*\{[\s\S]*?return false;\s*\}",
         )
 

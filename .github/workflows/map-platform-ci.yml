@@ -56,7 +56,8 @@ jobs:
             tests/test_feature_types.py \
             tests/test_font_asset.py \
             tests/test_label_pipeline.py \
-            tests/test_map_format.py
+            tests/test_map_format.py \
+            tests/test_target3_cli.py
       - name: YAML/config tests
         run: python -m unittest discover -s tests
       - name: Shell syntax

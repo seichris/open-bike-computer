@@ -129,9 +129,13 @@ def reuse_keys(
     )
 
 
-def aligned_processing_bounds(job: MapJob) -> Bounds:
-    """Expand bounding-box builds to complete fixed Web Mercator blocks."""
-    if job.geometry.mode != GeometryMode.CUSTOM_BBOX:
+def aligned_processing_bounds(
+    job: MapJob,
+    *,
+    complete_blocks: bool = False,
+) -> Bounds:
+    """Expand builds that require complete fixed Web Mercator blocks."""
+    if not complete_blocks and job.geometry.mode != GeometryMode.CUSTOM_BBOX:
         return job.geometry.bounds
     min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
     return Bounds(
@@ -160,10 +164,10 @@ def expanded_building_source_bounds(
         raise ValueError("building calibration window is invalid")
     cell = cell_size_meters
     halo = halo_cells
-    min_x = (math.floor(_lon_to_x(bounds.min_lon) / cell) - halo) * cell
-    min_y = (math.floor(_lat_to_y(bounds.min_lat) / cell) - halo) * cell
-    max_x = (math.ceil(_lon_to_x(bounds.max_lon) / cell) + halo) * cell
-    max_y = (math.ceil(_lat_to_y(bounds.max_lat) / cell) + halo) * cell
+    min_x = (_floor_grid_index(_lon_to_x(bounds.min_lon), cell) - halo) * cell
+    min_y = (_floor_grid_index(_lat_to_y(bounds.min_lat), cell) - halo) * cell
+    max_x = (_ceil_grid_index(_lon_to_x(bounds.max_lon), cell) + halo) * cell
+    max_y = (_ceil_grid_index(_lat_to_y(bounds.max_lat), cell) + halo) * cell
     min_x = max(-WEB_MERCATOR_LIMIT_METERS, min_x)
     min_y = max(-WEB_MERCATOR_LIMIT_METERS, min_y)
     max_x = min(WEB_MERCATOR_LIMIT_METERS, max_x)
@@ -177,10 +181,18 @@ def expanded_building_source_bounds(
 
 
 def aligned_projected_extent(bounds: Bounds) -> tuple[int, int, int, int]:
-    min_x = math.floor(_lon_to_x(bounds.min_lon) / MAP_BLOCK_SIZE_METERS) * MAP_BLOCK_SIZE_METERS
-    min_y = math.floor(_lat_to_y(bounds.min_lat) / MAP_BLOCK_SIZE_METERS) * MAP_BLOCK_SIZE_METERS
-    max_x = math.ceil(_lon_to_x(bounds.max_lon) / MAP_BLOCK_SIZE_METERS) * MAP_BLOCK_SIZE_METERS
-    max_y = math.ceil(_lat_to_y(bounds.max_lat) / MAP_BLOCK_SIZE_METERS) * MAP_BLOCK_SIZE_METERS
+    min_x = _floor_grid_index(
+        _lon_to_x(bounds.min_lon), MAP_BLOCK_SIZE_METERS
+    ) * MAP_BLOCK_SIZE_METERS
+    min_y = _floor_grid_index(
+        _lat_to_y(bounds.min_lat), MAP_BLOCK_SIZE_METERS
+    ) * MAP_BLOCK_SIZE_METERS
+    max_x = _ceil_grid_index(
+        _lon_to_x(bounds.max_lon), MAP_BLOCK_SIZE_METERS
+    ) * MAP_BLOCK_SIZE_METERS
+    max_y = _ceil_grid_index(
+        _lat_to_y(bounds.max_lat), MAP_BLOCK_SIZE_METERS
+    ) * MAP_BLOCK_SIZE_METERS
     if max_x <= min_x or max_y <= min_y:
         raise ValueError("map bounds do not cover a complete map block")
     return min_x, min_y, max_x, max_y
@@ -267,20 +279,38 @@ def _document_sha256(document: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _lon_to_x(lon: float) -> int:
-    return round(math.radians(lon) * EARTH_RADIUS_METERS)
+def _grid_ratio(value: float, cell_size: int) -> float:
+    ratio = value / cell_size
+    nearest = round(ratio)
+    return (
+        float(nearest)
+        if math.isclose(ratio, nearest, rel_tol=0.0, abs_tol=1e-9)
+        else ratio
+    )
 
 
-def _lat_to_y(lat: float) -> int:
-    return round(
+def _floor_grid_index(value: float, cell_size: int) -> int:
+    return math.floor(_grid_ratio(value, cell_size))
+
+
+def _ceil_grid_index(value: float, cell_size: int) -> int:
+    return math.ceil(_grid_ratio(value, cell_size))
+
+
+def _lon_to_x(lon: float) -> float:
+    return math.radians(lon) * EARTH_RADIUS_METERS
+
+
+def _lat_to_y(lat: float) -> float:
+    return (
         math.log(math.tan(math.radians(lat) / 2 + math.pi / 4))
         * EARTH_RADIUS_METERS
     )
 
 
-def _x_to_lon(x: int) -> float:
+def _x_to_lon(x: float) -> float:
     return math.degrees(x / EARTH_RADIUS_METERS)
 
 
-def _y_to_lat(y: int) -> float:
+def _y_to_lat(y: float) -> float:
     return math.degrees(2 * math.atan(math.exp(y / EARTH_RADIUS_METERS)) - math.pi / 2)

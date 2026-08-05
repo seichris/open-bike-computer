@@ -257,10 +257,29 @@ class MapReuseTests(unittest.TestCase):
             cell_size_meters=8192,
             halo_cells=1,
         )
-        self.assertEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
-        self.assertEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
-        self.assertEqual(reuse_module._lon_to_x(expanded.max_lon), 16384)
-        self.assertEqual(reuse_module._lat_to_y(expanded.max_lat), 16384)
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.max_lon), 16384)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.max_lat), 16384)
+
+    def test_calibration_bounds_preserve_sub_meter_cell_crossings(self):
+        bounds = Bounds(
+            reuse_module._x_to_lon(8191.6),
+            reuse_module._y_to_lat(8191.6),
+            reuse_module._x_to_lon(8192.4),
+            reuse_module._y_to_lat(8192.4),
+        )
+
+        expanded = expanded_building_source_bounds(
+            bounds,
+            cell_size_meters=8192,
+            halo_cells=1,
+        )
+
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.max_lon), 24576)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.max_lat), 24576)
 
     def test_worker_reuses_identical_ready_pack_without_building(self):
         with tempfile.TemporaryDirectory() as tmp:

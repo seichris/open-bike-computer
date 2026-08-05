@@ -172,15 +172,22 @@ def direct_height(
         if tags.get("building:levels") not in (None, ""):
             _reject(diagnostics, "levelsMalformed")
         return None
+    base_height = levels * rules.floor_height_meters
     roof = parse_length_meters(tags.get("roof:height"))
+    if roof is not None and not (
+        0 <= roof <= rules.maximum_meters
+        and base_height + roof <= rules.maximum_meters
+    ):
+        _reject(diagnostics, "roofHeightOutsideBounds")
+        roof = None
+    elif roof is None and tags.get("roof:height") not in (None, ""):
+        _reject(diagnostics, "roofHeightMalformed")
     if roof is None:
-        if tags.get("roof:height") not in (None, ""):
-            _reject(diagnostics, "roofHeightMalformed")
         roof_levels = parse_levels(tags.get("roof:levels"), rules.maximum_levels)
         if roof_levels is None and tags.get("roof:levels") not in (None, ""):
             _reject(diagnostics, "roofLevelsMalformed")
         roof = (roof_levels or 0.0) * rules.roof_level_height_meters
-    result = levels * rules.floor_height_meters + roof
+    result = base_height + roof
     if rules.minimum_meters <= result <= rules.maximum_meters:
         return result, HeightProvenance.LEVELS
     _reject(diagnostics, "levelsHeightOutsideBounds")
@@ -227,9 +234,12 @@ def resolve_height(
 
     height_dm = _decimeters(resolved[0])
     minimum = parse_length_meters(tags.get("min_height"))
+    if minimum is not None and _decimeters(minimum) >= height_dm:
+        _reject(diagnostics, "minimumHeightNotBelowHeight")
+        minimum = None
+    elif minimum is None and tags.get("min_height") not in (None, ""):
+        _reject(diagnostics, "minimumHeightMalformed")
     if minimum is None:
-        if tags.get("min_height") not in (None, ""):
-            _reject(diagnostics, "minimumHeightMalformed")
         minimum_levels = parse_levels(tags.get("building:min_level"), rules.maximum_levels)
         if minimum_levels is None and tags.get("building:min_level") not in (None, ""):
             _reject(diagnostics, "minimumLevelsMalformed")
@@ -237,7 +247,7 @@ def resolve_height(
     minimum_dm = max(0, _decimeters(minimum))
     if minimum_dm >= height_dm:
         _reject(diagnostics, "minimumHeightNotBelowHeight")
-        minimum_dm = 0
+        minimum_dm = max(0, height_dm - 1)
     return ResolvedHeight(height_dm, minimum_dm, resolved[1])
 
 

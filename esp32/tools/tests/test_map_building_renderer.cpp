@@ -22,6 +22,16 @@ bool isWall(Surface surface) {
          surface == Surface::WallMiddle || surface == Surface::WallDark;
 }
 
+bool samePoint(const ScreenPoint &left, const ScreenPoint &right) {
+  return left.x == right.x && left.y == right.y;
+}
+
+bool samePoints(const std::vector<ScreenPoint> &left,
+                const std::vector<ScreenPoint> &right) {
+  return left.size() == right.size() &&
+         std::equal(left.begin(), left.end(), right.begin(), samePoint);
+}
+
 map_projection::Projection makeProjection(uint16_t width, uint16_t height,
                                           map_projection::Mode mode,
                                           uint8_t zoom = 3,
@@ -71,17 +81,48 @@ map_building_block::Building buildingWithCourtyard() {
 std::vector<Command> render(const map_building_block::Building &building,
                             uint16_t width, uint16_t height,
                             map_projection::Mode mode,
-                            bool extrusionRequested) {
+                            bool extrusionRequested,
+                            double blockMercatorScale = 1.0) {
   const auto projection = makeProjection(width, height, mode);
   std::vector<Command> commands;
   const bool completed = map_building_renderer::renderSurfaces(
-      building, 100000, 200000, 1.0, projection, extrusionRequested,
+      building, 100000, 200000, blockMercatorScale, projection,
+      extrusionRequested,
       [&](Surface surface, const auto &points) {
         commands.push_back({surface, {points.begin(), points.end()}});
         return true;
       });
   assert(completed);
   return commands;
+}
+
+void assertOSMHeightsChangeProjectedSurfaces() {
+  const auto building = buildingWithCourtyard();
+  const auto original = render(building, 466, 366,
+                               map_projection::Mode::BirdsEye, true);
+
+  auto groundLevel = building;
+  groundLevel.minimumHeightDm = 0;
+  const auto groundLevelCommands = render(
+      groundLevel, 466, 366, map_projection::Mode::BirdsEye, true);
+  assert(!samePoint(original[0].points[0], groundLevelCommands[0].points[0]));
+  assert(samePoint(original[0].points[2], groundLevelCommands[0].points[2]));
+
+  auto lowerRoof = building;
+  lowerRoof.heightDm = 60;
+  const auto lowerRoofCommands = render(
+      lowerRoof, 466, 366, map_projection::Mode::BirdsEye, true);
+  assert(samePoint(original[0].points[0], lowerRoofCommands[0].points[0]));
+  assert(!samePoint(original[0].points[2], lowerRoofCommands[0].points[2]));
+  assert(original[3].surface == Surface::Roof);
+  assert(lowerRoofCommands[3].surface == Surface::Roof);
+  assert(!samePoints(original[3].points, lowerRoofCommands[3].points));
+
+  const auto scaled = render(building, 466, 366,
+                             map_projection::Mode::BirdsEye, true, 2.0);
+  assert(!samePoint(original[0].points[0], scaled[0].points[0]));
+  assert(!samePoint(original[0].points[2], scaled[0].points[2]));
+  assert(!samePoints(original[3].points, scaled[3].points));
 }
 
 void assertExtrudedCourtyard(uint16_t width, uint16_t height) {
@@ -450,6 +491,7 @@ int main() {
   // Native render extents for the 1.75-inch and 2.06-inch layouts.
   assertExtrudedCourtyard(466, 366);
   assertExtrudedCourtyard(410, 430);
+  assertOSMHeightsChangeProjectedSurfaces();
   assertFlatFallbacks();
   assertOrderingAndBudget();
   assertNearPlaneMatrix();

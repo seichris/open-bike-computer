@@ -54,6 +54,50 @@ class BuildingHeightTests(unittest.TestCase):
         self.assertEqual(resolved.provenance, HeightProvenance.LEVELS)
         self.assertEqual(resolved.height_dm, 85)
 
+    def test_implausible_roof_height_falls_back_to_roof_levels(self):
+        diagnostics = {}
+        resolved = resolve_height(
+            {
+                "building": "house",
+                "building:levels": "4",
+                "roof:height": "2000",
+                "roof:levels": "1",
+            },
+            self.rules,
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(resolved.provenance, HeightProvenance.LEVELS)
+        self.assertEqual(resolved.height_dm, 145)
+        self.assertEqual(diagnostics["roofHeightOutsideBounds"], 1)
+
+    def test_contradictory_minimum_height_falls_back_to_minimum_levels(self):
+        diagnostics = {}
+        resolved = resolve_height(
+            {
+                "building": "office",
+                "height": "20",
+                "min_height": "30",
+                "building:min_level": "2",
+            },
+            self.rules,
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(resolved.height_dm, 200)
+        self.assertEqual(resolved.minimum_height_dm, 60)
+        self.assertEqual(diagnostics["minimumHeightNotBelowHeight"], 1)
+
+    def test_minimum_level_fallback_is_clamped_below_total_height(self):
+        resolved = resolve_height(
+            {
+                "building": "house",
+                "height": "6",
+                "building:min_level": "4",
+            },
+            self.rules,
+        )
+        self.assertEqual(resolved.height_dm, 60)
+        self.assertEqual(resolved.minimum_height_dm, 59)
+
     def test_parent_then_local_then_class_default(self):
         parent = resolve_height({"height": "20", "building": "office"}, self.rules)
         inherited = resolve_height(

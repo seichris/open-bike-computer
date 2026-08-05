@@ -228,8 +228,12 @@ class MapBuildPipeline:
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
-        processing_bounds = aligned_processing_bounds(job)
-        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        format_version = renderer_format_version(job.request)
+        processing_bounds = aligned_processing_bounds(
+            job,
+            complete_blocks=format_version == BUILDING_RENDERER_FORMAT_VERSION,
+        )
+        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
             )
@@ -250,7 +254,7 @@ class MapBuildPipeline:
         source_pbf = self._source_pbf_path(job)
         if on_status:
             on_status(JobStatus.EXTRACTING_PBF)
-        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
             self._extract_pbf(
                 job,
                 source_pbf,

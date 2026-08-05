@@ -7,6 +7,7 @@ from label_pipeline import join_named_roads, normalize_preferred_languages, prep
 from block_progress import BlockProgressReporter
 from building_pipeline import (
     clip_buildings,
+    collect_building_features,
     load_relation_index,
     load_rules,
     prepare_buildings,
@@ -49,6 +50,11 @@ styles = yaml.safe_load( open(CONF_STYLES, "r"))
 min_lon, min_lat, max_lon, max_lat = args.min_lon, args.min_lat, args.max_lon, args.max_lat
 area_min_x, area_min_y = lon2x( float( min_lon)), lat2y( float( min_lat))
 area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
+if args.renderer_format == 3:
+    area_min_x &= ~mapblock_mask
+    area_min_y &= ~mapblock_mask
+    area_max_x = (area_max_x + mapblock_mask) & ~mapblock_mask
+    area_max_y = (area_max_y + mapblock_mask) & ~mapblock_mask
 
 print("  Step 1/5 reading lines files")
 lines = json.load( open( LINES_INPUT_FILE, "r"))
@@ -84,7 +90,10 @@ if args.renderer_format == 3:
     building_rules, building_rules_sha256 = load_rules(rules_path)
     relation_index = load_relation_index(f"{args.geojson_prefix}_building_relations.json")
     buildings, building_report, _ = prepare_buildings(
-        polygons["features"], building_rules, relation_index, selection_geometry
+        collect_building_features(polygons["features"], lines["features"]),
+        building_rules,
+        relation_index,
+        selection_geometry,
     )
 
 # extract relevant features

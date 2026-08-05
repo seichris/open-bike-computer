@@ -9390,6 +9390,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelLanguageModeSettingID, 32, "Map + Navigation street-label language uses setting ID 32")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID, 33, "Map + Navigation street-label size uses setting ID 33")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID, 35, "Map + Navigation 3D buildings use setting ID 35")
         assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
         assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
         assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
@@ -12955,6 +12956,7 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.labelTextSize",
             "mapPlusNavigationSettings.labelOrientation",
             "mapPlusNavigationSettings.showBuildings",
+            "mapPlusNavigationSettings.buildingVisibilityDefaultPending.v1",
             "mapPlusNavigationSettings.showGreenSpace",
             "mapPlusNavigationSettings.showPaths",
             "mapPlusNavigationSettings.showTracks",
@@ -13001,8 +13003,8 @@ struct NavigationProtocolTests {
                     "fresh Map + Navigation profiles default to 4 px streets")
         assertEqual(freshManager.mapPlusNavigationPositionMarkerScale, 2,
                     "fresh Map + Navigation profiles keep a 2x position marker")
-        assert(freshManager.mapPlusNavigationShowBuildings,
-               "fresh Map + Navigation profiles show buildings")
+        assert(!freshManager.mapPlusNavigationShowBuildings,
+               "fresh Map + Navigation profiles wait for advertised 3D-building support")
         assert(!freshManager.mapPlusNavigationShowGreenSpace,
                "fresh Map + Navigation profiles hide green space")
         assert(!freshManager.mapPlusNavigationShowPaths,
@@ -13052,10 +13054,13 @@ struct NavigationProtocolTests {
         assert(batteryScreenMigratedManager.isDeviceScreenEnabled(.batteryStatus),
                "existing four-screen installs enable Battery Status once")
 
-        freshManager.isConnected = true
-        freshManager.isNavigationReady = true
+        let restartedFreshManager = BLEManager()
+        assert(!restartedFreshManager.mapPlusNavigationShowBuildings,
+               "the capability-aware default remains pending across app restarts")
+        restartedFreshManager.isConnected = true
+        restartedFreshManager.isNavigationReady = true
         var freshProfilePackets: [Data] = []
-        freshManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+        restartedFreshManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 20,
             canSend: { true },
             write: { freshProfilePackets.append($0) }
@@ -13063,7 +13068,7 @@ struct NavigationProtocolTests {
         let independentCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
                   DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
-        assert(freshManager.handleDeviceCapabilitiesNotification(independentCapabilities),
+        assert(restartedFreshManager.handleDeviceCapabilitiesNotification(independentCapabilities),
                "fresh profiles negotiate independent map settings")
         let freshVisibilityPacket = freshProfilePackets.first {
             $0.count == 9 && $0[4] == DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
@@ -13084,8 +13089,8 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation visibility is sent after capability negotiation")
         assert(freshDetailPacket != nil,
                "fresh Map + Navigation detail is sent after capability negotiation")
-        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x1039,
-                    "fresh Map + Navigation sends buildings, major roads, local roads, and water")
+        assertEqual(readInt32LE(freshVisibilityPacket!, offset: 5), 0x1038,
+                    "older firmware receives major roads, local roads, and water without buildings")
         assertEqual(readInt32LE(freshDetailPacket!, offset: 5), 0,
                     "fresh Map + Navigation sends low detail")
         assertEqual(readInt32LE(freshRoutePacket!, offset: 5), 15,
@@ -13094,8 +13099,29 @@ struct NavigationProtocolTests {
                     "fresh Map + Navigation encodes its 4 px street width compatibly")
         assertEqual(readInt32LE(freshZoomPacket!, offset: 5), 3,
                     "fresh Map + Navigation sends zoom level 3")
-        freshManager.streetLineWidth = 7
-        freshManager.sendSetting(id: 9, value: 7)
+
+        freshProfilePackets.removeAll()
+        let buildingCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x18, 0x10, 0, 0])
+        assert(restartedFreshManager.handleDeviceCapabilitiesNotification(buildingCapabilities),
+               "CAP2 3D-building support upgrades the fresh visibility default")
+        let buildingVisibilityPacket = freshProfilePackets.first {
+            $0.count == 9 &&
+                $0[4] == DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
+        }
+        let buildingExtrusionPacket = freshProfilePackets.first {
+            $0.count == 9 &&
+                $0[4] == DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID
+        }
+        assert(restartedFreshManager.mapPlusNavigationShowBuildings,
+               "fresh profiles show buildings only after CAP2 advertises 3D support")
+        assertEqual(readInt32LE(buildingVisibilityPacket!, offset: 5), 0x1039,
+                    "3D-capable firmware receives building visibility")
+        assertEqual(readInt32LE(buildingExtrusionPacket!, offset: 5), 1,
+                    "setting ID 35 enables 3D extrusion for the fresh profile")
+        restartedFreshManager.streetLineWidth = 7
+        restartedFreshManager.sendSetting(id: 9, value: 7)
         let customStreetPacket = freshProfilePackets.last { $0.count == 9 && $0[4] == 9 }
         assertEqual(readInt32LE(customStreetPacket!, offset: 5), 3,
                     "a displayed 7 px street width uses the compatible +3 wire value")
@@ -13151,6 +13177,25 @@ struct NavigationProtocolTests {
                     "existing shared zoom migrates into Map + Navigation")
         assert(!migratedProfileManager.mapPlusNavigationShowBuildings,
                "existing shared visibility migrates into Map + Navigation")
+        migratedProfileManager.isConnected = true
+        migratedProfileManager.isNavigationReady = true
+        var migratedPackets: [Data] = []
+        migratedProfileManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { migratedPackets.append($0) }
+        ))
+        assert(migratedProfileManager.handleDeviceCapabilitiesNotification(
+            buildingCapabilities
+        ), "3D-capable firmware accepts a migrated profile")
+        let migratedVisibilityPacket = migratedPackets.first {
+            $0.count == 9 &&
+                $0[4] == DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
+        }
+        assert(!migratedProfileManager.mapPlusNavigationShowBuildings,
+               "CAP2 preserves an existing profile's hidden-building choice")
+        assertEqual(readInt32LE(migratedVisibilityPacket!, offset: 5) & 1, 0,
+                    "migrated hidden-building visibility remains disabled on 3D firmware")
         assert(!migratedProfileManager.showTracks && !migratedProfileManager.mapPlusNavigationShowTracks,
                "track visibility inherits the previous paths setting")
         assert(!migratedProfileManager.showServiceRoads && !migratedProfileManager.mapPlusNavigationShowServiceRoads,
