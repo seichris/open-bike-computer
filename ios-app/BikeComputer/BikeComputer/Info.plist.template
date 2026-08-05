@@ -2,13 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleDisplayName</key>
+	<string>Bicino</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 
 	<!-- 
-	Info.plist Configuration Template for BikeComputer
+		Info.plist Configuration Template for Bicino
 	
 	IMPORTANT: Copy these entries to your Info.plist or configure in Xcode:
 	1. Select your target
@@ -18,23 +20,23 @@
 	
 	<!-- Location Permissions -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>BikeComputer needs your location to provide turn-by-turn navigation while you ride.</string>
+	<string>Bicino needs your location to provide turn-by-turn navigation while you ride.</string>
 	
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>BikeComputer needs your location to provide turn-by-turn navigation.</string>
+	<string>Bicino needs your location to provide turn-by-turn navigation.</string>
 	
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>BikeComputer needs background location access to continue navigation when the app is not visible.</string>
+	<string>Bicino needs background location access to continue navigation when the app is not visible.</string>
 
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>BikeComputer uses Bluetooth to connect to your ESP32 bike computer display.</string>
+	<string>Bicino uses Bluetooth to connect to your ESP32 bike computer display.</string>
 	
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>BikeComputer uses Bluetooth to communicate with your bike computer display.</string>
+	<string>Bicino uses Bluetooth to communicate with your bike computer display.</string>
 
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>BikeComputer connects to your bike computer over local Wi-Fi to transfer offline maps.</string>
+	<string>Bicino connects to your bike computer over local Wi-Fi to transfer offline maps.</string>
 	
 	<!-- Background Modes -->
 	<key>UIBackgroundModes</key>
@@ -47,7 +49,7 @@
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
 	<dict>
 		<key>Navigation</key>
-		<string>BikeComputer needs precise location for accurate turn-by-turn navigation.</string>
+			<string>Bicino needs precise location for accurate turn-by-turn navigation.</string>
 	</dict>
 	
 	<!-- Supported Interface Orientations -->

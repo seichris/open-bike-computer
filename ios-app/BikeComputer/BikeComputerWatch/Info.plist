@@ -24,10 +24,10 @@
 		<string>workout-processing</string>
 	</array>
 	<key>NSHealthShareUsageDescription</key>
-	<string>BikeComputer reads live cycling metrics from Apple Watch and connected cycling sensors during your workout.</string>
+	<string>Bicino reads live cycling metrics from Apple Watch and connected cycling sensors during your workout.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>BikeComputer saves the cycling workouts and routes that you start in the BikeComputer Watch app.</string>
+	<string>Bicino saves the cycling workouts and routes that you start in the Bicino Watch app.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>BikeComputer records your outdoor ride route and uses location for speed and elevation when cycling sensors are unavailable.</string>
+	<string>Bicino records your outdoor ride route and uses location for speed and elevation when cycling sensors are unavailable.</string>
 </dict>
 </plist>

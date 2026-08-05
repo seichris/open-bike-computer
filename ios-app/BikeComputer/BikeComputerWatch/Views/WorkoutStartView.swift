@@ -55,7 +55,7 @@ struct WorkoutStartView: View {
             }
         } message: {
             Text(
-                "This may abandon an unfinished ride. BikeComputer will preserve the damaged recovery file for diagnosis before resetting setup."
+                "This may abandon an unfinished ride. Bicino will preserve the damaged recovery file for diagnosis before resetting setup."
             )
         }
     }
@@ -87,7 +87,7 @@ struct WorkoutStartView: View {
             .tint(.green)
             .disabled(manager.state == .failed)
         case .denied:
-            Text("BikeComputer can’t start a workout without permission to save workouts in Health.")
+            Text("Bicino can’t start a workout without permission to save workouts in Health.")
                 .font(.caption)
                 .multilineTextAlignment(.center)
             Button("Check Again") {
@@ -99,7 +99,7 @@ struct WorkoutStartView: View {
                 .multilineTextAlignment(.center)
         case .failed:
             if manager.hasCorruptRecoveryState {
-                Text("BikeComputer found damaged workout recovery data. Setup is blocked to protect a possible unfinished ride.")
+                Text("Bicino found damaged workout recovery data. Setup is blocked to protect a possible unfinished ride.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                 Button("Recover Setup") {

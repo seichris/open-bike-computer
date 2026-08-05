@@ -42,6 +42,7 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             plistlib.dump(
                 {
                     "CFBundleIdentifier": "LetItRide.BikeComputer",
+                    "CFBundleDisplayName": "Bicino",
                     "NSSupportsLiveActivities": True,
                 },
                 handle,
@@ -50,6 +51,7 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             plistlib.dump(
                 {
                     "CFBundleIdentifier": "LetItRide.BikeComputer.watchkitapp",
+                    "CFBundleDisplayName": "Bicino",
                     "CFBundleURLTypes": [
                         {"CFBundleURLSchemes": ["another-scheme"]},
                         {"CFBundleURLSchemes": ["bikecomputer"]},

@@ -1576,7 +1576,7 @@ private struct DeveloperSettingsView: View {
                 Text("Workout Heart Zones")
             } footer: {
                 Text(
-                    "BikeComputer calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
+                    "Bicino calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
                 )
             }
 

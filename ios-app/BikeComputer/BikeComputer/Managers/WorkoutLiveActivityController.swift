@@ -743,7 +743,7 @@ final class WorkoutLiveActivityController {
             cancelPendingMetricUpdate()
             reportIssue(
                 "Live Activity unavailable: iOS reports that Live Activities "
-                    + "are disabled for BikeComputer."
+                    + "are disabled for Bicino."
             )
             return
         }

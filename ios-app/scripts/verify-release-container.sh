@@ -80,9 +80,17 @@ require_plist_value \
   ":CFBundleIdentifier" \
   "LetItRide.BikeComputer"
 require_plist_value \
+  "${APP_PATH}/Info.plist" \
+  ":CFBundleDisplayName" \
+  "Bicino"
+require_plist_value \
   "${WATCH_PATH}/Info.plist" \
   ":CFBundleIdentifier" \
   "LetItRide.BikeComputer.watchkitapp"
+require_plist_value \
+  "${WATCH_PATH}/Info.plist" \
+  ":CFBundleDisplayName" \
+  "Bicino"
 require_plist_value \
   "${COMPLICATION_PATH}/Info.plist" \
   ":CFBundleIdentifier" \

@@ -1,8 +1,8 @@
 # Watch workout companion release notes
 
-Release candidate: **1.1 (7)**. App Store version 1.0 is already distributed,
-and App Store Connect already contains builds through 5, so both the marketing
-version and build number must advance for this release.
+Release candidate: **1.3 (10)**. App Store version 1.2 is already distributed,
+and App Store Connect already contains builds through 9, so both the marketing
+version and build number advance for this release.
 
 ## App Store What's New
 
@@ -25,7 +25,7 @@ navigation requires iOS 16.4 or later.
 
 ## App Review notes
 
-BikeComputer includes a companion Apple Watch app. The Watch is the sole owner
+Bicino includes a companion Apple Watch app. The Watch is the sole owner
 and writer of outdoor cycling workouts. The iPhone uses Apple's workout-session
 mirroring APIs for display and remote controls and never saves a duplicate
 workout.
@@ -33,10 +33,10 @@ workout.
 To test:
 
 1. Install the iPhone build and its embedded Watch app on a paired Watch.
-2. Open BikeComputer on Watch, select **Set Up Health**, and grant workout and
+2. Open Bicino on Watch, select **Set Up Health**, and grant workout and
    location access.
 3. Select **Start Ride**.
-4. Open BikeComputer on iPhone to view the same live workout and use mirrored
+4. Open Bicino on iPhone to view the same live workout and use mirrored
    pause, resume, save, discard, or segment controls. Lock the iPhone to review
    the Live Activity and authenticate a Segment or Pause/Resume action.
 5. End that workout, then select **Start workout** on iPhone. With the Watch
@@ -54,7 +54,7 @@ and actual outdoor movement.
 
 The Live Activity is created after a verified Watch snapshot while the iPhone
 app is foreground. If a ride starts from Watch while iPhone is backgrounded,
-foreground BikeComputer once to create it. Active workout metrics may remain
+foreground Bicino once to create it. Active workout metrics may remain
 visible on the Lock Screen and Always-On display. Dismissing or disabling the
 Live Activity has no effect on the Watch-owned workout, and no Live Activity
 content is sent to a backend.

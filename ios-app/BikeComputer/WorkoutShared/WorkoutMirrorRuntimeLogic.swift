@@ -233,32 +233,32 @@ nonisolated enum WorkoutErrorCopyV1 {
     ) -> String {
         switch code {
         case .authorizationDenied, .setupRequired:
-            return "Open BikeComputer on Apple Watch and allow Health access, then try again."
+            return "Open Bicino on Apple Watch and allow Health access, then try again."
         case .anotherWorkoutActive:
             return "Another app may now own the workout session. Check your Apple Watch before starting or resuming a ride."
         case .watchUnavailable:
             switch context {
             case .activeWorkout:
-                return "Keep your paired Apple Watch nearby, unlocked, and wearing BikeComputer. A current workout continues on Watch."
+                return "Keep your paired Apple Watch nearby, unlocked, and wearing Bicino. A current workout continues on Watch."
             case .workoutLaunch:
-                return "BikeComputer could not reach Apple Watch, so the workout did not start. Open BikeComputer on Watch and try again."
+                return "Bicino could not reach Apple Watch, so the workout did not start. Open Bicino on Watch and try again."
             case .general:
-                return "BikeComputer could not communicate with Apple Watch. Check BikeComputer on Watch and verify the workout state."
+                return "Bicino could not communicate with Apple Watch. Check Bicino on Watch and verify the workout state."
             }
         case .finalSummaryUnavailable:
-            return "Apple Watch reported that the ride ended, but the final saved or discarded result was not received. Check BikeComputer on Watch or Health before dismissing."
+            return "Apple Watch reported that the ride ended, but the final saved or discarded result was not received. Check Bicino on Watch or Health before dismissing."
         case .terminalChoiceConflict:
             return "Apple Watch had already committed the other finish choice. The saved or discarded result shown above is authoritative."
         case .terminalChoiceUnconfirmed:
-            return "BikeComputer could not confirm whether your Save or Discard choice was applied. Check BikeComputer on Apple Watch; if the ride ended, verify the result in Health."
+            return "Bicino could not confirm whether your Save or Discard choice was applied. Check Bicino on Apple Watch; if the ride ended, verify the result in Health."
         case .segmentMarkFailed:
             return "Apple Watch couldn’t add that segment to the workout. The ride is still running, so you can try again."
         case .segmentMarkUnconfirmed:
             return "Apple Watch is still confirming that segment. You can pause or end the ride, but wait before marking another segment."
         case .segmentFinalizationPending:
-            return "Open BikeComputer on Apple Watch to retry the pending segment or save the ride anyway."
+            return "Open Bicino on Apple Watch to retry the pending segment or save the ride anyway."
         case .sessionFailed, .unknown, nil:
-            return "Check BikeComputer on Apple Watch. No workout is saved or ended by iPhone alone."
+            return "Check Bicino on Apple Watch. No workout is saved or ended by iPhone alone."
         }
     }
 

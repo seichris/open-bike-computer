@@ -93,13 +93,13 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                 with self.subTest(
                     target=target_name, configuration=configuration_name
                 ):
-                    self.assertIn("CURRENT_PROJECT_VERSION = 7;", settings)
-                    self.assertIn("MARKETING_VERSION = 1.1;", settings)
+                    self.assertIn("CURRENT_PROJECT_VERSION = 10;", settings)
+                    self.assertIn("MARKETING_VERSION = 1.3;", settings)
                     self.assertIn(
                         f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier};",
                         settings,
                     )
-        self.assertIn("Release candidate: **1.1 (7)**", release_notes)
+        self.assertIn("Release candidate: **1.3 (10)**", release_notes)
 
     def test_privacy_policy_is_reachable_and_covers_release_obligations(self):
         shared_policy = (

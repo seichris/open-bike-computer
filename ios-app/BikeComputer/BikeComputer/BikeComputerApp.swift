@@ -76,7 +76,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
         
         // Configure for background location updates
-        print("BikeComputer app launched")
+        print("Bicino app launched")
         _ = coordinator
         workoutMirrorManager.installMirroringHandler()
         if #available(iOS 17.0, *) {
