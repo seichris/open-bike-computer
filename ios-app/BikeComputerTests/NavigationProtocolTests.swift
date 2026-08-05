@@ -592,6 +592,7 @@ struct NavigationProtocolTests {
         testRouteInitialLocationUsesResolvedSource()
         testRouteTransportTypes()
         testMapTrackingPolicy()
+        testDeveloperLocationOverride()
         testRideActivityPolicy()
         testDeviceGPSPacketBuilder()
         testNavigationPacketBuilder()
@@ -14072,6 +14073,56 @@ struct NavigationProtocolTests {
             ),
             "an idle foreground app should allow Auto-Lock"
         )
+    }
+
+    static func testDeveloperLocationOverride() {
+        let coordinate = DeveloperLocationOverride.coordinate(arguments: [
+            "BikeComputer",
+            "--device-map-location=1.305,103.855"
+        ])
+        assert(coordinate != nil, "valid developer location override should parse")
+        assertCoordinate(
+            coordinate!,
+            latitude: 1.305,
+            longitude: 103.855,
+            "developer location override coordinate"
+        )
+        assert(
+            DeveloperLocationOverride.coordinate(arguments: [
+                "BikeComputer",
+                "--device-map-location=91,103.855"
+            ]) == nil,
+            "out-of-range developer location override should be rejected"
+        )
+        assert(
+            DeveloperLocationOverride.coordinate(arguments: [
+                "BikeComputer",
+                "--device-map-location=1.305"
+            ]) == nil,
+            "incomplete developer location override should be rejected"
+        )
+
+        let timestamp = Date(timeIntervalSinceReferenceDate: 800_600_000)
+        let source = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737),
+            altitude: 18,
+            horizontalAccuracy: 4,
+            verticalAccuracy: 6,
+            course: 72,
+            speed: 8,
+            timestamp: timestamp
+        )
+        let overridden = DeveloperLocationOverride.applying(coordinate!, to: source)
+        assertCoordinate(
+            overridden.coordinate,
+            latitude: 1.305,
+            longitude: 103.855,
+            "developer location override application"
+        )
+        assertEqual(overridden.timestamp, timestamp, "override should preserve timestamp")
+        assertEqual(overridden.horizontalAccuracy, 4, "override should preserve accuracy")
+        assertEqual(overridden.course, 72, "override should preserve course")
+        assertEqual(overridden.speed, 8, "override should preserve speed")
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
