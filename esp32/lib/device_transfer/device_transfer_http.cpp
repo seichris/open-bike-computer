@@ -13,13 +13,11 @@
 namespace device_transfer {
 namespace {
 
-// The worker previously reserved 16 KiB of scarce internal RAM before a phone
-// had associated with the accessory AP. On the production 1.75-inch build that
-// left roughly 17 KiB free while the Wi-Fi driver still needed to authenticate
-// a station and start DHCP. Runtime high-water diagnostics show the idle worker
-// consumes about 2 KiB; 8 KiB keeps a wide call-stack margin without starving
-// the radio during association.
-constexpr uint32_t kHttpWorkerStackBytes = 8192;
+// Map activation is handed off to this worker after the HTTP response completes
+// so the transfer and activation phases do not allocate two large stacks at
+// once. Activation reaches substantially deeper than the idle accept loop;
+// retain the 16 KiB budget required by that handoff path.
+constexpr uint32_t kHttpWorkerStackBytes = 16384;
 
 static std::string trim(const std::string &value) {
   size_t begin = 0;

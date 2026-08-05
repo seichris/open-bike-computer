@@ -11,6 +11,9 @@ SOURCE = (
 HEADER = (
     PROJECT_DIR / "lib/map_transfer_http/map_transfer_http.hpp"
 ).read_text(encoding="utf-8")
+DEVICE_TRANSFER_SOURCE = (
+    PROJECT_DIR / "lib/device_transfer/device_transfer_http.cpp"
+).read_text(encoding="utf-8")
 
 
 def method_body(name: str) -> str:
@@ -57,6 +60,12 @@ class MapActivationHandoffTests(unittest.TestCase):
             "executeActivation(", method_body("beginDeferredActivation")
         )
         self.assertIn("executeActivation(", method_body("activationTaskThunk"))
+
+    def test_transfer_worker_retains_activation_stack_budget(self):
+        self.assertIn(
+            "constexpr uint32_t kHttpWorkerStackBytes = 16384;",
+            DEVICE_TRANSFER_SOURCE,
+        )
 
     def test_activation_progress_yields_to_the_idle_task(self):
         body = method_body("updateActivationProgress")
