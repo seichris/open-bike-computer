@@ -131,23 +131,25 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("psramLargest=%u", render_body)
         self.assertIn("if (!item.render)", render_body)
 
-    def test_post_building_road_repaint_honors_building_deadline(self):
+    def test_ground_roads_render_once_before_buildings(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        repaint_start = render_body.index(
-            "// Building roofs and walls are composed across all loaded blocks."
-        )
-        repaint_end = render_body.index(
-            'MAPIO_LOG("MAPIO: buildings', repaint_start
-        )
-        repaint_body = render_body[repaint_start:repaint_end]
-        self.assertGreaterEqual(repaint_body.count("shouldStopBuildingWork()"), 3)
-        self.assertGreaterEqual(
-            repaint_body.count("return abortStoppedBuildingWork(1)"), 3
-        )
-        self.assertNotIn("stopRoadRepaint", repaint_body)
+        self.assertEqual(render_body.count("for (const auto &line :"), 1)
         self.assertLess(
-            repaint_body.rindex("shouldStopBuildingWork()"),
-            repaint_body.index("buildingDrawMs ="),
+            render_body.index("////// Lines"),
+            render_body.index(
+                "buildingPassPhase = BuildingPassPhase::Draw;"
+            ),
+        )
+        self.assertNotIn(
+            "roads once above them",
+            render_body,
+        )
+
+    def test_navigation_route_remains_above_completed_map(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap")
+        self.assertLess(
+            render_body.index("Maps::readVectorMap("),
+            render_body.index("routeOverlay.drawRoute("),
         )
 
     def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):

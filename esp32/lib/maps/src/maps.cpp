@@ -3062,60 +3062,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             ? visibleWallCandidateCount - generatedWallFaces
             : 0;
 
-    // Building roofs and walls are composed across all loaded blocks. Redraw
-    // roads once above them so navigation-relevant geometry remains legible.
-    if (renderedBuildings != 0) {
-      for (MapBlock *block : memCache.blocks) {
-        if (shouldStopBuildingWork())
-          return abortStoppedBuildingWork(1);
-        if (!block->inView)
-          continue;
-        ScreenMapRenderSettings blockStyle = style;
-        blockStyle.visibilityMask =
-            map_profile_protocol::visibilityMaskForMapVersion(
-                style.visibilityMask, block->formatVersion);
-        const BBox screenBbox = viewPort.bbox - block->offset;
-        for (const auto &line : block->polylines) {
-          if (shouldStopBuildingWork())
-            return abortStoppedBuildingWork(1);
-          if (zoom > line.maxZoom || !line.bbox.intersects(screenBbox) ||
-              line.points.size() < 2 ||
-              !isLineVisible(line.typeId, line.color, line.width, blockStyle))
-            continue;
-          const uint16_t color = map_line_style::displayColor(
-              line.typeId, line.color, line.width, mapNavigationActive);
-          const uint8_t baseWidth =
-              shouldBoostLineWidth(line.typeId, line.width)
-                  ? blockStyle.streetLineWidth
-                  : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
-          for (size_t index = 1; index < line.points.size(); ++index) {
-            if (((index - 1U) & 0x0FU) == 0 && shouldStopBuildingWork())
-              return abortStoppedBuildingWork(1);
-            auto start = projection.groundForWorld(
-                {static_cast<double>(block->offset.x + line.points[index - 1].x),
-                 static_cast<double>(block->offset.y + line.points[index - 1].y)});
-            auto end = projection.groundForWorld(
-                {static_cast<double>(block->offset.x + line.points[index].x),
-                 static_cast<double>(block->offset.y + line.points[index].y)});
-            if (!projection.clipSegmentToNearPlane(start, end))
-              continue;
-            const auto p1 = projection.projectGround(start);
-            const auto p2 = projection.projectGround(end);
-            if (!p1.valid || !p2.valid)
-              continue;
-            Maps::drawLine(
-                canvas, map_transform::quantizePixel(p1.x),
-                map_transform::quantizePixel(p1.y),
-                map_transform::quantizePixel(p2.x),
-                map_transform::quantizePixel(p2.y), color,
-                projection.scaledLineWidth(
-                    baseWidth, (p1.depthScale + p2.depthScale) / 2.0, 24));
-          }
-        }
-      }
-      if (shouldStopBuildingWork())
-        return abortStoppedBuildingWork(1);
-    }
     buildingDrawMs = millis() - buildingPhaseStartMs;
     buildingPassPhase = BuildingPassPhase::Complete;
     MAPIO_LOG("MAPIO: buildings parsedRecords=%u parsedRings=%u "

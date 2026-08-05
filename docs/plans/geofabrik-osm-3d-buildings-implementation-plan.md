@@ -493,7 +493,8 @@ Refactor the map draw path into bounded passes:
 3. collect visible building fragments into one queue;
 4. project and depth-sort visible building surfaces with a stable tie-breaker;
 5. draw facade walls, then roof surfaces, back-to-front;
-6. draw map road/line features above buildings on the base RGB565 canvas;
+6. keep map road/line features on the ground plane beneath building solids on
+   the base RGB565 canvas;
 7. render retained street labels and route/navigation geometry through the merged foreground RGB565A8 canvas; and
 8. composite the foreground over the base canvas using its existing priority and collision behavior.
 
@@ -520,7 +521,10 @@ No runtime heap growth may scale without an encoded/validated upper bound. Prefe
 
 ### Navigation legibility
 
-Building solids and road lines render on the base canvas; the already-merged foreground canvas keeps street labels, the active route, and navigation overlays above it. Validate that:
+Ground polygons and road lines render before building solids on the base
+canvas, so roofs and walls naturally occlude ordinary streets. The
+already-merged foreground canvas keeps street labels, the active route, and
+navigation overlays above it. Validate that:
 
 - the route line is never occluded by roofs or walls;
 - retained v3 street labels remain readable and keep their existing collision/asset-health behavior;
@@ -773,7 +777,8 @@ Exact filenames may follow the baseline module boundaries, but the separation of
 - wall-mask enforcement at seams;
 - all bird's-eye perspective settings, headings, and supported zooms;
 - both display aspect ratios;
-- roads above buildings on the base canvas and labels/route above the base through the foreground canvas;
+- ordinary roads beneath buildings on the base canvas and labels/route above
+  the base through the foreground canvas;
 - unchanged label collision, asset-health, route-priority, and foreground-compositing behavior;
 - nearest-first geometry-budget reservation with flat overflow;
 - corrupt-block rejection without reset or starvation; and
@@ -821,7 +826,9 @@ The implementation is complete only when all of the following are true:
 4. Explicit, level-derived, inherited, local-median, and class-default coverage is visible in signed/artifact diagnostics.
 5. Multipolygon holes and building parts render correctly.
 6. Buildings spanning blocks have continuous roofs and no artificial seam walls.
-7. Roads, street labels, and the active route remain legible and are never occluded by building solids; foreground collision and priority behavior is unchanged.
+7. Building solids occlude ordinary ground-level roads, while street labels
+   and the active route remain legible above them; foreground collision and
+   priority behavior is unchanged.
 8. Renderer-format-1/2 activation, FMB v1/v2/v3 parsing, street-label behavior, and flat-building rendering regressions are absent.
 9. Old devices are never offered renderer format 3/FMB v4; iOS refuses an incompatible saved artifact before transfer; and new firmware rejects unsupported or mislabeled artifacts before activation.
 10. The new setting is capability-gated, persisted, acknowledged, and documented.
