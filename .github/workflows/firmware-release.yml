@@ -33,7 +33,7 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
       - name: Build firmware
-        run: python tools/build_firmware.py "${{ matrix.environment }}"
+        run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.environment }}"
       - name: Stage firmware image
         run: |
           mkdir -p dist
