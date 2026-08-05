@@ -255,26 +255,30 @@ static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   target.labelProfileVersion = manifest.labelProfileVersion;
   target.labelLanguages = manifest.labelLanguages;
   target.internationalFallback = manifest.internationalFallback;
+  target.buildingProfileVersion = manifest.buildingProfileVersion;
   return target;
 }
 
 static bool targetMetadataEmpty(const MapTargetMetadata &target) {
   return target.renderer.empty() && target.formatVersion == 0 &&
          target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
-         target.internationalFallback.empty();
+         target.internationalFallback.empty() &&
+         target.buildingProfileVersion == 0;
 }
 
 static bool targetMetadataValid(const MapTargetMetadata &target) {
   if (targetMetadataEmpty(target))
     return true;
   if (target.renderer != "esp32-fmb" ||
-      (target.formatVersion != 1 && target.formatVersion != 2)) {
+      (target.formatVersion != 1 && target.formatVersion != 2 &&
+       target.formatVersion != 3)) {
     return false;
   }
   if (target.formatVersion == 1) {
     return target.labelProfileVersion == 0 &&
            target.labelLanguages.empty() &&
-           target.internationalFallback.empty();
+           target.internationalFallback.empty() &&
+           target.buildingProfileVersion == 0;
   }
   if (target.labelProfileVersion != 1 ||
       target.labelLanguages.size() > 3 ||
@@ -290,7 +294,8 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
         return false;
     }
   }
-  return true;
+  return target.formatVersion == 3 ? target.buildingProfileVersion == 1
+                                   : target.buildingProfileVersion == 0;
 }
 
 static bool targetMetadataMatches(const MapTargetMetadata &left,
@@ -299,7 +304,8 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
          left.formatVersion == right.formatVersion &&
          left.labelProfileVersion == right.labelProfileVersion &&
          left.labelLanguages == right.labelLanguages &&
-         left.internationalFallback == right.internationalFallback;
+         left.internationalFallback == right.internationalFallback &&
+         left.buildingProfileVersion == right.buildingProfileVersion;
 }
 
 static MapTargetMetadata targetMetadataFromJson(const std::string &json,
@@ -318,6 +324,7 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   const std::string profileKey = key("LabelProfileVersion");
   const std::string languagesKey = key("LabelLanguages");
   const std::string fallbackKey = key("InternationalFallback");
+  const std::string buildingProfileKey = key("BuildingProfileVersion");
   const auto hasKey = [&](const std::string &name) {
     return json.find("\"" + name + "\"") != std::string::npos;
   };
@@ -331,13 +338,19 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
       jsonStringArrayValue(json, languagesKey, &languagesValid);
   target.internationalFallback =
       jsonStringValue(json, fallbackKey);
+  const uint64_t buildingProfileVersion =
+      jsonUintValue(json, buildingProfileKey);
+  target.buildingProfileVersion =
+      static_cast<uint32_t>(buildingProfileVersion);
   const bool metadataPresent =
       hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
-      hasKey(languagesKey) || hasKey(fallbackKey);
+      hasKey(languagesKey) || hasKey(fallbackKey) ||
+      hasKey(buildingProfileKey);
   if (valid != nullptr) {
     *valid = (!metadataPresent || languagesValid) &&
              formatVersion <= UINT32_MAX &&
-             labelProfileVersion <= UINT32_MAX;
+             labelProfileVersion <= UINT32_MAX &&
+             buildingProfileVersion <= UINT32_MAX;
   }
   return target;
 }
@@ -366,7 +379,9 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
     json += "\"" + jsonEscape(target.labelLanguages[index]) + "\"";
   }
   json += "],\"" + key("InternationalFallback") + "\":\"" +
-          jsonEscape(target.internationalFallback) + "\"";
+          jsonEscape(target.internationalFallback) + "\",\"" +
+          key("BuildingProfileVersion") + "\":" +
+          std::to_string(target.buildingProfileVersion);
   return json;
 }
 
@@ -667,6 +682,20 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonStringArrayValue(manifestText, "labelLanguages", &labelLanguagesValid);
   manifest.internationalFallback =
       jsonStringValue(manifestText, "internationalFallback");
+  manifest.buildingProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "buildingProfileVersion"));
+  manifest.buildingRecordCount = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "recordCount"));
+  manifest.buildingProvenanceCounts[0] = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "explicitHeightCount"));
+  manifest.buildingProvenanceCounts[1] = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "levelsHeightCount"));
+  manifest.buildingProvenanceCounts[2] = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "inheritedHeightCount"));
+  manifest.buildingProvenanceCounts[3] = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "localMedianHeightCount"));
+  manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "classDefaultHeightCount"));
   manifest.minimumFirmwareVersion =
       jsonStringValue(manifestText, "minFirmwareVersion");
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
@@ -719,13 +748,14 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   if (manifest.files.empty())
     return fail("manifest_files", "manifest contains no map files");
   if (manifest.renderer != "esp32-fmb" ||
-      (manifest.formatVersion != 1 && manifest.formatVersion != 2))
+      (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
+       manifest.formatVersion != 3))
     return fail("manifest_target", "manifest renderer target is unsupported");
-  if ((manifest.formatVersion == 2 &&
+  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (manifest.formatVersion == 1 && fontAssetCount != 0))
     return fail("manifest_target", "manifest files do not match renderer target");
-  if (manifest.formatVersion == 2) {
+  if (manifest.formatVersion == 2 || manifest.formatVersion == 3) {
     bool uniqueLanguages = true;
     for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
       for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
@@ -743,6 +773,17 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
              !manifest.labelLanguages.empty() ||
              !manifest.internationalFallback.empty()) {
     return fail("manifest_labels", "legacy manifest contains label metadata");
+  }
+  uint64_t provenanceTotal = 0;
+  for (uint32_t count : manifest.buildingProvenanceCounts)
+    provenanceTotal += count;
+  if (manifest.formatVersion == 3) {
+    if (manifest.buildingProfileVersion != 1 ||
+        provenanceTotal != manifest.buildingRecordCount)
+      return fail("manifest_buildings", "manifest building profile is invalid");
+  } else if (manifest.buildingProfileVersion != 0 ||
+             manifest.buildingRecordCount != 0 || provenanceTotal != 0) {
+    return fail("manifest_buildings", "non-v3 manifest contains building metadata");
   }
   return {true, "ok", ""};
 }
@@ -2660,6 +2701,11 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
   for (const std::string &language : manifest.labelLanguages)
     value += language + "\n";
   value += manifest.internationalFallback + "\n" +
+           std::to_string(manifest.buildingProfileVersion) + "\n" +
+           std::to_string(manifest.buildingRecordCount) + "\n";
+  for (uint32_t count : manifest.buildingProvenanceCounts)
+    value += std::to_string(count) + "\n";
+  value +=
            manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
     value += file.path + "\n" + file.publishPath + "\n" +
@@ -2686,7 +2732,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
     bool useManifestPaths) const {
-  if (manifest.formatVersion != 2)
+  if (manifest.formatVersion != 2 && manifest.formatVersion != 3)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
     if (useManifestPaths)
@@ -2705,10 +2751,10 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     }
   }
   if (fontFile == nullptr)
-    return fail("label_font_missing", "target-2 map has no FMA1 asset");
+    return fail("label_font_missing", "label-aware map has no FMA1 asset");
   map_font_asset::Asset font;
   if (!font.open(resolvedPath(*fontFile)))
-    return fail("label_font_invalid", "target-2 FMA1 asset is invalid");
+    return fail("label_font_invalid", "label-aware FMA1 asset is invalid");
   if (font.languageCount() != manifest.labelLanguages.size())
     return fail("label_languages", "FMA1 languages do not match manifest");
   for (uint8_t index = 0; index < font.languageCount(); ++index)
@@ -2721,19 +2767,22 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       continue;
     const std::string path = resolvedPath(file);
     if (path.empty())
-      return fail("label_block_path", "target-2 block path is invalid");
+      return fail("label_block_path", "label-aware block path is invalid");
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input || input.tellg() <= 0 ||
         static_cast<uint64_t>(input.tellg()) >
             map_block_format::kMaximumBlockBytes)
-      return fail("label_block_open", "could not read target-2 FMB block");
+      return fail("label_block_open", "could not read label-aware FMB block");
     const size_t size = static_cast<size_t>(input.tellg());
     input.seekg(0, std::ios::beg);
     std::vector<uint8_t> bytes(size);
     input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
-    if (!input || bytes.size() < 4 || bytes[3] != 3)
-      return fail("label_block_version", "target-2 map contains a non-v3 block");
+    const uint8_t expectedBlockVersion =
+        manifest.formatVersion == 3 ? 4 : 3;
+    if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
+      return fail("label_block_version",
+                  "map block version does not match renderer target");
     map_label_block::Block labels;
     std::string error;
     if (!map_label_block::decode(bytes.data(), bytes.size(),
@@ -2742,7 +2791,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
         labels.profileFingerprint != font.profileFingerprint() ||
         !labels.referencesResolve(font.glyphCount(), font.languageCount())) {
       return fail("label_block_contract",
-                  "FMB v3 label references do not match FMA1");
+                  "FMB label references do not match FMA1");
     }
   }
   return {true, "ok", ""};

@@ -20,6 +20,9 @@ constexpr uint32_t kMaximumRoadLabels = 8192;
 constexpr uint32_t kMaximumLabelCandidates = 16384;
 constexpr uint8_t kMaximumLabelVariants = 8;
 constexpr uint8_t kMaximumGlyphsPerRun = 192;
+constexpr uint32_t kMaximumBuildings = 8192;
+constexpr uint32_t kMaximumBuildingRings = 32;
+constexpr uint32_t kMaximumBuildingPoints = 131072;
 
 // Performs the same structural walk as the renderer without allocating or
 // dereferencing beyond the supplied bytes. Only renderer-supported binary map
@@ -62,6 +65,11 @@ private:
     LabelFixed,
     LabelVariant,
     LabelCandidate,
+    BuildingHeader,
+    BuildingFixed,
+    BuildingRingHeader,
+    BuildingRingPoints,
+    BuildingWallMask,
     Complete,
   };
   enum class AsciiState {
@@ -105,7 +113,7 @@ private:
     uint32_t length = 0;
     uint32_t crc32 = 0;
   };
-  V3Section v3Sections_[3] = {};
+  V3Section v3Sections_[4] = {};
   uint8_t v3Directory_[16] = {};
   size_t v3DirectorySize_ = 0;
   uint8_t v3SectionCount_ = 0;
@@ -115,7 +123,7 @@ private:
   uint32_t v3SectionBytesSeen_ = 0;
   uint32_t v3SectionCrc_ = 0xFFFFFFFFU;
   V3ParseState v3ParseState_ = V3ParseState::None;
-  uint8_t v3Record_[10] = {};
+  uint8_t v3Record_[18] = {};
   size_t v3RecordSize_ = 0;
   uint32_t v3RecordsRemaining_ = 0;
   uint32_t v3ItemsRemaining_ = 0;
@@ -128,6 +136,16 @@ private:
   uint8_t v3Utf8Remaining_ = 0;
   uint32_t v3Utf8Codepoint_ = 0;
   uint32_t v3Utf8Minimum_ = 0;
+  uint32_t v4DeclaredBuildingPoints_ = 0;
+  uint32_t v4BuildingPointsSeen_ = 0;
+  uint16_t v4RingsRemaining_ = 0;
+  uint16_t v4RingPointCount_ = 0;
+  uint16_t v4RingPointsRemaining_ = 0;
+  uint16_t v4WallBytesRemaining_ = 0;
+  uint16_t v4CurrentRingIndex_ = 0;
+  uint8_t v4CurrentBuildingFlags_ = 0;
+  int16_t v4DeclaredBounds_[4] = {};
+  int16_t v4ActualBounds_[4] = {};
   AsciiState asciiState_ = AsciiState::PolygonHeader;
   std::string line_;
   CoordinateState coordinateState_ = CoordinateState::Prefix;

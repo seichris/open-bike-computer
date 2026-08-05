@@ -31,6 +31,51 @@ one active workout session, and public APIs do not reveal whether another app
 currently owns it. If BikeComputer is displaced, it reports that outcome
 instead of retrying in a loop.
 
+## Physical-device offline-map validation
+
+The bike computer selects offline map blocks from the WGS-84 GPS position sent
+by the iPhone over BLE. An installed map covers only its requested area, so
+**No map data** is expected when the current phone position is outside that
+area. A completed upload, **Step 5 - 100%**, and an **Uploaded** state in the app
+confirm installation; they do not mean the current GPS coordinate intersects
+the installed pack.
+
+Debug builds accept a launch-only location override. For example, this
+Singapore coordinate is inside the development area used to validate 3D
+buildings:
+
+```sh
+xcrun devicectl list devices
+xcrun devicectl device process launch \
+  --device IPHONE_IDENTIFIER \
+  --terminate-existing \
+  LetItRide.BikeComputer \
+  --device-map-location=1.305,103.855
+```
+
+The override is compiled only in `DEBUG`, is not a production location-spoofing
+feature, and lasts only for that launched process. Opening the app normally
+from the Home Screen launches it without the argument. Add `--console` before
+the bundle identifier when diagnosing the handoff, keep that command running,
+and verify these checkpoints:
+
+```text
+Developer device-map location override active: 1.305,103.855
+BLE peripheral authenticated
+Sent native GPS position
+```
+
+The override is applied to the next real CoreLocation update, preserving its
+timestamp, accuracy, course, and speed while replacing only the coordinate.
+Location permission and a BLE-authenticated bike-computer connection are still
+required.
+
+Map installation temporarily joins the Wi-Fi access point hosted by the bike
+computer. If iPhone Mirroring repeatedly reports that it cannot join, approve
+or retry the association on the unlocked physical iPhone before treating it as
+a firmware, BLE, or transfer-server failure. This fallback was required during
+physical validation even though the same join succeeded directly on the phone.
+
 ## Workout behavior
 
 The Watch owns the `HKWorkoutSession`, `HKLiveWorkoutBuilder`, sensor collection,

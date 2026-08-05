@@ -19,7 +19,9 @@
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
 #include "mapFontAsset.hpp"
+#include "mapBuildingRenderer.hpp"
 #include "mapLabelBlock.hpp"
+#include "mapBuildingBlock.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -86,11 +88,13 @@ private:
                   // one single map file.
   {
     Point32 offset;
+    double mercatorScale = 1.0;
     bool inView = false;
     uint8_t formatVersion = 1;
     std::vector<Polyline, PsramAllocator<Polyline>> polylines;
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
     map_label_block::Block labelData;
+    map_building_block::Block buildingData;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
@@ -127,6 +131,7 @@ private:
   MemCache memCache;               // Memory Cache
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
+  map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;
   bool streetLabelRuntimeFailurePending = false;
   std::string streetLabelRuntimeFailureCode;
   struct LabelLayoutCacheKey {
@@ -179,14 +184,16 @@ private:
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
   bool buildPolygonGrid(
       MapBlock *mblock); // Build spatial grid for polygon culling
-  bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
+  bool fillPolygon(const Polygon &p, lv_obj_t *canvas,
+                   uint32_t deadlineStartMs = 0,
+                   uint32_t deadlineDurationMs = 0);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation,
                      const map_projection::Projection &projection,
-                     bool drawLabels = true);
+                     bool drawLabels = true, bool suppressBuildings = false);
   bool renderRollingRasterCell(double rasterOriginX, double rasterOriginY,
                                int32_t cellOffsetX, int32_t cellOffsetY,
                                uint8_t zoom, double rotation,

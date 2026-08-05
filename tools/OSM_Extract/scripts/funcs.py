@@ -69,6 +69,15 @@ def process_features( features, conf, label_diagnostics=None ):
 
         label_tags = extract_label_tags(properties, tags, diagnostics=label_diagnostics)
         label_join = extract_join_metadata(properties, tags)
+        building_tags = {
+            key: tags[key]
+            for key in (
+                'building', 'building:part', 'height', 'min_height',
+                'building:levels', 'building:min_level', 'roof:height',
+                'roof:levels',
+            )
+            if key in tags
+        }
         
         # some features are defined just by a tag in "other_Tags", like railway
         # we add them to the properties
@@ -100,6 +109,13 @@ def process_features( features, conf, label_diagnostics=None ):
         geoms = get_geoms( feature['geometry']) 
         id = properties['osm_way_id'] if 'osm_way_id' in properties else \
             properties['osm_id'] if 'osm_id' in properties else ''
+        osm_key = (
+            'w' + str(properties['osm_way_id'])
+            if properties.get('osm_way_id') not in (None, '')
+            else 'r' + str(properties['osm_id'])
+            if properties.get('osm_id') not in (None, '')
+            else ''
+        )
         for geom in geoms:
             if not geom.is_valid or geom.is_empty: continue
             if (label_diagnostics is not None and label_tags and
@@ -113,6 +129,8 @@ def process_features( features, conf, label_diagnostics=None ):
                 'tags':  feature_type_tags,
                 'label_tags': label_tags,
                 'label_join': label_join,
+                'building_tags': building_tags,
+                'osm_key': osm_key,
                 'z_order': z_order,
                 'geom': geom
                 })

@@ -709,6 +709,31 @@ int main() {
     assert(std::string_view(validManifest)
                .substr(firstDescriptor.tileOffset, firstDescriptor.tileBytes) ==
            "+0000+0000");
+    const std::string buildingManifest =
+        std::string("{\"buildings\":{\"classDefaultHeightCount\":0,") +
+        "\"explicitHeightCount\":1,\"inheritedHeightCount\":0," +
+        "\"levelsHeightCount\":0,\"localMedianHeightCount\":0," +
+        "\"recordCount\":1},\"files\":[{\"bytes\":1,\"path\":\"" +
+        first + "\",\"sha256\":\"" + sha +
+        "\"},{\"bytes\":2,\"path\":\"VECTMAP/map/assets/street-labels.fma\"," +
+        "\"sha256\":\"" + sha +
+        "\"}],\"mapId\":\"map\",\"schemaVersion\":1," +
+        "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":3," +
+        "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"]," +
+        "\"labelProfileVersion\":1,\"minFirmwareVersion\":\"0.0.0\"," +
+        "\"renderer\":\"esp32-fmb\"}}";
+    assert(parseMapStreamManifest(buildingManifest, manifestHeader, parsed));
+    assert(parsed.metadata.formatVersion == 3);
+    assert(parsed.metadata.buildingProfileVersion == 1);
+    assert(parsed.metadata.buildingRecordCount == 1);
+    assert(parsed.metadata.buildingProvenanceCounts[0] == 1);
+    auto mismatchedBuildingSummary = buildingManifest;
+    const size_t explicitCount =
+        mismatchedBuildingSummary.find("\"explicitHeightCount\":1");
+    assert(explicitCount != std::string::npos);
+    mismatchedBuildingSummary[explicitCount + 22] = '0';
+    assert(!parseMapStreamManifest(mismatchedBuildingSummary, manifestHeader,
+                                   parsed));
     assert(!parseMapStreamManifest(manifestText(second, first), manifestHeader,
                                    parsed));
     assert(!parseMapStreamManifest(manifestText(first, first), manifestHeader,

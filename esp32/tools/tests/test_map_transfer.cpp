@@ -95,14 +95,18 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
   return crc ^ 0xFFFFFFFFU;
 }
 
-static std::string emptyLabelFmb(uint32_t fingerprint) {
-  std::vector<uint8_t> data = {'F', 'M', 'B', 3, 0, 0, 0, 0,
-                               'E', 'X', 'T', '3', 3, 0, 0, 0};
+static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
+  std::vector<uint8_t> data = {
+      'F', 'M', 'B', version, 0, 0, 0, 0, 'E', 'X', 'T',
+      static_cast<uint8_t>('0' + version), version, 0, 0, 0};
   std::vector<uint8_t> labels;
   appendLe32(labels, fingerprint);
   appendLe16(labels, 0);
-  const std::vector<std::vector<uint8_t>> sections = {{0, 0}, {0, 0}, labels};
-  uint32_t offset = static_cast<uint32_t>(data.size() + 3U * 16U);
+  std::vector<std::vector<uint8_t>> sections = {{0, 0}, {0, 0}, labels};
+  if (version == 4)
+    sections.push_back({0, 0, 0, 0, 0, 0, 0, 0});
+  uint32_t offset =
+      static_cast<uint32_t>(data.size() + sections.size() * 16U);
   for (uint8_t index = 0; index < sections.size(); ++index) {
     data.push_back(index + 1);
     data.push_back(1);
@@ -287,6 +291,52 @@ static void testTargetTwoLabelContractValidation() {
       installer.validateStagedMap(mismatchSession, parsed);
   assert(!mismatch.ok);
   assert(mismatch.code == "label_block_contract");
+}
+
+static void testTargetThreeBuildingContractValidation() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-buildings";
+  const std::string blockPath =
+      "VECTMAP/map-buildings/+0000+0000/0_0.fmb";
+  const std::string fontPath =
+      "VECTMAP/map-buildings/assets/street-labels.fma";
+  const std::string block = emptyLabelFmb(0x12345678, 4);
+  const std::string font = emptyFontAsset(0x12345678);
+  const std::string directory = installer.stagingRoot(session);
+  assert(::system((std::string("mkdir -p ") + directory +
+                   "/VECTMAP/map-buildings/+0000+0000 " + directory +
+                   "/VECTMAP/map-buildings/assets")
+                      .c_str()) == 0);
+  writeFile(directory + "/" + blockPath, block);
+  writeFile(directory + "/" + fontPath, font);
+  writeFile(
+      directory + "/manifest.json",
+      "{\"schemaVersion\":1,\"mapId\":\"map-buildings\",\"target\":{"
+      "\"renderer\":\"esp32-fmb\",\"formatVersion\":3,"
+      "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+      "\"internationalFallback\":\"en\",\"buildingProfileVersion\":1},"
+      "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
+      "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
+      "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
+      "\"files\":[{\"path\":\"" + blockPath + "\",\"bytes\":" +
+          std::to_string(block.size()) + ",\"sha256\":\"" + sha(block) +
+          "\"},{\"path\":\"" + fontPath + "\",\"bytes\":" +
+          std::to_string(font.size()) + ",\"sha256\":\"" + sha(font) +
+          "\"}]}\n");
+  MapManifest parsed;
+  const auto validation = installer.validateStagedMap(session, parsed);
+  if (!validation.ok)
+    std::cerr << validation.code << ": " << validation.message << "\n";
+  assert(validation.ok);
+  assert(parsed.formatVersion == 3);
+  assert(parsed.buildingProfileVersion == 1);
+  assert(parsed.buildingRecordCount == 0);
+  assert(installer.activateStagedMap(session, parsed).ok);
+  ActiveMapSelection active;
+  assert(installer.readActiveMap(active).ok);
+  assert(active.target.formatVersion == 3);
+  assert(active.target.buildingProfileVersion == 1);
 }
 
 static void testActivationStateTracksAttemptsAndCompactStatus() {
@@ -1208,6 +1258,7 @@ static void testPendingArchiveActivationSurvivesRestart() {
 int main() {
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
+  testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
   testRejectsMalformedActiveTargetMetadata();

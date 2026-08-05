@@ -190,7 +190,8 @@ bool StreamValidator::feedBinary(uint8_t byte) {
     if (smallSize_ != 4)
       return true;
     if (std::memcmp(small_, "FMB", 3) != 0 ||
-        (small_[3] != 1 && small_[3] != 2 && small_[3] != 3))
+        (small_[3] != 1 && small_[3] != 2 && small_[3] != 3 &&
+         small_[3] != 4))
       return false;
     binaryVersion_ = small_[3];
     smallSize_ = 0;
@@ -231,7 +232,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
         return false;
       featuresSeen_ += value;
       if (recordsRemaining_ == 0) {
-        if (binaryVersion_ == 3)
+        if (binaryVersion_ >= 3)
           return beginV3Extensions();
         binaryState_ = BinaryState::Complete;
       }
@@ -279,7 +280,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
     binaryState_ = BinaryState::PolylinePointCount;
   } else if (binaryState_ == BinaryState::PolylinePoints) {
     if (--recordsRemaining_ == 0) {
-      if (binaryVersion_ == 3)
+      if (binaryVersion_ >= 3)
         return beginV3Extensions();
       binaryState_ = BinaryState::Complete;
     }
@@ -304,8 +305,10 @@ bool StreamValidator::feedV3Directory(uint8_t byte) {
   if (binaryState_ == BinaryState::V3DirectoryHeader) {
     if (v3DirectorySize_ != 8)
       return true;
-    if (std::memcmp(v3Directory_, "EXT3", 4) != 0 ||
-        v3Directory_[4] != 3 || v3Directory_[5] != 0 ||
+    const char expectedVersion = static_cast<char>('0' + binaryVersion_);
+    if (std::memcmp(v3Directory_, "EXT", 3) != 0 ||
+        v3Directory_[3] != static_cast<uint8_t>(expectedVersion) ||
+        v3Directory_[4] != binaryVersion_ || v3Directory_[5] != 0 ||
         v3Directory_[6] != 0 || v3Directory_[7] != 0)
       return false;
     v3SectionCount_ = v3Directory_[4];
@@ -366,6 +369,11 @@ bool StreamValidator::beginV3Section(uint8_t sectionIndex) {
     break;
   case 3:
     v3ParseState_ = V3ParseState::LabelHeader;
+    break;
+  case 4:
+    v3ParseState_ = V3ParseState::BuildingHeader;
+    v4DeclaredBuildingPoints_ = 0;
+    v4BuildingPointsSeen_ = 0;
     break;
   default:
     return false;
@@ -566,6 +574,99 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
                           : V3ParseState::LabelFixed;
     }
     return true;
+  case V3ParseState::BuildingHeader:
+    if (!collect(8) || v3RecordSize_ != 8)
+      return true;
+    v3RecordsRemaining_ = littleEndian16(v3Record_);
+    v4DeclaredBuildingPoints_ = littleEndian32(v3Record_ + 4);
+    if (littleEndian16(v3Record_ + 2) != 0 ||
+        v3RecordsRemaining_ > kMaximumBuildings ||
+        v4DeclaredBuildingPoints_ > kMaximumBuildingPoints)
+      return false;
+    v3RecordSize_ = 0;
+    v3ParseState_ = v3RecordsRemaining_ == 0
+                        ? V3ParseState::Complete
+                        : V3ParseState::BuildingFixed;
+    return true;
+  case V3ParseState::BuildingFixed:
+    if (!collect(18) || v3RecordSize_ != 18)
+      return true;
+    v4RingsRemaining_ = littleEndian16(v3Record_ + 16);
+    v4CurrentRingIndex_ = 0;
+    v4CurrentBuildingFlags_ = v3Record_[1];
+    v4DeclaredBounds_[0] = littleEndianSigned16(v3Record_ + 8);
+    v4DeclaredBounds_[1] = littleEndianSigned16(v3Record_ + 10);
+    v4DeclaredBounds_[2] = littleEndianSigned16(v3Record_ + 12);
+    v4DeclaredBounds_[3] = littleEndianSigned16(v3Record_ + 14);
+    if (v3Record_[0] != 100 || v3Record_[1] > 2U ||
+        v3Record_[2] > 4 || v3Record_[3] != 0 ||
+        littleEndian16(v3Record_ + 6) >= littleEndian16(v3Record_ + 4) ||
+        v4DeclaredBounds_[0] > v4DeclaredBounds_[2] ||
+        v4DeclaredBounds_[1] > v4DeclaredBounds_[3] ||
+        v4RingsRemaining_ == 0 ||
+        v4RingsRemaining_ > kMaximumBuildingRings)
+      return false;
+    v4ActualBounds_[0] = 32767;
+    v4ActualBounds_[1] = 32767;
+    v4ActualBounds_[2] = -32768;
+    v4ActualBounds_[3] = -32768;
+    v3RecordSize_ = 0;
+    v3ParseState_ = V3ParseState::BuildingRingHeader;
+    return true;
+  case V3ParseState::BuildingRingHeader:
+    if (!collect(4) || v3RecordSize_ != 4)
+      return true;
+    v4RingPointCount_ = littleEndian16(v3Record_);
+    v4RingPointsRemaining_ = v4RingPointCount_;
+    v4WallBytesRemaining_ =
+        static_cast<uint16_t>((v4RingPointCount_ + 7U) / 8U);
+    if (v4RingPointCount_ < 3 ||
+        v4RingPointCount_ > kMaximumBuildingPoints - v4BuildingPointsSeen_ ||
+        v3Record_[2] != (v4CurrentRingIndex_ == 0 ? 0 : 1) ||
+        v3Record_[3] != 0)
+      return false;
+    v4BuildingPointsSeen_ += v4RingPointCount_;
+    v3RecordSize_ = 0;
+    v3ParseState_ = V3ParseState::BuildingRingPoints;
+    return true;
+  case V3ParseState::BuildingRingPoints:
+    if (!collect(4) || v3RecordSize_ != 4)
+      return true;
+    {
+      const int16_t x = littleEndianSigned16(v3Record_);
+      const int16_t y = littleEndianSigned16(v3Record_ + 2);
+      v4ActualBounds_[0] = std::min(v4ActualBounds_[0], x);
+      v4ActualBounds_[1] = std::min(v4ActualBounds_[1], y);
+      v4ActualBounds_[2] = std::max(v4ActualBounds_[2], x);
+      v4ActualBounds_[3] = std::max(v4ActualBounds_[3], y);
+    }
+    v3RecordSize_ = 0;
+    if (--v4RingPointsRemaining_ == 0)
+      v3ParseState_ = V3ParseState::BuildingWallMask;
+    return true;
+  case V3ParseState::BuildingWallMask:
+    if (v4WallBytesRemaining_ == 0)
+      return false;
+    if ((v4CurrentBuildingFlags_ & 2U) != 0 && byte != 0)
+      return false;
+    if (v4WallBytesRemaining_ == 1 && (v4RingPointCount_ % 8U) != 0 &&
+        (byte & ~((1U << (v4RingPointCount_ % 8U)) - 1U)) != 0)
+      return false;
+    if (--v4WallBytesRemaining_ != 0)
+      return true;
+    ++v4CurrentRingIndex_;
+    if (--v4RingsRemaining_ != 0) {
+      v3ParseState_ = V3ParseState::BuildingRingHeader;
+      return true;
+    }
+    if (!std::equal(std::begin(v4DeclaredBounds_),
+                    std::end(v4DeclaredBounds_),
+                    std::begin(v4ActualBounds_)))
+      return false;
+    v3ParseState_ = --v3RecordsRemaining_ == 0
+                        ? V3ParseState::Complete
+                        : V3ParseState::BuildingFixed;
+    return true;
   case V3ParseState::None:
   case V3ParseState::Complete:
     return false;
@@ -575,7 +676,9 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
 
 bool StreamValidator::finishV3Section() {
   return v3ParseState_ == V3ParseState::Complete && v3RecordSize_ == 0 &&
-         v3Utf8Remaining_ == 0;
+         v3Utf8Remaining_ == 0 &&
+         (v3Sections_[v3CurrentSection_].type != 4 ||
+          v4BuildingPointsSeen_ == v4DeclaredBuildingPoints_);
 }
 
 void StreamValidator::beginCoordinateLine() {

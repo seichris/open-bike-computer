@@ -92,7 +92,6 @@ struct DestinationPickerView {
   DestinationRowContext
       rowContexts[destination_picker_protocol::MAX_ITEMS]{};
 };
-static DestinationPickerView mapGuidanceDestinationPicker;
 static DestinationPickerView navigationDestinationPicker;
 static ui_update_policy::ChangeTracker uiChangeTracker;
 static map_render_policy::Scheduler mapRenderScheduler;
@@ -147,7 +146,7 @@ uint64_t navigationSignature() {
   hashScalar(hash, navigation.iconID);
   hashScalar(hash, navigation.distance);
   hashText(hash, navigation.instruction, sizeof(navigation.instruction));
-  if (activeTile == NAV || activeTile == MAP_GUIDANCE) {
+  if (activeTile == NAV) {
     const DestinationCatalogSnapshot catalog = getDestinationCatalogSnapshot();
     const DestinationPickerStatusSnapshot status =
         getDestinationPickerStatusSnapshot();
@@ -514,18 +513,14 @@ bool shouldInterruptMapRenderForScreenCycle() {
   }
 
   // The BOOT button always handles the forward action. On Map + Navigation,
-  // also use the touch controller's interrupt hint while the destination
-  // picker is open (or tap-to-switch is enabled) so a new tap can pre-empt the
-  // synchronous vector renderer before LVGL consumes the touch event.
+  // also use the touch controller's interrupt hint when tap-to-switch is
+  // enabled so a new tap can pre-empt the synchronous vector renderer before
+  // LVGL consumes the touch event.
   if (waveshareBootScreenCyclePending ||
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
-  const bool pickerNeedsInput =
-      navigation_content_mode::forNavigationState(
-          hasCurrentNavigationData()) ==
-      navigation_content_mode::Mode::FavoriteDestinations;
-  return (pickerNeedsInput || mapRenderSettings.tapToSwitchScreens) &&
+  return mapRenderSettings.tapToSwitchScreens &&
          (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
 #else
   return false;
@@ -727,26 +722,8 @@ static void applyMapRotationForActiveTile() {
   }
 }
 
-static uint16_t mapGuidanceOverlayHeight(bool expanded) {
-  return expanded ? (TFT_HEIGHT * 2) / 3 : TFT_HEIGHT / 3;
-}
-
-static bool mapGuidanceTapIsOutsideOverlay(lv_event_t *event) {
-  if (mapGuidanceOverlay == nullptr || event == nullptr) {
-    return false;
-  }
-
-  lv_indev_t *indev = lv_event_get_indev(event);
-  if (indev == nullptr) {
-    return false;
-  }
-
-  lv_point_t point;
-  lv_area_t overlayArea;
-  lv_indev_get_point(indev, &point);
-  lv_obj_get_coords(mapGuidanceOverlay, &overlayArea);
-  return point.x < overlayArea.x1 || point.x > overlayArea.x2 ||
-         point.y < overlayArea.y1 || point.y > overlayArea.y2;
+static uint16_t mapGuidanceOverlayHeight() {
+  return TFT_HEIGHT / 3;
 }
 
 static lv_obj_t *createDestinationPickerContainer(lv_obj_t *parent) {
@@ -934,70 +911,28 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
   }
 }
 
-static void applyMapGuidanceOverlayLayout() {
-  if (!mapGuidanceOverlay || !mapGuidanceDestinationPicker.container ||
-      !mapGuidanceCycleStrip) {
-    return;
-  }
-
-  const bool expanded =
-      navigation_content_mode::forNavigationState(
-          hasCurrentNavigationData()) ==
-      navigation_content_mode::Mode::FavoriteDestinations;
-  const uint16_t overlayHeight = mapGuidanceOverlayHeight(expanded);
-  lv_obj_set_size(mapGuidanceOverlay, TFT_WIDTH, overlayHeight);
-  lv_obj_set_pos(mapGuidanceOverlay, 0, TFT_HEIGHT - overlayHeight);
-
-  if (expanded) {
-    lv_obj_set_size(mapGuidanceDestinationPicker.container, TFT_WIDTH - 16,
-                    overlayHeight - 16);
-    lv_obj_align(mapGuidanceDestinationPicker.container, LV_ALIGN_CENTER, 0,
-                 0);
-    lv_obj_add_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_HIDDEN);
-  } else {
-    lv_obj_set_size(mapGuidanceDestinationPicker.container, TFT_WIDTH - 52,
-                    overlayHeight - 16);
-    lv_obj_align(mapGuidanceDestinationPicker.container, LV_ALIGN_LEFT_MID, 0,
-                 0);
-    lv_obj_set_size(mapGuidanceCycleStrip, 28, overlayHeight - 16);
-    lv_obj_align(mapGuidanceCycleStrip, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_clear_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_HIDDEN);
-  }
-}
-
 static void updateMapGuidanceOverlay() {
-  if (!mapGuidanceArrow || !mapGuidanceDistance ||
-      !mapGuidanceDestinationPicker.container) {
+  if (!mapGuidanceOverlay || !mapGuidanceArrow || !mapGuidanceDistance) {
     return;
   }
 
-  const navigation_content_mode::Mode contentMode =
-      navigation_content_mode::forNavigationState(hasCurrentNavigationData());
-  static int8_t displayedContentMode = -1;
-  const int8_t nextContentMode = static_cast<int8_t>(contentMode);
-  if (displayedContentMode != nextContentMode) {
-    applyMapGuidanceOverlayLayout();
-    displayedContentMode = nextContentMode;
-  }
-
-  if (contentMode == navigation_content_mode::Mode::FavoriteDestinations) {
+  const bool hasNavigationData = hasCurrentNavigationData();
+  if (navigation_content_mode::hidesMapGuidanceOverlay(hasNavigationData)) {
     setImageAngleIfChanged(mapGuidanceArrow, 0);
     setLabelTextIfChanged(mapGuidanceDistance, "--");
-    setHiddenIfChanged(mapGuidanceArrow, true);
-    setHiddenIfChanged(mapGuidanceDistance, true);
-    setHiddenIfChanged(mapGuidanceDestinationPicker.container, false);
-    renderDestinationPicker(mapGuidanceDestinationPicker);
+    setHiddenIfChanged(mapGuidanceOverlay, true);
     return;
   }
-
-  setHiddenIfChanged(mapGuidanceDestinationPicker.container, true);
-  setHiddenIfChanged(mapGuidanceArrow, false);
-  setHiddenIfChanged(mapGuidanceDistance, false);
 
   NavigationData navData = getCurrentNavigationData();
   setImageAngleIfChanged(mapGuidanceArrow,
                          navigationArrowAngle(navData.iconID));
   setNavigationDistanceLabel(mapGuidanceDistance, navData.distance);
+  if (activeTile == MAP_GUIDANCE && !mapTileTransition.pending && mapTile &&
+      !lv_obj_has_flag(mapTile, LV_OBJ_FLAG_HIDDEN)) {
+    setHiddenIfChanged(mapGuidanceOverlay, false);
+    lv_obj_move_foreground(mapGuidanceOverlay);
+  }
 }
 
 static void refreshDestinationPickersAsync(void *userData) {
@@ -1005,13 +940,10 @@ static void refreshDestinationPickersAsync(void *userData) {
   if (!isMainScreen || mainScreen == nullptr) {
     return;
   }
-  if (activeTile == MAP_GUIDANCE) {
-    updateMapGuidanceOverlay();
-  } else if (activeTile == NAV) {
-    updateNavEvent(nullptr);
-  } else {
+  if (activeTile != NAV) {
     return;
   }
+  updateNavEvent(nullptr);
   lv_obj_invalidate(mainScreen);
 }
 
@@ -1433,17 +1365,6 @@ void scrollMapEvent(lv_event_t *event) {
   if (!canScrollMap) {
     if (activeTile == MAP_GUIDANCE &&
         lv_event_get_code(event) == LV_EVENT_CLICKED) {
-      if (!hasCurrentNavigationData()) {
-        // The inactive screen has one stable favorites state. A tap on the
-        // exposed map can still cycle screens, while this coordinate guard
-        // prevents a misdirected row touch from doing so.
-        if (mapRenderSettings.tapToSwitchScreens &&
-            mapGuidanceTapIsOutsideOverlay(event)) {
-          log_i("MAP GUIDANCE TAP: cycling main screen");
-          showNextMainScreen();
-        }
-        return;
-      }
       if (mapRenderSettings.tapToSwitchScreens) {
         log_i("MAP GUIDANCE TAP: cycling main screen");
         showNextMainScreen();
@@ -1818,7 +1739,7 @@ void updateNavEvent(lv_event_t *event) {
 }
 
 static void createMapGuidanceOverlay() {
-  const uint16_t overlayHeight = mapGuidanceOverlayHeight(false);
+  const uint16_t overlayHeight = mapGuidanceOverlayHeight();
 
   mapGuidanceOverlay = lv_obj_create(mainScreen);
   lv_obj_remove_style_all(mapGuidanceOverlay);
@@ -1831,13 +1752,6 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
   lv_obj_add_event_cb(mapGuidanceOverlay, mapGuidanceOverlayTapEvent,
                       LV_EVENT_CLICKED, NULL);
-
-  mapGuidanceDestinationPicker.container =
-      createDestinationPickerContainer(mapGuidanceOverlay);
-  lv_obj_set_size(mapGuidanceDestinationPicker.container, TFT_WIDTH - 52,
-                  overlayHeight - 16);
-  lv_obj_align(mapGuidanceDestinationPicker.container, LV_ALIGN_LEFT_MID, 0,
-               0);
 
   mapGuidanceCycleStrip = lv_btn_create(mapGuidanceOverlay);
   lv_obj_set_size(mapGuidanceCycleStrip, 28, overlayHeight - 16);
@@ -1872,8 +1786,6 @@ static void createMapGuidanceOverlay() {
   lv_label_set_text_static(mapGuidanceDistance, "--");
   lv_obj_align(mapGuidanceDistance, LV_ALIGN_LEFT_MID, 212, 0);
 
-  mapGuidanceDestinationPicker.catalogRevision = UINT32_MAX;
-  mapGuidanceDestinationPicker.statusRevision = UINT32_MAX;
   updateMapGuidanceOverlay();
 
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
@@ -1971,7 +1883,9 @@ static void revealPendingMapTileIfReady() {
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
 
-  if (activeTile == MAP_GUIDANCE) {
+  if (activeTile == MAP_GUIDANCE &&
+      navigation_content_mode::showsMapGuidanceOverlay(
+          hasCurrentNavigationData())) {
     lv_obj_clear_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(mapGuidanceOverlay);
   } else {
@@ -2012,9 +1926,6 @@ static void tapCycleScreenEvent(lv_event_t *event) {
 }
 
 static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
-  if (!hasCurrentNavigationData()) {
-    return;
-  }
   tapCycleScreenEvent(event);
 }
 

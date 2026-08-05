@@ -91,6 +91,16 @@ inline double birdsEyeAnchorY(uint16_t viewportHeight) {
   return std::floor((static_cast<double>(viewportHeight) * 56.0) / 100.0);
 }
 
+inline double mercatorScaleForLatitude(double latitudeDegrees) {
+  constexpr double kMaximumWebMercatorLatitude = 85.05112878;
+  constexpr double kDegreesToRadians =
+      3.14159265358979323846 / 180.0;
+  const double latitude = std::max(
+      -kMaximumWebMercatorLatitude,
+      std::min(kMaximumWebMercatorLatitude, latitudeDegrees));
+  return 1.0 / std::cos(latitude * kDegreesToRadians);
+}
+
 class Projection {
 public:
   Projection() = default;
@@ -170,6 +180,20 @@ public:
         effectiveMaximumDepthScale(), focalDistance_ / denominator);
     return {config_.anchorX + ground.lateral * depthScale,
             config_.anchorY - ground.forward * depthScale, depthScale, true};
+  }
+
+  ProjectedPoint projectElevatedGround(
+      GroundPoint ground, double physicalHeightMeters,
+      double blockMercatorScale = 1.0) const {
+    ProjectedPoint projected = projectGround(ground);
+    if (!projected.valid || !(physicalHeightMeters > 0.0))
+      return projected;
+    const double correctedHeight =
+        physicalHeightMeters * std::max(1.0, blockMercatorScale);
+    projected.y -= correctedHeight *
+                   map_transform::worldToScreenScale(config_.zoom) *
+                   projected.depthScale;
+    return projected;
   }
 
   ProjectedPoint projectWorld(map_transform::WorldPoint world) const {
@@ -278,9 +302,10 @@ private:
   double nearPlaneForward_ = -1.0;
 };
 
+template <typename InputContainer, typename OutputContainer>
 inline void clipPolygonToNearPlane(const Projection &projection,
-                                   const std::vector<GroundPoint> &input,
-                                   std::vector<GroundPoint> &output) {
+                                   const InputContainer &input,
+                                   OutputContainer &output) {
   output.clear();
   if (input.empty())
     return;

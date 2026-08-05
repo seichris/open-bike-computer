@@ -223,6 +223,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
 
     func forDevice(
         supportsStreetLabels: Bool,
+        supports3DBuildings: Bool = false,
         firmwareVersion: String
     ) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
@@ -234,7 +235,13 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: clientInstallationId,
             clientRequestId: clientRequestId,
             installOnDevice: installOnDevice,
-            target: supportsStreetLabels
+            target: supports3DBuildings
+                ? RendererTarget(
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 3,
+                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                )
+                : supportsStreetLabels
                 ? RendererTarget(
                     renderer: "esp32-fmb",
                     rendererFormatVersion: 2,
@@ -245,7 +252,44 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                     rendererFormatVersion: 1,
                     firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
                 ),
-            labels: supportsStreetLabels ? labels ?? Self.defaultLabelProfile : nil
+            labels: (supportsStreetLabels || supports3DBuildings)
+                ? labels ?? Self.defaultLabelProfile
+                : nil
+        )
+    }
+
+    func compatibleFallback(
+        requestedRendererFormatVersion: Int,
+        supportedRendererFormatVersions: [Int]
+    ) -> OfflineMapJobRequest? {
+        guard requestedRendererFormatVersion == 3,
+              target?.renderer == "esp32-fmb",
+              target?.rendererFormatVersion == requestedRendererFormatVersion else {
+            return nil
+        }
+        let fallbackFormat: Int
+        if labels != nil && supportedRendererFormatVersions.contains(2) {
+            fallbackFormat = 2
+        } else if supportedRendererFormatVersions.contains(1) {
+            fallbackFormat = 1
+        } else {
+            return nil
+        }
+        return OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: RendererTarget(
+                renderer: "esp32-fmb",
+                rendererFormatVersion: fallbackFormat,
+                firmwareVersion: target?.firmwareVersion
+            ),
+            labels: fallbackFormat == 2 ? labels : nil
         )
     }
 }
@@ -670,6 +714,11 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
+    case unsupportedRendererTarget(
+        requestedRendererFormatVersion: Int,
+        supportedRendererFormatVersions: [Int],
+        message: String
+    )
     case serverStatus(Int, String)
 
     var errorDescription: String? {
@@ -702,10 +751,27 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Map pack entry is compressed and cannot be transferred: \(path)"
         case .invalidResponse:
             return "Map server returned an invalid response"
+        case .unsupportedRendererTarget(_, _, let message):
+            return message
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }
     }
+}
+
+private struct OfflineMapAPIErrorEnvelope: Decodable {
+    let detail: OfflineMapAPIErrorDetail
+}
+
+private struct OfflineMapAPIErrorDetail: Decodable {
+    let code: String
+    let message: String
+    let requestedRendererFormatVersion: Int?
+    let supportedRendererFormatVersions: [Int]?
+}
+
+private struct OfflineMapAPILegacyErrorEnvelope: Decodable {
+    let detail: String
 }
 
 struct OfflineMapPackEntry: Equatable {
@@ -836,9 +902,15 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         let dataBase64: String?
     }
 
+    struct Target: Decodable, Equatable {
+        let renderer: String?
+        let formatVersion: Int?
+    }
+
     let mapId: String?
     let displayName: String?
     let source: Source?
+    let target: Target?
     let preview: Preview?
     let files: [File]?
     let bounds: [Double]?
@@ -858,6 +930,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case mapId
         case displayName
         case source
+        case target
         case preview
         case files
         case bounds
@@ -869,6 +942,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         mapId = try container.decodeIfPresent(String.self, forKey: .mapId)
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
         source = try container.decodeIfPresent(Source.self, forKey: .source)
+        target = try container.decodeIfPresent(Target.self, forKey: .target)
         preview = try? container.decode(Preview.self, forKey: .preview)
         files = try container.decodeIfPresent([File].self, forKey: .files)
         bounds = try? container.decode([Double].self, forKey: .bounds)
@@ -2438,6 +2512,30 @@ struct OfflineMapPlatformClient {
         guard jobRequest.clientInstallationId == clientInstallationId else {
             throw OfflineMapPlatformError.invalidResponse
         }
+        do {
+            return try await createJobOnce(jobRequest)
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(
+            let requestedRendererFormatVersion,
+            let supportedRendererFormatVersions,
+            let message
+        ) {
+            guard let fallback = jobRequest.compatibleFallback(
+                requestedRendererFormatVersion: requestedRendererFormatVersion,
+                supportedRendererFormatVersions: supportedRendererFormatVersions
+            ) else {
+                throw OfflineMapPlatformError.unsupportedRendererTarget(
+                    requestedRendererFormatVersion: requestedRendererFormatVersion,
+                    supportedRendererFormatVersions: supportedRendererFormatVersions,
+                    message: message
+                )
+            }
+            return try await createJobOnce(fallback)
+        }
+    }
+
+    private func createJobOnce(
+        _ jobRequest: OfflineMapJobRequest
+    ) async throws -> OfflineMapJob {
         var request = try Self.makeCreateJobURLRequest(
             baseURL: baseURL,
             jobRequest: jobRequest
@@ -2517,8 +2615,7 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+            throw Self.platformError(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(OfflineMapJobsResponse.self, from: data).jobs
     }
@@ -2723,10 +2820,48 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         guard 200..<300 ~= http.statusCode else {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw OfflineMapPlatformError.serverStatus(http.statusCode, bodyText)
+            throw Self.platformError(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    private static func platformError(
+        statusCode: Int,
+        data: Data
+    ) -> OfflineMapPlatformError {
+        if let envelope = try? JSONDecoder().decode(
+            OfflineMapAPIErrorEnvelope.self,
+            from: data
+        ),
+           envelope.detail.code == "unsupported_renderer_target",
+           let requested = envelope.detail.requestedRendererFormatVersion,
+           let supported = envelope.detail.supportedRendererFormatVersions {
+            return .unsupportedRendererTarget(
+                requestedRendererFormatVersion: requested,
+                supportedRendererFormatVersions: supported,
+                message: envelope.detail.message
+            )
+        }
+        // The renderer-format-2 control plane predates the typed target error
+        // envelope. Recognize only its exact target-3 rejection so an app can
+        // downgrade during a rolling deployment; arbitrary HTTP 400 responses
+        // must remain hard failures.
+        if statusCode == 400,
+           let legacy = try? JSONDecoder().decode(
+               OfflineMapAPILegacyErrorEnvelope.self,
+               from: data
+           ),
+           legacy.detail == "target rendererFormatVersion must be 1 or 2" {
+            return .unsupportedRendererTarget(
+                requestedRendererFormatVersion: 3,
+                supportedRendererFormatVersions: [2, 1],
+                message: legacy.detail
+            )
+        }
+        return .serverStatus(
+            statusCode,
+            String(data: data, encoding: .utf8) ?? ""
+        )
     }
 
     private func authorizeInstallation(_ request: inout URLRequest) {

@@ -16,11 +16,13 @@ int main() {
   static_assert(
       device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE ==
       (1UL << 11));
+  static_assert(device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE ==
+                (1UL << 12));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
-      0x00000fff, power, true, output, sizeof(output));
-  const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x0f,
+      0x00001fff, power, true, output, sizeof(output));
+  const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x1f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
   static_assert(sizeof(expected) == device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));

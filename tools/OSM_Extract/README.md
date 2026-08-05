@@ -43,13 +43,14 @@ The container mounts:
 - `./scripts` as `/scripts`
 - `./conf` as `/conf` (read-only configuration)
 
-For host-only development, this project requires `shapely`, `PyYAML`, and `Pillow`. Use a virtual environment:
+For host-only development, this project requires `shapely`, `PyYAML`,
+`Pillow`, `freetype-py`, `uharfbuzz`, and Pyosmium. Use a virtual environment:
 
 ```bash
 cd scripts
 python3 -m venv venv
 source venv/bin/activate
-pip install shapely PyYAML Pillow
+pip install shapely PyYAML Pillow freetype-py uharfbuzz "osmium==4.3.1"
 ```
 
 ## Example of the creation of the map files
@@ -93,3 +94,55 @@ The script takes 6 arguments:
 6. `output_folder` (Optional): Where the `.fmp` and `.fmb` files will be saved. Defaults to `../maps/shanghai_v2`.
 
 These files will contain the feature types defined in */conf/conf_extract.yaml* of your area, with the visual styles defined in */conf/conf_styles.yaml*
+
+## Renderer formats and OSM 3D buildings
+
+`extract_features.py --renderer-format` selects the durable binary output:
+
+- format 1 writes the existing FMB v2 blocks;
+- format 2 writes FMB v3 blocks plus the shared FMA1 street-label asset; and
+- format 3 writes FMB v4 blocks with the same label sections plus the bounded
+  building section documented in [`docs/fmb-v4.md`](../../docs/fmb-v4.md).
+
+The format-3 stage reads `building=*` and `building:part=*` ways and
+multipolygon relations directly from the clipped Geofabrik/OSM PBF. It keeps
+holes, relation membership, OSM height tags, source edge identity, and a stable
+source key. `building_height_rules.yaml` defines all accepted ranges and the
+deterministic fallback ladder: explicit height, OSM levels, eligible parent
+inheritance, local OSM median, then checked-in building-class default. No
+external height or building source is queried.
+
+Every renderable format-3 building therefore has a resolved height even when it
+has no usable height-related OSM tags. A part first inherits an eligible
+explicit or levels-derived parent height. Otherwise, the pipeline uses the
+median of at least three explicit or levels-derived OSM samples from the same
+coarse building class in the configured fixed cell and halo. If no eligible
+median exists, it uses these checked-in class defaults:
+
+| Normalized OSM building class | Default height |
+| --- | ---: |
+| `apartments` | 15 m |
+| `commercial` | 12 m |
+| `house` | 6 m |
+| `industrial` | 9 m |
+| `office` | 15 m |
+| `residential` | 9 m |
+| `retail` | 6 m |
+| `school` | 9 m |
+| `shed` | 3 m |
+| `warehouse` | 9 m |
+| unknown / generic | 9 m |
+
+The source of truth is
+[`conf/building_height_rules.yaml`](conf/building_height_rules.yaml), which also
+sets the 3 m floor-height assumption, 2.5 m roof-level assumption, class safety
+ranges, 8,192 m calibration cell, one-cell halo, and three-sample minimum.
+Malformed or contradictory height tags are counted in build diagnostics and
+fall through to the next valid resolution step instead of rejecting the map.
+FMB v4 stores the selected provenance separately from the height value.
+
+The source PBF must include an 8,192-metre halo around the final aligned block
+extent. Buildings are clipped only when FMB blocks are emitted; new clip edges
+receive a cleared wall bit so adjacent blocks do not render artificial seam
+facades. The script emits `BUILDING_STATS` with exact encoded-record provenance
+counts for backend comparison with the final FMB v4 artifacts.

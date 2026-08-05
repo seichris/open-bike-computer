@@ -15,13 +15,20 @@ from map_platform.reuse import (
     aligned_processing_bounds,
     block_from_pack_path,
     child_pack_path,
+    expanded_building_source_bounds,
     parent_contains_child_blocks,
     required_blocks,
     reuse_keys,
 )
+from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
 from map_platform.worker import MapWorker
-from tests.map_label_fixtures import empty_fma1, empty_fmb3
+from tests.map_label_fixtures import (
+    empty_fma1,
+    empty_fmb3,
+    one_building_fmb4,
+    one_label_fma1,
+)
 
 
 PRODUCER_BUILD = "1" * 64
@@ -72,6 +79,16 @@ class FullBuildFallbackPipeline(MapBuildPipeline):
         return MapBuildResult(map_id, archive, [])
 
 
+class TrackingFullBuildFallbackPipeline(FullBuildFallbackPipeline):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.subset_build_calls = 0
+
+    def build_subset(self, job, parent, **kwargs):
+        self.subset_build_calls += 1
+        return MapBuildPipeline.build_subset(self, job, parent, **kwargs)
+
+
 class MapReuseTests(unittest.TestCase):
     def setUp(self):
         self.source = SourceRegion(
@@ -83,6 +100,21 @@ class MapReuseTests(unittest.TestCase):
             published_at="2026-07-15T00:00:00Z",
             checksum="3" * 64,
         )
+
+    @staticmethod
+    def _renderer_request(format_version: int) -> dict:
+        return {
+            "target": {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": format_version,
+                "firmwareVersion": "1.2.3",
+            },
+            "labels": {
+                "profileVersion": 1,
+                "preferredLanguages": ["zh-Hant", "en"],
+                "internationalFallback": "en",
+            },
+        }
 
     def test_exact_key_ignores_ownership_but_not_geometry_or_pack_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,6 +244,42 @@ class MapReuseTests(unittest.TestCase):
             self.assertGreaterEqual(aligned.max_lat, child.geometry.bounds.max_lat)
             self.assertTrue(parent_contains_child_blocks(parent, child))
             self.assertTrue(required_blocks(child.geometry.bounds))
+
+    def test_building_source_bounds_cover_complete_calibration_halo_cells(self):
+        bounds = Bounds(
+            reuse_module._x_to_lon(4096),
+            reuse_module._y_to_lat(4096),
+            reuse_module._x_to_lon(8192),
+            reuse_module._y_to_lat(8192),
+        )
+        expanded = expanded_building_source_bounds(
+            bounds,
+            cell_size_meters=8192,
+            halo_cells=1,
+        )
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.max_lon), 16384)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.max_lat), 16384)
+
+    def test_calibration_bounds_preserve_sub_meter_cell_crossings(self):
+        bounds = Bounds(
+            reuse_module._x_to_lon(8191.6),
+            reuse_module._y_to_lat(8191.6),
+            reuse_module._x_to_lon(8192.4),
+            reuse_module._y_to_lat(8192.4),
+        )
+
+        expanded = expanded_building_source_bounds(
+            bounds,
+            cell_size_meters=8192,
+            halo_cells=1,
+        )
+
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.min_lon), -8192)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.min_lat), -8192)
+        self.assertAlmostEqual(reuse_module._lon_to_x(expanded.max_lon), 24576)
+        self.assertAlmostEqual(reuse_module._lat_to_y(expanded.max_lat), 24576)
 
     def test_worker_reuses_identical_ready_pack_without_building(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -421,6 +489,233 @@ class MapReuseTests(unittest.TestCase):
             )
             self.assertEqual(asset.read_bytes(), empty_fma1())
 
+    def test_target_three_subset_reuse_preserves_v4_blocks_font_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            )
+            target = self._renderer_request(3)
+            parent = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.70, 1.20, 104.00, 1.50],
+                    **target,
+                }
+            )
+            child = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.80, 1.30, 103.90, 1.40],
+                    **target,
+                }
+            )
+            parent_archive = self._make_parent_archive(root, parent, child)
+            keys = reuse_keys(
+                parent,
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+            store.update_status(
+                parent.job_id,
+                JobStatus.READY,
+                map_id=parent.map_id,
+                pack_path=str(parent_archive),
+                pack_bytes=parent_archive.stat().st_size,
+                build_cache_key=keys.exact,
+                build_compatibility_key=keys.compatibility,
+                artifacts=parent.artifacts,
+                finished=True,
+            )
+            pipeline = TrackingSubsetPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=VersionRunner(),
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+
+            result = MapWorker(store, pipeline, worker_id="worker-target3-subset").run_next()
+
+            self.assertEqual(result.job.status, JobStatus.READY)
+            self.assertEqual(result.job.reuse_strategy, "subset")
+            self.assertEqual(result.job.reuse_source_job_id, parent.job_id)
+            self.assertEqual(pipeline.subset_build_calls, 1)
+            self.assertEqual(pipeline.full_build_calls, 0)
+            with zipfile.ZipFile(result.job.pack_path) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                fmb_paths = [
+                    entry["path"]
+                    for entry in manifest["files"]
+                    if entry["path"].endswith(".fmb")
+                ]
+                font_paths = [
+                    entry["path"]
+                    for entry in manifest["files"]
+                    if entry["path"].endswith(".fma")
+                ]
+                self.assertTrue(
+                    all(archive.read(path)[:4] == b"FMB\x04" for path in fmb_paths)
+                )
+                self.assertEqual(archive.read(font_paths[0]), one_label_fma1())
+            expected_blocks = required_blocks(child.geometry.bounds)
+            self.assertEqual(
+                {block_from_pack_path(path) for path in fmb_paths},
+                expected_blocks,
+            )
+            self.assertEqual(len(font_paths), 1)
+            self.assertFalse(any(entry["path"].endswith(".fmp") for entry in manifest["files"]))
+            self.assertEqual(manifest["target"]["formatVersion"], 3)
+            self.assertEqual(manifest["target"]["buildingProfileVersion"], 1)
+            self.assertEqual(manifest["buildings"]["recordCount"], len(expected_blocks))
+            self.assertEqual(
+                manifest["buildings"]["explicitHeightCount"],
+                len(expected_blocks),
+            )
+
+    def test_corrupt_target_three_subset_falls_back_to_full_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            )
+            target = self._renderer_request(3)
+            parent = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.70, 1.20, 104.00, 1.50],
+                    **target,
+                }
+            )
+            child = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.80, 1.30, 103.90, 1.40],
+                    **target,
+                }
+            )
+            archive_path = self._make_parent_archive(root, parent, child)
+            corrupt_path = root / "corrupt-target3.zip"
+            with zipfile.ZipFile(archive_path, "r") as source_archive:
+                selected = next(
+                    path for path in source_archive.namelist() if path.endswith(".fmb")
+                )
+                with zipfile.ZipFile(
+                    corrupt_path,
+                    "w",
+                    compression=zipfile.ZIP_STORED,
+                ) as corrupt_archive:
+                    for info in source_archive.infolist():
+                        data = source_archive.read(info)
+                        corrupt_archive.writestr(
+                            info,
+                            b"corrupt" if info.filename == selected else data,
+                        )
+            corrupt_path.replace(archive_path)
+            parent.artifacts = [
+                ArtifactRecord(
+                    format="zip-stored-v1",
+                    media_type="application/zip",
+                    filename=archive_path.name,
+                    object_key=f"test/{archive_path.name}",
+                    bytes=archive_path.stat().st_size,
+                    sha256=sha256_file(archive_path),
+                )
+            ]
+            keys = reuse_keys(
+                parent,
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+            store.update_status(
+                parent.job_id,
+                JobStatus.READY,
+                map_id=parent.map_id,
+                pack_path=str(archive_path),
+                pack_bytes=archive_path.stat().st_size,
+                build_cache_key=keys.exact,
+                build_compatibility_key=keys.compatibility,
+                artifacts=parent.artifacts,
+                finished=True,
+            )
+            pipeline = TrackingFullBuildFallbackPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=VersionRunner(),
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+
+            result = MapWorker(store, pipeline, worker_id="worker-target3-fallback").run_next()
+
+            self.assertEqual(result.job.status, JobStatus.READY)
+            self.assertIsNone(result.job.reuse_strategy)
+            self.assertEqual(pipeline.subset_build_calls, 1)
+            self.assertEqual(pipeline.full_build_calls, 1)
+            self.assertEqual(Path(result.job.pack_path).read_bytes(), b"full-build-fallback")
+
+    def test_target_three_reuse_identity_is_separate_from_target_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            service = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            )
+            target_two = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.70, 1.20, 104.00, 1.50],
+                    **self._renderer_request(2),
+                }
+            )
+            target_three = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.80, 1.30, 103.90, 1.40],
+                    **self._renderer_request(3),
+                }
+            )
+            target_two_keys = reuse_keys(
+                target_two,
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+            target_three_keys = reuse_keys(
+                target_three,
+                producer_build_sha256=PRODUCER_BUILD,
+                producer_image_digest=PRODUCER_IMAGE,
+            )
+            store.update_status(
+                target_two.job_id,
+                JobStatus.READY,
+                map_id="target-two",
+                pack_path=str(Path(tmp) / "target-two.zip"),
+                pack_bytes=0,
+                build_cache_key=target_two_keys.exact,
+                build_compatibility_key=target_two_keys.compatibility,
+                finished=True,
+            )
+
+            self.assertNotEqual(
+                target_two_keys.compatibility,
+                target_three_keys.compatibility,
+            )
+            self.assertEqual(
+                store.find_subset_reuse_candidates(
+                    target_three,
+                    build_compatibility_key=target_three_keys.compatibility,
+                ),
+                [],
+            )
+
     def test_corrupt_subset_candidate_falls_back_to_full_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -468,23 +763,28 @@ class MapReuseTests(unittest.TestCase):
         parent.map_id = "parent-map"
         pack_root = root / f"pack-{parent.job_id}"
         child_blocks = required_blocks(child.geometry.bounds)
+        format_version = parent.request.get("target", {}).get(
+            "rendererFormatVersion", 1
+        )
         extensions = (
             ("fmb",)
-            if parent.request.get("target", {}).get("rendererFormatVersion") == 2
+            if format_version in {2, 3}
             else ("fmb", "fmp")
         )
         for block in child_blocks:
             for extension in extensions:
                 path = pack_root / child_pack_path(parent.map_id, block, extension)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if extensions == ("fmb",):
+                if format_version == 3:
+                    data = one_building_fmb4()
+                elif format_version == 2:
                     data = empty_fmb3()
                 elif extension == "fmb":
                     data = b"FMB\x02"
                 else:
                     data = f"{block.x}:{block.y}:{extension}".encode()
                 path.write_bytes(data)
-        if parent.request.get("target", {}).get("rendererFormatVersion") == 2:
+        if format_version in {2, 3}:
             asset = (
                 pack_root
                 / "VECTMAP"
@@ -493,7 +793,9 @@ class MapReuseTests(unittest.TestCase):
                 / "street-labels.fma"
             )
             asset.parent.mkdir(parents=True, exist_ok=True)
-            asset.write_bytes(empty_fma1())
+            asset.write_bytes(
+                one_label_fma1() if format_version == 3 else empty_fma1()
+            )
         manifest = build_manifest(
             parent,
             pack_root,

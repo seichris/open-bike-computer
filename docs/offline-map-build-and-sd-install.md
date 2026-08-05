@@ -68,6 +68,18 @@ Copy the generated map folders to the SD card under:
 The ESP32 firmware reads `.fmb` blocks from this layout for offline map
 rendering.
 
+## 4. Validate the active area
+
+The renderer loads blocks around its current GPS coordinate; it does not show
+an installed pack merely because the transfer completed. **No map data** can
+therefore mean that the current coordinate is outside the installed area, not
+that installation or activation failed. Confirm the pack is marked uploaded,
+then compare the active GPS position with its bounds.
+
+For physical-device development, including the debug-only Singapore location
+override used for 3D-building validation, follow
+[`ios-app/README.md`](../ios-app/README.md#physical-device-offline-map-validation).
+
 The iOS app needs an internet connection for route planning. For a fully
 offline, phone-free setup, flash [IceNav-v3](https://github.com/jgauchia/IceNav-v3)
 on a GPS-equipped board like the

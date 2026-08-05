@@ -61,6 +61,48 @@ nonisolated enum RideIdleTimerController {
     }
 }
 
+nonisolated enum DeveloperLocationOverride {
+    static let argumentPrefix = "--device-map-location="
+
+    static func coordinate(arguments: [String]) -> CLLocationCoordinate2D? {
+        guard let argument = arguments.first(where: {
+            $0.hasPrefix(argumentPrefix)
+        }) else {
+            return nil
+        }
+        let value = argument.dropFirst(argumentPrefix.count)
+        let components = value.split(separator: ",", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              let latitude = CLLocationDegrees(components[0]),
+              let longitude = CLLocationDegrees(components[1]),
+              latitude.isFinite,
+              longitude.isFinite,
+              (-90...90).contains(latitude),
+              (-180...180).contains(longitude) else {
+            return nil
+        }
+        return CLLocationCoordinate2D(
+            latitude: latitude,
+            longitude: longitude
+        )
+    }
+
+    static func applying(
+        _ coordinate: CLLocationCoordinate2D,
+        to location: CLLocation
+    ) -> CLLocation {
+        CLLocation(
+            coordinate: coordinate,
+            altitude: location.altitude,
+            horizontalAccuracy: location.horizontalAccuracy,
+            verticalAccuracy: location.verticalAccuracy,
+            course: location.course,
+            speed: location.speed,
+            timestamp: location.timestamp
+        )
+    }
+}
+
 enum LocationAuthorizationLevel {
     case denied
     case whenInUse
@@ -167,6 +209,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
     private var hasRequestedAlwaysAuthorizationForRideActivity = false
+#if DEBUG
+    private let developerLocationOverride = DeveloperLocationOverride.coordinate(
+        arguments: ProcessInfo.processInfo.arguments
+    )
+#endif
     
     init(
         locationManager: LocationManagerClient = CoreLocationManagerClient(),
@@ -179,6 +226,15 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         super.init()
         locationManager.setDelegate(self)
         locationManager.configureForCycling()
+#if DEBUG
+        if let developerLocationOverride {
+            print(
+                "Developer device-map location override active: " +
+                    "\(developerLocationOverride.latitude)," +
+                    "\(developerLocationOverride.longitude)"
+            )
+        }
+#endif
         // First-run onboarding owns the permission prompt so the user can read
         // the rationale or skip location before iOS asks for access.
     }
@@ -325,7 +381,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     }
     
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let location = locations.last else { return }
+        guard let sourceLocation = locations.last else { return }
+#if DEBUG
+        let location = developerLocationOverride.map {
+            DeveloperLocationOverride.applying($0, to: sourceLocation)
+        } ?? sourceLocation
+#else
+        let location = sourceLocation
+#endif
         
         currentLocation = location
         

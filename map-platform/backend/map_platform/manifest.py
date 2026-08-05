@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .map_artifact_validation import validate_renderer_artifacts
+from .map_artifact_validation import summarize_fmb4_buildings, validate_renderer_artifacts
+from .map_buildings import (
+    BUILDING_PROFILE_VERSION,
+    BUILDING_RENDERER_FORMAT_VERSION,
+    manifest_building_summary,
+)
 from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 from .models import MapJob
 from .preview import (
@@ -107,7 +112,13 @@ def validate_pack_path(relative_path: str) -> None:
         raise ValueError(f"map pack path is too long: {relative_path}")
 
 
-def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> dict[str, Any]:
+def build_manifest(
+    job: MapJob,
+    map_root: Path,
+    pipeline: PipelineMetadata,
+    *,
+    building_stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
     preview_bytes = render_boundary_preview(
@@ -120,11 +131,18 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
     format_version = renderer_format_version(job.request)
     font_asset_path = f"VECTMAP/{map_id}/assets/street-labels.fma"
     file_paths = {entry["path"] for entry in files}
-    if format_version == LABEL_RENDERER_FORMAT_VERSION:
+    if format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    }:
         if font_asset_path not in file_paths:
-            raise ValueError("renderer target 2 map pack is missing street-labels.fma")
+            raise ValueError(
+                f"renderer target {format_version} map pack is missing street-labels.fma"
+            )
         if any(entry["path"].endswith(".fmp") for entry in files):
-            raise ValueError("renderer target 2 map pack contains legacy text blocks")
+            raise ValueError(
+                f"renderer target {format_version} map pack contains legacy text blocks"
+            )
     elif font_asset_path in file_paths:
         raise ValueError("renderer target 1 map pack contains a label font asset")
     validate_renderer_artifacts(map_root, map_id, files, format_version)
@@ -165,11 +183,30 @@ def build_manifest(job: MapJob, map_root: Path, pipeline: PipelineMetadata) -> d
         },
         "files": files,
     }
-    if format_version == LABEL_RENDERER_FORMAT_VERSION:
+    if format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    }:
         labels = job.request["labels"]
         manifest["target"]["labelProfileVersion"] = labels["profileVersion"]
         manifest["target"]["labelLanguages"] = labels["preferredLanguages"]
         manifest["target"]["internationalFallback"] = labels["internationalFallback"]
+    if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+        manifest["target"]["buildingProfileVersion"] = BUILDING_PROFILE_VERSION
+        artifact_summary = summarize_fmb4_buildings(
+            [
+                map_root / entry["path"]
+                for entry in files
+                if entry["path"].endswith(".fmb")
+            ]
+        )
+        if building_stats is not None:
+            reported_summary = manifest_building_summary(building_stats)
+            if reported_summary != artifact_summary:
+                raise ValueError("building statistics do not match FMB v4 artifacts")
+        manifest["buildings"] = artifact_summary
+    elif building_stats is not None:
+        raise ValueError("building statistics require renderer target 3")
     return manifest
 
 

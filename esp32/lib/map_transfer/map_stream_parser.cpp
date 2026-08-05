@@ -51,6 +51,7 @@ public:
     bool haveMapId = false;
     bool haveFiles = false;
     bool haveTarget = false;
+    bool haveBuildings = false;
     uint64_t schema = 0;
     skipWhitespace();
     if (!consume('{'))
@@ -77,6 +78,10 @@ public:
         if (haveFiles || !parseFiles(parsed.files))
           return false;
         haveFiles = true;
+      } else if (key == "buildings") {
+        if (haveBuildings || !parseBuildings(manifest))
+          return false;
+        haveBuildings = true;
       } else if (key == "target") {
         if (haveTarget || !parseTarget(manifest))
           return false;
@@ -95,7 +100,9 @@ public:
     if (position_ != text_.size() || !canonical_ || !haveSchema || !haveMapId ||
         !haveFiles || !haveTarget || schema != 1 ||
         manifest.renderer != "esp32-fmb" ||
-        (manifest.formatVersion != 1 && manifest.formatVersion != 2)) {
+        (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
+         manifest.formatVersion != 3) ||
+        (manifest.formatVersion == 3) != haveBuildings) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);
@@ -298,6 +305,76 @@ private:
     return !(position_ - start > 1 && text_[start] == '0');
   }
 
+  bool parseStringArray(std::vector<std::string> &values, size_t maximum) {
+    values.clear();
+    skipWhitespace();
+    if (!consume('['))
+      return false;
+    skipWhitespace();
+    if (consume(']'))
+      return true;
+    while (true) {
+      std::string value;
+      if (values.size() >= maximum || !parseString(value))
+        return false;
+      values.push_back(std::move(value));
+      skipWhitespace();
+      if (consume(']'))
+        return true;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+  }
+
+  bool parseBuildings(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return false;
+    bool seen[6] = {false, false, false, false, false, false};
+    static constexpr const char *keys[6] = {
+        "classDefaultHeightCount", "explicitHeightCount",
+        "inheritedHeightCount", "levelsHeightCount",
+        "localMedianHeightCount", "recordCount"};
+    skipWhitespace();
+    std::string previousKey;
+    while (true) {
+      std::string key;
+      uint64_t value = 0;
+      if (!parseString(key) || (!previousKey.empty() && key <= previousKey) ||
+          !consumeAfterWhitespace(':') || !parseUnsigned(value) ||
+          value > UINT32_MAX)
+        return false;
+      previousKey = key;
+      size_t index = 0;
+      while (index < 6 && key != keys[index])
+        ++index;
+      if (index == 6 || seen[index])
+        return false;
+      seen[index] = true;
+      if (index == 5)
+        manifest.buildingRecordCount = static_cast<uint32_t>(value);
+      else {
+        static constexpr uint8_t provenanceIndex[5] = {4, 0, 2, 1, 3};
+        manifest.buildingProvenanceCounts[provenanceIndex[index]] =
+            static_cast<uint32_t>(value);
+      }
+      skipWhitespace();
+      if (consume('}'))
+        break;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+    uint64_t total = 0;
+    for (size_t index = 0; index < 6; ++index)
+      if (!seen[index])
+        return false;
+    for (uint32_t count : manifest.buildingProvenanceCounts)
+      total += count;
+    return total == manifest.buildingRecordCount;
+  }
+
   bool parseFiles(MapStreamFileTable &files) {
     skipWhitespace();
     if (!consume('['))
@@ -371,6 +448,10 @@ private:
     bool haveRenderer = false;
     bool haveFormat = false;
     bool haveMinimumFirmware = false;
+    bool haveBuildingProfile = false;
+    bool haveLabelProfile = false;
+    bool haveLanguages = false;
+    bool haveFallback = false;
     skipWhitespace();
     if (consume('}'))
       return false;
@@ -392,6 +473,26 @@ private:
           return false;
         manifest.formatVersion = static_cast<uint32_t>(formatVersion);
         haveFormat = true;
+      } else if (key == "buildingProfileVersion") {
+        uint64_t value = 0;
+        if (haveBuildingProfile || !parseUnsigned(value) || value > UINT32_MAX)
+          return false;
+        manifest.buildingProfileVersion = static_cast<uint32_t>(value);
+        haveBuildingProfile = true;
+      } else if (key == "labelProfileVersion") {
+        uint64_t value = 0;
+        if (haveLabelProfile || !parseUnsigned(value) || value > UINT32_MAX)
+          return false;
+        manifest.labelProfileVersion = static_cast<uint32_t>(value);
+        haveLabelProfile = true;
+      } else if (key == "labelLanguages") {
+        if (haveLanguages || !parseStringArray(manifest.labelLanguages, 3))
+          return false;
+        haveLanguages = true;
+      } else if (key == "internationalFallback") {
+        if (haveFallback || !parseString(manifest.internationalFallback))
+          return false;
+        haveFallback = true;
       } else if (key == "minFirmwareVersion") {
         if (haveMinimumFirmware ||
             !parseString(manifest.minimumFirmwareVersion))
@@ -402,7 +503,16 @@ private:
       }
       skipWhitespace();
       if (consume('}'))
-        return haveRenderer && haveFormat && haveMinimumFirmware;
+        return haveRenderer && haveFormat && haveMinimumFirmware &&
+               (manifest.formatVersion == 1
+                    ? (!haveBuildingProfile && !haveLabelProfile &&
+                       !haveLanguages && !haveFallback)
+                    : (haveLabelProfile && haveLanguages && haveFallback &&
+                       manifest.labelProfileVersion == 1 &&
+                       (manifest.formatVersion == 3
+                            ? haveBuildingProfile &&
+                                  manifest.buildingProfileVersion == 1
+                            : !haveBuildingProfile)));
       if (!consume(','))
         return false;
       skipWhitespace();
@@ -855,7 +965,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
       legacyTextBlockCount++;
     previousPath = path;
   }
-  if ((parsed.metadata.formatVersion == 2 &&
+  if (((parsed.metadata.formatVersion == 2 ||
+        parsed.metadata.formatVersion == 3) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (parsed.metadata.formatVersion == 1 && fontAssetCount != 0)) {
     return false;

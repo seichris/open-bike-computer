@@ -79,6 +79,28 @@ void assertPerspectiveBehavior() {
   assert(!invalid.valid);
 }
 
+void assertPhysicalHeightProjection() {
+  const auto projection = makeProjection(map_projection::Mode::BirdsEye);
+  const map_projection::GroundPoint ground{40.0, 120.0};
+  const auto base = projection.projectGround(ground);
+  const auto zero = projection.projectElevatedGround(
+      ground, 0.0, map_projection::mercatorScaleForLatitude(60.0));
+  assertNear(zero.x, base.x);
+  assertNear(zero.y, base.y);
+  assertNear(zero.depthScale, base.depthScale);
+
+  assertNear(map_projection::mercatorScaleForLatitude(0.0), 1.0);
+  assertNear(map_projection::mercatorScaleForLatitude(60.0), 2.0);
+  assertNear(map_projection::mercatorScaleForLatitude(90.0),
+             map_projection::mercatorScaleForLatitude(85.05112878));
+  const auto equator = projection.projectElevatedGround(
+      ground, 10.0, map_projection::mercatorScaleForLatitude(0.0));
+  const auto latitude60 = projection.projectElevatedGround(
+      ground, 10.0, map_projection::mercatorScaleForLatitude(60.0));
+  assert(equator.valid && latitude60.valid);
+  assertNear(base.y - latitude60.y, 2.0 * (base.y - equator.y));
+}
+
 void assertPerspectivePresets() {
   using map_projection::BirdsEyePerspective;
   assertNear(map_projection::birdsEyeTopEdgeScale(
@@ -262,6 +284,7 @@ void assertLineWidthScaling() {
 int main() {
   assertFlatParity();
   assertPerspectiveBehavior();
+  assertPhysicalHeightProjection();
   assertPerspectivePresets();
   assertClippingAndInverseBounds();
   assertCappedInverseRoundTrip();

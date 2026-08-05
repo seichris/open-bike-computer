@@ -150,6 +150,8 @@ target-2 map can activate.
 - FMB v1 has untyped base geometry and no extensions.
 - FMB v2 has typed base geometry and no extensions.
 - FMB v3 has typed base geometry and the three required label sections.
-- Label-aware firmware reads all three versions.
+- FMB v4 retains those sections and adds the required building section defined
+  in [`fmb-v4.md`](fmb-v4.md).
+- Current label/building-aware firmware reads all four versions.
 - Legacy firmware rejects v3 at the version byte and must never receive a
   renderer-target-2 pack.

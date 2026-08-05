@@ -34,6 +34,10 @@ from .manifest import (
 )
 from .map_stream import write_map_stream_artifact
 from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
+from .map_buildings import (
+    BUILDING_RENDERER_FORMAT_VERSION,
+    load_building_calibration_window,
+)
 from .models import JobStatus, MapJob, SourceRegion
 from .reuse import (
     MapReuseKeys,
@@ -43,6 +47,7 @@ from .reuse import (
     child_pack_path,
     required_blocks,
     reuse_keys,
+    expanded_building_source_bounds,
 )
 from .source_cache import SourceCache
 from .sources import SourceResolutionError
@@ -112,6 +117,7 @@ class CommandRunner:
 
 _MAP_PROGRESS_PATTERN = re.compile(r"MAP_PROGRESS:(\d+):(\d+)")
 _LABEL_STATS_PREFIX = "LABEL_STATS:"
+_BUILDING_STATS_PREFIX = "BUILDING_STATS:"
 
 
 def parse_map_progress(line: str) -> tuple[int, int] | None:
@@ -125,10 +131,18 @@ def parse_map_progress(line: str) -> tuple[int, int] | None:
 
 
 def parse_label_stats(line: str) -> dict[str, Any] | None:
-    marker = line.find(_LABEL_STATS_PREFIX)
+    return _parse_structured_stats(line, _LABEL_STATS_PREFIX)
+
+
+def parse_building_stats(line: str) -> dict[str, Any] | None:
+    return _parse_structured_stats(line, _BUILDING_STATS_PREFIX)
+
+
+def _parse_structured_stats(line: str, prefix: str) -> dict[str, Any] | None:
+    marker = line.find(prefix)
     if marker < 0:
         return None
-    payload = line[marker + len(_LABEL_STATS_PREFIX):].strip()
+    payload = line[marker + len(prefix):].strip()
     if not payload or len(payload) > 256 * 1024:
         return None
     try:
@@ -214,7 +228,22 @@ class MapBuildPipeline:
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
-        processing_bounds = aligned_processing_bounds(job)
+        format_version = renderer_format_version(job.request)
+        processing_bounds = aligned_processing_bounds(
+            job,
+            complete_blocks=format_version == BUILDING_RENDERER_FORMAT_VERSION,
+        )
+        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+            calibration = load_building_calibration_window(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            )
+            source_bounds = expanded_building_source_bounds(
+                processing_bounds,
+                cell_size_meters=calibration.cell_size_meters,
+                halo_cells=calibration.halo_cells,
+            )
+        else:
+            source_bounds = processing_bounds
 
         if job_dir.exists():
             shutil.rmtree(job_dir)
@@ -225,10 +254,19 @@ class MapBuildPipeline:
         source_pbf = self._source_pbf_path(job)
         if on_status:
             on_status(JobStatus.EXTRACTING_PBF)
-        self._extract_pbf(job, source_pbf, clipped_pbf, bounds=processing_bounds)
+        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+            self._extract_pbf(
+                job,
+                source_pbf,
+                clipped_pbf,
+                bounds=source_bounds,
+                force_bounds=True,
+            )
+        else:
+            self._extract_pbf(job, source_pbf, clipped_pbf, bounds=source_bounds)
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
-        self._convert_to_geojson(job, clipped_pbf, geojson_prefix, bounds=processing_bounds)
+        self._convert_to_geojson(job, clipped_pbf, geojson_prefix, bounds=source_bounds)
         label_metrics = self._extract_features(
             job,
             geojson_prefix,
@@ -320,12 +358,20 @@ class MapBuildPipeline:
         job_dir = archive_path.parent
         packaging_started = time.perf_counter()
         self._resolve_source_preview_geometry(job)
-        manifest = build_manifest(job, pack_root, self._pipeline_metadata())
+        metrics: dict[str, Any] = dict(build_metrics or {})
+        manifest = build_manifest(
+            job,
+            pack_root,
+            self._pipeline_metadata(),
+            building_stats=metrics.get("buildingBuild"),
+        )
         write_pack_archive(pack_root, manifest, archive_path)
         artifacts: list[ArtifactRecord] = []
-        metrics: dict[str, Any] = dict(build_metrics or {})
         packaging_seconds = time.perf_counter() - packaging_started
-        if renderer_format_version(job.request) == LABEL_RENDERER_FORMAT_VERSION:
+        if renderer_format_version(job.request) in {
+            LABEL_RENDERER_FORMAT_VERSION,
+            BUILDING_RENDERER_FORMAT_VERSION,
+        }:
             label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
             if isinstance(label_phase_timings, dict):
                 label_phase_timings["labelPackaging"] = packaging_seconds
@@ -401,7 +447,10 @@ class MapBuildPipeline:
             metrics.update(
                 {f"stream{name[0].upper()}{name[1:]}": value for name, value in stream_build.timings.items()}
             )
-            if renderer_format_version(job.request) == LABEL_RENDERER_FORMAT_VERSION:
+            if renderer_format_version(job.request) in {
+                LABEL_RENDERER_FORMAT_VERSION,
+                BUILDING_RENDERER_FORMAT_VERSION,
+            }:
                 label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
                 if isinstance(label_phase_timings, dict):
                     label_phase_timings["labelSigning"] = stream_build.timings[
@@ -466,6 +515,7 @@ class MapBuildPipeline:
         clipped_pbf: Path,
         *,
         bounds=None,
+        force_bounds: bool = False,
     ) -> None:
         bounds = bounds or job.geometry.bounds
         args = [
@@ -479,7 +529,13 @@ class MapBuildPipeline:
             str(clipped_pbf),
             "--overwrite",
         ]
-        if job.geometry.geometry and job.geometry.mode.value == "custom_polygon":
+        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+            args.insert(3, "--option=types=multipolygon,building")
+        if (
+            not force_bounds
+            and job.geometry.geometry
+            and job.geometry.mode.value == "custom_polygon"
+        ):
             polygon_path = clipped_pbf.parent / "clip.geojson"
             polygon_path.write_text(json.dumps(job.geometry.geometry))
             args = [
@@ -542,24 +598,50 @@ class MapBuildPipeline:
         ]
         format_version = renderer_format_version(job.request)
         args.extend(["--renderer-format", str(format_version)])
-        if format_version == LABEL_RENDERER_FORMAT_VERSION:
+        if format_version in {
+            LABEL_RENDERER_FORMAT_VERSION,
+            BUILDING_RENDERER_FORMAT_VERSION,
+        }:
             labels = job.request["labels"]
             for language in labels["preferredLanguages"]:
                 args.extend(["--preferred-language", language])
             args.extend(
                 ["--international-fallback", labels["internationalFallback"]]
             )
+        if (
+            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            and job.geometry.geometry is not None
+            and job.geometry.mode.value in {"custom_polygon", "route_corridor"}
+        ):
+            selection_path = geojson_prefix.parent / "feature-selection.geojson"
+            selection_path.write_text(
+                json.dumps(
+                    job.geometry.geometry,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            args.extend(["--selection-geometry", str(selection_path)])
+            if job.geometry.mode.value == "route_corridor":
+                args.extend(
+                    ["--selection-buffer-m", str(job.geometry.corridor_width_m)]
+                )
         progress_coalescer = ProgressCoalescer()
         label_stats: dict[str, Any] | None = None
+        building_stats: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
-            nonlocal label_stats
+            nonlocal label_stats, building_stats
             progress = parse_map_progress(line)
             if progress is not None and on_progress and progress_coalescer.should_emit(*progress):
                 on_progress(*progress)
             parsed_label_stats = parse_label_stats(line)
             if parsed_label_stats is not None:
                 label_stats = parsed_label_stats
+            parsed_building_stats = parse_building_stats(line)
+            if parsed_building_stats is not None:
+                building_stats = parsed_building_stats
 
         if on_progress and hasattr(self.runner, "run_streaming"):
             self.runner.run_streaming(
@@ -567,7 +649,7 @@ class MapBuildPipeline:
                 cwd=self.paths.osm_extract_root / "scripts",
                 on_output=handle_output,
             )
-            return self._label_build_metrics(format_version, label_stats)
+            return self._build_metrics(format_version, label_stats, building_stats)
 
         output = self.runner.run(args, cwd=self.paths.osm_extract_root / "scripts")
         if on_progress:
@@ -578,14 +660,21 @@ class MapBuildPipeline:
                 parsed_label_stats = parse_label_stats(line)
                 if parsed_label_stats is not None:
                     label_stats = parsed_label_stats
-        return self._label_build_metrics(format_version, label_stats)
+                parsed_building_stats = parse_building_stats(line)
+                if parsed_building_stats is not None:
+                    building_stats = parsed_building_stats
+        return self._build_metrics(format_version, label_stats, building_stats)
 
     @staticmethod
-    def _label_build_metrics(
+    def _build_metrics(
         format_version: int,
         stats: dict[str, Any] | None,
+        building_stats: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if format_version != LABEL_RENDERER_FORMAT_VERSION:
+        if format_version not in {
+            LABEL_RENDERER_FORMAT_VERSION,
+            BUILDING_RENDERER_FORMAT_VERSION,
+        }:
             return {}
         if stats is None:
             raise RuntimeError("label-aware extraction did not emit LABEL_STATS")
@@ -595,10 +684,15 @@ class MapBuildPipeline:
             for key, value in phase_timings.items()
         ):
             raise RuntimeError("label-aware extraction emitted invalid phase timings")
-        return {
+        result = {
             "labelBuild": stats,
             "labelPhaseTimings": phase_timings,
         }
+        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+            if building_stats is None:
+                raise RuntimeError("building-aware extraction did not emit BUILDING_STATS")
+            result["buildingBuild"] = building_stats
+        return result
 
     def _stage_subset_pack(
         self,
@@ -731,10 +825,13 @@ class MapBuildPipeline:
         if copied_fmb == 0:
             raise SubsetReuseUnavailable("parent map contains no required binary blocks")
         if (
-            renderer_format_version(child.request) == LABEL_RENDERER_FORMAT_VERSION
+            renderer_format_version(child.request) in {
+                LABEL_RENDERER_FORMAT_VERSION,
+                BUILDING_RENDERER_FORMAT_VERSION,
+            }
             and not copied_font_asset
         ):
-            raise SubsetReuseUnavailable("parent target-2 map has no label font asset")
+            raise SubsetReuseUnavailable("parent label-aware map has no label font asset")
 
     def _stage_vectmap(self, raw_output_dir: Path, vectmap_output: Path) -> None:
         if not raw_output_dir.exists():

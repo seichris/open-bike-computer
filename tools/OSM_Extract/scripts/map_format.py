@@ -8,6 +8,7 @@ from label_pipeline import label_max_zoom
 FMB_V3_SECTION_STRINGS = 1
 FMB_V3_SECTION_RUNS = 2
 FMB_V3_SECTION_ROAD_LABELS = 3
+FMB_V4_SECTION_BUILDINGS = 4
 FMB_V3_CRITICAL_SECTION = 1
 MAX_BLOCK_STRINGS = 4096
 MAX_BLOCK_STRING_BYTES = 256 * 1024
@@ -15,6 +16,9 @@ MAX_BLOCK_RUNS = 12288
 MAX_BLOCK_LABELS = 8192
 MAX_BLOCK_CANDIDATES = 16384
 MAX_LABEL_VARIANTS = 8
+MAX_BLOCK_BUILDINGS = 8192
+MAX_BUILDING_RINGS = 32
+MAX_BUILDING_POINTS = 131072
 
 _DIRECTORY_HEADER = struct.Struct("<4sB3x")
 _DIRECTORY_ENTRY = struct.Struct("<BBHIII")
@@ -22,6 +26,9 @@ _RUN_GLYPH = struct.Struct("<Hhhh")
 _LABEL_FIXED = struct.Struct("<HBBBHBB")
 _LABEL_VARIANT = struct.Struct("<BBHHHH")
 _LABEL_CANDIDATE = struct.Struct("<hhhhBB")
+_BUILDING_SECTION_HEADER = struct.Struct("<HHI")
+_BUILDING_FIXED = struct.Struct("<BBBBHHhhhhH")
+_BUILDING_RING = struct.Struct("<HBB")
 
 _VARIANT_KIND = {
     "local": 0,
@@ -277,10 +284,122 @@ def _label_sections(polylines, min_x, min_y, font_builder):
     }
 
 
-def write_fmb(path, polygons, polylines, min_x, min_y, font_builder=None):
-    """Write one v2 block, or a label-aware v3 block with ``font_builder``."""
+def _building_section(records):
+    if len(records) > MAX_BLOCK_BUILDINGS:
+        raise MapFormatError("building record count exceeds FMB v4 limits")
+    total_points = 0
+    section = bytearray(_BUILDING_SECTION_HEADER.pack(len(records), 0, 0))
+    for record in records:
+        rings = record["rings"]
+        if not 1 <= len(rings) <= MAX_BUILDING_RINGS:
+            raise MapFormatError("building ring count exceeds FMB v4 limits")
+        height_dm = int(record["height_dm"])
+        minimum_height_dm = int(record["minimum_height_dm"])
+        provenance = int(record["provenance"])
+        bbox = tuple(int(value) for value in record["bbox"])
+        if (
+            int(record["type_id"]) != 100
+            or int(record["flags"]) not in {0, 1, 2}
+            or not 0 <= provenance <= 4
+            or not 0 <= minimum_height_dm < height_dm <= 65535
+            or len(bbox) != 4
+            or any(value < -32768 or value > 32767 for value in bbox)
+            or bbox[0] > bbox[2]
+            or bbox[1] > bbox[3]
+        ):
+            raise MapFormatError("building record metadata is invalid")
+        section.extend(
+            _BUILDING_FIXED.pack(
+                int(record["type_id"]),
+                int(record["flags"]),
+                provenance,
+                0,
+                height_dm,
+                minimum_height_dm,
+                *bbox,
+                len(rings),
+            )
+        )
+        for ring in rings:
+            points = list(ring["points"])
+            walls = list(ring["walls"])
+            flags = int(ring.get("flags", 0))
+            if (
+                not 3 <= len(points) <= 65535
+                or len(walls) != len(points)
+                or flags not in {0, 1}
+                or (int(record["flags"]) & 2 and any(walls))
+                or any(
+                    value < -32768 or value > 32767
+                    for point in points
+                    for value in point
+                )
+            ):
+                raise MapFormatError("building ring is invalid")
+            total_points += len(points)
+            if total_points > MAX_BUILDING_POINTS:
+                raise MapFormatError("building point count exceeds FMB v4 limits")
+            section.extend(_BUILDING_RING.pack(len(points), flags, 0))
+            for x, y in points:
+                section.extend(struct.pack("<hh", x, y))
+            mask = bytearray((len(points) + 7) // 8)
+            for index, enabled in enumerate(walls):
+                if enabled:
+                    mask[index // 8] |= 1 << (index % 8)
+            section.extend(mask)
+    _BUILDING_SECTION_HEADER.pack_into(section, 0, len(records), 0, total_points)
+    return bytes(section), {
+        "buildings": len(records),
+        "buildingPoints": total_points,
+        "buildingBytes": len(section),
+    }
 
-    version = 3 if font_builder is not None else 2
+
+def _append_directory(data, magic, sections):
+    if len(magic) != 4 or not 1 <= len(sections) <= 255:
+        raise MapFormatError("extension directory header is invalid")
+    directory_offset = len(data)
+    data.extend(_DIRECTORY_HEADER.pack(magic, len(sections)))
+    section_offset = (
+        directory_offset
+        + _DIRECTORY_HEADER.size
+        + len(sections) * _DIRECTORY_ENTRY.size
+    )
+    entries = bytearray()
+    payload = bytearray()
+    for expected_type, (section_type, section) in enumerate(sections, start=1):
+        if section_type != expected_type or not section:
+            raise MapFormatError("extension sections are not canonical")
+        entries.extend(
+            _DIRECTORY_ENTRY.pack(
+                section_type,
+                FMB_V3_CRITICAL_SECTION,
+                0,
+                section_offset,
+                len(section),
+                zlib.crc32(section) & 0xFFFFFFFF,
+            )
+        )
+        payload.extend(section)
+        section_offset += len(section)
+    data.extend(entries)
+    data.extend(payload)
+
+
+def write_fmb(
+    path,
+    polygons,
+    polylines,
+    min_x,
+    min_y,
+    font_builder=None,
+    building_records=None,
+):
+    """Write a renderer-format-specific FMB v2, v3, or v4 block."""
+
+    if building_records is not None and font_builder is None:
+        raise MapFormatError("FMB v4 requires the street-label font/profile")
+    version = 4 if building_records is not None else (3 if font_builder is not None else 2)
     data = bytearray(b"FMB" + bytes((version,)))
     data.extend(struct.pack("<H", len(polygons)))
     for feature in polygons:
@@ -289,31 +408,28 @@ def write_fmb(path, polygons, polylines, min_x, min_y, font_builder=None):
     for feature in polylines:
         _append_polyline(data, feature, min_x, min_y)
 
-    metadata = {"strings": 0, "stringBytes": 0, "runs": 0, "labels": 0, "candidates": 0}
+    metadata = {
+        "strings": 0,
+        "stringBytes": 0,
+        "runs": 0,
+        "labels": 0,
+        "candidates": 0,
+        "buildings": 0,
+        "buildingPoints": 0,
+        "buildingBytes": 0,
+    }
     if font_builder is not None:
         sections, metadata = _label_sections(
             polylines, min_x, min_y, font_builder
         )
-        directory_offset = len(data)
-        data.extend(_DIRECTORY_HEADER.pack(b"EXT3", len(sections)))
-        section_offset = directory_offset + _DIRECTORY_HEADER.size + len(sections) * _DIRECTORY_ENTRY.size
-        entries = bytearray()
-        payload = bytearray()
-        for section_type, section in sections:
-            entries.extend(
-                _DIRECTORY_ENTRY.pack(
-                    section_type,
-                    FMB_V3_CRITICAL_SECTION,
-                    0,
-                    section_offset,
-                    len(section),
-                    zlib.crc32(section) & 0xFFFFFFFF,
-                )
-            )
-            payload.extend(section)
-            section_offset += len(section)
-        data.extend(entries)
-        data.extend(payload)
+        metadata.update({"buildings": 0, "buildingPoints": 0, "buildingBytes": 0})
+        if building_records is not None:
+            building_section, building_metadata = _building_section(building_records)
+            sections = (*sections, (FMB_V4_SECTION_BUILDINGS, building_section))
+            metadata.update(building_metadata)
+            _append_directory(data, b"EXT4", sections)
+        else:
+            _append_directory(data, b"EXT3", sections)
 
     if len(data) > 2 * 1024 * 1024:
         raise MapFormatError("FMB block exceeds the 2 MiB renderer limit")

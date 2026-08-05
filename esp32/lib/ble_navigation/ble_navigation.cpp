@@ -95,6 +95,7 @@ static volatile bool phoneBatteryCharging = false;
 static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
+static bool bleSessionSupports3DBuildings = false;
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
@@ -1190,6 +1191,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
+    bleSessionSupports3DBuildings = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -1429,7 +1431,7 @@ static std::string mapTransferStatusJson() {
             "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion == 2 &&
+      body += activeMap.target.formatVersion >= 2 &&
                       mapView.debugStreetLabelFontHealthy()
                   ? "true"
                   : "false";
@@ -1743,7 +1745,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::STREET_LABELS_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
-        device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE;
+        device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
+        device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -1811,6 +1814,7 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >= 1;
     bleSessionSupportsStreetLabels =
         clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
+    bleSessionSupports3DBuildings = bleSessionSupportsStreetLabels;
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
@@ -2204,6 +2208,11 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                   settingId);
     return;
   }
+  if (settingId == map_profile_protocol::MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID &&
+      !bleSessionSupports3DBuildings) {
+    Serial.println("BLE Settings: ignored unnegotiated 3D buildings setting");
+    return;
+  }
   if (map_profile_protocol::isIndependentSetting(settingId)) {
     bleSessionUsesIndependentMapProfiles = true;
   }
@@ -2518,6 +2527,14 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
             map_profile_protocol::clampValue(settingId, settingValue));
     persistMapProfileSetting();
     break;
+  case map_profile_protocol::MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID:
+    mapRenderSettings.mapNavigation3DBuildingsEnabled =
+        map_profile_protocol::clampValue(settingId, settingValue) != 0;
+    settingsPrefs.begin("mapSettings", false);
+    map_profile_persistence::persist3DBuildingsEnabled(
+        settingsPrefs, mapRenderSettings.mapNavigation3DBuildingsEnabled);
+    settingsPrefs.end();
+    break;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -2692,6 +2709,7 @@ public:
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
+    bleSessionSupports3DBuildings = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -2749,6 +2767,7 @@ public:
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
+    bleSessionSupports3DBuildings = false;
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -3102,6 +3121,8 @@ static void loadSettingsFromNVS() {
       map_profile_persistence::loadBirdsEyeEnabled(prefs);
   mapRenderSettings.mapNavigationBirdsEyePerspective =
       map_profile_persistence::loadBirdsEyePerspective(prefs);
+  mapRenderSettings.mapNavigation3DBuildingsEnabled =
+      map_profile_persistence::load3DBuildingsEnabled(prefs);
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   uint8_t storedScreenMask =

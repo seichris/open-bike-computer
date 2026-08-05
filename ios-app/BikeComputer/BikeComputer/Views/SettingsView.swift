@@ -895,7 +895,7 @@ private struct MapStyleSettingsView: View {
     @ObservedObject var offlineMapManager: OfflineMapManager
 
     private var labelsAvailable: Bool {
-        bleManager.activeMapRendererFormat == 2 &&
+        (bleManager.activeMapRendererFormat ?? 0) >= 2 &&
             bleManager.activeMapLabelProfileVersion == 1 &&
             bleManager.activeMapFontAssetHealthy
     }
@@ -914,7 +914,7 @@ private struct MapStyleSettingsView: View {
     }
 
     private var streetLabelsFooter: String {
-        if bleManager.activeMapRendererFormat != 2 {
+        if (bleManager.activeMapRendererFormat ?? 0) < 2 {
             return "Download this map again to add street names."
         }
         if !bleManager.activeMapFontAssetHealthy {
@@ -1069,12 +1069,12 @@ private struct MapStyleSettingsView: View {
             return "Update the Bike Computer firmware to enable bird's-eye view."
         }
         if !bleManager.supportsBirdsEyeMapNavigationPerspective {
-            return "Tilts the map during active navigation. Update the Bike Computer firmware to adjust the perspective."
+            return "Tilts the Map + Navigation screen. Update the Bike Computer firmware to adjust the perspective."
         }
         if !bleManager.supportsBirdsEyeMapNavigationStrongerPerspective {
-            return "Choose how strongly the map tilts during active navigation. Update the Bike Computer firmware for Very Strong and Maximum."
+            return "Choose how strongly Map + Navigation tilts. Update the Bike Computer firmware for Very Strong and Maximum."
         }
-        return "Choose how strongly the map tilts during active navigation. The ordinary Map screen stays flat."
+        return "Choose how strongly Map + Navigation tilts. The ordinary Map screen stays flat."
     }
 
     private var birdsEyePerspectiveOptions: [MapNavigationBirdsEyePerspective] {
@@ -1145,6 +1145,22 @@ private struct MapStyleSettingsView: View {
                             bleManager.sendSetting(
                                 id: DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
                                 value: Int32(perspective.rawValue)
+                            )
+                        }
+                        .disabled(!bleManager.mapPlusNavigationBirdsEyeViewEnabled)
+                    }
+
+                    if bleManager.supports3DBuildings {
+                        Toggle(
+                            "3D Buildings",
+                            isOn: $bleManager.mapPlusNavigation3DBuildingsEnabled
+                        )
+                        .onChange(
+                            of: bleManager.mapPlusNavigation3DBuildingsEnabled
+                        ) { enabled in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID,
+                                value: enabled ? 1 : 0
                             )
                         }
                         .disabled(!bleManager.mapPlusNavigationBirdsEyeViewEnabled)

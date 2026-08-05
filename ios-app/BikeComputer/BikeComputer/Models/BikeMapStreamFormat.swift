@@ -111,6 +111,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let requiredFirmwareGitSHA: String?
     let fileCount: Int
     let payloadBytes: Int64
+    let rendererFormatVersion: Int
 
     fileprivate init(
         url: URL,
@@ -131,7 +132,8 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         requiredFirmwareBuild: UInt32?,
         requiredFirmwareGitSHA: String?,
         fileCount: Int,
-        payloadBytes: Int64
+        payloadBytes: Int64,
+        rendererFormatVersion: Int
     ) {
         self.url = url
         self.mapID = mapID
@@ -152,6 +154,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.requiredFirmwareGitSHA = requiredFirmwareGitSHA
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
+        self.rendererFormatVersion = rendererFormatVersion
     }
 }
 
@@ -363,6 +366,16 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let labelProfileVersion: Int?
             let labelLanguages: [String]?
             let internationalFallback: String?
+            let buildingProfileVersion: Int?
+        }
+
+        struct Buildings: Decodable {
+            let recordCount: Int
+            let explicitHeightCount: Int
+            let levelsHeightCount: Int
+            let inheritedHeightCount: Int
+            let localMedianHeightCount: Int
+            let classDefaultHeightCount: Int
         }
 
         struct File: Decodable {
@@ -377,6 +390,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let producer: Producer
         let target: Target
         let files: [File]
+        let buildings: Buildings?
     }
 
     static func validate(
@@ -604,7 +618,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
             requiredFirmwareBuild: artifact.requiredFirmwareBuild,
             requiredFirmwareGitSHA: artifact.requiredFirmwareGitSha,
             fileCount: manifest.files.count,
-            payloadBytes: Int64(header.payloadBytes)
+            payloadBytes: Int64(header.payloadBytes),
+            rendererFormatVersion: manifest.target.formatVersion
         )
     }
 
@@ -634,7 +649,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             throw BikeMapStreamFormatError.invalidManifest("map ID does not match")
         }
         guard manifest.target.renderer == renderer,
-              manifest.target.formatVersion == 1 || manifest.target.formatVersion == 2 else {
+              [1, 2, 3].contains(manifest.target.formatVersion) else {
             throw BikeMapStreamFormatError.invalidManifest("renderer target is unsupported")
         }
         guard !manifest.files.isEmpty,
@@ -671,7 +686,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 throw BikeMapStreamFormatError.invalidManifest("map file SHA-256 is invalid")
             }
         }
-        if manifest.target.formatVersion == 2 {
+        if manifest.target.formatVersion == 2 || manifest.target.formatVersion == 3 {
             guard fontAssetCount == 1, legacyTextBlockCount == 0,
                   manifest.target.labelProfileVersion == 1,
                   let languages = manifest.target.labelLanguages,
@@ -681,13 +696,37 @@ nonisolated enum BikeMapStreamArtifactValidator {
                   let fallback = manifest.target.internationalFallback,
                   isCanonicalLanguageTag(fallback) else {
                 throw BikeMapStreamFormatError.invalidManifest(
-                    "renderer target 2 label metadata is invalid"
+                    "label-aware renderer metadata is invalid"
+                )
+            }
+            if manifest.target.formatVersion == 3 {
+                guard manifest.target.buildingProfileVersion == 1,
+                      let buildings = manifest.buildings,
+                      buildings.recordCount >= 0,
+                      buildings.explicitHeightCount >= 0,
+                      buildings.levelsHeightCount >= 0,
+                      buildings.inheritedHeightCount >= 0,
+                      buildings.localMedianHeightCount >= 0,
+                      buildings.classDefaultHeightCount >= 0,
+                      buildings.explicitHeightCount + buildings.levelsHeightCount +
+                        buildings.inheritedHeightCount + buildings.localMedianHeightCount +
+                        buildings.classDefaultHeightCount == buildings.recordCount else {
+                    throw BikeMapStreamFormatError.invalidManifest(
+                        "renderer target 3 building metadata is invalid"
+                    )
+                }
+            } else if manifest.target.buildingProfileVersion != nil ||
+                        manifest.buildings != nil {
+                throw BikeMapStreamFormatError.invalidManifest(
+                    "renderer target 2 contains building data"
                 )
             }
         } else if fontAssetCount != 0 ||
                     manifest.target.labelProfileVersion != nil ||
                     manifest.target.labelLanguages != nil ||
-                    manifest.target.internationalFallback != nil {
+                    manifest.target.internationalFallback != nil ||
+                    manifest.target.buildingProfileVersion != nil ||
+                    manifest.buildings != nil {
             throw BikeMapStreamFormatError.invalidManifest(
                 "renderer target 1 contains label data"
             )
@@ -735,7 +774,9 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             let expectedVersions: Set<UInt8> =
-                rendererFormatVersion == 2 ? [3] : [1, 2]
+                rendererFormatVersion == 3
+                    ? [4]
+                    : (rendererFormatVersion == 2 ? [3] : [1, 2])
             guard expectedVersions.contains(prefix[3]) else {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "binary map block version does not match its target"

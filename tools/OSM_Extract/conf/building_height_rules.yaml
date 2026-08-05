@@ -1,0 +1,39 @@
+schemaVersion: 1
+
+height:
+  minimumMeters: 1.0
+  maximumMeters: 1000.0
+  maximumLevels: 250
+  floorHeightMeters: 3.0
+  roofLevelHeightMeters: 2.5
+
+localMedian:
+  cellSizeMeters: 8192
+  haloCells: 1
+  minimumSamples: 3
+
+classRangesMeters:
+  apartments: [3.0, 180.0]
+  commercial: [3.0, 300.0]
+  house: [2.0, 40.0]
+  industrial: [3.0, 120.0]
+  office: [3.0, 300.0]
+  residential: [2.0, 180.0]
+  retail: [3.0, 120.0]
+  school: [3.0, 80.0]
+  shed: [1.0, 20.0]
+  warehouse: [3.0, 80.0]
+  generic: [1.0, 300.0]
+
+classDefaultsMeters:
+  apartments: 15.0
+  commercial: 12.0
+  house: 6.0
+  industrial: 9.0
+  office: 15.0
+  residential: 9.0
+  retail: 6.0
+  school: 9.0
+  shed: 3.0
+  warehouse: 9.0
+  generic: 9.0

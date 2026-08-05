@@ -42,6 +42,34 @@ class JobRecordEnumerationError(RuntimeError):
         )
 
 
+class UnsupportedRendererTargetError(ValueError):
+    code = "unsupported_renderer_target"
+
+    def __init__(
+        self,
+        requested_renderer_format_version: int,
+        supported_renderer_format_versions: list[int],
+    ):
+        self.requested_renderer_format_version = requested_renderer_format_version
+        self.supported_renderer_format_versions = tuple(
+            supported_renderer_format_versions
+        )
+        super().__init__(
+            f"renderer format {requested_renderer_format_version} generation "
+            "is not available for this installation"
+        )
+
+    def response_detail(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "requestedRendererFormatVersion": self.requested_renderer_format_version,
+            "supportedRendererFormatVersions": list(
+                self.supported_renderer_format_versions
+            ),
+        }
+
+
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
@@ -1124,11 +1152,15 @@ class MapJobService:
         limits: JobLimits | None = None,
         *,
         label_target2_enabled: bool = False,
+        building_target3_enabled: bool = False,
+        building_target3_allowlist: frozenset[str] = frozenset(),
     ):
         self.source_index = source_index
         self.store = store
         self.limits = limits or JobLimits()
         self.label_target2_enabled = label_target2_enabled
+        self.building_target3_enabled = building_target3_enabled
+        self.building_target3_allowlist = building_target3_allowlist
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1162,7 +1194,13 @@ class MapJobService:
                     client_request_id,
                 )
                 if existing is not None:
-                    if existing.request != job.request:
+                    if (
+                        existing.request != job.request
+                        and not _is_compatible_renderer_fallback_replay(
+                            job.request,
+                            existing.request,
+                        )
+                    ):
                         raise ValueError(
                             "clientRequestId was already used for a different map request"
                         )
@@ -1192,26 +1230,64 @@ class MapJobService:
     ) -> tuple[str | None, str | None, MapJob | None]:
         """Validate idempotency fields and return an existing matching request."""
         _validate_map_job_fields(request)
+        from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
         from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 
-        if (
-            renderer_format_version(request) == LABEL_RENDERER_FORMAT_VERSION
-            and not self.label_target2_enabled
-        ):
-            raise ValueError("renderer format 2 generation is not enabled")
         client_installation_id = _client_identifier(request, "clientInstallationId")
         client_request_id = _client_identifier(request, "clientRequestId")
         if bool(client_installation_id) != bool(client_request_id):
-            raise ValueError("clientInstallationId and clientRequestId must be provided together")
+            raise ValueError(
+                "clientInstallationId and clientRequestId must be provided together"
+            )
+        existing = None
+        if client_installation_id and client_request_id:
+            existing = self.find_by_client_request(
+                client_installation_id,
+                client_request_id,
+            )
+            if existing is not None and (
+                existing.request == request
+                or _is_compatible_renderer_fallback_replay(
+                    request,
+                    existing.request,
+                )
+            ):
+                # Generation gates govern new work. Exact replays keep
+                # returning jobs created under earlier gate states. A target-3
+                # retry also recovers a stored target-2/1 compatibility fallback
+                # after its response was lost, even if target 3 is now enabled.
+                return client_installation_id, client_request_id, existing
+
+        requested_format = renderer_format_version(request)
+        if (
+            requested_format == LABEL_RENDERER_FORMAT_VERSION
+            and not self.label_target2_enabled
+        ):
+            raise UnsupportedRendererTargetError(requested_format, [1])
+        if (
+            requested_format == BUILDING_RENDERER_FORMAT_VERSION
+            and (
+                not self.building_target3_enabled
+                or (
+                    bool(self.building_target3_allowlist)
+                    and client_installation_id not in self.building_target3_allowlist
+                )
+            )
+        ):
+            supported_formats = [1]
+            if self.label_target2_enabled:
+                supported_formats.insert(0, LABEL_RENDERER_FORMAT_VERSION)
+            raise UnsupportedRendererTargetError(
+                requested_format,
+                supported_formats,
+            )
         if not client_installation_id or not client_request_id:
             return client_installation_id, client_request_id, None
-        existing = self.find_by_client_request(
-            client_installation_id,
-            client_request_id,
-        )
-        if existing is not None and existing.request != request:
-            raise ValueError("clientRequestId was already used for a different map request")
-        return client_installation_id, client_request_id, existing
+        if existing is not None:
+            raise ValueError(
+                "clientRequestId was already used for a different map request"
+            )
+        return client_installation_id, client_request_id, None
 
     def get_job(self, job_id: str) -> MapJob:
         return self.store.get(job_id)
@@ -1375,6 +1451,7 @@ def _client_identifier(request: dict[str, Any], key: str) -> str | None:
 
 
 def _validate_map_job_fields(request: dict[str, Any]) -> None:
+    from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
     from .map_labels import (
         LABEL_PROFILE_VERSION,
         LABEL_RENDERER_FORMAT_VERSION,
@@ -1407,9 +1484,13 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             renderer_format_version = target["rendererFormatVersion"]
             if (
                 isinstance(renderer_format_version, bool)
-                or renderer_format_version not in {1, LABEL_RENDERER_FORMAT_VERSION}
+                or renderer_format_version not in {
+                    1,
+                    LABEL_RENDERER_FORMAT_VERSION,
+                    BUILDING_RENDERER_FORMAT_VERSION,
+                }
             ):
-                raise ValueError("target rendererFormatVersion must be 1 or 2")
+                raise ValueError("target rendererFormatVersion must be 1, 2, or 3")
             normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
@@ -1421,10 +1502,13 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             normalized_target["firmwareVersion"] = firmware_version
         request["target"] = normalized_target
     renderer_format_version = request.get("target", {}).get("rendererFormatVersion", 1)
-    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION and request.get(
-        "target", {}
-    ).get("renderer") != "esp32-fmb":
-        raise ValueError("renderer format 2 requires explicit esp32-fmb target")
+    if renderer_format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    } and request.get("target", {}).get("renderer") != "esp32-fmb":
+        raise ValueError(
+            f"renderer format {renderer_format_version} requires explicit esp32-fmb target"
+        )
     if "labels" in request:
         labels = request["labels"]
         if not isinstance(labels, dict):
@@ -1454,17 +1538,51 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             "preferredLanguages": normalized_languages,
             "internationalFallback": fallback,
         }
-    if renderer_format_version == LABEL_RENDERER_FORMAT_VERSION:
+    if renderer_format_version in {
+        LABEL_RENDERER_FORMAT_VERSION,
+        BUILDING_RENDERER_FORMAT_VERSION,
+    }:
         if "labels" not in request:
-            raise ValueError("renderer format 2 requires labels")
+            raise ValueError(
+                f"renderer format {renderer_format_version} requires labels"
+            )
     elif "labels" in request:
-        raise ValueError("labels require renderer format 2")
+        raise ValueError("labels require renderer format 2 or 3")
 
 
 def _validate_identifier(value: str, key: str) -> str:
     if not _CLIENT_IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"{key} must contain 8-128 letters, numbers, hyphens, or underscores")
     return value
+
+
+def _is_compatible_renderer_fallback_replay(
+    requested: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    """Recognize the exact target-3 to target-2/1 rollout fallback pair."""
+    requested_target = requested.get("target")
+    existing_target = existing.get("target")
+    if not isinstance(requested_target, dict) or not isinstance(
+        existing_target, dict
+    ):
+        return False
+    if (
+        requested_target.get("renderer") != "esp32-fmb"
+        or requested_target.get("rendererFormatVersion") != 3
+        or existing_target.get("renderer") != "esp32-fmb"
+        or existing_target.get("rendererFormatVersion") not in {1, 2}
+    ):
+        return False
+
+    expected = dict(requested)
+    expected_target = dict(requested_target)
+    fallback_format = existing_target["rendererFormatVersion"]
+    expected_target["rendererFormatVersion"] = fallback_format
+    expected["target"] = expected_target
+    if fallback_format == 1:
+        expected.pop("labels", None)
+    return expected == existing
 
 
 def _normalize_user_label(value: Any) -> str:

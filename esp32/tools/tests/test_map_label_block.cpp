@@ -26,13 +26,13 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
   return crc ^ 0xFFFFFFFFU;
 }
 
-static std::vector<uint8_t> fixture() {
+static std::vector<uint8_t> fixture(uint8_t version = 3) {
   std::vector<uint8_t> data = {
-      'F', 'M', 'B', 3, 0, 0, 1, 0, // header, no polygons, one line
+      'F', 'M', 'B', version, 0, 0, 1, 0, // header, no polygons, one line
       0x34, 0x12, 2, 5, 7,           // color, width, zoom, type
       0, 0, 0, 0, 100, 0, 0, 0,     // bbox
       2, 0, 0, 0, 0, 0, 100, 0, 0, 0, // points
-      'E', 'X', 'T', '3', 3, 0, 0, 0,
+      'E', 'X', 'T', static_cast<uint8_t>('0' + version), version, 0, 0, 0,
   };
   std::vector<uint8_t> strings = {1, 0, 4, 0, 'M', 'a', 'i', 'n'};
   std::vector<uint8_t> runs = {3, 0};
@@ -63,8 +63,11 @@ static std::vector<uint8_t> fixture() {
   append16(labels, 0);
   labels.insert(labels.end(), {200, 0});
 
-  const std::vector<std::vector<uint8_t>> sections = {strings, runs, labels};
-  uint32_t offset = static_cast<uint32_t>(data.size() + 3U * 16U);
+  std::vector<std::vector<uint8_t>> sections = {strings, runs, labels};
+  if (version == 4)
+    sections.push_back({0, 0, 0, 0, 0, 0, 0, 0});
+  uint32_t offset =
+      static_cast<uint32_t>(data.size() + sections.size() * 16U);
   for (uint8_t index = 0; index < sections.size(); ++index) {
     data.push_back(index + 1);
     data.push_back(1);
@@ -91,6 +94,13 @@ int main() {
   assert(block.labels[0].candidates[0].endX == 90);
   assert(block.referencesResolve(1, 0));
   assert(!block.referencesResolve(0, 0));
+
+  const auto dataV4 = fixture(4);
+  map_label_block::Block blockV4;
+  assert(map_label_block::decode(dataV4.data(), dataV4.size(), 1, blockV4,
+                                 &error));
+  assert(blockV4.profileFingerprint == block.profileFingerprint);
+  assert(blockV4.labels.size() == 1);
 
   map_label_block::Block legacy;
   const std::vector<uint8_t> v2 = {'F', 'M', 'B', 2, 0, 0, 0, 0};

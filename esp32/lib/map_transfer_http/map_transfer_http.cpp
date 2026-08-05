@@ -945,7 +945,7 @@ void MapTransferHttpServer::handleStatus(WiFiClient &client) {
             "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion == 2 ? "true" : "false";
+      body += activeMap.target.formatVersion >= 2 ? "true" : "false";
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +
@@ -1227,6 +1227,12 @@ void MapTransferHttpServer::updateActivationProgress(
   activationState_.updateProgress(progress);
   unlockState();
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
+  // Archive extraction and validation can otherwise keep a priority-1 worker
+  // runnable long enough to starve the CPU0 idle task and trip the task WDT.
+  // Progress checkpoints are frequent and shared by both the response-handoff
+  // and boot-recovery activation paths, making them a natural cooperative
+  // scheduling boundary without weakening watchdog coverage.
+  vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,

@@ -38,7 +38,8 @@ struct NavigationData {
  * Map + Navigation. IDs 6,11-15 configure shared/device behavior, and IDs
  * 23-24 carry the connected phone's transient battery percentage and charging
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
- * perspective. IDs 27-34 configure street labels for Map and Map + Navigation.
+ * perspective. IDs 27-34 configure street labels for Map and Map + Navigation,
+ * and ID 35 controls OSM 3D buildings in bird's-eye navigation.
  * Legacy ID 4 is ignored because display rotation is selected by the hardware
  * target.
  */
@@ -126,6 +127,7 @@ struct MapRenderSettings {
   bool mapNavigationBirdsEyeEnabled = true;
   uint8_t mapNavigationBirdsEyePerspective =
       map_profile_protocol::MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE;
+  bool mapNavigation3DBuildingsEnabled = true;
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =

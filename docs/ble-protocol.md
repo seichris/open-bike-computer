@@ -486,7 +486,7 @@ Current setting IDs:
 | `22` | Map + Navigation current-position marker scale | `1...5` |
 | `23` | Connected phone battery level | transient whole-number percentage `0...100`; iOS sends it after authentication and whenever the phone battery level changes. Firmware clears it on disconnect. |
 | `24` | Connected phone charging state | transient `0` not charging, `1` charging; iOS sends it after authentication and whenever the public battery state changes. Firmware clears it on disconnect. |
-| `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective only while Map + Navigation has an active route. |
+| `25` | Map + Navigation bird's-eye view | `0` disabled, `1` enabled; defaults to enabled and is persisted as `navBirdEye`. The projection is effective whenever Map + Navigation is visible, including before a route starts. |
 | `26` | Map + Navigation bird's-eye perspective | `0` Gentle, `1` Standard, `2` Strong, `3` Very Strong, `4` Maximum; defaults to Standard and is persisted as `navBirdTilt`. This changes the shared projection strength for the map, route, and position marker. At extreme zoom/viewport combinations, firmware eases the requested strength only as much as needed to stay within the four-block renderer budget. |
 | `27` | Map street-label density | `0` off, `1` major roads, `2` balanced, `3` all roads; defaults to balanced |
 | `28` | Map street-label language | `0` local, `1` preferred, `2` local + preferred; defaults to local + preferred |
@@ -496,6 +496,12 @@ Current setting IDs:
 | `32` | Map + Navigation street-label language | Same values as ID `28` |
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
+| `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
+
+In a dense scene, firmware reserves its bounded extrusion workspace from the
+nearest eligible buildings outward, preserves global back-to-front drawing,
+and renders overflow records as flat roofs. One oversized viewport therefore
+does not flatten every otherwise-visible building.
 
 The app presents label visibility as a separate switch from density. It keeps
 the selected `1...3` density in the screen profile and sends density `0` while
@@ -525,15 +531,16 @@ overlay visibility remains shared by both profiles.
 
 Setting ID `25` is separately capability-gated and does not change the
 `16...22` independent-profile range. The ordinary Map screen and Map +
-Navigation without an active route remain flat. During active navigation the
-bird's-eye renderer uses one projection snapshot for vector features, route
-geometry, and the current-position marker so all three layers stay aligned.
+Navigation with bird's-eye disabled remain flat. When bird's-eye is enabled,
+Map + Navigation uses one projection snapshot before and during guidance for
+vector features, route geometry, and the current-position marker so all three
+layers stay aligned.
 
 Fresh Map profiles default to high detail, zoom level `3`, a `4` px route line,
 `4` px streets, and a `2x` position marker. Fresh Map + Navigation profiles
 default to low detail, zoom level `3`, a `15` px route line, `4` px streets, a
 `2x` position marker, and only Major Roads, Residential & Local Roads, and
-Water visible. Existing customized profiles keep their saved values; profiles
+Water, and Buildings visible. Existing customized profiles keep their saved values; profiles
 that still exactly match the former recommendations migrate once.
 
 Apps that support the extended visibility classes set marker bit `12`. Without
@@ -709,8 +716,9 @@ TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
 ```
 
 Schema `1` assigns feature bit `8` to street-label profiles, bit `9` to the
-bird's-eye projection, bit `10` to its first three perspective presets, and bit
-`11` to the Very Strong and Maximum presets. Bits `0...7` retain their legacy
+bird's-eye projection, bit `10` to its first three perspective presets, bit
+`11` to the Very Strong and Maximum presets, and bit `12` to OSM 3D buildings
+and renderer target 3. Bits `0...7` retain their legacy
 meanings above. TLV type `1` carries the persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
@@ -721,8 +729,8 @@ clients accept either envelope.
 Golden vectors:
 
 ```text
-CAP2 schema 1, flags 0x00000fff, PWR enabled/sound 4/volume 80:
-43 41 50 32 01 ff 0f 00 00 01 03 01 04 50
+CAP2 schema 1, flags 0x00001fff, PWR enabled/sound 4/volume 80:
+43 41 50 32 01 ff 1f 00 00 01 03 01 04 50
 
 CAP2 schema 1, flags 0, no TLVs:
 43 41 50 32 01 00 00 00 00
@@ -733,17 +741,23 @@ Older sessions therefore never receive label-only setting IDs. Missing NVS
 values migrate to balanced density, local language, standard text, and Follow
 roads independently for Map and Map + Navigation.
 
+ID `35` is sent only after a valid `CAP2` response advertises bit `12`.
+Firmware without that bit is never offered renderer target 3 and never receives
+the new setting. The setting has no effect unless Buildings is visible, Map +
+Navigation is using bird's-eye projection, and an FMB v4 block supplies
+building records.
+
 ## Destination Picker
 
-The idle Map + Navigation overlay mirrors up to three favorites from the
-companion app. Recent searches are not sent or displayed. Labels are non-empty
-UTF-8 strings of at most 64 bytes, and an empty catalog is valid.
+The idle Navigation screen mirrors up to three favorites from the companion
+app. Recent searches are not sent or displayed. Labels are non-empty UTF-8
+strings of at most 64 bytes, and an empty catalog is valid.
 
-When idle, the picker expands the bottom overlay to two-thirds of the display.
-It shows large, transparent destination rows with a small yellow star before
-each label and no section heading. Tapping the exposed map or pressing the
-BOOT/forward button dismisses the picker and restores the normal one-third
-guidance strip; a later forward press resumes normal screen cycling.
+The picker fills the dedicated Navigation screen with large, transparent
+destination rows and a small yellow star before each label. Map + Navigation
+does not present the catalog: it always opens directly to its configured map,
+with no bottom overlay while idle and the one-third maneuver strip only while
+guidance is active.
 
 The logical catalog is versioned JSON:
 
@@ -923,12 +937,12 @@ Status responses should include:
 - `activeManifestReceipt`: SHA-256 identity of the exact installed manifest;
   the app binds the following label-health fields to this receipt.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
-  `2` FMB v3 + FMA1 street labels).
-- `labelProfileVersion`: `1` for the current target-2 label profile, otherwise
+  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings).
+- `labelProfileVersion`: `1` for the current target-2/3 label profile, otherwise
   `0`.
 - `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
   active pack.
-- `fontAssetHealthy`: `true` only when the target-2 FMA1 asset passed activation
+- `fontAssetHealthy`: `true` only when the target-2/3 FMA1 asset passed activation
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.
