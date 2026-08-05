@@ -13,6 +13,14 @@
 namespace device_transfer {
 namespace {
 
+// The worker previously reserved 16 KiB of scarce internal RAM before a phone
+// had associated with the accessory AP. On the production 1.75-inch build that
+// left roughly 17 KiB free while the Wi-Fi driver still needed to authenticate
+// a station and start DHCP. Runtime high-water diagnostics show the idle worker
+// consumes about 2 KiB; 8 KiB keeps a wide call-stack margin without starving
+// the radio during association.
+constexpr uint32_t kHttpWorkerStackBytes = 8192;
+
 static std::string trim(const std::string &value) {
   size_t begin = 0;
   while (begin < value.size() &&
@@ -295,7 +303,8 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     // an immediately scheduled worker wait until both fields are coherent.
     lockState();
     const BaseType_t created =
-        xTaskCreate(workerTaskThunk, "device_http", 16384, this, 1, &worker);
+        xTaskCreate(workerTaskThunk, "device_http", kHttpWorkerStackBytes, this,
+                    1, &worker);
     if (created == pdPASS) {
       workerTask_ = worker;
       powerLockHeld_ = acquiredPowerLock;
