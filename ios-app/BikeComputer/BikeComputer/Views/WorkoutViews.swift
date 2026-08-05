@@ -20,11 +20,11 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
     var message: String {
         switch self {
         case .unsupported:
-            return "Starting a workout from iPhone requires iOS 17 or later and the BikeComputer app on Apple Watch."
+            return "Starting a workout from iPhone requires iOS 17 or later and the Bicino app on Apple Watch."
         case .activationFailed:
-            return "BikeComputer couldn’t check your Apple Watch. Make sure Bluetooth and Wi-Fi are on, then try again."
+            return "Bicino couldn’t check your Apple Watch. Make sure Bluetooth and Wi-Fi are on, then try again."
         case .noPairedWatch:
-            return "You need the BikeComputer app on an Apple Watch to start tracking your workout. Pair an Apple Watch with this iPhone first."
+            return "You need the Bicino app on an Apple Watch to start tracking your workout. Pair an Apple Watch with this iPhone first."
         }
     }
 }
@@ -746,7 +746,7 @@ struct WorkoutDashboardView: View {
             VStack(spacing: 10) {
                 if presentation.errorCode == .setupRequired
                     || presentation.errorCode == .authorizationDenied {
-                    Text("On Apple Watch, open BikeComputer and tap Set Up Health. If needed, use Watch Settings › Health › Apps › BikeComputer.")
+                    Text("On Apple Watch, open Bicino and tap Set Up Health. If needed, use Watch Settings › Health › Apps › Bicino.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -767,7 +767,7 @@ struct WorkoutDashboardView: View {
                 .multilineTextAlignment(.center)
         } else if presentation.connectionState == .disconnected {
             VStack(spacing: 10) {
-                Text("No verified workout state was received. Check BikeComputer on Apple Watch; if no ride is active there, try again.")
+                Text("No verified workout state was received. Check Bicino on Apple Watch; if no ride is active there, try again.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -787,7 +787,7 @@ struct WorkoutDashboardView: View {
                 .multilineTextAlignment(.center)
         } else if presentation.isWorkoutActive {
             if !store.supportsSegmentMarking {
-                Text("Update BikeComputer on Apple Watch to mark segments from iPhone.")
+                Text("Update Bicino on Apple Watch to mark segments from iPhone.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

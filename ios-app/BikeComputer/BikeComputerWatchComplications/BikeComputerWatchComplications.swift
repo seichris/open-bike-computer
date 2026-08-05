@@ -49,7 +49,7 @@ private struct StartRideComplicationView: View {
                         .font(.title2)
                         .widgetAccentable()
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("BikeComputer")
+                        Text("Bicino")
                             .font(.headline)
                         Text("Start Ride")
                             .font(.caption)
@@ -72,7 +72,7 @@ private struct StartRideComplicationView: View {
             Color.clear
         }
         .widgetURL(WatchWorkoutLaunchRequest.startOutdoorCyclingURL)
-        .accessibilityLabel("Start a BikeComputer ride")
+        .accessibilityLabel("Start a Bicino ride")
     }
 }
 
@@ -84,7 +84,7 @@ private struct StartRideComplication: Widget {
             StartRideComplicationView()
         }
         .configurationDisplayName("Start Ride")
-        .description("Start an outdoor cycling workout in BikeComputer.")
+        .description("Start an outdoor cycling workout in Bicino.")
         .supportedFamilies([
             .accessoryCircular,
             .accessoryRectangular,

@@ -62,7 +62,7 @@ enum WorkoutLiveActivityIntentExecution {
 struct BikeComputerMarkSegmentIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Mark Workout Segment"
     static let description = IntentDescription(
-        "Marks a segment in the active BikeComputer workout."
+        "Marks a segment in the active Bicino workout."
     )
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy =
@@ -94,7 +94,7 @@ struct BikeComputerMarkSegmentIntent: LiveActivityIntent {
 struct BikeComputerPauseWorkoutIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Pause Workout"
     static let description = IntentDescription(
-        "Pauses the active BikeComputer workout."
+        "Pauses the active Bicino workout."
     )
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy =
@@ -126,7 +126,7 @@ struct BikeComputerPauseWorkoutIntent: LiveActivityIntent {
 struct BikeComputerResumeWorkoutIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Resume Workout"
     static let description = IntentDescription(
-        "Resumes the paused BikeComputer workout."
+        "Resumes the paused Bicino workout."
     )
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy =

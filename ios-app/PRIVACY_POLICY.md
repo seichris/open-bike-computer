@@ -1,14 +1,14 @@
-# Bike Computer 2.0 Privacy Policy
+# Bicino Privacy Policy
 
 Effective date: July 19, 2026
 
-Bike Computer 2.0 is a cycling navigation and workout companion. This policy
+Bicino is a cycling navigation and workout companion. This policy
 explains what information the iPhone app, Apple Watch app, compatible bike
 computer hardware, and optional offline-map service use.
 
 ## Accounts, advertising, and analytics
 
-Bike Computer 2.0 does not require an account. We do not sell personal data,
+Bicino does not require an account. We do not sell personal data,
 use advertising SDKs, track you across other companies' apps or websites, or
 use third-party analytics SDKs.
 

@@ -13,7 +13,7 @@ struct CyclingSensorProfilesSection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("No Sensors", systemImage: "gauge")
                     Text(
-                        "Add a sensor after BikeComputer receives cadence or power data from your Apple Watch."
+                        "Add a sensor after Bicino receives cadence or power data from your Apple Watch."
                     )
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -118,7 +118,7 @@ struct CyclingSensorConnectionSection: View {
         if detectionCoordinator.hasActiveWorkout {
             return "Keep pedaling so Apple Watch continues receiving cadence or power data."
         }
-        return "On Apple Watch, pair the sensor in Settings > Bluetooth > Health Devices. Wake the sensor, then start a BikeComputer cycling workout."
+        return "On Apple Watch, pair the sensor in Settings > Bluetooth > Health Devices. Wake the sensor, then start a Bicino cycling workout."
     }
 }
 
@@ -286,13 +286,13 @@ private struct CyclingSensorEnrollmentSheet: View {
                     }
                 } footer: {
                     Text(
-                        "Apple Watch keeps managing the Bluetooth connection. This choice controls which BikeComputer workout stats are shown."
+                        "Apple Watch keeps managing the Bluetooth connection. This choice controls which Bicino workout stats are shown."
                     )
                 }
 
                 Section {
                     Label(
-                        "BikeComputer detected \(candidate.capabilities.displayName.lowercased()) data during the current workout.",
+                        "Bicino detected \(candidate.capabilities.displayName.lowercased()) data during the current workout.",
                         systemImage: "applewatch.radiowaves.left.and.right"
                     )
                     .font(.footnote)
@@ -383,7 +383,7 @@ private struct CyclingSensorDetailView: View {
                     }
                 } footer: {
                     Text(
-                        "Forgetting removes this BikeComputer profile. It does not unpair the sensor from Apple Watch."
+                        "Forgetting removes this Bicino profile. It does not unpair the sensor from Apple Watch."
                     )
                 }
                 .confirmationDialog(

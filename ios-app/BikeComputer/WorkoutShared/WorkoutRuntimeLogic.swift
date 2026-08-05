@@ -853,18 +853,18 @@ nonisolated enum WorkoutCrossAppTakeoverCopyV1 {
     static func live(disposition: WorkoutFinishDisposition) -> String {
         switch disposition {
         case .save:
-            "Another workout app took over. BikeComputer is saving the partial ride."
+            "Another workout app took over. Bicino is saving the partial ride."
         case .discard:
-            "Another workout app took over. BikeComputer is discarding the partial ride as requested."
+            "Another workout app took over. Bicino is discarding the partial ride as requested."
         }
     }
 
     static func summary(disposition: WorkoutFinishDisposition) -> String {
         switch disposition {
         case .save:
-            "Another workout app took over. This is the partial BikeComputer ride saved before the handoff."
+            "Another workout app took over. This is the partial Bicino ride saved before the handoff."
         case .discard:
-            "Another workout app took over. The partial BikeComputer ride was discarded as requested."
+            "Another workout app took over. The partial Bicino ride was discarded as requested."
         }
     }
 }

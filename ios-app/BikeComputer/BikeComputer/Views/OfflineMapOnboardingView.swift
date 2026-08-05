@@ -218,7 +218,7 @@ private extension OfflineMapOnboardingStep {
     var message: String {
         switch self {
         case .location:
-            return "Bike Computer needs your current location to prepare the right offline map."
+            return "Bicino needs your current location to prepare the right offline map."
         case .device:
             return "Connect your Bike Computer before downloading its first map."
         case .checkingDevice:

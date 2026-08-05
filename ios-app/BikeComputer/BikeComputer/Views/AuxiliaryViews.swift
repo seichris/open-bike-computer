@@ -24,7 +24,7 @@ struct ConnectionStatusView: View {
                         radius: 4
                     )
 
-                Text("BikeComputer")
+                Text("Bicino")
                     .font(.caption)
                     .foregroundColor(.primary)
                     .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
@@ -34,7 +34,7 @@ struct ConnectionStatusView: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityLabel(isConnected ? "BikeComputer connected" : "Reconnect BikeComputer")
+        .accessibilityLabel(isConnected ? "Bicino connected" : "Reconnect Bicino")
     }
 }
 

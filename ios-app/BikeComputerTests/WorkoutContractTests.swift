@@ -5289,7 +5289,7 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             terminalDetail.contains("Save or Discard")
-                && terminalDetail.contains("Check BikeComputer on Apple Watch"),
+                && terminalDetail.contains("Check Bicino on Apple Watch"),
             "terminal uncertainty should tell the rider what was not confirmed and where to check"
         )
         expect(
@@ -5829,13 +5829,13 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactIPhoneConfirmation.contains(
-                "YouneedtheBikeComputerapponanAppleWatchtostarttrackingyourworkout"
+                "YouneedtheBicinoapponanAppleWatchtostarttrackingyourworkout"
             )
                 && compactIPhoneConfirmation.contains(
                     ".alert(item:$presentedAlert)"
                 )
                 && !iPhoneConfirmationComponent.contains(
-                    "Install BikeComputer on Apple Watch"
+                    "Install Bicino on Apple Watch"
                 ),
             "iPhone must keep paired-Watch guidance without blocking on a stale companion-install flag"
         )
