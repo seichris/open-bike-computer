@@ -287,7 +287,7 @@ void assertNearPlaneMatrix() {
       map_projection::BirdsEyePerspective::VeryStrong,
       map_projection::BirdsEyePerspective::Maximum,
   };
-  for (const auto [width, height] :
+  for (const auto &[width, height] :
        {std::pair<uint16_t, uint16_t>{466, 366}, {410, 430}}) {
     for (uint8_t zoom = map_transform::kMinimumRuntimeZoom;
          zoom <= map_transform::kMaximumRuntimeZoom; ++zoom) {
