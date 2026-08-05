@@ -112,6 +112,35 @@ deterministic fallback ladder: explicit height, OSM levels, eligible parent
 inheritance, local OSM median, then checked-in building-class default. No
 external height or building source is queried.
 
+Every renderable format-3 building therefore has a resolved height even when it
+has no usable height-related OSM tags. A part first inherits an eligible
+explicit or levels-derived parent height. Otherwise, the pipeline uses the
+median of at least three explicit or levels-derived OSM samples from the same
+coarse building class in the configured fixed cell and halo. If no eligible
+median exists, it uses these checked-in class defaults:
+
+| Normalized OSM building class | Default height |
+| --- | ---: |
+| `apartments` | 15 m |
+| `commercial` | 12 m |
+| `house` | 6 m |
+| `industrial` | 9 m |
+| `office` | 15 m |
+| `residential` | 9 m |
+| `retail` | 6 m |
+| `school` | 9 m |
+| `shed` | 3 m |
+| `warehouse` | 9 m |
+| unknown / generic | 9 m |
+
+The source of truth is
+[`conf/building_height_rules.yaml`](conf/building_height_rules.yaml), which also
+sets the 3 m floor-height assumption, 2.5 m roof-level assumption, class safety
+ranges, 8,192 m calibration cell, one-cell halo, and three-sample minimum.
+Malformed or contradictory height tags are counted in build diagnostics and
+fall through to the next valid resolution step instead of rejecting the map.
+FMB v4 stores the selected provenance separately from the height value.
+
 The source PBF must include an 8,192-metre halo around the final aligned block
 extent. Buildings are clipped only when FMB blocks are emitted; new clip edges
 receive a cleared wall bit so adjacent blocks do not render artificial seam

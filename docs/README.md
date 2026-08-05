@@ -18,6 +18,7 @@
 
 | Plan | Status |
 | --- | --- |
+| [Geofabrik/OSM 3D buildings](plans/geofabrik-osm-3d-buildings-implementation-plan.md) | Implemented; physical rendering validated on the 1.75-inch device |
 | [Cycling sensor settings and workout tile gating](plans/cycling-sensor-settings-implementation-plan.md) | Implemented slice; direct ESP32 sensor support remains in [issue #85](https://github.com/seichris/open-bike-computer/issues/85) |
 | [iPhone interactive workout Live Activity](plans/iphone-workout-live-activity-implementation-plan.md) | Implemented |
 | [Two-finger map zoom](plans/two-finger-map-zoom-implementation-plan.md) | Implemented; physical two-contact acceptance remains documented in the plan |

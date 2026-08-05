@@ -74,6 +74,11 @@ The provenance values are:
 | 3 | Median of eligible OSM heights in the configured local cell and halo |
 | 4 | Checked-in OSM building-class default |
 
+The resolver policy and current class-default values are documented in the
+[`OSM_Extract` renderer-format guide](../tools/OSM_Extract/README.md#renderer-formats-and-osm-3d-buildings).
+They are build policy rather than part of the binary wire format; the encoded
+provenance keeps estimated heights distinguishable from explicit OSM data.
+
 The first ring is the outer ring and every later ring is a hole:
 
 ```text

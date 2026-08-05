@@ -105,6 +105,12 @@ python3 tools/capture_boot.py \
   --require-ready
 ```
 
+Do not open an interactive serial connection merely to check a successful map
+flash or upload. Opening the USB serial path can reset the board and replace the
+state being investigated, including an in-progress activation or SD-map mount.
+When boot evidence is required, arm `capture_boot.py` before the intentional
+power cycle or reconnect instead.
+
 Arm that command before reconnecting a fully unpowered device for a true
 cold-start test. Disconnect both USB and battery first so the PMIC reloads its
 power-on baseline; preserving rails cannot prove that a still-powered PMIC is
@@ -215,6 +221,29 @@ xcodebuild -project BikeComputer/BikeComputer.xcodeproj \
   -scheme BikeComputer -destination 'generic/platform=iOS' \
   CODE_SIGNING_ALLOWED=NO build
 ```
+
+For physical-device offline-map validation, remember that the firmware renders
+blocks around the WGS-84 position sent by iOS. **No map data** after a completed
+upload can simply mean the phone's real location is outside the installed map.
+The installed DEBUG app accepts a per-launch coordinate override; Singapore's
+3D-building test area uses:
+
+```sh
+xcrun devicectl list devices
+xcrun devicectl device process launch \
+  --device IPHONE_IDENTIFIER \
+  --terminate-existing \
+  --console \
+  LetItRide.BikeComputer \
+  --device-map-location=1.305,103.855
+```
+
+Keep the console session alive and require the app logs to show the active
+override, BLE authentication, and a sent native GPS position. A normal Home
+Screen relaunch has no override, and non-Debug builds ignore it. If iPhone
+Mirroring cannot approve the device-hosted Wi-Fi join during map transfer,
+retry the association on the unlocked physical iPhone before diagnosing the
+firmware or transfer server. See `ios-app/README.md` for the full procedure.
 
 ### Map backend
 
