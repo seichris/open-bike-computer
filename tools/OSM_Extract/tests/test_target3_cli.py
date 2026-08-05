@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -9,10 +10,19 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EARTH_RADIUS_METERS = 6_378_137
+HOST_FONT_CANDIDATES = (
+    pathlib.Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+)
 
 
 class Target3CLITests(unittest.TestCase):
     def test_target_three_cli_emits_closed_line_parts_and_edge_blocks(self):
+        host_font = next(
+            (path for path in HOST_FONT_CANDIDATES if path.is_file()),
+            None,
+        )
+        self.assertIsNotNone(host_font, "host font fixture is unavailable")
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             prefix = root / "features"
@@ -105,6 +115,13 @@ class Target3CLITests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "OBC_LABEL_LATIN_FONT": str(host_font),
+                    "OBC_LABEL_CJK_FONT": str(host_font),
+                }
+            )
             result = subprocess.run(
                 [
                     sys.executable,
@@ -127,6 +144,7 @@ class Target3CLITests(unittest.TestCase):
                 ],
                 cwd=ROOT / "scripts",
                 check=False,
+                env=environment,
                 text=True,
                 capture_output=True,
             )
