@@ -10837,6 +10837,8 @@ struct NavigationProtocolTests {
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 7
         ), "user denial never triggers a second join prompt")
+        assert(DeviceNetworkJoinPolicy.reachabilityTimeout >= 30,
+               "an accepted local-only accessory network gets a stable association window")
         assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 17,
