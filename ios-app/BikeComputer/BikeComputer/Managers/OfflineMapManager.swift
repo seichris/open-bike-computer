@@ -1716,8 +1716,6 @@ final class OfflineMapManager: ObservableObject {
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
                 .forDevice(
-                    supportsStreetLabels: bleManager.supportsStreetLabels,
-                    supports3DBuildings: bleManager.supports3DBuildings,
                     firmwareVersion: bleManager.firmwareVersion
                 )
                 .identified(
