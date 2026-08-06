@@ -2381,15 +2381,15 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const bool mapNavigationActive = isMapGuidanceScreenActive();
   const bool guidanceBirdsEye = mapNavigationActive && projection.isBirdsEye();
+  // Candidate discovery runs on the UI task. Keep that scan short, but do not
+  // turn a scan timeout into a whole-frame 2D fallback: the bounded candidate
+  // queue below still contains the nearest buildings already discovered.
   constexpr uint32_t kGuidanceBuildingTimeBudgetMs = 900U;
+  constexpr uint32_t kBuildingDrawTimeBudgetMs =
+      map_building_renderer::kMaximumBuildingRenderTimeMs;
   constexpr size_t kGuidanceMaximumQueuedBuildingRecords = 2048U;
   constexpr double kGuidanceFarBuildingCutoffFraction = 0.20;
-  // Guidance renders on the UI task. Keep the optional 3D pass bounded so a
-  // dense city cannot starve GPS/scene updates for several seconds. The
-  // normal-map budget remains unchanged; if guidance reaches this limit, the
-  // existing retry path presents the same frame with buildings suppressed,
-  // leaving the 2D roads/land-use map intact.
-  const uint32_t buildingTimeBudgetMs =
+  const uint32_t buildingPrepassTimeBudgetMs =
       guidanceBirdsEye
           ? kGuidanceBuildingTimeBudgetMs
           : map_building_renderer::kMaximumBuildingRenderTimeMs;
@@ -2754,6 +2754,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     BuildingPassPhase buildingPassPhase = BuildingPassPhase::Projection;
     uint32_t buildingPhaseStartMs = millis();
     const uint32_t buildingPassStartMs = buildingPhaseStartMs;
+    uint32_t buildingDeadlineStartMs = buildingPassStartMs;
+    uint32_t buildingPhaseBudgetMs = buildingPrepassTimeBudgetMs;
     const auto finishBuildingPhaseTiming = [&]() {
       const uint32_t elapsed = millis() - buildingPhaseStartMs;
       switch (buildingPassPhase) {
@@ -2802,7 +2804,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     static uint64_t extrusionRecordOverflowTotal = 0;
     static uint64_t extrusionPointOverflowTotal = 0;
     const auto buildingDeadlineReached = [&]() {
-      return millis() - buildingPassStartMs >= buildingTimeBudgetMs;
+      return millis() - buildingDeadlineStartMs >= buildingPhaseBudgetMs;
     };
     const auto shouldStopBuildingWork = [&]() {
       if (shouldInterruptMapRenderForScreenCycle()) {
@@ -2948,34 +2950,47 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       buildingPhaseStartMs = millis();
       renderRecordLimitOverflow =
           boundedBuildingCandidateCount - buildingQueue.size();
-      if (!stopBuildingPrepass) {
-        std::sort(buildingQueue.begin(), buildingQueue.end(),
-                  buildingRendersBefore);
-        buildingSortMs = millis() - buildingPhaseStartMs;
-        if (!shouldStopBuildingWork()) {
-          renderSelection = map_building_renderer::selectNearestForRendering(
-              buildingQueue.rbegin(), buildingQueue.rend(),
-              shouldStopBuildingWork);
-          if (!buildingDeadlineExceeded && !buildingScreenInterrupted &&
-              extrudeBuildings) {
-            // The painter queue is far-to-near. Reserve in reverse so the
-            // geometry nearest the rider keeps its walls when a dense city
-            // exceeds the bounded extrusion workspace; overflow roofs remain
-            // visible and flat.
-            buildingSelection =
-                map_building_renderer::selectNearestForExtrusion(
-                    buildingQueue.rbegin(), buildingQueue.rend(),
-                    shouldStopBuildingWork);
-            buildingBudgetFallback = buildingSelection.usedFallback();
-            extrusionRecordOverflowTotal +=
-                buildingSelection.recordLimitOverflow;
-            extrusionPointOverflowTotal +=
-                buildingSelection.pointLimitOverflow;
-          }
+      if (stopBuildingPrepass && buildingDeadlineExceeded) {
+        // The discovery budget is a responsiveness guard, not a reason to
+        // throw away the entire scratch frame. Sort and render the bounded
+        // nearest queue collected so far, with the normal geometry budget.
+        buildingPrepassDeadlineExceeded = true;
+        buildingDeadlineExceeded = false;
+      }
+      if (buildingScreenInterrupted)
+        return false;
+
+      // Sorting and surface rendering operate on bounded queues/point counts.
+      // Give those phases their own hard budget so a partial discovery pass
+      // can still produce a useful 3D frame without becoming unbounded.
+      buildingDeadlineStartMs = millis();
+      buildingPhaseBudgetMs = kBuildingDrawTimeBudgetMs;
+      std::sort(buildingQueue.begin(), buildingQueue.end(),
+                buildingRendersBefore);
+      buildingSortMs = millis() - buildingPhaseStartMs;
+      if (!shouldStopBuildingWork()) {
+        renderSelection = map_building_renderer::selectNearestForRendering(
+            buildingQueue.rbegin(), buildingQueue.rend(),
+            shouldStopBuildingWork);
+        if (!buildingDeadlineExceeded && !buildingScreenInterrupted &&
+            extrudeBuildings) {
+          // The painter queue is far-to-near. Reserve in reverse so the
+          // geometry nearest the rider keeps its walls when a dense city
+          // exceeds the bounded extrusion workspace; overflow roofs remain
+          // visible and flat.
+          buildingSelection =
+              map_building_renderer::selectNearestForExtrusion(
+                  buildingQueue.rbegin(), buildingQueue.rend(),
+                  shouldStopBuildingWork);
+          buildingBudgetFallback = buildingSelection.usedFallback();
+          extrusionRecordOverflowTotal +=
+              buildingSelection.recordLimitOverflow;
+          extrusionPointOverflowTotal += buildingSelection.pointLimitOverflow;
         }
       }
       if (buildingDeadlineExceeded) {
-        buildingPrepassDeadlineExceeded = true;
+        // A timeout in the bounded sort/selection phase is still a genuine
+        // render abort; the prepass case above is intentionally recoverable.
         return abortStoppedBuildingWork(buildingQueue.size());
       }
       if (buildingScreenInterrupted)
@@ -3009,8 +3024,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       buildingPolygon.bbox.min = Point16(minX, minY);
       buildingPolygon.bbox.max = Point16(maxX, maxY);
       const bool completed = Maps::fillPolygon(
-          buildingPolygon, canvas, buildingPassStartMs,
-          buildingTimeBudgetMs);
+          buildingPolygon, canvas, buildingDeadlineStartMs,
+          buildingPhaseBudgetMs);
       if (!completed)
         shouldStopBuildingWork();
       return completed;
@@ -3325,8 +3340,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned)buildingFailurePsramFree,
             (unsigned)buildingFailurePsramLargest,
             buildingFailurePsramSamplePostCleanup ? 1U : 0U);
-        buildingFailureRetryCooldown.recordFailure(
-            millis(), buildingContextSignature, buildingRenderRegion);
+        // A deadline is a transient workload signal, not a memory failure.
+        // Only allocation failures enter the cooldown; otherwise one dense
+        // frame would suppress 3D buildings for the next five minutes.
+        if (buildingAllocationFailed) {
+          buildingFailureRetryCooldown.recordFailure(
+              millis(), buildingContextSignature, buildingRenderRegion);
+        }
         releaseBuildingFailureWorkspace();
         const bool screenCycleInterrupted =
             shouldInterruptMapRenderForScreenCycle();

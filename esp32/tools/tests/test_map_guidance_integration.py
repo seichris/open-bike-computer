@@ -88,12 +88,9 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_dense_scene_selection_uses_shared_nearest_first_policy(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        self.assertIn(
-            "map_building_renderer::selectNearestForExtrusion(\n"
-            "                    buildingQueue.rbegin(), buildingQueue.rend(),\n"
-            "                    shouldStopBuildingWork)",
-            render_body,
-        )
+        self.assertIn("map_building_renderer::selectNearestForExtrusion(", render_body)
+        self.assertIn("buildingQueue.rbegin(), buildingQueue.rend(),", render_body)
+        self.assertIn("shouldStopBuildingWork);", render_body)
         self.assertIn("item.extrude", render_body)
         self.assertIn("buildingSelection.flatOverflow()", render_body)
         self.assertIn("buildingSelection.recordLimitOverflow", render_body)
@@ -191,11 +188,20 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             "visibleProjection.anchorY() + availableMotion", refresh_body
         )
 
-    def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):
+    def test_building_deadline_and_allocation_failures_use_bounded_fallback(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         self.assertIn("runAllocationSafe", render_body)
         self.assertIn("buildingAllocationFailed", render_body)
         self.assertIn("buildingDeadlineAborted", render_body)
+        self.assertIn("buildingPrepassDeadlineExceeded", render_body)
+        self.assertIn("buildingPrepassTimeBudgetMs", render_body)
+        self.assertIn("kBuildingDrawTimeBudgetMs", render_body)
+        self.assertIn("buildingDeadlineStartMs", render_body)
+        self.assertIn("buildingPhaseBudgetMs", render_body)
+        self.assertIn("queue collected so far", render_body)
+        self.assertIn(
+            "if (stopBuildingPrepass && buildingDeadlineExceeded)", render_body
+        )
         self.assertIn('reason=%s', render_body)
         self.assertIn('"allocation"', render_body)
         self.assertIn('"deadline"', render_body)
@@ -205,6 +211,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("psramUsed=%u psramFree=%u", render_body)
         self.assertIn("shouldRetryWithoutBuildings", render_body)
         self.assertIn("buildingFailureRetryCooldown.recordFailure", render_body)
+        self.assertRegex(
+            render_body,
+            r"if\s*\(buildingAllocationFailed\)\s*\{[\s\S]*?"
+            r"buildingFailureRetryCooldown\.recordFailure",
+        )
         self.assertIn("psramSamplePostCleanup", render_body)
         self.assertGreaterEqual(render_body.count("releaseBuildingFailureWorkspace();"), 2)
         self.assertLess(
