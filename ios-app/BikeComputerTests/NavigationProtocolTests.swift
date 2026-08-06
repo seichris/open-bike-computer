@@ -7129,6 +7129,12 @@ struct NavigationProtocolTests {
             "tapping installed status explains that the map is already on the device"
         )
         assert(
+            source.contains("isShowingDeleteConfirmation = true") &&
+                source.contains("\"Delete Saved Map?\"") &&
+                source.contains("Button(\"Delete\", role: .destructive)"),
+            "deleting a saved map requires explicit confirmation"
+        )
+        assert(
             source.contains("manager.hasActiveBackgroundUpload"),
             "a restored upload disables conflicting saved-map upload and delete actions"
         )

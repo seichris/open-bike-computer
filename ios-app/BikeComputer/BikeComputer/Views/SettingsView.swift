@@ -495,6 +495,7 @@ private struct DownloadedMapRow: View {
     @Binding var renameInteraction: SavedMapRenameInteraction
     let onCommitRename: (SavedMapRenameCommit) -> Void
     @State private var isShowingInstalledConfirmation = false
+    @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
         let displayName = manager.displayName(forCachedPack: packURL)
@@ -604,7 +605,7 @@ private struct DownloadedMapRow: View {
             Button(role: .destructive) {
                 finishRenaming()
                 focusedPackFilename = nil
-                manager.deleteCachedPack(at: packURL)
+                isShowingDeleteConfirmation = true
             } label: {
                 Image(systemName: "trash")
                     .frame(width: 32, height: 32)
@@ -617,6 +618,21 @@ private struct DownloadedMapRow: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This map is already installed on the device.")
+        }
+        .confirmationDialog(
+            "Delete Saved Map?",
+            isPresented: $isShowingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                manager.deleteCachedPack(at: packURL)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(
+                "This removes \(displayName) from Saved Maps on this iPhone. " +
+                    "A copy already installed on the Bike Computer remains there."
+            )
         }
     }
 
