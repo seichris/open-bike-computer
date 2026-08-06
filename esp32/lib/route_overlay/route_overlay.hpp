@@ -60,11 +60,14 @@ public:
    * Guidance uses this on a transparent foreground at the display cadence.
    * The full route window is still supplied by iOS, but the first pixel is
    * derived from the same presented position as the marker so a stale BLE
-   * geometry window cannot leave a gap or a trailing tail at the arrow.
+   * geometry window cannot leave a gap or a trailing tail at the arrow. The
+   * separate markerCenterWorld keeps the visible line attached to the arrow's
+   * center while presentedWorld remains the progress anchor.
    */
   void drawLiveHead(lv_obj_t *canvas,
                     const map_projection::Projection &projection,
-                    map_transform::WorldPoint presentedWorld);
+                    map_transform::WorldPoint presentedWorld,
+                    map_transform::WorldPoint markerCenterWorld);
 
   /**
    * @brief Clear all route points

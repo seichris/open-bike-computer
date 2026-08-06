@@ -5420,8 +5420,27 @@ void Maps::updateGuidanceRouteHead(
                             viewportHeight);
   }
   lv_obj_center(Maps::canvasForeground);
+
+  // Keep the geographic GPS anchor at the arrow's lower center so map
+  // rotation still pivots around the rider, but attach the visible route line
+  // to the arrow's visual center. The foreground is translated after this
+  // draw; deriving the center from the presented projection keeps that
+  // attachment exact during sub-fix motion as well as full map renders.
+  map_transform::WorldPoint markerCenterWorld = presentedWorld;
+  const auto presentedProjection =
+      visibleProjection.projectWorld(presentedWorld);
+  if (presentedProjection.valid) {
+    const double markerCenterOffsetX =
+        static_cast<double>(currentMarkerSize() / 2 - currentMarkerAnchorX());
+    const double markerCenterOffsetY =
+        static_cast<double>(currentMarkerSize() / 2 - currentMarkerAnchorY());
+    const auto markerCenterGround = visibleProjection.groundForScreen(
+        presentedProjection.x + markerCenterOffsetX,
+        presentedProjection.y + markerCenterOffsetY);
+    markerCenterWorld = visibleProjection.worldForGround(markerCenterGround);
+  }
   routeOverlay.drawLiveHead(Maps::canvasForeground, visibleProjection,
-                            presentedWorld);
+                            presentedWorld, markerCenterWorld);
   rollingForegroundReady = false;
   lv_obj_clear_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
   lv_obj_invalidate(Maps::canvasForeground);

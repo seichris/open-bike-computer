@@ -264,7 +264,8 @@ void RouteOverlay::drawRoute(
 
 void RouteOverlay::drawLiveHead(
     lv_obj_t *canvas, const map_projection::Projection &projection,
-    map_transform::WorldPoint presentedWorld) {
+    map_transform::WorldPoint presentedWorld,
+    map_transform::WorldPoint markerCenterWorld) {
   if (canvas == nullptr || points.size() < 2)
     return;
 
@@ -392,10 +393,11 @@ void RouteOverlay::drawLiveHead(
     }
   };
 
-  // Start at the exact presented marker position, connect to the nearest
-  // route point when GPS is slightly off the polyline, then draw only forward
-  // route geometry. This removes both stale leading gaps and trailing tails.
-  drawSegment(presentedWorld, projectedRoutePoint);
+  // Progress follows the exact presented GPS position, but the visible line
+  // must meet the visual center of the arrow. The geographic marker anchor is
+  // deliberately at the arrow's lower center for rotation; using it here
+  // would make the route appear to start at the arrow's bottom edge.
+  drawSegment(markerCenterWorld, projectedRoutePoint);
   drawSegment(projectedRoutePoint, routeEnd);
   for (size_t i = closestSegment + 1; i + 1 < points.size(); ++i) {
     drawSegment(routeWorldPoint(points[i]), routeWorldPoint(points[i + 1]));
