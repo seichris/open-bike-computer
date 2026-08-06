@@ -649,6 +649,7 @@ struct NavigationProtocolTests {
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineStartsRouteGeometryAtExactCurrentLocation()
+        testNavigationEngineDerivesSimulationCourse()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineRefreshesElapsedWithoutLocationChange()
@@ -13632,6 +13633,35 @@ struct NavigationProtocolTests {
             longitude: current.coordinate.longitude,
             "route geometry starts at the exact current GPS coordinate"
         )
+    }
+
+    static func testNavigationEngineDerivesSimulationCourse() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        let route = TestRoute(
+            instructions: "Continue east",
+            coordinates: [
+                CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+                CLLocationCoordinate2D(latitude: 37.0000, longitude: -121.9980)
+            ]
+        )
+        engine.startNavigation(with: route, isTestMode: true)
+        manager.sentGPSPositions.removeAll()
+
+        engine.updateSimulationForTesting(timeInterval: 1)
+
+        guard let packet = manager.sentGPSPositions.first else {
+            assert(false, "simulation should send a GPS position")
+            return
+        }
+        let heading = readUInt16LE(packet, offset: 8)
+        assert(heading >= 80 && heading <= 100,
+               "simulation should send the route bearing instead of north")
+        engine.stopNavigation()
     }
 
     static func testNavigationEngineClearsRouteGeometryOnStop() {

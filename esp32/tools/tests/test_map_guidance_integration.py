@@ -43,6 +43,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("mapNavigationBirdsEyeEnabled", expression)
         self.assertNotIn("hasRoute", expression)
 
+    def test_course_up_starts_with_navigation_snapshot_before_route_window(self):
+        self.assertIn("routeOverlay.hasRoute() || hasCurrentNavigationData()",
+                      MAIN_SCREEN_SOURCE)
+
     def test_map_guidance_owns_no_destination_picker(self):
         self.assertNotIn("mapGuidanceDestinationPicker", MAIN_SCREEN_SOURCE)
         overlay_body = function_body(

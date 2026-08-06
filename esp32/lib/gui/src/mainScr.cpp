@@ -653,7 +653,14 @@ static tileName nextEnabledTile(tileName current) {
   return configuredDefaultTile();
 }
 
-static bool isGuidanceNavigating() { return routeOverlay.hasRoute(); }
+// The route window and the maneuver snapshot arrive over separate BLE
+// characteristics.  Treat either one as active guidance so the map does not
+// briefly fall back to persisted north-up while the sliding geometry window
+// is being exchanged (or when a device is using the native GPS path before
+// the first geometry packet has arrived).
+static bool isGuidanceNavigating() {
+  return routeOverlay.hasRoute() || hasCurrentNavigationData();
+}
 
 static int16_t navigationArrowAngle(uint8_t iconID) {
   switch (iconID) {

@@ -61,6 +61,10 @@ The presenter adapts its bounded dead-reckoning horizon to the most recent
 accepted phone-fix interval (750--1,800 ms) and decays stale velocity over
 180 ms. This keeps the arrow and live head moving between normal Core Location
 updates without allowing a disconnected phone to drift the map indefinitely.
+Course-up activation is keyed to either the maneuver snapshot or the route
+window because those BLE inputs arrive independently; the companion derives a
+route bearing when Core Location reports an invalid course (including test
+navigation), so a valid navigation session cannot silently encode north-up.
 
 ## 3D-building workspace
 

@@ -294,7 +294,11 @@ class NavigationEngine: NSObject, ObservableObject {
                 altitude: 0,
                 horizontalAccuracy: 5,
                 verticalAccuracy: -1,
-                course: -1,
+                // MapKit does not provide a heading for a synthetic
+                // location.  Supplying the current route bearing keeps the
+                // bike computer's course-up projection deterministic during
+                // test navigation instead of silently encoding north (0°).
+                course: routeCourse(at: position) ?? -1,
                 speed: simulationSpeed,
                 timestamp: now
             )
@@ -340,6 +344,63 @@ class NavigationEngine: NSObject, ObservableObject {
         }
         
         return points.last
+    }
+
+    /// Return the bearing of the route segment nearest to a route-space
+    /// coordinate.  Core Location's `course` is often -1 while a rider is
+    /// stationary or while a simulation is running; the route itself is the
+    /// authoritative course in those cases.  The caller supplies coordinates
+    /// in the same MapKit/GCJ-02 space as `currentRoute`.
+    private func routeCourse(at coordinate: CLLocationCoordinate2D) -> CLLocationDirection? {
+        guard let route = currentRoute else { return nil }
+
+        let polyline = route.polyline
+        let pointCount = polyline.pointCount
+        guard pointCount > 1 else { return nil }
+
+        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
+        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
+
+        let currentMapPoint = MKMapPoint(coordinate)
+        var closestSegmentIndex: Int?
+        var closestDistance = Double.greatestFiniteMagnitude
+        for index in 0..<(pointCount - 1) {
+            let start = MKMapPoint(points[index])
+            let end = MKMapPoint(points[index + 1])
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let lengthSquared = (dx * dx) + (dy * dy)
+            guard lengthSquared > 0 else { continue }
+
+            let projected = ((currentMapPoint.x - start.x) * dx +
+                             (currentMapPoint.y - start.y) * dy) /
+                lengthSquared
+            let t = max(0, min(1, projected))
+            let closest = MKMapPoint(x: start.x + dx * t,
+                                     y: start.y + dy * t)
+            let distance = currentMapPoint.distance(to: closest)
+            if distance < closestDistance {
+                closestDistance = distance
+                closestSegmentIndex = index
+            }
+        }
+
+        guard let index = closestSegmentIndex else { return nil }
+        let start = points[index]
+        let end = points[index + 1]
+        let latitude1 = start.latitude * .pi / 180
+        let latitude2 = end.latitude * .pi / 180
+        let deltaLongitude = (end.longitude - start.longitude) * .pi / 180
+        let y = sin(deltaLongitude) * cos(latitude2)
+        let x = cos(latitude1) * sin(latitude2) -
+            sin(latitude1) * cos(latitude2) * cos(deltaLongitude)
+        guard x.isFinite, y.isFinite, abs(x) > 0 || abs(y) > 0 else {
+            return nil
+        }
+
+        let bearing = atan2(y, x) * 180 / .pi
+        let normalized = bearing >= 0 ? bearing : bearing + 360
+        return normalized.isFinite && normalized < 360 ? normalized : nil
     }
 
     /// Send test navigation data for BLE testing
@@ -672,7 +733,19 @@ class NavigationEngine: NSObject, ObservableObject {
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate
-        let heading = location.course >= 0 ? location.course : 0
+        let routeCoordinate = convertFromMapKitRoute
+            ? location.coordinate
+            : CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate
+        let routeHeading = routeCourse(at: routeCoordinate)
+        let locationHeading = location.course.isFinite &&
+            location.course >= 0 && location.course < 360
+            ? location.course
+            : nil
+        // Prefer a measured course, but never encode Core Location's invalid
+        // -1 as a north-up 0°.  During simulation and low-speed GPS, the
+        // current route bearing is the stable fallback for the firmware's
+        // course-up presenter.
+        let heading = locationHeading ?? routeHeading ?? 0
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,
