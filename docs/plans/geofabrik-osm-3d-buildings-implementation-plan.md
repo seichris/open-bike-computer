@@ -36,7 +36,7 @@ That baseline already contains:
 - a shared flat/bird's-eye projection in `map_projection.hpp`;
 - near-plane clipping for projected map geometry;
 - map-feature visibility settings, including Buildings;
-- CAP2 schema v1, Map + Navigation setting IDs 27–34, target-aware iOS offline-map selection, and capability-gated settings synchronization;
+- CAP2 schema v1, Map + Navigation setting IDs 27–34, target-3 iOS offline-map generation, and capability-gated settings synchronization;
 - cross-block street-label collection, bounded PSRAM workspaces, cooperative interruption, renderer diagnostics, and a foreground canvas for labels and route geometry; and
 - the isolated `compose.hardware-validation.yaml` stack used for physical map validation.
 
@@ -52,7 +52,7 @@ Renderer format 3 retains its own independent rollout gate. No renderer-format-2
 
 ## Implementation status
 
-Implemented on `agent/osm-3d-buildings` across extraction, map-platform packaging and validation, firmware parsing/rendering, BLE capability/settings, iOS target selection and saved-map compatibility, documentation, and host regression tests. Renderer-format-3 generation remains disabled by default through `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`.
+Implemented on `agent/osm-3d-buildings` across extraction, map-platform packaging and validation, firmware parsing/rendering, BLE capability/settings, iOS target-3 map generation and saved-map compatibility, documentation, and host regression tests. Renderer-format-3 generation remains disabled by default through `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`.
 
 The target-3 physical-device matrix, timing/PSRAM capture, signed production pack transfer, and production gate enablement remain rollout work. They are intentionally not recorded as complete by this implementation-only branch.
 
@@ -419,11 +419,15 @@ Extend the strict backend, iOS, and firmware manifest decoders together: rendere
 
 ### Capability and selection
 
-Use CAP2 feature bit 12 for 3D-building support and extend the existing `OfflineMapJobRequest.forDevice(...)` selection matrix:
+Use CAP2 feature bit 12 for 3D-building support, but make renderer format 3
+the only target used for new map generation. The iOS request builder always
+includes the connected firmware version and the renderer-format-3 label
+profile; capability flags no longer select a 2D generation target.
 
-- bit 12 present: request renderer format 3;
-- street-label support present without bit 12: request renderer format 2; and
-- otherwise, including legacy or absent CAP2: request renderer format 1.
+Devices without bit 12 can continue to transfer compatible saved format-1/2
+artifacts, but a new format-3 map is refused before transfer. If the backend
+cannot generate format 3, iOS surfaces the typed unsupported-target error and
+does not silently retry as format 2 or 1.
 
 The existing `activeRendererFormat` status remains the device's renderer-format signal; extend its accepted/installed values to include 3 rather than adding a parallel supported-format list. iOS persists the verified renderer format with each saved artifact and refuses transfer when the connected device cannot activate it.
 
@@ -594,7 +598,12 @@ The backend worker receives `target.rendererFormatVersion` through the merged no
 - renderer format `2`: FMB v3 street-label artifacts with FMA1; and
 - renderer format `3`: building extraction, height resolution, retained street-label sections/FMA1, and FMB v4.
 
-Extend `OfflineMapJobRequest.forDevice(supportsStreetLabels:firmwareVersion:)` with 3D-building capability and reuse the merged `map_artifact_validation.py`, `manifest.py`, `reuse.py`, job, and label-pipeline contracts. Renderer format 3 preserves the request's `labels` profile and languages. Do not make v4 a hidden global replacement; cache/reuse keys must distinguish renderer formats 1, 2, and 3.
+Make the iOS `OfflineMapJobRequest` builder emit renderer format 3 for every
+new bbox, polygon, route-corridor, and connected-device request. Reuse the
+merged `map_artifact_validation.py`, `manifest.py`, `reuse.py`, job, and
+label-pipeline contracts. Renderer format 3 preserves the request's `labels`
+profile and languages. Do not make v4 a hidden global replacement;
+cache/reuse keys must distinguish renderer formats 1, 2, and 3.
 
 ### Reproducibility
 
@@ -611,7 +620,7 @@ For the same complete identity, the generated FMB files and manifest building su
 
 ### Feature gate
 
-Add `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0` as a fail-closed renderer-format-3 generation gate. Initial production configuration permits it only for an explicit test allowlist. A request outside the allowlist receives a typed unsupported-target response so iOS can offer the newest explicitly supported renderer format 1 or 2 rather than mislabeling another artifact as format 3.
+Add `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0` as a fail-closed renderer-format-3 generation gate. Initial production configuration permits it only for an explicit test allowlist. A request outside the allowlist receives a typed unsupported-target response; iOS reports that error and never mislabels or silently substitutes a format-1/2 artifact.
 
 The format-3 gate is independent of `MAP_PLATFORM_LABEL_TARGET2_ENABLED`: a permitted format-3 build can invoke the shared label pipeline without requiring the client-facing format-2 gate to be enabled. Existing stream publication approvals and allowlists continue to govern artifact release.
 
@@ -687,10 +696,10 @@ Exit gate: golden blocks pass on host tests, flat ground projection is unchanged
 ### Phase 5 — BLE capability, setting, and iOS artifact gating
 
 1. Add setting ID 35 and CAP2 feature bit 12.
-2. Extend `OfflineMapJobRequest.forDevice(...)` to choose renderer format 3, 2, or 1 from bit 12 and street-label capability.
+2. Make every new iOS map request target renderer format 3; retain capability checks only for saved-artifact transfer compatibility.
 3. Persist and verify the artifact's renderer format in iOS, and accept `activeRendererFormat: 3` in status.
-4. Request renderer format 3 only for paired devices advertising CAP2 bit 12.
-5. Refuse incompatible transfers before sending bytes.
+4. Refuse format-3 transfers on devices that do not advertise CAP2 bit 12, before sending bytes.
+5. Do not downgrade a rejected format-3 generation or transfer to a 2D target.
 6. Add the iOS 3D Buildings toggle, explanatory copy, redraw policy, and fresh-profile Buildings visibility default without migrating persisted `navVis`.
 
 Exit gate: old devices continue to receive renderer format 1 or label-capable renderer format 2 with no new switch; compatible devices request/transfer renderer format 3 and round-trip the setting across reconnect and reboot.
@@ -701,7 +710,7 @@ Exit gate: old devices continue to receive renderer format 1 or label-capable re
 2. Compare coverage reports and visually inspect known fixtures.
 3. Test all supported zooms, headings, perspective levels, and route states.
 4. Run dense-route soak tests on both AMOLED board sizes.
-5. Exercise gate-off, target downgrade, saved-artifact mismatch, and firmware-setting rollback paths.
+5. Exercise gate-off, unsupported-target errors without downgrade, saved-artifact mismatch, and firmware-setting rollback paths.
 6. Reconfirm the live renderer-format-2 production/physical state, enable a small format-3 allowlist independently, inspect production build and device diagnostics, then widen deliberately.
 
 Exit gate: all acceptance criteria below are evidenced with artifacts, logs, screenshots, timings, and exact build/source identities.
@@ -791,8 +800,8 @@ Exact filenames may follow the baseline module boundaries, but the separation of
 - exact format-3 FMB v4 plus FMA1 file composition and rejection of missing/extra/mismatched files;
 - signed manifest tamper rejection;
 - manifest target/header mismatch and unsupported-target rejection on-device;
-- legacy CAP2 payload without bit 12 selecting renderer format 1 or 2 as appropriate;
-- iOS `forDevice` selection for legacy, street-label-only, and 3D-building devices;
+- legacy CAP2 payload without bit 12 refusing new renderer-format-3 transfer while retaining saved-map compatibility;
+- every new iOS map request selecting renderer format 3, with no target-2/1 generation fallback;
 - `activeRendererFormat` status values 1, 2, and 3, including unknown-value rejection;
 - saved-artifact renderer-format persistence and compatibility checks;
 - compatible and incompatible artifact transfer;
@@ -830,12 +839,12 @@ The implementation is complete only when all of the following are true:
    and the active route remain legible above them; foreground collision and
    priority behavior is unchanged.
 8. Renderer-format-1/2 activation, FMB v1/v2/v3 parsing, street-label behavior, and flat-building rendering regressions are absent.
-9. Old devices are never offered renderer format 3/FMB v4; iOS refuses an incompatible saved artifact before transfer; and new firmware rejects unsupported or mislabeled artifacts before activation.
+9. Old devices never receive renderer format 3/FMB v4; iOS refuses an incompatible saved artifact before transfer; and new firmware rejects unsupported or mislabeled artifacts before activation.
 10. The new setting is capability-gated, persisted, acknowledged, and documented.
 11. Malformed or oversized building data fails closed without unbounded allocation, reset, or navigation starvation.
 12. Both Waveshare targets pass the agreed render-time, PSRAM, responsiveness, and soak-test budgets.
 13. The target-3-aware control-plane/API and worker images are promoted, renderer-target reuse is separated, and a real signed renderer-format-3/FMB v4 pack is regenerated and transferred end to end.
-14. Format-3 gate-off, renderer-format-1/2 request, device setting-off, and saved-format-1/2 rollback paths are demonstrated.
+14. Format-3 gate-off/error handling, device setting-off, and saved-format-1/2 compatibility paths are demonstrated.
 15. Exact source checksums, build identities, firmware/iOS revisions, device targets, metrics, and visual evidence are attached to the delivery record.
 
 ## Rollout and rollback
@@ -844,10 +853,10 @@ The implementation is complete only when all of the following are true:
 
 1. Merge format docs and fixture tests before enabling production generation.
 2. Record the supplied implementation assumption that renderer format 2 is deployed and physically validated; keep its rollout gate independent.
-3. Ship new firmware support while iOS still requests the current compatible renderer format 1 or 2.
+3. Ship new firmware support before enabling the target-3-only iOS map-generation path.
 4. Build the shared target-3-aware image and complete its worker/hardware gates before promotion. The repository detects worker-input changes and deliberately prevents a new-control-plane/old-worker promotion for this release.
 5. Co-promote the control-plane/API and worker digest with `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0`; verify typed unsupported-target responses and worker health while generation remains disabled.
-6. Ship iOS capability negotiation and transfer refusal. Retain the exact legacy target-3 rejection fallback only for clients that reach a pre-promotion control plane during rollout.
+6. Ship the iOS target-3-only generation path and transfer refusal. A pre-promotion control plane returns a typed unsupported-target error; the app does not downgrade to a 2D artifact.
 7. Enable renderer format 3 for internal paired devices and regenerate packs from fresh requests.
 8. Compare production coverage/size/timing with the pinned validation artifacts.
 9. Widen the allowlist only after both hardware targets remain inside budgets.
@@ -856,8 +865,8 @@ The implementation is complete only when all of the following are true:
 
 Rollback does not require deleting or rewriting maps:
 
-- disable `MAP_PLATFORM_BUILDING_TARGET3_ENABLED` so requests use an explicit compatible renderer-format-1/2 path;
-- have iOS request renderer format 1 or 2 for subsequent generations according to device capability;
+- disable `MAP_PLATFORM_BUILDING_TARGET3_ENABLED` so new target-3 requests fail closed with a typed unavailable-target error;
+- keep existing signed renderer-format-1/2 artifacts available for compatible devices, without generating new 2D replacements;
 - turn off 3D Buildings on-device to render v4 footprints flat;
 - continue using existing signed renderer-format-1/2 artifacts; and
 - retain v3/v4 parsing in firmware so already transferred maps remain safe and readable.

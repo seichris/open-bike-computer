@@ -149,10 +149,13 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
-    private static var targetTwo: RendererTarget {
+    // Renderer target 3 is the only format generated for new maps. Older
+    // renderer targets remain supported only when transferring already-saved
+    // artifacts to compatible legacy firmware.
+    private static var targetThree: RendererTarget {
         RendererTarget(
             renderer: "esp32-fmb",
-            rendererFormatVersion: 2,
+            rendererFormatVersion: 3,
             firmwareVersion: nil
         )
     }
@@ -167,7 +170,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: nil,
             clientRequestId: nil,
             installOnDevice: nil,
-            target: targetTwo,
+            target: targetThree,
             labels: defaultLabelProfile
         )
     }
@@ -182,7 +185,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: nil,
             clientRequestId: nil,
             installOnDevice: nil,
-            target: targetTwo,
+            target: targetThree,
             labels: defaultLabelProfile
         )
     }
@@ -197,7 +200,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: nil,
             clientRequestId: nil,
             installOnDevice: nil,
-            target: targetTwo,
+            target: targetThree,
             labels: defaultLabelProfile
         )
     }
@@ -221,61 +224,8 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
-    func forDevice(
-        supportsStreetLabels: Bool,
-        supports3DBuildings: Bool = false,
-        firmwareVersion: String
-    ) -> OfflineMapJobRequest {
+    func forDevice(firmwareVersion: String) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
-            mode: mode,
-            bbox: bbox,
-            geometry: geometry,
-            route: route,
-            corridorWidthM: corridorWidthM,
-            clientInstallationId: clientInstallationId,
-            clientRequestId: clientRequestId,
-            installOnDevice: installOnDevice,
-            target: supports3DBuildings
-                ? RendererTarget(
-                    renderer: "esp32-fmb",
-                    rendererFormatVersion: 3,
-                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
-                )
-                : supportsStreetLabels
-                ? RendererTarget(
-                    renderer: "esp32-fmb",
-                    rendererFormatVersion: 2,
-                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
-                )
-                : RendererTarget(
-                    renderer: "esp32-fmb",
-                    rendererFormatVersion: 1,
-                    firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
-                ),
-            labels: (supportsStreetLabels || supports3DBuildings)
-                ? labels ?? Self.defaultLabelProfile
-                : nil
-        )
-    }
-
-    func compatibleFallback(
-        requestedRendererFormatVersion: Int,
-        supportedRendererFormatVersions: [Int]
-    ) -> OfflineMapJobRequest? {
-        guard requestedRendererFormatVersion == 3,
-              target?.renderer == "esp32-fmb",
-              target?.rendererFormatVersion == requestedRendererFormatVersion else {
-            return nil
-        }
-        let fallbackFormat: Int
-        if labels != nil && supportedRendererFormatVersions.contains(2) {
-            fallbackFormat = 2
-        } else if supportedRendererFormatVersions.contains(1) {
-            fallbackFormat = 1
-        } else {
-            return nil
-        }
-        return OfflineMapJobRequest(
             mode: mode,
             bbox: bbox,
             geometry: geometry,
@@ -286,10 +236,10 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             installOnDevice: installOnDevice,
             target: RendererTarget(
                 renderer: "esp32-fmb",
-                rendererFormatVersion: fallbackFormat,
-                firmwareVersion: target?.firmwareVersion
+                rendererFormatVersion: 3,
+                firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
             ),
-            labels: fallbackFormat == 2 ? labels : nil
+            labels: labels ?? Self.defaultLabelProfile
         )
     }
 }
@@ -2512,25 +2462,10 @@ struct OfflineMapPlatformClient {
         guard jobRequest.clientInstallationId == clientInstallationId else {
             throw OfflineMapPlatformError.invalidResponse
         }
-        do {
-            return try await createJobOnce(jobRequest)
-        } catch OfflineMapPlatformError.unsupportedRendererTarget(
-            let requestedRendererFormatVersion,
-            let supportedRendererFormatVersions,
-            let message
-        ) {
-            guard let fallback = jobRequest.compatibleFallback(
-                requestedRendererFormatVersion: requestedRendererFormatVersion,
-                supportedRendererFormatVersions: supportedRendererFormatVersions
-            ) else {
-                throw OfflineMapPlatformError.unsupportedRendererTarget(
-                    requestedRendererFormatVersion: requestedRendererFormatVersion,
-                    supportedRendererFormatVersions: supportedRendererFormatVersions,
-                    message: message
-                )
-            }
-            return try await createJobOnce(fallback)
-        }
+        // Do not silently downgrade a new map to a 2D/legacy renderer. A
+        // target-3 generation failure is surfaced to the caller so the app
+        // cannot present a map that lacks 3D buildings.
+        return try await createJobOnce(jobRequest)
     }
 
     private func createJobOnce(
@@ -2843,9 +2778,9 @@ struct OfflineMapPlatformClient {
             )
         }
         // The renderer-format-2 control plane predates the typed target error
-        // envelope. Recognize only its exact target-3 rejection so an app can
-        // downgrade during a rolling deployment; arbitrary HTTP 400 responses
-        // must remain hard failures.
+        // envelope. Recognize only its exact target-3 rejection so the app
+        // can surface a useful typed error during a rolling deployment;
+        // arbitrary HTTP 400 responses must remain hard failures.
         if statusCode == 400,
            let legacy = try? JSONDecoder().decode(
                OfflineMapAPILegacyErrorEnvelope.self,

@@ -658,7 +658,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
-        await testOfflineMapClientRetriesCompatibleRendererOnce()
+        await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
         testBikeMapStreamArtifactValidation()
@@ -4225,6 +4225,26 @@ struct NavigationProtocolTests {
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
         assert(abs((request.bbox?[3] ?? 0) - 35.1) < 0.001, "bbox max latitude uses requested size")
+        assertEqual(request.target?.rendererFormatVersion ?? 0, 3,
+                    "custom cut-outs always request renderer target 3")
+
+        let polygon = OfflineMapJobRequest.customPolygon(ring: [
+            CLLocationCoordinate2D(latitude: 35.0, longitude: 136.0),
+            CLLocationCoordinate2D(latitude: 35.01, longitude: 136.0),
+            CLLocationCoordinate2D(latitude: 35.01, longitude: 136.01)
+        ])
+        assertEqual(polygon.target?.rendererFormatVersion ?? 0, 3,
+                    "custom polygons always request renderer target 3")
+
+        let corridor = OfflineMapJobRequest.routeCorridor(
+            route: [
+                CLLocationCoordinate2D(latitude: 35.0, longitude: 136.0),
+                CLLocationCoordinate2D(latitude: 35.01, longitude: 136.01)
+            ],
+            widthMeters: 500
+        )
+        assertEqual(corridor.target?.rendererFormatVersion ?? 0, 3,
+                    "route corridors always request renderer target 3")
 
         let identified = request.identified(
             clientInstallationId: "installation-test",
@@ -4235,84 +4255,33 @@ struct NavigationProtocolTests {
         assertEqual(identified.clientRequestId, "request-test-123", "request includes idempotency identity")
         assertEqual(identified.installOnDevice, true, "request preserves install workflow intent")
 
-        let targetTwo = request.forDevice(
-            supportsStreetLabels: true,
+        let deviceRequest = request.forDevice(
             firmwareVersion: "0.4.0"
         )
-        let targetTwoJSON = try! JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(targetTwo)
+        let deviceRequestJSON = try! JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(deviceRequest)
         ) as! [String: Any]
-        let target = targetTwoJSON["target"] as! [String: Any]
-        let labels = targetTwoJSON["labels"] as! [String: Any]
+        let target = deviceRequestJSON["target"] as! [String: Any]
+        let labels = deviceRequestJSON["labels"] as! [String: Any]
         assertEqual(target["renderer"] as? String, "esp32-fmb",
-                    "label-aware requests name the renderer explicitly")
-        assertEqual(target["rendererFormatVersion"] as? Int, 2,
-                    "label-aware requests select renderer target 2")
+                    "device requests name the renderer explicitly")
+        assertEqual(target["rendererFormatVersion"] as? Int, 3,
+                    "device requests select renderer target 3")
+        assertEqual(target["firmwareVersion"] as? String, "0.4.0",
+                    "device requests carry the connected firmware version")
         assertEqual(labels["profileVersion"] as? Int, 1,
-                    "label-aware requests carry label profile 1")
+                    "3D requests carry label profile 1")
         assert((labels["preferredLanguages"] as? [String])?.count ?? 0 <= 3,
-               "label-aware requests cap preferred languages")
+               "3D requests cap preferred languages")
 
-        let targetThree = request.forDevice(
-            supportsStreetLabels: true,
-            supports3DBuildings: true,
-            firmwareVersion: "0.5.0"
-        )
-        let targetThreeJSON = try! JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(targetThree)
-        ) as! [String: Any]
-        assertEqual(
-            (targetThreeJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
-            3,
-            "3D-building devices request renderer target 3"
-        )
-        assert(targetThreeJSON["labels"] != nil,
-               "renderer target 3 retains the street-label profile")
-
-        let targetTwoFallback = targetThree.compatibleFallback(
-            requestedRendererFormatVersion: 3,
-            supportedRendererFormatVersions: [2, 1]
-        )
-        let targetTwoFallbackJSON = try! JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(targetTwoFallback)
-        ) as! [String: Any]
-        assertEqual(
-            (targetTwoFallbackJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
-            2,
-            "unsupported target 3 prefers the server-supported label target"
-        )
-        assert(targetTwoFallbackJSON["labels"] != nil,
-               "target 2 fallback preserves the requested label profile")
-
-        let targetOneFallback = targetThree.compatibleFallback(
-            requestedRendererFormatVersion: 3,
-            supportedRendererFormatVersions: [1]
-        )
-        let targetOneFallbackJSON = try! JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(targetOneFallback)
-        ) as! [String: Any]
-        assertEqual(
-            (targetOneFallbackJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
-            1,
-            "unsupported target 3 falls back to the legacy renderer when labels are unavailable"
-        )
-        assert(targetOneFallbackJSON["labels"] == nil,
-               "target 1 fallback removes unsupported label metadata")
-
-        let legacy = request.forDevice(
-            supportsStreetLabels: false,
-            firmwareVersion: "0.3.0"
-        )
-        let legacyJSON = try! JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(legacy)
-        ) as! [String: Any]
-        assertEqual((legacyJSON["target"] as? [String: Any])?["rendererFormatVersion"] as? Int,
-                    1, "legacy devices request renderer target 1")
-        assert(legacyJSON["labels"] == nil,
-               "legacy requests omit unsupported label metadata")
+        let noFirmware = request.forDevice(firmwareVersion: "")
+        assertEqual(noFirmware.target?.rendererFormatVersion ?? 0, 3,
+                    "3D requests remain target 3 without firmware metadata")
+        assert(noFirmware.target?.firmwareVersion == nil,
+               "empty firmware metadata is omitted")
     }
 
-    static func testOfflineMapClientRetriesCompatibleRendererOnce() async {
+    static func testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade() async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -4325,14 +4294,10 @@ struct NavigationProtocolTests {
             .customBBox(
                 OfflineMapBounds(minLon: 103.75, minLat: 1.24, maxLon: 103.93, maxLat: 1.37)
             )
-            .forDevice(
-                supportsStreetLabels: true,
-                supports3DBuildings: true,
-                firmwareVersion: "0.5.0"
-            )
+            .forDevice(firmwareVersion: "0.5.0")
             .identified(
                 clientInstallationId: installationID,
-                clientRequestId: "request-target3-fallback",
+                clientRequestId: "request-target3-only",
                 installOnDevice: true
             )
         let client = OfflineMapPlatformClient(
@@ -4370,51 +4335,31 @@ struct NavigationProtocolTests {
             submittedLabelProfiles.append(
                 (body["labels"] as? [String: Any])?["profileVersion"] as? Int
             )
-            if submittedFormats.count == 1 {
-                return (400, unsupportedResponse(requested: 3, supported: [2, 1]))
-            }
-            return (200, Data(#"{"jobId":"job-target2","status":"queued"}"#.utf8))
+            return (400, unsupportedResponse(requested: 3, supported: [2, 1]))
         }
-        let job = try? await client.createJob(originalRequest)
-        assertEqual(job?.jobId, "job-target2", "compatible fallback returns the created target 2 job")
-        assertEqual(submittedFormats, [3, 2], "target 3 is retried exactly once as target 2")
+        do {
+            _ = try await client.createJob(originalRequest)
+            assert(false, "an unsupported 3D target must remain an error")
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(
+            let requested,
+            let supported,
+            _
+        ) {
+            assertEqual(requested, 3, "the typed rejection reports target 3")
+            assertEqual(supported, [2, 1], "the typed rejection preserves supported targets")
+        } catch {
+            assert(false, "unsupported renderer errors retain their typed form")
+        }
+        assertEqual(submittedFormats, [3], "target 3 is submitted exactly once")
         assertEqual(
             submittedRequestIDs,
-            ["request-target3-fallback", "request-target3-fallback"],
-            "fallback preserves the idempotency identity"
+            ["request-target3-only"],
+            "the target-3 request preserves its idempotency identity"
         )
         assertEqual(
             submittedLabelProfiles.compactMap { $0 },
-            [1, 1],
-            "fallback request keeps the target 2 label profile"
-        )
-
-        var legacySubmittedFormats: [Int] = []
-        OfflineMapTestURLProtocol.configure { request in
-            let body = try! JSONSerialization.jsonObject(
-                with: OfflineMapTestURLProtocol.bodyData(from: request)
-            ) as! [String: Any]
-            legacySubmittedFormats.append(
-                (body["target"] as! [String: Any])["rendererFormatVersion"] as! Int
-            )
-            if legacySubmittedFormats.count == 1 {
-                return (
-                    400,
-                    Data(#"{"detail":"target rendererFormatVersion must be 1 or 2"}"#.utf8)
-                )
-            }
-            return (200, Data(#"{"jobId":"job-legacy-target2","status":"queued"}"#.utf8))
-        }
-        let legacyJob = try? await client.createJob(originalRequest)
-        assertEqual(
-            legacyJob?.jobId,
-            "job-legacy-target2",
-            "the exact legacy control-plane rejection safely downgrades target 3"
-        )
-        assertEqual(
-            legacySubmittedFormats,
-            [3, 2],
-            "the legacy compatibility path retries once with renderer target 2"
+            [1],
+            "the target-3 request carries the street-label profile"
         )
 
         var genericBadRequestCount = 0
@@ -4424,7 +4369,7 @@ struct NavigationProtocolTests {
         }
         do {
             _ = try await client.createJob(originalRequest)
-            assert(false, "an unrelated HTTP 400 must not trigger target fallback")
+            assert(false, "an unrelated HTTP 400 must remain an error")
         } catch OfflineMapPlatformError.serverStatus(let status, _) {
             assertEqual(status, 400, "generic bad requests retain their HTTP status")
         } catch {
@@ -4433,38 +4378,31 @@ struct NavigationProtocolTests {
         assertEqual(
             genericBadRequestCount,
             1,
-            "generic bad requests are never retried as renderer downgrades"
+            "generic bad requests are submitted exactly once"
         )
 
         var rejectedRequestCount = 0
-        OfflineMapTestURLProtocol.configure { request in
+        OfflineMapTestURLProtocol.configure { _ in
             rejectedRequestCount += 1
-            let body = try! JSONSerialization.jsonObject(
-                with: OfflineMapTestURLProtocol.bodyData(from: request)
-            ) as! [String: Any]
-            let requested = (body["target"] as! [String: Any])["rendererFormatVersion"] as! Int
             return (
                 400,
-                unsupportedResponse(
-                    requested: requested,
-                    supported: requested == 3 ? [2, 1] : [1]
-                )
+                Data(#"{"detail":"target rendererFormatVersion must be 1 or 2"}"#.utf8)
             )
         }
         do {
             _ = try await client.createJob(originalRequest)
-            assert(false, "a rejected fallback should remain an error")
+            assert(false, "the legacy 2D-only rejection must remain an error")
         } catch OfflineMapPlatformError.unsupportedRendererTarget(
             let requested,
             let supported,
             _
         ) {
-            assertEqual(requested, 2, "the second rejection reports the fallback target accurately")
-            assertEqual(supported, [1], "the second rejection preserves the server contract")
+            assertEqual(requested, 3, "the legacy rejection reports target 3")
+            assertEqual(supported, [2, 1], "the legacy rejection reports its supported targets")
         } catch {
-            assert(false, "a rejected fallback should retain the typed renderer error")
+            assert(false, "the legacy rejection retains the typed renderer error")
         }
-        assertEqual(rejectedRequestCount, 2, "renderer fallback never retries more than once")
+        assertEqual(rejectedRequestCount, 1, "the legacy rejection is not retried as target 2")
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {
