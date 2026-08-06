@@ -343,9 +343,6 @@ private struct DownloadingMapsSettingsSection: View {
 
             if let preparationTimeEstimate {
                 SettingsValueRow(title: "Estimated Preparation", value: preparationTimeEstimate)
-                Text("Feature density and water coverage can affect preparation time.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             if let error = manager.errorMessage {
