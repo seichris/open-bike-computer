@@ -2347,6 +2347,23 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   std::vector<map_projection::GroundPoint> clippedGroundPolygon;
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const bool mapNavigationActive = isMapGuidanceScreenActive();
+  const bool guidanceBirdsEye = mapNavigationActive && projection.isBirdsEye();
+  constexpr uint32_t kGuidanceBuildingTimeBudgetMs = 900U;
+  constexpr size_t kGuidanceMaximumQueuedBuildingRecords = 2048U;
+  constexpr double kGuidanceFarBuildingCutoffFraction = 0.20;
+  // Guidance renders on the UI task. Keep the optional 3D pass bounded so a
+  // dense city cannot starve GPS/scene updates for several seconds. The
+  // normal-map budget remains unchanged; if guidance reaches this limit, the
+  // existing retry path presents the same frame with buildings suppressed,
+  // leaving the 2D roads/land-use map intact.
+  const uint32_t buildingTimeBudgetMs =
+      guidanceBirdsEye
+          ? kGuidanceBuildingTimeBudgetMs
+          : map_building_renderer::kMaximumBuildingRenderTimeMs;
+  const size_t maximumQueuedBuildingRecords =
+      guidanceBirdsEye
+          ? kGuidanceMaximumQueuedBuildingRecords
+          : map_building_renderer::kMaximumRenderedBuildingRecords;
   uint64_t buildingContextSignature = 1469598103934665603ULL;
   const auto mixBuildingContext = [&](uint64_t value) {
     buildingContextSignature ^= value;
@@ -2738,8 +2755,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     static uint64_t extrusionRecordOverflowTotal = 0;
     static uint64_t extrusionPointOverflowTotal = 0;
     const auto buildingDeadlineReached = [&]() {
-      return millis() - buildingPassStartMs >=
-             map_building_renderer::kMaximumBuildingRenderTimeMs;
+      return millis() - buildingPassStartMs >= buildingTimeBudgetMs;
     };
     const auto shouldStopBuildingWork = [&]() {
       if (shouldInterruptMapRenderForScreenCycle()) {
@@ -2783,9 +2799,26 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             break;
           }
           const auto &building = block->buildingData.buildings[recordIndex];
+          const map_transform::WorldPoint center{
+              static_cast<double>(block->offset.x) +
+                  (static_cast<double>(building.minX) + building.maxX) / 2.0,
+              static_cast<double>(block->offset.y) +
+                  (static_cast<double>(building.minY) + building.maxY) / 2.0};
+          const auto centerGround = projection.groundForWorld(center);
+          const auto centerProjection = projection.projectGround(centerGround);
+          // The top of a birds-eye frame is the far field. Keep its building
+          // footprints as flat 2D surfaces, reserving wall work for the
+          // foreground where it materially improves orientation.
+          const bool guidanceExtrusionAllowed =
+              !guidanceBirdsEye ||
+              (centerProjection.valid &&
+               centerProjection.y >=
+                   static_cast<double>(projection.config().viewportHeight) *
+                       kGuidanceFarBuildingCutoffFraction);
           const bool mayExtrude =
               extrudeBuildings &&
-              map_building_renderer::usesExtrusion(true, building.flags);
+              map_building_renderer::usesExtrusion(true, building.flags) &&
+              guidanceExtrusionAllowed;
           // A roof can project into the frame even when its ground footprint is
           // just outside it. Expand conservatively in world space before
           // excluding the record from the queue and its geometry budget.
@@ -2830,12 +2863,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             continue;
           }
           ++boundedBuildingCandidateCount;
-          const map_transform::WorldPoint center{
-              static_cast<double>(block->offset.x) +
-                  (static_cast<double>(building.minX) + building.maxX) / 2.0,
-              static_cast<double>(block->offset.y) +
-                  (static_cast<double>(building.minY) + building.maxY) / 2.0};
-          const auto centerGround = projection.groundForWorld(center);
           const bool extrusionZoomEligible =
               map_building_renderer::eligibleExtrusionZoom(zoom);
           double projectedArea = 0.0;
@@ -2863,7 +2890,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                                        kMinimumBuildingExtrusionAreaPixels};
           map_building_renderer::retainNearestCandidate(
               buildingQueue, candidate,
-              map_building_renderer::kMaximumRenderedBuildingRecords,
+              maximumQueuedBuildingRecords,
               buildingRendersBefore);
         }
         if (stopBuildingPrepass)
@@ -2936,7 +2963,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       buildingPolygon.bbox.max = Point16(maxX, maxY);
       const bool completed = Maps::fillPolygon(
           buildingPolygon, canvas, buildingPassStartMs,
-          map_building_renderer::kMaximumBuildingRenderTimeMs);
+          buildingTimeBudgetMs);
       if (!completed)
         shouldStopBuildingWork();
       return completed;
@@ -5499,10 +5526,36 @@ void Maps::applyGuidanceMotionOffset(
   if (Maps::canvasForeground != nullptr) {
     lv_obj_set_pos(Maps::canvasForeground, baseX, baseY);
   }
-  const int32_t offsetX = map_transform::quantizePixel(
+  const int32_t requestedOffsetX = map_transform::quantizePixel(
       visibleProjection.anchorX() - projected.x);
-  const int32_t offsetY = map_transform::quantizePixel(
+  const int32_t requestedOffsetY = map_transform::quantizePixel(
       visibleProjection.anchorY() - projected.y);
+  // The guidance canvas is currently viewport-sized. Do not move it beyond
+  // its parent while a new vector frame is being rendered: doing so exposes
+  // the parent's background as a black/unloaded strip that looks like map
+  // data arriving in chunks. If a future renderer provides overscan, these
+  // same bounds naturally expand to that coverage.
+  const int32_t parentWidth = lv_obj_get_width(mapTile);
+  const int32_t parentHeight = lv_obj_get_height(mapTile);
+  const int32_t canvasWidth = lv_obj_get_width(Maps::canvasMap);
+  const int32_t canvasHeight = lv_obj_get_height(Maps::canvasMap);
+  const int32_t minOffsetX = -static_cast<int32_t>(baseX);
+  const int32_t maxOffsetX = parentWidth -
+                             (static_cast<int32_t>(baseX) + canvasWidth);
+  const int32_t minOffsetY = -static_cast<int32_t>(baseY);
+  const int32_t maxOffsetY = parentHeight -
+                             (static_cast<int32_t>(baseY) + canvasHeight);
+  const auto clampOffset = [](int32_t value, int32_t minimum,
+                              int32_t maximum) -> int32_t {
+    if (minimum > maximum)
+      return static_cast<int32_t>(0);
+    return static_cast<int32_t>(
+        std::max<int32_t>(minimum, std::min<int32_t>(maximum, value)));
+  };
+  const int32_t offsetX =
+      clampOffset(requestedOffsetX, minOffsetX, maxOffsetX);
+  const int32_t offsetY =
+      clampOffset(requestedOffsetY, minOffsetY, maxOffsetY);
   if (offsetX == 0 && offsetY == 0)
     return;
 
