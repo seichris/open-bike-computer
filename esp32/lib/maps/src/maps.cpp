@@ -129,17 +129,22 @@ map_projection::Projection makeMapProjection(
     uint16_t viewportWidth, uint16_t viewportHeight,
     map_projection::Mode mode,
     map_projection::BirdsEyePerspective birdsEyePerspective =
-        map_projection::BirdsEyePerspective::Standard) {
+        map_projection::BirdsEyePerspective::Standard,
+    double anchorXOverride = -1.0, double anchorYOverride = -1.0) {
   map_projection::Config config;
   config.viewportWidth = viewportWidth;
   config.viewportHeight = viewportHeight;
   config.worldOrigin = {rasterOriginX, rasterOriginY};
   config.zoom = zoom;
   config.rotationRad = rotation;
-  config.anchorX = gui_layout::mapAnchorX(viewportWidth);
-  config.anchorY = mode == map_projection::Mode::BirdsEye
-                       ? map_projection::birdsEyeAnchorY(viewportHeight)
-                       : gui_layout::mapAnchorY(viewportHeight);
+  config.anchorX = anchorXOverride >= 0.0
+                       ? anchorXOverride
+                       : gui_layout::mapAnchorX(viewportWidth);
+  config.anchorY = anchorYOverride >= 0.0
+                       ? anchorYOverride
+                       : (mode == map_projection::Mode::BirdsEye
+                              ? map_projection::birdsEyeAnchorY(viewportHeight)
+                              : gui_layout::mapAnchorY(viewportHeight));
   config.rasterCellOffset = {rasterCellOffsetX, rasterCellOffsetY};
   config.mode = mode;
   config.topEdgeScale =
@@ -345,6 +350,34 @@ static size_t bufMapScreenSize = 0;
 static size_t bufMapTempSize = 0;
 static size_t bufMapForegroundSize = 0;
 static void *bufMapIcon = nullptr;
+
+// Guidance keeps a modest overscan around the visible viewport. The base map
+// can then translate under the fixed rider marker between full vector-frame
+// settlements without exposing the parent background at an edge.
+constexpr uint16_t kGuidanceOverscanPixels = 96;
+constexpr uint16_t kGuidanceRefreshSafetyPixels = 16;
+
+static uint16_t guidanceFrameWidth(uint16_t viewportWidth) {
+  return static_cast<uint16_t>(viewportWidth +
+                               (2U * kGuidanceOverscanPixels));
+}
+
+static uint16_t guidanceFrameHeight(uint16_t viewportHeight) {
+  return static_cast<uint16_t>(viewportHeight +
+                               (2U * kGuidanceOverscanPixels));
+}
+
+static double guidanceFrameAnchorX(uint16_t viewportWidth) {
+  return static_cast<double>(gui_layout::mapAnchorX(viewportWidth)) +
+         kGuidanceOverscanPixels;
+}
+
+static double guidanceFrameAnchorY(uint16_t viewportHeight, bool birdsEye) {
+  const double visibleAnchor =
+      birdsEye ? map_projection::birdsEyeAnchorY(viewportHeight)
+               : gui_layout::mapAnchorY(viewportHeight);
+  return visibleAnchor + kGuidanceOverscanPixels;
+}
 
 static bool ensureMapBuffer(void *&buffer, size_t &capacity,
                             size_t requiredSize, const char *name) {
@@ -3792,29 +3825,41 @@ void Maps::createMapScrSprites() {
   const uint32_t normalStride = lv_draw_buf_width_to_stride(
       Maps::mapScrWidth, LV_COLOR_FORMAT_RGB565);
   const size_t maximumNormalFrameSize = normalStride * Maps::mapScrFull;
+  const uint16_t guidanceWidth = guidanceFrameWidth(Maps::mapScrWidth);
+  const uint16_t guidanceHeight = guidanceFrameHeight(Maps::mapScrFull);
+  const uint32_t guidanceStride = lv_draw_buf_width_to_stride(
+      guidanceWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t maximumGuidanceFrameSize =
+      static_cast<size_t>(guidanceStride) * guidanceHeight;
+  const size_t maximumScreenBufferSize =
+      std::max(maximumNormalFrameSize, maximumGuidanceFrameSize);
   const size_t requiredTempSize = std::max(
-      maximumNormalFrameSize + maximumTileSize,
-      maximumScratchRowSize);
+      std::max(maximumNormalFrameSize + maximumTileSize,
+               maximumScratchRowSize),
+      maximumGuidanceFrameSize);
 
   ESP_LOGI(TAG,
            "MapBuff: rollingWide=%ux%u rollingCompact=%ux%u "
-           "rollingScreen=%u initialScreen=%u scratch=%u initial=%ux%u",
+           "rollingScreen=%u initialScreen=%u guidance=%ux%u scratch=%u "
+           "initial=%ux%u",
            (unsigned)maximumGrid.width, (unsigned)maximumGrid.height,
            (unsigned)compactGrid.width, (unsigned)compactGrid.height,
            (unsigned)rollingScreenSize, (unsigned)maximumNormalFrameSize,
+           (unsigned)guidanceWidth, (unsigned)guidanceHeight,
            (unsigned)requiredTempSize, (unsigned)w, (unsigned)h);
-  // Keep the front buffer viewport-sized until standalone Map first reaches
-  // a runtime zoom. Map + Navigation therefore does not pay the rolling
-  // grid's PSRAM cost merely by creating the shared map canvases.
-  if (!ensureMapScreenBuffer(maximumNormalFrameSize) ||
+  // Keep the canvas viewport-sized until standalone Map first reaches a
+  // runtime zoom. The backing allocation reserves guidance overscan up front,
+  // but Map + Navigation does not pay the rolling grid's PSRAM cost merely by
+  // creating the shared map canvases.
+  if (!ensureMapScreenBuffer(maximumScreenBufferSize) ||
       !ensureMapTempBuffer(requiredTempSize) ||
-      !ensureMapForegroundBuffer(Maps::mapScrWidth, Maps::mapScrFull)) {
+      !ensureMapForegroundBuffer(guidanceWidth, guidanceHeight)) {
     return;
   }
-  memset(bufMapScreen, 0, maximumNormalFrameSize);
+  memset(bufMapScreen, 0, maximumGuidanceFrameSize);
   memset(bufMapTemp, 0, requiredTempSize);
   memset(bufMapForeground, 0,
-         rgb565A8BufferSize(Maps::mapScrWidth, Maps::mapScrFull));
+         rgb565A8BufferSize(guidanceWidth, guidanceHeight));
   invalidateRollingRasterWindow();
 
   Maps::canvasMap = lv_canvas_create(mapTile);
@@ -5432,18 +5477,23 @@ void Maps::updateGuidanceRouteHead(
     return;
   }
 
-  const uint16_t viewportHeight =
+  uint16_t viewportWidth = Maps::mapScrWidth;
+  uint16_t viewportHeight =
       mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  if (!ensureMapForegroundBuffer(Maps::mapScrWidth, viewportHeight)) {
+  if (hasVisibleProjection) {
+    viewportWidth = visibleProjection.config().viewportWidth;
+    viewportHeight = visibleProjection.config().viewportHeight;
+  }
+  if (!ensureMapForegroundBuffer(viewportWidth, viewportHeight)) {
     rollingForegroundReady = false;
     hideRollingForeground();
     return;
   }
 
   lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(Maps::canvasForeground);
-  if (drawBuffer == nullptr || drawBuffer->header.w != Maps::mapScrWidth ||
+  if (drawBuffer == nullptr || drawBuffer->header.w != viewportWidth ||
       drawBuffer->header.h != viewportHeight) {
-    bindMapForegroundCanvas(Maps::canvasForeground, Maps::mapScrWidth,
+    bindMapForegroundCanvas(Maps::canvasForeground, viewportWidth,
                             viewportHeight);
   }
   lv_obj_center(Maps::canvasForeground);
@@ -5486,21 +5536,16 @@ bool Maps::guidanceProjectionNeedsRefresh() const {
   if (!projected.valid)
     return true;
 
-  // Keep a generous safety margin inside the rendered world bounds. Between
-  // these epochs, the lightweight guidance translation can move the map
-  // continuously without repeatedly rebuilding the perspective frame for
-  // every GPS fix. A new projection is rendered only when the rider is close
-  // enough to an edge that the cached map blocks may no longer cover it.
-  constexpr double kProjectionRefreshMarginPixels = 96.0;
-  const auto &config = visibleProjection.config();
-  return projected.x < kProjectionRefreshMarginPixels ||
-         projected.x >
-             static_cast<double>(config.viewportWidth) -
-                 kProjectionRefreshMarginPixels ||
-         projected.y < kProjectionRefreshMarginPixels ||
-         projected.y >
-             static_cast<double>(config.viewportHeight) -
-                 kProjectionRefreshMarginPixels;
+  // The rendered guidance frame includes overscan around the visible
+  // viewport. Refresh before the lightweight translation consumes that
+  // overscan, leaving a small safety margin for the next completed frame.
+  const double availableMotion =
+      static_cast<double>(kGuidanceOverscanPixels) -
+      static_cast<double>(kGuidanceRefreshSafetyPixels);
+  return projected.x < visibleProjection.anchorX() - availableMotion ||
+         projected.x > visibleProjection.anchorX() + availableMotion ||
+         projected.y < visibleProjection.anchorY() - availableMotion ||
+         projected.y > visibleProjection.anchorY() + availableMotion;
 }
 
 void Maps::applyGuidanceMotionOffset(
@@ -5530,21 +5575,25 @@ void Maps::applyGuidanceMotionOffset(
       visibleProjection.anchorX() - projected.x);
   const int32_t requestedOffsetY = map_transform::quantizePixel(
       visibleProjection.anchorY() - projected.y);
-  // The guidance canvas is currently viewport-sized. Do not move it beyond
-  // its parent while a new vector frame is being rendered: doing so exposes
-  // the parent's background as a black/unloaded strip that looks like map
-  // data arriving in chunks. If a future renderer provides overscan, these
-  // same bounds naturally expand to that coverage.
+  // Do not move the canvas beyond its parent while a new vector frame is
+  // being rendered: doing so exposes the parent's background as a
+  // black/unloaded strip that looks like map data arriving in chunks. The
+  // guidance vector frame includes overscan, so these bounds allow continuous
+  // motion while still guaranteeing full parent coverage.
   const int32_t parentWidth = lv_obj_get_width(mapTile);
   const int32_t parentHeight = lv_obj_get_height(mapTile);
   const int32_t canvasWidth = lv_obj_get_width(Maps::canvasMap);
   const int32_t canvasHeight = lv_obj_get_height(Maps::canvasMap);
-  const int32_t minOffsetX = -static_cast<int32_t>(baseX);
-  const int32_t maxOffsetX = parentWidth -
+  // To cover the parent, the canvas's right/bottom edge must remain at or
+  // beyond the parent edge while its left/top edge must remain at or before
+  // the parent origin. For an overscanned canvas this yields a real finite
+  // translation interval; for a viewport-sized canvas it collapses to zero.
+  const int32_t minOffsetX = parentWidth -
                              (static_cast<int32_t>(baseX) + canvasWidth);
-  const int32_t minOffsetY = -static_cast<int32_t>(baseY);
-  const int32_t maxOffsetY = parentHeight -
+  const int32_t maxOffsetX = -static_cast<int32_t>(baseX);
+  const int32_t minOffsetY = parentHeight -
                              (static_cast<int32_t>(baseY) + canvasHeight);
+  const int32_t maxOffsetY = -static_cast<int32_t>(baseY);
   const auto clampOffset = [](int32_t value, int32_t minimum,
                               int32_t maximum) -> int32_t {
     if (minimum > maximum)
@@ -5614,6 +5663,16 @@ void Maps::updatePositionOverlay() {
                                       map_transform::quantizePixel(
                                           visibleProjection.anchorY()))
                                 : mapAnchorYForHeight(h);
+    const int16_t canvasOriginX =
+        useSharedProjection && Maps::canvasMap != nullptr
+            ? gui_layout::centeredViewportOrigin(
+                  containerWidth, lv_obj_get_width(Maps::canvasMap))
+            : mapOriginX;
+    const int16_t canvasOriginY =
+        useSharedProjection && Maps::canvasMap != nullptr
+            ? gui_layout::centeredViewportOrigin(
+                  containerHeight, lv_obj_get_height(Maps::canvasMap))
+            : mapOriginY;
     updateCurrentPositionMarker(Maps::canvasArrow);
     const int16_t markerAnchorX = currentMarkerAnchorX();
     const int16_t markerAnchorY = currentMarkerAnchorY();
@@ -5624,8 +5683,8 @@ void Maps::updatePositionOverlay() {
       // The marker is a sibling of the centered map canvas, so translate the
       // canvas-local anchor into map-tile coordinates before applying the
       // marker's geographic lower-center anchor.
-      x = mapOriginX + anchorX - markerAnchorX;
-      y = mapOriginY + anchorY - markerAnchorY;
+      x = canvasOriginX + anchorX - markerAnchorX;
+      y = canvasOriginY + anchorY - markerAnchorY;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
     } else {
@@ -5639,9 +5698,9 @@ void Maps::updatePositionOverlay() {
           lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
           return;
         }
-        x = mapOriginX + map_transform::quantizePixel(markerPoint.x) -
+        x = canvasOriginX + map_transform::quantizePixel(markerPoint.x) -
             markerAnchorX;
-        y = mapOriginY + map_transform::quantizePixel(markerPoint.y) -
+        y = canvasOriginY + map_transform::quantizePixel(markerPoint.y) -
             markerAnchorY;
       } else {
         const auto markerDelta = map_transform::worldToScreen(
@@ -5778,8 +5837,15 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   }
 
   invalidateRollingRasterWindow();
-  const map_drag_preview::CanvasExtent renderExtent = {Maps::mapScrWidth,
-                                                        viewportHeight};
+  const bool guidanceFrame = isMapGuidanceScreenActive();
+  const uint16_t renderWidth = guidanceFrame
+                                   ? guidanceFrameWidth(Maps::mapScrWidth)
+                                   : Maps::mapScrWidth;
+  const uint16_t renderHeight = guidanceFrame
+                                    ? guidanceFrameHeight(viewportHeight)
+                                    : viewportHeight;
+  const map_drag_preview::CanvasExtent renderExtent = {renderWidth,
+                                                        renderHeight};
   const uint32_t renderStride = lv_draw_buf_width_to_stride(
       renderExtent.width, LV_COLOR_FORMAT_RGB565);
   const size_t renderSize = renderStride * renderExtent.height;
@@ -5808,6 +5874,12 @@ bool Maps::generateVectorMap(uint8_t zoom) {
       navigation_content_mode::usesMapGuidanceBirdsEye(
           isMapGuidanceScreenActive(),
           mapRenderSettings.mapNavigationBirdsEyeEnabled);
+  const double frameAnchorX =
+      guidanceFrame ? guidanceFrameAnchorX(Maps::mapScrWidth) : -1.0;
+  const double frameAnchorY = guidanceFrame
+                                  ? guidanceFrameAnchorY(viewportHeight,
+                                                         birdsEyeActive)
+                                  : -1.0;
   const auto frameProjection = makeMapProjection(
       Maps::viewPort.rasterOriginX, Maps::viewPort.rasterOriginY,
       Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY, zoom,
@@ -5815,7 +5887,8 @@ bool Maps::generateVectorMap(uint8_t zoom) {
       birdsEyeActive ? map_projection::Mode::BirdsEye
                      : map_projection::Mode::Flat,
       map_projection::birdsEyePerspectiveForValue(
-          mapRenderSettings.mapNavigationBirdsEyePerspective));
+          mapRenderSettings.mapNavigationBirdsEyePerspective),
+      frameAnchorX, frameAnchorY);
   if (frameProjection.isBirdsEye()) {
     const auto bounds = frameProjection.worldBounds(4.0);
     Maps::viewPort.bbox.min =

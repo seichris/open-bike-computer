@@ -152,6 +152,45 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             render_body.index("routeOverlay.drawRoute("),
         )
 
+    def test_guidance_vector_frame_reserves_motion_overscan(self):
+        self.assertIn(
+            "constexpr uint16_t kGuidanceOverscanPixels = 96;",
+            MAP_RENDERER_SOURCE,
+        )
+        render_body = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"
+        )
+        self.assertIn(
+            "const bool guidanceFrame = isMapGuidanceScreenActive();", render_body
+        )
+        self.assertIn("guidanceFrameWidth", render_body)
+        self.assertIn("guidanceFrameHeight", render_body)
+        self.assertIn("guidanceFrameAnchorX", render_body)
+        self.assertIn("guidanceFrameAnchorY", render_body)
+
+        motion_body = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::applyGuidanceMotionOffset"
+        )
+        self.assertIn("parentWidth -", motion_body)
+        self.assertIn(
+            "maxOffsetX = -static_cast<int32_t>(baseX)", motion_body
+        )
+        self.assertIn(
+            "maxOffsetY = -static_cast<int32_t>(baseY)", motion_body
+        )
+
+    def test_guidance_refreshes_before_overscan_is_exhausted(self):
+        refresh_body = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::guidanceProjectionNeedsRefresh"
+        )
+        self.assertIn("kGuidanceRefreshSafetyPixels", refresh_body)
+        self.assertIn(
+            "visibleProjection.anchorX() - availableMotion", refresh_body
+        )
+        self.assertIn(
+            "visibleProjection.anchorY() + availableMotion", refresh_body
+        )
+
     def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         self.assertIn("runAllocationSafe", render_body)
