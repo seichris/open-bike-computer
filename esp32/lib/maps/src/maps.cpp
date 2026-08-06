@@ -1782,6 +1782,109 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                                   x2, y2, color, width);
 }
 
+bool Maps::beginMapBlockLoad(const Point32 &offset, const String &fileName) {
+  if (mapBlockLoadJob.state != MapBlockLoadJob::State::Idle)
+    return false;
+
+  mapBlockLoadJob.offset = offset;
+  mapBlockLoadJob.fileName = fileName;
+  mapBlockLoadJob.result = nullptr;
+  mapBlockLoadJob.found = false;
+  mapBlockLoadJob.cancelRequested = false;
+  mapBlockLoadJob.state = MapBlockLoadJob::State::Loading;
+  __sync_synchronize();
+
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      &Maps::mapBlockLoadTaskEntry, "map-block-load", 8192, this, 1,
+      &mapBlockLoadJob.task, 0);
+  if (created != pdPASS) {
+    mapBlockLoadJob.task = nullptr;
+    mapBlockLoadJob.state = MapBlockLoadJob::State::Idle;
+    return false;
+  }
+  return true;
+}
+
+void Maps::mapBlockLoadTaskEntry(void *context) {
+  auto *maps = static_cast<Maps *>(context);
+  if (maps != nullptr)
+    maps->mapBlockLoadTask();
+  vTaskDelete(nullptr);
+}
+
+void Maps::mapBlockLoadTask() {
+  // The UI does not mutate the request while State::Loading. Copy the String
+  // before entering the parser so the worker never observes a partial path.
+  const String fileName = mapBlockLoadJob.fileName;
+  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
+  // readMapBlock historically reports its result through the renderer's
+  // aggregate flag. Keep that worker-local side effect from hiding the
+  // already-visible map (or making the live arrow disappear) while the UI
+  // continues presenting it.
+  const bool previousMapFound = Maps::isMapFound;
+  Maps::isMapFound = false;
+  MapBlock *block = readMapBlock(fileName);
+  const bool found = Maps::isMapFound && block != nullptr;
+  const bool cancelled = mapBlockLoadJob.cancelRequested;
+  Maps::isMapFound = previousMapFound;
+  __sync_synchronize();
+
+  if (cancelled || !found) {
+    delete block;
+    mapBlockLoadJob.result = nullptr;
+    mapBlockLoadJob.found = false;
+    mapBlockLoadJob.state = cancelled ? MapBlockLoadJob::State::Cancelled
+                                      : MapBlockLoadJob::State::Failed;
+  } else {
+    mapBlockLoadJob.result = block;
+    mapBlockLoadJob.found = true;
+    mapBlockLoadJob.state = MapBlockLoadJob::State::Ready;
+  }
+  __sync_synchronize();
+}
+
+bool Maps::pollMapBlockLoad(MapBlock *&result, Point32 &offset) {
+  result = nullptr;
+  const MapBlockLoadJob::State state = mapBlockLoadJob.state;
+  if (state == MapBlockLoadJob::State::Loading)
+    return false;
+  if (state == MapBlockLoadJob::State::Idle)
+    return true;
+
+  __sync_synchronize();
+  offset = mapBlockLoadJob.offset;
+  if (state == MapBlockLoadJob::State::Ready && mapBlockLoadJob.found) {
+    result = mapBlockLoadJob.result;
+    mapBlockLoadJob.result = nullptr;
+  } else {
+    delete mapBlockLoadJob.result;
+    mapBlockLoadJob.result = nullptr;
+  }
+  mapBlockLoadJob.task = nullptr;
+  mapBlockLoadJob.state = MapBlockLoadJob::State::Idle;
+  mapBlockLoadJob.cancelRequested = false;
+  mapBlockLoadJob.found = false;
+  return true;
+}
+
+void Maps::cancelMapBlockLoad() {
+  const MapBlockLoadJob::State state = mapBlockLoadJob.state;
+  if (state == MapBlockLoadJob::State::Loading) {
+    // The worker owns the in-flight allocation. It will discard the decoded
+    // block after the current SD read/parse reaches its safe completion point.
+    mapBlockLoadJob.cancelRequested = true;
+    return;
+  }
+  if (state != MapBlockLoadJob::State::Idle) {
+    delete mapBlockLoadJob.result;
+    mapBlockLoadJob.result = nullptr;
+    mapBlockLoadJob.task = nullptr;
+    mapBlockLoadJob.state = MapBlockLoadJob::State::Idle;
+    mapBlockLoadJob.cancelRequested = false;
+    mapBlockLoadJob.found = false;
+  }
+}
+
 /**
  * @brief Get bounding objects in memory block
  *
@@ -1797,9 +1900,6 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   uint16_t cacheHits = 0;
   uint16_t loadedBlocks = 0;
   uint16_t evictedBlocks = 0;
-  for (MapBlock *block : memCache.blocks) {
-    block->inView = false;
-  }
 
   // 1. Identify all required block offsets for the current viewport
   std::vector<Point32> requiredOffsets;
@@ -1824,7 +1924,91 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     }
   }
 
+  // A guidance cache miss is decoded on a low-priority worker. Do not touch
+  // the cache or its in-view flags while that worker owns the request: the
+  // visible frame may still be using those blocks for its live projection.
+  if (mapBlockLoadJob.state == MapBlockLoadJob::State::Loading)
+    return false;
+
+  MapBlock *completedAsyncBlock = nullptr;
+  Point32 completedAsyncOffset;
+  const MapBlockLoadJob::State completedAsyncState = mapBlockLoadJob.state;
+  if (completedAsyncState != MapBlockLoadJob::State::Idle)
+    (void)pollMapBlockLoad(completedAsyncBlock, completedAsyncOffset);
+  const bool skipFailedAsyncOffset =
+      completedAsyncState == MapBlockLoadJob::State::Failed;
+
   // 2. Mark existing blocks as inView if they are in the required set
+  for (MapBlock *block : memCache.blocks) {
+    block->inView = false;
+  }
+
+  const auto isRequiredOffset = [&](const Point32 &offset) {
+    return std::any_of(requiredOffsets.begin(), requiredOffsets.end(),
+                       [&](const Point32 &required) {
+                         return required.x == offset.x &&
+                                required.y == offset.y;
+                       });
+  };
+
+  // Commit a decoded block only on the UI task. A stale result that no longer
+  // belongs to this viewport is kept only when there is spare cache capacity;
+  // it must never evict a block that still covers the current frame.
+  if (completedAsyncBlock != nullptr) {
+    bool alreadyCached = false;
+    for (const MapBlock *block : memCache.blocks) {
+      if (block->offset.x == completedAsyncOffset.x &&
+          block->offset.y == completedAsyncOffset.y) {
+        alreadyCached = true;
+        break;
+      }
+    }
+    if (alreadyCached) {
+      delete completedAsyncBlock;
+    } else if (!isRequiredOffset(completedAsyncOffset) &&
+               memCache.blocks.size() >= MAPBLOCKS_MAX) {
+      delete completedAsyncBlock;
+    } else {
+      if (memCache.blocks.size() >= MAPBLOCKS_MAX) {
+        bool evicted = false;
+        for (auto it = memCache.blocks.begin(); it != memCache.blocks.end();
+             ++it) {
+          if (!(*it)->inView) {
+            ESP_LOGI(TAG, "Evicting block for async load: offset(%d, %d)",
+                     (*it)->offset.x, (*it)->offset.y);
+            delete *it;
+            memCache.blocks.erase(it);
+            evictedBlocks++;
+            evicted = true;
+            break;
+          }
+        }
+        if (!evicted) {
+          // MAPBLOCKS_MAX bounds the number of required offsets, so this is
+          // only a defensive fallback for a malformed viewport.
+          delete completedAsyncBlock;
+          completedAsyncBlock = nullptr;
+        }
+      }
+      if (completedAsyncBlock != nullptr) {
+        completedAsyncBlock->inView = isRequiredOffset(completedAsyncOffset);
+        completedAsyncBlock->offset = completedAsyncOffset;
+        completedAsyncBlock->mercatorScale =
+            map_projection::mercatorScaleForLatitude(
+                Maps::mercatorY2lat(
+                    static_cast<double>(completedAsyncOffset.y) +
+                    (1 << (MAPBLOCK_SIZE_BITS - 1))));
+        memCache.blocks.push_back(completedAsyncBlock);
+        loadedBlocks++;
+        ESP_LOGI(TAG, "Async block loaded: %p, offset(%d, %d)",
+                 completedAsyncBlock, completedAsyncOffset.x,
+                 completedAsyncOffset.y);
+        ESP_LOGI(TAG, "FreeHeap: %d", (int)esp_get_free_heap_size());
+      }
+    }
+  }
+
+  // Mark both cached blocks and a just-committed async block as inView.
   for (MapBlock *memblock : memCache.blocks) {
     for (const auto &req : requiredOffsets) {
       if (memblock->offset.x == req.x && memblock->offset.y == req.y) {
@@ -1853,6 +2037,14 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
       continue;
     }
 
+    // A missing file should not be reopened on every 30 ms render attempt.
+    // Treat the failed request as an empty neighboring block for this frame;
+    // a later viewport change can retry it through a new async job.
+    if (skipFailedAsyncOffset && req.x == completedAsyncOffset.x &&
+        req.y == completedAsyncOffset.y) {
+      continue;
+    }
+
     ESP_LOGI(TAG, "getMapBlocks loading missing: offset(%d, %d)", req.x, req.y);
 
     // Block is not in memory => load from disk
@@ -1867,6 +2059,17 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
         vectorMapFolder + folderName + "/" + blockX + "_" + blockY;
 
     log_i("Attempting to load map file: %s", fileName.c_str());
+
+    // Guidance owns a live overlay and a visible overscanned frame. Decode a
+    // missing block away from the LVGL task so this slow SD path cannot pause
+    // the arrow, route head, or canvas motion. The next map cycle consumes
+    // the mailbox and renders against the committed block.
+    if (isMapGuidanceScreenActive() &&
+        beginMapBlockLoad(req, fileName)) {
+      MAPIO_LOG("MAPIO: block-load async-start offset=(%d,%d)\n", req.x,
+                req.y);
+      return false;
+    }
 
     // If cache is full, find a block that is NOT in view to evict
     if (memCache.blocks.size() >= MAPBLOCKS_MAX) {
@@ -3756,6 +3959,7 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
 
 bool Maps::setVectorMapFolder(const std::string &folder) {
   power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
+  cancelMapBlockLoad();
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
@@ -6103,6 +6307,37 @@ bool Maps::renderGuidanceBuilding(
   }
 }
 
+void Maps::publishGuidanceBaseFrame() {
+  auto &job = guidanceBuildingRenderJob;
+  if (!job.active || bufMapScreen == nullptr || bufMapTemp == nullptr)
+    return;
+
+  // The 2D underlay already contains the complete course-up projection. Make
+  // it visible before the potentially multi-second building admission/draw
+  // job starts. Navigation owns the display cadence, so an unfinished 3D
+  // pass must never hold the route head or marker on an older projection.
+  const size_t rowBytes = static_cast<size_t>(job.width) * sizeof(uint16_t);
+  auto *front = static_cast<uint8_t *>(bufMapScreen);
+  const auto *back = static_cast<const uint8_t *>(bufMapTemp);
+  for (uint16_t y = 0; y < job.height; ++y) {
+    std::memcpy(front + static_cast<size_t>(y) * job.strideBytes,
+                back + static_cast<size_t>(y) * job.strideBytes, rowBytes);
+  }
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, job.width, job.height,
+                       LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, job.width, job.height,
+                       LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_center(Maps::canvasMapTemp);
+  Maps::viewPort = job.viewPort;
+  visibleProjection = job.projection;
+  hasVisibleProjection = true;
+  lv_obj_invalidate(Maps::canvasMap);
+  MAPIO_LOG("MAPIO: guidance-base published mode=%s width=%u height=%u\n",
+            job.projection.isBirdsEye() ? "birds-eye" : "flat",
+            (unsigned)job.width, (unsigned)job.height);
+}
+
 void Maps::publishGuidanceRenderJob() {
   auto &job = guidanceBuildingRenderJob;
   if (!job.active || bufMapScreen == nullptr || bufMapTemp == nullptr)
@@ -6332,11 +6567,18 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     return false;
   }
 
-  // A guidance frame with buildings is a latest-wins cooperative job.  Do
-  // not recompute its projection or touch the hidden canvas until the current
-  // immutable request has either completed or been cancelled by input.
-  if (isMapRenderPending())
-    return advanceGuidanceBuildingRenderJob();
+  // A guidance frame with buildings is a latest-wins cooperative job. Do not
+  // recompute its projection while the immutable building request is
+  // advancing; its complete 2D/course-up underlay is published at admission
+  // and the 3D pass finishes into the hidden buffer. A block-load job has no
+  // renderable result until getMapBlocks consumes its mailbox, so leave the
+  // current frame in place until then.
+  if (isMapRenderPending()) {
+    if (guidanceBuildingRenderJob.active)
+      return advanceGuidanceBuildingRenderJob();
+    if (mapBlockLoadJob.state == MapBlockLoadJob::State::Loading)
+      return false;
+  }
 
   // The hidden buffer is about to become the render target. Any prepared
   // zoom-out backdrop in it is no longer reusable.
@@ -6540,9 +6782,10 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     if (startGuidanceBuildingRenderJob(
             zoom, renderExtent.width, renderExtent.height, renderStride,
             Maps::viewPort, frameProjection)) {
-      // The base map is already complete in the hidden buffer.  The building
-      // pass advances one bounded unit per UI cycle and publishes atomically
-      // when its deterministic queue is exhausted.
+      // Publish the complete base immediately. The building pass advances one
+      // bounded unit per UI cycle and publishes its deterministic far-to-near
+      // result atomically over this frame when exhausted.
+      publishGuidanceBaseFrame();
       MAPIO_LOG("MAPIO: guidance-job start zoom=%u baseMs=%lu blocks=%u\n",
                 (unsigned)zoom, (unsigned long)drawMs,
                 (unsigned)Maps::memCache.blocks.size());

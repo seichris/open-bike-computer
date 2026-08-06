@@ -56,6 +56,9 @@ public:
     if (distanceSquared(raw, target_) > kFixChangeEpsilonSquared) {
       const double intervalSeconds = clampDelta(
           static_cast<double>(sinceFixMs) / 1000.0, 0.05, 2.0);
+      lastFixIntervalMs_ = std::max<uint32_t>(
+          kMinimumPredictionMs,
+          std::min<uint32_t>(kMaximumPredictionMs, sinceFixMs));
       const map_transform::WorldPoint measuredVelocity = {
           (raw.x - target_.x) / intervalSeconds,
           (raw.y - target_.y) / intervalSeconds};
@@ -79,13 +82,22 @@ public:
     const uint32_t frameDeltaMs = nowMs - lastFrameMs_;
     const double frameDeltaSeconds = clampDelta(
         static_cast<double>(frameDeltaMs) / 1000.0, 0.0, 0.05);
+    // Native GPS writes are driven by Core Location's distance filter and are
+    // not guaranteed to arrive at a fixed one-second cadence. Match the
+    // bounded dead-reckoning window to the most recent accepted fix interval
+    // instead of stopping at a hard 750 ms on a slower phone update. The
+    // horizon remains bounded and the stale decay still brings the presenter
+    // back to the last measured point when the link goes quiet.
+    const uint32_t predictionHorizonMs = std::max<uint32_t>(
+        kMinimumPredictionMs,
+        std::min<uint32_t>(kMaximumPredictionMs, lastFixIntervalMs_));
     const uint32_t predictionAgeMs =
-        std::min<uint32_t>(nowMs - lastFixMs_, kMaximumPredictionMs);
+        std::min<uint32_t>(nowMs - lastFixMs_, predictionHorizonMs);
     const double predictionSeconds =
         static_cast<double>(predictionAgeMs) / 1000.0;
     const uint32_t staleAgeMs =
-        nowMs - lastFixMs_ > kMaximumPredictionMs
-            ? nowMs - lastFixMs_ - kMaximumPredictionMs
+        nowMs - lastFixMs_ > predictionHorizonMs
+            ? nowMs - lastFixMs_ - predictionHorizonMs
             : 0;
     const double staleVelocityScale = std::exp(
         -static_cast<double>(staleAgeMs) / 1000.0 /
@@ -110,6 +122,7 @@ public:
     displayed_ = {};
     velocity_ = {};
     lastFixMs_ = 0;
+    lastFixIntervalMs_ = kMinimumPredictionMs;
     lastFrameMs_ = 0;
   }
 
@@ -118,15 +131,17 @@ public:
 private:
   static constexpr double kFixChangeEpsilonSquared = 1e-8;
   static constexpr double kMaximumWorldSpeedPerSecond = 100.0;
-  static constexpr uint32_t kMaximumPredictionMs = 750;
+  static constexpr uint32_t kMinimumPredictionMs = 750;
+  static constexpr uint32_t kMaximumPredictionMs = 1800;
   static constexpr double kResponseTimeSeconds = 0.14;
-  static constexpr double kStaleVelocityDecaySeconds = 0.25;
+  static constexpr double kStaleVelocityDecaySeconds = 0.18;
 
   bool initialized_ = false;
   map_transform::WorldPoint target_{};
   map_transform::WorldPoint displayed_{};
   map_transform::WorldPoint velocity_{};
   uint32_t lastFixMs_ = 0;
+  uint32_t lastFixIntervalMs_ = kMinimumPredictionMs;
   uint32_t lastFrameMs_ = 0;
 };
 

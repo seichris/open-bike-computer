@@ -6,6 +6,8 @@
 #include <math.h>
 #include <string>
 #include <vector>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // #include "../../compass/compass.hpp" // Circular dependency if not careful,
 // but likely needed for getHeading
@@ -122,9 +124,10 @@ private:
   ViewPort viewPort; // Vector map viewport
 
   // Guidance buildings are rendered as a resumable job after the flat map
-  // underlay has been prepared.  The visible canvas is never touched by this
-  // job; all callbacks write directly to bufMapTemp and publish only after a
-  // complete far-to-near pass.
+  // underlay has been prepared.  The course-up 2D frame is published before
+  // this job starts so navigation never waits for 3D admission. All building
+  // callbacks write to bufMapTemp and the completed far-to-near pass is then
+  // published atomically over that already-visible base frame.
   struct GuidanceBuildingRenderItem {
     MapBlock *block = nullptr;
     const map_building_block::Building *building = nullptr;
@@ -206,6 +209,7 @@ private:
       const MapBuildingVector<map_building_renderer::ScreenPoint> &points,
       uint16_t color);
   void publishGuidanceRenderJob();
+  void publishGuidanceBaseFrame();
   struct MemBlocks   // MemBlocks stored in memory
   {
     std::map<String, u_int16_t> blocks_map; // block offset -> block index
@@ -217,6 +221,29 @@ private:
     std::vector<MapBlock *> blocks;
   };
   MemCache memCache;               // Memory Cache
+
+  // A map block can take about two seconds to read/decode from the SD card on
+  // the 1.75-inch target. Guidance requests it on a low-priority worker so a
+  // cache miss never monopolizes the LVGL task. The UI owns `memCache`; the
+  // worker only publishes one fully decoded block through this mailbox.
+  struct MapBlockLoadJob {
+    enum class State : uint8_t { Idle, Loading, Ready, Failed, Cancelled };
+
+    volatile State state = State::Idle;
+    volatile bool cancelRequested = false;
+    volatile bool found = false;
+    MapBlock *result = nullptr;
+    Point32 offset;
+    String fileName;
+    TaskHandle_t task = nullptr;
+  } mapBlockLoadJob;
+
+  bool beginMapBlockLoad(const Point32 &offset, const String &fileName);
+  bool pollMapBlockLoad(MapBlock *&result, Point32 &offset);
+  void cancelMapBlockLoad();
+  static void mapBlockLoadTaskEntry(void *context);
+  void mapBlockLoadTask();
+
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
   map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;
@@ -487,9 +514,18 @@ public:
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
   bool hasMapCanvas() const { return canvasMap != nullptr; }
-  bool isMapRenderPending() const { return guidanceBuildingRenderJob.active; }
-  void cancelPendingMapRender() { guidanceBuildingRenderJob.clear(); }
-  void releasePendingMapRender() { guidanceBuildingRenderJob.release(); }
+  bool isMapRenderPending() const {
+    return guidanceBuildingRenderJob.active ||
+           mapBlockLoadJob.state == MapBlockLoadJob::State::Loading;
+  }
+  void cancelPendingMapRender() {
+    guidanceBuildingRenderJob.clear();
+    cancelMapBlockLoad();
+  }
+  void releasePendingMapRender() {
+    guidanceBuildingRenderJob.release();
+    cancelMapBlockLoad();
+  }
   void displayMap();
   void updatePositionOverlay();
   bool isGuidanceBirdsEyeProjection() const;

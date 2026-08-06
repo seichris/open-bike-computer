@@ -25,15 +25,16 @@ drop, including renderer overhead).
 
 Guidance bird's-eye rendering no longer enters the synchronous 3D-building
 phase from the LVGL event callback. `readVectorMap` produces the complete 2D
-underlay in `bufMapTemp`, then `Maps::GuidanceBuildingRenderJob` advances
-nearest-first admission and raw RGB565 surface drawing in short cooperative
-slices. The visible `bufMapScreen` and its projection remain unchanged until
-the job has completed, at which point the frame is copied and published as one
-unit. Navigation overlay, arrow, and the live route head continue to use the
-presented pose while the job is pending. A navigation/style invalidation,
-screen-cycle input, or motion beyond the pending frame's dynamic lead cancels
-the job (latest request wins). The same job handles flat building roofs when
-the 3D toggle is off; the toggle gates extrusion only.
+underlay in `bufMapTemp`, publishes that course-up frame immediately, then
+`Maps::GuidanceBuildingRenderJob` advances nearest-first admission and raw
+RGB565 surface drawing in short cooperative slices. The visible `bufMapScreen`
+therefore never waits for 3D admission; once the deterministic far-to-near
+pass completes, its frame is copied and published atomically over the already
+visible underlay. Navigation overlay, arrow, and the live route head continue
+to use the presented pose while the job is pending. A navigation/style
+invalidation, screen-cycle input, or motion beyond the pending frame's dynamic
+lead cancels the job (latest request wins). The same job handles flat building
+roofs when the 3D toggle is off; the toggle gates extrusion only.
 
 The guidance admission contract is deterministic for one immutable frame
 request and does not use an elapsed-time prefix:
@@ -56,6 +57,11 @@ and the 300 ms cooperative-job latency bound. The 96 px overscan and 16 px
 safety reserve therefore remain an invariant, while faster motion requests a
 new frame earlier. No additional full-frame PSRAM allocation is introduced.
 
+The presenter adapts its bounded dead-reckoning horizon to the most recent
+accepted phone-fix interval (750--1,800 ms) and decays stale velocity over
+180 ms. This keeps the arrow and live head moving between normal Core Location
+updates without allowing a disconnected phone to drift the map indefinitely.
+
 ## 3D-building workspace
 
 The building pass now snapshots only the projected courtyard bounding box and
@@ -71,8 +77,13 @@ allocation fails, its roof/hole is left unfilled so the real 2D underlay stays
 visible; the rest of the 2D map and other building surfaces still render.
 With `WAVESHARE_MAPIO_TIMING_LOG` or touch diagnostics enabled, the standalone
 building log reports `courtyardMaxBytes` and `courtyardBudgetBytes`; the
-cooperative guidance job uses the same cap and still needs a device timing
-run before its runtime workspace numbers are recorded here.
+cooperative guidance job uses the same cap. On Waveshare 1.75, revision
+`83ac3354`, profile `WAVESHARE_AMOLED_175_TOUCH_DIAGNOSTICS`, and the Shanghai
+`+206+055/4_14.fmb` fixture, the measured trace was: block read/parse 1,826 ms,
+2D bird's-eye underlay 103 ms, 2,717 building records discovered, 258 admitted
+and rendered, 48 extruded, with 3.45 ms cooperative discovery/draw slices.
+The underlay was published before the building job, so course-up navigation
+does not wait for the roughly 10-second 3D pass.
 
 ## Validation and maintenance
 
@@ -81,7 +92,7 @@ visible and render frame sizes, PSRAM free/largest values, building snapshot
 bytes, render timings, map/GPS fixture, and pass/fallback result here. Battery
 claims require a source-monitor test with USB disconnected; static PSRAM size
 alone is not a battery-current measurement. The cooperative-job policy
-and raw renderer contracts are host-tested. No new device timing, PSRAM,
-battery, or post-flash result is claimed for this implementation; the
-`WAVESHARE_AMOLED_175` build/device-navigation gate remains required before
-calling runtime behavior validated.
+and raw renderer contracts are host-tested. The diagnostic trace above is a
+renderer timing measurement, not a claim that a physical navigation session
+has passed; the normal `WAVESHARE_AMOLED_175` build/device-navigation gate
+remains required before calling runtime behavior validated.
