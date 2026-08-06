@@ -178,15 +178,16 @@ struct MapViewContainer: UIViewRepresentable {
                 mapView: uiView,
                 coordinate: simPos,
                 isFreePanActive: isFreePanActive,
-                animated: true
+                animated: false
             )
             
             // Update or add annotation
             if let annotation = existingSimAnnotations.first as? SimulatedPositionAnnotation {
-                // Animate coordinate change
-                UIView.animate(withDuration: 1.0) {
-                    annotation.coordinate = simPos
-                }
+                // The simulation now presents at 30 Hz. Overlapping one-second
+                // animations would continually chase stale coordinates and
+                // recreate the old stop/go motion, so update the annotation
+                // directly at the display cadence.
+                annotation.coordinate = simPos
             } else {
                 let annotation = SimulatedPositionAnnotation()
                 annotation.coordinate = simPos

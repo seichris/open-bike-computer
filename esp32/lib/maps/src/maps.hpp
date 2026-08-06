@@ -362,7 +362,10 @@ private:
   // map, and marker move as one continuous presentation.
   map_motion::PositionPresenter positionPresenter;
   map_motion::HeadingPresenter headingPresenter;
+  map_transform::WorldPoint latestPresentedWorld;
+  bool hasLatestPresentedWorld = false;
   map_transform::WorldPoint presentedGpsWorld(uint32_t nowMs);
+  void updateGuidanceRouteHead(map_transform::WorldPoint presentedWorld);
   void applyGuidanceMotionOffset(map_transform::WorldPoint presentedWorld);
 
 public:
@@ -397,6 +400,8 @@ public:
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
   void updatePositionOverlay();
+  bool isGuidanceBirdsEyeProjection() const;
+  bool guidanceProjectionNeedsRefresh() const;
   uint16_t courseUpHeading(double latitude, double longitude,
                            uint16_t gpsHeading);
   void resetCourseUpHeading();
@@ -404,6 +409,7 @@ public:
   void updateMap();
   void panMap(int8_t dx, int8_t dy);
   void centerOnGps(double lat, double lon);
+  void centerOnPresentedGps();
   void scrollMap(int16_t dx, int16_t dy);
   void preloadTiles(int8_t dirX, int8_t dirY);
   bool preparePinchZoomOutBackdrop(uint8_t baseZoom);

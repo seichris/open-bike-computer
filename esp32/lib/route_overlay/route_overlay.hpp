@@ -55,6 +55,18 @@ public:
                  const map_projection::Projection &projection);
 
   /**
+   * @brief Draw the live route head from the presented GPS position forward.
+   *
+   * Guidance uses this on a transparent foreground at the display cadence.
+   * The full route window is still supplied by iOS, but the first pixel is
+   * derived from the same presented position as the marker so a stale BLE
+   * geometry window cannot leave a gap or a trailing tail at the arrow.
+   */
+  void drawLiveHead(lv_obj_t *canvas,
+                    const map_projection::Projection &projection,
+                    map_transform::WorldPoint presentedWorld);
+
+  /**
    * @brief Clear all route points
    */
   void clear();
@@ -86,6 +98,8 @@ public:
 private:
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> points;
   uint32_t revisionCounter = 0;
+  bool liveProgressValid = false;
+  double liveProgress = 0.0;
 
   /**
    * @brief Draw a single line segment with thickness

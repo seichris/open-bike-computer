@@ -52,6 +52,9 @@ class NavigationEngine: NSObject, ObservableObject {
     private var simulationProgress: Double = 0.0 // 0.0 to 1.0 along route
     private var simulationSpeed: Double = 10.0 // meters per second (~36 km/h)
     private var lastSimulationUpdate: Date?
+    private var lastSimulationLogicUpdate: Date?
+    private let simulationPresentationInterval: TimeInterval = 1.0 / 30.0
+    private let simulationLogicInterval: TimeInterval = 0.2
     
     // BLE Manager reference
     private var bleManager: BLEManager?
@@ -228,9 +231,10 @@ class NavigationEngine: NSObject, ObservableObject {
         print("Starting simulated navigation")
         simulationProgress = 0.0
         lastSimulationUpdate = Date()
+        lastSimulationLogicUpdate = nil
         
         simulationTimer?.invalidate()
-        simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        simulationTimer = Timer.scheduledTimer(withTimeInterval: simulationPresentationInterval, repeats: true) { [weak self] _ in
             self?.updateSimulation()
         }
         // Add timer to RunLoop to ensure it fires in common run loop modes (including background)
@@ -240,6 +244,7 @@ class NavigationEngine: NSObject, ObservableObject {
     internal func stopSimulation() {
         simulationTimer?.invalidate()
         simulationTimer = nil
+        lastSimulationLogicUpdate = nil
         isSimulationMode = false
         simulatedPosition = nil
     }
@@ -277,6 +282,12 @@ class NavigationEngine: NSObject, ObservableObject {
         // Calculate position
         if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
             simulatedPosition = position
+
+            let shouldRunLogic = lastSimulationLogicUpdate.map {
+                now.timeIntervalSince($0) >= simulationLogicInterval
+            } ?? true
+            guard shouldRunLogic else { return }
+            lastSimulationLogicUpdate = now
 
             let location = CLLocation(
                 coordinate: position,

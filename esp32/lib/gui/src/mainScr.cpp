@@ -1067,18 +1067,26 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     mapView.updatePositionOverlay();
   }
 
+  if (mapView.guidanceProjectionNeedsRefresh()) {
+    mapRenderScheduler.request(map_render_policy::Reason::Position);
+  }
+
   if (mapRenderScheduler.hasPendingWork()) {
     const bool followPosition =
         mapView.followGps || activeTile == MAP_GUIDANCE;
     const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
+    const bool stableGuidanceProjection =
+        mapView.isGuidanceBirdsEyeProjection();
     const map_render_policy::Decision decision =
-        mapRenderScheduler.evaluate(nowMs, followPosition, courseUp);
+        mapRenderScheduler.evaluate(nowMs,
+                                    followPosition && !stableGuidanceProjection,
+                                    courseUp);
     if (decision.render) {
       mapRenderScheduler.commit(decision);
       noteMapRenderReasons(decision.reasons);
       if (followPosition) {
         mapView.followGps = true;
-        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+        mapView.centerOnPresentedGps();
       } else {
         mapView.isPosMoved = true;
       }

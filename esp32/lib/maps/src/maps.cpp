@@ -3700,6 +3700,8 @@ void Maps::deleteMapScrSprites() {
   cancelPinchPreview();
   positionPresenter.reset();
   headingPresenter.reset();
+  latestPresentedWorld = {};
+  hasLatestPresentedWorld = false;
   pinchZoomOutBackdrop = {};
   invalidateRollingRasterWindow();
   hasVisibleProjection = false;
@@ -5382,7 +5384,77 @@ void Maps::displayMap() {
 map_transform::WorldPoint Maps::presentedGpsWorld(uint32_t nowMs) {
   const map_transform::WorldPoint raw = {
       lon2x(gps.gpsData.longitude), lat2y(gps.gpsData.latitude)};
-  return positionPresenter.update(raw, nowMs);
+  latestPresentedWorld = positionPresenter.update(raw, nowMs);
+  hasLatestPresentedWorld = true;
+  return latestPresentedWorld;
+}
+
+void Maps::updateGuidanceRouteHead(
+    map_transform::WorldPoint presentedWorld) {
+  // Standalone Map owns this foreground for its rolling labels/route. Only
+  // guidance uses the live head, so do not hide the standalone foreground on
+  // every 30 ms position update.
+  if (!isMapGuidanceScreenActive())
+    return;
+
+  if (Maps::canvasForeground == nullptr || !hasVisibleProjection ||
+      !routeOverlay.hasRoute() ||
+      !isRouteOverlayVisible(mapRenderSettings)) {
+    rollingForegroundReady = false;
+    hideRollingForeground();
+    return;
+  }
+
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  if (!ensureMapForegroundBuffer(Maps::mapScrWidth, viewportHeight)) {
+    rollingForegroundReady = false;
+    hideRollingForeground();
+    return;
+  }
+
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(Maps::canvasForeground);
+  if (drawBuffer == nullptr || drawBuffer->header.w != Maps::mapScrWidth ||
+      drawBuffer->header.h != viewportHeight) {
+    bindMapForegroundCanvas(Maps::canvasForeground, Maps::mapScrWidth,
+                            viewportHeight);
+  }
+  lv_obj_center(Maps::canvasForeground);
+  routeOverlay.drawLiveHead(Maps::canvasForeground, visibleProjection,
+                            presentedWorld);
+  rollingForegroundReady = false;
+  lv_obj_clear_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_invalidate(Maps::canvasForeground);
+}
+
+bool Maps::isGuidanceBirdsEyeProjection() const {
+  return isMapGuidanceScreenActive() && hasVisibleProjection &&
+         visibleProjection.isBirdsEye();
+}
+
+bool Maps::guidanceProjectionNeedsRefresh() const {
+  if (!isGuidanceBirdsEyeProjection() || !hasLatestPresentedWorld)
+    return false;
+
+  const auto projected = visibleProjection.projectWorld(latestPresentedWorld);
+  if (!projected.valid)
+    return true;
+
+  // Keep a generous safety margin inside the rendered world bounds. Between
+  // these epochs, the lightweight guidance translation can move the map
+  // continuously without repeatedly rebuilding the perspective frame for
+  // every GPS fix. A new projection is rendered only when the rider is close
+  // enough to an edge that the cached map blocks may no longer cover it.
+  constexpr double kProjectionRefreshMarginPixels = 96.0;
+  const auto &config = visibleProjection.config();
+  return projected.x < kProjectionRefreshMarginPixels ||
+         projected.x >
+             static_cast<double>(config.viewportWidth) -
+                 kProjectionRefreshMarginPixels ||
+         projected.y < kProjectionRefreshMarginPixels ||
+         projected.y >
+             static_cast<double>(config.viewportHeight) -
+                 kProjectionRefreshMarginPixels;
 }
 
 void Maps::applyGuidanceMotionOffset(
@@ -5405,6 +5477,9 @@ void Maps::applyGuidanceMotionOffset(
   lv_obj_center(Maps::canvasMap);
   const int16_t baseX = lv_obj_get_x_aligned(Maps::canvasMap);
   const int16_t baseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  if (Maps::canvasForeground != nullptr) {
+    lv_obj_set_pos(Maps::canvasForeground, baseX, baseY);
+  }
   const int32_t offsetX = map_transform::quantizePixel(
       visibleProjection.anchorX() - projected.x);
   const int32_t offsetY = map_transform::quantizePixel(
@@ -5413,7 +5488,13 @@ void Maps::applyGuidanceMotionOffset(
     return;
 
   lv_obj_set_pos(Maps::canvasMap, baseX + offsetX, baseY + offsetY);
+  if (Maps::canvasForeground != nullptr) {
+    lv_obj_set_pos(Maps::canvasForeground, baseX + offsetX,
+                   baseY + offsetY);
+  }
   lv_obj_invalidate(Maps::canvasMap);
+  if (Maps::canvasForeground != nullptr)
+    lv_obj_invalidate(Maps::canvasForeground);
 }
 
 uint16_t Maps::courseUpHeading(double latitude, double longitude,
@@ -5436,6 +5517,7 @@ void Maps::updatePositionOverlay() {
   if (Maps::canvasArrow) {
     if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
       lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+      updateGuidanceRouteHead(presentedWorld);
       MAPIO_LOG("MAPIO: current-position marker hidden mapFound=%d visible=%d\n",
                 Maps::isMapFound, isCurrentPositionVisible(mapRenderSettings));
       return;
@@ -5515,6 +5597,7 @@ void Maps::updatePositionOverlay() {
     }
     lv_obj_move_foreground(Maps::canvasArrow);
   }
+  updateGuidanceRouteHead(presentedWorld);
   applyGuidanceMotionOffset(presentedWorld);
   MAPIO_LOG("MAPIO: display invalidateMs=%lu hasCanvas=%d hasArrow=%d\n",
             (unsigned long)(MAPIO_TIME_MS() - displayStartMs),
@@ -5732,13 +5815,20 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 #endif
   ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
            routeOverlay.hasRoute());
-  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
+  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings) &&
+      !isMapGuidanceScreenActive()) {
     ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
              routeOverlay.getPointCount());
 
     routeOverlay.drawRoute(Maps::canvasMapTemp, frameProjection);
     ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
              rotationRad, renderExtent.height);
+  } else if (routeOverlay.hasRoute() && isMapGuidanceScreenActive()) {
+    // Guidance draws the route head on the display cadence from the same
+    // presented position as the marker. Keeping the static snapshot out of
+    // the base frame prevents stale geometry from leaving a gap or trailing
+    // tail while BLE route windows are refreshed.
+    ESP_LOGI(TAG, "Route overlay deferred to live guidance head");
   } else if (routeOverlay.hasRoute()) {
     ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
   } else {
@@ -5859,6 +5949,21 @@ void Maps::centerOnGps(double lat, double lon) {
   Maps::isPosMoved = true;
 
   ESP_LOGI(TAG, "centerOnGps: map center updated");
+}
+
+void Maps::centerOnPresentedGps() {
+  const map_transform::WorldPoint presented = presentedGpsWorld(MAPIO_TIME_MS());
+  Maps::followGps = true;
+  Maps::point.x = static_cast<int32_t>(std::lround(presented.x));
+  Maps::point.y = static_cast<int32_t>(std::lround(presented.y));
+
+  const double lat = Maps::mercatorY2lat(presented.y);
+  const double lon = Maps::mercatorX2lon(presented.x);
+  Maps::currentMapTile.tilex = Maps::lon2tilex(lon, Maps::currentMapTile.zoom);
+  Maps::currentMapTile.tiley = Maps::lat2tiley(lat, Maps::currentMapTile.zoom);
+  Maps::currentMapTile.lat = lat;
+  Maps::currentMapTile.lon = lon;
+  Maps::isPosMoved = true;
 }
 
 /**
