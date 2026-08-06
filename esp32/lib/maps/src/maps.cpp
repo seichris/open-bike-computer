@@ -353,30 +353,31 @@ static void *bufMapIcon = nullptr;
 
 // Guidance keeps a modest overscan around the visible viewport. The base map
 // can then translate under the fixed rider marker between full vector-frame
-// settlements without exposing the parent background at an edge.
-constexpr uint16_t kGuidanceOverscanPixels = 96;
-constexpr uint16_t kGuidanceRefreshSafetyPixels = 16;
+// settlements without exposing the parent background at an edge. The policy
+// header owns the values so frame sizing and refresh admission cannot drift.
 
 static uint16_t guidanceFrameWidth(uint16_t viewportWidth) {
   return static_cast<uint16_t>(viewportWidth +
-                               (2U * kGuidanceOverscanPixels));
+                               (2U *
+                                map_render_job_policy::kGuidanceOverscanPixels));
 }
 
 static uint16_t guidanceFrameHeight(uint16_t viewportHeight) {
   return static_cast<uint16_t>(viewportHeight +
-                               (2U * kGuidanceOverscanPixels));
+                               (2U *
+                                map_render_job_policy::kGuidanceOverscanPixels));
 }
 
 static double guidanceFrameAnchorX(uint16_t viewportWidth) {
   return static_cast<double>(gui_layout::mapAnchorX(viewportWidth)) +
-         kGuidanceOverscanPixels;
+         map_render_job_policy::kGuidanceOverscanPixels;
 }
 
 static double guidanceFrameAnchorY(uint16_t viewportHeight, bool birdsEye) {
   const double visibleAnchor =
       birdsEye ? map_projection::birdsEyeAnchorY(viewportHeight)
                : gui_layout::mapAnchorY(viewportHeight);
-  return visibleAnchor + kGuidanceOverscanPixels;
+  return visibleAnchor + map_render_job_policy::kGuidanceOverscanPixels;
 }
 
 static bool ensureMapBuffer(void *&buffer, size_t &capacity,
@@ -2381,22 +2382,16 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
   const bool mapNavigationActive = isMapGuidanceScreenActive();
   const bool guidanceBirdsEye = mapNavigationActive && projection.isBirdsEye();
-  // Candidate discovery runs on the UI task. Keep that scan short, but do not
-  // turn a scan timeout into a whole-frame 2D fallback: the bounded candidate
-  // queue below still contains the nearest buildings already discovered.
-  constexpr uint32_t kGuidanceBuildingTimeBudgetMs = 900U;
+  // Guidance buildings are admitted by the resumable back-buffer job in
+  // generateVectorMap.  The synchronous path remains for standalone Map,
+  // where it is not coupled to the navigation presentation cadence.
   constexpr uint32_t kBuildingDrawTimeBudgetMs =
       map_building_renderer::kMaximumBuildingRenderTimeMs;
-  constexpr size_t kGuidanceMaximumQueuedBuildingRecords = 2048U;
   constexpr double kGuidanceFarBuildingCutoffFraction = 0.20;
   const uint32_t buildingPrepassTimeBudgetMs =
-      guidanceBirdsEye
-          ? kGuidanceBuildingTimeBudgetMs
-          : map_building_renderer::kMaximumBuildingRenderTimeMs;
+      map_building_renderer::kMaximumBuildingRenderTimeMs;
   const size_t maximumQueuedBuildingRecords =
-      guidanceBirdsEye
-          ? kGuidanceMaximumQueuedBuildingRecords
-          : map_building_renderer::kMaximumRenderedBuildingRecords;
+      map_building_renderer::kMaximumRenderedBuildingRecords;
   const size_t buildingWorkspaceViewportPixels =
       static_cast<size_t>(Maps::mapScrWidth) *
       static_cast<size_t>(mapSet.mapFullScreen ? Maps::mapScrFull
@@ -2432,7 +2427,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       viewPort.bbox.min.x, viewPort.bbox.min.y, viewPort.bbox.max.x,
       viewPort.bbox.max.y};
   const bool buildingsSuppressed =
-      suppressBuildings || buildingFailureRetryCooldown.shouldSuppress(
+      suppressBuildings || guidanceBirdsEye ||
+      buildingFailureRetryCooldown.shouldSuppress(
                                millis(), buildingContextSignature,
                                buildingRenderRegion);
   uint32_t projectionClippedCount = 0;
@@ -3853,12 +3849,15 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
  *
  */
 void Maps::deleteMapScrSprites() {
+  releasePendingMapRender();
   cancelDragPreview();
   cancelPinchPreview();
   positionPresenter.reset();
   headingPresenter.reset();
   latestPresentedWorld = {};
   hasLatestPresentedWorld = false;
+  guidancePixelsPerMs = 0.0;
+  guidanceMotionSampleMs = 0;
   pinchZoomOutBackdrop = {};
   invalidateRollingRasterWindow();
   hasVisibleProjection = false;
@@ -3886,6 +3885,7 @@ void Maps::deleteMapScrSprites() {
  */
 void Maps::createMapScrSprites() {
   ESP_LOGI(TAG, "createMapScrSprites start");
+  releasePendingMapRender();
   hasVisibleProjection = false;
   // Map Sprite
   // Map Sprite (Canvas)
@@ -5553,8 +5553,23 @@ void Maps::displayMap() {
 map_transform::WorldPoint Maps::presentedGpsWorld(uint32_t nowMs) {
   const map_transform::WorldPoint raw = {
       lon2x(gps.gpsData.longitude), lat2y(gps.gpsData.latitude)};
+  const auto previous = latestPresentedWorld;
+  const bool hadPrevious = hasLatestPresentedWorld;
   latestPresentedWorld = positionPresenter.update(raw, nowMs);
   hasLatestPresentedWorld = true;
+  if (hadPrevious && nowMs != guidanceMotionSampleMs) {
+    const uint32_t elapsedMs = nowMs - guidanceMotionSampleMs;
+    if (elapsedMs != 0) {
+      const double worldDistance = std::hypot(
+          latestPresentedWorld.x - previous.x,
+          latestPresentedWorld.y - previous.y);
+      const double pixels = worldDistance *
+                            map_transform::worldToScreenScale(zoomLevel);
+      const double measured = pixels / static_cast<double>(elapsedMs);
+      guidancePixelsPerMs = guidancePixelsPerMs * 0.65 + measured * 0.35;
+    }
+  }
+  guidanceMotionSampleMs = nowMs;
   return latestPresentedWorld;
 }
 
@@ -5626,23 +5641,40 @@ bool Maps::isGuidanceBirdsEyeProjection() const {
 }
 
 bool Maps::guidanceProjectionNeedsRefresh() const {
-  if (!isGuidanceBirdsEyeProjection() || !hasLatestPresentedWorld)
+  if (!isMapGuidanceScreenActive() || !hasLatestPresentedWorld)
     return false;
 
-  const auto projected = visibleProjection.projectWorld(latestPresentedWorld);
+  // While a building job is pending, its immutable projection is the frame
+  // that would be published.  Compare motion against that target rather than
+  // the older visible projection; otherwise every cooperative slice would
+  // look stale and discovery would be cancelled/restarted on every UI tick.
+  const map_projection::Projection *projection = nullptr;
+  if (guidanceBuildingRenderJob.active &&
+      guidanceBuildingRenderJob.projection.isBirdsEye()) {
+    projection = &guidanceBuildingRenderJob.projection;
+  } else if (hasVisibleProjection && visibleProjection.isBirdsEye()) {
+    projection = &visibleProjection;
+  }
+  if (projection == nullptr)
+    return false;
+
+  const auto projected = projection->projectWorld(latestPresentedWorld);
   if (!projected.valid)
     return true;
 
   // The rendered guidance frame includes overscan around the visible
-  // viewport. Refresh before the lightweight translation consumes that
-  // overscan, leaving a small safety margin for the next completed frame.
-  const double availableMotion =
-      static_cast<double>(kGuidanceOverscanPixels) -
-      static_cast<double>(kGuidanceRefreshSafetyPixels);
-  return projected.x < visibleProjection.anchorX() - availableMotion ||
-         projected.x > visibleProjection.anchorX() + availableMotion ||
-         projected.y < visibleProjection.anchorY() - availableMotion ||
-         projected.y > visibleProjection.anchorY() + availableMotion;
+  // viewport.  Reserve a lead proportional to the measured presentation
+  // speed and the bounded cooperative-job latency; a fixed 16 px margin is
+  // not sufficient when a dense frame is still being admitted.
+  const double availableMotion = static_cast<double>(
+      map_render_job_policy::availableMotionPixels());
+  const double lead = static_cast<double>(
+      map_render_job_policy::refreshLeadPixels(guidancePixelsPerMs));
+  const double refreshDistance = std::max(0.0, availableMotion - lead);
+  return projected.x < projection->anchorX() - refreshDistance ||
+         projected.x > projection->anchorX() + refreshDistance ||
+         projected.y < projection->anchorY() - refreshDistance ||
+         projected.y > projection->anchorY() + refreshDistance;
 }
 
 void Maps::applyGuidanceMotionOffset(
@@ -5832,6 +5864,455 @@ void Maps::updatePositionOverlay() {
             Maps::canvasMap != nullptr, Maps::canvasArrow != nullptr);
 }
 
+bool Maps::fillGuidancePolygon(
+    const MapBuildingVector<map_building_renderer::ScreenPoint> &points,
+    uint16_t color) {
+  if (points.size() < 3 || bufMapTemp == nullptr)
+    return true;
+
+  uint16_t *pixels = static_cast<uint16_t *>(bufMapTemp);
+  const int32_t width = guidanceBuildingRenderJob.width;
+  const int32_t height = guidanceBuildingRenderJob.height;
+  const size_t stridePixels = guidanceBuildingRenderJob.strideBytes / 2U;
+  if (width <= 0 || height <= 0 || stridePixels < static_cast<size_t>(width))
+    return false;
+
+  int32_t minY = points.front().y;
+  int32_t maxY = points.front().y;
+  for (const auto &point : points) {
+    minY = std::min(minY, point.y);
+    maxY = std::max(maxY, point.y);
+  }
+  minY = std::max<int32_t>(0, minY);
+  maxY = std::min<int32_t>(height - 1, maxY);
+  if (minY > maxY)
+    return true;
+
+  try {
+    if (guidanceBuildingRenderJob.courtyardScanlineNodes.size() <
+        points.size()) {
+      guidanceBuildingRenderJob.courtyardScanlineNodes.resize(points.size());
+    }
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+
+  auto &nodes = guidanceBuildingRenderJob.courtyardScanlineNodes;
+  for (int32_t y = minY; y <= maxY; ++y) {
+    if ((y & 0x0F) == 0 && shouldInterruptMapRenderForScreenCycle())
+      return false;
+    size_t nodeCount = 0;
+    for (size_t index = 0; index < points.size(); ++index) {
+      const auto &start = points[index];
+      const auto &end = points[(index + 1U) % points.size()];
+      if ((start.y < y && end.y >= y) ||
+          (start.y >= y && end.y < y)) {
+        nodes[nodeCount++] = static_cast<int32_t>(
+            start.x + static_cast<double>(y - start.y) /
+                          static_cast<double>(end.y - start.y) *
+                          static_cast<double>(end.x - start.x));
+      }
+    }
+    std::sort(nodes.begin(), nodes.begin() + nodeCount);
+    for (size_t index = 0; index + 1U < nodeCount; index += 2U) {
+      const int32_t startX = std::max<int32_t>(0, nodes[index]);
+      const int32_t endX = std::min<int32_t>(width, nodes[index + 1U]);
+      if (startX >= endX)
+        continue;
+      auto *row = pixels + static_cast<size_t>(y) * stridePixels;
+      std::fill(row + startX, row + endX, color);
+    }
+  }
+  return true;
+}
+
+bool Maps::startGuidanceBuildingRenderJob(
+    uint8_t requestedZoom, uint16_t width, uint16_t height,
+    uint32_t strideBytes, const ViewPort &frameViewPort,
+    const map_projection::Projection &projection) {
+  guidanceBuildingRenderJob.clear();
+  try {
+    guidanceBuildingRenderJob.active = true;
+    guidanceBuildingRenderJob.phase =
+        GuidanceBuildingRenderJob::Phase::Discover;
+    guidanceBuildingRenderJob.zoom = requestedZoom;
+    guidanceBuildingRenderJob.width = width;
+    guidanceBuildingRenderJob.height = height;
+    guidanceBuildingRenderJob.strideBytes = strideBytes;
+    guidanceBuildingRenderJob.projection = projection;
+    guidanceBuildingRenderJob.viewPort = frameViewPort;
+    guidanceBuildingRenderJob.queue.reserve(
+        map_render_job_policy::kGuidanceMaximumQueuedBuildingRecords);
+    guidanceBuildingRenderJob.eligibilityGround.reserve(
+        map_render_job_policy::kGuidanceMaximumRenderedBuildingPointsPerRecord);
+    guidanceBuildingRenderJob.eligibilityClipped.reserve(
+        map_render_job_policy::kGuidanceMaximumRenderedBuildingPointsPerRecord);
+    guidanceBuildingRenderJob.courtyardScanlineNodes.reserve(
+        map_render_job_policy::kGuidanceMaximumRenderedBuildingPointsPerRecord);
+    return true;
+  } catch (const std::bad_alloc &) {
+    guidanceBuildingRenderJob.clear();
+    ESP_LOGW(TAG, "Guidance building job unavailable: PSRAM admission failed");
+    return false;
+  }
+}
+
+bool Maps::renderGuidanceBuilding(
+    const GuidanceBuildingRenderItem &item) {
+  if (item.block == nullptr || item.building == nullptr || bufMapTemp == nullptr)
+    return false;
+
+  auto &job = guidanceBuildingRenderJob;
+  job.courtyardUnderlayReady = false;
+  job.courtyardUnderlayUnavailable = false;
+  job.courtyardUnderlayRegion = {};
+  job.courtyardUnderlay.clear();
+
+  const uint16_t visibleHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const size_t maximumUnderlayPixels =
+      static_cast<size_t>(Maps::mapScrWidth) * visibleHeight;
+  const uint16_t roofColor = lv_color_to_u16(lv_color_hex(0xB9B2A8));
+  const uint16_t wallLight = lv_color_to_u16(lv_color_hex(0x958E84));
+  const uint16_t wallMiddle = lv_color_to_u16(lv_color_hex(0x827B72));
+  const uint16_t wallDark = lv_color_to_u16(lv_color_hex(0x6D665E));
+  const auto shouldStop = [&]() {
+    return shouldInterruptMapRenderForScreenCycle();
+  };
+  bool courtyardCaptureSeen = false;
+  bool courtyardSnapshotAttempted = false;
+  int32_t courtyardMinX = job.width;
+  int32_t courtyardMinY = job.height;
+  int32_t courtyardMaxX = -1;
+  int32_t courtyardMaxY = -1;
+  const auto prepareCourtyardUnderlay = [&]() {
+    if (!courtyardCaptureSeen || courtyardSnapshotAttempted)
+      return;
+    courtyardSnapshotAttempted = true;
+    const int32_t regionX = std::max<int32_t>(0, courtyardMinX);
+    const int32_t regionY = std::max<int32_t>(0, courtyardMinY);
+    const int32_t regionEndX =
+        std::min<int32_t>(job.width, courtyardMaxX + 1);
+    const int32_t regionEndY =
+        std::min<int32_t>(job.height, courtyardMaxY + 1);
+    const int32_t regionWidth = regionEndX - regionX;
+    const int32_t regionHeight = regionEndY - regionY;
+    if (regionWidth <= 0 || regionHeight <= 0) {
+      job.courtyardUnderlayUnavailable = true;
+      return;
+    }
+    const size_t pixelCount = static_cast<size_t>(regionWidth) *
+                              static_cast<size_t>(regionHeight);
+    if (pixelCount > maximumUnderlayPixels) {
+      job.courtyardUnderlayUnavailable = true;
+      return;
+    }
+    try {
+      job.courtyardUnderlay.resize(pixelCount);
+    } catch (const std::bad_alloc &) {
+      job.courtyardUnderlayUnavailable = true;
+      return;
+    }
+    job.courtyardUnderlayRegion = {
+        regionX, regionY, regionWidth, regionHeight,
+        static_cast<size_t>(regionWidth), pixelCount};
+    const size_t stridePixels = job.strideBytes / 2U;
+    const auto *source = static_cast<const uint16_t *>(bufMapTemp);
+    for (int32_t row = 0; row < regionHeight; ++row) {
+      const size_t sourceOffset =
+          static_cast<size_t>(regionY + row) * stridePixels +
+          static_cast<size_t>(regionX);
+      const size_t underlayOffset =
+          static_cast<size_t>(row) * job.courtyardUnderlayRegion.stridePixels;
+      std::memcpy(job.courtyardUnderlay.data() + underlayOffset,
+                  source + sourceOffset,
+                  static_cast<size_t>(regionWidth) * sizeof(uint16_t));
+    }
+    job.courtyardUnderlayReady = true;
+  };
+
+  try {
+    return map_building_renderer::renderSurfaces(
+        *item.building, item.block->offset.x, item.block->offset.y,
+        item.block->mercatorScale, job.projection, item.extrude,
+        [&](map_building_renderer::Surface surface,
+            const auto &points) -> bool {
+        if (shouldStop())
+          return false;
+        if (points.size() < 3 &&
+            surface != map_building_renderer::Surface::CourtyardCapture)
+          return true;
+
+        if (surface == map_building_renderer::Surface::CourtyardCapture) {
+          if (points.size() < 3)
+            return true;
+          courtyardCaptureSeen = true;
+          for (const auto &point : points) {
+            courtyardMinX = std::min(courtyardMinX, point.x);
+            courtyardMaxX = std::max(courtyardMaxX, point.x);
+            courtyardMinY = std::min(courtyardMinY, point.y);
+            courtyardMaxY = std::max(courtyardMaxY, point.y);
+          }
+          return true;
+        }
+
+        if (surface == map_building_renderer::Surface::Roof ||
+            surface == map_building_renderer::Surface::Courtyard)
+          prepareCourtyardUnderlay();
+
+        if (surface == map_building_renderer::Surface::Courtyard) {
+          if (job.courtyardUnderlayUnavailable ||
+              !job.courtyardUnderlayReady)
+            return true;
+          return map_building_renderer::restoreCourtyardUnderlayRegion(
+              points, static_cast<uint16_t *>(bufMapTemp), job.width,
+              job.height, job.strideBytes / 2U, job.courtyardUnderlay.data(),
+              job.courtyardUnderlayRegion, job.courtyardScanlineNodes,
+              shouldStop);
+        }
+
+        if (job.courtyardUnderlayUnavailable &&
+            surface == map_building_renderer::Surface::Roof)
+          return true;
+
+        uint16_t color = roofColor;
+        switch (surface) {
+        case map_building_renderer::Surface::WallLight:
+          color = wallLight;
+          break;
+        case map_building_renderer::Surface::WallMiddle:
+          color = wallMiddle;
+          break;
+        case map_building_renderer::Surface::WallDark:
+          color = wallDark;
+          break;
+        case map_building_renderer::Surface::Roof:
+        case map_building_renderer::Surface::Courtyard:
+        case map_building_renderer::Surface::CourtyardCapture:
+          break;
+        }
+        return fillGuidancePolygon(points, color);
+        },
+        nullptr, shouldStop);
+  } catch (const std::bad_alloc &) {
+    // Per-ring projection vectors are allocated by the shared renderer. A
+    // transient PSRAM failure must abort this hidden frame cleanly rather than
+    // unwinding through the LVGL event callback and corrupting the UI task.
+    ESP_LOGW(TAG, "Guidance building job aborted: geometry allocation failed");
+    return false;
+  }
+}
+
+void Maps::publishGuidanceRenderJob() {
+  auto &job = guidanceBuildingRenderJob;
+  if (!job.active || bufMapScreen == nullptr || bufMapTemp == nullptr)
+    return;
+  const size_t rowBytes = static_cast<size_t>(job.width) * sizeof(uint16_t);
+  auto *front = static_cast<uint8_t *>(bufMapScreen);
+  const auto *back = static_cast<const uint8_t *>(bufMapTemp);
+  for (uint16_t y = 0; y < job.height; ++y) {
+    std::memcpy(front + static_cast<size_t>(y) * job.strideBytes,
+                back + static_cast<size_t>(y) * job.strideBytes, rowBytes);
+  }
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, job.width, job.height,
+                       LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, job.width, job.height,
+                       LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(Maps::canvasMap);
+  lv_obj_center(Maps::canvasMapTemp);
+  Maps::viewPort = job.viewPort;
+  visibleProjection = job.projection;
+  hasVisibleProjection = true;
+  finishDragSettlement();
+  finishPinchSettlement();
+  MAPIO_LOG("MAPIO: guidance-job complete discovered=%u rendered=%u "
+            "extruded=%u points=%u\n",
+            (unsigned)job.discoveredRecords, (unsigned)job.renderedRecords,
+            (unsigned)job.extrudedRecords, (unsigned)job.renderedPoints);
+  job.clear();
+}
+
+bool Maps::advanceGuidanceBuildingRenderJob() {
+  auto &job = guidanceBuildingRenderJob;
+  if (!job.active)
+    return true;
+  if (shouldInterruptMapRenderForScreenCycle()) {
+    job.clear();
+    return false;
+  }
+
+  const uint32_t sliceStartUs = micros();
+  switch (job.phase) {
+  case GuidanceBuildingRenderJob::Phase::Discover: {
+    size_t processed = 0;
+    while (job.blockIndex < memCache.blocks.size() &&
+           processed < map_render_job_policy::kGuidanceDiscoveryRecordsPerSlice &&
+           static_cast<uint32_t>(micros() - sliceStartUs) <
+               map_render_job_policy::kGuidanceSliceBudgetUs) {
+      MapBlock *block = memCache.blocks[job.blockIndex];
+      if (block == nullptr || !block->inView || block->formatVersion < 4) {
+        ++job.blockIndex;
+        job.recordIndex = 0;
+        continue;
+      }
+      if (job.recordIndex >= block->buildingData.buildings.size()) {
+        ++job.blockIndex;
+        job.recordIndex = 0;
+        continue;
+      }
+
+      const size_t currentIndex = job.recordIndex++;
+      ++processed;
+      ++job.discoveredRecords;
+      const auto &building = block->buildingData.buildings[currentIndex];
+      const BBox screenBbox = job.viewPort.bbox - block->offset;
+      const map_transform::WorldPoint center{
+          static_cast<double>(block->offset.x) +
+              (static_cast<double>(building.minX) + building.maxX) / 2.0,
+          static_cast<double>(block->offset.y) +
+              (static_cast<double>(building.minY) + building.maxY) / 2.0};
+      const auto centerGround = job.projection.groundForWorld(center);
+      const auto centerProjection = job.projection.projectGround(centerGround);
+      const bool extrudeRequested =
+          mapRenderSettings.mapNavigation3DBuildingsEnabled &&
+          map_building_renderer::eligibleExtrusionZoom(job.zoom) &&
+          map_building_renderer::usesExtrusion(true, building.flags) &&
+          centerProjection.valid &&
+          centerProjection.y >=
+              static_cast<double>(job.projection.config().viewportHeight) * 0.20;
+      const int32_t elevationMargin = extrudeRequested
+          ? static_cast<int32_t>(std::ceil(
+                building.heightDm / 10.0 * block->mercatorScale))
+          : 0;
+      const BBox buildingBbox(
+          Point32(building.minX - elevationMargin,
+                  building.minY - elevationMargin),
+          Point32(building.maxX + elevationMargin,
+                  building.maxY + elevationMargin));
+      if (!buildingBbox.intersects(screenBbox))
+        continue;
+
+      size_t pointCount = 0;
+      for (const auto &ring : building.rings)
+        pointCount += ring.points.size();
+      if (pointCount == 0 ||
+          pointCount >
+              map_render_job_policy::kGuidanceMaximumRenderedBuildingPointsPerRecord)
+        continue;
+
+      const double projectedArea =
+          map_building_renderer::projectedFootprintAreaPixels(
+              building, block->offset.x, block->offset.y, job.projection,
+              job.eligibilityGround, job.eligibilityClipped,
+              shouldInterruptMapRenderForScreenCycle);
+      if (shouldInterruptMapRenderForScreenCycle()) {
+        job.clear();
+        return false;
+      }
+      if (projectedArea > static_cast<double>(
+                              map_render_job_policy::kGuidanceMaximumBuildingPixelsPerRecord))
+        continue;
+
+      GuidanceBuildingRenderItem candidate{
+          block, &building, centerGround.forward,
+          static_cast<uint16_t>(currentIndex), pointCount, false,
+          extrudeRequested, extrudeRequested};
+      const auto rendersBefore =
+          [](const GuidanceBuildingRenderItem &left,
+             const GuidanceBuildingRenderItem &right) {
+            return map_building_renderer::rendersBefore(
+                {left.depth, left.block->offset.x, left.block->offset.y,
+                 left.recordIndex},
+                {right.depth, right.block->offset.x, right.block->offset.y,
+                 right.recordIndex});
+          };
+      map_building_renderer::retainNearestCandidate(
+          job.queue, candidate,
+          map_render_job_policy::kGuidanceMaximumQueuedBuildingRecords,
+          rendersBefore);
+    }
+    if (job.blockIndex >= memCache.blocks.size())
+      job.phase = GuidanceBuildingRenderJob::Phase::Select;
+    break;
+  }
+  case GuidanceBuildingRenderJob::Phase::Select: {
+    const auto rendersBefore =
+        [](const GuidanceBuildingRenderItem &left,
+           const GuidanceBuildingRenderItem &right) {
+          return map_building_renderer::rendersBefore(
+              {left.depth, left.block->offset.x, left.block->offset.y,
+               left.recordIndex},
+              {right.depth, right.block->offset.x, right.block->offset.y,
+               right.recordIndex});
+        };
+    std::sort(job.queue.begin(), job.queue.end(), rendersBefore);
+    size_t points = 0;
+    size_t extrusionPoints = 0;
+    size_t extrusionRecords = 0;
+    for (auto iterator = job.queue.rbegin(); iterator != job.queue.rend();
+         ++iterator) {
+      auto &item = *iterator;
+      item.render = false;
+      item.extrude = false;
+      if (item.pointCount >
+              map_render_job_policy::kGuidanceMaximumRenderedBuildingPoints -
+                  points ||
+          item.pointCount >
+              map_render_job_policy::kGuidanceMaximumRenderedBuildingPointsPerRecord)
+        continue;
+      item.render = true;
+      points += item.pointCount;
+      if (item.extrusionCandidate &&
+          extrusionRecords <
+              map_render_job_policy::kGuidanceMaximumExtrudedBuildingRecords &&
+          item.pointCount <=
+              map_render_job_policy::kGuidanceMaximumExtrudedBuildingPoints -
+                  extrusionPoints) {
+        item.extrude = true;
+        ++extrusionRecords;
+        extrusionPoints += item.pointCount;
+      }
+    }
+    job.renderedPoints = points;
+    job.phase = GuidanceBuildingRenderJob::Phase::Draw;
+    break;
+  }
+  case GuidanceBuildingRenderJob::Phase::Draw: {
+    size_t completedBuildings = 0;
+    while (job.drawIndex < job.queue.size() &&
+           completedBuildings < map_render_job_policy::kGuidanceBuildingsPerSlice &&
+           static_cast<uint32_t>(micros() - sliceStartUs) <
+               map_render_job_policy::kGuidanceSliceBudgetUs) {
+      const auto &item = job.queue[job.drawIndex++];
+      if (!item.render)
+        continue;
+      if (!renderGuidanceBuilding(item)) {
+        job.clear();
+        return false;
+      }
+      ++completedBuildings;
+      ++job.renderedRecords;
+      if (item.extrude)
+        ++job.extrudedRecords;
+    }
+    if (job.drawIndex >= job.queue.size()) {
+      publishGuidanceRenderJob();
+      return true;
+    }
+    break;
+  }
+  case GuidanceBuildingRenderJob::Phase::None:
+    return true;
+  }
+
+  MAPIO_LOG("MAPIO: guidance-job slice phase=%u us=%lu discovered=%u "
+            "queued=%u draw=%u/%u\n",
+            (unsigned)job.phase, (unsigned long)(micros() - sliceStartUs),
+            (unsigned)job.discoveredRecords, (unsigned)job.queue.size(),
+            (unsigned)job.drawIndex, (unsigned)job.queue.size());
+  return false;
+}
+
 /**
  * @brief Generate Vector Map
  *
@@ -5850,6 +6331,12 @@ bool Maps::generateVectorMap(uint8_t zoom) {
     ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
     return false;
   }
+
+  // A guidance frame with buildings is a latest-wins cooperative job.  Do
+  // not recompute its projection or touch the hidden canvas until the current
+  // immutable request has either completed or been cancelled by input.
+  if (isMapRenderPending())
+    return advanceGuidanceBuildingRenderJob();
 
   // The hidden buffer is about to become the render target. Any prepared
   // zoom-out backdrop in it is no longer reusable.
@@ -6028,8 +6515,12 @@ bool Maps::generateVectorMap(uint8_t zoom) {
 #if POWER_METRICS
   const uint32_t powerDrawStartUs = micros();
 #endif
+  const bool cooperativeGuidanceBuildings =
+      guidanceFrame && frameProjection.isBirdsEye() &&
+      (currentMapStyleSettings().visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
   if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
-                           zoom, rotationRad, frameProjection)) {
+                           zoom, rotationRad, frameProjection, true,
+                           cooperativeGuidanceBuildings)) {
 #if POWER_METRICS
     powerDrawUs = micros() - powerDrawStartUs;
     powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
@@ -6044,6 +6535,24 @@ bool Maps::generateVectorMap(uint8_t zoom) {
                                      powerRouteUs);
 #endif
   const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
+
+  if (cooperativeGuidanceBuildings) {
+    if (startGuidanceBuildingRenderJob(
+            zoom, renderExtent.width, renderExtent.height, renderStride,
+            Maps::viewPort, frameProjection)) {
+      // The base map is already complete in the hidden buffer.  The building
+      // pass advances one bounded unit per UI cycle and publishes atomically
+      // when its deterministic queue is exhausted.
+      MAPIO_LOG("MAPIO: guidance-job start zoom=%u baseMs=%lu blocks=%u\n",
+                (unsigned)zoom, (unsigned long)drawMs,
+                (unsigned)Maps::memCache.blocks.size());
+      powerMeasurement.finish(false);
+      return false;
+    }
+    // Allocation failure is controlled degradation: publish the complete 2D
+    // underlay rather than retrying a synchronous multi-second pass.
+    MAPIO_LOG("MAPIO: guidance-job fallback=2d reason=allocation\n");
+  }
 
   if (shouldInterruptMapRenderForScreenCycle()) {
     log_i("Map render interrupted before route overlay");

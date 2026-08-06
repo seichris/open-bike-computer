@@ -21,6 +21,7 @@
 #include "lvgl.h"
 #include "mapFontAsset.hpp"
 #include "mapBuildingRenderer.hpp"
+#include "mapRenderJobPolicy.hpp"
 #include "mapLabelBlock.hpp"
 #include "mapBuildingBlock.hpp"
 #include "mapLabelLayout.hpp"
@@ -119,6 +120,92 @@ private:
     uint8_t zoom;
   };
   ViewPort viewPort; // Vector map viewport
+
+  // Guidance buildings are rendered as a resumable job after the flat map
+  // underlay has been prepared.  The visible canvas is never touched by this
+  // job; all callbacks write directly to bufMapTemp and publish only after a
+  // complete far-to-near pass.
+  struct GuidanceBuildingRenderItem {
+    MapBlock *block = nullptr;
+    const map_building_block::Building *building = nullptr;
+    double depth = 0.0;
+    uint16_t recordIndex = 0;
+    size_t pointCount = 0;
+    bool render = false;
+    bool extrude = false;
+    bool extrusionCandidate = false;
+  };
+
+  struct GuidanceBuildingRenderJob {
+    enum class Phase : uint8_t { None, Discover, Select, Draw };
+
+    bool active = false;
+    Phase phase = Phase::None;
+    uint8_t zoom = map_transform::kMinimumRuntimeZoom;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint32_t strideBytes = 0;
+    size_t blockIndex = 0;
+    size_t recordIndex = 0;
+    size_t drawIndex = 0;
+    size_t discoveredRecords = 0;
+    size_t renderedRecords = 0;
+    size_t extrudedRecords = 0;
+    size_t renderedPoints = 0;
+    size_t extrudedPoints = 0;
+    map_projection::Projection projection;
+    ViewPort viewPort;
+    std::vector<GuidanceBuildingRenderItem,
+                PsramAllocator<GuidanceBuildingRenderItem>> queue;
+    MapBuildingVector<map_projection::GroundPoint> eligibilityGround;
+    MapBuildingVector<map_projection::GroundPoint> eligibilityClipped;
+    std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
+    std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    map_building_renderer::UnderlayRegion courtyardUnderlayRegion;
+    bool courtyardUnderlayReady = false;
+    bool courtyardUnderlayUnavailable = false;
+
+    void clear() {
+      active = false;
+      phase = Phase::None;
+      blockIndex = 0;
+      recordIndex = 0;
+      drawIndex = 0;
+      discoveredRecords = 0;
+      renderedRecords = 0;
+      extrudedRecords = 0;
+      renderedPoints = 0;
+      extrudedPoints = 0;
+      queue.clear();
+      eligibilityGround.clear();
+      eligibilityClipped.clear();
+      courtyardUnderlay.clear();
+      courtyardScanlineNodes.clear();
+      courtyardUnderlayRegion = {};
+      courtyardUnderlayReady = false;
+      courtyardUnderlayUnavailable = false;
+    }
+
+    void release() {
+      clear();
+      decltype(queue){}.swap(queue);
+      decltype(eligibilityGround){}.swap(eligibilityGround);
+      decltype(eligibilityClipped){}.swap(eligibilityClipped);
+      decltype(courtyardUnderlay){}.swap(courtyardUnderlay);
+      decltype(courtyardScanlineNodes){}.swap(courtyardScanlineNodes);
+    }
+  } guidanceBuildingRenderJob;
+
+  bool advanceGuidanceBuildingRenderJob();
+  bool startGuidanceBuildingRenderJob(
+      uint8_t zoom, uint16_t width, uint16_t height, uint32_t strideBytes,
+      const ViewPort &frameViewPort,
+      const map_projection::Projection &projection);
+  bool renderGuidanceBuilding(const GuidanceBuildingRenderItem &item);
+  bool fillGuidancePolygon(
+      const MapBuildingVector<map_building_renderer::ScreenPoint> &points,
+      uint16_t color);
+  void publishGuidanceRenderJob();
   struct MemBlocks   // MemBlocks stored in memory
   {
     std::map<String, u_int16_t> blocks_map; // block offset -> block index
@@ -364,6 +451,8 @@ private:
   map_motion::HeadingPresenter headingPresenter;
   map_transform::WorldPoint latestPresentedWorld;
   bool hasLatestPresentedWorld = false;
+  double guidancePixelsPerMs = 0.0;
+  uint32_t guidanceMotionSampleMs = 0;
   map_transform::WorldPoint presentedGpsWorld(uint32_t nowMs);
   void updateGuidanceRouteHead(map_transform::WorldPoint presentedWorld);
   void applyGuidanceMotionOffset(map_transform::WorldPoint presentedWorld);
@@ -398,6 +487,9 @@ public:
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
   bool hasMapCanvas() const { return canvasMap != nullptr; }
+  bool isMapRenderPending() const { return guidanceBuildingRenderJob.active; }
+  void cancelPendingMapRender() { guidanceBuildingRenderJob.clear(); }
+  void releasePendingMapRender() { guidanceBuildingRenderJob.release(); }
   void displayMap();
   void updatePositionOverlay();
   bool isGuidanceBirdsEyeProjection() const;

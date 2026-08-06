@@ -1044,10 +1044,20 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
   applyMapRotationForActiveTile();
 
   bool navigationOverlayChanged = false;
+  const bool routeChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Route) != 0;
+  const bool settingsChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Settings) != 0;
   if (activeTile == MAP_GUIDANCE) {
     mapView.followGps = true;
     navigationOverlayChanged =
         uiChangeTracker.take(ui_update_policy::Source::Navigation);
+    if (navigationOverlayChanged || routeChanged || settingsChanged) {
+      // A navigation, route, or style mutation invalidates the immutable
+      // back-buffer request. Cancel it before the next scheduler decision so
+      // old buildings can never be published over a newer map model.
+      mapView.cancelPendingMapRender();
+    }
     if (navigationOverlayChanged) {
       // Apply the maneuver model before considering synchronous base-map work.
       // The caller gives LVGL one cycle to present this overlay first.
@@ -1067,7 +1077,22 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     mapView.updatePositionOverlay();
   }
 
-  if (mapView.guidanceProjectionNeedsRefresh()) {
+  const bool projectionNeedsRefresh =
+      mapView.guidanceProjectionNeedsRefresh();
+
+  // Keep the current visible frame translating while a guidance building job
+  // fills the hidden back buffer.  A position request inside its dynamic
+  // overscan lead can wait for the current immutable frame; once that lead is
+  // consumed, cancel and admit a fresh frame instead of publishing stale
+  // geometry at the edge of the visible viewport.
+  if (mapView.isMapRenderPending()) {
+    if (!projectionNeedsRefresh)
+      return navigationOverlayChanged;
+    mapView.cancelPendingMapRender();
+    mapRenderScheduler.request(map_render_policy::Reason::Position);
+  }
+
+  if (projectionNeedsRefresh) {
     mapRenderScheduler.request(map_render_policy::Reason::Position);
   }
 
@@ -1207,12 +1232,6 @@ void updateMainScreen(lv_timer_t *t) {
     }
   }
 
-  // Route and settings handlers already set the concrete map redraw flags or
-  // apply screen settings. Consuming their signatures prevents stale work from
-  // being mistaken for a later visible-widget change.
-  (void)uiChangeTracker.take(ui_update_policy::Source::Route);
-  (void)uiChangeTracker.take(ui_update_policy::Source::Settings);
-
   // Synchronous vector-map generation can be long. When a new maneuver and a
   // base-map request arrive together, return to LVGL once so the lightweight
   // overlay can be presented before the expensive background regeneration.
@@ -1284,6 +1303,12 @@ void updateMap(lv_event_t *event) {
       powerMeasurement.finish(true);
     }
     if (!renderCompleted) {
+      if (mapView.isMapRenderPending()) {
+        // Cooperative progress is expected; do not mark it interrupted or
+        // force a fresh request while the hidden frame is still being built.
+        mapView.redrawMap = true;
+        return;
+      }
       // Keep both flags set so the map is regenerated cleanly if the user
       // remains on this screen. Do not display the partially rendered canvas.
       mapView.redrawMap = true;

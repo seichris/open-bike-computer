@@ -151,7 +151,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_guidance_vector_frame_reserves_motion_overscan(self):
         self.assertIn(
-            "constexpr uint16_t kGuidanceOverscanPixels = 96;",
+            "map_render_job_policy::kGuidanceOverscanPixels",
             MAP_RENDERER_SOURCE,
         )
         render_body = function_body(
@@ -180,13 +180,53 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         refresh_body = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::guidanceProjectionNeedsRefresh"
         )
-        self.assertIn("kGuidanceRefreshSafetyPixels", refresh_body)
+        self.assertIn("map_render_job_policy::refreshLeadPixels", refresh_body)
+        self.assertIn("map_render_job_policy::availableMotionPixels", refresh_body)
+        self.assertIn("guidancePixelsPerMs", refresh_body)
+        self.assertIn("guidanceBuildingRenderJob.projection", refresh_body)
         self.assertIn(
-            "visibleProjection.anchorX() - availableMotion", refresh_body
+            "projection->anchorX() - refreshDistance", refresh_body
         )
         self.assertIn(
-            "visibleProjection.anchorY() + availableMotion", refresh_body
+            "projection->anchorY() + refreshDistance", refresh_body
         )
+
+    def test_guidance_buildings_use_a_resumable_back_buffer_job(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap")
+        read_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        update_body = function_body(MAIN_SCREEN_SOURCE, "void updateMap(lv_event_t *event)")
+        self.assertIn("if (isMapRenderPending())", render_body)
+        self.assertIn("return advanceGuidanceBuildingRenderJob();", render_body)
+        self.assertIn("cooperativeGuidanceBuildings", render_body)
+        self.assertIn("startGuidanceBuildingRenderJob", render_body)
+        self.assertIn("readVectorMap(Maps::viewPort", render_body)
+        self.assertIn("cooperativeGuidanceBuildings))", render_body)
+        self.assertIn("suppressBuildings || guidanceBirdsEye", read_body)
+        self.assertIn("if (mapView.isMapRenderPending())", update_body)
+        self.assertIn("mapView.cancelPendingMapRender()", MAIN_SCREEN_SOURCE)
+
+    def test_pending_guidance_job_is_cancelled_only_after_motion_lead_is_used(self):
+        prepare_body = function_body(
+            MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate"
+        )
+        self.assertIn("const bool projectionNeedsRefresh", prepare_body)
+        self.assertIn("if (!projectionNeedsRefresh)", prepare_body)
+        self.assertIn("mapView.cancelPendingMapRender()", prepare_body)
+        self.assertIn(
+            "mapRenderScheduler.request(map_render_policy::Reason::Position)",
+            prepare_body,
+        )
+
+    def test_guidance_admission_is_fixed_quota_not_a_wall_clock_prefix(self):
+        policy_source = (
+            ESP32_ROOT / "lib" / "maps" / "src" / "mapRenderJobPolicy.hpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("kGuidanceMaximumQueuedBuildingRecords", policy_source)
+        self.assertIn("kGuidanceMaximumRenderedBuildingRecords", policy_source)
+        self.assertIn("kGuidanceMaximumRenderedBuildingPoints", policy_source)
+        self.assertIn("kGuidanceDiscoveryRecordsPerSlice", policy_source)
+        self.assertIn("same immutable frame", policy_source)
+        self.assertNotIn("900U", policy_source)
 
     def test_building_deadline_and_allocation_failures_use_bounded_fallback(self):
         render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
