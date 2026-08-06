@@ -1,4 +1,6 @@
 esp32/.pio
+# pioarduino generates this ESP-IDF project file during verified builds.
+esp32/CMakeLists.txt
 esp32/.vscode/.browse.c_cpp.db*
 esp32/.vscode/c_cpp_properties.json
 esp32/.vscode/launch.json
