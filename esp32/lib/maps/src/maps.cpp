@@ -2397,6 +2397,17 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       guidanceBirdsEye
           ? kGuidanceMaximumQueuedBuildingRecords
           : map_building_renderer::kMaximumRenderedBuildingRecords;
+  const size_t buildingWorkspaceViewportPixels =
+      static_cast<size_t>(Maps::mapScrWidth) *
+      static_cast<size_t>(mapSet.mapFullScreen ? Maps::mapScrFull
+                                               : Maps::mapScrHeight);
+  // Courtyard snapshots are temporary building-pass workspace. Keep an
+  // individual snapshot no larger than the visible viewport even when the
+  // guidance renderer is using its 96 px overscan frame. A large courtyard
+  // that exceeds this bound is left unfilled so the real underlay remains
+  // visible; the 2D map and other building surfaces still render.
+  const size_t maximumCourtyardUnderlayPixels =
+      std::max<size_t>(1U, buildingWorkspaceViewportPixels);
   uint64_t buildingContextSignature = 1469598103934665603ULL;
   const auto mixBuildingContext = [&](uint64_t value) {
     buildingContextSignature ^= value;
@@ -2712,6 +2723,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
     std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    map_building_renderer::UnderlayRegion courtyardUnderlayRegion;
+    size_t largestCourtyardUnderlayBytes = 0;
+    uint32_t courtyardSnapshotCount = 0;
     map_building_renderer::SurfaceStats buildingSurfaceStats;
     const auto releaseBuildingFailureWorkspace = [&]() {
       decltype(buildingQueue){}.swap(buildingQueue);
@@ -3022,6 +3036,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       }
       bool courtyardUnderlayReady = false;
       bool courtyardUnderlayUnavailable = false;
+      courtyardUnderlayRegion = {};
       const bool surfacesRendered = map_building_renderer::renderSurfaces(
           *item.building, item.block->offset.x, item.block->offset.y,
           item.block->mercatorScale, projection, item.extrude,
@@ -3058,17 +3073,70 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                 courtyardUnderlayUnavailable = true;
                 return true;
               }
-              const size_t stridePixels = drawBuffer->header.stride / 2U;
+              if (drawBuffer->data == nullptr) {
+                courtyardUnderlayUnavailable = true;
+                return true;
+              }
+              const int32_t canvasWidth = drawBuffer->header.w;
+              const int32_t canvasHeight = drawBuffer->header.h;
+              const size_t canvasStridePixels =
+                  drawBuffer->header.stride / sizeof(uint16_t);
+              int32_t minX = buildingSurfacePoints.front().x;
+              int32_t maxX = buildingSurfacePoints.front().x;
+              int32_t minY = buildingSurfacePoints.front().y;
+              int32_t maxY = buildingSurfacePoints.front().y;
+              for (const Point16 &point : buildingSurfacePoints) {
+                minX = std::min(minX, static_cast<int32_t>(point.x));
+                maxX = std::max(maxX, static_cast<int32_t>(point.x));
+                minY = std::min(minY, static_cast<int32_t>(point.y));
+                maxY = std::max(maxY, static_cast<int32_t>(point.y));
+              }
+              const int32_t regionX = std::max<int32_t>(0, minX);
+              const int32_t regionY = std::max<int32_t>(0, minY);
+              const int32_t regionEndX =
+                  std::min<int32_t>(canvasWidth, maxX + 1);
+              const int32_t regionEndY =
+                  std::min<int32_t>(canvasHeight, maxY + 1);
+              const int32_t regionWidth = regionEndX - regionX;
+              const int32_t regionHeight = regionEndY - regionY;
+              if (regionWidth <= 0 || regionHeight <= 0) {
+                courtyardUnderlayUnavailable = true;
+                return true;
+              }
               const size_t pixelCount =
-                  stridePixels * drawBuffer->header.h;
+                  static_cast<size_t>(regionWidth) *
+                  static_cast<size_t>(regionHeight);
+              if (pixelCount > maximumCourtyardUnderlayPixels) {
+                courtyardUnderlayUnavailable = true;
+                return true;
+              }
               try {
                 courtyardUnderlay.resize(pixelCount);
               } catch (const std::bad_alloc &) {
                 courtyardUnderlayUnavailable = true;
                 return true;
               }
-              std::memcpy(courtyardUnderlay.data(), drawBuffer->data,
-                          pixelCount * sizeof(uint16_t));
+              courtyardUnderlayRegion = {
+                  regionX, regionY, regionWidth, regionHeight,
+                  static_cast<size_t>(regionWidth), pixelCount};
+              const auto *canvasPixels =
+                  reinterpret_cast<const uint16_t *>(drawBuffer->data);
+              for (int32_t row = 0; row < regionHeight; ++row) {
+                const size_t canvasOffset =
+                    static_cast<size_t>(regionY + row) * canvasStridePixels +
+                    static_cast<size_t>(regionX);
+                const size_t underlayOffset =
+                    static_cast<size_t>(row) *
+                    courtyardUnderlayRegion.stridePixels;
+                std::memcpy(courtyardUnderlay.data() + underlayOffset,
+                            canvasPixels + canvasOffset,
+                            static_cast<size_t>(regionWidth) *
+                                sizeof(uint16_t));
+              }
+              largestCourtyardUnderlayBytes = std::max(
+                  largestCourtyardUnderlayBytes,
+                  pixelCount * sizeof(uint16_t));
+              ++courtyardSnapshotCount;
               if (shouldStopBuildingWork())
                 return false;
               courtyardUnderlayReady = true;
@@ -3089,14 +3157,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
               if (drawBuffer == nullptr)
                 return false;
-              return map_building_renderer::restoreCourtyardUnderlay(
+              return map_building_renderer::restoreCourtyardUnderlayRegion(
                   buildingSurfacePoints,
                   reinterpret_cast<uint16_t *>(drawBuffer->data),
                   drawBuffer->header.w, drawBuffer->header.h,
                   drawBuffer->header.stride / 2U,
-                  courtyardUnderlay.data(), courtyardUnderlay.size(),
-                  courtyardScanlineNodes,
-                  shouldStopBuildingWork);
+                  courtyardUnderlay.data(), courtyardUnderlayRegion,
+                  courtyardScanlineNodes, shouldStopBuildingWork);
             }
 
             uint16_t color = roofColor;
@@ -3151,6 +3218,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "wallCandidates=%llu generatedWallFaces=%llu "
               "suppressedWallFaces=%llu "
               "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+              "courtyardSnapshots=%u courtyardMaxBytes=%u "
+              "courtyardBudgetBytes=%u "
               "deadlineExceeded=%u prepassDeadlineExceeded=%u "
               "psramUsed=%u psramFree=%u psramLargest=%u "
               "budgetFallback=%u renderRecordOverflowTotal=%llu "
@@ -3184,6 +3253,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)buildingProjectionMs,
               (unsigned long)buildingSortMs,
               (unsigned long)buildingDrawMs,
+              (unsigned)courtyardSnapshotCount,
+              (unsigned)largestCourtyardUnderlayBytes,
+              (unsigned)(maximumCourtyardUnderlayPixels * sizeof(uint16_t)),
               buildingDeadlineExceeded ? 1U : 0U,
               buildingPrepassDeadlineExceeded ? 1U : 0U,
               (unsigned)(ESP.getPsramSize() -
@@ -3226,6 +3298,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             "visibleRecords=%u visiblePoints=%llu rendered=%u extruded=%u "
             "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
             "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+            "courtyardSnapshots=%u courtyardMaxBytes=%u "
+            "courtyardBudgetBytes=%u "
             "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
             "psramLargest=%u psramSamplePostCleanup=%u\n",
             failureReason, (unsigned)loadedBuildingStats.records,
@@ -3243,6 +3317,9 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned long long)renderTimeOverflowTotal,
             (unsigned long)buildingProjectionMs,
             (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
+            (unsigned)courtyardSnapshotCount,
+            (unsigned)largestCourtyardUnderlayBytes,
+            (unsigned)(maximumCourtyardUnderlayPixels * sizeof(uint16_t)),
             buildingPrepassDeadlineExceeded ? 1U : 0U,
             (unsigned)buildingFailurePsramUsed,
             (unsigned)buildingFailurePsramFree,

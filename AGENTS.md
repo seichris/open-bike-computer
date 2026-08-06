@@ -20,7 +20,10 @@
 - `hardware/`: authoritative Waveshare pinouts, board findings, schematics,
   datasheets, and physical validation records. Read `hardware/README.md` before
   changing board-specific firmware.
-- `docs/`: protocol, rollout, and implementation documentation.
+- `docs/`: protocol, rollout, and implementation documentation. The
+  [firmware map-rendering and PSRAM budget](docs/firmware-map-rendering-psram.md)
+  is the source of truth for map-frame sizes, 3D-building workspace, and
+  measured rendering/power numbers.
 
 ## Quick commands
 
@@ -202,6 +205,16 @@ as flashed until a later `BOOT_META` independently confirms the
 embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
+
+### Firmware map-rendering and PSRAM budget
+
+When a task asks about map rendering, 3D buildings, PSRAM, rendering
+performance, or battery impact—or changes or tests any of those areas—read
+`docs/firmware-map-rendering-psram.md` first. Update that document in the same
+change whenever an implementation or device test produces a relevant number;
+record the commit, board/profile, map/navigation fixture, and whether the
+number is static, runtime, or externally measured. Do not treat USB current or
+host-only estimates as a battery baseline.
 
 ### iOS app
 

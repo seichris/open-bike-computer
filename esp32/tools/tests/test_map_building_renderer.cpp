@@ -406,6 +406,35 @@ void assertCourtyardRestoresRealUnderlay() {
   assert(canvas[7 * width + 7] == 0xFFFF);
 }
 
+void assertCourtyardRestoresCompactUnderlayRegion() {
+  constexpr int32_t width = 8;
+  constexpr int32_t height = 8;
+  constexpr int32_t regionX = 2;
+  constexpr int32_t regionY = 2;
+  constexpr int32_t regionWidth = 4;
+  constexpr int32_t regionHeight = 4;
+  std::vector<uint16_t> underlay(regionWidth * regionHeight);
+  for (size_t index = 0; index < underlay.size(); ++index)
+    underlay[index] = static_cast<uint16_t>(100 + index);
+  std::vector<uint16_t> canvas(width * height, 0xFFFF);
+  const std::vector<ScreenPoint> courtyard = {
+      {2, 2}, {6, 2}, {6, 6}, {2, 6},
+  };
+  std::vector<int32_t> nodes(courtyard.size());
+  const map_building_renderer::UnderlayRegion region{
+      regionX, regionY, regionWidth, regionHeight,
+      static_cast<size_t>(regionWidth), underlay.size()};
+  const bool restored =
+      map_building_renderer::restoreCourtyardUnderlayRegion(
+          courtyard, canvas.data(), width, height, width, underlay.data(),
+          region, nodes, []() { return false; });
+  assert(restored);
+  assert(canvas[3 * width + 3] == underlay[1 * regionWidth + 1]);
+  assert(canvas[5 * width + 5] == underlay[3 * regionWidth + 3]);
+  assert(canvas[0] == 0xFFFF);
+  assert(canvas[7 * width + 7] == 0xFFFF);
+}
+
 void assertInterruptionPropagates() {
   const auto building = buildingWithCourtyard();
   const auto projection =
@@ -496,6 +525,7 @@ int main() {
   assertOrderingAndBudget();
   assertNearPlaneMatrix();
   assertCourtyardRestoresRealUnderlay();
+  assertCourtyardRestoresCompactUnderlayRegion();
   assertInterruptionPropagates();
   assertAllocationFailureFailsClosed();
   assertFailureRetryCooldown();

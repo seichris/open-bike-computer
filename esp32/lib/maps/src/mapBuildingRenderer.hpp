@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <utility>
 
 namespace map_building_renderer {
 
@@ -343,21 +344,42 @@ struct SurfaceStats {
   size_t suppressedWallFaces = 0;
 };
 
+// The underlay is normally a small courtyard bounding box, not a second copy
+// of the complete map canvas. Coordinates stay in canvas space so the same
+// helper works for an overscanned guidance frame and the ordinary viewport.
+struct UnderlayRegion {
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t width = 0;
+  int32_t height = 0;
+  size_t stridePixels = 0;
+  size_t pixels = 0;
+};
+
 // Restore the pixels under a projected courtyard after the outer roof has
 // been filled. The snapshot is captured after wall drawing but before roofs,
 // so land use, roads, farther buildings, and courtyard walls remain visible
 // through the opening instead of being replaced by a fixed background color.
 template <typename Points, typename Nodes, typename ShouldInterrupt>
-bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
-                              int32_t width, int32_t height,
-                              size_t stridePixels, const uint16_t *underlay,
-                              size_t underlayPixels, Nodes &nodes,
-                              ShouldInterrupt &&shouldInterrupt) {
+bool restoreCourtyardUnderlayRegion(
+    const Points &points, uint16_t *canvas, int32_t width, int32_t height,
+    size_t stridePixels, const uint16_t *underlay,
+    const UnderlayRegion &underlayRegion, Nodes &nodes,
+    ShouldInterrupt &&shouldInterrupt) {
   if (points.size() < 3)
     return true;
   if (canvas == nullptr || underlay == nullptr || width <= 0 || height <= 0 ||
       stridePixels < static_cast<size_t>(width) ||
-      underlayPixels < stridePixels * static_cast<size_t>(height) ||
+      underlayRegion.x < 0 || underlayRegion.y < 0 ||
+      underlayRegion.width <= 0 || underlayRegion.height <= 0 ||
+      underlayRegion.stridePixels <
+          static_cast<size_t>(underlayRegion.width) ||
+      underlayRegion.pixels <
+          underlayRegion.stridePixels *
+              static_cast<size_t>(underlayRegion.height) ||
+      underlayRegion.x >= width || underlayRegion.y >= height ||
+      underlayRegion.x + underlayRegion.width > width ||
+      underlayRegion.y + underlayRegion.height > height ||
       nodes.size() < points.size()) {
     return false;
   }
@@ -368,8 +390,11 @@ bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
     minY = std::min<int32_t>(minY, point.y);
     maxY = std::max<int32_t>(maxY, point.y);
   }
-  minY = std::max<int32_t>(0, minY);
-  maxY = std::min<int32_t>(height - 1, maxY);
+  minY = std::max<int32_t>(
+      std::max<int32_t>(0, minY), underlayRegion.y);
+  maxY = std::min<int32_t>(
+      std::min<int32_t>(height - 1, maxY),
+      underlayRegion.y + underlayRegion.height - 1);
   if (minY > maxY)
     return true;
 
@@ -390,16 +415,41 @@ bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
     }
     std::sort(nodes.begin(), nodes.begin() + count);
     for (size_t index = 0; index + 1U < count; index += 2U) {
-      const int32_t startX = std::max<int32_t>(0, nodes[index]);
-      const int32_t endX = std::min<int32_t>(width, nodes[index + 1U]);
+      const int32_t startX = std::max<int32_t>(
+          std::max<int32_t>(0, nodes[index]), underlayRegion.x);
+      const int32_t endX = std::min<int32_t>(
+          std::min<int32_t>(width, nodes[index + 1U]),
+          underlayRegion.x + underlayRegion.width);
       if (startX >= endX)
         continue;
-      const size_t offset = static_cast<size_t>(y) * stridePixels + startX;
-      std::memcpy(canvas + offset, underlay + offset,
+      const size_t canvasOffset = static_cast<size_t>(y) * stridePixels +
+                                   static_cast<size_t>(startX);
+      const size_t underlayOffset =
+          static_cast<size_t>(y - underlayRegion.y) *
+              underlayRegion.stridePixels +
+          static_cast<size_t>(startX - underlayRegion.x);
+      std::memcpy(canvas + canvasOffset, underlay + underlayOffset,
                   static_cast<size_t>(endX - startX) * sizeof(uint16_t));
     }
   }
   return true;
+}
+
+template <typename Points, typename Nodes, typename ShouldInterrupt>
+bool restoreCourtyardUnderlay(const Points &points, uint16_t *canvas,
+                              int32_t width, int32_t height,
+                              size_t stridePixels, const uint16_t *underlay,
+                              size_t underlayPixels, Nodes &nodes,
+                              ShouldInterrupt &&shouldInterrupt) {
+  const UnderlayRegion fullRegion{0,
+                                  0,
+                                  width,
+                                  height,
+                                  stridePixels,
+                                  underlayPixels};
+  return restoreCourtyardUnderlayRegion(
+      points, canvas, width, height, stridePixels, underlay, fullRegion, nodes,
+      std::forward<ShouldInterrupt>(shouldInterrupt));
 }
 
 // Emits walls first, then roof/courtyard rings. The callback returns false to

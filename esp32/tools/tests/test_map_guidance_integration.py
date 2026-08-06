@@ -229,6 +229,18 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             r"if \(!buildingPassCompleted\)\s*\{[\s\S]*?return false;\s*\}",
         )
 
+    def test_courtyard_workspace_is_bounded_to_visible_viewport(self):
+        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn("buildingWorkspaceViewportPixels", render_body)
+        self.assertIn("maximumCourtyardUnderlayPixels", render_body)
+        self.assertIn("restoreCourtyardUnderlayRegion", render_body)
+        self.assertIn("courtyardBudgetBytes=%u", render_body)
+        self.assertIn("courtyardMaxBytes=%u", render_body)
+        self.assertIn("courtyardUnderlayUnavailable", render_body)
+        self.assertIn("real underlay", render_body)
+        self.assertIn("maxX + 1", render_body)
+        self.assertIn("maxY + 1", render_body)
+
     def test_navigation_screen_retains_destination_picker(self):
         create_body = function_body(MAIN_SCREEN_SOURCE, "void createMainScr")
         update_body = function_body(MAIN_SCREEN_SOURCE, "void updateNavEvent")
