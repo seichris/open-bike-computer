@@ -14,6 +14,7 @@
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
+#include "mapMotion.hpp"
 #include "map_projection.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
 #include "../../utils/src/mapRasterWindow.hpp"
@@ -356,6 +357,14 @@ private:
   void rebaseRollingDragAtVisibleEndpoint();
   void resetDragPresentationVisuals();
 
+  // GPS fixes arrive less frequently than the LVGL frame timer. Keep the
+  // displayed position and course independent from that cadence so the route,
+  // map, and marker move as one continuous presentation.
+  map_motion::PositionPresenter positionPresenter;
+  map_motion::HeadingPresenter headingPresenter;
+  map_transform::WorldPoint presentedGpsWorld(uint32_t nowMs);
+  void applyGuidanceMotionOffset(map_transform::WorldPoint presentedWorld);
+
 public:
   uint16_t mapScrHeight;  // Screen map size height
   uint16_t mapScrWidth;   // Screen map size width
@@ -388,6 +397,9 @@ public:
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
   void updatePositionOverlay();
+  uint16_t courseUpHeading(double latitude, double longitude,
+                           uint16_t gpsHeading);
+  void resetCourseUpHeading();
   void setWaypoint(double wptLat, double wptLon);
   void updateMap();
   void panMap(int8_t dx, int8_t dy);

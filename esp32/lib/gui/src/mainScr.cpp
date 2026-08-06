@@ -549,12 +549,9 @@ static int16_t mapInteractionAnchorY() {
 }
 
 static uint16_t currentCourseUpHeading() {
-  uint16_t routeHeading = 0;
-  if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
-                               routeHeading)) {
-    return routeHeading;
-  }
-  return gps.gpsData.heading;
+  return mapView.courseUpHeading(gps.gpsData.latitude,
+                                 gps.gpsData.longitude,
+                                 gps.gpsData.heading);
 }
 
 static bool isMapBackedTile(uint8_t tile) {
@@ -691,6 +688,7 @@ static void applyMapRotationForActiveTile() {
         isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
     if (mapView.rotationMode != desiredMode) {
       mapView.rotationMode = desiredMode;
+      mapView.resetCourseUpHeading();
       if (desiredMode == Maps::ROT_NORTH_UP) {
         mapView.rotationRad = 0;
       }
@@ -709,12 +707,14 @@ static void applyMapRotationForActiveTile() {
   if (mapRenderSettings.mapRotationMode == 1 &&
       mapView.rotationMode != Maps::ROT_COURSE_UP) {
     mapView.rotationMode = Maps::ROT_COURSE_UP;
+    mapView.resetCourseUpHeading();
     mapView.updateArrowColor();
     requestMapRender(map_render_policy::Reason::Style);
     log_i("Creating Map: Syncing rotation to Course Up (from settings)");
   } else if (mapRenderSettings.mapRotationMode == 0 &&
              mapView.rotationMode != Maps::ROT_NORTH_UP) {
     mapView.rotationMode = Maps::ROT_NORTH_UP;
+    mapView.resetCourseUpHeading();
     mapView.rotationRad = 0;
     mapView.updateArrowColor();
     requestMapRender(map_render_policy::Reason::Style);
@@ -1055,11 +1055,16 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     }
   }
 
-  if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
-    // Keep the lightweight marker current for every accepted fix. The vector
-    // background has a separate, bounded regeneration policy.
-    mapView.updatePositionOverlay();
+  const bool gpsChanged = uiChangeTracker.take(ui_update_policy::Source::Gps);
+  if (gpsChanged) {
     mapRenderScheduler.observe(currentMapFix());
+  }
+
+  // Present the latest fix on every 30 ms UI tick. This is intentionally
+  // separate from the bounded base-map scheduler: the route and map canvas can
+  // move by sub-fix pixels without forcing a full synchronous vector render.
+  if (activeTile == MAP || activeTile == MAP_GUIDANCE) {
+    mapView.updatePositionOverlay();
   }
 
   if (mapRenderScheduler.hasPendingWork()) {

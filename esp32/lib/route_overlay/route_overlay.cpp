@@ -73,6 +73,7 @@ bool RouteOverlay::headingNear(double lat, double lon,
   const double cosLat = cos(DEG2RAD(lat));
   double bestDistanceSq = DBL_MAX;
   size_t bestSegment = 0;
+  double firstSegmentDistanceSq = DBL_MAX;
 
   for (size_t i = 0; i + 1 < points.size(); i++) {
     const double lat1 = points[i].lat / 1000000.0;
@@ -96,6 +97,9 @@ bool RouteOverlay::headingNear(double lat, double lon,
     const double closestX = x1 + (segX * t);
     const double closestY = y1 + (segY * t);
     const double distanceSq = (closestX * closestX) + (closestY * closestY);
+    if (i == 0) {
+      firstSegmentDistanceSq = distanceSq;
+    }
     if (distanceSq < bestDistanceSq) {
       bestDistanceSq = distanceSq;
       bestSegment = i;
@@ -104,6 +108,22 @@ bool RouteOverlay::headingNear(double lat, double lon,
 
   if (bestDistanceSq == DBL_MAX) {
     return false;
+  }
+
+  // Geometry windows start with the rider's current route position. Keep the
+  // first segment while the rider is still close to it, even if a later turn
+  // is geometrically almost as close. This prevents a course-up rotation from
+  // anticipating a corner because the outgoing segment is visible ahead. Once
+  // the rider has left the first segment by more than the GPS tolerance, the
+  // nearest-segment search naturally advances to the next segment.
+  constexpr double kHeadingContinuityToleranceMeters = 8.0;
+  constexpr double kMetersPerDegree = 111320.0;
+  const double continuityToleranceDegrees =
+      kHeadingContinuityToleranceMeters / kMetersPerDegree;
+  if (firstSegmentDistanceSq != DBL_MAX &&
+      firstSegmentDistanceSq <=
+          continuityToleranceDegrees * continuityToleranceDegrees) {
+    bestSegment = 0;
   }
 
   const double segmentHeading =

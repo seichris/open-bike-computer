@@ -648,6 +648,7 @@ struct NavigationProtocolTests {
         testNavigationEngineKeepsProgressAtRouteCrossing()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
+        testNavigationEngineStartsRouteGeometryAtExactCurrentLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineRefreshesElapsedWithoutLocationChange()
@@ -13603,6 +13604,36 @@ struct NavigationProtocolTests {
                          "route geometry resend should use the latest device location window")
     }
 
+    static func testNavigationEngineStartsRouteGeometryAtExactCurrentLocation() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        let routeCoordinates = [
+            CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0010, longitude: -122.0000),
+            CLLocationCoordinate2D(latitude: 37.0020, longitude: -121.9990)
+        ]
+        let route = TestRoute(instructions: "Continue", coordinates: routeCoordinates)
+        let current = CLLocation(latitude: 37.0007, longitude: -122.0000)
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, initialLocation: current)
+
+        guard let geometry = manager.sentRouteGeometry.first,
+              let firstCoordinate = routeStartCoordinate(from: geometry) else {
+            assert(false, "initial route geometry should include the current GPS coordinate")
+            return
+        }
+        assertCoordinate(
+            firstCoordinate,
+            latitude: current.coordinate.latitude,
+            longitude: current.coordinate.longitude,
+            "route geometry starts at the exact current GPS coordinate"
+        )
+    }
+
     static func testNavigationEngineClearsRouteGeometryOnStop() {
         let manager = TestBLEManager()
         manager.isConnected = true
@@ -14215,8 +14246,8 @@ struct NavigationProtocolTests {
         }
         assertCoordinate(
             replacementStart,
-            latitude: firstManeuver.latitude,
-            longitude: firstManeuver.longitude,
+            latitude: latest.coordinate.latitude,
+            longitude: latest.coordinate.longitude,
             "replacement geometry starts near the rider's latest route position"
         )
         assert(

@@ -492,6 +492,22 @@ static lv_value_precise_t markerCoord(int32_t origin, int16_t size,
           navigation_visual_style::POSITION_MARKER_BASE_SIZE);
 }
 
+// The arrow's geographic reference is the point where it touches the road,
+// not the center of its 48x48 drawing box.  Keeping this anchor explicit makes
+// course-up rotation pivot around the rider's position instead of the arrow's
+// tip and prevents a visual lead/lag when the map canvas moves underneath it.
+static int16_t currentMarkerAnchorX() {
+  const int16_t size = currentMarkerSize();
+  return static_cast<int16_t>(std::lround(markerCoord(0, size, 24)));
+}
+
+static int16_t currentMarkerAnchorY() {
+  const int16_t size = currentMarkerSize();
+  const int16_t baseY = routeOverlay.hasRoute() ? 42 : 24;
+  return static_cast<int16_t>(std::lround(
+      markerCoord(0, size, baseY)));
+}
+
 static lv_value_precise_t markerEdgeXAtY(const lv_point_precise_t &start,
                                          const lv_point_precise_t &end,
                                          lv_value_precise_t y) {
@@ -3682,6 +3698,8 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
 void Maps::deleteMapScrSprites() {
   cancelDragPreview();
   cancelPinchPreview();
+  positionPresenter.reset();
+  headingPresenter.reset();
   pinchZoomOutBackdrop = {};
   invalidateRollingRasterWindow();
   hasVisibleProjection = false;
@@ -5057,12 +5075,16 @@ void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
   if (!pinchPresentation.capturedFollowGps && Maps::canvasArrow != nullptr) {
     const double pivotX = pinchPresentation.initialMidpointX;
     const double pivotY = pinchPresentation.initialMidpointY;
-    const double markerCenterX = pinchPresentation.markerBaseX + 24.0;
-    const double markerCenterY = pinchPresentation.markerBaseY + 24.0;
+    const int16_t markerAnchorX = currentMarkerAnchorX();
+    const int16_t markerAnchorY = currentMarkerAnchorY();
+    const double markerCenterX = pinchPresentation.markerBaseX + markerAnchorX;
+    const double markerCenterY = pinchPresentation.markerBaseY + markerAnchorY;
     const int16_t transformedX = static_cast<int16_t>(std::round(
-        pivotX + ((markerCenterX - pivotX) * ratio) + translationX - 24.0));
+        pivotX + ((markerCenterX - pivotX) * ratio) + translationX -
+        markerAnchorX));
     const int16_t transformedY = static_cast<int16_t>(std::round(
-        pivotY + ((markerCenterY - pivotY) * ratio) + translationY - 24.0));
+        pivotY + ((markerCenterY - pivotY) * ratio) + translationY -
+        markerAnchorY));
     lv_obj_set_pos(Maps::canvasArrow, transformedX, transformedY);
   }
   lv_obj_invalidate(Maps::canvasMap);
@@ -5214,9 +5236,11 @@ void Maps::finishPinchSettlement() {
 void Maps::toggleRotationMode() {
   if (rotationMode == ROT_NORTH_UP) {
     rotationMode = ROT_COURSE_UP;
+    resetCourseUpHeading();
     log_i("Map Rotation: COURSE UP");
   } else {
     rotationMode = ROT_NORTH_UP;
+    resetCourseUpHeading();
     rotationRad = 0;
     log_i("Map Rotation: NORTH UP");
   }
@@ -5355,8 +5379,59 @@ void Maps::displayMap() {
   updatePositionOverlay();
 }
 
+map_transform::WorldPoint Maps::presentedGpsWorld(uint32_t nowMs) {
+  const map_transform::WorldPoint raw = {
+      lon2x(gps.gpsData.longitude), lat2y(gps.gpsData.latitude)};
+  return positionPresenter.update(raw, nowMs);
+}
+
+void Maps::applyGuidanceMotionOffset(
+    map_transform::WorldPoint presentedWorld) {
+  if (!isMapGuidanceScreenActive() || !Maps::followGps ||
+      Maps::canvasMap == nullptr || !hasVisibleProjection ||
+      dragPreviewController.active() || dragPreviewController.settlementPending() ||
+      pinchPresentation.active || pinchPresentation.settlementPending) {
+    return;
+  }
+
+  const auto projected = visibleProjection.projectWorld(presentedWorld);
+  if (!projected.valid)
+    return;
+
+  // A synchronous vector render recenters the canvas. Rebase from that stable
+  // origin on every frame, then apply only the small sub-fix translation. The
+  // marker remains fixed at the same lower-center anchor while the route and
+  // base map move together underneath it.
+  lv_obj_center(Maps::canvasMap);
+  const int16_t baseX = lv_obj_get_x_aligned(Maps::canvasMap);
+  const int16_t baseY = lv_obj_get_y_aligned(Maps::canvasMap);
+  const int32_t offsetX = map_transform::quantizePixel(
+      visibleProjection.anchorX() - projected.x);
+  const int32_t offsetY = map_transform::quantizePixel(
+      visibleProjection.anchorY() - projected.y);
+  if (offsetX == 0 && offsetY == 0)
+    return;
+
+  lv_obj_set_pos(Maps::canvasMap, baseX + offsetX, baseY + offsetY);
+  lv_obj_invalidate(Maps::canvasMap);
+}
+
+uint16_t Maps::courseUpHeading(double latitude, double longitude,
+                               uint16_t gpsHeading) {
+  uint16_t routeHeading = 0;
+  const uint16_t rawHeading =
+      routeOverlay.headingNear(latitude, longitude, routeHeading)
+          ? routeHeading
+          : gpsHeading;
+  return headingPresenter.update(rawHeading, millis(), routeOverlay.revision());
+}
+
+void Maps::resetCourseUpHeading() { headingPresenter.reset(); }
+
 void Maps::updatePositionOverlay() {
   const uint32_t displayStartMs = MAPIO_TIME_MS();
+  const map_transform::WorldPoint presentedWorld =
+      presentedGpsWorld(millis());
   // Update Arrow Position
   if (Maps::canvasArrow) {
     if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
@@ -5386,47 +5461,42 @@ void Maps::updatePositionOverlay() {
                                           visibleProjection.anchorY()))
                                 : mapAnchorYForHeight(h);
     updateCurrentPositionMarker(Maps::canvasArrow);
+    const int16_t markerAnchorX = currentMarkerAnchorX();
+    const int16_t markerAnchorY = currentMarkerAnchorY();
     const int16_t markerVisualHalf = currentMarkerSize() / 2;
     int16_t x, y;
 
     if (Maps::followGps) {
       // The marker is a sibling of the centered map canvas, so translate the
       // canvas-local anchor into map-tile coordinates before applying the
-      // marker's center offset.
-      x = mapOriginX + anchorX - markerVisualHalf;
-      y = mapOriginY + anchorY - markerVisualHalf;
+      // marker's geographic lower-center anchor.
+      x = mapOriginX + anchorX - markerAnchorX;
+      y = mapOriginY + anchorY - markerAnchorY;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
-      ESP_LOGI(TAG, "GPS indicator: followGps mode, anchor screen pos(%d,%d)",
-               x, y);
     } else {
       // Calculate position relative to viewport center
       // Convert GPS lat/lon to Mercator coordinates
-      int32_t gpsX = lon2x(gps.gpsData.longitude);
-      int32_t gpsY = lat2y(gps.gpsData.latitude);
 
       if (useSharedProjection) {
         const auto markerPoint = visibleProjection.projectWorld(
-            {static_cast<double>(gpsX), static_cast<double>(gpsY)});
+            presentedWorld);
         if (!markerPoint.valid) {
           lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
           return;
         }
         x = mapOriginX + map_transform::quantizePixel(markerPoint.x) -
-            markerVisualHalf;
+            markerAnchorX;
         y = mapOriginY + map_transform::quantizePixel(markerPoint.y) -
-            markerVisualHalf;
+            markerAnchorY;
       } else {
         const auto markerDelta = map_transform::worldToScreen(
-            {static_cast<double>(gpsX - Maps::viewPort.center.x),
-             static_cast<double>(gpsY - Maps::viewPort.center.y)},
+            {presentedWorld.x - Maps::viewPort.center.x,
+             presentedWorld.y - Maps::viewPort.center.y},
             zoom, visibleMapRotation());
-        x = mapOriginX + round(markerDelta.x) + anchorX - markerVisualHalf;
-        y = mapOriginY + round(markerDelta.y) + anchorY - markerVisualHalf;
+        x = mapOriginX + round(markerDelta.x) + anchorX - markerAnchorX;
+        y = mapOriginY + round(markerDelta.y) + anchorY - markerAnchorY;
       }
-
-      ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
-               zoom);
 
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
@@ -5439,13 +5509,13 @@ void Maps::updatePositionOverlay() {
           centerY < mapOriginY - markerVisualHalf ||
           centerY > mapOriginY + (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-        ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {
         lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       }
     }
     lv_obj_move_foreground(Maps::canvasArrow);
   }
+  applyGuidanceMotionOffset(presentedWorld);
   MAPIO_LOG("MAPIO: display invalidateMs=%lu hasCanvas=%d hasArrow=%d\n",
             (unsigned long)(MAPIO_TIME_MS() - displayStartMs),
             Maps::canvasMap != nullptr, Maps::canvasArrow != nullptr);
@@ -5482,20 +5552,17 @@ bool Maps::generateVectorMap(uint8_t zoom) {
   // focal calculation started from; a changed heading is rendered next.
   double requestedRotation = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
-    uint16_t courseUpHeading = gps.gpsData.heading;
-    const char *courseUpSource = "gps";
     uint16_t routeHeading = 0;
-    if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
-                                 routeHeading)) {
-      courseUpHeading = routeHeading;
-      courseUpSource = "route";
-    }
+    const bool hasRouteHeading = routeOverlay.headingNear(
+        gps.gpsData.latitude, gps.gpsData.longitude, routeHeading);
+    const uint16_t smoothedHeading = courseUpHeading(
+        gps.gpsData.latitude, gps.gpsData.longitude, gps.gpsData.heading);
 
     // Use negative heading to rotate map so the selected navigation/course
     // direction points up.
-    requestedRotation = -DEG2RAD(courseUpHeading);
+    requestedRotation = -DEG2RAD(smoothedHeading);
     ESP_LOGI(TAG, "Course-Up: heading=%u source=%s gpsHeading=%u",
-             (unsigned)courseUpHeading, courseUpSource,
+             (unsigned)smoothedHeading, hasRouteHeading ? "route" : "gps",
              (unsigned)gps.gpsData.heading);
   }
   const bool frozenPinchSettlement = isPinchSettlementPending();

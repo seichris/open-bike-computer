@@ -697,19 +697,61 @@ extension NavigationEngine {
         var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
         polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
 
-        var closestIndex = 0
+        let currentMapPoint = MKMapPoint(currentLocation.coordinate)
+        var closestSegmentIndex = 0
         var closestDistance = Double.greatestFiniteMagnitude
-        for (index, point) in points.enumerated() {
-            let pointLocation = CLLocation(latitude: point.latitude, longitude: point.longitude)
-            let distance = currentLocation.distance(from: pointLocation)
-            if distance < closestDistance {
-                closestDistance = distance
-                closestIndex = index
+        if pointCount > 1 {
+            for index in 0..<(pointCount - 1) {
+                let start = MKMapPoint(points[index])
+                let end = MKMapPoint(points[index + 1])
+                let dx = end.x - start.x
+                let dy = end.y - start.y
+                let lengthSquared = (dx * dx) + (dy * dy)
+                let t: Double
+                if lengthSquared > 0 {
+                    let projected = ((currentMapPoint.x - start.x) * dx +
+                                     (currentMapPoint.y - start.y) * dy) /
+                        lengthSquared
+                    t = max(0, min(1, projected))
+                } else {
+                    t = 0
+                }
+                let closest = MKMapPoint(x: start.x + dx * t,
+                                         y: start.y + dy * t)
+                let distance = currentMapPoint.distance(to: closest)
+                if distance < closestDistance {
+                    closestDistance = distance
+                    closestSegmentIndex = index
+                }
             }
         }
 
-        let endIndex = min(closestIndex + geometryWindowSize, pointCount)
-        let windowPoints = Array(points[closestIndex..<endIndex])
+        // Always make the device's current route-space coordinate the first
+        // point. The line therefore starts exactly under the marker after the
+        // same GCJ-02 -> WGS-84 conversion used for every other route point,
+        // even when GPS is a few metres away from Apple's route polyline.
+        // Future route vertices begin at the projected segment, not at the
+        // nearest coarse vertex.
+        var windowPoints = [currentLocation.coordinate]
+        if pointCount > 1 {
+            let firstFutureIndex = min(closestSegmentIndex + 1, pointCount - 1)
+            let endIndex = min(firstFutureIndex + max(geometryWindowSize - 1, 0),
+                               pointCount)
+            if firstFutureIndex < endIndex {
+                for point in points[firstFutureIndex..<endIndex] {
+                    let previous = windowPoints[windowPoints.count - 1]
+                    let separation = CLLocation(latitude: previous.latitude,
+                                                longitude: previous.longitude)
+                        .distance(from: CLLocation(latitude: point.latitude,
+                                                   longitude: point.longitude))
+                    // Do not add a duplicate at an exact route vertex. The
+                    // projected segment still contributes its next vertex.
+                    if separation > 0.01 {
+                        windowPoints.append(point)
+                    }
+                }
+            }
+        }
         guard !windowPoints.isEmpty else { return nil }
 
         return compressRoutePoints(windowPoints)
