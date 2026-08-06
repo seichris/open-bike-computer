@@ -20,7 +20,7 @@ A sleek, Garmin-mounted bike computer.
 Explore proposed and in-progress features on our
 [open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature).
 
-Ideas and feature requests are welcome—[open an issue](https://github.com/seichris/open-bike-computer/issues/new).
+Ideas and feature requests are welcome![ Open an issue](https://github.com/seichris/open-bike-computer/issues/new).
 
 For code contributions, see
 [CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
