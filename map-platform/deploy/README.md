@@ -98,6 +98,12 @@ workflow never offers an unsafe "new API with old worker" override after worker
 inputs have changed. Resolve the pending candidate or build a dedicated,
 reviewed compatibility release instead.
 
+The shared `map-platform-data` volume is also the restart-safe source for
+`jobs/*.json`, `map-monitoring.sqlite3`, source-cache state, and filesystem
+artifacts. Coolify/container stdout remains a live structured-log surface, not
+the durable monitoring store; use the admin monitoring endpoint or the CLI
+summary when inspecting history after a restart.
+
 The PR body reports worker movement from the final manifest diff, not merely
 the latest commit's path classification. The workflow never changes production
 directly.

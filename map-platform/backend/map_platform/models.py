@@ -230,6 +230,7 @@ class MapJob:
             "workerId": self.worker_id,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
+            "serverTiming": self.server_timing(),
             "progress": self.progress(),
             "events": self.events,
             "phaseTimings": self.phase_timings(),
@@ -306,6 +307,15 @@ class MapJob:
             "fraction": completed / self.progress_total,
         }
 
+    def server_timing(self) -> dict[str, Any]:
+        """Return durable lifecycle timings derived from persisted timestamps."""
+        return {
+            "queueWaitSeconds": _duration_seconds(self.created_at, self.started_at),
+            "processingSeconds": _duration_seconds(self.started_at, self.finished_at),
+            "totalSeconds": _duration_seconds(self.created_at, self.finished_at),
+            "attempts": self.attempts,
+        }
+
     def phase_timings(self) -> list[dict[str, Any]]:
         transitions: list[tuple[str, str]] = []
         if self.started_at:
@@ -344,7 +354,9 @@ class MapJob:
         return timings
 
 
-def _parse_utc(value: str) -> datetime | None:
+def _parse_utc(value: str | None) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
@@ -362,7 +374,7 @@ def _progress_value(progress: Any, key: str) -> int | None:
         return None
 
 
-def _duration_seconds(started_at: str, finished_at: str) -> float | None:
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
     start = _parse_utc(started_at)
     finish = _parse_utc(finished_at)
     if start is None or finish is None:

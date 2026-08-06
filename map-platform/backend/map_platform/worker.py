@@ -12,6 +12,7 @@ from .jobs import (
     JobStore,
 )
 from .models import JobStatus, MapJob
+from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
 from .pipeline import MapBuildPipeline
 from .reuse import SubsetReuseUnavailable
 
@@ -21,6 +22,7 @@ class WorkerResult:
     worker_id: str
     job: MapJob | None
     processed: bool
+    monitoring_event: dict[str, object] | None = None
 
 
 class ExpiredArtifactCleanupError(RuntimeError):
@@ -94,6 +96,7 @@ class MapWorker:
         interrupted_job_stale_seconds: float = 15 * 60,
         heartbeat_interval_seconds: float = 30.0,
         on_heartbeat=None,
+        monitoring_store: MapMonitoringStore | None = None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -101,6 +104,7 @@ class MapWorker:
         self.interrupted_job_stale_seconds = interrupted_job_stale_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.on_heartbeat = on_heartbeat
+        self.monitoring_store = monitoring_store
 
     def run_next(self) -> WorkerResult:
         self.store.requeue_retryable_failures()
@@ -110,6 +114,7 @@ class MapWorker:
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
+        attempt_started_at = job.updated_at
 
         def update(status: JobStatus) -> None:
             self.store.update_status_unless_cancelled(job.job_id, status, worker_id=self.worker_id)
@@ -168,10 +173,16 @@ class MapWorker:
                             build_compatibility_key=reuse_keys.compatibility,
                         )
                         if finished is not None:
+                            monitoring_event = self._monitoring_event(
+                                finished,
+                                attempt_started_at,
+                                outcome="exact_reuse",
+                            )
                             return WorkerResult(
                                 worker_id=self.worker_id,
                                 job=finished,
                                 processed=True,
+                                monitoring_event=monitoring_event,
                             )
                     build_result = None
                     for parent in self.store.find_subset_reuse_candidates(
@@ -212,7 +223,21 @@ class MapWorker:
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
             )
-            return WorkerResult(worker_id=self.worker_id, job=finished, processed=True)
+            monitoring_event = self._monitoring_event(
+                finished,
+                attempt_started_at,
+                outcome=(
+                    "subset_reuse"
+                    if reuse_strategy == "subset"
+                    else "built"
+                ),
+            )
+            return WorkerResult(
+                worker_id=self.worker_id,
+                job=finished,
+                processed=True,
+                monitoring_event=monitoring_event,
+            )
         except Exception as exc:
             current = self.store.get(job.job_id)
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
@@ -222,7 +247,17 @@ class MapWorker:
                     and self.pipeline.artifact_store is not None
                 ):
                     self.store.queue_terminal_pending_artifacts(job.job_id)
-                return WorkerResult(worker_id=self.worker_id, job=current, processed=True)
+                monitoring_event = self._monitoring_event(
+                    current,
+                    attempt_started_at,
+                    outcome=current.status.value,
+                )
+                return WorkerResult(
+                    worker_id=self.worker_id,
+                    job=current,
+                    processed=True,
+                    monitoring_event=monitoring_event,
+                )
             failed = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.FAILED,
@@ -231,6 +266,12 @@ class MapWorker:
                 worker_id=self.worker_id,
                 event=str(exc),
                 finished=True,
+            )
+            monitoring_event = self._monitoring_event(
+                failed,
+                attempt_started_at,
+                outcome="failed",
+                persist=failed.attempts >= failed.max_attempts,
             )
             if failed.attempts < failed.max_attempts:
                 failed = self.store.update_status_unless_cancelled(
@@ -244,7 +285,50 @@ class MapWorker:
             elif isinstance(self.pipeline, MapBuildPipeline) and self.pipeline.artifact_store is not None:
                 self.store.queue_terminal_pending_artifacts(job.job_id)
                 failed = self.store.get(job.job_id)
-            return WorkerResult(worker_id=self.worker_id, job=failed, processed=True)
+            return WorkerResult(
+                worker_id=self.worker_id,
+                job=failed,
+                processed=True,
+                monitoring_event=monitoring_event,
+            )
+
+    def _monitoring_event(
+        self,
+        job: MapJob,
+        attempt_started_at: str,
+        *,
+        outcome: str,
+        persist: bool = True,
+    ) -> dict[str, object] | None:
+        if self.monitoring_store is None:
+            return None
+        monitoring_persisted = False
+        if persist:
+            try:
+                self.monitoring_store.record_job(job)
+                monitoring_persisted = True
+            except Exception:
+                # Observability must never turn a completed map into a failed map.
+                monitoring_persisted = False
+        try:
+            event = build_map_job_monitoring_event(
+                job,
+                self.worker_id,
+                attempt_started_at=attempt_started_at,
+                outcome=outcome,
+            )
+        except Exception:
+            # A malformed optional telemetry field must not change job outcome.
+            event = {
+                "event": "map_job_run_completed",
+                "jobId": job.job_id,
+                "workerId": self.worker_id,
+                "status": job.status.value,
+                "outcome": outcome,
+                "attempt": job.attempts,
+            }
+        event["monitoringPersisted"] = monitoring_persisted
+        return event
 
     def run_until_empty(self, *, max_jobs: int | None = None) -> list[WorkerResult]:
         results: list[WorkerResult] = []

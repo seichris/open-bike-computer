@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import map_platform.api as api_module
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
-from map_platform.models import MapJob
+from map_platform.models import JobStatus, MapJob
 
 
 class BackendDependencyHintTests(unittest.TestCase):
@@ -728,6 +728,33 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertTrue(document["maps"][0]["installationRef"].startswith("install_"))
         self.assertNotIn(installation_id, inventory.text)
         self.assertNotIn("download-receipt-0001", inventory.text)
+
+    def test_admin_map_monitoring_is_authenticated_and_restart_safe(self):
+        job_id = self.create_job()
+        job = self.client.app.state.job_store.get(job_id)
+        job.status = JobStatus.READY
+        job.started_at = job.created_at
+        job.finished_at = job.created_at
+        job.updated_at = job.created_at
+        job.events = [
+            {"at": job.created_at, "status": JobStatus.VALIDATING.value},
+            {"at": job.created_at, "status": JobStatus.READY.value},
+        ]
+        self.client.app.state.job_store.save(job)
+
+        unauthorized = self.client.get("/v1/admin/map-monitoring")
+        response = self.client.get(
+            "/v1/admin/map-monitoring",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        document = response.json()
+        self.assertEqual(document["runs"]["count"], 1)
+        self.assertEqual(document["runs"]["byStatus"], {"ready": 1})
+        self.assertEqual(document["serverTiming"]["processingSeconds"]["p50Seconds"], 0.0)
+        self.assertEqual(document["byRendererFormat"]["1"]["runs"]["count"], 1)
 
     def test_inventory_mutations_require_the_owning_registered_installation(self):
         owner = self.client.post("/v1/installations").json()

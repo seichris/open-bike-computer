@@ -15,6 +15,7 @@ from .map_buildings import (
 )
 from .map_labels import label_target2_generation_enabled
 from .map_signing import load_map_artifact_signer_from_environment
+from .monitoring import DEFAULT_MONITORING_RETENTION_DAYS, MapMonitoringStore
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -204,6 +205,8 @@ def _perform_maintenance(
     retention_days: int,
     artifact_store,
     max_gc_items: int,
+    monitoring_store: MapMonitoringStore | None = None,
+    monitoring_retention_days: int | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "maintenance": True,
@@ -231,6 +234,18 @@ def _perform_maintenance(
             lambda: purge_expired_rate_limits(data_root / "rate-limits.sqlite3"),
         ),
     )
+    if monitoring_store is not None:
+        tasks += (
+            (
+                "monitoring",
+                lambda: {
+                    "synced": monitoring_store.sync_jobs(store.list()),
+                    "removed": monitoring_store.prune(
+                        older_than_days=monitoring_retention_days,
+                    ),
+                },
+            ),
+        )
     for field, task in tasks:
         try:
             result[field] = task()
@@ -270,6 +285,9 @@ def main() -> int:
 
     run = subparsers.add_parser("run-job")
     run.add_argument("job_id")
+
+    monitoring_summary = subparsers.add_parser("monitoring-summary")
+    monitoring_summary.add_argument("--window-hours", type=int, default=168)
 
     subparsers.add_parser("run-next")
 
@@ -337,6 +355,16 @@ def main() -> int:
         / "source-regions.json"
     )
     store = JobStore(data_root / "jobs")
+    monitoring_retention_days = int(
+        os.environ.get(
+            "MAP_PLATFORM_MONITORING_RETENTION_DAYS",
+            str(DEFAULT_MONITORING_RETENTION_DAYS),
+        )
+    )
+    monitoring_store = MapMonitoringStore(
+        data_root / "map-monitoring.sqlite3",
+        retention_days=monitoring_retention_days,
+    )
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     source_index = SourceIndex.from_json(
         source_index_path,
@@ -391,17 +419,43 @@ def main() -> int:
         return 0
     if args.command == "run-job":
         pipeline = create_pipeline()
-        print(json.dumps(run_job(store, pipeline, args.job_id).to_dict(), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                run_job(
+                    store,
+                    pipeline,
+                    args.job_id,
+                    monitoring_store=monitoring_store,
+                ).to_dict(),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "monitoring-summary":
+        monitoring_store.sync_jobs(store.list())
+        print(
+            json.dumps(
+                monitoring_store.summary(window_hours=args.window_hours),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "run-next":
         pipeline = create_pipeline()
-        result = MapWorker(store, pipeline).run_next()
+        result = MapWorker(
+            store,
+            pipeline,
+            monitoring_store=monitoring_store,
+        ).run_next()
         print(
             json.dumps(
                 {
                     "workerId": result.worker_id,
                     "processed": result.processed,
                     "job": result.job.to_dict() if result.job else None,
+                    "monitoring": result.monitoring_event,
                 },
                 indent=2,
                 sort_keys=True,
@@ -410,7 +464,11 @@ def main() -> int:
         return 0
     if args.command == "run-until-empty":
         pipeline = create_pipeline()
-        results = MapWorker(store, pipeline).run_until_empty(max_jobs=args.max_jobs)
+        results = MapWorker(
+            store,
+            pipeline,
+            monitoring_store=monitoring_store,
+        ).run_until_empty(max_jobs=args.max_jobs)
         print(
             json.dumps(
                 [
@@ -418,6 +476,7 @@ def main() -> int:
                         "workerId": result.worker_id,
                         "processed": result.processed,
                         "job": result.job.to_dict() if result.job else None,
+                        "monitoring": result.monitoring_event,
                     }
                     for result in results
                 ],
@@ -434,7 +493,12 @@ def main() -> int:
         def write_worker_heartbeat() -> None:
             heartbeat_path.write_text(str(time.time()))
 
-        worker = MapWorker(store, pipeline, on_heartbeat=write_worker_heartbeat)
+        worker = MapWorker(
+            store,
+            pipeline,
+            on_heartbeat=write_worker_heartbeat,
+            monitoring_store=monitoring_store,
+        )
         processed = 0
         while args.max_jobs is None or processed < args.max_jobs:
             write_worker_heartbeat()
@@ -442,10 +506,12 @@ def main() -> int:
             write_worker_heartbeat()
             if result.processed:
                 processed += 1
-                print(
-                    json.dumps({"workerId": result.worker_id, "processed": True, "jobId": result.job.job_id if result.job else None}),
-                    flush=True,
-                )
+                event = dict(result.monitoring_event or {})
+                event.setdefault("event", "map_job_processed")
+                event["processed"] = True
+                event.setdefault("workerId", result.worker_id)
+                event.setdefault("jobId", result.job.job_id if result.job else None)
+                print(json.dumps(event, sort_keys=True), flush=True)
                 continue
             time.sleep(args.idle_sleep_seconds)
         return 0
@@ -462,6 +528,8 @@ def main() -> int:
                     retention_days=args.retention_days,
                     artifact_store=artifact_store,
                     max_gc_items=args.max_gc_items,
+                    monitoring_store=monitoring_store,
+                    monitoring_retention_days=monitoring_retention_days,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result
