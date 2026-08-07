@@ -11,7 +11,7 @@ permissions:
 jobs:
   apply:
     if: contains(github.event.head_commit.message, '[apply-navigation-patch]')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -116,7 +116,22 @@ jobs:
           set -euo pipefail
           cd esp32
           OUT="$RUNNER_TEMP/navigation-host-tests"
+          rm -rf "$OUT"
           mkdir -p "$OUT"
+
+          echo "runner architecture: $(uname -m)"
+          uname -a
+          command -v g++
+          g++ --version
+
+          EXPECTED_PINCH_SHA=76468d07ea9e053983295bcfef3a29b6c69716970baa972045183ab66937741d
+          echo "$EXPECTED_PINCH_SHA  tools/tests/test_map_pinch_zoom.cpp" | sha256sum -c -
+          if grep -Fn "currentZoom" tools/tests/test_map_pinch_zoom.cpp; then
+            echo "Unexpected currentZoom source in test_map_pinch_zoom.cpp" >&2
+            exit 1
+          fi
+          nl -ba tools/tests/test_map_pinch_zoom.cpp | sed -n '75,90p'
+
           for test in \
             test_map_render_job \
             test_map_presentation \
@@ -125,7 +140,6 @@ jobs:
             test_map_building_workspace \
             test_map_building_renderer \
             test_map_render_policy \
-            test_map_pinch_zoom \
             test_map_projection \
             test_line_rasterizer \
             test_workout_telemetry_state; do
@@ -133,6 +147,18 @@ jobs:
               "tools/tests/${test}.cpp" -o "$OUT/${test}"
             "$OUT/${test}"
           done
+
+          PINCH_BIN="$OUT/test_map_pinch_zoom-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_pinch_zoom.cpp -o "$PINCH_BIN"
+          sha256sum "$PINCH_BIN"
+          file "$PINCH_BIN"
+          if strings "$PINCH_BIN" | grep -F "currentZoom"; then
+            echo "Compiled pinch binary contains an impossible stale assertion" >&2
+            exit 1
+          fi
+          "$PINCH_BIN"
+
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_map_block_format.cpp \
             lib/maps/src/mapBlockFormat.cpp \
