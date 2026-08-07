@@ -8,10 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: apply-navigation-render-ahead
+  cancel-in-progress: true
+
 jobs:
   apply:
     if: contains(github.event.head_commit.message, '[apply-navigation-patch]')
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -22,58 +26,106 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PATCH_DIR=.github/navigation-patch
-          ORIGINAL_B64="$RUNNER_TEMP/navigation.patch.gz.b64"
-          ORIGINAL_GZ="$RUNNER_TEMP/navigation.patch.gz"
-          ORIGINAL_PATCH="$RUNNER_TEMP/navigation.patch"
-          MEMORY_B64="$RUNNER_TEMP/maps-memory-v2.patch.gz.b64"
-          MEMORY_GZ="$RUNNER_TEMP/maps-memory-v2.patch.gz"
-          MEMORY_PATCH="$RUNNER_TEMP/maps-memory-v2.patch"
+          python3 - <<'PY'
+          from __future__ import annotations
 
-          {
-            cat "$PATCH_DIR/chunk-00"
-            cat "$PATCH_DIR/chunk-01a"
-            cat "$PATCH_DIR/chunk-01b"
-            cat "$PATCH_DIR/chunk-01c0"
-            cat "$PATCH_DIR/chunk-01c10"
-            cat "$PATCH_DIR/chunk-01c11"
-            cat "$PATCH_DIR/chunk-01c12"
-            cat "$PATCH_DIR/chunk-01c13"
-            cat "$PATCH_DIR/chunk-01c2"
-            cat "$PATCH_DIR/chunk-01c3"
-            cat "$PATCH_DIR/chunk-02"
-            cat "$PATCH_DIR/chunk-03a-fixed"
-            cat "$PATCH_DIR/chunk-03b"
-            cat "$PATCH_DIR/chunk-03c"
-            cat "$PATCH_DIR/chunk-04a"
-            cat "$PATCH_DIR/chunk-04b"
-            cat "$PATCH_DIR/chunk-04c"
-            cat "$PATCH_DIR/chunk-05a"
-            cat "$PATCH_DIR/chunk-05b"
-            cat "$PATCH_DIR/chunk-05c"
-            cat "$PATCH_DIR/chunk-06a"
-            cat "$PATCH_DIR/chunk-06b"
-            cat "$PATCH_DIR/chunk-06c"
-            cat "$PATCH_DIR/chunk-07a"
-            cat "$PATCH_DIR/chunk-07b"
-            cat "$PATCH_DIR/chunk-07c"
-            cat "$PATCH_DIR/chunk-08a"
-            cat "$PATCH_DIR/chunk-08b"
-            cat "$PATCH_DIR/chunk-08c"
-          } | tr -d '\r\n\t ' > "$ORIGINAL_B64"
+          import base64
+          import gzip
+          import hashlib
+          import os
+          from pathlib import Path
 
-          echo "b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8  $ORIGINAL_B64" | sha256sum -c -
-          base64 --decode "$ORIGINAL_B64" > "$ORIGINAL_GZ"
-          echo "cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489  $ORIGINAL_GZ" | sha256sum -c -
-          gzip -dc "$ORIGINAL_GZ" > "$ORIGINAL_PATCH"
-          echo "f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2  $ORIGINAL_PATCH" | sha256sum -c -
+          patch_dir = Path('.github/navigation-patch')
+          runner_temp = Path(os.environ['RUNNER_TEMP'])
+          chunk_names = [
+              'chunk-00',
+              'chunk-01a',
+              'chunk-01b',
+              'chunk-01c0',
+              'chunk-01c10',
+              'chunk-01c11',
+              'chunk-01c12',
+              'chunk-01c13',
+              'chunk-01c2',
+              'chunk-01c3',
+              'chunk-02',
+              'chunk-03a-fixed',
+              'chunk-03b',
+              'chunk-03c',
+              'chunk-04a',
+              'chunk-04b',
+              'chunk-04c',
+              'chunk-05a',
+              'chunk-05b',
+              'chunk-05c',
+              'chunk-06a',
+              'chunk-06b',
+              'chunk-06c',
+              'chunk-07a',
+              'chunk-07b',
+              'chunk-07c',
+              'chunk-08a',
+              'chunk-08b',
+              'chunk-08c',
+          ]
 
-          tr -d '\r\n\t ' < "$PATCH_DIR/maps-memory-integration-v2" > "$MEMORY_B64"
-          echo "e880da562e25e26f524b8e6339a33b735c955d7e980b0ee12226722a75c57f1d  $MEMORY_B64" | sha256sum -c -
-          base64 --decode "$MEMORY_B64" > "$MEMORY_GZ"
-          echo "f772ee5c5dfce0910e468b3956e8f2c6167cb7eda13c3223789078a102abf72f  $MEMORY_GZ" | sha256sum -c -
-          gzip -dc "$MEMORY_GZ" > "$MEMORY_PATCH"
-          echo "1e2d89cd90de082ad27a02e5293b952fee076f54d8e52ccdcc2c0fd599867d7e  $MEMORY_PATCH" | sha256sum -c -
+          def compact_text(path: Path) -> str:
+              return ''.join(path.read_text(encoding='utf-8').split())
+
+          def verify(data: bytes, expected: str, label: str) -> None:
+              actual = hashlib.sha256(data).hexdigest()
+              if actual != expected:
+                  raise SystemExit(
+                      f'{label} SHA-256 mismatch: expected {expected}, got {actual}'
+                  )
+              print(f'{label}: OK ({actual})')
+
+          original_b64_text = ''.join(
+              compact_text(patch_dir / name) for name in chunk_names
+          )
+          original_b64 = original_b64_text.encode('ascii')
+          verify(
+              original_b64,
+              'b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8',
+              'original base64',
+          )
+          original_gz = base64.b64decode(original_b64, validate=True)
+          verify(
+              original_gz,
+              'cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489',
+              'original gzip',
+          )
+          original_patch = gzip.decompress(original_gz)
+          verify(
+              original_patch,
+              'f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2',
+              'original patch',
+          )
+          (runner_temp / 'navigation.patch').write_bytes(original_patch)
+
+          memory_b64_text = compact_text(
+              patch_dir / 'maps-memory-integration-v2'
+          )
+          memory_b64 = memory_b64_text.encode('ascii')
+          verify(
+              memory_b64,
+              'e880da562e25e26f524b8e6339a33b735c955d7e980b0ee12226722a75c57f1d',
+              'memory integration base64',
+          )
+          memory_gz = base64.b64decode(memory_b64, validate=True)
+          verify(
+              memory_gz,
+              'f772ee5c5dfce0910e468b3956e8f2c6167cb7eda13c3223789078a102abf72f',
+              'memory integration gzip',
+          )
+          memory_patch = gzip.decompress(memory_gz)
+          verify(
+              memory_patch,
+              '1e2d89cd90de082ad27a02e5293b952fee076f54d8e52ccdcc2c0fd599867d7e',
+              'memory integration patch',
+          )
+          (runner_temp / 'maps-memory-v2.patch').write_bytes(memory_patch)
+          PY
 
       - name: Rebuild cleanly on current main
         shell: bash
@@ -124,12 +176,22 @@ jobs:
           command -v g++
           g++ --version
 
-          EXPECTED_PINCH_SHA=76468d07ea9e053983295bcfef3a29b6c69716970baa972045183ab66937741d
-          echo "$EXPECTED_PINCH_SHA  tools/tests/test_map_pinch_zoom.cpp" | sha256sum -c -
-          if grep -Fn "currentZoom" tools/tests/test_map_pinch_zoom.cpp; then
-            echo "Unexpected currentZoom source in test_map_pinch_zoom.cpp" >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          path = Path('tools/tests/test_map_pinch_zoom.cpp')
+          data = path.read_bytes()
+          expected = '76468d07ea9e053983295bcfef3a29b6c69716970baa972045183ab66937741d'
+          actual = hashlib.sha256(data).hexdigest()
+          if actual != expected:
+              raise SystemExit(
+                  f'pinch source SHA-256 mismatch: expected {expected}, got {actual}'
+              )
+          if b'currentZoom' in data:
+              raise SystemExit('unexpected currentZoom source in pinch test')
+          print(f'pinch source: OK ({actual})')
+          PY
           nl -ba tools/tests/test_map_pinch_zoom.cpp | sed -n '75,90p'
 
           for test in \
@@ -151,12 +213,21 @@ jobs:
           PINCH_BIN="$OUT/test_map_pinch_zoom-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_map_pinch_zoom.cpp -o "$PINCH_BIN"
-          sha256sum "$PINCH_BIN"
+          python3 - "$PINCH_BIN" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          data = path.read_bytes()
+          digest = hashlib.sha256(data).hexdigest()
+          print(f'pinch binary SHA-256: {digest}')
+          if b'currentZoom' in data:
+              raise SystemExit(
+                  'compiled pinch binary contains an impossible stale assertion'
+              )
+          PY
           file "$PINCH_BIN"
-          if strings "$PINCH_BIN" | grep -F "currentZoom"; then
-            echo "Compiled pinch binary contains an impossible stale assertion" >&2
-            exit 1
-          fi
           "$PINCH_BIN"
 
           g++ -std=c++17 -Wall -Wextra -Werror \
