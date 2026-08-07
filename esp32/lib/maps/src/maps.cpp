@@ -59,6 +59,32 @@ const char *TAG PROGMEM = "Maps";
 
 namespace {
 
+// Keep memory samples behind the existing map timing/diagnostics switch.  The
+// fields are deliberately stable and machine-readable so a source-monitor
+// capture can correlate heap fragmentation with a map-render phase without
+// changing the renderer's allocation or scheduling policy.
+static void logMapMemorySnapshot(const char *phase) {
+#if defined(WAVESHARE_MAPIO_TIMING_LOG) || defined(WAVESHARE_TOUCH_DIAGNOSTICS)
+  const uint32_t freeHeap = esp_get_free_heap_size();
+  const uint32_t largestHeap =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  const uint32_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const uint32_t largestPsram =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  const uint32_t psramTotal = ESP.getPsramSize();
+  const uint32_t psramUsed = psramTotal > freePsram
+                                 ? psramTotal - freePsram
+                                 : 0U;
+  MAPIO_LOG("MAPIO: memory phase=%s freeHeap=%u largestHeap=%u "
+            "freePsram=%u largestPsram=%u psramUsed=%u psramTotal=%u\n",
+            phase, (unsigned)freeHeap, (unsigned)largestHeap,
+            (unsigned)freePsram, (unsigned)largestPsram, (unsigned)psramUsed,
+            (unsigned)psramTotal);
+#else
+  (void)phase;
+#endif
+}
+
 bool findMapBlock(const std::string &directory, std::string &basePath,
                   size_t &visited, size_t depth) {
   if (depth > 6 || visited >= 65536)
@@ -1884,6 +1910,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
             (unsigned)loadedBlocks, (unsigned)evictedBlocks,
             (unsigned)memCache.blocks.size(),
             (unsigned long)(MAPIO_TIME_MS() - blocksStartMs));
+  logMapMemorySnapshot("block-cache");
   return true;
 }
 
@@ -2375,6 +2402,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-no-map");
     return true;
   }
 
@@ -2627,8 +2655,13 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint32_t buildingFailurePsramUsed = 0;
     uint32_t buildingFailurePsramFree = 0;
     uint32_t buildingFailurePsramLargest = 0;
+    uint32_t buildingFailureHeapFree = 0;
+    uint32_t buildingFailureHeapLargest = 0;
     bool buildingFailurePsramSamplePostCleanup = false;
     const auto captureBuildingFailureMemory = [&]() {
+      buildingFailureHeapFree = esp_get_free_heap_size();
+      buildingFailureHeapLargest =
+          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
       buildingFailurePsramFree =
           heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
       buildingFailurePsramLargest =
@@ -2646,6 +2679,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
     std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    size_t largestCourtyardUnderlayBytes = 0;
+    uint32_t courtyardSnapshotCount = 0;
     map_building_renderer::SurfaceStats buildingSurfaceStats;
     const auto releaseBuildingFailureWorkspace = [&]() {
       decltype(buildingQueue){}.swap(buildingQueue);
@@ -2993,6 +3028,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               }
               std::memcpy(courtyardUnderlay.data(), drawBuffer->data,
                           pixelCount * sizeof(uint16_t));
+              largestCourtyardUnderlayBytes = std::max(
+                  largestCourtyardUnderlayBytes,
+                  pixelCount * sizeof(uint16_t));
+              ++courtyardSnapshotCount;
               if (shouldStopBuildingWork())
                 return false;
               courtyardUnderlayReady = true;
@@ -3075,6 +3114,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "wallCandidates=%llu generatedWallFaces=%llu "
               "suppressedWallFaces=%llu "
               "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+              "courtyardSnapshots=%u courtyardMaxBytes=%u "
+              "freeHeap=%u largestHeap=%u "
               "deadlineExceeded=%u prepassDeadlineExceeded=%u "
               "psramUsed=%u psramFree=%u psramLargest=%u "
               "budgetFallback=%u renderRecordOverflowTotal=%llu "
@@ -3108,6 +3149,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)buildingProjectionMs,
               (unsigned long)buildingSortMs,
               (unsigned long)buildingDrawMs,
+              (unsigned)courtyardSnapshotCount,
+              (unsigned)largestCourtyardUnderlayBytes,
+              (unsigned)esp_get_free_heap_size(),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
               buildingDeadlineExceeded ? 1U : 0U,
               buildingPrepassDeadlineExceeded ? 1U : 0U,
               (unsigned)(ESP.getPsramSize() -
@@ -3150,6 +3195,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             "visibleRecords=%u visiblePoints=%llu rendered=%u extruded=%u "
             "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
             "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+            "courtyardSnapshots=%u courtyardMaxBytes=%u "
+            "freeHeap=%u largestHeap=%u "
             "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
             "psramLargest=%u psramSamplePostCleanup=%u\n",
             failureReason, (unsigned)loadedBuildingStats.records,
@@ -3167,6 +3214,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned long long)renderTimeOverflowTotal,
             (unsigned long)buildingProjectionMs,
             (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
+            (unsigned)courtyardSnapshotCount,
+            (unsigned)largestCourtyardUnderlayBytes,
+            (unsigned)buildingFailureHeapFree,
+            (unsigned)buildingFailureHeapLargest,
             buildingPrepassDeadlineExceeded ? 1U : 0U,
             (unsigned)buildingFailurePsramUsed,
             (unsigned)buildingFailurePsramFree,
@@ -3247,12 +3298,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)projectionRejectedCount,
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-draw");
   } else {
     Maps::isMapFound = false;
     lv_canvas_fill_bg(canvas, lv_color_hex(TFT_BLACK), LV_OPA_COVER);
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-draw-empty");
     //    Maps::showNoMap(map);
     //    ESP_LOGE(TAG, "Map doesn't exist");
   }
