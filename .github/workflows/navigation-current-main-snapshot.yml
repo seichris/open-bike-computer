@@ -25,3 +25,4 @@ jobs:
           path: esp32/lib/maps/src/maps.cpp
           if-no-files-found: error
           retention-days: 1
+          compression-level: 9
