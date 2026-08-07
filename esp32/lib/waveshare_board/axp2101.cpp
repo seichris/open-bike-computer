@@ -227,6 +227,14 @@ bool initializePowerState() {
         static_cast<unsigned>(requestedPowerButtonOffLevel),
         static_cast<unsigned>(observedPowerButtonOffLevel), powerButtonConfig);
   }
+#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+  const char *bootPmicMode = powerButtonOffConfigured
+                                 ? "display-enable-only"
+                                 : "power-button-config-failed";
+#else
+  const char *bootPmicMode =
+      powerButtonOffConfigured ? "read-only" : "power-button-config-failed";
+#endif
 
   PowerStatus status;
   uint8_t ldoEnable = 0;
@@ -255,13 +263,14 @@ bool initializePowerState() {
                   status.batteryPresent ? "present" : "absent",
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoEnable, ldoReadOk ? 1 : 0);
-    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+    Serial.printf("BOOT_PMIC schema=1 mode=%s available=1 "
                   "railState=%s statusRead=1 status1=0x%02X status2=0x%02X "
                   "vbus=%d battery=%d currentDirection=%u charging=%u "
                   "ldoRead=%d ldo=0x%02X displayRecovery=%d "
                   "displayChanged=%d powerButtonOffConfigured=%d "
                   "powerButtonOffSeconds=%u powerButtonOffLevel=%u "
                   "powerButtonConfigRead=%d powerButtonConfig=0x%02X\n",
+                  bootPmicMode,
                   displayRecoveryOk ? "display-enabled" : "unknown",
                   status.status1, status.status2, status.vbusGood ? 1 : 0,
                   status.batteryPresent ? 1 : 0,
@@ -281,13 +290,14 @@ bool initializePowerState() {
                   status.batteryPresent ? "present" : "absent",
                   status.batteryCurrentDirection, status.chargingStatus,
                   ldoEnable, ldoReadOk ? 1 : 0);
-    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+    Serial.printf("BOOT_PMIC schema=1 mode=%s available=1 "
                   "railState=current-preserved "
                   "statusRead=1 status1=0x%02X status2=0x%02X vbus=%d "
                   "battery=%d currentDirection=%u charging=%u ldoRead=%d "
                   "ldo=0x%02X powerButtonOffConfigured=%d "
                   "powerButtonOffSeconds=%u powerButtonOffLevel=%u "
                   "powerButtonConfigRead=%d powerButtonConfig=0x%02X\n",
+                  bootPmicMode,
                   status.status1, status.status2, status.vbusGood ? 1 : 0,
                   status.batteryPresent ? 1 : 0,
                   status.batteryCurrentDirection, status.chargingStatus,
@@ -302,12 +312,13 @@ bool initializePowerState() {
     Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
                   "status read failed ldo=0x%02X ldoRead=%d\n",
                   ldoEnable, ldoReadOk ? 1 : 0);
-    Serial.printf("BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+    Serial.printf("BOOT_PMIC schema=1 mode=%s available=1 "
                   "railState=%s statusRead=0 ldoRead=%d ldo=0x%02X "
                   "displayRecovery=%d displayChanged=%d "
                   "powerButtonOffConfigured=%d powerButtonOffSeconds=%u "
                   "powerButtonOffLevel=%u powerButtonConfigRead=%d "
                   "powerButtonConfig=0x%02X\n",
+                  bootPmicMode,
                   displayRecoveryOk ? "display-enabled" : "unknown",
                   ldoReadOk ? 1 : 0, ldoEnable,
                   displayRecoveryOk ? 1 : 0,
@@ -320,12 +331,13 @@ bool initializePowerState() {
     Serial.printf("AXP2101: preserving current PMIC rail state; status read failed "
                   "ldo=0x%02X ldoRead=%d\n",
                   ldoEnable, ldoReadOk ? 1 : 0);
-    Serial.printf("BOOT_PMIC schema=1 mode=read-only available=1 "
+    Serial.printf("BOOT_PMIC schema=1 mode=%s available=1 "
                   "railState=current-preserved "
                   "statusRead=0 ldoRead=%d ldo=0x%02X "
                   "powerButtonOffConfigured=%d powerButtonOffSeconds=%u "
                   "powerButtonOffLevel=%u powerButtonConfigRead=%d "
                   "powerButtonConfig=0x%02X\n",
+                  bootPmicMode,
                   ldoReadOk ? 1 : 0, ldoEnable,
                   powerButtonOffConfigured ? 1 : 0,
                   AXP2101_POWER_BUTTON_OFF_SECONDS,
