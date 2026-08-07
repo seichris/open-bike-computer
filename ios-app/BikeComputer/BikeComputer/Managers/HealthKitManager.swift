@@ -52,50 +52,69 @@ class HealthKitManager: NSObject, ObservableObject {
         super.init()
         isHealthKitAvailable = HKHealthStore.isHealthDataAvailable()
         if isHealthKitAvailable {
-            requestAuthorization()
+            refreshAuthorizationStatus()
         }
     }
 
-    func requestAuthorization() {
+    @discardableResult
+    func refreshAuthorizationStatus() -> Bool {
         guard HKHealthStore.isHealthDataAvailable() else {
             isHealthKitAvailable = false
+            isAuthorized = false
+            return false
+        }
+
+        let hasRequiredShareAuthorization = typesToWrite.allSatisfy {
+            healthStore.authorizationStatus(for: $0) == .sharingAuthorized
+        }
+        isAuthorized = hasRequiredShareAuthorization
+        return hasRequiredShareAuthorization
+    }
+
+    func requestAuthorization(completion: ((Bool) -> Void)? = nil) {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            isHealthKitAvailable = false
+            isAuthorized = false
+            completion?(false)
             print("HealthKit not available on this device")
             return
         }
 
-        let typesToWrite: Set<HKSampleType> = [
-            HKObjectType.workoutType(),
-            HKObjectType.quantityType(forIdentifier: .distanceCycling)!
-        ]
-        
-        let typesToRead: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .heartRate)!
-        ]
-
         healthStore.requestAuthorization(toShare: typesToWrite, read: typesToRead) { [weak self] success, error in
             DispatchQueue.main.async {
-                guard success else {
-                    self?.isAuthorized = false
-                    if let error = error {
-                        print("HealthKit authorization failed: \(error.localizedDescription)")
-                    }
+                guard let self else {
+                    completion?(false)
                     return
                 }
 
-                let requiredShareTypes = typesToWrite
-                let hasRequiredShareAuthorization = requiredShareTypes.allSatisfy {
-                    self?.healthStore.authorizationStatus(for: $0) == .sharingAuthorized
-                }
+                let hasRequiredShareAuthorization = success && self.refreshAuthorizationStatus()
 
                 if hasRequiredShareAuthorization {
-                    self?.isAuthorized = true
                     print("HealthKit authorization granted")
                 } else {
-                    self?.isAuthorized = false
-                    print("HealthKit authorization incomplete")
+                    if let error {
+                        print("HealthKit authorization failed: \(error.localizedDescription)")
+                    } else {
+                        print("HealthKit authorization incomplete")
+                    }
                 }
+
+                completion?(hasRequiredShareAuthorization)
             }
         }
+    }
+
+    private var typesToWrite: Set<HKSampleType> {
+        [
+            HKObjectType.workoutType(),
+            HKObjectType.quantityType(forIdentifier: .distanceCycling)!
+        ]
+    }
+
+    private var typesToRead: Set<HKObjectType> {
+        [
+            HKObjectType.quantityType(forIdentifier: .heartRate)!
+        ]
     }
     
     func updateLocation(speed: Double, distance: Double) {
@@ -271,8 +290,15 @@ class HealthKitManager: NSObject, ObservableObject {
         isAuthorized = false
     }
 
-    func requestAuthorization() {
+    @discardableResult
+    func refreshAuthorizationStatus() -> Bool {
         isAuthorized = false
+        return false
+    }
+
+    func requestAuthorization(completion: ((Bool) -> Void)? = nil) {
+        isAuthorized = false
+        completion?(false)
     }
 
     func updateLocation(speed: Double, distance: Double) {

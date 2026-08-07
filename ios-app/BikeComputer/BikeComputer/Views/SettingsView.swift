@@ -971,6 +971,7 @@ private struct DeveloperSettingsView: View {
                 currentLocation: currentLocation,
                 onStartNavigation: onStartTestNavigation
             )
+            HealthKitSettingsSection()
 
             Section {
                 HStack {
@@ -1055,6 +1056,29 @@ private struct DeveloperSettingsView: View {
         }
 
         return "Connected"
+    }
+}
+
+private struct HealthKitSettingsSection: View {
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        Section {
+            Button {
+                openHealthKitSettings()
+            } label: {
+                Label("Open BikeComputer Settings", systemImage: "heart.text.square")
+            }
+        } header: {
+            Text("HealthKit")
+        } footer: {
+            Text("Review BikeComputer's Health access in Settings > Health, then return to the app.")
+        }
+    }
+
+    private func openHealthKitSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 }
 

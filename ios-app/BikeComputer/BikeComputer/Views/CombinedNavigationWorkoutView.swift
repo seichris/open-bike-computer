@@ -49,13 +49,12 @@ struct CombinedNavigationWorkoutView: View {
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
                             .padding(.vertical, 8)
-                            .background(coordinator.isHealthKitAuthorized ? Color.green : Color.gray)
+                            .background(coordinator.isHealthKitAuthorized ? Color.green : Color.accentColor)
                             .cornerRadius(10)
                     }
-                    .disabled(!coordinator.isHealthKitAuthorized)
 
                     if !coordinator.isHealthKitAuthorized {
-                        Text("HealthKit access required")
+                        Text("Tap to enable HealthKit access")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }

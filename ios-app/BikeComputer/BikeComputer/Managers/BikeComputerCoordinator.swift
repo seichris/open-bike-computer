@@ -49,6 +49,7 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var isWorkoutActive: Bool = false
     @Published var isHealthKitAuthorized: Bool = false
     @Published var isHealthKitAvailable: Bool = false
+    @Published var isHealthKitSettingsPromptPresented: Bool = false
     @Published var workoutElapsedTime: TimeInterval = 0
     @Published var currentSpeedKmh: Double = 0
     @Published var distanceKm: Double = 0
@@ -278,7 +279,25 @@ class BikeComputerCoordinator: ObservableObject {
     // MARK: - Public API: Workout
 
     func startWorkout() {
-        healthKitManager.startBikeWorkout()
+        guard healthKitManager.isHealthKitAvailable else { return }
+
+        if healthKitManager.refreshAuthorizationStatus() {
+            healthKitManager.startBikeWorkout()
+            return
+        }
+
+        healthKitManager.requestAuthorization { [weak self] authorized in
+            guard let self else { return }
+            if authorized {
+                self.healthKitManager.startBikeWorkout()
+            } else {
+                self.isHealthKitSettingsPromptPresented = true
+            }
+        }
+    }
+
+    func refreshHealthKitAuthorization() {
+        _ = healthKitManager.refreshAuthorizationStatus()
     }
 
     func endWorkout() {

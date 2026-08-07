@@ -164,18 +164,20 @@ struct StartWorkoutView: View {
 
             if isHealthKitAvailable {
                 Button(action: onStartWorkout) {
-                    Label("Start Bike Workout", systemImage: "play.circle.fill")
+                    Label(
+                        isHealthKitAuthorized ? "Start Bike Workout" : "Enable HealthKit & Start",
+                        systemImage: "play.circle.fill"
+                    )
                         .font(.headline)
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding()
-                        .background(isHealthKitAuthorized ? Color.green : Color.gray)
+                        .background(isHealthKitAuthorized ? Color.green : Color.accentColor)
                         .cornerRadius(15)
                 }
-                .disabled(!isHealthKitAuthorized)
 
                 if !isHealthKitAuthorized {
-                    Text("HealthKit access required for workout tracking")
+                    Text("HealthKit access is needed to save this workout")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)

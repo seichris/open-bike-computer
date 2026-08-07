@@ -7,10 +7,14 @@
 
 import SwiftUI
 import MapKit
+import UIKit
 
 struct ContentView: View {
     
     // MARK: - State
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     
     @StateObject private var coordinator = BikeComputerCoordinator()
     @StateObject private var offlineMapManager = OfflineMapManager()
@@ -83,6 +87,14 @@ struct ContentView: View {
             } message: {
                 Text(coordinator.alert.message)
             }
+            .alert("Health Access Required", isPresented: $coordinator.isHealthKitSettingsPromptPresented) {
+                Button("Open BikeComputer Settings") {
+                    openHealthKitSettings()
+                }
+                Button("Not Now", role: .cancel) { }
+            } message: {
+                Text("Enable Health access for BikeComputer in Settings > Health, then return to the app to try again.")
+            }
             .sheet(isPresented: $showingSettings) {
                 SettingsView(
                     locationAuthorized: coordinator.isLocationAuthorized,
@@ -104,6 +116,11 @@ struct ContentView: View {
         .onChange(of: coordinator.selectedView) { newValue in
             coordinator.updateSelectedView(newValue)
         }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                coordinator.refreshHealthKitAuthorization()
+            }
+        }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 showingSettings = false
@@ -114,6 +131,11 @@ struct ContentView: View {
                 offlineMapSelectionDragStartFrame = nil
             }
         }
+    }
+
+    private func openHealthKitSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 
     private var shouldShowOfflineMapOnboarding: Bool {
