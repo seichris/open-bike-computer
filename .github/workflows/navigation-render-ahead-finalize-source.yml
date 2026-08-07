@@ -1,0 +1,494 @@
+name: Finalize navigation render-ahead branch from source
+
+on:
+  push:
+    branches: [agent/navigation-render-ahead]
+    paths: [.github/workflows/navigation-render-ahead-finalize-source.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: navigation-render-ahead-finalize-source
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/agent/navigation-render-ahead'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify prepared navigation patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import gzip
+          import hashlib
+          from pathlib import Path
+
+          root = Path('.github/navigation-patch')
+          parts = [
+              'chunk-00',
+              'chunk-01a', 'chunk-01b',
+              'chunk-01c0', 'chunk-01c10', 'chunk-01c11', 'chunk-01c12', 'chunk-01c13', 'chunk-01c2', 'chunk-01c3',
+              'chunk-02',
+              'chunk-03a-fixed', 'chunk-03b', 'chunk-03c',
+              'chunk-04a', 'chunk-04b', 'chunk-04c',
+              'chunk-05a', 'chunk-05b', 'chunk-05c',
+              'chunk-06a', 'chunk-06b', 'chunk-06c',
+              'chunk-07a', 'chunk-07b', 'chunk-07c',
+              'chunk-08a', 'chunk-08b', 'chunk-08c',
+          ]
+          encoded = ''.join((root / name).read_text() for name in parts).encode()
+          assert len(encoded) == 106524
+          assert hashlib.sha256(encoded).hexdigest() == 'b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8'
+          compressed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == 'cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489'
+          patch = gzip.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == 'f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2'
+          assert b'Subject: [PATCH] Rebuild navigation map rendering with latest-wins worker' in patch
+          Path('/tmp/navigation.patch').write_bytes(patch)
+          PY
+
+      - name: Apply onto current main and integrate PR 202 diagnostics
+        shell: bash
+        env:
+          EXPECTED_MAIN: 876acac61b12b5cb572389c844ceb68f9484a085
+          EXPECTED_STAGING_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git reset --hard origin/main
+          git clean -fdx
+          git config user.name OpenAI
+          git config user.email noreply@openai.com
+
+          if git am -3 --committer-date-is-author-date /tmp/navigation.patch; then
+            echo 'Expected the known maps.cpp overlap with PR #202, but the patch applied cleanly.' >&2
+            exit 1
+          fi
+          test "$(git diff --name-only --diff-filter=U)" = 'esp32/lib/maps/src/maps.cpp'
+          git checkout --theirs -- esp32/lib/maps/src/maps.cpp
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('esp32/lib/maps/src/maps.cpp')
+          s = path.read_text()
+
+          helper = r'''
+          #if defined(WAVESHARE_MAPIO_TIMING_LOG) || defined(WAVESHARE_TOUCH_DIAGNOSTICS)
+          constexpr uint32_t kMapMemorySnapshotMinIntervalMs = 250;
+          constexpr size_t kMapMemorySnapshotPhaseCount = 4;
+
+          struct MapMemoryStats {
+            uint32_t freeInternalHeap = 0;
+            uint32_t largestInternalHeap = 0;
+            uint32_t freePsram = 0;
+            uint32_t largestPsram = 0;
+            uint32_t psramTotal = 0;
+          };
+
+          static MapMemoryStats readMapMemoryStats() {
+            MapMemoryStats stats;
+          #ifdef ARDUINO_ARCH_ESP32
+            stats.freeInternalHeap =
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            stats.largestInternalHeap =
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            stats.freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            stats.largestPsram =
+                heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+            stats.psramTotal = ESP.getPsramSize();
+          #endif
+            return stats;
+          }
+
+          static void logMapMemorySnapshot(const char *phase) {
+          #ifdef ARDUINO_ARCH_ESP32
+            enum class Phase : uint8_t {
+              BlockCache = 0,
+              CanvasNoMap,
+              CanvasDraw,
+              CanvasDrawEmpty,
+            };
+            Phase phaseIndex = Phase::CanvasDrawEmpty;
+            if (strcmp(phase, "block-cache") == 0)
+              phaseIndex = Phase::BlockCache;
+            else if (strcmp(phase, "canvas-no-map") == 0)
+              phaseIndex = Phase::CanvasNoMap;
+            else if (strcmp(phase, "canvas-draw") == 0)
+              phaseIndex = Phase::CanvasDraw;
+
+            static uint32_t lastSnapshotMs[kMapMemorySnapshotPhaseCount] = {};
+            const uint32_t nowMs = millis();
+            uint32_t &lastPhaseSnapshotMs =
+                lastSnapshotMs[static_cast<size_t>(phaseIndex)];
+            if (lastPhaseSnapshotMs != 0 &&
+                nowMs - lastPhaseSnapshotMs < kMapMemorySnapshotMinIntervalMs) {
+              return;
+            }
+            lastPhaseSnapshotMs = nowMs;
+
+            const MapMemoryStats stats = readMapMemoryStats();
+            const uint32_t psramUsed =
+                stats.psramTotal >= stats.freePsram
+                    ? stats.psramTotal - stats.freePsram
+                    : 0;
+            MAPIO_LOG("MAPIO: memory phase=%s freeInternalHeap=%u "
+                      "largestInternalHeap=%u freePsram=%u largestPsram=%u "
+                      "psramUsed=%u psramTotal=%u\n",
+                      phase, (unsigned)stats.freeInternalHeap,
+                      (unsigned)stats.largestInternalHeap,
+                      (unsigned)stats.freePsram, (unsigned)stats.largestPsram,
+                      (unsigned)psramUsed, (unsigned)stats.psramTotal);
+          #else
+            (void)phase;
+          #endif
+          }
+          #else
+          struct MapMemoryStats {
+            uint32_t freeInternalHeap = 0;
+            uint32_t largestInternalHeap = 0;
+            uint32_t freePsram = 0;
+            uint32_t largestPsram = 0;
+            uint32_t psramTotal = 0;
+          };
+
+          static MapMemoryStats readMapMemoryStats() { return {}; }
+          static void logMapMemorySnapshot(const char *) {}
+          #endif
+          '''
+          helper = '\n'.join(line[10:] if line.startswith('          ') else line
+                             for line in helper.splitlines())
+
+          needle = 'namespace {\n\nconstexpr uint16_t kColorTransparent = 0x0000;'
+          assert needle in s
+          s = s.replace(needle, 'namespace {\n' + helper + '\nconstexpr uint16_t kColorTransparent = 0x0000;', 1)
+
+          needle = '''  lastBlockLoadCount = static_cast<uint32_t>(result.size());
+            lastBlockLoadMs = millis() - loadStart;
+            return true;
+          }'''
+          assert needle in s
+          s = s.replace(needle, '''  lastBlockLoadCount = static_cast<uint32_t>(result.size());
+            lastBlockLoadMs = millis() - loadStart;
+            logMapMemorySnapshot("block-cache");
+            return true;
+          }''', 1)
+
+          needle = '''bool Maps::readVectorMap(MapRenderJob &job, uint16_t backgroundColor,
+                                   MapSurface &surface) {
+            if (!surface.valid())
+              return false;
+
+            const MapProjectionState &projection = job.request.projection;
+            ResetMapRenderInterrupt();'''
+          assert needle in s
+          s = s.replace(needle, '''bool Maps::readVectorMap(MapRenderJob &job, uint16_t backgroundColor,
+                                   MapSurface &surface) {
+            if (!surface.valid()) {
+              logMapMemorySnapshot("canvas-draw-empty");
+              return false;
+            }
+            if (job.blocks.empty()) {
+              surface.fill(backgroundColor);
+              logMapMemorySnapshot("canvas-draw-empty");
+              return true;
+            }
+
+            const MapProjectionState &projection = job.request.projection;
+            ResetMapRenderInterrupt();
+            logMapMemorySnapshot("canvas-draw");''', 1)
+
+          needle = '''    if (blocks.size() == 0) {
+                backSurface->fill(kColorDark);
+                success = true;
+              } else {'''
+          assert needle in s
+          s = s.replace(needle, '''    if (blocks.size() == 0) {
+                backSurface->fill(kColorDark);
+                logMapMemorySnapshot("canvas-no-map");
+                success = true;
+              } else {''', 1)
+
+          start_marker = '  bool buildingFailure = false;\n'
+          end_marker = '  return !shouldCancelMapRenderWork();\n}\n\nvoid Maps::transformMap'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+          segment = s[start:end]
+
+          old_prelude = '''  bool buildingFailure = false;
+            MapBuildingAdmissionStats buildingAdmissionStats;
+            MapBuildingRenderStats buildingRenderStats;
+            uint32_t selectedBuildingCount = 0;
+            uint32_t extrudedBuildingCount = 0;
+            uint32_t flatBuildingCount = 0;
+          '''
+          assert old_prelude in segment
+          new_prelude = r'''  bool buildingFailure = false;
+          MapBuildingAdmissionStats buildingAdmissionStats;
+          MapBuildingRenderStats buildingRenderStats;
+          uint32_t selectedBuildingCount = 0;
+          uint32_t extrudedBuildingCount = 0;
+          uint32_t flatBuildingCount = 0;
+          size_t courtyardSnapshotCount = 0;
+          size_t largestCourtyardUnderlayBytes = 0;
+          const MapMemoryStats buildingStartMemory = readMapMemoryStats();
+
+          auto logBuildingComplete = [&]() {
+            const MapMemoryStats memory = readMapMemoryStats();
+            const uint32_t psramUsed =
+                memory.psramTotal >= memory.freePsram
+                    ? memory.psramTotal - memory.freePsram
+                    : 0;
+            MAPIO_LOG(
+                "MAPIO: buildings complete selected=%u extruded=%u flat=%u "
+                "deferred=%u courtyardSnapshots=%u courtyardMaxBytes=%u "
+                "freeInternalHeapBefore=%u largestInternalHeapBefore=%u "
+                "freePsramBefore=%u largestPsramBefore=%u "
+                "freeInternalHeap=%u largestInternalHeap=%u "
+                "psramUsed=%u psramFree=%u psramLargest=%u\n",
+                (unsigned)selectedBuildingCount, (unsigned)extrudedBuildingCount,
+                (unsigned)flatBuildingCount, (unsigned)buildingRenderStats.deferred,
+                (unsigned)courtyardSnapshotCount,
+                (unsigned)largestCourtyardUnderlayBytes,
+                (unsigned)buildingStartMemory.freeInternalHeap,
+                (unsigned)buildingStartMemory.largestInternalHeap,
+                (unsigned)buildingStartMemory.freePsram,
+                (unsigned)buildingStartMemory.largestPsram,
+                (unsigned)memory.freeInternalHeap,
+                (unsigned)memory.largestInternalHeap, (unsigned)psramUsed,
+                (unsigned)memory.freePsram, (unsigned)memory.largestPsram);
+          };
+
+          auto logBuildingInterrupted = [&]() {
+            const MapMemoryStats memory = readMapMemoryStats();
+            const uint32_t psramUsed =
+                memory.psramTotal >= memory.freePsram
+                    ? memory.psramTotal - memory.freePsram
+                    : 0;
+            MAPIO_LOG(
+                "MAPIO: buildings aborted reason=interrupt fallback=deferred "
+                "selected=%u extruded=%u flat=%u deferred=%u "
+                "courtyardSnapshots=%u courtyardMaxBytes=%u "
+                "freeInternalHeapBefore=%u largestInternalHeapBefore=%u "
+                "freePsramBefore=%u largestPsramBefore=%u "
+                "freeInternalHeap=%u largestInternalHeap=%u "
+                "psramUsed=%u psramFree=%u psramLargest=%u\n",
+                (unsigned)selectedBuildingCount, (unsigned)extrudedBuildingCount,
+                (unsigned)flatBuildingCount, (unsigned)buildingRenderStats.deferred,
+                (unsigned)courtyardSnapshotCount,
+                (unsigned)largestCourtyardUnderlayBytes,
+                (unsigned)buildingStartMemory.freeInternalHeap,
+                (unsigned)buildingStartMemory.largestInternalHeap,
+                (unsigned)buildingStartMemory.freePsram,
+                (unsigned)buildingStartMemory.largestPsram,
+                (unsigned)memory.freeInternalHeap,
+                (unsigned)memory.largestInternalHeap, (unsigned)psramUsed,
+                (unsigned)memory.freePsram, (unsigned)memory.largestPsram);
+          };
+
+          auto logBuildingAllocationFailure = [&]() {
+            const MapMemoryStats memory = readMapMemoryStats();
+            const uint32_t psramUsed =
+                memory.psramTotal >= memory.freePsram
+                    ? memory.psramTotal - memory.freePsram
+                    : 0;
+            MAPIO_LOG(
+                "MAPIO: buildings aborted reason=allocation fallback=footprints "
+                "selected=%u extruded=%u flat=%u deferred=%u "
+                "courtyardSnapshots=%u courtyardMaxBytes=%u "
+                "freeInternalHeapBefore=%u largestInternalHeapBefore=%u "
+                "freePsramBefore=%u largestPsramBefore=%u "
+                "freeInternalHeap=%u largestInternalHeap=%u "
+                "psramUsed=%u psramFree=%u psramLargest=%u\n",
+                (unsigned)selectedBuildingCount, (unsigned)extrudedBuildingCount,
+                (unsigned)flatBuildingCount, (unsigned)buildingRenderStats.deferred,
+                (unsigned)courtyardSnapshotCount,
+                (unsigned)largestCourtyardUnderlayBytes,
+                (unsigned)buildingStartMemory.freeInternalHeap,
+                (unsigned)buildingStartMemory.largestInternalHeap,
+                (unsigned)buildingStartMemory.freePsram,
+                (unsigned)buildingStartMemory.largestPsram,
+                (unsigned)memory.freeInternalHeap,
+                (unsigned)memory.largestInternalHeap, (unsigned)psramUsed,
+                (unsigned)memory.freePsram, (unsigned)memory.largestPsram);
+          };
+          '''
+          new_prelude = '\n'.join(line[10:] if line.startswith('          ') else line
+                                  for line in new_prelude.splitlines())
+          segment = segment.replace(old_prelude, new_prelude, 1)
+
+          old_if = '''  if (enable3DBuildings && memCache.has3DBuildings &&
+                !memCache.buildingRecords.empty()) {'''
+          assert old_if in segment
+          segment = segment.replace(old_if, '''  const bool buildingPassAttempted =
+                enable3DBuildings && memCache.has3DBuildings &&
+                !memCache.buildingRecords.empty();
+            if (buildingPassAttempted) {''', 1)
+
+          needle = '''                snapshot.pixels.resize(pixelCount);
+                          std::memcpy(snapshot.pixels.data(), surface.data,
+                                      pixelCount * sizeof(uint16_t));'''
+          assert needle in segment
+          segment = segment.replace(needle, '''                snapshot.pixels.resize(pixelCount);
+                          const size_t courtyardBytes = snapshot.pixels.capacity() * sizeof(uint16_t);
+                          ++courtyardSnapshotCount;
+                          largestCourtyardUnderlayBytes =
+                              std::max(largestCourtyardUnderlayBytes, courtyardBytes);
+                          std::memcpy(snapshot.pixels.data(), surface.data,
+                                      pixelCount * sizeof(uint16_t));''', 1)
+
+          segment, count = re.subn(
+              r'(?m)^(\s*)if \(shouldCancelMapRenderWork\(\)\)\n\1  return false;',
+              lambda match: (
+                  f'{match.group(1)}if (shouldCancelMapRenderWork()) {{\n'
+                  f'{match.group(1)}  logBuildingInterrupted();\n'
+                  f'{match.group(1)}  return false;\n'
+                  f'{match.group(1)}}}'
+              ),
+              segment,
+          )
+          assert count >= 3, count
+
+          needle = '''            if (!rendered)
+                          return false;'''
+          assert needle in segment
+          segment = segment.replace(needle, '''            if (!rendered) {
+                          logBuildingInterrupted();
+                          return false;
+                        }''', 1)
+
+          old_tail = '  return !shouldCancelMapRenderWork();\n'
+          assert segment.endswith(old_tail)
+          segment = segment[:-len(old_tail)] + '''  if (shouldCancelMapRenderWork()) {
+              if (buildingPassAttempted)
+                logBuildingInterrupted();
+              return false;
+            }
+            if (buildingPassAttempted) {
+              if (buildingFailure)
+                logBuildingAllocationFailure();
+              else
+                logBuildingComplete();
+            }
+            return true;
+          '''
+
+          s = s[:start] + segment + s[end:]
+          path.write_text(s)
+          PY
+
+          PYTHONPATH=esp32 python3 -m unittest tools.tests.test_map_memory_diagnostics
+          git add esp32/lib/maps/src/maps.cpp
+          GIT_EDITOR=true git am --continue
+
+          # Keep PR #202-only files byte-for-byte identical to current main.
+          git restore --source="$EXPECTED_MAIN" --staged --worktree -- \
+            docs/README.md \
+            docs/firmware-map-memory-diagnostics.md \
+            esp32/platformio.ini \
+            esp32/tools/tests/test_map_memory_diagnostics.py
+          git commit --amend --no-edit
+
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_MAIN"
+          test "$(git log -1 --pretty=%s)" = 'Rebuild navigation map rendering with latest-wins worker'
+          test ! -e .github/navigation-patch
+          test ! -e .github/workflows/navigation-render-ahead-apply.yml
+          test ! -e .github/workflows/navigation-render-ahead-finalize.yml
+          test ! -e .github/workflows/navigation-render-ahead-finalize-retry.yml
+          test ! -e .github/workflows/navigation-render-ahead-finalize-source.yml
+          test ! -e .github/workflows/navigation-current-main-snapshot.yml
+
+          python3 - <<'PY'
+          import subprocess
+
+          expected = sorted('''
+          .github/workflows/ci.yml
+          docs/firmware-map-render-scheduler.md
+          docs/fmb-v4.md
+          docs/plans/geofabrik-osm-3d-buildings-implementation-plan.md
+          esp32/lib/ble_navigation/gps_position_protocol.hpp
+          esp32/lib/gps/gps.cpp
+          esp32/lib/gps/gps.hpp
+          esp32/lib/gui/src/mainScr.cpp
+          esp32/lib/gui/src/mapRenderPolicy.hpp
+          esp32/lib/maps/src/mapBuildingAdmission.hpp
+          esp32/lib/maps/src/mapBuildingRenderer.hpp
+          esp32/lib/maps/src/mapBuildingWorkspace.hpp
+          esp32/lib/maps/src/mapPresentation.hpp
+          esp32/lib/maps/src/mapRenderJob.hpp
+          esp32/lib/maps/src/mapRouteGeometry.hpp
+          esp32/lib/maps/src/mapSurface.hpp
+          esp32/lib/maps/src/maps.cpp
+          esp32/lib/maps/src/maps.hpp
+          esp32/lib/route_overlay/route_overlay.cpp
+          esp32/lib/route_overlay/route_overlay.hpp
+          esp32/lib/utils/src/line_rasterizer.hpp
+          esp32/tools/tests/test_line_rasterizer.cpp
+          esp32/tools/tests/test_map_building_admission.cpp
+          esp32/tools/tests/test_map_building_renderer.cpp
+          esp32/tools/tests/test_map_building_workspace.cpp
+          esp32/tools/tests/test_map_guidance_integration.py
+          esp32/tools/tests/test_map_presentation.cpp
+          esp32/tools/tests/test_map_render_job.cpp
+          esp32/tools/tests/test_map_render_policy.cpp
+          esp32/tools/tests/test_map_route_geometry.cpp
+          esp32/tools/tests/test_workout_telemetry_state.cpp
+          ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift
+          ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift
+          ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift
+          ios-app/BikeComputerTests/NavigationProtocolTests.swift
+          '''.split())
+          actual = subprocess.check_output(
+              ['git', 'diff', '--name-only', '876acac61b12b5cb572389c844ceb68f9484a085..HEAD'],
+              text=True,
+          ).splitlines()
+          assert actual == expected, f'unexpected changed files: {sorted(set(actual) ^ set(expected))}'
+          PY
+
+          git diff --exit-code "$EXPECTED_MAIN" -- \
+            docs/README.md \
+            docs/firmware-map-memory-diagnostics.md \
+            esp32/platformio.ini \
+            esp32/tools/tests/test_map_memory_diagnostics.py
+          grep -Fq test_map_memory_diagnostics .github/workflows/ci.yml
+          grep -Fq test_map_render_job .github/workflows/ci.yml
+          grep -Fq 'MAPIO: memory phase=%s freeInternalHeap=%u ' esp32/lib/maps/src/maps.cpp
+          grep -Fq 'MAPIO: buildings aborted reason=interrupt fallback=deferred ' esp32/lib/maps/src/maps.cpp
+          grep -Fq WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS esp32/platformio.ini
+          grep -Fq xTaskCreatePinnedToCore esp32/lib/maps/src/maps.cpp
+          grep -Fq MapRenderJob esp32/lib/maps/src/maps.cpp
+          git diff --check "$EXPECTED_MAIN"..HEAD
+
+          cd esp32
+          for test in \
+            test_map_render_job test_map_presentation test_map_building_admission \
+            test_map_route_geometry test_map_building_workspace test_map_building_renderer \
+            test_map_render_policy test_map_pinch_zoom test_map_projection \
+            test_line_rasterizer test_workout_telemetry_state; do
+            g++ -std=c++17 -Wall -Wextra -Werror "tools/tests/${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapBlockFormat.cpp lib/maps/src/mapBuildingBlock.cpp \
+            tools/tests/test_map_block_format.cpp -o /tmp/test_map_block_format
+          /tmp/test_map_block_format
+          PYTHONPATH=. python3 -m unittest \
+            tools.tests.test_map_guidance_integration \
+            tools.tests.test_map_activation_handoff \
+            tools.tests.test_map_memory_diagnostics
+          cd ..
+
+          git push \
+            --force-with-lease="refs/heads/agent/navigation-render-ahead:${EXPECTED_STAGING_HEAD}" \
+            origin HEAD:refs/heads/agent/navigation-render-ahead
