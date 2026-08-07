@@ -15,7 +15,11 @@ from .map_buildings import (
 )
 from .map_labels import label_target2_generation_enabled
 from .map_signing import load_map_artifact_signer_from_environment
-from .monitoring import DEFAULT_MONITORING_RETENTION_DAYS, MapMonitoringStore
+from .monitoring import (
+    DEFAULT_MONITORING_RETENTION_DAYS,
+    DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
+    MapMonitoringStore,
+)
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -238,12 +242,7 @@ def _perform_maintenance(
         tasks += (
             (
                 "monitoring",
-                lambda: {
-                    "synced": monitoring_store.sync_jobs(store.list()),
-                    "removed": monitoring_store.prune(
-                        older_than_days=monitoring_retention_days,
-                    ),
-                },
+                lambda: monitoring_store.reconcile_jobs(store.list()),
             ),
         )
     for field, task in tasks:
@@ -361,9 +360,16 @@ def main() -> int:
             str(DEFAULT_MONITORING_RETENTION_DAYS),
         )
     )
+    monitoring_summary_run_limit = int(
+        os.environ.get(
+            "MAP_PLATFORM_MONITORING_SUMMARY_RUN_LIMIT",
+            str(DEFAULT_MONITORING_SUMMARY_RUN_LIMIT),
+        )
+    )
     monitoring_store = MapMonitoringStore(
         data_root / "map-monitoring.sqlite3",
         retention_days=monitoring_retention_days,
+        summary_run_limit=monitoring_summary_run_limit,
     )
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     source_index = SourceIndex.from_json(
@@ -433,7 +439,7 @@ def main() -> int:
         )
         return 0
     if args.command == "monitoring-summary":
-        monitoring_store.sync_jobs(store.list())
+        monitoring_store.reconcile_jobs(store.list())
         print(
             json.dumps(
                 monitoring_store.summary(window_hours=args.window_hours),

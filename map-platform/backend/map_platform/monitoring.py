@@ -16,6 +16,9 @@ MONITORING_SCHEMA_VERSION = 1
 DEFAULT_MONITORING_RETENTION_DAYS = 90
 MAX_MONITORING_RETENTION_DAYS = 3_650
 MAX_MONITORING_WINDOW_HOURS = 24 * 365
+DEFAULT_MONITORING_SUMMARY_RUN_LIMIT = 50_000
+MAX_MONITORING_SUMMARY_RUN_LIMIT = 1_000_000
+SUMMARY_SAMPLING_STRATEGY = "most_recent_completion_desc"
 MONITORED_TERMINAL_STATUSES = frozenset(
     {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}
 )
@@ -28,6 +31,31 @@ NON_WORK_PHASES = frozenset(
         JobStatus.CANCELLED.value,
     }
 )
+MONITORING_TABLE = "map_build_runs"
+MONITORING_COLUMNS = frozenset(
+    {
+        "job_id",
+        "status",
+        "completed_at",
+        "completed_epoch",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "queue_wait_seconds",
+        "processing_seconds",
+        "total_seconds",
+        "attempts",
+        "renderer_format_version",
+        "geometry_mode",
+        "area_km2",
+        "reuse_strategy",
+        "phase_timings_json",
+    }
+)
+
+
+class MonitoringSchemaError(RuntimeError):
+    """The durable monitoring database cannot be safely used by this release."""
 
 
 class MapMonitoringStore:
@@ -38,6 +66,7 @@ class MapMonitoringStore:
         path: str | Path,
         *,
         retention_days: int = DEFAULT_MONITORING_RETENTION_DAYS,
+        summary_run_limit: int = DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
         clock=None,
     ):
         if (
@@ -47,44 +76,57 @@ class MapMonitoringStore:
             raise ValueError(
                 "monitoring retention days must be between 1 and 3650"
             )
+        if (
+            isinstance(summary_run_limit, bool)
+            or not 1 <= summary_run_limit <= MAX_MONITORING_SUMMARY_RUN_LIMIT
+        ):
+            raise ValueError(
+                "monitoring summary run limit must be between 1 and 1000000"
+            )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
+        self.summary_run_limit = summary_run_limit
         self._clock = clock or time.time
         self._initialize()
 
     def record_job(self, job: MapJob) -> bool:
         """Upsert a terminal build record; return whether a record was written."""
         record = self._record_for_job(job)
-        if record is None:
-            return False
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            self._upsert(connection, record)
-            connection.commit()
-        finally:
-            connection.close()
-        return True
+        result = self._reconcile_records([record] if record is not None else [])
+        return result["synced"] == 1
 
     def sync_jobs(self, jobs: Iterable[MapJob]) -> int:
         """Reconcile terminal job records after worker/API restarts."""
+        return int(self.reconcile_jobs(jobs)["synced"])
+
+    def reconcile_jobs(self, jobs: Iterable[MapJob]) -> dict[str, int]:
+        """Atomically prune expired rows and reconcile terminal job records."""
         records = [
             record
             for job in jobs
             if (record := self._record_for_job(job)) is not None
         ]
-        if not records:
-            return 0
+        return self._reconcile_records(records)
+
+    def _reconcile_records(self, records: list[tuple[Any, ...]]) -> dict[str, int]:
+        cutoff = self._retention_cutoff()
+        eligible_records = [
+            record for record in records if float(record[3]) >= cutoff
+        ]
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            for record in records:
+            removed = self._prune_connection(connection, cutoff)
+            for record in eligible_records:
                 self._upsert(connection, record)
             connection.commit()
+            return {"synced": len(eligible_records), "removed": removed}
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
-        return len(records)
 
     def prune(self, *, older_than_days: int | None = None) -> int:
         days = self.retention_days if older_than_days is None else older_than_days
@@ -93,12 +135,13 @@ class MapMonitoringStore:
         cutoff = self._clock() - days * 86_400
         connection = self._connect()
         try:
-            cursor = connection.execute(
-                "DELETE FROM map_build_runs WHERE completed_epoch < ?",
-                (cutoff,),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            removed = self._prune_connection(connection, cutoff)
             connection.commit()
-            return max(cursor.rowcount, 0)
+            return removed
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -111,7 +154,10 @@ class MapMonitoringStore:
                 "monitoring window hours must be between 1 and 8760"
             )
         now = self._clock()
-        cutoff = now - window_hours * 3_600
+        effective_window_hours = min(window_hours, self.retention_days * 24)
+        requested_cutoff = now - window_hours * 3_600
+        retention_cutoff = self._retention_cutoff(now)
+        cutoff = max(requested_cutoff, retention_cutoff)
         connection = self._connect()
         try:
             rows = connection.execute(
@@ -128,26 +174,53 @@ class MapMonitoringStore:
                     renderer_format_version,
                     phase_timings_json
                 FROM map_build_runs
-                WHERE completed_epoch >= ?
-                ORDER BY completed_epoch ASC, job_id ASC
+                WHERE completed_epoch >= ? AND completed_epoch <= ?
+                ORDER BY completed_epoch DESC, job_id DESC
+                LIMIT ?
                 """,
-                (cutoff,),
+                (cutoff, now, self.summary_run_limit),
             ).fetchall()
+            matching_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM map_build_runs
+                    WHERE completed_epoch >= ? AND completed_epoch <= ?
+                    """,
+                    (cutoff, now),
+                ).fetchone()[0]
+            )
             retained_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM map_build_runs"
+                    """
+                    SELECT COUNT(*)
+                    FROM map_build_runs
+                    WHERE completed_epoch >= ? AND completed_epoch <= ?
+                    """,
+                    (retention_cutoff, now),
                 ).fetchone()[0]
             )
         finally:
             connection.close()
 
+        # The query intentionally reads newest-first so SQLite can use the
+        # composite completion index. Restore chronological order for the
+        # existing aggregate helpers and lastCompletedAt field.
+        rows.reverse()
+        sampled_count = len(rows)
+
         return {
             "schemaVersion": MONITORING_SCHEMA_VERSION,
             "generatedAt": utc_now_iso(),
-            "windowHours": window_hours,
+            "windowHours": effective_window_hours,
             "windowStartedAt": _iso_from_epoch(cutoff),
             "retentionDays": self.retention_days,
             "retainedRunCount": retained_count,
+            "matchingRunCount": matching_count,
+            "sampledRunCount": sampled_count,
+            "configuredRunLimit": self.summary_run_limit,
+            "truncated": matching_count > sampled_count,
+            "samplingStrategy": SUMMARY_SAMPLING_STRATEGY,
             "runs": _run_counts(rows),
             "serverTiming": _timing_summary(rows),
             "phaseTimings": _phase_summary(rows),
@@ -159,35 +232,90 @@ class MapMonitoringStore:
         connection = self._connect()
         try:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            table_exists = connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS map_build_runs(
-                    job_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    completed_at TEXT NOT NULL,
-                    completed_epoch REAL NOT NULL,
-                    created_at TEXT NOT NULL,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    queue_wait_seconds REAL,
-                    processing_seconds REAL,
-                    total_seconds REAL,
-                    attempts INTEGER NOT NULL,
-                    renderer_format_version INTEGER,
-                    geometry_mode TEXT NOT NULL,
-                    area_km2 REAL NOT NULL,
-                    reuse_strategy TEXT,
-                    phase_timings_json TEXT NOT NULL
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                """,
+                (MONITORING_TABLE,),
+            ).fetchone() is not None
+
+            if version > MONITORING_SCHEMA_VERSION:
+                raise MonitoringSchemaError(
+                    f"unsupported monitoring schema version {version}"
                 )
-                """
-            )
+            if not table_exists:
+                if version != 0:
+                    raise MonitoringSchemaError(
+                        "monitoring schema version is set but its table is missing"
+                    )
+                connection.execute(
+                    """
+                    CREATE TABLE map_build_runs(
+                        job_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        completed_epoch REAL NOT NULL,
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        queue_wait_seconds REAL,
+                        processing_seconds REAL,
+                        total_seconds REAL,
+                        attempts INTEGER NOT NULL,
+                        renderer_format_version INTEGER,
+                        geometry_mode TEXT NOT NULL,
+                        area_km2 REAL NOT NULL,
+                        reuse_strategy TEXT,
+                        phase_timings_json TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+                )
+            else:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({MONITORING_TABLE})"
+                    ).fetchall()
+                }
+                missing = sorted(MONITORING_COLUMNS - columns)
+                if missing:
+                    raise MonitoringSchemaError(
+                        "monitoring schema is missing required columns: "
+                        + ", ".join(missing)
+                    )
+                if version == 0:
+                    # PR #198 shipped this exact table before user_version was
+                    # introduced. Adopt it only after validating every column.
+                    connection.execute(
+                        f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+                    )
+                elif version != MONITORING_SCHEMA_VERSION:
+                    raise MonitoringSchemaError(
+                        f"unsupported monitoring schema version {version}"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS map_build_runs_completed
                 ON map_build_runs(completed_epoch)
                 """
             )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS map_build_runs_completed_desc
+                ON map_build_runs(completed_epoch DESC, job_id DESC)
+                """
+            )
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -196,6 +324,17 @@ class MapMonitoringStore:
         connection.execute("PRAGMA busy_timeout=5000")
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _retention_cutoff(self, now: float | None = None) -> float:
+        return (self._clock() if now is None else now) - self.retention_days * 86_400
+
+    @staticmethod
+    def _prune_connection(connection: sqlite3.Connection, cutoff: float) -> int:
+        cursor = connection.execute(
+            "DELETE FROM map_build_runs WHERE completed_epoch < ?",
+            (cutoff,),
+        )
+        return max(cursor.rowcount, 0)
 
     def _record_for_job(self, job: MapJob) -> tuple[Any, ...] | None:
         if job.status not in MONITORED_TERMINAL_STATUSES or not job.finished_at:

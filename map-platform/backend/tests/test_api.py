@@ -741,12 +741,18 @@ class MapJobRunAPITests(unittest.TestCase):
             {"at": job.created_at, "status": JobStatus.READY.value},
         ]
         self.client.app.state.job_store.save(job)
+        self.client.app.state.monitoring_store.record_job(job)
 
         unauthorized = self.client.get("/v1/admin/map-monitoring")
-        response = self.client.get(
-            "/v1/admin/map-monitoring",
-            headers={"Authorization": "Bearer admin-secret"},
-        )
+        with patch.object(
+            self.client.app.state.job_store,
+            "list",
+            side_effect=AssertionError("monitoring GET must not reconcile job files"),
+        ):
+            response = self.client.get(
+                "/v1/admin/map-monitoring",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
 
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(response.status_code, 200)

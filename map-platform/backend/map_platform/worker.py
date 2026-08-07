@@ -305,8 +305,9 @@ class MapWorker:
         monitoring_persisted = False
         if persist:
             try:
-                self.monitoring_store.record_job(job)
-                monitoring_persisted = True
+                monitoring_persisted = bool(
+                    self.monitoring_store.record_job(job)
+                )
             except Exception:
                 # Observability must never turn a completed map into a failed map.
                 monitoring_persisted = False

@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
 from map_platform.jobs import (
@@ -232,6 +232,26 @@ class WorkerTests(unittest.TestCase):
             second = worker.run_next()
             self.assertTrue(second.monitoring_event["monitoringPersisted"])
             self.assertEqual(monitoring.summary()["runs"]["count"], 1)
+
+    def test_monitoring_event_reports_store_return_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            monitoring = Mock()
+            monitoring.record_job.return_value = False
+
+            result = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-monitoring-return-value",
+                monitoring_store=monitoring,
+            ).run_next()
+
+            self.assertFalse(result.monitoring_event["monitoringPersisted"])
+            monitoring.record_job.assert_called_once()
 
     def test_worker_ignores_cancelled_job(self):
         with tempfile.TemporaryDirectory() as tmp:

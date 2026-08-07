@@ -46,7 +46,11 @@ from .map_stream_rollout import (
     parse_map_stream_trust_capabilities,
 )
 from .map_stream_trust_registry import trusted_key_fingerprints
-from .monitoring import DEFAULT_MONITORING_RETENTION_DAYS, MapMonitoringStore
+from .monitoring import (
+    DEFAULT_MONITORING_RETENTION_DAYS,
+    DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
+    MapMonitoringStore,
+)
 from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .rate_limits import (
@@ -114,9 +118,16 @@ def create_app():
             str(DEFAULT_MONITORING_RETENTION_DAYS),
         )
     )
+    monitoring_summary_run_limit = int(
+        os.environ.get(
+            "MAP_PLATFORM_MONITORING_SUMMARY_RUN_LIMIT",
+            str(DEFAULT_MONITORING_SUMMARY_RUN_LIMIT),
+        )
+    )
     monitoring_store = MapMonitoringStore(
         data_root / "map-monitoring.sqlite3",
         retention_days=monitoring_retention_days,
+        summary_run_limit=monitoring_summary_run_limit,
     )
     rate_limiter = PersistentRateLimiter(
         data_root / "rate-limits.sqlite3",
@@ -416,7 +427,6 @@ def create_app():
                 detail="windowHours must be between 1 and 8760",
             )
         try:
-            monitoring_store.sync_jobs(service.store.list())
             return monitoring_store.summary(window_hours=windowHours)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
