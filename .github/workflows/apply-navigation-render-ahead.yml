@@ -1,0 +1,156 @@
+name: Apply navigation render-ahead patch
+
+on:
+  push:
+    branches:
+      - agent/navigation-render-ahead
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: contains(github.event.head_commit.message, '[apply-navigation-patch]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify prepared patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH_DIR=.github/navigation-patch
+          ORIGINAL_B64="$RUNNER_TEMP/navigation.patch.gz.b64"
+          ORIGINAL_GZ="$RUNNER_TEMP/navigation.patch.gz"
+          ORIGINAL_PATCH="$RUNNER_TEMP/navigation.patch"
+          MEMORY_B64="$RUNNER_TEMP/maps-memory-v2.patch.gz.b64"
+          MEMORY_GZ="$RUNNER_TEMP/maps-memory-v2.patch.gz"
+          MEMORY_PATCH="$RUNNER_TEMP/maps-memory-v2.patch"
+
+          {
+            cat "$PATCH_DIR/chunk-00"
+            cat "$PATCH_DIR/chunk-01a"
+            cat "$PATCH_DIR/chunk-01b"
+            cat "$PATCH_DIR/chunk-01c0"
+            cat "$PATCH_DIR/chunk-01c10"
+            cat "$PATCH_DIR/chunk-01c11"
+            cat "$PATCH_DIR/chunk-01c12"
+            cat "$PATCH_DIR/chunk-01c13"
+            cat "$PATCH_DIR/chunk-01c2"
+            cat "$PATCH_DIR/chunk-01c3"
+            cat "$PATCH_DIR/chunk-02"
+            cat "$PATCH_DIR/chunk-03a-fixed"
+            cat "$PATCH_DIR/chunk-03b"
+            cat "$PATCH_DIR/chunk-03c"
+            cat "$PATCH_DIR/chunk-04a"
+            cat "$PATCH_DIR/chunk-04b"
+            cat "$PATCH_DIR/chunk-04c"
+            cat "$PATCH_DIR/chunk-05a"
+            cat "$PATCH_DIR/chunk-05b"
+            cat "$PATCH_DIR/chunk-05c"
+            cat "$PATCH_DIR/chunk-06a"
+            cat "$PATCH_DIR/chunk-06b"
+            cat "$PATCH_DIR/chunk-06c"
+            cat "$PATCH_DIR/chunk-07a"
+            cat "$PATCH_DIR/chunk-07b"
+            cat "$PATCH_DIR/chunk-07c"
+            cat "$PATCH_DIR/chunk-08a"
+            cat "$PATCH_DIR/chunk-08b"
+            cat "$PATCH_DIR/chunk-08c"
+          } | tr -d '\r\n\t ' > "$ORIGINAL_B64"
+
+          echo "b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8  $ORIGINAL_B64" | sha256sum -c -
+          base64 --decode "$ORIGINAL_B64" > "$ORIGINAL_GZ"
+          echo "cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489  $ORIGINAL_GZ" | sha256sum -c -
+          gzip -dc "$ORIGINAL_GZ" > "$ORIGINAL_PATCH"
+          echo "f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58f  $ORIGINAL_PATCH" | sha256sum -c -
+
+          tr -d '\r\n\t ' < "$PATCH_DIR/maps-memory-integration-v2" > "$MEMORY_B64"
+          echo "e880da562e25e26f524b8e6339a33b735c955d7e980b0ee12226722a75c57f1d  $MEMORY_B64" | sha256sum -c -
+          base64 --decode "$MEMORY_B64" > "$MEMORY_GZ"
+          echo "f772ee5c5dfce0910e468b3956e8f2c6167cb7eda13c3223789078a102abf72f  $MEMORY_GZ" | sha256sum -c -
+          gzip -dc "$MEMORY_GZ" > "$MEMORY_PATCH"
+          echo "1e2d89cd90de082ad27a02e5293b952fee076f54d8e52ccdcc2c0fd599867d7e  $MEMORY_PATCH" | sha256sum -c -
+
+      - name: Rebuild cleanly on current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORIGINAL_PATCH="$RUNNER_TEMP/navigation.patch"
+          MEMORY_PATCH="$RUNNER_TEMP/maps-memory-v2.patch"
+          OLD_BASE_WORKTREE="$RUNNER_TEMP/navigation-old-base"
+
+          git fetch origin main
+          CURRENT_MAIN=$(git rev-parse origin/main)
+          echo "Rebuilding on current main: $CURRENT_MAIN"
+          git reset --hard origin/main
+
+          # Apply every prepared change except maps.cpp directly to current main.
+          # --3way preserves independent main changes such as PR #202's CI test.
+          git apply --index --3way \
+            --exclude=esp32/lib/maps/src/maps.cpp \
+            "$ORIGINAL_PATCH"
+
+          # Reproduce the renderer from its exact package-time base, then layer
+          # the deterministic PR #202 diagnostic integration before copying it
+          # into the current-main tree.
+          git worktree add --detach "$OLD_BASE_WORKTREE" \
+            951a51089197c4ef58374c452d320c73fb3a7f03
+          git -C "$OLD_BASE_WORKTREE" apply \
+            --include=esp32/lib/maps/src/maps.cpp \
+            "$ORIGINAL_PATCH"
+          git -C "$OLD_BASE_WORKTREE" apply "$MEMORY_PATCH"
+          cp "$OLD_BASE_WORKTREE/esp32/lib/maps/src/maps.cpp" \
+            esp32/lib/maps/src/maps.cpp
+          git worktree remove --force "$OLD_BASE_WORKTREE"
+
+          git add -A
+          git diff --cached --check
+
+      - name: Run focused executable contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd esp32
+          OUT="$RUNNER_TEMP/navigation-host-tests"
+          mkdir -p "$OUT"
+          for test in \
+            test_map_render_job \
+            test_map_presentation \
+            test_map_building_admission \
+            test_map_route_geometry \
+            test_map_building_workspace \
+            test_map_building_renderer \
+            test_map_render_policy \
+            test_map_pinch_zoom \
+            test_map_projection \
+            test_line_rasterizer \
+            test_workout_telemetry_state; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" -o "$OUT/${test}"
+            "$OUT/${test}"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_map_block_format.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
+            -o "$OUT/test_map_block_format"
+          "$OUT/test_map_block_format"
+          PYTHONPATH=. python3 -m unittest \
+            tools.tests.test_map_guidance_integration \
+            tools.tests.test_map_activation_handoff \
+            tools.tests.test_map_memory_diagnostics
+
+      - name: Publish one clean commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name OpenAI
+          git config user.email openai@example.invalid
+          git commit -m "Rebuild navigation map rendering with latest-wins worker"
+          git push \
+            --force-with-lease=refs/heads/agent/navigation-render-ahead:${GITHUB_SHA} \
+            origin HEAD:refs/heads/agent/navigation-render-ahead
