@@ -1,0 +1,27 @@
+name: Export current main map renderer
+
+on:
+  push:
+    branches:
+      - agent/navigation-render-ahead
+    paths:
+      - .github/workflows/navigation-current-main-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 876acac61b12b5cb572389c844ceb68f9484a085
+          fetch-depth: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: current-main-map-renderer
+          path: esp32/lib/maps/src/maps.cpp
+          if-no-files-found: error
+          retention-days: 1
