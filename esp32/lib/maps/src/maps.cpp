@@ -65,9 +65,25 @@ namespace {
 // changing the renderer's allocation or scheduling policy.
 static void logMapMemorySnapshot(const char *phase) {
 #if defined(WAVESHARE_MAPIO_TIMING_LOG) || defined(WAVESHARE_TOUCH_DIAGNOSTICS)
-  const uint32_t freeHeap = esp_get_free_heap_size();
-  const uint32_t largestHeap =
-      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  constexpr uint32_t kMapMemorySnapshotMinIntervalMs = 250;
+  static uint32_t lastSnapshotMs[4] = {};
+  size_t phaseIndex = 0;
+  if (strcmp(phase, "canvas-draw") == 0)
+    phaseIndex = 1;
+  else if (strcmp(phase, "canvas-no-map") == 0)
+    phaseIndex = 2;
+  else if (strcmp(phase, "canvas-draw-empty") == 0)
+    phaseIndex = 3;
+  const uint32_t nowMs = millis();
+  if (lastSnapshotMs[phaseIndex] != 0 &&
+      nowMs - lastSnapshotMs[phaseIndex] < kMapMemorySnapshotMinIntervalMs)
+    return;
+  lastSnapshotMs[phaseIndex] = nowMs;
+  constexpr uint32_t kInternalHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const uint32_t freeInternalHeap =
+      heap_caps_get_free_size(kInternalHeapCaps);
+  const uint32_t largestInternalHeap =
+      heap_caps_get_largest_free_block(kInternalHeapCaps);
   const uint32_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   const uint32_t largestPsram =
       heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
@@ -75,10 +91,12 @@ static void logMapMemorySnapshot(const char *phase) {
   const uint32_t psramUsed = psramTotal > freePsram
                                  ? psramTotal - freePsram
                                  : 0U;
-  MAPIO_LOG("MAPIO: memory phase=%s freeHeap=%u largestHeap=%u "
+  MAPIO_LOG("MAPIO: memory phase=%s freeInternalHeap=%u "
+            "largestInternalHeap=%u "
             "freePsram=%u largestPsram=%u psramUsed=%u psramTotal=%u\n",
-            phase, (unsigned)freeHeap, (unsigned)largestHeap,
-            (unsigned)freePsram, (unsigned)largestPsram, (unsigned)psramUsed,
+            phase, (unsigned)freeInternalHeap,
+            (unsigned)largestInternalHeap, (unsigned)freePsram,
+            (unsigned)largestPsram, (unsigned)psramUsed,
             (unsigned)psramTotal);
 #else
   (void)phase;
@@ -2655,13 +2673,16 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint32_t buildingFailurePsramUsed = 0;
     uint32_t buildingFailurePsramFree = 0;
     uint32_t buildingFailurePsramLargest = 0;
-    uint32_t buildingFailureHeapFree = 0;
-    uint32_t buildingFailureHeapLargest = 0;
+    uint32_t buildingFailureInternalHeapFree = 0;
+    uint32_t buildingFailureInternalHeapLargest = 0;
     bool buildingFailurePsramSamplePostCleanup = false;
     const auto captureBuildingFailureMemory = [&]() {
-      buildingFailureHeapFree = esp_get_free_heap_size();
-      buildingFailureHeapLargest =
-          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+      constexpr uint32_t internalHeapCaps =
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+      buildingFailureInternalHeapFree =
+          heap_caps_get_free_size(internalHeapCaps);
+      buildingFailureInternalHeapLargest =
+          heap_caps_get_largest_free_block(internalHeapCaps);
       buildingFailurePsramFree =
           heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
       buildingFailurePsramLargest =
@@ -2726,6 +2747,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       }
       buildingPassPhase = BuildingPassPhase::Complete;
     };
+    bool buildingScreenInterrupted = false;
     const bool buildingPassCompleted =
         map_building_renderer::runAllocationSafe(
             [&]() -> bool {
@@ -2750,7 +2772,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint64_t visibleWallCandidateCount = 0;
     bool buildingBudgetFallback = false;
     bool buildingDeadlineExceeded = false;
-    bool buildingScreenInterrupted = false;
     static uint64_t renderRecordOverflowTotal = 0;
     static uint64_t renderPointOverflowTotal = 0;
     static uint64_t renderOversizedOverflowTotal = 0;
@@ -3030,7 +3051,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                           pixelCount * sizeof(uint16_t));
               largestCourtyardUnderlayBytes = std::max(
                   largestCourtyardUnderlayBytes,
-                  pixelCount * sizeof(uint16_t));
+                  courtyardUnderlay.capacity() * sizeof(uint16_t));
               ++courtyardSnapshotCount;
               if (shouldStopBuildingWork())
                 return false;
@@ -3115,7 +3136,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "suppressedWallFaces=%llu "
               "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
               "courtyardSnapshots=%u courtyardMaxBytes=%u "
-              "freeHeap=%u largestHeap=%u "
+              "freeInternalHeap=%u largestInternalHeap=%u "
               "deadlineExceeded=%u prepassDeadlineExceeded=%u "
               "psramUsed=%u psramFree=%u psramLargest=%u "
               "budgetFallback=%u renderRecordOverflowTotal=%llu "
@@ -3151,8 +3172,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)buildingDrawMs,
               (unsigned)courtyardSnapshotCount,
               (unsigned)largestCourtyardUnderlayBytes,
-              (unsigned)esp_get_free_heap_size(),
-              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                         MALLOC_CAP_8BIT),
               buildingDeadlineExceeded ? 1U : 0U,
               buildingPrepassDeadlineExceeded ? 1U : 0U,
               (unsigned)(ESP.getPsramSize() -
@@ -3186,6 +3209,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                                       ? "allocation"
                                       : (buildingDeadlineAborted ? "deadline"
                                                                  : "interrupt");
+      const bool screenCycleInterrupted =
+          buildingScreenInterrupted || shouldInterruptMapRenderForScreenCycle();
       if (buildingAllocationFailed || buildingDeadlineAborted) {
         MAPIO_LOG(
             "MAPIO: buildings aborted reason=%s fallback=buildings-hidden "
@@ -3196,7 +3221,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
             "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
             "courtyardSnapshots=%u courtyardMaxBytes=%u "
-            "freeHeap=%u largestHeap=%u "
+            "freeInternalHeap=%u largestInternalHeap=%u "
             "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
             "psramLargest=%u psramSamplePostCleanup=%u\n",
             failureReason, (unsigned)loadedBuildingStats.records,
@@ -3216,8 +3241,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
             (unsigned)courtyardSnapshotCount,
             (unsigned)largestCourtyardUnderlayBytes,
-            (unsigned)buildingFailureHeapFree,
-            (unsigned)buildingFailureHeapLargest,
+            (unsigned)buildingFailureInternalHeapFree,
+            (unsigned)buildingFailureInternalHeapLargest,
             buildingPrepassDeadlineExceeded ? 1U : 0U,
             (unsigned)buildingFailurePsramUsed,
             (unsigned)buildingFailurePsramFree,
@@ -3225,9 +3250,24 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             buildingFailurePsramSamplePostCleanup ? 1U : 0U);
         buildingFailureRetryCooldown.recordFailure(
             millis(), buildingContextSignature, buildingRenderRegion);
+      } else if (screenCycleInterrupted) {
+        captureBuildingFailureMemory();
+        MAPIO_LOG(
+            "MAPIO: buildings aborted reason=interrupt fallback=deferred "
+            "courtyardSnapshots=%u courtyardMaxBytes=%u "
+            "freeInternalHeap=%u largestInternalHeap=%u "
+            "psramUsed=%u psramFree=%u psramLargest=%u\n",
+            (unsigned)courtyardSnapshotCount,
+            (unsigned)largestCourtyardUnderlayBytes,
+            (unsigned)buildingFailureInternalHeapFree,
+            (unsigned)buildingFailureInternalHeapLargest,
+            (unsigned)buildingFailurePsramUsed,
+            (unsigned)buildingFailurePsramFree,
+            (unsigned)buildingFailurePsramLargest);
+      }
+      if (buildingAllocationFailed || buildingDeadlineAborted ||
+          screenCycleInterrupted) {
         releaseBuildingFailureWorkspace();
-        const bool screenCycleInterrupted =
-            shouldInterruptMapRenderForScreenCycle();
         if (map_building_renderer::shouldRetryWithoutBuildings(
                 buildingsSuppressed, buildingAllocationFailed,
                 buildingDeadlineAborted, screenCycleInterrupted)) {
