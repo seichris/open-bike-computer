@@ -17,29 +17,44 @@ from capture_boot import (
 from resolve_upload_port import ResolvedDevice
 
 
-HEALTHY_CAPTURE = """
+POWER_BUTTON_FIELDS = (
+    "powerButtonOffConfigured=1 powerButtonOffSeconds=4 "
+    "powerButtonOffLevel=0 powerButtonConfigRead=1 powerButtonConfig=0xF3"
+)
+READ_ONLY_PMIC_LINE = (
+    "BOOT_PMIC schema=1 mode=read-only available=1 "
+    "railState=current-preserved statusRead=1 status1=0x20 status2=0x15 "
+    "vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF "
+    + POWER_BUTTON_FIELDS
+)
+DISPLAY_RECOVERY_PMIC_LINE = (
+    "BOOT_PMIC schema=1 mode=display-enable-only available=1 "
+    "railState=display-enabled statusRead=1 status1=0x20 status2=0x15 "
+    "vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0x80 "
+    "displayRecovery=1 displayChanged=1 "
+    + POWER_BUTTON_FIELDS
+)
+
+HEALTHY_CAPTURE = f"""
 BOOT_META schema=1 sequence=2 target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175 version=0.2.2 build=7 git=0123456789012345678901234567890123456789 built=2026-07-31T01:02:03Z fingerprint=12345678 reset=usb resetCode=11
 BOOT_PREVIOUS schema=1 history=retained valid=1 sameFirmware=1 sequence=1 fingerprint=12345678 ready=1 safeMode=0 diagnosticHold=0 reset=power_on resetCode=1 active=ready completed=ready failureCount=0 failureStage=none failureAfter=none failureReset=unknown failureResetCode=0
 BOOT_FAILURE schema=1 recorded=0 count=0 threshold=3 stage=none after=none reset=unknown resetCode=0 safeMode=0
-BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF
+{READ_ONLY_PMIC_LINE}
 BOOT_STAGE schema=1 sequence=2 event=ready id=15 name=ready uptimeMs=1042
 """
 
-USB_COLD_CAPTURE = """
+USB_COLD_CAPTURE = f"""
 BOOT_META schema=1 sequence=1 target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175 version=0.2.2 build=7 git=0123456789012345678901234567890123456789 built=2026-07-31T01:02:03Z fingerprint=12345678 reset=usb resetCode=11
 BOOT_PREVIOUS schema=1 history=empty_or_invalid valid=0 sameFirmware=0 sequence=0 fingerprint=00000000 ready=0 safeMode=0 diagnosticHold=0 reset=unknown resetCode=0 active=none completed=none failureCount=0 failureStage=none failureAfter=none failureReset=unknown failureResetCode=0
 BOOT_FAILURE schema=1 recorded=0 count=0 threshold=3 stage=none after=none reset=unknown resetCode=0 safeMode=0
-BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF
+{READ_ONLY_PMIC_LINE}
 BOOT_STAGE schema=1 sequence=1 event=ready id=15 name=ready uptimeMs=1042
 """
 
 DISPLAY_RECOVERY_CAPTURE = HEALTHY_CAPTURE.replace(
     "target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175",
     "target=WAVESHARE_AMOLED_206 profile=WAVESHARE_AMOLED_206",
-).replace(
-    "BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF",
-    "BOOT_PMIC schema=1 mode=display-enable-only available=1 railState=display-enabled statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0x80 displayRecovery=1 displayChanged=1",
-)
+).replace(READ_ONLY_PMIC_LINE, DISPLAY_RECOVERY_PMIC_LINE)
 
 
 class CaptureBootTests(unittest.TestCase):
@@ -239,6 +254,11 @@ class CaptureBootTests(unittest.TestCase):
         self.assertIn("ready=1", rendered)
         self.assertIn("pmicMode=read-only", rendered)
         self.assertIn("pmicRailState=current-preserved", rendered)
+        self.assertIn("pmicPowerButtonOffConfigured=1", rendered)
+        self.assertIn("pmicPowerButtonOffSeconds=4", rendered)
+        self.assertIn("pmicPowerButtonOffLevel=0", rendered)
+        self.assertIn("pmicPowerButtonConfigRead=1", rendered)
+        self.assertIn("pmicPowerButtonConfig=0xF3", rendered)
         self.assertIn("profile=WAVESHARE_AMOLED_175", rendered)
         self.assertIn("previousFingerprint=12345678", rendered)
         self.assertIn("stageSchemaMismatches=0", rendered)
@@ -458,7 +478,7 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
 
     def test_pmic_gate_requires_probe_and_both_reads(self) -> None:
         unavailable = HEALTHY_CAPTURE.replace(
-            "BOOT_PMIC schema=1 mode=read-only available=1 railState=current-preserved statusRead=1 status1=0x20 status2=0x15 vbus=1 battery=0 currentDirection=0 charging=5 ldoRead=1 ldo=0xFF",
+            READ_ONLY_PMIC_LINE,
             "BOOT_PMIC schema=1 mode=read-only available=0 railState=unknown",
         )
         errors = validation_errors(
@@ -488,6 +508,74 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
                 summarize(changed_rails), require_pmic_read_only=True
             ),
         )
+
+    def test_pmic_gate_requires_verified_four_second_power_button_config(self) -> None:
+        for capture, gate in (
+            (HEALTHY_CAPTURE, {"require_pmic_read_only": True}),
+            (
+                DISPLAY_RECOVERY_CAPTURE,
+                {"require_pmic_display_enable_only": True},
+            ),
+        ):
+            with self.subTest(mode=summarize(capture).pmic["mode"]):
+                self.assertEqual(validation_errors(summarize(capture), **gate), [])
+                legacy = capture.replace(" " + POWER_BUTTON_FIELDS, "", 1)
+                errors = validation_errors(summarize(legacy), **gate)
+                self.assertIn(
+                    "PMIC four-second power-button-off configuration required "
+                    "(got missing)",
+                    errors,
+                )
+                self.assertIn(
+                    "PMIC power-button config read required (got missing)", errors
+                )
+                self.assertIn(
+                    "PMIC power-button-off seconds expected 4, got missing", errors
+                )
+                self.assertIn(
+                    "PMIC power-button-off level expected 0, got missing", errors
+                )
+                self.assertIn(
+                    "PMIC power-button config byte required (got missing)", errors
+                )
+
+        for old, new, expected_error in (
+            (
+                "powerButtonOffConfigured=1",
+                "powerButtonOffConfigured=0",
+                "PMIC four-second power-button-off configuration required (got 0)",
+            ),
+            (
+                "powerButtonConfigRead=1",
+                "powerButtonConfigRead=0",
+                "PMIC power-button config read required (got 0)",
+            ),
+            (
+                "powerButtonOffSeconds=4",
+                "powerButtonOffSeconds=6",
+                "PMIC power-button-off seconds expected 4, got 6",
+            ),
+            (
+                "powerButtonOffLevel=0",
+                "powerButtonOffLevel=1",
+                "PMIC power-button-off level expected 0, got 1",
+            ),
+            (
+                "powerButtonConfig=0xF3",
+                "powerButtonConfig=0xF7",
+                "PMIC power-button config off-level bits expected 0, got 1",
+            ),
+            (
+                "powerButtonConfig=0xF3",
+                "powerButtonConfig=invalid",
+                "PMIC power-button config byte required (got invalid)",
+            ),
+        ):
+            errors = validation_errors(
+                summarize(HEALTHY_CAPTURE.replace(old, new, 1)),
+                require_pmic_read_only=True,
+            )
+            self.assertIn(expected_error, errors)
 
     def test_206_pmic_gate_requires_verified_display_enable_only_recovery(self) -> None:
         summary = summarize(DISPLAY_RECOVERY_CAPTURE)
