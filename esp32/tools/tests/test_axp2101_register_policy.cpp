@@ -53,6 +53,14 @@ int main() {
       assert((updated & POWER_BUTTON_OFF_LEVEL_MASK) ==
              ((level << POWER_BUTTON_OFF_LEVEL_SHIFT) &
               POWER_BUTTON_OFF_LEVEL_MASK));
+      assert(powerButtonOffLevel(updated) == level);
+      assert(hasPowerButtonOffLevel(updated, level));
+      assert(!hasPowerButtonOffLevel(updated, POWER_BUTTON_OFF_LEVEL_COUNT));
+
+      // The transition guard must reject collateral changes to any neighboring
+      // PWR-button setting, even when the requested OFFLEVEL bits are correct.
+      assert(!isPowerButtonOffLevelTransition(current,
+                                              updated ^ uint8_t{0x01}));
     }
   }
 

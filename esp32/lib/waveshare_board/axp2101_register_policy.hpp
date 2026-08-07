@@ -52,6 +52,16 @@ constexpr bool isDisplayEnableOnlyTransition206(uint8_t current,
          ((current ^ updated) & ~DISPLAY_ENABLE_MASK_206) == 0;
 }
 
+constexpr uint8_t powerButtonOffLevel(uint8_t registerValue) {
+  return (registerValue & POWER_BUTTON_OFF_LEVEL_MASK) >>
+         POWER_BUTTON_OFF_LEVEL_SHIFT;
+}
+
+constexpr bool hasPowerButtonOffLevel(uint8_t registerValue, uint8_t level) {
+  return level < POWER_BUTTON_OFF_LEVEL_COUNT &&
+         powerButtonOffLevel(registerValue) == level;
+}
+
 constexpr bool isPowerButtonOffLevelTransition(uint8_t current,
                                                 uint8_t updated) {
   return ((current ^ updated) & ~POWER_BUTTON_OFF_LEVEL_MASK) == 0;
