@@ -87,12 +87,21 @@ struct WorkoutStartView: View {
             .tint(.green)
             .disabled(manager.state == .failed)
         case .denied:
-            Text("Bicino can’t start a workout without permission to save workouts in Health.")
-                .font(.caption)
-                .multilineTextAlignment(.center)
-            Button("Check Again") {
-                manager.requestAuthorization()
+            VStack(spacing: 6) {
+                Text("Bicino can’t start a workout without permission to save workouts in Health.")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                Text(
+                    "On Apple Watch, open Settings > Health > Apps > Bicino and enable Workouts and Workout Routes, then return here."
+                )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
+            Button("Check Again") {
+                manager.refreshAuthorizationIfNeeded()
+            }
+            .tint(.blue)
         case .unavailable:
             Text("Health data isn’t available on this Watch.")
                 .font(.caption)

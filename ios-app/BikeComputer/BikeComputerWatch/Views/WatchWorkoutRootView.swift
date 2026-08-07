@@ -2,6 +2,7 @@ import SwiftUI
 
 struct WatchWorkoutRootView: View {
     @ObservedObject var manager: WatchWorkoutManager
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -27,6 +28,13 @@ struct WatchWorkoutRootView: View {
                     WorkoutStartView(manager: manager)
                 }
             }
+        }
+        .onAppear {
+            manager.refreshAuthorizationIfNeeded()
+        }
+        .onChange(of: scenePhase) { newValue in
+            guard newValue == .active else { return }
+            manager.refreshAuthorizationIfNeeded()
         }
     }
 }
