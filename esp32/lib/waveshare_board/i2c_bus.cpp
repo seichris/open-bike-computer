@@ -325,8 +325,13 @@ bool ensureAxp2101PowerButtonOffLevel(
 
         if (current == updated) {
           result.after = current;
-          result.changed = result.before != current;
-          return true;
+          const bool valid =
+              axp_policy::isPowerButtonOffLevelTransition(result.before,
+                                                           current);
+          if (valid) {
+            result.changed = result.before != current;
+          }
+          return valid;
         }
 
         Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
