@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import unittest
 
 
@@ -9,6 +8,15 @@ MAIN_SCREEN_SOURCE = (
 ).read_text(encoding="utf-8")
 MAP_RENDERER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.cpp"
+).read_text(encoding="utf-8")
+MAP_HEADER_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
+).read_text(encoding="utf-8")
+BUILDING_ADMISSION_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapBuildingAdmission.hpp"
+).read_text(encoding="utf-8")
+ROUTE_SOURCE = (
+    ESP32_ROOT / "lib" / "route_overlay" / "route_overlay.cpp"
 ).read_text(encoding="utf-8")
 LVGL_SETUP_SOURCE = (
     ESP32_ROOT / "lib" / "lvgl" / "src" / "lvglSetup.cpp"
@@ -30,184 +38,144 @@ def function_body(source: str, signature: str) -> str:
 
 
 class MapGuidanceIntegrationTests(unittest.TestCase):
-    def test_birds_eye_activation_does_not_require_a_route(self):
-        match = re.search(
-            r"const bool birdsEyeActive\s*=\s*(.*?);",
-            function_body(MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"),
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        expression = match.group(1)
-        self.assertIn("usesMapGuidanceBirdsEye", expression)
-        self.assertIn("isMapGuidanceScreenActive()", expression)
-        self.assertIn("mapNavigationBirdsEyeEnabled", expression)
-        self.assertNotIn("hasRoute", expression)
+    """Supplemental wiring guards; behavioral contracts live in C++ tests."""
 
-    def test_map_guidance_owns_no_destination_picker(self):
-        self.assertNotIn("mapGuidanceDestinationPicker", MAIN_SCREEN_SOURCE)
-        overlay_body = function_body(
-            MAIN_SCREEN_SOURCE, "static void createMapGuidanceOverlay"
+    def test_ui_submission_path_contains_no_storage_or_raster_work(self):
+        generate = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"
         )
-        self.assertNotIn("createDestinationPickerContainer", overlay_body)
-        self.assertIn("mapGuidanceArrow =", overlay_body)
-        self.assertIn("mapGuidanceDistance =", overlay_body)
+        self.assertIn("buildRenderRequest", generate)
+        self.assertIn("submitRenderRequest", generate)
+        for forbidden in (
+            "getMapBlocks",
+            "readVectorMap",
+            "readMapBlock",
+            "fillPolygon",
+            "renderSurfaces",
+            "lv_canvas_set_buffer",
+        ):
+            self.assertNotIn(forbidden, generate)
 
-    def test_map_guidance_overlay_is_navigation_data_gated(self):
-        update_body = function_body(
-            MAIN_SCREEN_SOURCE, "static void updateMapGuidanceOverlay() {"
-        )
-        reveal_body = function_body(
-            MAIN_SCREEN_SOURCE, "static void revealPendingMapTileIfReady() {"
-        )
-        self.assertIn(
-            "if (navigation_content_mode::hidesMapGuidanceOverlay("
-            "hasNavigationData))",
-            update_body,
-        )
-        self.assertIn(
-            "navigation_content_mode::showsMapGuidanceOverlay(\n"
-            "          hasCurrentNavigationData())",
-            reveal_body,
-        )
-        self.assertIn("setHiddenIfChanged(mapGuidanceOverlay, true)", update_body)
+        ui_tick = function_body(MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate")
+        self.assertIn("serviceRenderPipeline", ui_tick)
+        self.assertIn("updatePositionOverlay", ui_tick)
+        self.assertNotIn("readVectorMap", ui_tick)
+        self.assertNotIn("getMapBlocks", ui_tick)
 
-    def test_building_extrusion_uses_complete_map_guidance_gate(self):
-        match = re.search(
-            r"bool extrudeBuildings\s*=\s*(.*?);",
-            MAP_RENDERER_SOURCE,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        expression = match.group(1)
-        self.assertIn("extrudesMapGuidanceBuildings", expression)
-        self.assertIn("buildingsVisible", expression)
-        self.assertIn("mapNavigationActive", expression)
-        self.assertIn("projection.isBirdsEye()", expression)
-        self.assertIn("mapNavigation3DBuildingsEnabled", expression)
-        self.assertNotIn("hasRoute", expression)
+    def test_worker_owns_block_io_and_raw_back_buffer_only(self):
+        worker = function_body(MAP_RENDERER_SOURCE, "void Maps::renderWorkerLoop")
+        self.assertIn("getMapBlocks", worker)
+        self.assertIn("readVectorMap", worker)
+        self.assertIn("map_surface::Rgb565Surface target", worker)
+        self.assertIn("bufMapTemp", worker)
+        self.assertIn("shouldCancelMapRenderWork", worker)
+        self.assertNotIn("lv_canvas_set_buffer", worker)
+        self.assertNotIn("lv_obj_", worker)
+        self.assertNotIn("lv_img_", worker)
 
-    def test_dense_scene_selection_uses_shared_nearest_first_policy(self):
-        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        self.assertIn(
-            "map_building_renderer::selectNearestForExtrusion(\n"
-            "                    buildingQueue.rbegin(), buildingQueue.rend(),\n"
-            "                    shouldStopBuildingWork)",
-            render_body,
-        )
-        self.assertIn("item.extrude", render_body)
-        self.assertIn("buildingSelection.flatOverflow()", render_body)
-        self.assertIn("buildingSelection.recordLimitOverflow", render_body)
-        self.assertIn("buildingSelection.pointLimitOverflow", render_body)
+        raw_map = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        raw_labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels")
+        for raw_path in (raw_map, raw_labels):
+            self.assertNotIn("lv_", raw_path)
+            self.assertNotIn("canvas", raw_path.lower())
 
-    def test_total_building_work_is_bounded_before_surface_rendering(self):
-        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        self.assertIn(
-            "buildingRecords=%u buildingRings=%u", MAP_RENDERER_SOURCE
-        )
-        self.assertIn(
-            "buildingPoints=%u heightExplicit=%u", MAP_RENDERER_SOURCE
-        )
-        self.assertIn("kMaximumRenderedBuildingPointsPerRecord", render_body)
-        self.assertIn("kMaximumRenderedBuildingRecords", render_body)
-        self.assertIn("retainNearestCandidate", render_body)
-        self.assertIn("selectNearestForRendering", render_body)
-        self.assertIn("kMaximumBuildingRenderTimeMs", render_body)
+    def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
+        publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
         self.assertLess(
-            render_body.index("const uint32_t buildingPassStartMs"),
-            render_body.index("for (MapBlock *block : memCache.blocks)"),
+            publish.index("renderResultStillCurrent"),
+            publish.index("std::swap(bufMapScreen, bufMapTemp)"),
         )
-        self.assertIn("projectedFootprintAreaPixels", render_body)
-        self.assertIn("if (mayExtrude && extrusionZoomEligible)", render_body)
-        self.assertIn("shouldStopBuildingWork", render_body)
-        self.assertIn("eligibleExtrusionZoom(zoom)", render_body)
-        self.assertIn("deadlineExceeded=%u", render_body)
-        self.assertIn("prepassDeadlineExceeded=%u", render_body)
-        self.assertIn("wallCandidates=%llu", render_body)
-        self.assertIn("generatedWallFaces=%llu", render_body)
-        self.assertIn("suppressedWallFaces=%llu", render_body)
-        self.assertIn("parsedRecords=%u parsedRings=%u", render_body)
-        self.assertIn("parsedPoints=%u heightExplicit=%u", render_body)
-        self.assertIn("heightClassDefault=%u", render_body)
-        self.assertIn("psramLargest=%u", render_body)
-        self.assertIn("if (!item.render)", render_body)
+        self.assertIn("rejectReadyAsStale", publish)
+        current = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::renderRequestStillCurrent"
+        )
+        self.assertIn("request.version.navigationEpoch == navigationEpoch", current)
+        self.assertIn("request.version.styleEpoch == styleEpoch", current)
+        self.assertIn("request.version.projectionEpoch == projectionEpoch", current)
+        self.assertIn("std::swap(bufMapScreenSize, bufMapTempSize)", publish)
+        self.assertIn("lv_canvas_set_buffer(canvasMap, bufMapScreen", publish)
+        self.assertIn("lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", publish)
 
-    def test_ground_roads_render_once_before_buildings(self):
-        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        self.assertEqual(render_body.count("for (const auto &line :"), 1)
-        self.assertLess(
-            render_body.index("////// Lines"),
-            render_body.index(
-                "buildingPassPhase = BuildingPassPhase::Draw;"
-            ),
+    def test_live_route_and_marker_share_presented_frame_transform(self):
+        foreground = function_body(MAP_RENDERER_SOURCE, "void Maps::renderLiveForeground")
+        marker = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePositionOverlay")
+        frame = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::updatePresentedFrameTransform"
         )
-        self.assertNotIn(
-            "roads once above them",
-            render_body,
-        )
+        self.assertIn("RoutePresentationTransform presentation", foreground)
+        self.assertIn("visibleRenderResult.overscanPixels", foreground)
+        self.assertIn("presentedPose", foreground)
+        self.assertIn("presentFramePoint", marker)
+        self.assertIn("visibleRenderResult.overscanPixels", marker)
+        self.assertIn("lv_image_set_pivot", frame)
+        self.assertIn("screenAnchorX", frame)
+        self.assertIn("rotationDelta", frame)
+        self.assertIn("map_presentation::presentFramePoint", ROUTE_SOURCE)
 
-    def test_navigation_route_remains_above_completed_map(self):
-        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap")
-        self.assertLess(
-            render_body.index("Maps::readVectorMap("),
-            render_body.index("routeOverlay.drawRoute("),
+    def test_guidance_session_accepts_route_or_maneuver_packets(self):
+        navigation_signature = function_body(
+            MAP_RENDERER_SOURCE, "uint64_t Maps::navigationSignature"
         )
+        pose = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedPose")
+        self.assertIn("routeOverlay.hasRoute() || hasCurrentNavigationData()", navigation_signature)
+        self.assertIn("routeActive || maneuverActive", pose)
+        self.assertIn("headingResolver.resolve", pose)
+        self.assertIn("gps.gpsData.heading < 360U", pose)
 
-    def test_building_deadline_and_allocation_failures_discard_scratch_frame(self):
-        render_body = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
-        self.assertIn("runAllocationSafe", render_body)
-        self.assertIn("buildingAllocationFailed", render_body)
-        self.assertIn("buildingDeadlineAborted", render_body)
-        self.assertIn('reason=%s', render_body)
-        self.assertIn('"allocation"', render_body)
-        self.assertIn('"deadline"', render_body)
-        self.assertIn('fallback=buildings-hidden', render_body)
-        self.assertIn("renderTimeOverflowTotal=%llu", render_body)
-        self.assertIn("projectionMs=%lu sortMs=%lu buildingDrawMs=%lu", render_body)
-        self.assertIn("psramUsed=%u psramFree=%u", render_body)
-        self.assertIn("shouldRetryWithoutBuildings", render_body)
-        self.assertIn("buildingFailureRetryCooldown.recordFailure", render_body)
-        self.assertIn("psramSamplePostCleanup", render_body)
-        self.assertGreaterEqual(render_body.count("releaseBuildingFailureWorkspace();"), 2)
-        self.assertLess(
-            render_body.rindex("releaseBuildingFailureWorkspace();"),
-            render_body.index("drawStreetLabels"),
+    def test_idle_guidance_screen_keeps_birdseye_3d_enabled(self):
+        capture = function_body(
+            MAP_RENDERER_SOURCE, "Maps::RenderContext Maps::captureRenderContext"
+        )
+        render = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::readVectorMap"
         )
         self.assertIn(
-            "projection, drawLabels, true)",
-            render_body,
+            "context.guidanceScreenActive = isMapGuidanceScreenActive()",
+            capture,
         )
-        self.assertRegex(
-            render_body,
-            r"if\s*\(\s*map_building_renderer::shouldRetryWithoutBuildings\("
-            r"\s*buildingsSuppressed,\s*buildingAllocationFailed,"
-            r"\s*buildingDeadlineAborted,\s*screenCycleInterrupted\s*\)\s*\)"
-            r"\s*\{\s*return\s+Maps::readVectorMap\("
-            r"\s*viewPort,\s*memCache,\s*canvas,\s*zoom,\s*rotation,"
-            r"\s*projection,\s*drawLabels,\s*true\s*\);\s*\}",
+        self.assertIn(
+            "buildingsVisible, context.guidanceScreenActive",
+            render,
         )
-        self.assertRegex(
-            render_body,
-            r"if \(!buildingPassCompleted\)\s*\{[\s\S]*?return false;\s*\}",
-        )
+        self.assertIn("navigationSessionActive", capture)
 
-    def test_navigation_screen_retains_destination_picker(self):
-        create_body = function_body(MAIN_SCREEN_SOURCE, "void createMainScr")
-        update_body = function_body(MAIN_SCREEN_SOURCE, "void updateNavEvent")
-        self.assertIn(
-            "createDestinationPickerContainer(navTile)", create_body
+    def test_position_only_requests_do_not_cancel_active_render(self):
+        job = (ESP32_ROOT / "lib" / "maps" / "src" / "mapRenderJob.hpp").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(
-            "renderDestinationPicker(navigationDestinationPicker)", update_body
-        )
+        self.assertIn("Version::sameFrame(active_, latest_)", job)
+        self.assertIn("state_ == State::Ready", job)
+        self.assertIn("requestCancellation", job)
+        self.assertIn("gMapRenderCancellationGeneration", MAP_RENDERER_SOURCE)
+
+    def test_building_admission_is_spatial_bounded_and_allocation_only_fallback(self):
+        render = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        self.assertIn("map_building_admission::retainNearest", render)
+        self.assertIn("map_building_admission::select", render)
+        self.assertIn("const map_building_admission::Quotas quotas", render)
+        self.assertIn("maximumExtrudedRecords", BUILDING_ADMISSION_SOURCE)
+        self.assertIn("admissionDiagnostics.flat", render)
+        self.assertIn("buildingAllocationFailed", render)
+        self.assertIn('failure=allocation fallback=bounded-flat', render)
+        self.assertIn('fallbackDiagnostics.allocationFallback = true', render)
+        self.assertNotIn("deadline", render.lower())
+        self.assertNotIn("kMaximumBuildingRenderTimeMs", MAP_HEADER_SOURCE)
+
+    def test_route_is_not_baked_into_worker_base_frame(self):
+        render = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
+        worker = function_body(MAP_RENDERER_SOURCE, "void Maps::renderWorkerLoop")
+        foreground = function_body(MAP_RENDERER_SOURCE, "void Maps::renderLiveForeground")
+        self.assertNotIn("drawRoute", render)
+        self.assertNotIn("drawSnapshot", worker)
+        self.assertIn("RouteOverlay::drawSnapshot", foreground)
 
     def test_main_screen_entry_defers_first_render_to_configured_screen(self):
-        load_body = function_body(LVGL_SETUP_SOURCE, "void loadMainScreen")
-        self.assertEqual(load_body.count("main_screen_entry_policy::enter("), 1)
-        self.assertEqual(load_body.count("showConfiguredDefaultMainScreen()"), 1)
-        self.assertNotIn("generateVectorMap", load_body)
-        self.assertNotIn("generateRenderMap", load_body)
-        self.assertNotIn("displayMap", load_body)
-        self.assertNotRegex(load_body, r"\bzoom\s*=\s*\d+")
+        load = function_body(LVGL_SETUP_SOURCE, "void loadMainScreen")
+        self.assertEqual(load.count("main_screen_entry_policy::enter("), 1)
+        self.assertEqual(load.count("showConfiguredDefaultMainScreen()"), 1)
+        self.assertNotIn("generateVectorMap", load)
+        self.assertNotIn("generateRenderMap", load)
+        self.assertNotIn("displayMap", load)
 
 
 if __name__ == "__main__":

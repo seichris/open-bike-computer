@@ -314,7 +314,7 @@ final class TestBLEManager: BLEManager {
     override func sendGPSPosition(
         lat: Double,
         lon: Double,
-        heading: Double = 0,
+        heading: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
@@ -595,6 +595,10 @@ struct NavigationProtocolTests {
         testDeveloperLocationOverride()
         testRideActivityPolicy()
         testDeviceGPSPacketBuilder()
+        testNavigationCourseResolver()
+        testRouteGeometryMath()
+        testRouteGeometryTransmissionPolicy()
+        testNavigationEngineUsesRouteBearingForInvalidCourse()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testGPSQueuePolicy()
@@ -4202,7 +4206,7 @@ struct NavigationProtocolTests {
         assertEqual(data.count, 30, "extended GPS packet has expected byte length")
         assertEqual(readInt32LE(data, offset: 0), 37_123_456, "GPS packet stores latitude microdegrees")
         assertEqual(readInt32LE(data, offset: 4), -122_654_321, "GPS packet stores longitude microdegrees")
-        assertEqual(readUInt16LE(data, offset: 8), 359, "GPS packet clamps heading")
+        assertEqual(readUInt16LE(data, offset: 8), 1, "GPS packet normalizes heading through wraparound")
         assertEqual(readUInt32LE(data, offset: 10), 1_234_567_890, "GPS packet stores Unix time")
         assertEqual(readUInt16LE(data, offset: 14), 555, "GPS packet stores speed in centimeters per second")
         assertEqual(readInt16LE(data, offset: 16), 42, "GPS packet stores altitude in meters")
@@ -4211,8 +4215,176 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(data, offset: 26), 9877, "GPS packet stores rounded route remaining meters")
 
         let invalidData = DeviceGPSPacketBuilder.data(lat: 0, lon: 0, unixTime: 0)
+        assertEqual(readUInt16LE(invalidData, offset: 8), DeviceGPSPacketBuilder.invalidHeadingDegrees, "missing heading uses invalid sentinel")
         assertEqual(readUInt16LE(invalidData, offset: 14), DeviceGPSPacketBuilder.invalidSpeedCmps, "missing speed uses invalid sentinel")
         assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
+    }
+
+    static func testNavigationCourseResolver() {
+        var resolver = NavigationCourseResolver()
+        resolver.reset(epoch: 1)
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: 361,
+                routeBearing: 90,
+                navigationActive: true
+            ) ?? -1),
+            1,
+            "valid measured course is preferred and normalized"
+        )
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: 92,
+                navigationActive: true
+            ) ?? -1),
+            92,
+            "invalid measured course falls back to route bearing"
+        )
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: nil,
+                routeBearing: nil,
+                navigationActive: true
+            ) ?? -1),
+            92,
+            "active navigation remembers the last valid course"
+        )
+        resolver.reset(epoch: 2)
+        assert(
+            resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: nil,
+                navigationActive: true
+            ) == nil,
+            "a new navigation epoch cannot inherit a stale heading"
+        )
+        assert(
+            resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: 90,
+                navigationActive: false
+            ) == nil,
+            "idle mode does not accidentally activate course-up from a route"
+        )
+    }
+
+    static func testRouteGeometryMath() {
+        let route = [
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -121.999),
+            CLLocationCoordinate2D(latitude: 37.001, longitude: -121.999)
+        ]
+        let rider = CLLocationCoordinate2D(
+            latitude: 37.0001,
+            longitude: -121.9996
+        )
+        guard let projection = RouteGeometryMath.nearestProjection(
+            to: rider,
+            on: route
+        ) else {
+            assert(false, "route projection exists")
+            return
+        }
+        assertEqual(projection.segmentIndex, 0, "nearest route segment is selected")
+        assert(abs(projection.coordinate.latitude - 37.0) < 0.000001,
+               "projection lies exactly on the route")
+        let window = RouteGeometryMath.slidingWindow(
+            riderCoordinate: rider,
+            routePoints: route,
+            maximumPointCount: 4
+        )
+        assertCoordinate(
+            window[0],
+            latitude: rider.latitude,
+            longitude: rider.longitude,
+            "route window begins at the exact rider coordinate"
+        )
+        assert(window.count >= 3, "route window retains the projected route and future geometry")
+        let bearing = RouteGeometryMath.bearingNear(rider, routePoints: route)
+        assert(bearing != nil && abs((bearing ?? 0) - 90) < 1,
+               "route bearing follows the nearest eastbound segment")
+    }
+
+    static func testRouteGeometryTransmissionPolicy() {
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 4,
+                lastSentSegmentIndex: nil,
+                maximumPointCount: 30
+            ),
+            "the first route window is always sent"
+        )
+        assert(
+            !RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 18,
+                lastSentSegmentIndex: 4,
+                maximumPointCount: 30
+            ),
+            "moving within the buffered route window does not churn route revisions"
+        )
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 24,
+                lastSentSegmentIndex: 4,
+                maximumPointCount: 30
+            ),
+            "consuming two thirds of the route window requests a replacement"
+        )
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 2,
+                lastSentSegmentIndex: 24,
+                maximumPointCount: 30
+            ),
+            "backtracking or a replacement route refreshes geometry"
+        )
+    }
+
+    @MainActor
+    static func testNavigationEngineUsesRouteBearingForInvalidCourse() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+                CLLocationCoordinate2D(latitude: 37.0, longitude: -121.99)
+            ]
+        )
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.0, longitude: -121.999),
+            altitude: 0,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: -1,
+            speed: 5,
+            timestamp: Date()
+        )
+        engine.startNavigation(with: route, initialLocation: location)
+        guard let packet = manager.sentGPSPositions.last else {
+            assert(false, "navigation sends a GPS packet")
+            return
+        }
+        let heading = readUInt16LE(packet, offset: 8)
+        assert(heading >= 89 && heading <= 91,
+               "invalid Core Location course uses route-segment bearing instead of north")
+
+        guard let geometry = engine.extractSlidingWindowGeometry(currentLocation: location) else {
+            assert(false, "navigation extracts route geometry")
+            return
+        }
+        let expected = CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
+        assertEqual(readInt32LE(geometry, offset: 0),
+                    Int32(expected.latitude * 1_000_000),
+                    "route geometry starts at exact current latitude")
+        assertEqual(readInt32LE(geometry, offset: 4),
+                    Int32(expected.longitude * 1_000_000),
+                    "route geometry starts at exact current longitude")
+        engine.stopNavigation()
     }
 
     static func testOfflineMapCustomBBoxRequest() {
@@ -14215,9 +14387,9 @@ struct NavigationProtocolTests {
         }
         assertCoordinate(
             replacementStart,
-            latitude: firstManeuver.latitude,
-            longitude: firstManeuver.longitude,
-            "replacement geometry starts near the rider's latest route position"
+            latitude: latest.coordinate.latitude,
+            longitude: latest.coordinate.longitude,
+            "replacement geometry starts at the rider's latest route position"
         )
         assert(
             readUInt32LE(telemetryAfterReplacement, offset: 18) >= distanceBeforeReplacement,

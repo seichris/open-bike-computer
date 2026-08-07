@@ -28,6 +28,7 @@ struct Fix {
   double latitude = 0.0;
   double longitude = 0.0;
   uint16_t headingDegrees = 0;
+  bool headingValid = false;
 };
 
 struct Decision {
@@ -80,33 +81,35 @@ public:
     Decision decision;
     decision.reasons = pendingForcedReasons_;
 
-    if (!hasRenderedFix_) {
-      if (hasObservation_) {
+    const bool hasBaseline = hasSubmittedFix_ || hasRenderedFix_;
+    const Fix &baseline = hasSubmittedFix_ ? submittedFix_ : renderedFix_;
+    if (!hasBaseline) {
+      if (hasObservation_)
         decision.reasons |= reasonMask(Reason::Position);
-      }
       decision.render = decision.reasons != 0;
       return decision;
     }
 
     if (hasObservation_) {
       decision.distanceMeters =
-          map_render_policy::distanceMeters(renderedFix_, observedFix_);
-      decision.headingDeltaDegrees = map_render_policy::headingDelta(
-          renderedFix_.headingDegrees, observedFix_.headingDegrees);
+          map_render_policy::distanceMeters(baseline, observedFix_);
+      if (baseline.headingValid && observedFix_.headingValid) {
+        decision.headingDeltaDegrees = map_render_policy::headingDelta(
+            baseline.headingDegrees, observedFix_.headingDegrees);
+      }
     }
 
     if (decision.reasons != 0) {
       decision.render = true;
       return decision;
     }
-
-    if (!hasObservation_) {
+    if (!hasObservation_)
       return decision;
-    }
 
     const bool moved =
         allowPosition && decision.distanceMeters >= kMovementThresholdMeters;
-    const bool turned = courseUp &&
+    const bool turned = courseUp && baseline.headingValid &&
+                        observedFix_.headingValid &&
                         decision.headingDeltaDegrees >=
                             kHeadingThresholdDegrees;
     if (!moved && !turned) {
@@ -114,38 +117,57 @@ public:
       return decision;
     }
 
-    if (static_cast<uint32_t>(nowMs - lastRenderMs_) <
+    if (static_cast<uint32_t>(nowMs - lastSubmissionMs_) <
         kMinimumRenderIntervalMs) {
       decision.deferredByCadence = true;
       return decision;
     }
 
-    if (moved) {
+    if (moved)
       decision.reasons |= reasonMask(Reason::Position);
-    }
-    if (turned) {
+    if (turned)
       decision.reasons |= reasonMask(Reason::Heading);
-    }
     decision.render = true;
     return decision;
   }
 
   void commit(const Decision &decision) {
-    if (decision.render) {
+    if (decision.render)
       pendingForcedReasons_ |= decision.reasons;
-    }
+  }
+
+  /**
+   * Advance the request baseline as soon as a render job is accepted. This
+   * prevents the 30 ms LVGL cadence from resubmitting an identical job while
+   * the worker is still rendering, without pretending that a frame has been
+   * published.
+   */
+  void markSubmitted(uint32_t nowMs, const Fix &submittedFix) {
+    submittedFix_ = submittedFix;
+    hasSubmittedFix_ = true;
+    observedFix_ = submittedFix;
+    hasObservation_ = false;
+    pendingForcedReasons_ = 0;
+    lastSubmissionMs_ = nowMs;
   }
 
   void markRendered(uint32_t nowMs, const Fix &renderedFix) {
     renderedFix_ = renderedFix;
+    submittedFix_ = renderedFix;
     observedFix_ = renderedFix;
     hasRenderedFix_ = true;
+    hasSubmittedFix_ = true;
     hasObservation_ = false;
     pendingForcedReasons_ = 0;
-    lastRenderMs_ = nowMs;
+    lastSubmissionMs_ = nowMs;
   }
 
-  void markInterrupted() { request(Reason::Recovery); }
+  void markInterrupted() {
+    // A failed job did not advance the visible frame. Rebase the retry on the
+    // last published frame and retain an explicit recovery reason.
+    hasSubmittedFix_ = false;
+    request(Reason::Recovery);
+  }
 
   void discardObservation() { hasObservation_ = false; }
 
@@ -157,11 +179,12 @@ public:
 
 private:
   Fix renderedFix_{};
+  Fix submittedFix_{};
   Fix observedFix_{};
-  uint32_t lastRenderMs_ = 0;
+  uint32_t lastSubmissionMs_ = 0;
   uint32_t pendingForcedReasons_ = 0;
   bool hasRenderedFix_ = false;
+  bool hasSubmittedFix_ = false;
   bool hasObservation_ = false;
 };
-
 } // namespace map_render_policy

@@ -25,7 +25,6 @@ constexpr size_t kMaximumRenderedBuildingPoints = 49152;
 constexpr size_t kMaximumRenderedBuildingPointsPerRecord = 1024;
 constexpr uint8_t kMaximumBuildingExtrusionZoom = 4;
 constexpr double kMinimumBuildingExtrusionAreaPixels = 6.0;
-constexpr uint32_t kMaximumBuildingRenderTimeMs = 10000;
 constexpr uint32_t kBuildingFailureRetryCooldownMs = 5U * 60U * 1000U;
 
 struct RenderRegion {
@@ -97,13 +96,6 @@ constexpr bool eligibleExtrusionZoom(uint8_t zoom) {
          zoom <= kMaximumBuildingExtrusionZoom;
 }
 
-constexpr bool shouldRetryWithoutBuildings(bool buildingsAlreadySuppressed,
-                                           bool allocationFailed,
-                                           bool deadlineAborted,
-                                           bool screenCycleInterrupted) {
-  return !buildingsAlreadySuppressed && !screenCycleInterrupted &&
-         (allocationFailed || deadlineAborted);
-}
 
 struct OrderKey {
   double depth = 0.0;

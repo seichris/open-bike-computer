@@ -570,14 +570,212 @@ enum RouteTransportTypes {
     static let cycling = MKDirectionsTransportType(rawValue: 1 << 3)
 }
 
+
+enum NavigationHeading {
+    static func normalized(_ raw: Double?) -> Double? {
+        guard let raw, raw.isFinite, raw >= 0 else { return nil }
+        let wrapped = raw.truncatingRemainder(dividingBy: 360)
+        return wrapped >= 0 ? wrapped : wrapped + 360
+    }
+
+    static func bearing(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D
+    ) -> CLLocationDirection? {
+        let lat1 = start.latitude * .pi / 180
+        let lat2 = end.latitude * .pi / 180
+        let deltaLongitude = (end.longitude - start.longitude) * .pi / 180
+        let y = sin(deltaLongitude) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) -
+            sin(lat1) * cos(lat2) * cos(deltaLongitude)
+        guard abs(x) > 1e-12 || abs(y) > 1e-12 else { return nil }
+        return normalized(atan2(y, x) * 180 / .pi)
+    }
+}
+
+struct NavigationCourseResolver {
+    private(set) var navigationEpoch: UInt32 = 0
+    private(set) var lastValidCourse: CLLocationDirection?
+
+    mutating func reset(epoch: UInt32) {
+        navigationEpoch = epoch
+        lastValidCourse = nil
+    }
+
+    mutating func resolve(
+        measuredCourse: CLLocationDirection?,
+        routeBearing: CLLocationDirection?,
+        navigationActive: Bool
+    ) -> CLLocationDirection? {
+        guard navigationActive else {
+            lastValidCourse = nil
+            return NavigationHeading.normalized(measuredCourse)
+        }
+        if let measured = NavigationHeading.normalized(measuredCourse) {
+            lastValidCourse = measured
+            return measured
+        }
+        if let route = NavigationHeading.normalized(routeBearing) {
+            lastValidCourse = route
+            return route
+        }
+        return lastValidCourse
+    }
+}
+
+struct RouteGeometryProjection {
+    let segmentIndex: Int
+    let fraction: Double
+    let coordinate: CLLocationCoordinate2D
+    let distanceSquared: Double
+}
+
+enum RouteGeometryMath {
+    private static func projectedXY(
+        _ coordinate: CLLocationCoordinate2D,
+        referenceLatitude: CLLocationDegrees
+    ) -> (x: Double, y: Double) {
+        let latitudeRadians = referenceLatitude * .pi / 180
+        return (
+            coordinate.longitude * cos(latitudeRadians),
+            coordinate.latitude
+        )
+    }
+
+    static func nearestProjection(
+        to coordinate: CLLocationCoordinate2D,
+        on points: [CLLocationCoordinate2D]
+    ) -> RouteGeometryProjection? {
+        guard points.count >= 2 else { return nil }
+        let referenceLatitude = coordinate.latitude
+        let target = projectedXY(coordinate, referenceLatitude: referenceLatitude)
+        var best: RouteGeometryProjection?
+
+        for index in 0..<(points.count - 1) {
+            let start = projectedXY(points[index], referenceLatitude: referenceLatitude)
+            let end = projectedXY(points[index + 1], referenceLatitude: referenceLatitude)
+            let segmentX = end.x - start.x
+            let segmentY = end.y - start.y
+            let lengthSquared = segmentX * segmentX + segmentY * segmentY
+            guard lengthSquared > 0 else { continue }
+            let unclamped = ((target.x - start.x) * segmentX +
+                             (target.y - start.y) * segmentY) / lengthSquared
+            let fraction = min(max(unclamped, 0), 1)
+            let projectedX = start.x + segmentX * fraction
+            let projectedY = start.y + segmentY * fraction
+            let deltaX = target.x - projectedX
+            let deltaY = target.y - projectedY
+            let distanceSquared = deltaX * deltaX + deltaY * deltaY
+            let projectedCoordinate = CLLocationCoordinate2D(
+                latitude: points[index].latitude +
+                    (points[index + 1].latitude - points[index].latitude) * fraction,
+                longitude: points[index].longitude +
+                    (points[index + 1].longitude - points[index].longitude) * fraction
+            )
+            if best == nil || distanceSquared < best!.distanceSquared {
+                best = RouteGeometryProjection(
+                    segmentIndex: index,
+                    fraction: fraction,
+                    coordinate: projectedCoordinate,
+                    distanceSquared: distanceSquared
+                )
+            }
+        }
+        return best
+    }
+
+    static func bearingNear(
+        _ coordinate: CLLocationCoordinate2D,
+        routePoints: [CLLocationCoordinate2D]
+    ) -> CLLocationDirection? {
+        guard let projection = nearestProjection(to: coordinate, on: routePoints) else {
+            return nil
+        }
+        let start = routePoints[projection.segmentIndex]
+        let end = routePoints[projection.segmentIndex + 1]
+        return NavigationHeading.bearing(from: start, to: end)
+    }
+
+    /// The first point is always the live rider coordinate.  The exact route
+    /// projection follows when needed, then future route vertices.  This keeps
+    /// the device route head attached to the arrow without discarding the
+    /// route's projection space.
+    static func slidingWindow(
+        riderCoordinate: CLLocationCoordinate2D,
+        routePoints: [CLLocationCoordinate2D],
+        maximumPointCount: Int
+    ) -> [CLLocationCoordinate2D] {
+        guard maximumPointCount > 0 else { return [] }
+        guard routePoints.count >= 2,
+              let projection = nearestProjection(
+                to: riderCoordinate,
+                on: routePoints
+              ) else {
+            return [riderCoordinate]
+        }
+
+        var result = [riderCoordinate]
+        let projectedLocation = CLLocation(
+            latitude: projection.coordinate.latitude,
+            longitude: projection.coordinate.longitude
+        )
+        let riderLocation = CLLocation(
+            latitude: riderCoordinate.latitude,
+            longitude: riderCoordinate.longitude
+        )
+        if result.count < maximumPointCount,
+           riderLocation.distance(from: projectedLocation) > 0.25 {
+            result.append(projection.coordinate)
+        }
+
+        var nextIndex = projection.segmentIndex + 1
+        while nextIndex < routePoints.count && result.count < maximumPointCount {
+            let next = routePoints[nextIndex]
+            if let last = result.last {
+                let lastLocation = CLLocation(latitude: last.latitude, longitude: last.longitude)
+                let nextLocation = CLLocation(latitude: next.latitude, longitude: next.longitude)
+                if lastLocation.distance(from: nextLocation) <= 0.25 {
+                    nextIndex += 1
+                    continue
+                }
+            }
+            result.append(next)
+            nextIndex += 1
+        }
+        return result
+    }
+}
+
+enum RouteGeometryTransmissionPolicy {
+    /// Keep the already-sent route window while it still contains useful
+    /// forward geometry. The device anchors that immutable geometry at every
+    /// presented GPS pose, so retransmitting merely because the first rider
+    /// coordinate moved would only churn the firmware route revision and
+    /// starve a longer render job.
+    static func shouldSend(
+        currentSegmentIndex: Int,
+        lastSentSegmentIndex: Int?,
+        maximumPointCount: Int
+    ) -> Bool {
+        guard maximumPointCount > 0, currentSegmentIndex >= 0 else { return false }
+        guard let lastSentSegmentIndex else { return true }
+        if currentSegmentIndex < lastSentSegmentIndex {
+            return true
+        }
+        let refreshStride = max(1, maximumPointCount * 2 / 3)
+        return currentSegmentIndex - lastSentSegmentIndex >= refreshStride
+    }
+}
+
 enum DeviceGPSPacketBuilder {
+    static let invalidHeadingDegrees = UInt16.max
     static let invalidSpeedCmps = UInt16.max
     static let invalidRouteRemainingMeters = UInt32.max
 
     static func data(
         lat: Double,
         lon: Double,
-        heading: Double = 0,
+        heading: Double? = nil,
         unixTime: UInt32 = UInt32(Date().timeIntervalSince1970),
         speedMetersPerSecond: Double? = nil,
         altitudeMeters: Double? = nil,
@@ -588,7 +786,12 @@ enum DeviceGPSPacketBuilder {
         var data = Data()
         let latInt = Int32(lat * 1_000_000)
         let lonInt = Int32(lon * 1_000_000)
-        let headingDeg: UInt16 = heading >= 0 ? UInt16(min(heading, 359)) : 0
+        let headingDeg: UInt16 = {
+            guard let normalized = NavigationHeading.normalized(heading) else {
+                return invalidHeadingDegrees
+            }
+            return UInt16(normalized.rounded()) % 360
+        }()
         let speedCmps: UInt16 = {
             guard let speedMetersPerSecond, speedMetersPerSecond >= 0 else {
                 return invalidSpeedCmps

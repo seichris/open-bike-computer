@@ -13,28 +13,31 @@ struct PointF {
   float y;
 };
 
-inline void plot(uint16_t *buf, int32_t width, int32_t height,
-                 uint32_t stride, int32_t x, int32_t y, uint16_t color) {
+template <typename Pixel>
+inline void plot(Pixel *buf, int32_t width, int32_t height,
+                 uint32_t stride, int32_t x, int32_t y, Pixel color) {
   if (x >= 0 && x < width && y >= 0 && y < height)
     buf[y * stride + x] = color;
 }
 
-inline void fillSpan(uint16_t *buf, int32_t width, int32_t height,
+template <typename Pixel>
+inline void fillSpan(Pixel *buf, int32_t width, int32_t height,
                      uint32_t stride, int32_t y, int32_t x1, int32_t x2,
-                     uint16_t color) {
+                     Pixel color) {
   if (y < 0 || y >= height || x2 < 0 || x1 >= width)
     return;
 
   x1 = std::max<int32_t>(x1, 0);
   x2 = std::min<int32_t>(x2, width - 1);
-  uint16_t *row = buf + y * stride;
+  Pixel *row = buf + y * stride;
   for (int32_t x = x1; x <= x2; ++x)
     row[x] = color;
 }
 
-inline void drawThinLine(uint16_t *buf, int32_t width, int32_t height,
+template <typename Pixel>
+inline void drawThinLine(Pixel *buf, int32_t width, int32_t height,
                          uint32_t stride, int32_t x1, int32_t y1, int32_t x2,
-                         int32_t y2, uint16_t color) {
+                         int32_t y2, Pixel color) {
   int32_t dx = std::abs(x2 - x1);
   int32_t sx = x1 < x2 ? 1 : -1;
   int32_t dy = -std::abs(y2 - y1);
@@ -121,9 +124,10 @@ inline bool clipLine(float &x1, float &y1, float &x2, float &y2, float minX,
   }
 }
 
-inline void fillConvexQuad(uint16_t *buf, int32_t width, int32_t height,
+template <typename Pixel>
+inline void fillConvexQuad(Pixel *buf, int32_t width, int32_t height,
                            uint32_t stride, const PointF (&points)[4],
-                           uint16_t color) {
+                           Pixel color) {
   float minY = points[0].y;
   float maxY = points[0].y;
   for (uint8_t i = 1; i < 4; ++i) {
@@ -185,9 +189,10 @@ inline void fillConvexQuad(uint16_t *buf, int32_t width, int32_t height,
   }
 }
 
-inline void fillDisc(uint16_t *buf, int32_t width, int32_t height,
+template <typename Pixel>
+inline void fillDisc(Pixel *buf, int32_t width, int32_t height,
                      uint32_t stride, float centerX, float centerY,
-                     float radius, uint16_t color) {
+                     float radius, Pixel color) {
   const int32_t firstY =
       std::max<int32_t>(0, static_cast<int32_t>(std::ceil(centerY - radius)));
   const int32_t lastY = std::min<int32_t>(
@@ -210,15 +215,17 @@ inline void fillDisc(uint16_t *buf, int32_t width, int32_t height,
 } // namespace detail
 
 /**
- * Draws an opaque, filled line directly into an RGB565 pixel buffer.
+ * Draws a filled line directly into a typed pixel plane (for example an
+ * RGB565 color plane or an 8-bit alpha plane).
  *
  * Thick lines are rasterized as a filled rectangle with round end caps. This
  * avoids the unwritten pixels produced by approximating thickness with several
  * rounded, parallel one-pixel Bresenham lines.
  */
-inline void drawFilledLine(uint16_t *buf, int32_t width, int32_t height,
+template <typename Pixel>
+inline void drawFilledLine(Pixel *buf, int32_t width, int32_t height,
                            uint32_t stride, int16_t x1, int16_t y1, int16_t x2,
-                           int16_t y2, uint16_t color, uint8_t lineWidth) {
+                           int16_t y2, Pixel color, uint8_t lineWidth) {
   if (buf == nullptr || width <= 0 || height <= 0 ||
       stride < static_cast<uint32_t>(width))
     return;

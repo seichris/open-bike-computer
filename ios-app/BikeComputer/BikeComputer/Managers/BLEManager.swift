@@ -2016,7 +2016,7 @@ class BLEManager: NSObject, ObservableObject {
     func sendGPSPosition(
         lat: Double,
         lon: Double,
-        heading: Double = 0,
+        heading: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
@@ -2096,7 +2096,11 @@ class BLEManager: NSObject, ObservableObject {
                     log("GPS position not queued: write queue unavailable")
                     return
                 }
-                log(String(format: "Queued native GPS position: heading=%.0f", heading))
+                if let heading {
+                    log(String(format: "Queued native GPS position: heading=%.0f", heading))
+                } else {
+                    log("Queued native GPS position: heading=invalid")
+                }
                 return
             }
         }

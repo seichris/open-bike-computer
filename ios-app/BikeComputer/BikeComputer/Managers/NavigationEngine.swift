@@ -35,10 +35,12 @@ class NavigationEngine: NSObject, ObservableObject {
     private var lastDeviceGpsLocation: (location: CLLocation, convertFromMapKitRoute: Bool)?
     private var latestExternalGpsLocation: CLLocation?
     private var hasAcceptedLiveLocation = false
-    private var lastSentGeometryHash: Int = 0
+    private var lastSentGeometrySegmentIndex: Int?
     private var geometrySendInterval: TimeInterval = 2.0
     private var lastGeometrySendTime: Date = .distantPast
     private let geometryWindowSize: Int = 30
+    private var navigationEpoch: UInt32 = 0
+    private var courseResolver = NavigationCourseResolver()
     private var rideStartDate: Date?
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
@@ -121,6 +123,8 @@ class NavigationEngine: NSObject, ObservableObject {
         currentStepIndex = 0
         isSimulationMode = isTestMode
         isNavigating = true
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         
         currentSnapshot = nil
         lastManeuverStepIndex = nil
@@ -128,7 +132,7 @@ class NavigationEngine: NSObject, ObservableObject {
         sendTracker.reset()
         initialNavigationLocation = initialLocation
         hasAcceptedLiveLocation = initialLocation == nil
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         resetRideTelemetry(startingAt: initialLocation)
         updateNavigationSummary(route: route, remainingDistance: route.distance)
@@ -156,6 +160,8 @@ class NavigationEngine: NSObject, ObservableObject {
         guard isNavigating, !isSimulationMode else { return }
 
         currentRoute = route
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         currentStepIndex = RouteStepSelection.closestNavigableStepIndex(
             to: currentLocation,
             in: route
@@ -166,7 +172,7 @@ class NavigationEngine: NSObject, ObservableObject {
         sendTracker.reset()
         initialNavigationLocation = nil
         hasAcceptedLiveLocation = true
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
 
         let remainingDistance = RouteProgress.remainingDistance(from: currentLocation, in: route) ?? route.distance
@@ -198,6 +204,8 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         bleManager?.clearRouteGeometry()
         isNavigating = false
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
         currentStepIndex = 0
         currentSnapshot = nil
@@ -207,7 +215,7 @@ class NavigationEngine: NSObject, ObservableObject {
         initialNavigationLocation = nil
         lastDeviceGpsLocation = nil
         hasAcceptedLiveLocation = false
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         routeRemainingDistance = nil
         routeRemainingTime = nil
@@ -507,7 +515,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resendCurrentRouteGeometry() {
         guard isNavigating, let route = currentRoute, route.polyline.pointCount > 0 else { return }
 
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         sendRouteGeometryIfNeeded(currentLocation: routeGeometryResendLocation(for: route))
     }
@@ -661,7 +669,20 @@ class NavigationEngine: NSObject, ObservableObject {
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate
-        let heading = location.course >= 0 ? location.course : 0
+        let routeCoordinate = convertFromMapKitRoute
+            ? location.coordinate
+            : CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate
+        let routeBearing = currentRoute.flatMap {
+            RouteGeometryMath.bearingNear(
+                routeCoordinate,
+                routePoints: routeCoordinates(for: $0)
+            )
+        }
+        let heading = courseResolver.resolve(
+            measuredCourse: location.course,
+            routeBearing: routeBearing,
+            navigationActive: isNavigating
+        )
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,
@@ -687,6 +708,20 @@ class NavigationEngine: NSObject, ObservableObject {
 // MARK: - Route Geometry for Device Map
 
 extension NavigationEngine {
+    private func routeCoordinates(for route: MKRoute) -> [CLLocationCoordinate2D] {
+        let pointCount = route.polyline.pointCount
+        guard pointCount > 0 else { return [] }
+        var points = [CLLocationCoordinate2D](
+            repeating: CLLocationCoordinate2D(),
+            count: pointCount
+        )
+        route.polyline.getCoordinates(
+            &points,
+            range: NSRange(location: 0, length: pointCount)
+        )
+        return points
+    }
+
     func extractSlidingWindowGeometry(currentLocation: CLLocation) -> Data? {
         guard let route = currentRoute else { return nil }
 
@@ -694,22 +729,12 @@ extension NavigationEngine {
         let pointCount = polyline.pointCount
         guard pointCount > 0 else { return nil }
 
-        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
-        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
-
-        var closestIndex = 0
-        var closestDistance = Double.greatestFiniteMagnitude
-        for (index, point) in points.enumerated() {
-            let pointLocation = CLLocation(latitude: point.latitude, longitude: point.longitude)
-            let distance = currentLocation.distance(from: pointLocation)
-            if distance < closestDistance {
-                closestDistance = distance
-                closestIndex = index
-            }
-        }
-
-        let endIndex = min(closestIndex + geometryWindowSize, pointCount)
-        let windowPoints = Array(points[closestIndex..<endIndex])
+        let points = routeCoordinates(for: route)
+        let windowPoints = RouteGeometryMath.slidingWindow(
+            riderCoordinate: currentLocation.coordinate,
+            routePoints: points,
+            maximumPointCount: geometryWindowSize
+        )
         guard !windowPoints.isEmpty else { return nil }
 
         return compressRoutePoints(windowPoints)
@@ -745,19 +770,27 @@ extension NavigationEngine {
     func sendRouteGeometryIfNeeded(currentLocation: CLLocation) {
         guard let bleManager = bleManager,
               bleManager.isConnected,
-              bleManager.isNavigationReady else {
+              bleManager.isNavigationReady,
+              let route = currentRoute else {
             return
         }
 
         let now = Date()
         guard now.timeIntervalSince(lastGeometrySendTime) >= geometrySendInterval else { return }
+        let routePoints = routeCoordinates(for: route)
+        guard let projection = RouteGeometryMath.nearestProjection(
+            to: currentLocation.coordinate,
+            on: routePoints
+        ) else { return }
+        guard RouteGeometryTransmissionPolicy.shouldSend(
+            currentSegmentIndex: projection.segmentIndex,
+            lastSentSegmentIndex: lastSentGeometrySegmentIndex,
+            maximumPointCount: geometryWindowSize
+        ) else { return }
         guard let geometryData = extractSlidingWindowGeometry(currentLocation: currentLocation) else { return }
-
-        let hash = geometryData.hashValue
-        guard hash != lastSentGeometryHash else { return }
 
         bleManager.sendRouteGeometry(geometryData)
         lastGeometrySendTime = now
-        lastSentGeometryHash = hash
+        lastSentGeometrySegmentIndex = projection.segmentIndex
     }
 }
