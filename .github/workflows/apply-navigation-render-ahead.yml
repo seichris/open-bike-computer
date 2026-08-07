@@ -66,7 +66,7 @@ jobs:
           base64 --decode "$ORIGINAL_B64" > "$ORIGINAL_GZ"
           echo "cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489  $ORIGINAL_GZ" | sha256sum -c -
           gzip -dc "$ORIGINAL_GZ" > "$ORIGINAL_PATCH"
-          echo "f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58f  $ORIGINAL_PATCH" | sha256sum -c -
+          echo "f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2  $ORIGINAL_PATCH" | sha256sum -c -
 
           tr -d '\r\n\t ' < "$PATCH_DIR/maps-memory-integration-v2" > "$MEMORY_B64"
           echo "e880da562e25e26f524b8e6339a33b735c955d7e980b0ee12226722a75c57f1d  $MEMORY_B64" | sha256sum -c -
