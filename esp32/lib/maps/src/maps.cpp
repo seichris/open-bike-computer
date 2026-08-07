@@ -59,6 +59,50 @@ const char *TAG PROGMEM = "Maps";
 
 namespace {
 
+// Keep memory samples behind the existing map timing/diagnostics switch.  The
+// fields are deliberately stable and machine-readable so a source-monitor
+// capture can correlate heap fragmentation with a map-render phase without
+// changing the renderer's allocation or scheduling policy.
+static void logMapMemorySnapshot(const char *phase) {
+#if defined(WAVESHARE_MAPIO_TIMING_LOG) || defined(WAVESHARE_TOUCH_DIAGNOSTICS)
+  constexpr uint32_t kMapMemorySnapshotMinIntervalMs = 250;
+  static uint32_t lastSnapshotMs[4] = {};
+  size_t phaseIndex = 0;
+  if (strcmp(phase, "canvas-draw") == 0)
+    phaseIndex = 1;
+  else if (strcmp(phase, "canvas-no-map") == 0)
+    phaseIndex = 2;
+  else if (strcmp(phase, "canvas-draw-empty") == 0)
+    phaseIndex = 3;
+  const uint32_t nowMs = millis();
+  if (lastSnapshotMs[phaseIndex] != 0 &&
+      nowMs - lastSnapshotMs[phaseIndex] < kMapMemorySnapshotMinIntervalMs)
+    return;
+  lastSnapshotMs[phaseIndex] = nowMs;
+  constexpr uint32_t kInternalHeapCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const uint32_t freeInternalHeap =
+      heap_caps_get_free_size(kInternalHeapCaps);
+  const uint32_t largestInternalHeap =
+      heap_caps_get_largest_free_block(kInternalHeapCaps);
+  const uint32_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const uint32_t largestPsram =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  const uint32_t psramTotal = ESP.getPsramSize();
+  const uint32_t psramUsed = psramTotal > freePsram
+                                 ? psramTotal - freePsram
+                                 : 0U;
+  MAPIO_LOG("MAPIO: memory phase=%s freeInternalHeap=%u "
+            "largestInternalHeap=%u "
+            "freePsram=%u largestPsram=%u psramUsed=%u psramTotal=%u\n",
+            phase, (unsigned)freeInternalHeap,
+            (unsigned)largestInternalHeap, (unsigned)freePsram,
+            (unsigned)largestPsram, (unsigned)psramUsed,
+            (unsigned)psramTotal);
+#else
+  (void)phase;
+#endif
+}
+
 bool findMapBlock(const std::string &directory, std::string &basePath,
                   size_t &visited, size_t depth) {
   if (depth > 6 || visited >= 65536)
@@ -1884,6 +1928,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
             (unsigned)loadedBlocks, (unsigned)evictedBlocks,
             (unsigned)memCache.blocks.size(),
             (unsigned long)(MAPIO_TIME_MS() - blocksStartMs));
+  logMapMemorySnapshot("block-cache");
   return true;
 }
 
@@ -2375,6 +2420,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-no-map");
     return true;
   }
 
@@ -2627,8 +2673,16 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint32_t buildingFailurePsramUsed = 0;
     uint32_t buildingFailurePsramFree = 0;
     uint32_t buildingFailurePsramLargest = 0;
+    uint32_t buildingFailureInternalHeapFree = 0;
+    uint32_t buildingFailureInternalHeapLargest = 0;
     bool buildingFailurePsramSamplePostCleanup = false;
     const auto captureBuildingFailureMemory = [&]() {
+      constexpr uint32_t internalHeapCaps =
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+      buildingFailureInternalHeapFree =
+          heap_caps_get_free_size(internalHeapCaps);
+      buildingFailureInternalHeapLargest =
+          heap_caps_get_largest_free_block(internalHeapCaps);
       buildingFailurePsramFree =
           heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
       buildingFailurePsramLargest =
@@ -2646,6 +2700,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
     std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
     std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
+    size_t largestCourtyardUnderlayBytes = 0;
+    uint32_t courtyardSnapshotCount = 0;
     map_building_renderer::SurfaceStats buildingSurfaceStats;
     const auto releaseBuildingFailureWorkspace = [&]() {
       decltype(buildingQueue){}.swap(buildingQueue);
@@ -2691,6 +2747,7 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
       }
       buildingPassPhase = BuildingPassPhase::Complete;
     };
+    bool buildingScreenInterrupted = false;
     const bool buildingPassCompleted =
         map_building_renderer::runAllocationSafe(
             [&]() -> bool {
@@ -2715,7 +2772,6 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
     uint64_t visibleWallCandidateCount = 0;
     bool buildingBudgetFallback = false;
     bool buildingDeadlineExceeded = false;
-    bool buildingScreenInterrupted = false;
     static uint64_t renderRecordOverflowTotal = 0;
     static uint64_t renderPointOverflowTotal = 0;
     static uint64_t renderOversizedOverflowTotal = 0;
@@ -2993,6 +3049,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               }
               std::memcpy(courtyardUnderlay.data(), drawBuffer->data,
                           pixelCount * sizeof(uint16_t));
+              largestCourtyardUnderlayBytes = std::max(
+                  largestCourtyardUnderlayBytes,
+                  courtyardUnderlay.capacity() * sizeof(uint16_t));
+              ++courtyardSnapshotCount;
               if (shouldStopBuildingWork())
                 return false;
               courtyardUnderlayReady = true;
@@ -3075,6 +3135,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               "wallCandidates=%llu generatedWallFaces=%llu "
               "suppressedWallFaces=%llu "
               "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+              "courtyardSnapshots=%u courtyardMaxBytes=%u "
+              "freeInternalHeap=%u largestInternalHeap=%u "
               "deadlineExceeded=%u prepassDeadlineExceeded=%u "
               "psramUsed=%u psramFree=%u psramLargest=%u "
               "budgetFallback=%u renderRecordOverflowTotal=%llu "
@@ -3108,6 +3170,12 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)buildingProjectionMs,
               (unsigned long)buildingSortMs,
               (unsigned long)buildingDrawMs,
+              (unsigned)courtyardSnapshotCount,
+              (unsigned)largestCourtyardUnderlayBytes,
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                         MALLOC_CAP_8BIT),
               buildingDeadlineExceeded ? 1U : 0U,
               buildingPrepassDeadlineExceeded ? 1U : 0U,
               (unsigned)(ESP.getPsramSize() -
@@ -3141,6 +3209,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
                                       ? "allocation"
                                       : (buildingDeadlineAborted ? "deadline"
                                                                  : "interrupt");
+      const bool screenCycleInterrupted =
+          buildingScreenInterrupted || shouldInterruptMapRenderForScreenCycle();
       if (buildingAllocationFailed || buildingDeadlineAborted) {
         MAPIO_LOG(
             "MAPIO: buildings aborted reason=%s fallback=buildings-hidden "
@@ -3150,6 +3220,8 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             "visibleRecords=%u visiblePoints=%llu rendered=%u extruded=%u "
             "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
             "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+            "courtyardSnapshots=%u courtyardMaxBytes=%u "
+            "freeInternalHeap=%u largestInternalHeap=%u "
             "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
             "psramLargest=%u psramSamplePostCleanup=%u\n",
             failureReason, (unsigned)loadedBuildingStats.records,
@@ -3167,6 +3239,10 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             (unsigned long long)renderTimeOverflowTotal,
             (unsigned long)buildingProjectionMs,
             (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
+            (unsigned)courtyardSnapshotCount,
+            (unsigned)largestCourtyardUnderlayBytes,
+            (unsigned)buildingFailureInternalHeapFree,
+            (unsigned)buildingFailureInternalHeapLargest,
             buildingPrepassDeadlineExceeded ? 1U : 0U,
             (unsigned)buildingFailurePsramUsed,
             (unsigned)buildingFailurePsramFree,
@@ -3174,9 +3250,24 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
             buildingFailurePsramSamplePostCleanup ? 1U : 0U);
         buildingFailureRetryCooldown.recordFailure(
             millis(), buildingContextSignature, buildingRenderRegion);
+      } else if (screenCycleInterrupted) {
+        captureBuildingFailureMemory();
+        MAPIO_LOG(
+            "MAPIO: buildings aborted reason=interrupt fallback=deferred "
+            "courtyardSnapshots=%u courtyardMaxBytes=%u "
+            "freeInternalHeap=%u largestInternalHeap=%u "
+            "psramUsed=%u psramFree=%u psramLargest=%u\n",
+            (unsigned)courtyardSnapshotCount,
+            (unsigned)largestCourtyardUnderlayBytes,
+            (unsigned)buildingFailureInternalHeapFree,
+            (unsigned)buildingFailureInternalHeapLargest,
+            (unsigned)buildingFailurePsramUsed,
+            (unsigned)buildingFailurePsramFree,
+            (unsigned)buildingFailurePsramLargest);
+      }
+      if (buildingAllocationFailed || buildingDeadlineAborted ||
+          screenCycleInterrupted) {
         releaseBuildingFailureWorkspace();
-        const bool screenCycleInterrupted =
-            shouldInterruptMapRenderForScreenCycle();
         if (map_building_renderer::shouldRetryWithoutBuildings(
                 buildingsSuppressed, buildingAllocationFailed,
                 buildingDeadlineAborted, screenCycleInterrupted)) {
@@ -3247,12 +3338,14 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
               (unsigned long)projectionRejectedCount,
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-draw");
   } else {
     Maps::isMapFound = false;
     lv_canvas_fill_bg(canvas, lv_color_hex(TFT_BLACK), LV_OPA_COVER);
     MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
               (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    logMapMemorySnapshot("canvas-draw-empty");
     //    Maps::showNoMap(map);
     //    ESP_LOGE(TAG, "Map doesn't exist");
   }
