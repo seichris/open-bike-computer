@@ -1,0 +1,133 @@
+name: Apply navigation render-ahead patch
+
+on:
+  push:
+    branches:
+      - agent/navigation-render-ahead
+    paths:
+      - .github/workflows/navigation-render-ahead-apply.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: navigation-render-ahead-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/agent/navigation-render-ahead'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify prepared patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          parts=(
+            chunk-00
+            chunk-01a chunk-01b
+            chunk-01c0 chunk-01c10 chunk-01c11 chunk-01c12 chunk-01c13 chunk-01c2 chunk-01c3
+            chunk-02
+            chunk-03a-fixed chunk-03b chunk-03c
+            chunk-04a chunk-04b chunk-04c
+            chunk-05a chunk-05b chunk-05c
+            chunk-06a chunk-06b chunk-06c
+            chunk-07a chunk-07b chunk-07c
+            chunk-08a chunk-08b chunk-08c
+          )
+          : > /tmp/navigation.patch.b64
+          for part in "${parts[@]}"; do
+            test -f ".github/navigation-patch/${part}"
+            cat ".github/navigation-patch/${part}" >> /tmp/navigation.patch.b64
+          done
+          test "$(wc -c < /tmp/navigation.patch.b64)" = 106524
+          echo 'b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8  /tmp/navigation.patch.b64' | sha256sum -c -
+          base64 --decode /tmp/navigation.patch.b64 > /tmp/navigation.patch.gz
+          echo 'cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489  /tmp/navigation.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/navigation.patch.gz > /tmp/navigation.patch
+          echo 'f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2  /tmp/navigation.patch' | sha256sum -c -
+          grep -Fq 'Subject: [PATCH] Rebuild navigation map rendering with latest-wins worker' /tmp/navigation.patch
+
+      - name: Apply onto current main and verify integration
+        shell: bash
+        env:
+          EXPECTED_MAIN: 876acac61b12b5cb572389c844ceb68f9484a085
+          EXPECTED_STAGING_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git reset --hard origin/main
+          git clean -fdx
+          git config user.name OpenAI
+          git config user.email noreply@openai.com
+          if ! git am -3 --committer-date-is-author-date /tmp/navigation.patch; then
+            git status --short
+            git diff -- . ':!*.lock'
+            exit 1
+          fi
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_MAIN"
+          test "$(git log -1 --pretty=%s)" = 'Rebuild navigation map rendering with latest-wins worker'
+          test ! -e .github/navigation-patch
+          test ! -e .github/workflows/navigation-render-ahead-apply.yml
+
+          git diff --name-only "$EXPECTED_MAIN"..HEAD | sort > /tmp/actual-files
+          cat > /tmp/expected-files <<'EOF'
+          .github/workflows/ci.yml
+          docs/firmware-map-render-scheduler.md
+          docs/fmb-v4.md
+          docs/plans/geofabrik-osm-3d-buildings-implementation-plan.md
+          esp32/lib/ble_navigation/gps_position_protocol.hpp
+          esp32/lib/gps/gps.cpp
+          esp32/lib/gps/gps.hpp
+          esp32/lib/gui/src/mainScr.cpp
+          esp32/lib/gui/src/mapRenderPolicy.hpp
+          esp32/lib/maps/src/mapBuildingAdmission.hpp
+          esp32/lib/maps/src/mapBuildingRenderer.hpp
+          esp32/lib/maps/src/mapBuildingWorkspace.hpp
+          esp32/lib/maps/src/mapPresentation.hpp
+          esp32/lib/maps/src/mapRenderJob.hpp
+          esp32/lib/maps/src/mapRouteGeometry.hpp
+          esp32/lib/maps/src/mapSurface.hpp
+          esp32/lib/maps/src/maps.cpp
+          esp32/lib/maps/src/maps.hpp
+          esp32/lib/route_overlay/route_overlay.cpp
+          esp32/lib/route_overlay/route_overlay.hpp
+          esp32/lib/utils/src/line_rasterizer.hpp
+          esp32/tools/tests/test_line_rasterizer.cpp
+          esp32/tools/tests/test_map_building_admission.cpp
+          esp32/tools/tests/test_map_building_renderer.cpp
+          esp32/tools/tests/test_map_building_workspace.cpp
+          esp32/tools/tests/test_map_guidance_integration.py
+          esp32/tools/tests/test_map_presentation.cpp
+          esp32/tools/tests/test_map_render_job.cpp
+          esp32/tools/tests/test_map_render_policy.cpp
+          esp32/tools/tests/test_map_route_geometry.cpp
+          esp32/tools/tests/test_workout_telemetry_state.cpp
+          ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift
+          ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift
+          ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift
+          ios-app/BikeComputerTests/NavigationProtocolTests.swift
+          EOF
+          sed -i 's/^          //' /tmp/expected-files
+          diff -u /tmp/expected-files /tmp/actual-files
+
+          test -f docs/firmware-map-memory-diagnostics.md
+          test -f esp32/tools/tests/test_map_memory_diagnostics.py
+          grep -Fq test_map_memory_diagnostics .github/workflows/ci.yml
+          grep -Fq test_map_render_job .github/workflows/ci.yml
+          grep -Fq logMapMemorySnapshot esp32/lib/maps/src/maps.cpp
+          grep -Fq WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS esp32/platformio.ini
+          git diff --check "$EXPECTED_MAIN"..HEAD
+          PYTHONPATH=esp32 python3 -m unittest \
+            tools.tests.test_map_guidance_integration \
+            tools.tests.test_map_memory_diagnostics
+
+          git push \
+            --force-with-lease="refs/heads/agent/navigation-render-ahead:${EXPECTED_STAGING_HEAD}" \
+            origin HEAD:refs/heads/agent/navigation-render-ahead
