@@ -1047,6 +1047,36 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(manager.setupState, .needsAuthorization)
     }
 
+    func testDeniedAuthorizationDoesNotRetryFromStartOrExplicitRequest()
+        async throws {
+        let refresh = AsyncVoidProbe()
+        var authorizationRequestCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            requestAuthorization: { authorizationRequestCount += 1 },
+            refreshAuthorization: { await refresh.run() },
+            authorizationRefreshState: .denied,
+            initializeOnLaunch: false
+        )
+
+        manager.refreshAuthorizationIfNeeded()
+        manager.refreshAuthorizationIfNeeded()
+        try await waitUntil { refresh.callCount == 1 }
+        refresh.complete()
+        try await waitUntil { manager.setupState == .denied }
+
+        manager.requestAuthorization()
+        await manager.startOutdoorCyclingWorkout()
+        await Task.yield()
+
+        XCTAssertEqual(authorizationRequestCount, 0)
+        XCTAssertEqual(manager.setupState, .denied)
+    }
+
     func testComplicationStartRequeuesIfRecoveryBeginsBeforeTaskRuns() async throws {
         let recovery = RecoveryProbe()
         var startCount = 0
