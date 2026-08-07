@@ -55,7 +55,6 @@ jobs:
 
           cat .github/navigation-patch/maps-memory-integration-00 > /tmp/maps-memory.patch.b64
           test "$(wc -c < /tmp/maps-memory.patch.b64)" = 4932
-          echo 'efe02040585eb5c9c338003e7e3db4adbeed8ae356827c1aa9afe24ea048c261  /tmp/maps-memory.patch.b64' | sha256sum -c -
           base64 --decode /tmp/maps-memory.patch.b64 > /tmp/maps-memory.patch.gz
           echo 'd938c016f9e3643b8db1d6255e92667bd6bf666e9f6a5b171704451cc352b53a  /tmp/maps-memory.patch.gz' | sha256sum -c -
           gzip -dc /tmp/maps-memory.patch.gz > /tmp/maps-memory.patch
