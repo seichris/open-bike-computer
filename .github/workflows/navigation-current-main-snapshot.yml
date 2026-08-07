@@ -1,4 +1,4 @@
-name: Export current main map renderer
+name: Export current main map diagnostics integration inputs
 
 on:
   push:
@@ -21,8 +21,14 @@ jobs:
           fetch-depth: 1
       - uses: actions/upload-artifact@v4
         with:
-          name: current-main-map-renderer
-          path: esp32/lib/maps/src/maps.cpp
+          name: current-main-map-diagnostics-inputs
+          path: |
+            .github/workflows/ci.yml
+            docs/README.md
+            docs/firmware-map-memory-diagnostics.md
+            esp32/lib/maps/src/maps.cpp
+            esp32/platformio.ini
+            esp32/tools/tests/test_map_memory_diagnostics.py
           if-no-files-found: error
           retention-days: 1
           compression-level: 9
