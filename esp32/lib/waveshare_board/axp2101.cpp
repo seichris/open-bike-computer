@@ -107,6 +107,23 @@ bool readBatteryPercentage(uint8_t &percentage) {
   return readBatteryStatus(percentage, charging);
 }
 
+bool setPowerButtonOffLevel(PowerButtonOffLevel level) {
+  if (!pmuAvailable) {
+    return false;
+  }
+
+  i2c::Axp2101PowerButtonOffLevelResult result;
+  const bool ok = i2c::ensureAxp2101PowerButtonOffLevel(
+      static_cast<uint8_t>(level), result);
+  if (ok) {
+    Serial.printf("AXP2101: PWR button off level=%u before=0x%02X "
+                  "after=0x%02X changed=%d\n",
+                  static_cast<unsigned>(level), result.before, result.after,
+                  result.changed ? 1 : 0);
+  }
+  return ok;
+}
+
 bool setPowerButtonEventMonitoring(bool enabled) {
   if (!pmuAvailable) {
     return false;
@@ -176,6 +193,12 @@ bool initializePowerState() {
                    "railState=unknown");
 #endif
     return false;
+  }
+
+  // The AXP2101 default is six seconds. Configure the shorter four-second
+  // hard-off gesture without changing any other PMU power-button fields.
+  if (!setPowerButtonOffLevel(PowerButtonOffLevel::FourSeconds)) {
+    Serial.println("AXP2101: failed to set four-second power button off level");
   }
 
   PowerStatus status;

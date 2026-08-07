@@ -17,6 +17,7 @@ int main() {
 
   static_assert(isWriteAllowed(INTERRUPT_ENABLE_1));
   static_assert(isWriteAllowed(INTERRUPT_STATUS_1));
+  static_assert(!isWriteAllowed(POWER_BUTTON_CONFIG_REGISTER));
 
   std::size_t allowedCount = 0;
   for (unsigned int address = 0; address <= 0xFF; ++address) {
@@ -32,6 +33,28 @@ int main() {
   // The exhaustive loop makes any future permission an intentional test
   // change instead of an accidental hole around the known rail registers.
   assert(allowedCount == 2);
+
+  // REG27 remains blocked through generic writes. The dedicated boot-time
+  // helper may change only the OFFLEVEL bits (3:2), preserving every other
+  // power-button field.
+  assert(!isTransactionWriteAllowed(DEVICE_ADDRESS,
+                                    POWER_BUTTON_CONFIG_REGISTER, 1, 1));
+  for (unsigned int currentValue = 0; currentValue <= 0xFF; ++currentValue) {
+    for (unsigned int level = 0; level < POWER_BUTTON_OFF_LEVEL_COUNT;
+         ++level) {
+      const uint8_t current = static_cast<uint8_t>(currentValue);
+      const uint8_t updated =
+          (current & ~POWER_BUTTON_OFF_LEVEL_MASK) |
+          ((static_cast<uint8_t>(level) << POWER_BUTTON_OFF_LEVEL_SHIFT) &
+           POWER_BUTTON_OFF_LEVEL_MASK);
+      assert(isPowerButtonOffLevelTransition(current, updated));
+      assert((updated & ~POWER_BUTTON_OFF_LEVEL_MASK) ==
+             (current & ~POWER_BUTTON_OFF_LEVEL_MASK));
+      assert((updated & POWER_BUTTON_OFF_LEVEL_MASK) ==
+             ((level << POWER_BUTTON_OFF_LEVEL_SHIFT) &
+              POWER_BUTTON_OFF_LEVEL_MASK));
+    }
+  }
 
   // The shared-bus block and 16-bit helpers must not provide alternate paths
   // into the AXP2101, even when the starting register itself is allowlisted.

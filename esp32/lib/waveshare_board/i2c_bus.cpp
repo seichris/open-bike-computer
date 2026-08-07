@@ -280,6 +280,84 @@ bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      });
 }
 
+bool ensureAxp2101PowerButtonOffLevel(
+    uint8_t level, Axp2101PowerButtonOffLevelResult &result,
+    uint8_t attempts) {
+  result = {};
+  if (level >= axp_policy::POWER_BUTTON_OFF_LEVEL_COUNT) {
+    Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X level=%u "
+                  "policy=power-button-off-level\n",
+                  axp_policy::POWER_BUTTON_CONFIG_REGISTER,
+                  static_cast<unsigned>(level));
+    return false;
+  }
+
+  bool observedInitialValue = false;
+  return withRetries(
+      axp_policy::DEVICE_ADDRESS, "AXP2101", "power-button-off-level",
+      attempts, [&result, &observedInitialValue, level]() {
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::POWER_BUTTON_CONFIG_REGISTER);
+        if (Wire.endTransmission() != 0 ||
+            Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                             static_cast<uint8_t>(1)) != 1) {
+          return false;
+        }
+
+        const uint8_t current = Wire.read();
+        if (!observedInitialValue) {
+          result.before = current;
+          observedInitialValue = true;
+        }
+
+        const uint8_t updated =
+            (current & ~axp_policy::POWER_BUTTON_OFF_LEVEL_MASK) |
+            ((level << axp_policy::POWER_BUTTON_OFF_LEVEL_SHIFT) &
+             axp_policy::POWER_BUTTON_OFF_LEVEL_MASK);
+        if (!axp_policy::isPowerButtonOffLevelTransition(current, updated) ||
+            !axp_policy::isPowerButtonOffLevelTransition(result.before,
+                                                          updated)) {
+          Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X value=0x%02X "
+                        "policy=power-button-off-level\n",
+                        axp_policy::POWER_BUTTON_CONFIG_REGISTER, updated);
+          return false;
+        }
+
+        if (current == updated) {
+          result.after = current;
+          result.changed = result.before != current;
+          return true;
+        }
+
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::POWER_BUTTON_CONFIG_REGISTER);
+        Wire.write(updated);
+        if (Wire.endTransmission() != 0) {
+          return false;
+        }
+
+        delay(5);
+        Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+        Wire.write(axp_policy::POWER_BUTTON_CONFIG_REGISTER);
+        if (Wire.endTransmission() != 0 ||
+            Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                             static_cast<uint8_t>(1)) != 1) {
+          return false;
+        }
+
+        const uint8_t readback = Wire.read();
+        result.after = readback;
+        const bool valid =
+            readback == updated &&
+            axp_policy::isPowerButtonOffLevelTransition(result.before,
+                                                         readback);
+        if (valid) {
+          result.changed = result.before != readback;
+        }
+        return valid;
+      });
+}
+
 #ifdef WAVESHARE_AMOLED_206
 bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
                                 uint8_t attempts) {

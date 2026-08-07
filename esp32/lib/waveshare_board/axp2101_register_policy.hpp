@@ -14,6 +14,10 @@ namespace waveshare_board::axp2101::register_policy {
 constexpr uint8_t DEVICE_ADDRESS = 0x34;
 constexpr uint8_t INTERRUPT_ENABLE_1 = 0x41;
 constexpr uint8_t INTERRUPT_STATUS_1 = 0x49;
+constexpr uint8_t POWER_BUTTON_CONFIG_REGISTER = 0x27;
+constexpr uint8_t POWER_BUTTON_OFF_LEVEL_MASK = 0x0C;
+constexpr uint8_t POWER_BUTTON_OFF_LEVEL_SHIFT = 2;
+constexpr uint8_t POWER_BUTTON_OFF_LEVEL_COUNT = 4;
 // The 2.06-inch target historically disabled this display bit before sleep and
 // relies on boot-time recovery after OTA rollback. The generic write helpers
 // still reject this register; only the dedicated one-way read/modify/write
@@ -46,6 +50,11 @@ constexpr bool isDisplayEnableOnlyTransition206(uint8_t current,
                                                 uint8_t updated) {
   return updated == withDisplayEnabled206(current) &&
          ((current ^ updated) & ~DISPLAY_ENABLE_MASK_206) == 0;
+}
+
+constexpr bool isPowerButtonOffLevelTransition(uint8_t current,
+                                                uint8_t updated) {
+  return ((current ^ updated) & ~POWER_BUTTON_OFF_LEVEL_MASK) == 0;
 }
 
 // Enforce the device policy at the shared I2C boundary, not only inside the
