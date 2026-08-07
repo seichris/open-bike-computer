@@ -274,8 +274,8 @@ interrupt-enable/status register pair `0x41`/`0x49`: bit `3` reports a short
 press, while bits `1` and `0` report the press and release edges. Firmware polls
 the latched status while awake and gives an active ownership comparison first
 refusal to confirm physical access. At all other times an enabled honk is queued
-on the existing
-speaker task. The PMU's six-second hard power-off is unchanged. Versioned
+on the existing speaker task. Firmware configures the PMU's hard power-off
+threshold to four seconds. Versioned
 capability discovery also returns the persisted honk configuration, so
 reconnecting from a fresh app does not overwrite device state with app
 defaults.
@@ -538,10 +538,12 @@ state when an older image may have programmed a still-powered PMIC.
 
 Safety rules:
 - Probe AXP2101 at `0x34` and read status for diagnostics only.
-- The firmware write allowlist contains exactly two addresses: interrupt-enable
-  register `0x41` and write-one-to-clear interrupt-status register `0x49`, both
-  used only for PWR-button events. Charger current/voltage, input limits,
-  BATFET, DCDC, LDO, and every other AXP2101 register are read-only.
+- The generic firmware write allowlist contains exactly two addresses:
+  interrupt-enable register `0x41` and write-one-to-clear interrupt-status
+  register `0x49`, both used only for PWR-button events. A dedicated boot-time
+  operation may read/modify/write only the PWR-button off-level bits (`3:2`) in
+  register `0x27`; charger current/voltage, input limits, BATFET, DCDC, LDO,
+  and every other AXP2101 register remain read-only.
 - Turn the AMOLED panel off with its controller command. Do not assume an
   AXP2101 enable bit belongs exclusively to the display or another peripheral.
 - A black screen is not sufficient evidence that an AXP rail should be forced;
@@ -554,8 +556,10 @@ Verified firmware behavior:
 - AXP2101 is found at `0x34`, and status plus the current LDO-enable value are
   logged without modifying them. The log labels that value as preserved current
   state, not verified factory state.
-- A register-policy guard rejects writes to all 254 non-allowlisted AXP2101
-  addresses, with an exhaustive host test covering the complete address space.
+- A register-policy guard rejects generic writes to all 254 non-allowlisted
+  AXP2101 addresses, with an exhaustive host test covering the complete
+  address space. The dedicated off-level operation verifies that it preserves
+  every bit outside register `0x27` bits `3:2`.
   A source-policy test also rejects raw `Wire.beginTransmission()` calls
   outside the guarded shared-I2C implementation.
 - Deep and light sleep preserve PMIC output state; the panel, buses, and radio
@@ -578,7 +582,8 @@ bit `0x80` if needed, and verifies the result while preserving every other bit.
 That one-way operation recovers a display supply that older 2.06 firmware could
 leave disabled; it cannot turn any output off or change a voltage. Generic
 AXP2101 writes remain limited to interrupt registers `0x41` and `0x49` on both
-targets.
+targets; the boot-time off-level operation is the only additional validated
+exception.
 
 ### Boot Failure Telemetry and Safe Mode
 

@@ -595,7 +595,8 @@ bit `2`. ACK-capable firmware uses a tracked frame:
 
 Firmware persists the complete configuration and queues the configured sound
 after an AXP2101 short-press event, so the button works without an active app
-connection. The AXP2101's six-second hardware power-off behavior is unchanged.
+connection. Firmware configures the AXP2101's hard power-off threshold to four
+seconds; this remains independent of the short-press honk behavior.
 
 Independently of hard power-off, connected firmware dims after 15 seconds and
 turns the panel off after 45 seconds without meaningful activity when no

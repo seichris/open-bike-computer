@@ -28,12 +28,20 @@ struct PowerButtonEvents {
   bool positiveEdge = false;
 };
 
+enum class PowerButtonOffLevel : uint8_t {
+  FourSeconds = 0,
+  SixSeconds = 1,
+  EightSeconds = 2,
+  TenSeconds = 3,
+};
+
 bool begin();
 bool isAvailable();
 bool readRegister(uint8_t reg, uint8_t &value);
 bool readPowerStatus(PowerStatus &status);
 bool readBatteryStatus(uint8_t &percentage, bool &charging);
 bool readBatteryPercentage(uint8_t &percentage);
+bool setPowerButtonOffLevel(PowerButtonOffLevel level);
 bool setPowerButtonEventMonitoring(bool enabled);
 bool readAndClearPowerButtonEvents(PowerButtonEvents &events);
 // Probe and report the PMIC state. The 1.75-inch target leaves every output

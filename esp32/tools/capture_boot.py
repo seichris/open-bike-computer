@@ -22,6 +22,10 @@ _POST_READY_BOOT_RECORD_MARKERS = (
     "BOOT_SAFE_MODE",
 )
 _SUPPORTED_BOOT_SCHEMA = "1"
+_EXPECTED_POWER_BUTTON_OFF_SECONDS = "4"
+_EXPECTED_POWER_BUTTON_OFF_LEVEL = 0
+_POWER_BUTTON_OFF_LEVEL_MASK = 0x0C
+_POWER_BUTTON_OFF_LEVEL_SHIFT = 2
 
 _EMPTY_RETAINED_HISTORY = {
     "schema": "1",
@@ -216,6 +220,12 @@ def format_summary(
         f"pmicRailState={value(summary.pmic, 'railState')} "
         f"pmicDisplayRecovery={value(summary.pmic, 'displayRecovery')} "
         f"pmicDisplayChanged={value(summary.pmic, 'displayChanged')} "
+        "pmicPowerButtonOffConfigured="
+        f"{value(summary.pmic, 'powerButtonOffConfigured')} "
+        f"pmicPowerButtonOffSeconds={value(summary.pmic, 'powerButtonOffSeconds')} "
+        f"pmicPowerButtonOffLevel={value(summary.pmic, 'powerButtonOffLevel')} "
+        f"pmicPowerButtonConfigRead={value(summary.pmic, 'powerButtonConfigRead')} "
+        f"pmicPowerButtonConfig={value(summary.pmic, 'powerButtonConfig')} "
         f"vbus={value(summary.pmic, 'vbus')} "
         f"battery={value(summary.pmic, 'battery')} "
         f"ldo={value(summary.pmic, 'ldo')} "
@@ -226,6 +236,59 @@ def format_summary(
         f"blockedWrites={summary.blocked_writes} "
         f"diagnosticErrors={summary.diagnostic_errors}"
     )
+
+
+def _validate_power_button_off_configuration(
+    summary: BootSummary, errors: list[str]
+) -> None:
+    if summary.pmic.get("powerButtonOffConfigured") != "1":
+        errors.append(
+            "PMIC four-second power-button-off configuration required "
+            f"(got {summary.pmic.get('powerButtonOffConfigured', 'missing')})"
+        )
+    if summary.pmic.get("powerButtonConfigRead") != "1":
+        errors.append(
+            "PMIC power-button config read required "
+            f"(got {summary.pmic.get('powerButtonConfigRead', 'missing')})"
+        )
+    if summary.pmic.get("powerButtonOffSeconds") != _EXPECTED_POWER_BUTTON_OFF_SECONDS:
+        errors.append(
+            "PMIC power-button-off seconds expected "
+            f"{_EXPECTED_POWER_BUTTON_OFF_SECONDS}, got "
+            f"{summary.pmic.get('powerButtonOffSeconds', 'missing')}"
+        )
+
+    expected_level = str(_EXPECTED_POWER_BUTTON_OFF_LEVEL)
+    if summary.pmic.get("powerButtonOffLevel") != expected_level:
+        errors.append(
+            "PMIC power-button-off level expected "
+            f"{expected_level}, got "
+            f"{summary.pmic.get('powerButtonOffLevel', 'missing')}"
+        )
+
+    raw_config = summary.pmic.get("powerButtonConfig")
+    try:
+        config = int(raw_config or "", 0)
+    except ValueError:
+        errors.append(
+            "PMIC power-button config byte required "
+            f"(got {raw_config or 'missing'})"
+        )
+    else:
+        if not 0 <= config <= 0xFF:
+            errors.append(
+                "PMIC power-button config byte out of range "
+                f"(got {raw_config})"
+            )
+        else:
+            observed_level = (
+                config & _POWER_BUTTON_OFF_LEVEL_MASK
+            ) >> _POWER_BUTTON_OFF_LEVEL_SHIFT
+            if observed_level != _EXPECTED_POWER_BUTTON_OFF_LEVEL:
+                errors.append(
+                    "PMIC power-button config off-level bits expected "
+                    f"{_EXPECTED_POWER_BUTTON_OFF_LEVEL}, got {observed_level}"
+                )
 
 
 def validation_errors(
@@ -376,6 +439,8 @@ def validation_errors(
                     "PMIC 2.06 display-enable bit required "
                     f"(got {summary.pmic.get('ldo', 'missing')})"
                 )
+    if require_pmic_read_only or require_pmic_display_enable_only:
+        _validate_power_button_off_configuration(summary, errors)
     if summary.blocked_writes:
         errors.append(f"blocked AXP2101 writes observed: {summary.blocked_writes}")
     if summary.diagnostic_errors:

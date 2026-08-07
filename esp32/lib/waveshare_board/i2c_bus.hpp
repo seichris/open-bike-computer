@@ -35,6 +35,20 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t attempts = 2);
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      const char *label = nullptr, uint8_t attempts = 2);
+
+struct Axp2101PowerButtonOffLevelResult {
+  uint8_t before = 0;
+  uint8_t after = 0;
+  bool changed = false;
+};
+
+// Boot-time, read/modify/write operation for the AXP2101 power-button off
+// level. The operation may change only REG27 bits 3:2; generic AXP2101 write
+// helpers remain blocked for this register.
+bool ensureAxp2101PowerButtonOffLevel(
+    uint8_t level, Axp2101PowerButtonOffLevelResult &result,
+    uint8_t attempts = 3);
+
 #ifdef WAVESHARE_AMOLED_206
 struct Axp2101DisplayEnableResult {
   uint8_t before = 0;
