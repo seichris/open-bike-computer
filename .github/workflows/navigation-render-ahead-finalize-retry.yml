@@ -1,0 +1,179 @@
+name: Finalize navigation render-ahead branch retry
+
+on:
+  push:
+    branches: [agent/navigation-render-ahead]
+    paths: [.github/workflows/navigation-render-ahead-finalize-retry.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: navigation-render-ahead-finalize-retry
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/agent/navigation-render-ahead'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct verified patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib
+          from pathlib import Path
+
+          root = Path('.github/navigation-patch')
+          parts = [
+              'chunk-00',
+              'chunk-01a', 'chunk-01b',
+              'chunk-01c0', 'chunk-01c10', 'chunk-01c11', 'chunk-01c12', 'chunk-01c13', 'chunk-01c2', 'chunk-01c3',
+              'chunk-02',
+              'chunk-03a-fixed', 'chunk-03b', 'chunk-03c',
+              'chunk-04a', 'chunk-04b', 'chunk-04c',
+              'chunk-05a', 'chunk-05b', 'chunk-05c',
+              'chunk-06a', 'chunk-06b', 'chunk-06c',
+              'chunk-07a', 'chunk-07b', 'chunk-07c',
+              'chunk-08a', 'chunk-08b', 'chunk-08c',
+          ]
+          encoded = ''.join((root / name).read_text() for name in parts).encode()
+          assert len(encoded) == 106524
+          assert hashlib.sha256(encoded).hexdigest() == 'b7a4525df7bd077da0360afacdb6421ebdbe048f0410c778fc29fbed109359b8'
+          compressed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == 'cef6fd83928789e176c08bda89b5ed5facea775eafe36f83d121d06bed62a489'
+          patch = gzip.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == 'f5396a9ce91b2652e19fc91b5f195cae6d8c32e0cf72e76655243e302bb58af2'
+          Path('/tmp/navigation.patch').write_bytes(patch)
+
+          encoded = (root / 'maps-memory-integration-00').read_text().encode()
+          assert len(encoded) == 4932
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'e4a3f26c22cd82ea7636a5b2c5636aceef72151acf584c802d50754dd2b46901'
+          Path('/tmp/maps-memory.patch').write_bytes(patch)
+          PY
+
+      - name: Apply, preserve main diagnostics, test, and publish
+        shell: bash
+        env:
+          EXPECTED_MAIN: 876acac61b12b5cb572389c844ceb68f9484a085
+          EXPECTED_STAGING_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git reset --hard origin/main
+          git clean -fdx
+          git config user.name OpenAI
+          git config user.email noreply@openai.com
+
+          if ! git am -3 --committer-date-is-author-date /tmp/navigation.patch; then
+            test "$(git diff --name-only --diff-filter=U)" = 'esp32/lib/maps/src/maps.cpp'
+            git checkout --theirs -- esp32/lib/maps/src/maps.cpp
+            git apply --check /tmp/maps-memory.patch
+            git apply /tmp/maps-memory.patch
+            git add esp32/lib/maps/src/maps.cpp
+            GIT_EDITOR=true git am --continue
+          fi
+
+          # Git's three-way am can carry add/add paths from the later main commit
+          # into the replayed commit. Restore PR #202-only files exactly from main.
+          git restore --source="$EXPECTED_MAIN" --staged --worktree -- \
+            docs/firmware-map-memory-diagnostics.md \
+            esp32/tools/tests/test_map_memory_diagnostics.py
+          git commit --amend --no-edit
+
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_MAIN"
+          test "$(git log -1 --pretty=%s)" = 'Rebuild navigation map rendering with latest-wins worker'
+          test ! -e .github/navigation-patch
+          test ! -e .github/workflows/navigation-render-ahead-apply.yml
+          test ! -e .github/workflows/navigation-render-ahead-finalize.yml
+          test ! -e .github/workflows/navigation-render-ahead-finalize-retry.yml
+          test ! -e .github/workflows/navigation-current-main-snapshot.yml
+
+          python3 - <<'PY'
+          import subprocess
+          expected = '''
+          .github/workflows/ci.yml
+          docs/firmware-map-render-scheduler.md
+          docs/fmb-v4.md
+          docs/plans/geofabrik-osm-3d-buildings-implementation-plan.md
+          esp32/lib/ble_navigation/gps_position_protocol.hpp
+          esp32/lib/gps/gps.cpp
+          esp32/lib/gps/gps.hpp
+          esp32/lib/gui/src/mainScr.cpp
+          esp32/lib/gui/src/mapRenderPolicy.hpp
+          esp32/lib/maps/src/mapBuildingAdmission.hpp
+          esp32/lib/maps/src/mapBuildingRenderer.hpp
+          esp32/lib/maps/src/mapBuildingWorkspace.hpp
+          esp32/lib/maps/src/mapPresentation.hpp
+          esp32/lib/maps/src/mapRenderJob.hpp
+          esp32/lib/maps/src/mapRouteGeometry.hpp
+          esp32/lib/maps/src/mapSurface.hpp
+          esp32/lib/maps/src/maps.cpp
+          esp32/lib/maps/src/maps.hpp
+          esp32/lib/route_overlay/route_overlay.cpp
+          esp32/lib/route_overlay/route_overlay.hpp
+          esp32/lib/utils/src/line_rasterizer.hpp
+          esp32/tools/tests/test_line_rasterizer.cpp
+          esp32/tools/tests/test_map_building_admission.cpp
+          esp32/tools/tests/test_map_building_renderer.cpp
+          esp32/tools/tests/test_map_building_workspace.cpp
+          esp32/tools/tests/test_map_guidance_integration.py
+          esp32/tools/tests/test_map_presentation.cpp
+          esp32/tools/tests/test_map_render_job.cpp
+          esp32/tools/tests/test_map_render_policy.cpp
+          esp32/tools/tests/test_map_route_geometry.cpp
+          esp32/tools/tests/test_workout_telemetry_state.cpp
+          ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift
+          ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift
+          ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift
+          ios-app/BikeComputerTests/NavigationProtocolTests.swift
+          '''
+          expected = sorted(line.strip() for line in expected.splitlines() if line.strip())
+          actual = subprocess.check_output(['git', 'diff', '--name-only', '876acac61b12b5cb572389c844ceb68f9484a085..HEAD'], text=True).splitlines()
+          assert actual == expected, f'unexpected changed files: {sorted(set(actual) ^ set(expected))}'
+          PY
+
+          git diff --exit-code "$EXPECTED_MAIN" -- \
+            docs/README.md \
+            docs/firmware-map-memory-diagnostics.md \
+            esp32/platformio.ini \
+            esp32/tools/tests/test_map_memory_diagnostics.py
+          grep -Fq test_map_memory_diagnostics .github/workflows/ci.yml
+          grep -Fq test_map_render_job .github/workflows/ci.yml
+          grep -Fq 'MAPIO: memory phase=%s freeInternalHeap=%u ' esp32/lib/maps/src/maps.cpp
+          grep -Fq 'MAPIO: buildings aborted reason=interrupt fallback=deferred ' esp32/lib/maps/src/maps.cpp
+          grep -Fq WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS esp32/platformio.ini
+          grep -Fq xTaskCreatePinnedToCore esp32/lib/maps/src/maps.cpp
+          grep -Fq MapRenderJob esp32/lib/maps/src/maps.cpp
+          git diff --check "$EXPECTED_MAIN"..HEAD
+
+          cd esp32
+          for test in \
+            test_map_render_job test_map_presentation test_map_building_admission \
+            test_map_route_geometry test_map_building_workspace test_map_building_renderer \
+            test_map_render_policy test_map_pinch_zoom test_map_projection \
+            test_line_rasterizer test_workout_telemetry_state; do
+            g++ -std=c++17 -Wall -Wextra -Werror "tools/tests/${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapBlockFormat.cpp lib/maps/src/mapBuildingBlock.cpp \
+            tools/tests/test_map_block_format.cpp -o /tmp/test_map_block_format
+          /tmp/test_map_block_format
+          PYTHONPATH=. python3 -m unittest \
+            tools.tests.test_map_guidance_integration \
+            tools.tests.test_map_activation_handoff \
+            tools.tests.test_map_memory_diagnostics
+          cd ..
+
+          git push \
+            --force-with-lease="refs/heads/agent/navigation-render-ahead:${EXPECTED_STAGING_HEAD}" \
+            origin HEAD:refs/heads/agent/navigation-render-ahead
