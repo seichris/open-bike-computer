@@ -34,6 +34,11 @@ from building_height import (
     normalized_building_class,
     resolve_height,
 )
+from building_calibration_cache import (
+    CalibrationCache,
+    CalibrationCacheError,
+    calibration_cell_for_bounds,
+)
 from feature_types import get_type_id
 from funcs import parse_tags
 from map_format import MAX_BUILDING_RINGS
@@ -68,15 +73,82 @@ def load_rules(path: str | Path) -> tuple[HeightRules, str]:
     return rules, hashlib.sha256(raw).hexdigest()
 
 
-def load_relation_index(path: str | Path) -> dict[str, Any]:
+def load_relation_index(
+    path: str | Path,
+    *,
+    require_closure: bool = False,
+) -> dict[str, Any]:
     path = Path(path)
     if not path.is_file():
-        return {"schemaVersion": 1, "partParents": {}, "relations": 0, "ambiguousParts": 0}
+        if require_closure:
+            raise ValueError("building relation closure audit is required")
+        return {
+            "schemaVersion": 1,
+            "partParents": {},
+            "parentTags": {},
+            "relations": 0,
+            "ambiguousParts": 0,
+        }
     value = json.loads(path.read_text(encoding="utf-8"))
+    closure = value.get("closureAudit")
+    closure_count_fields = {
+        "closureRelationCount",
+        "closureWayCount",
+        "closureNodeCount",
+        "relationRetryCount",
+        "candidateCount",
+    }
+    closure_identity_fields = {
+        "sourceIndexKey",
+        "sourceSnapshotSha256",
+        "scopePlanSha256",
+    }
+    valid_closure = closure is None or (
+        isinstance(closure, dict)
+        and set(closure) == closure_count_fields | closure_identity_fields
+        and all(
+            isinstance(closure[field], int)
+            and not isinstance(closure[field], bool)
+            and closure[field] >= 0
+            for field in closure_count_fields
+        )
+        and all(
+            isinstance(closure[field], str)
+            and len(closure[field]) == 64
+            and all(character in "0123456789abcdef" for character in closure[field])
+            for field in closure_identity_fields
+        )
+    )
     if (
         not isinstance(value, dict)
         or value.get("schemaVersion") != 1
         or not isinstance(value.get("partParents"), dict)
+        or any(
+            not isinstance(child, str)
+            or not child.startswith(("w", "r"))
+            or not isinstance(parent, str)
+            or not parent.startswith(("w", "r"))
+            for child, parent in value.get("partParents", {}).items()
+        )
+        or not isinstance(value.get("parentTags", {}), dict)
+        or any(
+            not isinstance(parent, str)
+            or not parent.startswith(("w", "r"))
+            or not isinstance(tags, dict)
+            or any(
+                not isinstance(key, str) or not isinstance(tag_value, str)
+                for key, tag_value in tags.items()
+            )
+            for parent, tags in value.get("parentTags", {}).items()
+        )
+        or any(
+            isinstance(value.get(field), bool)
+            or not isinstance(value.get(field), int)
+            or value[field] < 0
+            for field in ("relations", "ambiguousParts")
+        )
+        or not valid_closure
+        or (require_closure and closure is None)
     ):
         raise ValueError("building relation index is invalid")
     return value
@@ -85,14 +157,23 @@ def load_relation_index(path: str | Path) -> dict[str, Any]:
 def collect_building_features(
     polygon_features: Iterable[Mapping[str, Any]],
     line_features: Iterable[Mapping[str, Any]],
+    relation_index: Mapping[str, Any] | None = None,
 ) -> list[Mapping[str, Any]]:
-    """Return polygon buildings plus closed building parts from GDAL's line layer.
+    """Return polygon buildings plus required closed ways from GDAL's line layer.
 
     GDAL's OSM driver classifies a closed way tagged only with
-    ``building:part`` as a line. Convert those closed rings back to polygons
-    before the normal building validation and relation association pass.
+    ``building:part`` as a line. It can do the same for an untagged outline or
+    part whose building semantics come from a ``type=building`` relation.
+    Convert those required closed rings back to polygons before the normal
+    building validation and relation association pass.
     """
     collected = list(polygon_features)
+    part_parents = dict((relation_index or {}).get("partParents", {}))
+    required_relation_ways = {
+        key
+        for key in {*part_parents, *part_parents.values()}
+        if key.startswith("w")
+    }
     known_keys = {
         source_object_key(properties)
         for feature in collected
@@ -111,9 +192,12 @@ def collect_building_features(
             # multipolygons layer exposes closed-way IDs as osm_way_id.
             normalized_properties["osm_way_id"] = normalized_properties["osm_id"]
         tags = _building_tags(properties)
-        if tags.get("building:part") in (None, "", "no"):
-            continue
         object_key = source_object_key(normalized_properties)
+        if (
+            tags.get("building:part") in (None, "", "no")
+            and object_key not in required_relation_ways
+        ):
+            continue
         if not object_key or object_key in known_keys:
             continue
         try:
@@ -151,16 +235,52 @@ def prepare_buildings(
     rules: HeightRules,
     relation_index: Mapping[str, Any] | None = None,
     selection_geometry: Polygon | MultiPolygon | None = None,
+    calibration_cache: CalibrationCache | None = None,
+    calibration_rules_sha256: str | None = None,
+    calibration_source_sha256: str | None = None,
+    strict_relations: bool = False,
 ) -> tuple[list[SourceBuilding], dict[str, Any], set[str]]:
+    if calibration_cache is not None and (
+        calibration_cache.identity.rules_sha256 != calibration_rules_sha256
+        or calibration_cache.identity.source_snapshot_sha256 != calibration_source_sha256
+        or calibration_cache.identity.building_profile_version != BUILDING_PROFILE_VERSION
+        or calibration_cache.identity.cell_size_meters != rules.cell_size_meters
+        or calibration_cache.identity.halo_cells != rules.halo_cells
+        or calibration_cache.identity.minimum_samples != rules.minimum_samples
+    ):
+        raise CalibrationCacheError(
+            "building_calibration_unavailable",
+            "building calibration cache identity does not match extraction inputs",
+        )
     diagnostics: dict[str, int] = {}
+    part_parents = dict((relation_index or {}).get("partParents", {}))
+    parent_tags = dict((relation_index or {}).get("parentTags", {}))
+    explicit_parent_keys = set(part_parents.values())
     sources: list[SourceBuilding] = []
     for feature in features:
-        source = _source_building(feature, rules, diagnostics)
+        properties = feature.get("properties")
+        object_key = (
+            source_object_key(properties)
+            if isinstance(properties, Mapping)
+            else ""
+        )
+        source = _source_building(
+            feature,
+            rules,
+            diagnostics,
+            explicit_part=object_key in part_parents,
+            explicit_parent=object_key in explicit_parent_keys,
+            explicit_parent_tags=parent_tags.get(object_key),
+        )
         if source is not None:
             sources.append(source)
     sources.sort(key=lambda item: item.object_key)
     by_key = {source.object_key: source for source in sources}
-    part_parents = dict((relation_index or {}).get("partParents", {}))
+    if strict_relations and int((relation_index or {}).get("ambiguousParts", 0)):
+        raise CalibrationCacheError(
+            "building_relation_incomplete",
+            "output building relations contain ambiguous explicit parents",
+        )
 
     associated: list[SourceBuilding] = []
     outlines = [source for source in sources if not source.is_part]
@@ -173,7 +293,12 @@ def prepare_buildings(
             continue
         parent_key = part_parents.get(source.object_key)
         association = "relation" if parent_key in by_key else "none"
-        if association == "none":
+        if parent_key is not None and association == "none" and strict_relations:
+            raise CalibrationCacheError(
+                "building_relation_incomplete",
+                "an explicit building parent is missing from converted geometry",
+            )
+        if parent_key is None:
             parent_key = _containment_parent(source, prepared_outlines)
             association = "containment" if parent_key is not None else "none"
         associated.append(replace(source, parent_key=parent_key, association=association))
@@ -191,13 +316,23 @@ def prepare_buildings(
             continue
         resolved = resolve_height(source.tags, rules)
         direct[source.object_key] = resolved
-        cell_x, cell_y = _calibration_cell(source.geometry, rules.cell_size_meters)
-        calibration[(cell_x, cell_y, source.building_class)].append(candidate[0])
+        if calibration_cache is None:
+            cell_x, cell_y = _calibration_cell(source.geometry, rules.cell_size_meters)
+            calibration[(cell_x, cell_y, source.building_class)].append(candidate[0])
 
     resolved_sources: list[SourceBuilding] = []
     for source in sources:
         parent = direct.get(source.parent_key or "")
-        local_median = _local_median(source, calibration, rules)
+        cell = _calibration_cell(
+            source.geometry,
+            rules.cell_size_meters,
+            bounds_midpoint=calibration_cache is not None,
+        )
+        local_median = (
+            calibration_cache.local_median_meters(cell, source.building_class)
+            if calibration_cache is not None
+            else _local_median(source, calibration, rules)
+        )
         resolved = resolve_height(
             source.tags,
             rules,
@@ -275,7 +410,21 @@ def prepare_buildings(
         "relationAssociationCount": sum(source.association == "relation" for source in resolved_sources),
         "containmentAssociationCount": sum(source.association == "containment" for source in resolved_sources),
         "unassociatedPartCount": sum(source.is_part and source.parent_key is None for source in resolved_sources),
+        "relationCount": int((relation_index or {}).get("relations", 0)),
+        "ambiguousRelationPartCount": int(
+            (relation_index or {}).get("ambiguousParts", 0)
+        ),
+        "relationClosure": (relation_index or {}).get("closureAudit"),
         "rejectedTags": dict(sorted(diagnostics.items())),
+        "calibrationSource": (
+            "sourceSnapshotCache" if calibration_cache is not None else "requestCandidates"
+        ),
+        "calibrationKey": calibration_cache.key if calibration_cache is not None else None,
+        "calibrationLookup": (
+            calibration_cache.lookup_diagnostics()
+            if calibration_cache is not None
+            else None
+        ),
         **provenance_counts,
     }
     return resolved_sources, report, flat_outline_keys
@@ -418,11 +567,29 @@ def _source_building(
     feature: Mapping[str, Any],
     rules: HeightRules,
     diagnostics: dict[str, int],
+    *,
+    explicit_part: bool = False,
+    explicit_parent: bool = False,
+    explicit_parent_tags: Mapping[str, str] | None = None,
 ) -> SourceBuilding | None:
     properties = feature.get("properties")
     if not isinstance(properties, Mapping):
         return None
     tags = _building_tags(properties)
+    if explicit_parent_tags:
+        tags = {**explicit_parent_tags, **tags}
+    if (
+        explicit_parent
+        and tags.get("building") in (None, "", "no")
+        and tags.get("building:part") in (None, "", "no")
+    ):
+        tags["building"] = "yes"
+    if (
+        explicit_part
+        and tags.get("building") in (None, "", "no")
+        and tags.get("building:part") in (None, "", "no")
+    ):
+        tags["building:part"] = "yes"
     if tags.get("building") in (None, "no") and tags.get("building:part") in (None, "no"):
         return None
     object_key = source_object_key(properties)
@@ -440,7 +607,10 @@ def _source_building(
     return SourceBuilding(
         object_key=object_key,
         building_class=normalized_building_class(tags, rules),
-        is_part=tags.get("building:part") not in (None, "", "no"),
+        is_part=(
+            explicit_part
+            or tags.get("building:part") not in (None, "", "no")
+        ),
         geometry=geometry,
         tags=dict(sorted(tags.items())),
     )
@@ -529,7 +699,14 @@ def projected_selection_geometry(
     return projected
 
 
-def _calibration_cell(geometry: Polygon | MultiPolygon, size: int) -> tuple[int, int]:
+def _calibration_cell(
+    geometry: Polygon | MultiPolygon,
+    size: int,
+    *,
+    bounds_midpoint: bool = False,
+) -> tuple[int, int]:
+    if bounds_midpoint:
+        return calibration_cell_for_bounds(geometry.bounds, size)
     point = geometry.representative_point()
     return math.floor(point.x / size), math.floor(point.y / size)
 

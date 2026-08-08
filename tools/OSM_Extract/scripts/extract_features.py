@@ -13,10 +13,11 @@ from building_pipeline import (
     prepare_buildings,
     projected_selection_geometry,
 )
+from building_calibration_cache import CalibrationCache, CalibrationCacheError, canonical_json
 from itertools import product
 from shapely import box
 from shapely.geometry import shape
-import argparse, json, yaml
+import argparse, hashlib, json, yaml
 import os, sys, time
 
 parser = argparse.ArgumentParser()
@@ -31,6 +32,10 @@ parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
 parser.add_argument("--selection-geometry")
 parser.add_argument("--selection-buffer-m", type=float, default=0.0)
+parser.add_argument("--scope-plan")
+parser.add_argument("--suppress-scope-marker", action="store_true")
+parser.add_argument("--calibration-manifest")
+parser.add_argument("--calibration-source-sha256")
 args = parser.parse_args()
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
@@ -50,11 +55,93 @@ styles = yaml.safe_load( open(CONF_STYLES, "r"))
 min_lon, min_lat, max_lon, max_lat = args.min_lon, args.min_lat, args.max_lon, args.max_lat
 area_min_x, area_min_y = lon2x( float( min_lon)), lat2y( float( min_lat))
 area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
+building_normalization_started = None
+building_normalization_seconds = 0.0
 if args.renderer_format == 3:
+    building_normalization_started = time.perf_counter()
     area_min_x &= ~mapblock_mask
     area_min_y &= ~mapblock_mask
     area_max_x = (area_max_x + mapblock_mask) & ~mapblock_mask
     area_max_y = (area_max_y + mapblock_mask) & ~mapblock_mask
+
+scope_plan = None
+scope_block_positions = None
+selection_policy = None
+if args.scope_plan:
+    with open(args.scope_plan, "rb") as scope_file:
+        serialized_scope = json.load(scope_file)
+    scope_hash = serialized_scope.pop("scopePlanSha256", None)
+    if (
+        not isinstance(scope_hash, str)
+        or hashlib.sha256(canonical_json(serialized_scope)).hexdigest() != scope_hash
+        or serialized_scope.get("schemaVersion") != 1
+        or serialized_scope.get("policy", {}).get("policyVersion") != 1
+        or serialized_scope.get("policy", {}).get("blockGridVersion") != 1
+        or serialized_scope.get("policy", {}).get("blockSizeMeters") != 4096
+    ):
+        raise ValueError("scope plan identity or policy is invalid")
+    if args.renderer_format != 3:
+        raise ValueError("scope plans are only supported by renderer format 3")
+    output_blocks = serialized_scope.get("outputBlocks")
+    if not isinstance(output_blocks, list) or not output_blocks:
+        raise ValueError("scope plan output blocks are invalid")
+    scope_block_positions = []
+    previous_block = None
+    for block in output_blocks:
+        if not isinstance(block, dict) or set(block) != {"x", "y", "boundsMeters"}:
+            raise ValueError("scope plan output block is invalid")
+        x, y, bounds = block["x"], block["y"], block["boundsMeters"]
+        if (
+            isinstance(x, bool) or not isinstance(x, int)
+            or isinstance(y, bool) or not isinstance(y, int)
+            or bounds != [x * 4096, y * 4096, (x + 1) * 4096, (y + 1) * 4096]
+            or (previous_block is not None and (x, y) <= previous_block)
+        ):
+            raise ValueError("scope plan output blocks are not canonical")
+        previous_block = (x, y)
+        scope_block_positions.append((x * 4096, y * 4096))
+    scope_plan = serialized_scope
+    selection_policy = serialized_scope["policy"].get("selectionSemantics")
+    if selection_policy != "complete_blocks_no_selection_edge_clipping":
+        raise ValueError("scope plan selection semantics are unsupported")
+    scope_metrics = serialized_scope.get("metrics", {})
+    scope_marker = {
+        "scopePlanSha256": scope_hash,
+        "outputBlockCount": len(output_blocks),
+    }
+    for key in (
+        "requestedApproximateAreaM2",
+        "outputAreaM2",
+        "sourceAreaM2",
+        "sourceToOutputAreaBasisPoints",
+        "calibrationCellCount",
+        "calibrationSampleCellCount",
+    ):
+        value = scope_metrics.get(key) if isinstance(scope_metrics, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            scope_marker[key] = value
+    geometry_buffer = serialized_scope["policy"].get("geometryBufferMeters")
+    if isinstance(geometry_buffer, int) and not isinstance(geometry_buffer, bool):
+        scope_marker["geometryBufferMeters"] = geometry_buffer
+    source_bounds_e7 = serialized_scope.get("sourceScope", {}).get("boundsE7")
+    if (
+        isinstance(source_bounds_e7, list)
+        and len(source_bounds_e7) == 4
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in source_bounds_e7)
+    ):
+        scope_marker["sourceBoundsE7"] = source_bounds_e7
+    if not args.suppress_scope_marker:
+        print(
+            "BUILDING_SCOPE:" + canonical_json(scope_marker).decode("utf-8"),
+            flush=True,
+        )
+
+if args.renderer_format == 3:
+    print(
+        'BUILDING_PREPROCESS_PROGRESS:'
+        '{"completed":0,"indeterminate":true,"unit":"building_normalization"}',
+        flush=True,
+    )
 
 print("  Step 1/5 reading lines files")
 lines = json.load( open( LINES_INPUT_FILE, "r"))
@@ -68,9 +155,14 @@ if args.selection_geometry:
             json.load(selection_file), buffer_meters=args.selection_buffer_m
         )
 
+apply_selection_mask = (
+    selection_geometry is not None
+    and selection_policy != "complete_blocks_no_selection_edge_clipping"
+)
+
 
 def selected_features(features):
-    if selection_geometry is None:
+    if not apply_selection_mask:
         return features
     selected = []
     for feature in features:
@@ -88,12 +180,73 @@ building_rules_sha256 = None
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
-    relation_index = load_relation_index(f"{args.geojson_prefix}_building_relations.json")
-    buildings, building_report, _ = prepare_buildings(
-        collect_building_features(polygons["features"], lines["features"]),
-        building_rules,
-        relation_index,
-        selection_geometry,
+    relation_index = load_relation_index(
+        f"{args.geojson_prefix}_building_relations.json",
+        require_closure=scope_plan is not None,
+    )
+    calibration_cache = (
+        CalibrationCache.from_manifest(args.calibration_manifest)
+        if args.calibration_manifest
+        else None
+    )
+    if (calibration_cache is None) != (args.calibration_source_sha256 is None):
+        raise ValueError("calibration manifest and source identity must be supplied together")
+    if scope_plan is not None and calibration_cache is None:
+        raise ValueError("plan-aware target 3 requires immutable calibration")
+    if scope_plan is not None:
+        closure_audit = relation_index["closureAudit"]
+        if (
+            closure_audit["scopePlanSha256"] != scope_hash
+            or closure_audit["sourceSnapshotSha256"]
+            != args.calibration_source_sha256
+        ):
+            raise ValueError("building relation closure identity is incompatible")
+        scope_calibration = scope_plan.get("calibration", {})
+        required_calibration_cells = {
+            tuple(cell) for cell in scope_calibration.get("sampleCells", [])
+        }
+        if (
+            scope_calibration.get("cellSizeMeters") != building_rules.cell_size_meters
+            or scope_calibration.get("haloCells") != building_rules.halo_cells
+            or scope_calibration.get("minimumSamples") != building_rules.minimum_samples
+            or not required_calibration_cells
+            or not required_calibration_cells.issubset(calibration_cache.bound_cells())
+        ):
+            raise ValueError("scope plan calibration inputs are incomplete or incompatible")
+    try:
+        buildings, building_report, _ = prepare_buildings(
+            collect_building_features(
+                polygons["features"],
+                lines["features"],
+                relation_index,
+            ),
+            building_rules,
+            relation_index,
+            selection_geometry if apply_selection_mask else None,
+            calibration_cache=calibration_cache,
+            calibration_rules_sha256=building_rules_sha256,
+            calibration_source_sha256=args.calibration_source_sha256,
+            strict_relations=scope_plan is not None,
+        )
+    except CalibrationCacheError as exc:
+        print(
+            "BUILDING_PREPROCESS_FAILURE:"
+            + json.dumps(
+                {"code": exc.code, "message": str(exc)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        raise SystemExit(2) from exc
+    building_normalization_seconds = (
+        time.perf_counter() - building_normalization_started
+    )
+    print(
+        'BUILDING_PREPROCESS_PROGRESS:'
+        '{"completed":1,"indeterminate":false,"total":1,'
+        '"unit":"building_normalization"}',
+        flush=True,
     )
 
 # extract relevant features
@@ -155,7 +308,12 @@ if args.renderer_format >= 2:
 
 x_positions = range(area_min_x, area_max_x, 4096)
 y_positions = range(area_min_y, area_max_y, 4096)
-total = len(x_positions) * len(y_positions)
+if scope_block_positions is not None:
+    block_positions = scope_block_positions
+    total = len(scope_block_positions)
+else:
+    block_positions = product(x_positions, y_positions)
+    total = len(x_positions) * len(y_positions)
 progress = BlockProgressReporter(total)
 fmb_writing_seconds = 0.0
 building_totals = {
@@ -175,7 +333,10 @@ building_totals = {
     "classDefaultHeightCount": 0,
 }
 
-for init_x, init_y in progress.track(product(x_positions, y_positions)):
+building_block_encoding_started = (
+    time.perf_counter() if args.renderer_format == 3 else None
+)
+for init_x, init_y in progress.track(block_positions):
         # print("--------------------")
         # print("init_x, init_y", init_x, init_y)
         min_x = init_x & (~mapblock_mask)
@@ -301,6 +462,12 @@ for init_x, init_y in progress.track(product(x_positions, y_positions)):
                 building_block_stats["pointCount"],
             )
 
+building_block_encoding_seconds = (
+    time.perf_counter() - building_block_encoding_started
+    if building_block_encoding_started is not None
+    else 0.0
+)
+
 if font_builder is not None:
     label_phase_timings["labelShaping"] = font_builder.shaping_seconds
     label_phase_timings["labelFmbWriting"] = max(
@@ -323,4 +490,8 @@ if args.renderer_format == 3:
         if key not in building_totals:
             building_totals[key] = value
     building_totals["rulesSha256"] = building_rules_sha256
+    building_totals["phaseTimings"] = {
+        "buildingNormalization": round(building_normalization_seconds, 6),
+        "blockEncoding": round(building_block_encoding_seconds, 6),
+    }
     print("BUILDING_STATS:" + json.dumps(building_totals, sort_keys=True, separators=(",", ":")))

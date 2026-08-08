@@ -29,6 +29,7 @@ from .jobs import (
 )
 from .limits import JobLimits
 from .map_buildings import (
+    building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
     building_target3_generation_enabled,
 )
@@ -221,6 +222,7 @@ def create_app():
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
         source_cache=source_cache,
+        building_scope_mode=building_preprocessing_scope_mode(),
         source_preview_geometry_resolver=(
             source_provider.preview_geometry_for_source
             if source_provider is not None

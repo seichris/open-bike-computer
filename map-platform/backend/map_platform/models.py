@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import math
+import re
 from typing import Any
 
 from .artifacts import ArtifactRecord
@@ -169,7 +170,12 @@ class MapJob:
     artifact_metrics: dict[str, Any] | None = None
     user_label: str | None = None
     build_cache_key: str | None = None
+    build_cache_aliases: list[str] = field(default_factory=list)
+    build_identity_derivation: dict[str, Any] | None = None
     build_compatibility_key: str | None = None
+    building_preprocessing_inputs: dict[str, Any] | None = None
+    building_preprocessing_runtime: dict[str, Any] | None = None
+    building_preprocessing_mode: str | None = None
     reuse_strategy: str | None = None
     reuse_source_job_id: str | None = None
     download_receipts: list[MapDownloadReceipt] = field(default_factory=list)
@@ -182,6 +188,11 @@ class MapJob:
     finished_at: str | None = None
     progress_completed: int | None = None
     progress_total: int | None = None
+    progress_phase: str | None = None
+    progress_unit: str | None = None
+    progress_completed_units: int | None = None
+    progress_total_units: int | None = None
+    progress_indeterminate: bool | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -238,7 +249,12 @@ class MapJob:
         }
         if include_internal:
             result["buildCacheKey"] = self.build_cache_key
+            result["buildCacheAliases"] = self.build_cache_aliases
+            result["buildIdentityDerivation"] = self.build_identity_derivation
             result["buildCompatibilityKey"] = self.build_compatibility_key
+            result["buildingPreprocessingInputs"] = self.building_preprocessing_inputs
+            result["buildingPreprocessingRuntime"] = self.building_preprocessing_runtime
+            result["buildingPreprocessingMode"] = self.building_preprocessing_mode
             result["reuseSourceJobId"] = self.reuse_source_job_id
             result["downloadReceipts"] = [
                 receipt.to_dict() for receipt in self.download_receipts
@@ -279,7 +295,26 @@ class MapJob:
             artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
             user_label=data.get("userLabel"),
             build_cache_key=data.get("buildCacheKey"),
+            build_cache_aliases=_build_cache_aliases(data.get("buildCacheAliases", [])),
+            build_identity_derivation=(
+                dict(data["buildIdentityDerivation"])
+                if data.get("buildIdentityDerivation") is not None
+                else None
+            ),
             build_compatibility_key=data.get("buildCompatibilityKey"),
+            building_preprocessing_inputs=(
+                dict(data["buildingPreprocessingInputs"])
+                if data.get("buildingPreprocessingInputs") is not None
+                else None
+            ),
+            building_preprocessing_runtime=(
+                dict(data["buildingPreprocessingRuntime"])
+                if data.get("buildingPreprocessingRuntime") is not None
+                else None
+            ),
+            building_preprocessing_mode=_building_preprocessing_mode(
+                data.get("buildingPreprocessingMode")
+            ),
             reuse_strategy=data.get("reuseStrategy"),
             reuse_source_job_id=data.get("reuseSourceJobId"),
             download_receipts=[
@@ -295,18 +330,52 @@ class MapJob:
             finished_at=data.get("finishedAt"),
             progress_completed=_progress_value(data.get("progress"), "completedBlocks"),
             progress_total=_progress_value(data.get("progress"), "totalBlocks"),
+            progress_phase=_progress_string(data.get("progress"), "phase"),
+            progress_unit=_progress_string(data.get("progress"), "unit"),
+            progress_completed_units=_progress_value(data.get("progress"), "completed"),
+            progress_total_units=_progress_value(data.get("progress"), "total"),
+            progress_indeterminate=_progress_boolean(
+                data.get("progress"), "indeterminate"
+            ),
             events=list(data.get("events", [])),
         )
 
     def progress(self) -> dict[str, Any] | None:
-        if self.progress_completed is None or self.progress_total is None or self.progress_total <= 0:
+        has_blocks = (
+            self.progress_completed is not None
+            and self.progress_total is not None
+            and self.progress_total > 0
+        )
+        has_units = (
+            self.progress_completed_units is not None
+            and self.progress_total_units is not None
+            and self.progress_total_units > 0
+        )
+        if not has_blocks and not has_units and self.progress_phase is None:
             return None
-        completed = max(0, min(self.progress_completed, self.progress_total))
-        return {
-            "completedBlocks": completed,
-            "totalBlocks": self.progress_total,
-            "fraction": completed / self.progress_total,
-        }
+        result: dict[str, Any] = {}
+        if self.progress_phase is not None:
+            result["phase"] = self.progress_phase
+        if self.progress_unit is not None:
+            result["unit"] = self.progress_unit
+        if has_units:
+            completed_units = max(
+                0, min(self.progress_completed_units, self.progress_total_units)
+            )
+            result["completed"] = completed_units
+            result["total"] = self.progress_total_units
+            result["fraction"] = completed_units / self.progress_total_units
+        if has_blocks:
+            completed_blocks = max(
+                0, min(self.progress_completed, self.progress_total)
+            )
+            result["completedBlocks"] = completed_blocks
+            result["totalBlocks"] = self.progress_total
+            if "fraction" not in result and self.progress_indeterminate is not True:
+                result["fraction"] = completed_blocks / self.progress_total
+        if self.progress_indeterminate is not None:
+            result["indeterminate"] = self.progress_indeterminate
+        return result
 
     def server_timing(self) -> dict[str, Any]:
         """Return durable lifecycle timings derived from persisted timestamps."""
@@ -389,6 +458,23 @@ class MapJob:
                     timings.append(
                         {"status": phase, "durationSeconds": round(float(duration), 6)}
                     )
+        building_timings = (
+            self.artifact_metrics.get("buildingPhaseTimings")
+            if isinstance(self.artifact_metrics, dict)
+            else None
+        )
+        if isinstance(building_timings, dict):
+            for phase, duration in building_timings.items():
+                if (
+                    isinstance(phase, str)
+                    and _is_finite_nonnegative_number(duration)
+                ):
+                    timings.append(
+                        {
+                            "status": f"building_{phase}",
+                            "durationSeconds": round(float(duration), 6),
+                        }
+                    )
         return timings
 
 
@@ -426,6 +512,38 @@ def _progress_value(progress: Any, key: str) -> int | None:
         return int(progress[key])
     except (TypeError, ValueError):
         return None
+
+
+def _progress_string(progress: Any, key: str) -> str | None:
+    value = progress.get(key) if isinstance(progress, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _progress_boolean(progress: Any, key: str) -> bool | None:
+    value = progress.get(key) if isinstance(progress, dict) else None
+    return value if isinstance(value, bool) else None
+
+
+def _build_cache_aliases(value: Any) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"[0-9a-f]{64}", item) is None
+            for item in value
+        )
+        or len(value) != len(set(value))
+    ):
+        raise ValueError("build cache aliases are invalid")
+    return list(value)
+
+
+def _building_preprocessing_mode(value: Any) -> str | None:
+    if value is None:
+        return None
+    if value not in {"legacy", "shadow", "selected"}:
+        raise ValueError("building preprocessing mode is invalid")
+    return value
 
 
 def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:

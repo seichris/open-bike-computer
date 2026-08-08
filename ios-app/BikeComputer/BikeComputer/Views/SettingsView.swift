@@ -327,11 +327,17 @@ private struct DownloadingMapsSettingsSection: View {
                     HStack {
                         Text("Generation Progress")
                         Spacer()
-                        Text("\(generationProgress.percentage)%")
-                            .foregroundColor(.secondary)
+                        if generationProgress.displayFraction != nil {
+                            Text("\(generationProgress.percentage)%")
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    ProgressView(value: generationProgress.fraction)
-                    Text("\(generationProgress.completedBlocks) of \(generationProgress.totalBlocks) map blocks")
+                    if let fraction = generationProgress.displayFraction {
+                        ProgressView(value: fraction)
+                    } else {
+                        ProgressView()
+                    }
+                    Text(generationProgress.detail)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

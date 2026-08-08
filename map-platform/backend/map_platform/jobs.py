@@ -3,10 +3,12 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import threading
 import uuid
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -363,6 +365,8 @@ class JobStore:
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
+        build_cache_aliases: list[str] | None = None,
+        build_identity_derivation: dict[str, Any] | None = None,
         build_compatibility_key: str | None = None,
         reuse_strategy: str | None = None,
         reuse_source_job_id: str | None = None,
@@ -382,6 +386,8 @@ class JobStore:
                 artifacts=artifacts,
                 artifact_metrics=artifact_metrics,
                 build_cache_key=build_cache_key,
+                build_cache_aliases=build_cache_aliases,
+                build_identity_derivation=build_identity_derivation,
                 build_compatibility_key=build_compatibility_key,
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
@@ -403,6 +409,8 @@ class JobStore:
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
+        build_cache_aliases: list[str] | None = None,
+        build_identity_derivation: dict[str, Any] | None = None,
         build_compatibility_key: str | None = None,
         reuse_strategy: str | None = None,
         reuse_source_job_id: str | None = None,
@@ -427,6 +435,8 @@ class JobStore:
                 artifacts=artifacts,
                 artifact_metrics=artifact_metrics,
                 build_cache_key=build_cache_key,
+                build_cache_aliases=build_cache_aliases,
+                build_identity_derivation=build_identity_derivation,
                 build_compatibility_key=build_compatibility_key,
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
@@ -448,6 +458,8 @@ class JobStore:
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
+        build_cache_aliases: list[str] | None = None,
+        build_identity_derivation: dict[str, Any] | None = None,
         build_compatibility_key: str | None = None,
         reuse_strategy: str | None = None,
         reuse_source_job_id: str | None = None,
@@ -466,6 +478,11 @@ class JobStore:
         if previous_status != status and status in {JobStatus.QUEUED, JobStatus.VALIDATING}:
             job.progress_completed = None
             job.progress_total = None
+            job.progress_phase = None
+            job.progress_unit = None
+            job.progress_completed_units = None
+            job.progress_total_units = None
+            job.progress_indeterminate = None
         if status in {JobStatus.VALIDATING, JobStatus.RESOLVING_SOURCE, JobStatus.EXTRACTING_PBF} and job.started_at is None:
             job.started_at = job.updated_at
         if (
@@ -492,6 +509,12 @@ class JobStore:
             job.artifact_metrics = dict(artifact_metrics)
         if build_cache_key is not None:
             job.build_cache_key = build_cache_key
+        if build_cache_aliases is not None:
+            job.build_cache_aliases = list(build_cache_aliases)
+            if not job.build_cache_aliases and build_identity_derivation is None:
+                job.build_identity_derivation = None
+        if build_identity_derivation is not None:
+            job.build_identity_derivation = dict(build_identity_derivation)
         if build_compatibility_key is not None:
             job.build_compatibility_key = build_compatibility_key
         if reuse_strategy is not None:
@@ -546,6 +569,81 @@ class JobStore:
                 raise RuntimeError("job is owned by another worker")
             job.progress_completed = max(0, min(int(completed), int(total)))
             job.progress_total = int(total)
+            job.progress_phase = "block_encoding"
+            job.progress_unit = "blocks"
+            job.progress_completed_units = job.progress_completed
+            job.progress_total_units = job.progress_total
+            job.progress_indeterminate = False
+            job.updated_at = utc_now_iso()
+            if worker_id is not None:
+                job.worker_id = worker_id
+            self.save(job)
+            return job
+
+    def update_phase_progress_unless_cancelled(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        unit: str,
+        completed: int | None,
+        total: int | None,
+        completed_blocks: int | None,
+        total_blocks: int | None,
+        indeterminate: bool,
+        worker_id: str | None = None,
+    ) -> MapJob:
+        if (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", unit)
+            or not isinstance(indeterminate, bool)
+            or (total is None) != (completed is None)
+            or (total_blocks is None) != (completed_blocks is None)
+            or (
+                total is not None
+                and (
+                    isinstance(total, bool)
+                    or isinstance(completed, bool)
+                    or int(total) <= 0
+                    or int(completed) < 0
+                    or int(completed) > int(total)
+                )
+            )
+            or (
+                total_blocks is not None
+                and (
+                    isinstance(total_blocks, bool)
+                    or isinstance(completed_blocks, bool)
+                    or int(total_blocks) <= 0
+                    or int(completed_blocks) < 0
+                    or int(completed_blocks) > int(total_blocks)
+                )
+            )
+        ):
+            raise ValueError("structured progress is invalid")
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if worker_id is not None and job.worker_id not in {None, worker_id}:
+                raise RuntimeError("job is owned by another worker")
+            job.progress_phase = phase
+            job.progress_unit = unit
+            job.progress_completed_units = (
+                max(0, min(int(completed), int(total)))
+                if total is not None
+                else None
+            )
+            job.progress_total_units = int(total) if total is not None else None
+            job.progress_completed = (
+                max(0, min(int(completed_blocks), int(total_blocks)))
+                if total_blocks is not None
+                else None
+            )
+            job.progress_total = (
+                int(total_blocks) if total_blocks is not None else None
+            )
+            job.progress_indeterminate = indeterminate
             job.updated_at = utc_now_iso()
             if worker_id is not None:
                 job.worker_id = worker_id
@@ -743,6 +841,7 @@ class JobStore:
         worker_id: str,
         build_cache_key: str,
         build_compatibility_key: str,
+        building_preprocessing_inputs: dict[str, Any] | None = None,
     ) -> MapJob:
         with self._queue_lock():
             job = self.get(job_id)
@@ -752,6 +851,79 @@ class JobStore:
                 raise RuntimeError("job is owned by another worker")
             job.build_cache_key = build_cache_key
             job.build_compatibility_key = build_compatibility_key
+            if building_preprocessing_inputs is not None:
+                if (
+                    job.building_preprocessing_inputs is not None
+                    and job.building_preprocessing_inputs
+                    != building_preprocessing_inputs
+                ):
+                    raise RuntimeError(
+                        "building preprocessing inputs changed after reservation"
+                    )
+                job.building_preprocessing_inputs = deepcopy(
+                    building_preprocessing_inputs
+                )
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def freeze_building_preprocessing_inputs_unless_cancelled(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        building_preprocessing_inputs: dict[str, Any],
+        building_preprocessing_runtime: dict[str, Any] | None = None,
+    ) -> MapJob:
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            if (
+                job.building_preprocessing_inputs is not None
+                and job.building_preprocessing_inputs
+                != building_preprocessing_inputs
+            ):
+                raise RuntimeError(
+                    "building preprocessing inputs changed after reservation"
+                )
+            job.building_preprocessing_inputs = deepcopy(
+                building_preprocessing_inputs
+            )
+            if building_preprocessing_runtime is not None:
+                job.building_preprocessing_runtime = deepcopy(
+                    building_preprocessing_runtime
+                )
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def freeze_building_preprocessing_mode_unless_cancelled(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        building_preprocessing_mode: str,
+    ) -> MapJob:
+        if building_preprocessing_mode not in {"legacy", "shadow", "selected"}:
+            raise ValueError("building preprocessing mode is invalid")
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            if (
+                job.building_preprocessing_mode is not None
+                and job.building_preprocessing_mode
+                != building_preprocessing_mode
+            ):
+                raise RuntimeError(
+                    "building preprocessing rollout mode changed after reservation"
+                )
+            job.building_preprocessing_mode = building_preprocessing_mode
             job.updated_at = utc_now_iso()
             self.save(job)
             return job
@@ -768,7 +940,10 @@ class JobStore:
                 for job in self.list()
                 if job.job_id != job_id
                 and job.status == JobStatus.READY
-                and job.build_cache_key == build_cache_key
+                and (
+                    job.build_cache_key == build_cache_key
+                    or build_cache_key in job.build_cache_aliases
+                )
                 and job.map_id
                 and job.pack_path
                 and Path(job.pack_path).is_file()
@@ -806,6 +981,7 @@ class JobStore:
         source_job_id: str,
         build_cache_key: str,
         build_compatibility_key: str,
+        building_observability: dict[str, Any] | None = None,
     ) -> MapJob | None:
         """Atomically reference a compatible ready job, or return None if it vanished."""
         with self._queue_lock():
@@ -817,13 +993,74 @@ class JobStore:
                 raise RuntimeError("job is owned by another worker")
             if (
                 source.status != JobStatus.READY
-                or source.build_cache_key != build_cache_key
+                or (
+                    source.build_cache_key != build_cache_key
+                    and build_cache_key not in source.build_cache_aliases
+                )
                 or source.build_compatibility_key != build_compatibility_key
                 or not source.map_id
                 or not source.pack_path
                 or not Path(source.pack_path).is_file()
             ):
                 return None
+            immediate_source_metrics = deepcopy(source.artifact_metrics or {})
+            artifact_source_metrics = deepcopy(
+                immediate_source_metrics.get(
+                    "sourceArtifactMetrics", immediate_source_metrics
+                )
+            )
+            artifact_metrics = {
+                **artifact_source_metrics,
+                "reuseStrategy": "exact",
+                "reuseSourceJobId": source.job_id,
+                "sourceArtifactMetrics": artifact_source_metrics,
+            }
+            runtime = job.building_preprocessing_runtime or {}
+            calibration_runtime = runtime.get("calibrationGeneration")
+            current_building_timings: dict[str, float] = {}
+            exact_runtime: dict[str, Any] = {}
+            if isinstance(calibration_runtime, dict):
+                duration = calibration_runtime.get("durationSeconds")
+                if (
+                    isinstance(duration, (int, float))
+                    and not isinstance(duration, bool)
+                    and math.isfinite(float(duration))
+                    and duration >= 0
+                ):
+                    current_building_timings["calibrationGeneration"] = float(
+                        duration
+                    )
+                exact_runtime["calibrationGeneration"] = {
+                    key: calibration_runtime[key]
+                    for key in (
+                        "cacheOutcome",
+                        "cellsRequested",
+                        "cellsHits",
+                        "cellsMisses",
+                        "cellsRebuilt",
+                        "durationSeconds",
+                    )
+                    if key in calibration_runtime
+                }
+            artifact_metrics["buildingPhaseTimings"] = current_building_timings
+            current_observability = {
+                key: int(building_observability[key])
+                for key in (
+                    "firstProgressMilliseconds",
+                    "cacheWaitMilliseconds",
+                )
+                if isinstance(building_observability, dict)
+                and isinstance(building_observability.get(key), int)
+                and not isinstance(building_observability.get(key), bool)
+                and building_observability[key] >= 0
+            }
+            artifact_metrics["buildingObservability"] = current_observability
+            artifact_metrics["exactReuse"] = {
+                **exact_runtime,
+                "sourceJobId": source.job_id,
+                "sourceMapId": source.map_id,
+                "buildCacheKey": source.build_cache_key,
+            }
             return self._update_status_unlocked(
                 job_id,
                 JobStatus.READY,
@@ -831,9 +1068,11 @@ class JobStore:
                 pack_path=source.pack_path,
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
-                artifact_metrics={"reuseStrategy": "exact"},
-                build_cache_key=build_cache_key,
-                build_compatibility_key=build_compatibility_key,
+                artifact_metrics=artifact_metrics,
+                build_cache_key=source.build_cache_key,
+                build_cache_aliases=source.build_cache_aliases,
+                build_identity_derivation=source.build_identity_derivation,
+                build_compatibility_key=source.build_compatibility_key,
                 reuse_strategy="exact",
                 reuse_source_job_id=source.job_id,
                 pending_artifact_keys=[],
@@ -853,6 +1092,8 @@ class JobStore:
         artifacts: list[ArtifactRecord] | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
+        build_cache_aliases: list[str] | None = None,
+        build_identity_derivation: dict[str, Any] | None = None,
         build_compatibility_key: str | None = None,
         reuse_strategy: str | None = None,
         reuse_source_job_id: str | None = None,
@@ -883,6 +1124,8 @@ class JobStore:
                     artifacts=artifacts,
                     artifact_metrics=artifact_metrics,
                     build_cache_key=build_cache_key,
+                    build_cache_aliases=build_cache_aliases,
+                    build_identity_derivation=build_identity_derivation,
                     build_compatibility_key=build_compatibility_key,
                     reuse_strategy=reuse_strategy,
                     reuse_source_job_id=reuse_source_job_id,
@@ -1028,6 +1271,11 @@ class JobStore:
                 job.finished_at = None
                 job.progress_completed = None
                 job.progress_total = None
+                job.progress_phase = None
+                job.progress_unit = None
+                job.progress_completed_units = None
+                job.progress_total_units = None
+                job.progress_indeterminate = None
                 job.events.append(
                     {
                         "at": job.updated_at,
@@ -1057,6 +1305,11 @@ class JobStore:
         job.error_code = None
         job.progress_completed = None
         job.progress_total = None
+        job.progress_phase = None
+        job.progress_unit = None
+        job.progress_completed_units = None
+        job.progress_total_units = None
+        job.progress_indeterminate = None
         job.events.append(
             {
                 "at": job.updated_at,
@@ -1077,6 +1330,11 @@ class JobStore:
                     job.finished_at = None
                     job.progress_completed = None
                     job.progress_total = None
+                    job.progress_phase = None
+                    job.progress_unit = None
+                    job.progress_completed_units = None
+                    job.progress_total_units = None
+                    job.progress_indeterminate = None
                     job.events.append({"at": job.updated_at, "status": job.status.value, "message": "requeued for retry"})
                     self.save(job)
                     count += 1
@@ -1266,12 +1524,10 @@ class MapJobService:
             raise UnsupportedRendererTargetError(requested_format, [1])
         if (
             requested_format == BUILDING_RENDERER_FORMAT_VERSION
-            and (
-                not self.building_target3_enabled
-                or (
-                    bool(self.building_target3_allowlist)
-                    and client_installation_id not in self.building_target3_allowlist
-                )
+            and not (
+                self.building_target3_enabled
+                and not self.building_target3_allowlist
+                or client_installation_id in self.building_target3_allowlist
             )
         ):
             supported_formats = [1]

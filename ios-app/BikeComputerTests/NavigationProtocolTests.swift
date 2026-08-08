@@ -4783,9 +4783,14 @@ struct NavigationProtocolTests {
               "jobId": "job-progress",
               "status": "converting_features",
               "progress": {
+                "phase": "building_preprocessing",
+                "unit": "calibration_cells",
+                "completed": 2,
+                "total": 5,
                 "completedBlocks": 79,
                 "totalBlocks": 100,
-                "fraction": 0.79
+                "fraction": 0.4,
+                "indeterminate": false
               }
             }
             """.utf8
@@ -4798,8 +4803,11 @@ struct NavigationProtocolTests {
 
         assertEqual(progress.completedBlocks, 79, "map progress decodes completed blocks")
         assertEqual(progress.totalBlocks, 100, "map progress decodes total blocks")
-        assertEqual(progress.percentage, 79, "map progress calculates percentage")
+        assertEqual(progress.phase, "building_preprocessing", "map progress decodes phase")
+        assertEqual(progress.unit, "calibration_cells", "map progress decodes unit")
+        assertEqual(progress.percentage, 40, "map progress calculates phase percentage")
         assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
+        assertEqual(progress.detail, "Preparing deterministic building heights", "map progress explains preprocessing")
     }
 
     static func testOfflineMapJobProgressAbsentFallback() {
@@ -5171,6 +5179,12 @@ struct NavigationProtocolTests {
             """.utf8
         )
         let progressJob = try? JSONDecoder().decode(OfflineMapJob.self, from: progressPayload)
+        let cacheWaitPayload = Data(
+            """
+            {"jobId":"cache-wait-job","status":"converting_features","progress":{"phase":"building_preprocessing","unit":"source_cache_wait","completedBlocks":0,"totalBlocks":10,"indeterminate":true}}
+            """.utf8
+        )
+        let cacheWaitJob = try? JSONDecoder().decode(OfflineMapJob.self, from: cacheWaitPayload)
 
         assertEqual(
             OfflineMapProgressPresentation.value(job: legacy, downloadProgress: 0),
@@ -5186,6 +5200,16 @@ struct NavigationProtocolTests {
             OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
             0.4,
             "generation progress takes precedence while conversion is active"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: cacheWaitJob, downloadProgress: 0),
+            nil,
+            "source cache waits remain indeterminate"
+        )
+        assertEqual(
+            cacheWaitJob?.progress?.detail,
+            "Waiting for the verified map source",
+            "source cache waits have a distinct progress explanation"
         )
     }
 

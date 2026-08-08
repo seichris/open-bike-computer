@@ -2,11 +2,12 @@
 
 ## Status and scope
 
-This is an implementation plan only. It is based on the clean `origin/main`
-checkout at `a6da053cf502697a172c6025b4ffec78ff3016bf`. The selected-area
-preprocessing design described here is proposed work; it is not implemented by
-this document, and this plan does not change the renderer, app, worker, or
-deployment.
+This plan was authored from `origin/main` at
+`a6da053cf502697a172c6025b4ffec78ff3016bf`. Its implementation branch was
+rebased onto `origin/main` at `1e1899807f7ba10d5afc18788a3f24ec55401c40`
+before implementation began. The proposals below remain the design record;
+implementation status is tracked by code, tests, and rollout evidence rather
+than by rewriting the original plan claims.
 
 The plan addresses the expensive part of the existing renderer-format-3
 (`FMB v4`) path: a small requested map causes a much larger raw PBF extraction
@@ -197,7 +198,7 @@ current production settings:
 | `maxSourceToOutputAreaRatio` | `1.35` | Proposed benchmark safety bound using projected source/output areas |
 | `maxSourceAreaKm2` | `200` | Proposed Shanghai-scale hard cap; larger jobs need an explicit policy review |
 | `boundaryToleranceMeters` | `0.05` | Match the current seam-wall tolerance unless fixture evidence changes it |
-| `maxRelationObjectsPerJob` | `100,000` | Protect worker memory/CPU; exceedance is a typed failure, not silent truncation |
+| `maxRelationObjectsPerJob` | `200,000` | Protect worker memory/CPU; the pinned Shanghai benchmark requires 124,383 closure objects, leaving about 61% headroom; exceedance is a typed failure, not silent truncation |
 
 The area limits apply to the actual source query envelope/union measured in
 projected metres, not to the coarse `bbox_area_km2` approximation used for
