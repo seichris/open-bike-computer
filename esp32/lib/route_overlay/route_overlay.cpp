@@ -292,7 +292,7 @@ void RouteOverlay::drawRoute(
   if (drawBuffer == nullptr)
     return;
   map_surface::Rgb565Surface surface{
-      static_cast<uint16_t *>(drawBuffer->data),
+      reinterpret_cast<uint16_t *>(drawBuffer->data),
       static_cast<int32_t>(drawBuffer->header.w),
       static_cast<int32_t>(drawBuffer->header.h),
       static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t))};

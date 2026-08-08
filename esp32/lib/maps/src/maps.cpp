@@ -3167,8 +3167,10 @@ bool Maps::readVectorMap(
           if (region.valid())
             projectedCourtyardPixels += region.pixels();
           if (projectedCourtyardPixels >
-              std::min(kMaximumCourtyardWorkspacePixels,
-                       static_cast<size_t>(surface.width) * surface.height)) {
+              std::min<std::size_t>(
+                  static_cast<std::size_t>(kMaximumCourtyardWorkspacePixels),
+                  static_cast<std::size_t>(surface.width) *
+                      static_cast<std::size_t>(surface.height))) {
             courtyardFits = false;
             break;
           }
@@ -4328,7 +4330,7 @@ void Maps::renderLiveForeground() {
   auto *alpha = static_cast<uint8_t *>(drawBuffer->data) +
                 static_cast<size_t>(drawBuffer->header.stride) * height;
   map_surface::Rgb565A8Surface surface{
-      static_cast<uint16_t *>(drawBuffer->data), alpha, width, height,
+      reinterpret_cast<uint16_t *>(drawBuffer->data), alpha, width, height,
       colorStridePixels, colorStridePixels};
   surface.clearAlpha();
 
