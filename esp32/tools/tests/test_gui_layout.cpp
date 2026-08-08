@@ -37,11 +37,18 @@ int main() {
   map_tile_transition::State mapTransition;
   assert(!mapTransition.canReveal(false, false));
   mapTransition.begin();
+  assert(!mapTransition.canReveal(false, false));
+  assert(!mapTransition.canReveal(true, true));
+  assert(!mapTransition.canReveal(true, false));
+  assert(!mapTransition.canReveal(false, true));
+  mapTransition.noteFramePublished();
   assert(!mapTransition.canReveal(true, true));
   assert(!mapTransition.canReveal(true, false));
   assert(!mapTransition.canReveal(false, true));
   assert(mapTransition.canReveal(false, false));
   mapTransition.complete();
+  assert(!mapTransition.canReveal(false, false));
+  mapTransition.noteFramePublished();
   assert(!mapTransition.canReveal(false, false));
   mapTransition.begin();
   mapTransition.cancel();

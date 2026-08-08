@@ -379,6 +379,23 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("generateRenderMap", load)
         self.assertNotIn("displayMap", load)
 
+    def test_map_profile_transition_waits_for_new_frame_publication(self):
+        show = function_body(MAIN_SCREEN_SOURCE, "static void showMainTile")
+        self.assertNotIn("mapWasVisible", show)
+        self.assertLess(
+            show.index("lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN)"),
+            show.index("mapTileTransition.begin()"),
+        )
+
+        prepare = function_body(
+            MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate"
+        )
+        self.assertIn("mapTileTransition.noteFramePublished()", prepare)
+        self.assertLess(
+            prepare.index("mapTileTransition.noteFramePublished()"),
+            prepare.index("revealPendingMapTileIfReady()"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

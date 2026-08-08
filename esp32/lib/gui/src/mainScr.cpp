@@ -1071,6 +1071,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
   const bool framePublished = mapView.serviceRenderPipeline(nowMs);
   mapView.updatePositionOverlay();
   if (framePublished) {
+    mapTileTransition.noteFramePublished();
     (void)mapView.takeFramePublication();
     mapRenderScheduler.markRendered(nowMs, currentMapFix());
     revealPendingMapTileIfReady();
@@ -1824,7 +1825,6 @@ static void showMainTile(tileName tile) {
     return;
   }
 
-  const bool mapWasVisible = !lv_obj_has_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
   activeTile = tile;
@@ -1833,14 +1833,12 @@ static void showMainTile(tileName tile) {
     mapView.cancelDragPreview();
   }
   if (isMapBackedTile(activeTile)) {
-    // Keep the currently visible non-map tile in front until the new map
-    // profile has rendered into the back buffer. Revealing mapTile first can
-    // briefly expose its previous full-map frame while Map + Navigation is
-    // still rendering (or while the screen-cycle button remains pressed and
-    // interrupts that first render).
-    if (!mapWasVisible) {
-      lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
-    }
+    // Map and Map + Navigation share one front canvas but have different
+    // style/projection semantics. Conceal that canvas for every map-backed
+    // transition, including MAP <-> MAP_GUIDANCE, until the worker publishes
+    // a frame built for the destination profile. Otherwise the source
+    // profile remains visible briefly while the replacement renders.
+    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapTileTransition.begin();
     zoom = currentMapStyleSettings().zoomLevel;
     requestMapRender(map_render_policy::Reason::Screen);
@@ -1972,6 +1970,8 @@ void toggleNavigationScreen() {
  */
 void createMainScr() {
   mainScreen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(mainScreen, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(mainScreen, LV_OPA_COVER, 0);
 
 #if defined(WAVESHARE_AMOLED_175)
   // The CST9217's second contact belongs exclusively to the standalone Map.

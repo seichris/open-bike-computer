@@ -91,6 +91,12 @@ translates it continuously using the current `PresentedPose`. Course-up rotates
 it by the difference between the frame heading and the current presented
 heading. The route foreground applies the exact same transform, so its first
 point, the route head, the arrow, and the base map remain attached.
+This continuity applies only while the active screen profile is unchanged.
+Map and Map + Navigation share the same LVGL canvas but have different style
+and projection semantics. During a direct transition between those profiles,
+the shared canvas is concealed against the neutral screen background until a
+new worker publication for the destination profile arrives; the prior
+profile's already-published frame is never accepted as transition completion.
 The oversized base object stays LVGL center-aligned. Its style position is an
 offset from the centered origin, not an absolute parent coordinate; the
 presenter explicitly converts the desired parent-space pivot target to that
