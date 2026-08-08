@@ -275,6 +275,7 @@ Confirming implementation snapshot:
 | P6-609 | P2 | Pending controller revocations accepted an injected defaults store but loaded and persisted through `UserDefaults.standard`, undermining deterministic recovery and tests. | Use the coordinator's injected store for load, write, and deletion consistently. |
 | P6-610 | P2 | Route expiry and future-schema downgrade behavior were implemented but not exercised at the Watch library/journal boundary. | Add exact expiry-boundary physical-file deletion, future archive rejection, future journal rejection, and navigation-without-workout recovery coverage. |
 | P6-611 | P2 | Location usage, paired route/favorite transfer, online Watch MapKit requests, active-only storage, and re-enrollment behavior were absent from setup/privacy/release documentation. | Update the Watch usage description, public privacy policy, App Store answer sheet, setup README, plan status, documentation index, and fail-closed draft release notes. |
+| P6-612 | P1 | The first clean GitHub CI run stopped before every Swift and Xcode check because the release-asset test still required the obsolete zero-argument `WatchSettingsView()` construction. | Assert the dependency-injected settings construction and its exact `navigationSettings` argument; reproduce the failure locally, make the generated-identity suite green, and rerun the complete local contract matrix before republishing. |
 
 The confirming pass covered independent workout/navigation presentation,
 navigation-only relaunch recovery, combined BLE demand transitions, immediate
@@ -287,7 +288,8 @@ offline source is user-provided GPX.
 The shared route/GPX suite, Watch offline suite, Watch online manager suite,
 workout contract suite, full portable iPhone navigation/Catalyst suite,
 capability suite, lease suite, scoped payload suite, and ownership/crypto state
-suite pass. The complete Watch source graph type-checks against watchOS 10 with
+suite pass. The generated app-identity suite also passes after the clean-CI
+contract correction. The complete Watch source graph type-checks against watchOS 10 with
 warnings as errors. The complete iPhone source graph type-checks against iOS
 16.4. Watch and privacy plists validate, the Xcode project lists every expected
 target, and `git diff --check` passes. The portable iPhone suite emits only its
