@@ -941,8 +941,8 @@ class MapBuildingContractTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
             ).stdout
-            self.assertIn("Number of ways: 3", info)
-            self.assertIn("Number of relations: 4", info)
+            self.assertIn("Number of ways: 6", info)
+            self.assertIn("Number of relations: 5", info)
 
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_preprocessing_rehydrates_output_relation_and_calibration_cells(self):
