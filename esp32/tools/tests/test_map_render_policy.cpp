@@ -23,7 +23,7 @@ int main() {
   assert(headingDelta(5, 355) == 10);
   assert(headingDelta(20, 200) == 180);
 
-  const Fix origin{51.5007, -0.1246, 359};
+  const Fix origin{51.5007, -0.1246, 359, true};
   assert(std::fabs(distanceMeters(origin, northOf(origin, 10.0)) - 10.0) <
          0.1);
 
@@ -33,6 +33,9 @@ int main() {
   assert(first.render);
   assert((first.reasons & reasonMask(Reason::Position)) != 0);
   scheduler.commit(first);
+  scheduler.markSubmitted(100, origin);
+  // Accepted work is a request baseline, not proof of publication.
+  assert(!scheduler.hasPendingWork());
   scheduler.markRendered(100, origin);
 
   // Sub-threshold movement never schedules a render, even after the cadence.
@@ -51,7 +54,15 @@ int main() {
   assert(dueMove.render);
   assert((dueMove.reasons & reasonMask(Reason::Position)) != 0);
   scheduler.commit(dueMove);
+  scheduler.markSubmitted(850, moved);
   scheduler.markRendered(850, moved);
+
+  // Invalid course never becomes north or triggers a heading refresh.
+  Fix invalidCourse = moved;
+  invalidCourse.headingDegrees = 0;
+  invalidCourse.headingValid = false;
+  scheduler.observe(invalidCourse);
+  assert(!scheduler.evaluate(2000, true, true).render);
 
   // Stationary course noise stays below the heading threshold, including wrap.
   Fix noisy = moved;
@@ -65,6 +76,7 @@ int main() {
   assert(thresholdHeading.render);
   assert((thresholdHeading.reasons & reasonMask(Reason::Heading)) != 0);
   scheduler.commit(thresholdHeading);
+  scheduler.markSubmitted(2000, noisy);
   scheduler.markRendered(2000, noisy);
 
   // North-up ignores heading-only changes.
@@ -86,6 +98,7 @@ int main() {
   assert((forced.reasons & reasonMask(Reason::Route)) != 0);
   assert((forced.reasons & reasonMask(Reason::Style)) != 0);
   scheduler.commit(forced);
+  scheduler.markSubmitted(3001, pannedMovement);
   scheduler.markRendered(3001, pannedMovement);
 
   scheduler.request(Reason::Zoom);
@@ -135,6 +148,7 @@ int main() {
     const Decision decision = replay.evaluate(nowMs, true, true);
     if (decision.render) {
       replay.commit(decision);
+      replay.markSubmitted(nowMs, fix);
       replay.markRendered(nowMs, fix);
       replayRenders++;
     }

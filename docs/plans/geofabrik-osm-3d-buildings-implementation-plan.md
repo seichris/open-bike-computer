@@ -777,6 +777,16 @@ Exact filenames may follow the baseline module boundaries, but the separation of
 
 ### Firmware renderer
 
+The runtime renderer now uses render-ahead ownership rather than executing a
+monolithic building pass from an LVGL event. The UI presents the last complete
+base frame and foreground route from one `PresentedPose`; a low-priority worker
+renders a versioned hidden RGB565 frame, coalescing position-only requests while
+cancelling semantic invalidations and rejecting stale publications. Building
+candidates are retained globally nearest across all loaded blocks before fixed
+base/extrusion quotas are applied.
+Physical validation of this scheduler remains separate from the earlier FMB v4
+format implementation and must not be inferred from host tests or a build.
+
 - renderer-format-1/2 activation regression, renderer-format-3 activation, and FMB v4 flat-mode rendering;
 - zero-height projection equality with the baseline;
 - physical-height projection at representative latitudes;

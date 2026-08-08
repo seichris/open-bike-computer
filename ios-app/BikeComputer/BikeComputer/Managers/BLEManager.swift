@@ -149,7 +149,8 @@ enum DeviceBLEProtocol {
     static let birdsEyeMapNavigationPerspectiveCapabilityMask: UInt32 = 1 << 10
     static let birdsEyeMapNavigationStrongerPerspectiveCapabilityMask: UInt32 = 1 << 11
     static let osm3DBuildingsCapabilityMask: UInt32 = 1 << 12
-    static let deviceCapabilitiesVersion: UInt8 = 10
+    static let explicitInvalidGPSHeadingCapabilityMask: UInt32 = 1 << 13
+    static let deviceCapabilitiesVersion: UInt8 = 11
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
     static let workoutTelemetryExtendedCoalescingKey =
@@ -600,6 +601,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsWorkoutTelemetry: Bool = false
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
+    @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -2016,7 +2018,7 @@ class BLEManager: NSObject, ObservableObject {
     func sendGPSPosition(
         lat: Double,
         lon: Double,
-        heading: Double = 0,
+        heading: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
@@ -2033,7 +2035,10 @@ class BLEManager: NSObject, ObservableObject {
         let data = DeviceGPSPacketBuilder.data(
             lat: lat,
             lon: lon,
-            heading: heading,
+            heading: DeviceGPSHeadingWirePolicy.heading(
+                heading,
+                supportsExplicitInvalidHeading: supportsExplicitInvalidGPSHeading
+            ),
             speedMetersPerSecond: speedMetersPerSecond,
             altitudeMeters: altitudeMeters,
             distanceTraveledMeters: distanceTraveledMeters,
@@ -2096,7 +2101,11 @@ class BLEManager: NSObject, ObservableObject {
                     log("GPS position not queued: write queue unavailable")
                     return
                 }
-                log(String(format: "Queued native GPS position: heading=%.0f", heading))
+                if let heading {
+                    log(String(format: "Queued native GPS position: heading=%.0f", heading))
+                } else {
+                    log("Queued native GPS position: heading=invalid")
+                }
                 return
             }
         }
@@ -2619,6 +2628,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsExplicitInvalidGPSHeading = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -3368,6 +3378,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsExplicitInvalidGPSHeading = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -5390,6 +5401,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsExplicitInvalidGPSHeading = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -5501,6 +5513,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
         let has3DBuildings =
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
+        let hasExplicitInvalidGPSHeading =
+            flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -5577,6 +5591,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsDestinationPicker = hasDestinationPicker
         supportsStreetLabels = hasStreetLabels
         supports3DBuildings = has3DBuildings
+        supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()

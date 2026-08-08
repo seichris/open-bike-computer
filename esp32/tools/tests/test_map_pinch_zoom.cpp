@@ -622,6 +622,17 @@ int main() {
          gui_layout::centeredViewportOrigin(466, 768) +
              gui_layout::mapAnchorY(768));
 
+  // LVGL preserves CENTER alignment after lv_obj_center(). Position setters
+  // therefore take an offset from the centered origin. A fresh overscanned
+  // frame whose projected rider is at its render anchor needs offset zero,
+  // not the raw -96 px top-left origin that would apply overscan twice.
+  assert(gui_layout::centerAlignedOffsetForPoint(466, 658, 329, 233) == 0);
+  assert(gui_layout::centerAlignedOffsetForPoint(466, 558, 300, 254) == 0);
+  // As the live rider advances within the finished frame, only the projected
+  // displacement becomes the aligned offset.
+  assert(gui_layout::centerAlignedOffsetForPoint(466, 658, 405, 233) == -76);
+  assert(gui_layout::centerAlignedOffsetForPoint(466, 558, 345, 254) == -45);
+
   const auto northUpCell = map_transform::canvasWorldBounds(
       {1000.0, 2000.0}, 192.0, 192.0, 5, 0.0);
   assertNear(northUpCell.min.x, 616.0);

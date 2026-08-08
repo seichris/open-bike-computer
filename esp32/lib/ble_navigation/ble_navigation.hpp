@@ -264,6 +264,11 @@ public:
 
   BLEDebugStats getDebugStats() const;
 
+  /** True after this connection negotiated the explicit invalid-heading wire
+   * sentinel. Older clients use route-first guidance because their zero value
+   * is ambiguous between north and a missing Core Location course. */
+  bool supportsExplicitInvalidGpsHeading() const;
+
 private:
   bool initialized = false;
   bool connected = false;

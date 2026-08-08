@@ -223,5 +223,20 @@ int main() {
     assertPaddingUntouched(polyline);
   }
 
+
+  {
+    constexpr uint8_t ALPHA = 0xFF;
+    constexpr uint32_t ALPHA_STRIDE = 43;
+    std::vector<uint8_t> alpha(ALPHA_STRIDE * HEIGHT, 0);
+    line_rasterizer::drawFilledLine(
+        alpha.data(), WIDTH, HEIGHT, ALPHA_STRIDE, 3, 8, 34, 27, ALPHA, 5);
+    assert(alpha[8 * ALPHA_STRIDE + 3] == ALPHA);
+    assert(alpha[27 * ALPHA_STRIDE + 34] == ALPHA);
+    for (int32_t y = 0; y < HEIGHT; ++y) {
+      for (uint32_t x = WIDTH; x < ALPHA_STRIDE; ++x)
+        assert(alpha[y * ALPHA_STRIDE + x] == 0);
+    }
+  }
+
   return 0;
 }

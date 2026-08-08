@@ -81,6 +81,7 @@ public:
     double latitude;
     double longitude;
     uint16_t heading;
+    bool headingValid;
     float hdop;
     float pdop;
     float vdop;
@@ -88,7 +89,7 @@ public:
     char sunriseHour[6];
     char sunsetHour[6];
     int UTC;
-  } gpsData;
+  } gpsData{};
 
   struct SV {
     bool active;

@@ -35,10 +35,15 @@ class NavigationEngine: NSObject, ObservableObject {
     private var lastDeviceGpsLocation: (location: CLLocation, convertFromMapKitRoute: Bool)?
     private var latestExternalGpsLocation: CLLocation?
     private var hasAcceptedLiveLocation = false
-    private var lastSentGeometryHash: Int = 0
+    private var lastSentGeometrySegmentIndex: Int?
+    private var routeCoordinatesCache: [CLLocationCoordinate2D] = []
+    private var routeProgressMatcher = RouteProgressMatcher()
+    private(set) var routeCoordinateExtractionCount = 0
     private var geometrySendInterval: TimeInterval = 2.0
     private var lastGeometrySendTime: Date = .distantPast
     private let geometryWindowSize: Int = 30
+    private var navigationEpoch: UInt32 = 0
+    private var courseResolver = NavigationCourseResolver()
     private var rideStartDate: Date?
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
     private var lastRideLocation: CLLocation?
@@ -118,9 +123,12 @@ class NavigationEngine: NSObject, ObservableObject {
     /// Start navigation with a given route
     func startNavigation(with route: MKRoute, isTestMode: Bool = false, initialLocation: CLLocation? = nil) {
         currentRoute = route
+        cacheRouteCoordinates(from: route)
         currentStepIndex = 0
         isSimulationMode = isTestMode
         isNavigating = true
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         
         currentSnapshot = nil
         lastManeuverStepIndex = nil
@@ -128,7 +136,7 @@ class NavigationEngine: NSObject, ObservableObject {
         sendTracker.reset()
         initialNavigationLocation = initialLocation
         hasAcceptedLiveLocation = initialLocation == nil
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         resetRideTelemetry(startingAt: initialLocation)
         updateNavigationSummary(route: route, remainingDistance: route.distance)
@@ -156,6 +164,9 @@ class NavigationEngine: NSObject, ObservableObject {
         guard isNavigating, !isSimulationMode else { return }
 
         currentRoute = route
+        cacheRouteCoordinates(from: route)
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         currentStepIndex = RouteStepSelection.closestNavigableStepIndex(
             to: currentLocation,
             in: route
@@ -166,7 +177,7 @@ class NavigationEngine: NSObject, ObservableObject {
         sendTracker.reset()
         initialNavigationLocation = nil
         hasAcceptedLiveLocation = true
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
 
         let remainingDistance = RouteProgress.remainingDistance(from: currentLocation, in: route) ?? route.distance
@@ -198,7 +209,11 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         bleManager?.clearRouteGeometry()
         isNavigating = false
+        navigationEpoch &+= 1
+        courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
+        routeCoordinatesCache.removeAll(keepingCapacity: false)
+        routeProgressMatcher.reset()
         currentStepIndex = 0
         currentSnapshot = nil
         lastManeuverStepIndex = nil
@@ -207,7 +222,7 @@ class NavigationEngine: NSObject, ObservableObject {
         initialNavigationLocation = nil
         lastDeviceGpsLocation = nil
         hasAcceptedLiveLocation = false
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         routeRemainingDistance = nil
         routeRemainingTime = nil
@@ -298,14 +313,15 @@ class NavigationEngine: NSObject, ObservableObject {
     
     private func interpolatePositionAlongRoute(progress: Double) -> CLLocationCoordinate2D? {
         guard let route = currentRoute else { return nil }
-        
-        let polyline = route.polyline
-        let pointCount = polyline.pointCount
+
+        // Route coordinates are immutable for a navigation epoch and already
+        // cached for live GPS matching and MAPR transmission. Reuse the same
+        // geometry for simulation so test navigation cannot introduce a
+        // separate extraction/coordinate path.
+        let points = routeCoordinatesCache
+        let pointCount = points.count
         guard pointCount > 1 else { return nil }
-        
-        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
-        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
-        
+
         let targetDistance = progress * route.distance
         var currentDist = 0.0
         
@@ -507,7 +523,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resendCurrentRouteGeometry() {
         guard isNavigating, let route = currentRoute, route.polyline.pointCount > 0 else { return }
 
-        lastSentGeometryHash = 0
+        lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         sendRouteGeometryIfNeeded(currentLocation: routeGeometryResendLocation(for: route))
     }
@@ -661,7 +677,26 @@ class NavigationEngine: NSObject, ObservableObject {
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate
-        let heading = location.course >= 0 ? location.course : 0
+        let routeCoordinate = convertFromMapKitRoute
+            ? location.coordinate
+            : CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate
+        let routeProjection = isNavigating
+            ? routeProgressMatcher.projection(
+                to: routeCoordinate,
+                on: routeCoordinatesCache
+            )
+            : nil
+        let routeBearing = routeProjection.flatMap {
+            RouteGeometryMath.bearing(
+                for: $0,
+                routePoints: routeCoordinatesCache
+            )
+        }
+        let heading = courseResolver.resolve(
+            measuredCourse: location.course,
+            routeBearing: routeBearing,
+            navigationActive: isNavigating
+        )
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,
@@ -687,29 +722,49 @@ class NavigationEngine: NSObject, ObservableObject {
 // MARK: - Route Geometry for Device Map
 
 extension NavigationEngine {
-    func extractSlidingWindowGeometry(currentLocation: CLLocation) -> Data? {
-        guard let route = currentRoute else { return nil }
-
-        let polyline = route.polyline
-        let pointCount = polyline.pointCount
-        guard pointCount > 0 else { return nil }
-
-        var points = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: pointCount)
-        polyline.getCoordinates(&points, range: NSRange(location: 0, length: pointCount))
-
-        var closestIndex = 0
-        var closestDistance = Double.greatestFiniteMagnitude
-        for (index, point) in points.enumerated() {
-            let pointLocation = CLLocation(latitude: point.latitude, longitude: point.longitude)
-            let distance = currentLocation.distance(from: pointLocation)
-            if distance < closestDistance {
-                closestDistance = distance
-                closestIndex = index
-            }
+    private func cacheRouteCoordinates(from route: MKRoute) {
+        let pointCount = route.polyline.pointCount
+        guard pointCount > 0 else {
+            routeCoordinatesCache = []
+            routeProgressMatcher.reset()
+            return
         }
+        var points = [CLLocationCoordinate2D](
+            repeating: CLLocationCoordinate2D(),
+            count: pointCount
+        )
+        route.polyline.getCoordinates(
+            &points,
+            range: NSRange(location: 0, length: pointCount)
+        )
+        routeCoordinatesCache = points
+        routeProgressMatcher.reset()
+        routeCoordinateExtractionCount += 1
+    }
 
-        let endIndex = min(closestIndex + geometryWindowSize, pointCount)
-        let windowPoints = Array(points[closestIndex..<endIndex])
+    func extractSlidingWindowGeometry(currentLocation: CLLocation) -> Data? {
+        guard currentRoute != nil,
+              !routeCoordinatesCache.isEmpty,
+              let projection = routeProgressMatcher.projection(
+                to: currentLocation.coordinate,
+                on: routeCoordinatesCache
+              ) else { return nil }
+        return extractSlidingWindowGeometry(
+            currentLocation: currentLocation,
+            projection: projection
+        )
+    }
+
+    private func extractSlidingWindowGeometry(
+        currentLocation: CLLocation,
+        projection: RouteGeometryProjection
+    ) -> Data? {
+        let windowPoints = RouteGeometryMath.slidingWindow(
+            riderCoordinate: currentLocation.coordinate,
+            routePoints: routeCoordinatesCache,
+            maximumPointCount: geometryWindowSize,
+            projection: projection
+        )
         guard !windowPoints.isEmpty else { return nil }
 
         return compressRoutePoints(windowPoints)
@@ -745,19 +800,29 @@ extension NavigationEngine {
     func sendRouteGeometryIfNeeded(currentLocation: CLLocation) {
         guard let bleManager = bleManager,
               bleManager.isConnected,
-              bleManager.isNavigationReady else {
+              bleManager.isNavigationReady,
+              currentRoute != nil else {
             return
         }
 
-        let now = Date()
-        guard now.timeIntervalSince(lastGeometrySendTime) >= geometrySendInterval else { return }
-        guard let geometryData = extractSlidingWindowGeometry(currentLocation: currentLocation) else { return }
-
-        let hash = geometryData.hashValue
-        guard hash != lastSentGeometryHash else { return }
+        let currentTime = now()
+        guard currentTime.timeIntervalSince(lastGeometrySendTime) >= geometrySendInterval else { return }
+        guard let projection = routeProgressMatcher.projection(
+            to: currentLocation.coordinate,
+            on: routeCoordinatesCache
+        ) else { return }
+        guard RouteGeometryTransmissionPolicy.shouldSend(
+            currentSegmentIndex: projection.segmentIndex,
+            lastSentSegmentIndex: lastSentGeometrySegmentIndex,
+            maximumPointCount: geometryWindowSize
+        ) else { return }
+        guard let geometryData = extractSlidingWindowGeometry(
+            currentLocation: currentLocation,
+            projection: projection
+        ) else { return }
 
         bleManager.sendRouteGeometry(geometryData)
-        lastGeometrySendTime = now
-        lastSentGeometryHash = hash
+        lastGeometrySendTime = currentTime
+        lastSentGeometrySegmentIndex = projection.segmentIndex
     }
 }

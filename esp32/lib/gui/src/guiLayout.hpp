@@ -58,6 +58,20 @@ inline int16_t centeredViewportOrigin(uint16_t containerExtent,
   return (static_cast<int32_t>(containerExtent) - viewportExtent) / 2;
 }
 
+/**
+ * Return the LVGL x/y style offset that places a point inside a center-aligned
+ * object at a target coordinate in its parent. LVGL keeps the object's CENTER
+ * alignment after lv_obj_center(), so lv_obj_set_pos() is relative to the
+ * resolved centered origin rather than an absolute top-left coordinate.
+ */
+inline int32_t centerAlignedOffsetForPoint(uint16_t containerExtent,
+                                           uint16_t objectExtent,
+                                           int32_t objectPoint,
+                                           int32_t targetPoint) {
+  return targetPoint - objectPoint -
+         centeredViewportOrigin(containerExtent, objectExtent);
+}
+
 inline int16_t mapScreenAnchorX(uint16_t containerWidth,
                                 uint16_t mapWidth) {
   return centeredViewportOrigin(containerWidth, mapWidth) +

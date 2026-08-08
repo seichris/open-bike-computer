@@ -167,9 +167,11 @@ void Gps::getGPSData()
     gpsData.longitude = getLon();
   }
 
-  // Heading
-  if (fix.valid.heading)
-    gpsData.heading = (uint16_t)fix.heading();
+  // Heading validity is explicit. A missing/invalid course must never be
+  // interpreted as zero/north by navigation presentation.
+  gpsData.headingValid = fix.valid.heading;
+  if (gpsData.headingValid)
+    gpsData.heading = static_cast<uint16_t>(fix.heading()) % 360U;
 
   // HDOP , PDOP , VDOP
 #ifdef GPS_FIX_HDOP

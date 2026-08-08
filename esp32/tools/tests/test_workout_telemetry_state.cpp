@@ -27,6 +27,7 @@ struct TestRideData {
   double latitude = 0;
   double longitude = 0;
   uint16_t heading = 0;
+  bool headingValid = false;
 };
 
 void writeUInt16LE(uint8_t *bytes, std::size_t offset, uint16_t value) {
@@ -1100,10 +1101,12 @@ int main() {
     assert(rideData.satellites == 10);
     if (length == 8) {
       assert(rideData.heading == 99);
+      assert(!rideData.headingValid);
       assert(rideData.speed == 0);
     }
     if (length >= 10) {
       assert(rideData.heading == 270);
+      assert(rideData.headingValid);
     }
     if (length == 30) {
       assert(rideData.speed == 44);
@@ -1114,6 +1117,21 @@ int main() {
       assert(rideData.routeRemaining == 4321);
     }
   }
+
+  writeUInt16LE(gpsPacket, 8, UINT16_MAX);
+  assert(gps_position_protocol::decode(gpsPacket, 10, decoded));
+  assert(!decoded.hasHeading);
+  TestRideData invalidHeadingRide{};
+  invalidHeadingRide.heading = 123;
+  invalidHeadingRide.headingValid = true;
+  assert(gps_position_protocol::decodeAndApply(
+      gpsPacket, 10, invalidHeadingRide, &decoded));
+  assert(!invalidHeadingRide.headingValid);
+  assert(invalidHeadingRide.heading == 123);
+
+  writeUInt16LE(gpsPacket, 8, 360);
+  assert(gps_position_protocol::decode(gpsPacket, 10, decoded));
+  assert(!decoded.hasHeading);
 
   return 0;
 }
