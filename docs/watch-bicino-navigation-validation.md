@@ -164,10 +164,11 @@ navigation-characteristic privilege denial. The scoped key remains
 non-synchronizing and this-device-only, and neither it nor the OwnerKey is
 written to ordinary preferences.
 
-No PlatformIO target build, upload, serial capture, or physical dual-controller
-test has been performed in this phase. Repository policy requires identifying
-the connected Bicino hardware before the first such action, and the physical
-Watch/Bicino gates remain open rather than being inferred from host evidence.
+No physical-device PlatformIO build, upload, serial capture, or dual-controller
+test has been performed in this phase. The GitHub matrix provides firmware
+compile evidence, but repository policy requires identifying the connected
+Bicino hardware before any local hardware action; physical Watch/Bicino gates
+remain open rather than being inferred from host evidence.
 
 ### Phase 4 offline Watch + Bicino navigation
 
@@ -204,10 +205,10 @@ ownership host suites pass. The full Watch source graph type-checks against the
 watchOS SDK with warnings as errors, the Watch plist validates, and
 `git diff --check` passes.
 
-The runtime contains no route-provider dependency in offline mode. No
-PlatformIO target build, physical paired-Watch route install, wrist-down GPS,
-direct Watch/Bicino ride, reconnect, or battery test has been performed. The
-Phase 4 physical gate therefore remains open.
+The runtime contains no route-provider dependency in offline mode. No physical
+paired-Watch route install, wrist-down GPS, direct Watch/Bicino ride, reconnect,
+or battery test has been performed. The GitHub firmware matrix is green, but
+the Phase 4 physical gate remains open.
 
 ### Phase 5 online Watch + Bicino routing
 
@@ -300,9 +301,10 @@ warnings as errors. The complete iPhone source graph type-checks against iOS
 target, and `git diff --check` passes. The portable iPhone suite emits only its
 pre-existing SDK 26 MapKit/CoreLocation deprecation warnings.
 
-No PlatformIO target build or physical-device action was attempted because the
-connected Bicino model has not yet been identified as required by repository
-policy. No paired route transfer, offline/online ride, cellular transition,
+No physical-device PlatformIO action was attempted because the connected
+Bicino model has not yet been identified as required by repository policy. The
+final GitHub run's twelve-target firmware matrix is green. No paired route
+transfer, offline/online ride, cellular transition,
 direct Watch BLE session, revocation/replacement/reset sequence, wrist-down
 measurement, or two-hour battery/thermal run has been recorded. The Apple Maps
 accessory-display and durable-export determination also remains unapproved.
