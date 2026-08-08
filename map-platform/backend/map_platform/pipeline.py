@@ -39,6 +39,7 @@ from .map_buildings import (
     load_building_calibration_window,
 )
 from .models import JobStatus, MapJob, SourceRegion
+from .monitoring import MapMonitoringStore
 from .reuse import (
     MapReuseKeys,
     SubsetReuseUnavailable,
@@ -853,9 +854,25 @@ class MapBuildPipeline:
         return PipelineMetadata(osmium_version=osmium_version)
 
 
-def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interval_seconds: float = 30.0) -> MapJob:
+def run_job(
+    store,
+    pipeline: MapBuildPipeline,
+    job_id: str,
+    *,
+    heartbeat_interval_seconds: float = 30.0,
+    monitoring_store: MapMonitoringStore | None = None,
+) -> MapJob:
     worker_id = f"api-{uuid.uuid4().hex[:8]}"
     job = store.claim(job_id, worker_id)
+
+    def record_monitoring(job: MapJob) -> None:
+        if monitoring_store is None:
+            return
+        try:
+            monitoring_store.record_job(job)
+        except Exception:
+            # Observability must never turn a completed map into a failed map.
+            pass
 
     def update(status: JobStatus) -> None:
         store.update_status_unless_cancelled(job_id, status, worker_id=worker_id)
@@ -908,6 +925,7 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
                         build_compatibility_key=reuse_identity.compatibility,
                     )
                     if reused is not None:
+                        record_monitoring(reused)
                         return reused
                 build_result = None
                 for parent in store.find_subset_reuse_candidates(
@@ -935,7 +953,7 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             if hasattr(pipeline, "published_archive_path")
             else archive_path
         )
-        return store.complete_job(
+        finished = store.complete_job(
             job_id,
             worker_id=worker_id,
             map_id=map_id,
@@ -950,6 +968,8 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             reuse_strategy=reuse_strategy,
             reuse_source_job_id=reuse_source_job_id,
         )
+        record_monitoring(finished)
+        return finished
     except Exception as exc:
         current = store.get(job_id)
         if current.status == JobStatus.CANCELLED or current.worker_id != worker_id:
@@ -960,6 +980,7 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
             ):
                 store.queue_terminal_pending_artifacts(job_id)
                 current = store.get(job_id)
+            record_monitoring(current)
             return current
         failed = store.update_status_unless_cancelled(
             job_id,
@@ -971,4 +992,5 @@ def run_job(store, pipeline: MapBuildPipeline, job_id: str, *, heartbeat_interva
         if isinstance(pipeline, MapBuildPipeline) and pipeline.artifact_store is not None:
             store.queue_terminal_pending_artifacts(job_id)
             failed = store.get(job_id)
+        record_monitoring(failed)
         return failed

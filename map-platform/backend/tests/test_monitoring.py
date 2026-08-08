@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from map_platform.models import (
+    Bounds,
+    GeometryMode,
+    JobStatus,
+    MapJob,
+    NormalizedGeometry,
+    SourceRegion,
+)
+from map_platform.monitoring import (
+    MapMonitoringStore,
+    MonitoringSchemaError,
+    build_map_job_monitoring_event,
+)
+
+
+def iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def build_job(
+    job_id: str,
+    *,
+    now: datetime,
+    processing_seconds: float,
+    renderer_format: int = 3,
+    status: JobStatus = JobStatus.READY,
+) -> MapJob:
+    finished = now - timedelta(seconds=processing_seconds)
+    started = finished - timedelta(seconds=processing_seconds)
+    created = started - timedelta(seconds=3)
+    return MapJob(
+        job_id=job_id,
+        status=status,
+        request={
+            "mode": "custom_bbox",
+            "target": {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": renderer_format,
+            },
+        },
+        geometry=NormalizedGeometry(
+            mode=GeometryMode.CUSTOM_BBOX,
+            bounds=Bounds(103.75, 1.24, 103.93, 1.37),
+            area_km2=123.4,
+            vertex_count=4,
+        ),
+        source_region=SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/singapore.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        ),
+        created_at=iso(created),
+        updated_at=iso(finished),
+        started_at=iso(started),
+        finished_at=iso(finished),
+        attempts=1,
+        events=[
+            {"at": iso(started), "status": JobStatus.VALIDATING.value},
+            {
+                "at": iso(finished - timedelta(seconds=1)),
+                "status": JobStatus.CONVERTING_FEATURES.value,
+            },
+            {"at": iso(finished), "status": status.value},
+        ],
+    )
+
+
+class MapMonitoringStoreTests(unittest.TestCase):
+    def test_job_timing_and_summary_survive_store_reopen(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        now_epoch = now.timestamp()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "map-monitoring.sqlite3"
+            store = MapMonitoringStore(path, clock=lambda: now_epoch)
+            jobs = [
+                build_job(
+                    f"job-{duration}",
+                    now=now,
+                    processing_seconds=duration,
+                    renderer_format=3 if duration != 20 else 1,
+                )
+                for duration in (10, 20, 40)
+            ]
+
+            self.assertEqual(store.sync_jobs(jobs), 3)
+            reopened = MapMonitoringStore(path, clock=lambda: now_epoch)
+            summary = reopened.summary(window_hours=24)
+
+        self.assertEqual(summary["runs"]["count"], 3)
+        self.assertEqual(summary["serverTiming"]["processingSeconds"]["p50Seconds"], 20.0)
+        self.assertEqual(summary["serverTiming"]["processingSeconds"]["p95Seconds"], 38.0)
+        self.assertEqual(summary["byRendererFormat"]["3"]["runs"]["count"], 2)
+        self.assertEqual(
+            summary["phaseTimings"]["converting_features"]["count"],
+            3,
+        )
+
+    def test_prune_removes_only_old_monitoring_samples(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        now_epoch = now.timestamp()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                retention_days=3_650,
+                clock=lambda: now_epoch,
+            )
+            self.assertTrue(
+                store.record_job(
+                    build_job(
+                        "old",
+                        now=now - timedelta(days=100),
+                        processing_seconds=10,
+                    )
+                )
+            )
+            self.assertTrue(
+                store.record_job(
+                    build_job("new", now=now, processing_seconds=10)
+                )
+            )
+
+            self.assertEqual(store.prune(older_than_days=90), 1)
+            self.assertEqual(store.summary(window_hours=24)["runs"]["count"], 1)
+
+    def test_retention_prune_cannot_be_undone_by_later_reconciliation(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        clock = [now.timestamp()]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                retention_days=1,
+                clock=lambda: clock[0],
+            )
+            job = build_job("old-after-clock-advance", now=now, processing_seconds=10)
+            self.assertTrue(store.record_job(job))
+
+            clock[0] += 2 * 86_400
+            self.assertEqual(
+                store.reconcile_jobs([job]),
+                {"synced": 0, "removed": 1},
+            )
+            self.assertEqual(store.summary(window_hours=24)["runs"]["count"], 0)
+            self.assertEqual(store.summary(window_hours=24)["retainedRunCount"], 0)
+
+    def test_summary_clamps_to_retention_and_samples_recent_runs(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                retention_days=10,
+                summary_run_limit=2,
+                clock=lambda: now.timestamp(),
+            )
+            for duration in (1, 2, 3, 4):
+                self.assertTrue(
+                    store.record_job(
+                        build_job(
+                            f"sample-{duration}",
+                            now=now,
+                            processing_seconds=duration,
+                        )
+                    )
+                )
+
+            summary = store.summary(window_hours=24 * 365)
+
+        self.assertEqual(summary["windowHours"], 10 * 24)
+        self.assertEqual(summary["matchingRunCount"], 4)
+        self.assertEqual(summary["sampledRunCount"], 2)
+        self.assertEqual(summary["configuredRunLimit"], 2)
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["samplingStrategy"], "most_recent_completion_desc")
+        self.assertEqual(summary["runs"]["count"], 2)
+
+    def test_schema_version_adopts_legacy_database_and_rejects_future_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "map-monitoring.sqlite3"
+            MapMonitoringStore(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute("PRAGMA user_version = 0")
+
+            MapMonitoringStore(path)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+                indexes = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA index_list(map_build_runs)"
+                    )
+                }
+                self.assertIn("map_build_runs_completed_desc", indexes)
+                connection.execute("PRAGMA user_version = 2")
+
+            with self.assertRaises(MonitoringSchemaError):
+                MapMonitoringStore(path)
+
+    def test_schema_validation_rejects_incompatible_legacy_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "map-monitoring.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE map_build_runs(job_id TEXT PRIMARY KEY)")
+
+            with self.assertRaises(MonitoringSchemaError):
+                MapMonitoringStore(path)
+
+    def test_phase_history_is_ordered_across_retries_and_legacy_records(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        job = build_job("retry-history", now=now, processing_seconds=10)
+        job.started_at = "2026-08-06T00:05:00+00:00"
+        job.finished_at = "2026-08-06T00:20:00Z"
+        job.events = [
+            {"at": "2026-08-06T00:00:00Z", "status": "queued"},
+            {"at": "2026-08-06T00:05:00Z", "status": "validating"},
+            {"at": "2026-08-06T00:06:00Z", "status": "validating"},
+            {"at": "2026-08-06T00:07:00Z", "status": "queued"},
+            {"at": "2026-08-06T00:08:00Z", "status": "validating"},
+            {"at": "2026-08-06T00:10:00Z", "status": "converting_features"},
+            {"at": "2026-08-06T00:20:00Z", "status": "ready"},
+        ]
+
+        timings = job.phase_timings()
+        self.assertEqual(
+            [timing["status"] for timing in timings],
+            ["queued", "validating", "queued", "validating", "converting_features", "ready"],
+        )
+        self.assertTrue(
+            all(
+                timing.get("durationSeconds", 0) >= 0
+                for timing in timings
+            )
+        )
+
+        legacy = build_job("legacy-history", now=now, processing_seconds=10)
+        legacy.events = [{"at": "2026-08-06T00:00:00Z", "status": "queued"}]
+        legacy.started_at = "2026-08-06T00:05:00Z"
+        legacy.finished_at = "2026-08-06T00:10:00Z"
+        self.assertEqual(
+            [timing["status"] for timing in legacy.phase_timings()],
+            ["queued", "validating"],
+        )
+
+    def test_legacy_naive_timestamps_are_treated_as_utc(self):
+        job = build_job(
+            "naive-timestamps",
+            now=datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc),
+            processing_seconds=10,
+        )
+        job.created_at = "2026-08-06T00:00:00"
+        job.started_at = "2026-08-06T00:00:05+00:00"
+        job.finished_at = "2026-08-06T00:00:10"
+
+        response = job.to_dict()
+        self.assertEqual(response["serverTiming"]["queueWaitSeconds"], 5.0)
+        self.assertEqual(response["serverTiming"]["processingSeconds"], 5.0)
+        self.assertEqual(response["serverTiming"]["totalSeconds"], 10.0)
+
+    def test_nonfinite_optional_phase_metrics_are_ignored(self):
+        job = build_job(
+            "nonfinite-metrics",
+            now=datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc),
+            processing_seconds=10,
+        )
+        job.artifact_metrics = {
+            "labelPhaseTimings": {
+                "nan": float("nan"),
+                "infinity": float("inf"),
+                "negative": -1,
+                "boolean": True,
+                "valid": 1.25,
+            }
+        }
+
+        phases = job.phase_timings()
+        self.assertEqual(
+            [phase["status"] for phase in phases if phase["status"] in {
+                "nan", "infinity", "negative", "boolean", "valid"
+            }],
+            ["valid"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")
+            self.assertTrue(store.record_job(job))
+            json.dumps(store.summary(), allow_nan=False)
+
+    def test_monitoring_event_contains_safe_structured_timing(self):
+        now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
+        job = build_job("event-job", now=now, processing_seconds=10)
+        event = build_map_job_monitoring_event(
+            job,
+            "worker-test",
+            attempt_started_at=job.started_at,
+            outcome="built",
+        )
+
+        self.assertEqual(event["event"], "map_job_run_completed")
+        self.assertEqual(event["jobId"], "event-job")
+        self.assertEqual(event["rendererFormatVersion"], 3)
+        self.assertEqual(event["outcome"], "built")
+        self.assertNotIn("request", event)
+        self.assertGreater(event["attemptTiming"]["durationSeconds"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

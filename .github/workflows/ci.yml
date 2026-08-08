@@ -14,10 +14,12 @@ jobs:
       matrix:
         target:
           - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_175_POWER_METRICS
           - WAVESHARE_AMOLED_175_LIGHT_SLEEP
           - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_206_DISPLAY_TEST
           - WAVESHARE_AMOLED_206_POWER_METRICS
           - WAVESHARE_AMOLED_206_LIGHT_SLEEP
@@ -105,7 +107,8 @@ jobs:
             tools.tests.test_generated_sdkconfig \
             tools.tests.test_capture_boot \
             tools.tests.test_resolve_upload_port \
-            tools.tests.test_map_guidance_integration
+            tools.tests.test_map_guidance_integration \
+            tools.tests.test_map_memory_diagnostics
           g++ -std=c++17 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175

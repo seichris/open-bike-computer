@@ -27,6 +27,9 @@ contract and operating procedure.
   actual cached PBF snapshot and immutable worker identity.
 - Installation-authenticated saved-map names and successful-download receipts,
   plus a redacted admin inventory at `GET /v1/admin/maps`.
+- Durable map-build timing records and p50/p95 summaries at the admin-only
+  `GET /v1/admin/map-monitoring` endpoint. Worker completion logs emit the same
+  timing data as structured JSON for Coolify log search.
 - Coolify-oriented compose file and Dockerfile.
 
 ## Local API
@@ -65,6 +68,23 @@ Run a job:
 ```sh
 python -m map_platform.cli run-job <job-id>
 ```
+
+Inspect persisted server-build monitoring data locally or in a worker
+container:
+
+```sh
+python -m map_platform.cli monitoring-summary --window-hours 168
+```
+
+The production equivalent is the admin-only
+`GET /v1/admin/map-monitoring?windowHours=168` route. It is read-only and
+calculates queue, processing, and total-duration summaries from the bounded
+SQLite sample, including p50/p95 values overall and by renderer format.
+Maintenance performs the explicit restart reconciliation and retention prune;
+the CLI command above does the same before producing a local summary. The
+worker emits a `map_job_run_completed` JSON log event for each processed
+attempt; the SQLite record is the restart-safe source of truth, while the log
+is the live search surface.
 
 Run the production-style queue worker:
 
@@ -215,6 +235,14 @@ Useful production environment variables:
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
   their immutable completion time, default `30`; later downloads and label
   changes do not extend it. Must be between `1` and `3650`.
+- `MAP_PLATFORM_MONITORING_RETENTION_DAYS`: days to retain completed map-build
+  timing samples in `$MAP_PLATFORM_DATA_ROOT/map-monitoring.sqlite3`, default
+  `90`. This is independent of map-artifact retention and must be between `1`
+  and `3650`.
+- `MAP_PLATFORM_MONITORING_SUMMARY_RUN_LIMIT`: maximum number of most-recent
+  in-window timing samples loaded for an aggregate summary, default `50000`,
+  maximum `1000000`. Responses report the matching count, sampled count, limit,
+  and whether the summary was truncated.
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted

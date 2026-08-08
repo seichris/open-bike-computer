@@ -412,6 +412,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var mirrorRetryTask: Task<Void, Never>?
     private var mirrorShutdownWatchdogTask: Task<Void, Never>?
     private var complicationStartTask: Task<Void, Never>?
+    private var authorizationRefreshTask: Task<Void, Never>?
     private var segmentOperationTask: Task<Void, Never>?
     private var segmentOperationTimeoutTask: Task<Void, Never>?
     private var segmentOperationAttemptID: UUID?
@@ -657,6 +658,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorRetryTask?.cancel()
         mirrorShutdownWatchdogTask?.cancel()
         complicationStartTask?.cancel()
+        authorizationRefreshTask?.cancel()
         segmentOperationTask?.cancel()
         segmentOperationTimeoutTask?.cancel()
         finalSegmentOperationTask?.cancel()
@@ -696,6 +698,30 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func requestAuthorization() {
         Task { [weak self] in
             await self?.authorizeHealthKit()
+        }
+    }
+
+    /// Re-reads HealthKit authorization after the user returns from the
+    /// system's Health settings. This deliberately never presents a new
+    /// authorization sheet, so a previously denied request remains a
+    /// settings-only recovery path.
+    func refreshAuthorizationIfNeeded() {
+        guard !isWorkoutActive,
+              !isRecovering,
+              !isRecoveryLoopRunning,
+              session == nil,
+              setupState != .authorizing,
+              authorizationRefreshTask == nil else {
+            return
+        }
+
+        authorizationRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.authorizationRefreshTask = nil
+                self.drainPendingComplicationStartIfPossible()
+            }
+            await self.refreshAuthorizationState()
         }
     }
 
@@ -1099,7 +1125,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func authorizeHealthKit() async {
         defer { drainPendingComplicationStartIfPossible() }
-        guard !isWorkoutActive else { return }
+        guard !isWorkoutActive,
+              setupState != .denied,
+              setupState != .authorizing else {
+            return
+        }
         guard HKHealthStore.isHealthDataAvailable() else {
             setupState = .unavailable
             return
@@ -1136,6 +1166,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
         if setupState != .ready {
+            guard setupState != .denied else { return }
             await authorizeHealthKit()
         }
         guard setupState == .ready,

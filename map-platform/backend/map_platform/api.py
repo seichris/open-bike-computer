@@ -46,6 +46,11 @@ from .map_stream_rollout import (
     parse_map_stream_trust_capabilities,
 )
 from .map_stream_trust_registry import trusted_key_fingerprints
+from .monitoring import (
+    DEFAULT_MONITORING_RETENTION_DAYS,
+    DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
+    MapMonitoringStore,
+)
 from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .rate_limits import (
@@ -106,6 +111,23 @@ def create_app():
     artifact_store = create_artifact_store_from_environment(
         data_root,
         credential_scope="api",
+    )
+    monitoring_retention_days = int(
+        os.environ.get(
+            "MAP_PLATFORM_MONITORING_RETENTION_DAYS",
+            str(DEFAULT_MONITORING_RETENTION_DAYS),
+        )
+    )
+    monitoring_summary_run_limit = int(
+        os.environ.get(
+            "MAP_PLATFORM_MONITORING_SUMMARY_RUN_LIMIT",
+            str(DEFAULT_MONITORING_SUMMARY_RUN_LIMIT),
+        )
+    )
+    monitoring_store = MapMonitoringStore(
+        data_root / "map-monitoring.sqlite3",
+        retention_days=monitoring_retention_days,
+        summary_run_limit=monitoring_summary_run_limit,
     )
     rate_limiter = PersistentRateLimiter(
         data_root / "rate-limits.sqlite3",
@@ -214,6 +236,7 @@ def create_app():
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
     app.state.job_store = service.store
+    app.state.monitoring_store = monitoring_store
     app.state.map_stream_rollout = map_stream_rollout
     app.state.rate_limiter = rate_limiter
 
@@ -392,6 +415,26 @@ def create_app():
             pseudonym_secret=installation_secret or download_secret,
             include_undownloaded=includeUndownloaded,
         )
+
+    @app.get(
+        "/v1/admin/map-monitoring",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_map_monitoring(windowHours: int = 168) -> dict[str, Any]:
+        if isinstance(windowHours, bool) or not 1 <= windowHours <= 24 * 365:
+            raise HTTPException(
+                status_code=400,
+                detail="windowHours must be between 1 and 8760",
+            )
+        try:
+            return monitoring_store.summary(window_hours=windowHours)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="map monitoring is temporarily unavailable",
+            ) from exc
 
     @app.post("/v1/installations")
     def create_installation(
@@ -683,7 +726,12 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
         try:
-            return run_job(service.store, pipeline, job_id).to_dict()
+            return run_job(
+                service.store,
+                pipeline,
+                job_id,
+                monitoring_store=monitoring_store,
+            ).to_dict()
         except JobClaimError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -738,11 +786,16 @@ def create_app():
     def run_next_job() -> dict[str, Any]:
         if not inline_worker_enabled or map_stream_generation_enabled():
             raise HTTPException(status_code=503, detail="inline map workers are disabled")
-        result = MapWorker(service.store, pipeline).run_next()
+        result = MapWorker(
+            service.store,
+            pipeline,
+            monitoring_store=monitoring_store,
+        ).run_next()
         return {
             "workerId": result.worker_id,
             "processed": result.processed,
             "job": result.job.to_dict() if result.job else None,
+            "monitoring": result.monitoring_event,
         }
 
     @app.post("/v1/source-regions/{region_id}/cache", dependencies=[Depends(require_admin_token)])

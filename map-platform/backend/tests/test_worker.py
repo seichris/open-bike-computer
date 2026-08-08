@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
 from map_platform.jobs import (
@@ -16,6 +16,7 @@ from map_platform.jobs import (
     MapJobService,
 )
 from map_platform.models import Bounds, JobStatus, MapDownloadReceipt, SourceRegion
+from map_platform.monitoring import MapMonitoringStore
 from map_platform.pipeline import MapBuildResult, run_job
 from map_platform.sources import SourceIndex
 from map_platform.worker import (
@@ -149,6 +150,31 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(loaded.artifacts[0].signed_manifest_receipt, "4" * 64)
             self.assertEqual(loaded.artifact_metrics["streamPayloadBytes"], 42)
 
+    def test_worker_emits_and_persists_monitoring_timing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            monitoring = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+
+            result = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-monitoring",
+                monitoring_store=monitoring,
+            ).run_next()
+
+            self.assertTrue(result.processed)
+            self.assertEqual(result.monitoring_event["event"], "map_job_run_completed")
+            self.assertTrue(result.monitoring_event["monitoringPersisted"])
+            self.assertEqual(result.monitoring_event["jobId"], job.job_id)
+            self.assertIsNotNone(store.get(job.job_id).to_dict()["serverTiming"]["processingSeconds"])
+
+            reopened = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")
+            self.assertEqual(reopened.summary()["runs"]["count"], 1)
+
     def test_worker_removes_stale_queue_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(tmp, lock_stale_seconds=-1)
@@ -183,6 +209,49 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNone(first.job.to_dict()["progress"])
             self.assertEqual(first.job.to_dict()["errorCode"], "map_build_failed")
             self.assertEqual(first_queued_event["message"], "queued for retry")
+
+    def test_monitoring_skips_retryable_attempt_until_job_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            monitoring = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")
+            service = MapJobService(SourceIndex([self.source]), store)
+            service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            worker = MapWorker(
+                store,
+                FakePipeline(failures=1),
+                worker_id="worker-retry-monitoring",
+                monitoring_store=monitoring,
+            )
+
+            first = worker.run_next()
+            self.assertFalse(first.monitoring_event["monitoringPersisted"])
+            self.assertEqual(monitoring.summary()["runs"]["count"], 0)
+
+            second = worker.run_next()
+            self.assertTrue(second.monitoring_event["monitoringPersisted"])
+            self.assertEqual(monitoring.summary()["runs"]["count"], 1)
+
+    def test_monitoring_event_reports_store_return_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            monitoring = Mock()
+            monitoring.record_job.return_value = False
+
+            result = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-monitoring-return-value",
+                monitoring_store=monitoring,
+            ).run_next()
+
+            self.assertFalse(result.monitoring_event["monitoringPersisted"])
+            monitoring.record_job.assert_called_once()
 
     def test_worker_ignores_cancelled_job(self):
         with tempfile.TemporaryDirectory() as tmp:

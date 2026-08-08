@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import math
 from typing import Any
 
 from .artifacts import ArtifactRecord
@@ -230,6 +231,7 @@ class MapJob:
             "workerId": self.worker_id,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
+            "serverTiming": self.server_timing(),
             "progress": self.progress(),
             "events": self.events,
             "phaseTimings": self.phase_timings(),
@@ -306,29 +308,72 @@ class MapJob:
             "fraction": completed / self.progress_total,
         }
 
+    def server_timing(self) -> dict[str, Any]:
+        """Return durable lifecycle timings derived from persisted timestamps."""
+        return {
+            "queueWaitSeconds": _duration_seconds(self.created_at, self.started_at),
+            "processingSeconds": _duration_seconds(self.started_at, self.finished_at),
+            "totalSeconds": _duration_seconds(self.created_at, self.finished_at),
+            "attempts": self.attempts,
+        }
+
     def phase_timings(self) -> list[dict[str, Any]]:
-        transitions: list[tuple[str, str]] = []
-        if self.started_at:
-            transitions.append((JobStatus.VALIDATING.value, self.started_at))
+        transitions: list[tuple[str, datetime]] = []
+        has_claim_event = False
         for event in self.events:
+            if not isinstance(event, dict):
+                continue
             status = event.get("status")
-            at = event.get("at")
-            if isinstance(status, str) and isinstance(at, str):
-                if not transitions or transitions[-1] != (status, at):
-                    transitions.append((status, at))
+            at = _parse_utc(event.get("at"))
+            if not isinstance(status, str) or at is None:
+                continue
+            if status == JobStatus.VALIDATING.value:
+                has_claim_event = True
+            transitions.append((status, at))
+
+        # Records written before claim events were persisted only have the
+        # durable started_at timestamp. Keep those records observable without
+        # putting the synthetic transition ahead of an earlier queued event.
+        started_at = _parse_utc(self.started_at)
+        if started_at is not None and not has_claim_event:
+            transitions.append((JobStatus.VALIDATING.value, started_at))
+
+        transitions.sort(key=lambda transition: transition[1])
+        normalized_transitions: list[tuple[str, datetime]] = []
+        for transition in transitions:
+            if (
+                normalized_transitions
+                and normalized_transitions[-1][0] == transition[0]
+            ):
+                continue
+            normalized_transitions.append(transition)
 
         timings: list[dict[str, Any]] = []
-        for index, (status, started_at) in enumerate(transitions):
-            finished_at = transitions[index + 1][1] if index + 1 < len(transitions) else self.finished_at
+        finished_at = _parse_utc(self.finished_at)
+        for index, (status, phase_started_at) in enumerate(normalized_transitions):
+            phase_finished_at = (
+                normalized_transitions[index + 1][1]
+                if index + 1 < len(normalized_transitions)
+                else finished_at
+            )
+            if (
+                phase_finished_at is not None
+                and phase_finished_at < phase_started_at
+            ):
+                phase_finished_at = None
             timing: dict[str, Any] = {
                 "status": status,
-                "startedAt": started_at,
-                "finishedAt": finished_at,
+                "startedAt": _utc_iso(phase_started_at),
+                "finishedAt": (
+                    _utc_iso(phase_finished_at)
+                    if phase_finished_at is not None
+                    else None
+                ),
             }
-            if finished_at:
-                duration = _duration_seconds(started_at, finished_at)
-                if duration is not None:
-                    timing["durationSeconds"] = duration
+            if phase_finished_at is not None:
+                duration = (phase_finished_at - phase_started_at).total_seconds()
+                if math.isfinite(duration) and duration >= 0:
+                    timing["durationSeconds"] = round(float(duration), 6)
             timings.append(timing)
         label_timings = (
             self.artifact_metrics.get("labelPhaseTimings")
@@ -337,20 +382,41 @@ class MapJob:
         )
         if isinstance(label_timings, dict):
             for phase, duration in label_timings.items():
-                if isinstance(phase, str) and isinstance(duration, (int, float)) and duration >= 0:
+                if (
+                    isinstance(phase, str)
+                    and _is_finite_nonnegative_number(duration)
+                ):
                     timings.append(
                         {"status": phase, "durationSeconds": round(float(duration), 6)}
                     )
         return timings
 
 
-def _parse_utc(value: str) -> datetime | None:
+def _parse_utc(value: str | None) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def _utc_iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _is_finite_nonnegative_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
 
 
 def _progress_value(progress: Any, key: str) -> int | None:
@@ -362,7 +428,7 @@ def _progress_value(progress: Any, key: str) -> int | None:
         return None
 
 
-def _duration_seconds(started_at: str, finished_at: str) -> float | None:
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
     start = _parse_utc(started_at)
     finish = _parse_utc(finished_at)
     if start is None or finish is None:
