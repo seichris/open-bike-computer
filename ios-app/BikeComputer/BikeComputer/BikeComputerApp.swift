@@ -7,6 +7,7 @@
 
 import AppIntents
 import Combine
+import CoreLocation
 import SwiftUI
 
 @main
