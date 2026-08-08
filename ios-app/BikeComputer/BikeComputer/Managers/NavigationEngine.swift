@@ -86,13 +86,20 @@ class NavigationEngine: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
                 guard isReady, let self else { return }
-                self.resendCurrentDeviceGpsPosition()
-                guard self.isNavigating else {
-                    self.bleManager?.clearRouteGeometry()
-                    return
+                // @Published emits from willSet. Defer until the manager's
+                // readiness property has committed so guarded GPS/route sends
+                // do not re-read the previous false value on reconnect.
+                DispatchQueue.main.async { [weak self, weak manager] in
+                    guard let self, let manager,
+                          manager.isNavigationReady else { return }
+                    self.resendCurrentDeviceGpsPosition()
+                    guard self.isNavigating else {
+                        self.bleManager?.clearRouteGeometry()
+                        return
+                    }
+                    self.resendCurrentRouteGeometry()
+                    self.resendCurrentNavigationState()
                 }
-                self.resendCurrentRouteGeometry()
-                self.resendCurrentNavigationState()
             }
             .store(in: &cancellables)
     }

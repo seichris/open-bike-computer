@@ -652,6 +652,7 @@ struct NavigationProtocolTests {
         testNavigationEngineUsesDegenerateStepFallback()
         testNavigationEngineKeepsProgressAtRouteCrossing()
         testNavigationEngineResendsWhenBLEBecomesReady()
+        testNavigationEngineDefersReconnectGPSUntilReadinessCommits()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
@@ -10744,17 +10745,26 @@ struct NavigationProtocolTests {
 
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: true,
-            hasNativeWriteWithoutResponse: true
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
         ), .nativeWithResponse,
                     "an acknowledged native workout characteristic is preferred")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true
-        ), .nativeWithoutResponse,
-                    "the dedicated workout characteristic does not inherit navigation backpressure")
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
+        ), .navigationFallback,
+                    "an acknowledged fallback avoids priority-lane no-response head-of-line blocking")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: false
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: false
+        ), .nativeWithoutResponse,
+                    "native no-response remains available when the command transport is also unacknowledged")
+        assertEqual(WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse: false,
+            hasNativeWriteWithoutResponse: false,
+            navigationExpectsWriteResponse: false
         ), .navigationFallback,
                     "firmware without a dedicated workout transport uses navigation fallback")
 
@@ -12459,6 +12469,31 @@ struct NavigationProtocolTests {
                "missing acknowledged completion triggers bounded recovery")
         assert(!watchdogManager.isNavigationReady,
                "stall recovery closes the unusable navigation session")
+
+        let noResponseWatchdogManager = BLEManager()
+        noResponseWatchdogManager.isConnected = true
+        noResponseWatchdogManager.isNavigationReady = true
+        var noResponseRecoveries = 0
+        noResponseWatchdogManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: false,
+                canSend: { false },
+                write: { _ in
+                    assert(false, "backpressured transport must not write")
+                }
+            )
+        )
+        noResponseWatchdogManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { noResponseRecoveries += 1 }
+        )
+        assert(noResponseWatchdogManager.requestDeviceCapabilities(),
+               "no-response watchdog fixture admits the pending write")
+        assert(waitForMainLoop(timeout: 1) { noResponseRecoveries == 1 },
+               "persistent no-response backpressure triggers bounded recovery")
+        assert(!noResponseWatchdogManager.isNavigationReady,
+               "no-response recovery closes the wedged navigation session")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
@@ -13949,6 +13984,36 @@ struct NavigationProtocolTests {
         assertEqual(fields.count, 3, "resent packet uses firmware fields")
         assertEqual(String(fields[0]), "\(NavigationIconID.left)", "resent packet keeps current icon")
         assertEqual(String(fields[2]), "Turn left onto Test Road", "resent packet keeps current instruction")
+    }
+
+    static func testNavigationEngineDefersReconnectGPSUntilReadinessCommits() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 64,
+                expectsWriteResponse: false,
+                canSend: { true },
+                write: { writes.append($0) }
+            )
+        )
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.processExternalLocation(
+            CLLocation(latitude: 1.305, longitude: 103.855)
+        )
+        assert(writes.isEmpty,
+               "cached GPS remains unsent before authentication readiness")
+
+        manager.isNavigationReady = true
+        assert(waitForMainLoop(timeout: 1) {
+            writes.contains { data in
+                String(data: data.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.gpsPositionFallbackPrefix
+            }
+        }, "committed readiness resends cached GPS and can open the device map")
     }
 
     static func testNavigationEngineResendsRouteGeometryNearLastLocation() {

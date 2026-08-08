@@ -87,10 +87,18 @@ enum WorkoutTelemetryWriteRoute: Equatable {
 enum WorkoutTelemetryWriteRouting {
     static func route(
         hasNativeWriteWithResponse: Bool,
-        hasNativeWriteWithoutResponse: Bool
+        hasNativeWriteWithoutResponse: Bool,
+        navigationExpectsWriteResponse: Bool
     ) -> WorkoutTelemetryWriteRoute {
         if hasNativeWriteWithResponse {
             return .nativeWithResponse
+        }
+        // Prefer the acknowledged fallback over a dedicated unacknowledged
+        // characteristic. Both transports share one ordered queue, so a
+        // write-without-response credit stall at the priority head would also
+        // block GPS, settings, and transfer traffic behind the workout pair.
+        if navigationExpectsWriteResponse {
+            return .navigationFallback
         }
         if hasNativeWriteWithoutResponse {
             return .nativeWithoutResponse
@@ -833,6 +841,7 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteWithResponseLabel: String?
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
+    private var navigationBackpressureStartedAt: Date?
 #if HOST_TESTING
     private var navigationWriteResponseTimeout: TimeInterval = 60
 #else
@@ -2250,7 +2259,9 @@ class BLEManager: NSObject, ObservableObject {
                 characteristic?.properties.contains(.write) == true,
             hasNativeWriteWithoutResponse:
                 testEndpoint != nil ||
-                characteristic?.properties.contains(.writeWithoutResponse) == true
+                characteristic?.properties.contains(.writeWithoutResponse) == true,
+            navigationExpectsWriteResponse:
+                navigationEndpoint.expectsWriteResponse
         )
 
         switch route {
@@ -4526,6 +4537,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
+        var madeProgress = false
         navigationWriteQueue.flush(canSend: { [weak self] write in
             guard let self else { return false }
             let expectsWriteResponse = write.transportExpectsWriteResponse
@@ -4535,6 +4547,7 @@ class BLEManager: NSObject, ObservableObject {
             }
             return write.transportCanSend?() ?? endpoint.canSend()
         }, maxWrites: 1) { write in
+            madeProgress = true
             let expectsWriteResponse = write.transportExpectsWriteResponse
                 ?? endpoint.expectsWriteResponse
             if expectsWriteResponse {
@@ -4543,6 +4556,10 @@ class BLEManager: NSObject, ObservableObject {
             write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
+        updateNavigationBackpressureWatchdog(
+            madeProgress: madeProgress,
+            hasPendingWrites: navigationWriteQueue.count > 0
+        )
         if navigationWriteQueue.count == 0 {
             navigationFlushRetryTimer?.invalidate()
             navigationFlushRetryTimer = nil
@@ -4598,6 +4615,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func beginNavigationWriteResponseWait(for write: NavigationWrite) {
+        navigationBackpressureStartedAt = nil
         writeWithResponseInFlight = true
         navigationWriteWithResponseFailureHandler = write.onWriteFailure
         navigationWriteWithResponseLabel = write.label
@@ -4624,6 +4642,45 @@ class BLEManager: NSObject, ObservableObject {
         writeWithResponseInFlight = false
         navigationWriteWithResponseFailureHandler = nil
         navigationWriteWithResponseLabel = nil
+        navigationBackpressureStartedAt = nil
+    }
+
+    private func updateNavigationBackpressureWatchdog(
+        madeProgress: Bool,
+        hasPendingWrites: Bool
+    ) {
+        if madeProgress || !hasPendingWrites || writeWithResponseInFlight {
+            navigationBackpressureStartedAt = nil
+            return
+        }
+
+        let now = Date()
+        guard let startedAt = navigationBackpressureStartedAt else {
+            navigationBackpressureStartedAt = now
+            return
+        }
+        guard now.timeIntervalSince(startedAt) >=
+                navigationWriteResponseTimeout else {
+            return
+        }
+        recoverFromNavigationBackpressure()
+    }
+
+    private func recoverFromNavigationBackpressure() {
+        guard isNavigationReady else { return }
+        log("BLE write-without-response backpressure timed out; reconnecting")
+        navigationBackpressureStartedAt = nil
+        navigationFlushRetryTimer?.invalidate()
+        navigationFlushRetryTimer = nil
+        isNavigationReady = false
+
+        if let navigationWriteStallRecoveryForTesting {
+            navigationWriteStallRecoveryForTesting()
+            return
+        }
+        if let peripheral = connectedPeripheral {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
     }
 
     private func recoverFromNavigationWriteStall() {

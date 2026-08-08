@@ -3306,7 +3306,8 @@ void BLENavigationServer::init(const char *deviceName) {
   // Workout frames are accepted only after the same local authentication
   // handshake as navigation traffic and remain in RAM-only telemetry state.
   pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
-      WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+      WORKOUT_TELEMETRY_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pWorkoutTelemetryCharacteristic->setCallbacks(
       new MyWorkoutTelemetryCharacteristicCallbacks());
 
