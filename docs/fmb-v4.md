@@ -105,3 +105,25 @@ Renderer format 3 consists of FMB v4 blocks plus exactly one matching FMA1
 street-label asset and building profile version 1. Bike Map Stream remains at
 format v1. New firmware reads FMB v1 through v4; firmware without CAP2 feature
 bit 12 must never receive renderer target 3.
+
+
+## Runtime admission and presentation contract
+
+FMB v4 defines geometry, not traversal priority. Firmware must consider records
+from all loaded in-view blocks and choose a deterministic globally nearest set;
+cache or block iteration order must not decide which buildings become 3D.
+Fixed record, point, projected-pixel, courtyard-workspace, and PSRAM quotas are
+applied after spatial ordering. Nearest eligible records may be extruded and
+farther admitted records are drawn as dedicated flat FMB v4 footprints.
+Records beyond those quotas are explicitly deferred; they are not assumed to
+exist in the generic polygon stream. During a genuine allocation failure or
+its scoped cooldown, firmware renders a smaller deterministic nearest set as
+flat footprints without the normal candidate/sort workspace.
+
+Building IO, discovery, sorting, courtyard capture, and surface rasterization
+run only in a private render job. The worker writes a hidden raw RGB565 surface
+and never calls LVGL. Position-only requests are coalesced while semantic
+invalidations cancel at cooperative checkpoints; this keeps the last complete
+frame moving without making an otherwise healthy frame globally 2D. Allocation,
+corruption, and invariant failures are the only reasons to enter the documented
+flat fallback/cooldown path.

@@ -296,16 +296,26 @@ class BikeComputerCoordinator: ObservableObject {
                     return
                 }
                 let generation = self.deviceCapabilityRefreshGeneration
-                if let location = self.locationManager.currentLocation {
-                    self.navEngine.processExternalLocation(location)
+                // @Published emits from willSet. Run readiness-guarded work on
+                // the next main turn after isNavigationReady has committed.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.bleManager.isNavigationReady,
+                          self.deviceCapabilityRefreshGeneration == generation
+                    else { return }
+                    if let location = self.locationManager.currentLocation {
+                        self.navEngine.processExternalLocation(location)
+                    }
+                    self.requestMapTransferStatusAfterDeviceRefresh()
+                    DeviceCapabilityRetry.scheduleInitial { [weak self] in
+                        self?.refreshDeviceCapabilities(
+                            attempt: 0,
+                            generation: generation
+                        )
+                    }
+                    self.bleManager.requestDeviceTransferStatus()
+                    self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
                 }
-                self.requestMapTransferStatusAfterDeviceRefresh()
-                DeviceCapabilityRetry.scheduleInitial { [weak self] in
-                    self?.refreshDeviceCapabilities(attempt: 0,
-                                                    generation: generation)
-                }
-                self.bleManager.requestDeviceTransferStatus()
-                self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
             }
             .store(in: &cancellables)
 

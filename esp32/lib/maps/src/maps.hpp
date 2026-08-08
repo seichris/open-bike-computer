@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <math.h>
@@ -9,12 +10,16 @@
 
 // #include "../../compass/compass.hpp" // Circular dependency if not careful,
 // but likely needed for getHeading
+#include "../../ble_navigation/ble_navigation.hpp"
 #include "../../settings/settings.hpp"
 #include "../../storage/storage.hpp"
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
 #include "map_projection.hpp"
+#include "mapPresentation.hpp"
+#include "mapRenderJob.hpp"
+#include "mapSurface.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
@@ -28,7 +33,6 @@
 
 // Forward declarations
 struct MapSettings;
-struct ScreenMapRenderSettings;
 
 class Maps {
 private:
@@ -128,12 +132,88 @@ private:
   {
     std::vector<MapBlock *> blocks;
   };
-  MemCache memCache;               // Memory Cache
+
+  struct RenderContext {
+    ScreenMapRenderSettings style{};
+    map_transform::WorldPoint measuredGpsWorld{};
+    map_transform::WorldPoint presentedWorld{};
+    // Screen mode and route/session availability are distinct. The guidance
+    // screen may be bird's-eye before a route starts and must still render its
+    // configured 3D buildings.
+    bool guidanceScreenActive = false;
+    bool navigationSessionActive = false;
+    bool followPosition = true;
+    bool showCurrentPosition = true;
+    bool buildings3DEnabled = false;
+    uint8_t markerScale = 1;
+    uint8_t birdsEyePerspective = 0;
+  };
+
+  static constexpr uint16_t MAP_RENDER_OVERSCAN_PIXELS = 96;
+  static constexpr uint16_t MAP_RENDER_SAFETY_PIXELS = 16;
+  static constexpr uint32_t MAP_RENDER_WORKER_STACK_BYTES = 24576;
+  static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
+
+  struct RasterDiagnostics {
+    uint32_t selectedBuildings = 0;
+    uint32_t extrudedBuildings = 0;
+    uint32_t flatBuildings = 0;
+    uint32_t deferredBuildings = 0;
+    bool allocationFallback = false;
+  };
+
+  struct RenderRequest {
+    map_render_job::Version version{};
+    map_transform::WorldPoint center{};
+    RenderContext context{};
+    uint64_t styleSignature = 0;
+    uint64_t navigationSignature = 0;
+    uint64_t projectionSignature = 0;
+    uint8_t zoom = map_transform::kMinimumRuntimeZoom;
+    uint16_t viewportWidth = 0;
+    uint16_t viewportHeight = 0;
+    uint16_t renderWidth = 0;
+    uint16_t renderHeight = 0;
+    uint16_t overscanPixels = 0;
+    size_t renderStridePixels = 0;
+    double rotationRad = 0.0;
+    uint32_t cancellationGeneration = 0;
+    bool birdsEye = false;
+  };
+
+  struct RenderResult {
+    map_render_job::Version version{};
+    map_projection::Projection projection{};
+    ViewPort viewport{};
+    map_transform::WorldPoint center{};
+    uint64_t styleSignature = 0;
+    uint64_t navigationSignature = 0;
+    uint64_t projectionSignature = 0;
+    uint16_t viewportWidth = 0;
+    uint16_t viewportHeight = 0;
+    uint16_t renderWidth = 0;
+    uint16_t renderHeight = 0;
+    uint16_t overscanPixels = 0;
+    size_t renderStridePixels = 0;
+    uint32_t durationMs = 0;
+    uint32_t blocksMs = 0;
+    uint32_t drawMs = 0;
+    uint32_t psramFree = 0;
+    uint32_t psramLargest = 0;
+    double rotationRad = 0.0;
+    bool mapFound = false;
+    bool followPosition = true;
+    RasterDiagnostics raster{};
+  };
+
+  MemCache memCache;               // Worker-owned memory cache
+  std::atomic<size_t> cachedBlockCount{0};
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
+  std::atomic<bool> streetLabelFontHealthy{false};
+  std::atomic<map_font_asset::RuntimeError> streetLabelRuntimeFailure{
+      map_font_asset::RuntimeError::None};
   map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;
-  bool streetLabelRuntimeFailurePending = false;
-  std::string streetLabelRuntimeFailureCode;
   struct LabelLayoutCacheKey {
     int32_t centerX = 0;
     int32_t centerY = 0;
@@ -184,12 +264,21 @@ private:
   MapBlock *readMapBlockBinary(char *buffer, size_t fileSize);
   bool buildPolygonGrid(
       MapBlock *mblock); // Build spatial grid for polygon culling
-  bool fillPolygon(const Polygon &p, lv_obj_t *canvas,
-                   uint32_t deadlineStartMs = 0,
-                   uint32_t deadlineDurationMs = 0);
+  bool fillPolygon(const Polygon &p,
+                   map_surface::Rgb565Surface surface);
+  bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
+  void drawLine(map_surface::Rgb565Surface surface, int16_t x1, int16_t y1,
+                int16_t x2, int16_t y2, uint16_t color, uint8_t width);
   void drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                 int16_t y2, uint16_t color, uint8_t width);
   bool getMapBlocks(BBox &bbox, MemCache &memCache);
+  bool readVectorMap(ViewPort &viewPort, MemCache &memCache,
+                     map_surface::Rgb565Surface surface, uint8_t zoom,
+                     double rotation,
+                     const map_projection::Projection &projection,
+                     const RenderContext &context, bool drawLabels = true,
+                     bool suppressBuildings = false,
+                     RasterDiagnostics *diagnostics = nullptr);
   bool readVectorMap(ViewPort &viewPort, MemCache &memCache, lv_obj_t *canvas,
                      uint8_t zoom, double rotation,
                      const map_projection::Projection &projection,
@@ -229,9 +318,91 @@ private:
   uint64_t rollingRasterSignature() const;
   double visibleMapRotation() const;
   bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
+                        map_surface::LabelSurface surface, uint8_t zoom,
+                        double rotation, const RenderContext &context);
+  bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                         lv_obj_t *canvas, uint8_t zoom, double rotation,
                         const ScreenMapRenderSettings &style);
+  RenderContext captureRenderContext(uint32_t nowMs = 0);
+  static void renderWorkerTaskThunk(void *argument);
+  void renderWorkerLoop();
+  struct VectorMapActivationRequest {
+    uint32_t sequence = 0;
+    std::string folder;
+  };
+  struct VectorMapActivationCompletion {
+    uint32_t sequence = 0;
+    std::string folder;
+    bool loaded = false;
+  };
+  bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
+  bool processPendingVectorMapActivation();
+  bool probeVectorMapFolderOnStorageOwner(const std::string &folder);
+  bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
+  void finalizeVectorMapFolderSwitchOnUi();
+  bool startRenderWorker();
+  bool stopRenderWorker();
+  bool recoverRenderWorkerIfNeeded();
+  bool buildRenderRequest(uint8_t zoom, uint32_t nowMs,
+                          RenderRequest &request);
+  bool submitRenderRequest(const RenderRequest &request);
+  void cancelActiveRenderWork();
+  bool takeWorkerRequest(RenderRequest &request);
+  bool publishReadyFrame(uint32_t nowMs);
+  bool renderRequestStillCurrent(const RenderRequest &request) const;
+  bool renderResultStillCurrent(const RenderResult &result) const;
+  void updatePresentedPose(uint32_t nowMs);
+  void updatePresentedFrameTransform();
+  void renderLiveForeground();
+  void invalidateRenderSemantics(uint32_t nowMs);
+  bool presentationGestureOwnsTransforms() const;
+  uint64_t styleSignature(const ScreenMapRenderSettings &style) const;
+  uint64_t navigationSignature() const;
+  uint64_t projectionSignature(uint8_t zoom, uint16_t viewportWidth,
+                               uint16_t viewportHeight, bool birdsEye,
+                               uint8_t perspective) const;
+  map_projection::Projection makeRequestProjection(
+      const RenderRequest &request) const;
   void getPosition(double lat, double lon);
+
+  mutable SemaphoreHandle_t renderStateMutex = nullptr;
+  TaskHandle_t renderWorkerTaskHandle = nullptr;
+  map_render_job::LatestWins renderJobs;
+  RenderRequest latestRenderRequest{};
+  RenderResult readyRenderResult{};
+  bool latestRenderRequestValid = false;
+  uint32_t lastTakenRenderSequence = 0;
+  bool readyRenderResultValid = false;
+  bool framePublicationPending = false;
+  bool renderFailurePending = false;
+  VectorMapActivationRequest pendingVectorMapActivation{};
+  VectorMapActivationCompletion completedVectorMapActivation{};
+  bool pendingVectorMapActivationValid = false;
+  bool completedVectorMapActivationValid = false;
+  uint32_t vectorMapActivationSequence = 0;
+  bool publishedMapFrame = false;
+  bool publishedMapFound = false;
+  uint32_t lastCompletedRenderDurationMs = 1000;
+  uint32_t navigationEpoch = 1;
+  uint32_t styleEpoch = 1;
+  uint32_t mapEpoch = 1;
+  uint32_t projectionEpoch = 1;
+  uint64_t lastStyleSignature = 0;
+  uint64_t lastNavigationSignature = 0;
+  uint64_t lastProjectionSignature = 0;
+  uint64_t lastHeadingSessionSignature = 0;
+  uint64_t lastGpsSignature = 0;
+  uint32_t headingSessionEpoch = 1;
+  map_presentation::Presenter posePresenter;
+  map_presentation::HeadingResolver headingResolver;
+  map_presentation::PresentedPose presentedPose{};
+  bool hasPresentedPose = false;
+  uint64_t lastFramePresentationSignature = 0;
+  uint64_t lastForegroundPresentationSignature = 0;
+  RenderResult visibleRenderResult{};
+  std::atomic<bool> renderWorkerShutdown{false};
+  std::atomic<bool> renderWorkerExited{true};
+  std::atomic<bool> renderWorkerRestartAfterExit{false};
 
   // Common
   static const uint16_t tileHeight = 466;        // Tile 9x9 Height Size
@@ -250,7 +421,7 @@ private:
   double prevLat, prevLon;   // Previous Latitude and Longitude
   double destLat, destLon;   // Waypoint destination latitude and longitude
   uint8_t zoomLevel;         // Zoom level for map display
-  bool isMapFound = false;   // Flag to indicate when map is found on SD
+  std::atomic<bool> isMapFound{false}; // Worker-owned map-block load state
   struct tileBounds          // Map boundaries structure
   {
     double lat_min;
@@ -357,6 +528,10 @@ private:
   void resetDragPresentationVisuals();
 
 public:
+  struct VectorMapActivationResult {
+    std::string folder;
+    bool loaded = false;
+  };
   uint16_t mapScrHeight;  // Screen map size height
   uint16_t mapScrWidth;   // Screen map size width
   uint16_t mapScrFull;    // Screen map size in full screen
@@ -381,10 +556,16 @@ public:
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
   bool setVectorMapFolder(const std::string &folder);
   bool probeVectorMapFolder(const std::string &folder);
+  bool requestVectorMapFolderActivation(const std::string &folder);
+  bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
+  bool serviceRenderPipeline(uint32_t nowMs);
+  bool takeFramePublication();
+  bool takeRenderFailure();
+  bool hasPublishedMapFrame() const { return publishedMapFrame; }
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
   void updatePositionOverlay();
@@ -443,8 +624,12 @@ public:
   double rotationRad = 0; // Current rotation in radians
   void toggleRotationMode();
   void updateArrowColor();
-  bool debugIsMapFound() const { return isMapFound; }
-  size_t debugCachedBlockCount() const { return memCache.blocks.size(); }
-  bool debugStreetLabelFontHealthy() const { return labelFontAsset.healthy(); }
+  bool debugIsMapFound() const { return publishedMapFound; }
+  size_t debugCachedBlockCount() const {
+    return cachedBlockCount.load(std::memory_order_acquire);
+  }
+  bool debugStreetLabelFontHealthy() const {
+    return streetLabelFontHealthy.load(std::memory_order_acquire);
+  }
   bool takeStreetLabelRuntimeFailure(std::string &code);
 };

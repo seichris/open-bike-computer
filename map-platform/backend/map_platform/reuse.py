@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from .map_labels import renderer_format_version
+from .map_buildings import BUILDING_PROFILE_VERSION, BUILDING_RENDERER_FORMAT_VERSION
 from .models import Bounds, GeometryMode, MapJob
+from .preview import render_boundary_preview
 
 
 MAP_BLOCK_SIZE_METERS = 1 << 12
 MAP_FOLDER_BLOCKS = 1 << 4
-MAP_REUSE_SCHEMA_VERSION = 2
+MAP_REUSE_SCHEMA_VERSION = 4
 EARTH_RADIUS_METERS = 6_378_137
 WEB_MERCATOR_LIMIT_METERS = math.pi * EARTH_RADIUS_METERS
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -22,6 +24,15 @@ _BLOCK_PATH_RE = re.compile(
     r"VECTMAP/[^/]+/(?P<folder>[+-]\d{3,}[+-]\d{3,})/"
     r"(?P<block_x>\d{1,2})_(?P<block_y>\d{1,2})\.(?P<extension>fmb|fmp)"
 )
+
+
+def _legacy_building_identity() -> dict[str, Any]:
+    body = {
+        "schemaVersion": 1,
+        "mode": "legacy_cell_expanded_request_calibration",
+        "buildingProfileVersion": BUILDING_PROFILE_VERSION,
+    }
+    return {**body, "identitySha256": _document_sha256(body)}
 
 
 @dataclass(frozen=True)
@@ -70,6 +81,8 @@ def reuse_keys(
     producer_build_sha256: str | None,
     producer_image_digest: str | None,
     source_snapshot_sha256: str | None = None,
+    building_preprocessing_identity: dict[str, Any] | None = None,
+    preview_sha256: str | None = None,
 ) -> MapReuseKeys | None:
     """Return fail-closed cache identities for an immutable worker build."""
     if not _SHA256_RE.fullmatch(producer_build_sha256 or ""):
@@ -111,10 +124,51 @@ def reuse_keys(
         "target": job.request.get("target") or {},
         "labels": job.request.get("labels"),
     }
+    if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        building_identity = (
+            building_preprocessing_identity or _legacy_building_identity()
+        )
+        if (
+            not isinstance(building_identity, dict)
+            or not _SHA256_RE.fullmatch(
+                str(building_identity.get("identitySha256") or "")
+            )
+            or _document_sha256(
+                {
+                    key: value
+                    for key, value in building_identity.items()
+                    if key != "identitySha256"
+                }
+            )
+            != building_identity.get("identitySha256")
+        ):
+            return None
+        compatibility_identity = json.loads(json.dumps(building_identity))
+        exact_building_identity_sha256 = compatibility_identity.pop(
+            "identitySha256"
+        )
+        scope_identity = compatibility_identity.get("scope")
+        if isinstance(scope_identity, dict):
+            scope_identity.pop("scopePlanSha256", None)
+        compatibility_document["buildingPreprocessing"] = compatibility_identity
     compatibility = _document_sha256(compatibility_document)
+    if preview_sha256 is None:
+        preview_sha256 = hashlib.sha256(
+            render_boundary_preview(
+                job.source_region.preview_geometry or job.geometry.geometry,
+                job.geometry.bounds,
+            )
+        ).hexdigest()
+    if not _SHA256_RE.fullmatch(preview_sha256):
+        return None
     exact_document = {
         "compatibilityKey": compatibility,
         "packDisplayName": job.artifact_display_name,
+        "sourceManifest": {
+            "name": job.source_region.name,
+            "license": job.source_region.license,
+        },
+        "previewSha256": preview_sha256,
         "geometry": {
             "mode": job.geometry.mode.value,
             "bounds": job.geometry.bounds.to_list(),
@@ -123,6 +177,10 @@ def reuse_keys(
             "corridorWidthM": job.geometry.corridor_width_m,
         },
     }
+    if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        exact_document["buildingPreprocessingIdentitySha256"] = (
+            exact_building_identity_sha256
+        )
     return MapReuseKeys(
         exact=_document_sha256(exact_document),
         compatibility=compatibility,
@@ -208,11 +266,9 @@ def required_blocks(bounds: Bounds) -> set[MapBlock]:
 
 
 def parent_contains_child_blocks(parent: MapJob, child: MapJob) -> bool:
-    if (
-        parent.geometry.mode != GeometryMode.CUSTOM_BBOX
-        or child.geometry.mode != GeometryMode.CUSTOM_BBOX
-    ):
-        return False
+    # This envelope check is only candidate discovery. The subset staging path
+    # derives the selected target-3 block set and requires every semantic block
+    # before accepting sparse polygon or route artifacts.
     parent_min_x, parent_min_y, parent_max_x, parent_max_y = aligned_projected_extent(
         parent.geometry.bounds
     )

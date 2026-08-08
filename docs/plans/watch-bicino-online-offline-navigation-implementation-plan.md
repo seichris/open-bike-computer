@@ -189,7 +189,7 @@ The repository already has:
   GPS, settings, and workout channels;
 - Bicino live navigation characteristics: maneuver `2A6E`, sliding route
   geometry `2A6F`, GPS/ride state `2A72`, and Watch workout telemetry;
-- `CAP2` schema 1 feature negotiation with bits `0...12` assigned;
+- `CAP2` schema 1 feature negotiation with bits `0...13` assigned;
 - offline OpenStreetMap FMB map packs on Bicino.
 
 The current implementation does not have:
@@ -615,11 +615,12 @@ removes the scoped credential.
 
 ### Capability allocation and lease
 
-Current `main` uses `CAP2` schema 1 feature bits through bit 12. Reserve bit 13
-for the complete `watchDirectControllerV1` contract. Do not reuse the older
-draft's bit 8 allocation; bit 8 now belongs to street-label profiles.
+Current `main` uses `CAP2` schema 1 feature bits through bit 13. Reserve bit 14
+and client version 12 for the complete `watchDirectControllerV1` contract. Do
+not reuse the older draft's bit 8 allocation; bit 8 now belongs to street-label
+profiles.
 
-Firmware sets bit 13 only when all of these are active:
+Firmware sets bit 14 only when all of these are active:
 
 - atomic scoped-controller persistence;
 - scoped challenge/response authentication and protected session keys;
@@ -649,7 +650,7 @@ large iPhone `BLEManager.swift` into the Watch target. It must:
   full DeviceID during authentication;
 - connect, discover required characteristics, negotiate limits, authenticate
   the scoped credential, request `CAP2`, and claim the lease;
-- require feature bit 13 and workout bit 7 for the corresponding features;
+- require feature bit 14 and workout bit 7 for the corresponding features;
 - use one bounded priority queue with coalescing for replaceable GPS and route
   windows and ordered delivery for maneuver/workout pairs;
 - share packet encoders and golden vectors with iPhone;
@@ -732,7 +733,7 @@ standalone product has a different data owner and acceptance matrix under #97.
   `WorkoutWatchAvailabilityMonitor.swift` with `PhoneWatchSyncCoordinator`;
 - extend `BikeComputersSettingsView.swift` with direct-Watch enrollment and
   revocation;
-- extend `BLEManager.swift` for controller administration, `CAP2` bit 13, and
+- extend `BLEManager.swift` for controller administration, `CAP2` bit 14, and
   lease-aware iPhone writes.
 
 ### Watch code
@@ -772,7 +773,7 @@ standalone product has a different data owner and acceptance matrix under #97.
 2. Spike Watch cycling directions, GPS, and direct Bicino BLE during an active
    workout.
 3. Measure wrist-down behavior, reconnects, battery, and background limits.
-4. Prototype `CAP2` bit 13 plus controller/lease host tests.
+4. Prototype `CAP2` bit 14 plus controller/lease host tests.
 
 Gate: approved route-source policy and sustained physical Watch GPS/BLE proof.
 
@@ -800,7 +801,7 @@ iPhone/Watch app relaunch, and reports Ready only after hash-verified install.
 ### Phase 3: scoped Watch controller and exclusive lease
 
 1. Add firmware controller persistence, auth, role checks, and lease.
-2. Allocate and document `CAP2` feature bit 13.
+2. Allocate and document `CAP2` feature bit 14 and client version 12.
 3. Add iPhone enrollment/revocation and Watch Keychain storage.
 4. Add adversarial dual-controller, reset, and power-loss tests.
 
@@ -875,7 +876,7 @@ device, OS, firmware, commit, battery, and route-provider evidence.
 ### Firmware tests
 
 - every existing `CAPS` and `CAP2` golden vector remains byte-identical;
-- `CAP2` bit 13 appears only with the complete direct-controller contract;
+- `CAP2` bit 14 appears only with the complete direct-controller contract;
 - scoped auth success plus malformed, wrong-device, HMAC, nonce, replay,
   sequence, revoked, and wrong-role failures;
 - atomic controller stage/commit/revoke across NVS failures and reboot;

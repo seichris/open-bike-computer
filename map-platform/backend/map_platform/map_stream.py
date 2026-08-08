@@ -372,6 +372,11 @@ def _without_redundant_text_fallbacks(manifest: dict[str, Any]) -> dict[str, Any
     return normalized
 
 
+def canonical_stream_manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    """Return the exact canonical manifest embedded in a BIKEMAP1 artifact."""
+    return canonical_manifest_bytes(_without_redundant_text_fallbacks(manifest))
+
+
 def build_stream_prefix(
     manifest: bytes,
     envelope: MapStreamSignatureEnvelope,
@@ -400,9 +405,7 @@ def write_map_stream_artifact(
     resolved_root = root.resolve()
     destination = Path(output_path)
     canonicalization_started = time.perf_counter()
-    manifest_bytes = canonical_manifest_bytes(
-        _without_redundant_text_fallbacks(manifest)
-    )
+    manifest_bytes = canonical_stream_manifest_bytes(manifest)
     canonical_manifest = json.loads(manifest_bytes)
     files = canonical_manifest["files"]
     file_count = len(files)

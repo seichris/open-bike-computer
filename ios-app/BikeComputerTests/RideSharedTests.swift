@@ -291,6 +291,11 @@ enum RideSharedTests {
 
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
+        expect(
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 12 &&
+                WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14,
+            "Watch requests scoped-controller CAP2 version 12 on bit 14"
+        )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature
         cap2.append(UInt8(flags & 0xFF))

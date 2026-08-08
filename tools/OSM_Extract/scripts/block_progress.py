@@ -15,6 +15,17 @@ class BlockProgressReporter:
         self.total = total
         self.completed = 0
         self.stream = stream or sys.stdout
+        self.started = False
+
+    def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        print(
+            f"MAP_PROGRESS:0:{self.total}",
+            file=self.stream,
+            flush=True,
+        )
 
     def advance(self) -> None:
         if self.completed >= self.total:
@@ -33,6 +44,7 @@ class BlockProgressReporter:
         )
 
     def track(self, items: Iterable[T]) -> Iterator[T]:
+        self.start()
         for item in items:
             yield item
             self.advance()

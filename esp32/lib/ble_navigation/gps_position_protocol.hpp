@@ -47,8 +47,9 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
   decoded.longitudeMicrodegrees =
       static_cast<int32_t>(readUInt32LE(bytes, 4));
   if (length >= 10) {
-    decoded.hasHeading = true;
-    decoded.headingDegrees = readUInt16LE(bytes, 8);
+    const uint16_t heading = readUInt16LE(bytes, 8);
+    decoded.hasHeading = heading < 360U;
+    decoded.headingDegrees = decoded.hasHeading ? heading : 0U;
   }
   if (length >= 14) {
     decoded.hasUnixTime = true;
@@ -103,6 +104,7 @@ inline bool decodeAndApply(const uint8_t *bytes, std::size_t length,
   rideData.routeRemaining = 0;
   rideData.hasRouteRemaining = false;
 
+  rideData.headingValid = packet.hasHeading;
   if (packet.hasHeading) {
     rideData.heading = packet.headingDegrees;
   }

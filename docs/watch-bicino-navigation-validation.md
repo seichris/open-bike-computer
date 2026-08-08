@@ -9,7 +9,8 @@ satisfy a physical or route-provider compliance gate.
 
 - Implementation branch merged current `origin/main` at `1e1899807f7ba10d5afc18788a3f24ec55401c40`.
 - Portable iOS navigation/BLE tests passed before implementation on 2026-08-08.
-- `CAP2` bit 13 is reserved but is not advertised by firmware.
+- `CAP2` bit 13 is assigned to explicit invalid GPS heading; scoped Watch
+  control uses bit 14 and client version 12.
 - The exclusive controller lease has a host-testable state machine covering
   grant, renew, busy, role mismatch, activity refresh, release, disconnect,
   revocation, timeout, and `millis()` wrap.
@@ -143,7 +144,7 @@ Confirming implementation snapshot (excluding this self-referential ledger):
 | P3-303 | P1 | Watch Keychain promotion attempted to mutate the synchronizable attribute, which Security does not permit during an item update. | Keep the non-synchronizing attribute in the exact lookup and insertion identity, but remove it from mutable update attributes; test pending-to-active promotion behavior. |
 | P3-304 | P1 | A valid Watch controller orphaned by an interrupted unclaimed-device transition could prevent the next legitimate owner from enrolling a replacement. | Purge an orphan only when the owner state is validly unclaimed; retain fail-closed behavior when the owner record is corrupt. |
 | P3-305 | P1 | Watch credential deletion could be lost when WatchConnectivity was not activated, paired, or installed at the moment of revocation. | Persist exact device/controller revocations on iPhone, deduplicate them, and flush durable queued user-info after every eligible activation transition. |
-| P3-306 | P2 | Temporary ownership-lock contention could produce a valid capability response with direct-Watch bit 13 falsely clear. | Withhold the capability response on lock contention so the client retries; advertise bit 13 only after a clean controller-store boot. |
+| P3-306 | P2 | Temporary ownership-lock contention could produce a valid capability response with direct-Watch bit 14 falsely clear. | Withhold the capability response on lock contention so the client retries; advertise bit 14 only after a clean controller-store boot. |
 | P3-307 | P2 | A lost firmware commit/revoke response or failed Watch promotion could leave stale UI or Keychain authority. | Persist the non-secret controller ID per Bicino and reconcile it with exact `WCTRL_STATUS`; make Watch promotion and deletion idempotent while keeping firmware revocation first. |
 | P3-308 | P2 | The Watch maneuver allowlist accepted unbounded numeric fields later parsed with `atoi`, permitting integer overflow. | Bound icon IDs to 255 and distance to signed 32-bit range before accepting the fallback frame. |
 | P3-309 | P2 | Owner deregistration or local device removal did not necessarily clean the matching Watch credential. | Remember the exact controller ID and queue its Watch deletion only after the corresponding local owner mutation succeeds. |
@@ -179,7 +180,7 @@ Confirming implementation snapshot (excluding this self-referential ledger):
 
 | ID | Severity | Finding | Resolution |
 | --- | --- | --- | --- |
-| P4-401 | P1 | The scoped Watch payload allowlist denied `CAPS`, so a correctly authenticated Watch could never discover bit 13 and become ready. | Allow only the exact read-only five-byte capability request and test malformed and oversized variants; all privileged multiplexed commands remain denied. |
+| P4-401 | P1 | The scoped Watch payload allowlist denied `CAPS`, so a correctly authenticated Watch could never discover bit 14 and become ready. | Allow only the exact read-only five-byte capability request and test malformed and oversized variants; all privileged multiplexed commands remain denied. |
 | P4-402 | P1 | Stopping navigation removed BLE demand before queued route and maneuver clear frames could drain, allowing stale guidance to remain on Bicino. | Keep navigation demand until the protected clear frames have flushed, then release the lease only when no workout demand remains. |
 | P4-403 | P1 | Core and extended Watch workout frames had no shared pair generation, so reconnect or rapid updates could combine frames from different snapshots. | Stamp both frames with one two-bit generation and atomically replace a pending telemetry pair as one queue target. |
 | P4-404 | P1 | Recovery on a loop or out-and-back route could project onto an earlier geometrically identical segment and regress progress. | Restore through a validated step checkpoint and constrain the initial projection to that checkpoint's forward neighborhood. |

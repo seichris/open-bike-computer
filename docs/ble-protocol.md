@@ -37,11 +37,12 @@ firmware field to wrap.
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
 `2A73`, or the workout characteristic, the app falls back to framed binary
-writes over authenticated `2A6E`. A discovered workout characteristic always
-owns workout traffic; current firmware's write-without-response transport is
-flow-controlled through CoreBluetooth and the app's correlated-pair queue.
-`WTLM` is reserved for firmware whose GATT table does not expose the dedicated
-characteristic.
+writes over authenticated `2A6E`. Current firmware exposes acknowledged and
+unacknowledged workout writes, and iOS prefers the acknowledged native route.
+For earlier firmware whose workout characteristic is unacknowledged, iOS uses
+acknowledged `WTLM` whenever `2A6E` supports responses. Native
+write-without-response remains the compatibility route when the command
+transport is also unacknowledged.
 Fallback frame prefixes:
 
 | Prefix | Payload |
@@ -203,7 +204,7 @@ the sole active-slot pointer first and returns
 `WCTRL_REVOKED|<ControllerID>`. iOS then queues exact Keychain deletion to the
 Watch; reachability is not required for deletion. Owner deregistration and the
 physical owner-reset path also remove every active, inactive, and staged Watch
-record. Failed/corrupt active storage disables capability bit 13 and fails
+record. Failed/corrupt active storage disables capability bit 14 and fails
 Watch authentication closed while preserving owner authentication for
 recovery.
 
@@ -336,6 +337,15 @@ DeltaLon: Int16 microdegrees
 
 Coordinates are WGS-84. The iOS app converts Apple Maps route coordinates from
 GCJ-02 to WGS-84 before writing route geometry so it aligns with OSM map blocks.
+The first point is the rider's exact projection onto the route, followed only
+by forward route vertices. The retained packet never contains a rider-to-route
+connector: firmware prepends its current `PresentedPose` while drawing, so the
+blue head stays attached to the arrow without leaving a stale closest segment.
+The app's epoch-scoped bounded matcher sends a new forward window when its
+matched segment changes, subject to a two-second rate limit. This prevents
+loops or self-intersections from making firmware reacquire an older segment;
+ordinary window revisions update the live foreground and do not cancel a 3D
+base render.
 
 A zero-length route geometry packet clears the route overlay on the ESP32. The
 iOS app sends this when navigation stops so stale route geometry is not used for
@@ -348,7 +358,7 @@ Little-endian binary packet:
 ```text
 Lat: Int32 microdegrees
 Lon: Int32 microdegrees
-Heading: UInt16 degrees, 0...359
+Heading: UInt16 degrees, 0...359; 0xFFFF invalid when CAP2 bit 13 is negotiated
 UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
 Speed: UInt16 centimeters/second, 0xFFFF invalid (optional)
 Altitude: Int16 meters (optional)
@@ -362,6 +372,12 @@ coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+
+Client version `11` and CAP2 feature bit `13` negotiate the explicit invalid
+heading sentinel. Without that bit, the app preserves the legacy missing-course
+value `0`; version-11 firmware knows version-10 clients are ambiguous and uses
+the live route bearing before that zero during guidance. Thus new app/old
+firmware, old app/new firmware, and new app/new firmware remain interoperable.
 
 The iOS sender treats GPS as replaceable state, not an ordered history. At most
 one unsent native or `GPSP` position is retained; a newer position replaces only
@@ -382,10 +398,12 @@ Workout telemetry is iOS-to-device, RAM-only, and accepted only after the
 existing local authentication handshake. The logical native payload is exactly
 16 bytes. In an ownership-v2 session it is carried in an `S2` frame on protected
 channel `6`, for a 38-byte native wire write. Current firmware exposes the
-native characteristic as write-without-response, so iOS sends through that
-dedicated transport. The bounded queue admits each correlated core-plus-extended
-pair atomically, preserves pair ordering, coalesces obsolete state, and retries
-until the latest state converges. A cached GATT table uses this fallback:
+native characteristic with both write properties, so iOS uses acknowledged
+delivery. The bounded queue admits each correlated core-plus-extended pair
+atomically, preserves pair ordering, coalesces obsolete state, and retries until
+the latest state converges. Earlier firmware with only an unacknowledged native
+workout characteristic uses this fallback whenever the navigation
+characteristic supports acknowledged writes:
 
 ```text
 "WTLM" | 16-byte workout frame
@@ -395,9 +413,11 @@ The fallback plaintext is exactly 20 bytes before ownership-v2 protection and
 the protected fallback wire write is 42 bytes. Native and fallback payloads use
 the same parser after their authenticated channel is unwrapped. The ownership
 handshake already requires an ATT MTU large enough for either protected write.
-iOS prefers an acknowledged native workout characteristic when available,
-otherwise uses native write-without-response. It uses `WTLM` only when the
-dedicated characteristic is unavailable.
+iOS prefers an acknowledged native workout characteristic when available, then
+acknowledged `WTLM`, and uses native write-without-response only when no
+acknowledged route is available. Persistent no-response backpressure triggers a
+bounded reconnect instead of indefinitely blocking GPS, settings, and workout
+state in the shared queue.
 iOS sends no workout frames unless capability bit `7` is present, so older
 firmware continues using the existing GPS ride fields unchanged.
 
@@ -798,8 +818,11 @@ TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
 
 Schema `1` assigns feature bit `8` to street-label profiles, bit `9` to the
 bird's-eye projection, bit `10` to its first three perspective presets, bit
-`11` to the Very Strong and Maximum presets, and bit `12` to OSM 3D buildings
-and renderer target 3. Bits `0...7` retain their legacy
+`11` to the Very Strong and Maximum presets, bit `12` to OSM 3D buildings
+and renderer target 3, bit `13` to the explicit invalid GPS-heading sentinel,
+and bit `14` to scoped Watch control. Client version `11` requests bit `13`,
+client version `12` requests bit `14`, and version `10` remains a valid CAP2
+client without either newer feature. Bits `0...7` retain their legacy
 meanings above. TLV type `1` carries the persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
@@ -810,14 +833,17 @@ clients accept either envelope.
 Golden vectors:
 
 ```text
-CAP2 schema 1, flags 0x00001fff, PWR enabled/sound 4/volume 80:
-43 41 50 32 01 ff 1f 00 00 01 03 01 04 50
+CAP2 schema 1, flags 0x00003fff, PWR enabled/sound 4/volume 80 (version 11):
+43 41 50 32 01 ff 3f 00 00 01 03 01 04 50
+
+CAP2 schema 1, flags 0x00007fff, PWR enabled/sound 4/volume 80 (version 12):
+43 41 50 32 01 ff 7f 00 00 01 03 01 04 50
 
 CAP2 schema 1, flags 0, no TLVs:
 43 41 50 32 01 00 00 00 00
 ```
 
-Bit `13` (`0x00002000`) reports the complete scoped Watch-controller and
+Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
 exclusive writer-lease contract below. Firmware keeps it clear if the durable
 controller store does not boot cleanly. Merely compiling the lease state
 machine is not sufficient to advertise support.

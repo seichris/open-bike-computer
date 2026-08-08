@@ -8,8 +8,8 @@ enum WatchDirectBLEProtocolV1 {
     static let gpsUUID = "2A72"
     static let authUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
     static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
-    static let capabilityClientVersion: UInt8 = 10
-    static let scopedControllerFeature: UInt32 = 1 << 13
+    static let capabilityClientVersion: UInt8 = 12
+    static let scopedControllerFeature: UInt32 = 1 << 14
     static let workoutTelemetryFeature: UInt32 = 1 << 7
     static let protectedFrameOverhead = 22
 }

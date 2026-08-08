@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -17,7 +18,9 @@ from map_platform.jobs import (
 )
 from map_platform.models import Bounds, JobStatus, MapDownloadReceipt, SourceRegion
 from map_platform.monitoring import MapMonitoringStore
-from map_platform.pipeline import MapBuildResult, run_job
+from map_platform.pipeline import MapBuildPipeline, MapBuildResult, PipelinePaths, run_job
+from map_platform.reuse import MapReuseKeys
+from map_platform.source_cache import SourceCacheError
 from map_platform.sources import SourceIndex
 from map_platform.worker import (
     ExpiredArtifactCleanupError,
@@ -95,6 +98,107 @@ class ArtifactPipeline:
         )
 
 
+class IdentityObservingPipeline(MapBuildPipeline):
+    def __init__(self, paths):
+        super().__init__(paths)
+        self.observed_keys = None
+
+    def reuse_keys(
+        self, job, *, on_phase_progress=None, cancellation_check=None
+    ):
+        del on_phase_progress, cancellation_check
+        del job
+        return MapReuseKeys("a" * 64, "b" * 64)
+
+    @contextmanager
+    def exact_reuse_identity_lease(
+        self,
+        job,
+        *,
+        on_phase_progress=None,
+        cancellation_check=None,
+    ):
+        yield self.reuse_keys(
+            job,
+            on_phase_progress=on_phase_progress,
+            cancellation_check=cancellation_check,
+        )
+
+    def build(self, job, **kwargs):
+        del kwargs
+        self.observed_keys = (
+            job.build_cache_key,
+            job.build_compatibility_key,
+        )
+        pack_path = self.paths.work_root / f"{job.job_id}.zip"
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        pack_path.write_bytes(b"identity-pack")
+        return MapBuildResult("identity-map", pack_path, [])
+
+
+class SelectedProgressPipeline(MapBuildPipeline):
+    def __init__(self, paths, store):
+        super().__init__(paths, building_scope_mode="selected")
+        self.store = store
+        self.statuses_during_progress = []
+
+    def uses_selected_preprocessing(self, job):
+        del job
+        return True
+
+    def reuse_keys(
+        self, job, *, on_phase_progress=None, cancellation_check=None
+    ):
+        del job, on_phase_progress, cancellation_check
+        return None
+
+    def build(self, job, *, on_phase_progress=None, on_progress=None, **kwargs):
+        del kwargs
+        on_phase_progress(
+            {
+                "phase": "building_preprocessing",
+                "unit": "source_index",
+                "completed": None,
+                "total": None,
+                "completedBlocks": 0,
+                "totalBlocks": 12,
+                "indeterminate": True,
+            }
+        )
+        self.statuses_during_progress.append(self.store.get(job.job_id).status)
+        on_progress(12, 12)
+        pack_path = self.paths.work_root / f"{job.job_id}.zip"
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        pack_path.write_bytes(b"selected-progress")
+        return MapBuildResult("map-selected", pack_path, [])
+
+
+class FailingAttemptPipeline(MapBuildPipeline):
+    def reuse_keys(self, job, *, on_phase_progress=None, cancellation_check=None):
+        del job, on_phase_progress, cancellation_check
+        return None
+
+    def build(self, job, **kwargs):
+        del kwargs
+        attempt = self.paths.work_root / job.job_id / self._attempt_id(job)
+        attempt.mkdir(parents=True)
+        (attempt / "partial.tmp").write_bytes(b"partial")
+        raise RuntimeError("conversion failed")
+
+
+class SourceCacheFailingPipeline(MapBuildPipeline):
+    def __init__(self, paths):
+        super().__init__(paths, building_scope_mode="selected")
+
+    def reuse_keys(
+        self, job, *, on_phase_progress=None, cancellation_check=None
+    ):
+        del job, on_phase_progress, cancellation_check
+        raise SourceCacheError(
+            "timed out waiting for source cache lock: /private/secret/source.lock"
+        )
+
+
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.source = SourceRegion(
@@ -128,6 +232,119 @@ class WorkerTests(unittest.TestCase):
             timings = response["phaseTimings"]
             self.assertTrue(any(timing["status"] == "ready" for timing in timings))
             self.assertTrue(all("durationSeconds" in timing for timing in timings))
+
+    def test_selected_preprocessing_keeps_compatible_status_and_nested_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            pipeline = SelectedProgressPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                store,
+            )
+
+            result = MapWorker(store, pipeline, worker_id="worker-selected").run_next()
+
+            self.assertEqual(result.job.status, JobStatus.READY)
+            self.assertEqual(
+                pipeline.statuses_during_progress,
+                [JobStatus.CONVERTING_FEATURES],
+            )
+            statuses = [event["status"] for event in result.job.events]
+            self.assertNotIn(JobStatus.RESOLVING_SOURCE.value, statuses)
+            self.assertNotIn(JobStatus.EXTRACTING_PBF.value, statuses)
+            self.assertEqual(result.job.progress_phase, "block_encoding")
+
+    def test_failed_pipeline_removes_only_attempt_work_and_preserves_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            paths = PipelinePaths(root, root / "work", root / "packs")
+            cache_sentinel = paths.building_cache_root / "valid-cache.json"
+            cache_sentinel.parent.mkdir(parents=True)
+            cache_sentinel.write_bytes(b"valid")
+
+            result = MapWorker(
+                store,
+                FailingAttemptPipeline(paths),
+                worker_id="worker-failing-attempt",
+            ).run_next()
+
+            self.assertEqual(result.job.status, JobStatus.QUEUED)
+            self.assertFalse((paths.work_root / job.job_id).exists())
+            self.assertEqual(cache_sentinel.read_bytes(), b"valid")
+
+    def test_selected_source_cache_failure_is_typed_without_local_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(
+                SourceIndex([self.source]),
+                store,
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            )
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "target": {
+                        "renderer": "esp32-fmb",
+                        "rendererFormatVersion": 3,
+                    },
+                    "labels": {
+                        "profileVersion": 1,
+                        "preferredLanguages": ["en"],
+                        "internationalFallback": "en",
+                    },
+                }
+            )
+
+            result = MapWorker(
+                store,
+                SourceCacheFailingPipeline(
+                    PipelinePaths(root, root / "work", root / "packs")
+                ),
+                worker_id="worker-cache-failure",
+            ).run_next()
+
+            self.assertEqual(
+                result.job.error_code,
+                "source_cache_unavailable",
+            )
+            self.assertIn(f"jobId={job.job_id}", result.job.error)
+            self.assertIn("sourceRegionId=sg", result.job.error)
+            self.assertNotIn("/private/secret", result.job.error)
+            self.assertNotIn("/private/secret", result.job.events[-1]["message"])
+
+    def test_reserved_reuse_keys_are_visible_to_the_build_and_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            pipeline = IdentityObservingPipeline(
+                PipelinePaths(root, root / "work", root / "packs")
+            )
+
+            result = MapWorker(
+                store, pipeline, worker_id="worker-identity"
+            ).run_next()
+
+            self.assertTrue(result.processed)
+            self.assertEqual(pipeline.observed_keys, ("a" * 64, "b" * 64))
+            persisted = store.get(job.job_id)
+            self.assertEqual(persisted.build_cache_key, "a" * 64)
+            self.assertEqual(persisted.build_compatibility_key, "b" * 64)
 
     def test_worker_persists_immutable_artifact_metadata_and_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:

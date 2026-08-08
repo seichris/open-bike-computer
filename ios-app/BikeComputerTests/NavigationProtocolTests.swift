@@ -314,7 +314,7 @@ final class TestBLEManager: BLEManager {
     override func sendGPSPosition(
         lat: Double,
         lon: Double,
-        heading: Double = 0,
+        heading: Double? = nil,
         speedMetersPerSecond: Double? = nil,
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
@@ -596,6 +596,11 @@ struct NavigationProtocolTests {
         testDeveloperLocationOverride()
         testRideActivityPolicy()
         testDeviceGPSPacketBuilder()
+        testNavigationCourseResolver()
+        testRouteGeometryMath()
+        testRouteGeometryTransmissionPolicy()
+        testNavigationEngineUsesRouteBearingForInvalidCourse()
+        testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testGPSQueuePolicy()
@@ -648,6 +653,7 @@ struct NavigationProtocolTests {
         testNavigationEngineUsesDegenerateStepFallback()
         testNavigationEngineKeepsProgressAtRouteCrossing()
         testNavigationEngineResendsWhenBLEBecomesReady()
+        testNavigationEngineDefersReconnectGPSUntilReadinessCommits()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
@@ -4292,7 +4298,7 @@ struct NavigationProtocolTests {
         assertEqual(data.count, 30, "extended GPS packet has expected byte length")
         assertEqual(readInt32LE(data, offset: 0), 37_123_456, "GPS packet stores latitude microdegrees")
         assertEqual(readInt32LE(data, offset: 4), -122_654_321, "GPS packet stores longitude microdegrees")
-        assertEqual(readUInt16LE(data, offset: 8), 359, "GPS packet clamps heading")
+        assertEqual(readUInt16LE(data, offset: 8), 1, "GPS packet normalizes heading through wraparound")
         assertEqual(readUInt32LE(data, offset: 10), 1_234_567_890, "GPS packet stores Unix time")
         assertEqual(readUInt16LE(data, offset: 14), 555, "GPS packet stores speed in centimeters per second")
         assertEqual(readInt16LE(data, offset: 16), 42, "GPS packet stores altitude in meters")
@@ -4301,8 +4307,356 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(data, offset: 26), 9877, "GPS packet stores rounded route remaining meters")
 
         let invalidData = DeviceGPSPacketBuilder.data(lat: 0, lon: 0, unixTime: 0)
+        assertEqual(readUInt16LE(invalidData, offset: 8), DeviceGPSPacketBuilder.invalidHeadingDegrees, "missing heading uses invalid sentinel")
         assertEqual(readUInt16LE(invalidData, offset: 14), DeviceGPSPacketBuilder.invalidSpeedCmps, "missing speed uses invalid sentinel")
         assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
+
+        let legacyHeading = DeviceGPSHeadingWirePolicy.heading(
+            nil,
+            supportsExplicitInvalidHeading: false
+        )
+        let modernHeading = DeviceGPSHeadingWirePolicy.heading(
+            nil,
+            supportsExplicitInvalidHeading: true
+        )
+        assertEqual(Int(legacyHeading ?? -1), 0,
+                    "legacy firmware keeps the historical missing-course zero")
+        assert(modernHeading == nil,
+               "negotiated firmware receives the explicit invalid-heading sentinel")
+    }
+
+    static func testNavigationCourseResolver() {
+        var resolver = NavigationCourseResolver()
+        resolver.reset(epoch: 1)
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: 361,
+                routeBearing: 90,
+                navigationActive: true
+            ) ?? -1),
+            1,
+            "valid measured course is preferred and normalized"
+        )
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: 92,
+                navigationActive: true
+            ) ?? -1),
+            92,
+            "invalid measured course falls back to route bearing"
+        )
+        assertEqual(
+            Int(resolver.resolve(
+                measuredCourse: nil,
+                routeBearing: nil,
+                navigationActive: true
+            ) ?? -1),
+            92,
+            "active navigation remembers the last valid course"
+        )
+        resolver.reset(epoch: 2)
+        assert(
+            resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: nil,
+                navigationActive: true
+            ) == nil,
+            "a new navigation epoch cannot inherit a stale heading"
+        )
+        assert(
+            resolver.resolve(
+                measuredCourse: -1,
+                routeBearing: 90,
+                navigationActive: false
+            ) == nil,
+            "idle mode does not accidentally activate course-up from a route"
+        )
+    }
+
+    static func testRouteGeometryMath() {
+        let route = [
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+            CLLocationCoordinate2D(latitude: 37.0, longitude: -121.999),
+            CLLocationCoordinate2D(latitude: 37.001, longitude: -121.999)
+        ]
+        let rider = CLLocationCoordinate2D(
+            latitude: 37.0001,
+            longitude: -121.9996
+        )
+        guard let projection = RouteGeometryMath.nearestProjection(
+            to: rider,
+            on: route
+        ) else {
+            assert(false, "route projection exists")
+            return
+        }
+        assertEqual(projection.segmentIndex, 0, "nearest route segment is selected")
+        assert(abs(projection.coordinate.latitude - 37.0) < 0.000001,
+               "projection lies exactly on the route")
+        let window = RouteGeometryMath.slidingWindow(
+            riderCoordinate: rider,
+            routePoints: route,
+            maximumPointCount: 4
+        )
+        assertCoordinate(
+            window[0],
+            latitude: projection.coordinate.latitude,
+            longitude: projection.coordinate.longitude,
+            "route window begins at the exact route projection"
+        )
+        assert(window.count >= 2, "route window retains the projected route and future geometry")
+        assert(
+            CLLocation(latitude: window[0].latitude, longitude: window[0].longitude)
+                .distance(from: CLLocation(latitude: rider.latitude, longitude: rider.longitude)) > 1,
+            "retained route geometry does not contain a stale rider connector"
+        )
+        let bearing = RouteGeometryMath.bearingNear(rider, routePoints: route)
+        assert(bearing != nil && abs((bearing ?? 0) - 90) < 1,
+               "route bearing follows the nearest eastbound segment")
+
+        var matcher = RouteProgressMatcher(
+            lookBehindSegments: 1,
+            lookAheadSegments: 3,
+            reacquireDistanceMeters: 50
+        )
+        let crossingRoute = [
+            CLLocationCoordinate2D(latitude: 31.2300, longitude: 121.4700),
+            CLLocationCoordinate2D(latitude: 31.2300, longitude: 121.4710),
+            CLLocationCoordinate2D(latitude: 31.2300, longitude: 121.4720),
+            CLLocationCoordinate2D(latitude: 31.2310, longitude: 121.4720),
+            CLLocationCoordinate2D(latitude: 31.2320, longitude: 121.4720),
+            CLLocationCoordinate2D(latitude: 31.2310, longitude: 121.4710),
+            CLLocationCoordinate2D(latitude: 31.2300, longitude: 121.4700),
+            CLLocationCoordinate2D(latitude: 31.2290, longitude: 121.4710),
+            CLLocationCoordinate2D(latitude: 31.2300, longitude: 121.4720)
+        ]
+        _ = matcher.projection(
+            to: CLLocationCoordinate2D(latitude: 31.2310, longitude: 121.4710),
+            on: crossingRoute
+        )
+        _ = matcher.projection(
+            to: CLLocationCoordinate2D(latitude: 31.2305, longitude: 121.4705),
+            on: crossingRoute
+        )
+        let crossing = matcher.projection(
+            to: crossingRoute[0],
+            on: crossingRoute
+        )
+        assert((crossing?.segmentIndex ?? -1) >= 4,
+               "epoch-scoped matching does not jump back to the first branch at a crossing")
+
+        matcher.reset()
+        let resetProjection = matcher.projection(to: crossingRoute[0], on: crossingRoute)
+        assertEqual(resetProjection?.segmentIndex ?? -1, 0,
+                    "route replacement resets progress and permits global matching")
+
+        let backtrackRoute = (0...11).map { index in
+            CLLocationCoordinate2D(
+                latitude: 31.2300,
+                longitude: 121.4700 + Double(index) * 0.001
+            )
+        }
+        var backtrackMatcher = RouteProgressMatcher(
+            lookBehindSegments: 1,
+            lookAheadSegments: 3,
+            reacquireDistanceMeters: 50
+        )
+        let established = backtrackMatcher.projection(
+            to: CLLocationCoordinate2D(
+                latitude: 31.2300,
+                longitude: 121.4785
+            ),
+            on: backtrackRoute
+        )
+        assertEqual(established?.segmentIndex ?? -1, 8,
+                    "matcher establishes late-route forward progress")
+        let backtracked = backtrackMatcher.projection(
+            to: CLLocationCoordinate2D(
+                latitude: 31.2300,
+                longitude: 121.4725
+            ),
+            on: backtrackRoute
+        )
+        assertEqual(backtracked?.segmentIndex ?? -1, 2,
+                    "a deliberate far backtrack escapes the bounded window and reacquires globally")
+    }
+
+    static func testRouteGeometryTransmissionPolicy() {
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 4,
+                lastSentSegmentIndex: nil,
+                maximumPointCount: 30
+            ),
+            "the first route window is always sent"
+        )
+        assert(
+            !RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 4,
+                lastSentSegmentIndex: 4,
+                maximumPointCount: 30
+            ),
+            "remaining on one segment does not churn route revisions"
+        )
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 5,
+                lastSentSegmentIndex: 4,
+                maximumPointCount: 30
+            ),
+            "advancing one segment requests a fresh forward window"
+        )
+        assert(
+            RouteGeometryTransmissionPolicy.shouldSend(
+                currentSegmentIndex: 2,
+                lastSentSegmentIndex: 24,
+                maximumPointCount: 30
+            ),
+            "backtracking or a replacement route refreshes geometry"
+        )
+    }
+
+    @MainActor
+    static func testNavigationEngineUsesRouteBearingForInvalidCourse() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                CLLocationCoordinate2D(latitude: 37.0, longitude: -122.0),
+                CLLocationCoordinate2D(latitude: 37.0, longitude: -121.99)
+            ]
+        )
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.0, longitude: -121.999),
+            altitude: 0,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: -1,
+            speed: 5,
+            timestamp: Date()
+        )
+        engine.startNavigation(with: route, initialLocation: location)
+        guard let packet = manager.sentGPSPositions.last else {
+            assert(false, "navigation sends a GPS packet")
+            return
+        }
+        let heading = readUInt16LE(packet, offset: 8)
+        assert(heading >= 89 && heading <= 91,
+               "invalid Core Location course uses route-segment bearing instead of north")
+
+        guard let geometry = engine.extractSlidingWindowGeometry(currentLocation: location) else {
+            assert(false, "navigation extracts route geometry")
+            return
+        }
+        let expected = CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
+        assert(abs(readInt32LE(geometry, offset: 0) -
+                   Int32(expected.latitude * 1_000_000)) <= 1,
+               "route geometry starts at the route projection latitude")
+        assert(abs(readInt32LE(geometry, offset: 4) -
+                   Int32(expected.longitude * 1_000_000)) <= 1,
+               "route geometry starts at the route projection longitude")
+        assertEqual(engine.routeCoordinateExtractionCount, 1,
+                    "route coordinates are extracted once per navigation epoch")
+        engine.stopNavigation()
+    }
+
+    @MainActor
+    static func testShanghaiNormalAndTestNavigationShareWGSDeviceSpace() {
+        let wgsStart = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let gcjStart = CoordinateConverter.wgs84ToGCJ02(coordinate: wgsStart)
+        let gcjEnd = CLLocationCoordinate2D(
+            latitude: gcjStart.latitude,
+            longitude: gcjStart.longitude + 0.001
+        )
+        let route = TestRoute(
+            instructions: "Continue east",
+            coordinates: [gcjStart, gcjEnd]
+        )
+
+        func assertAligned(
+            _ manager: TestBLEManager,
+            expectedWGS: CLLocationCoordinate2D,
+            mode: String
+        ) {
+            guard let gps = manager.sentGPSPositions.last,
+                  let geometry = manager.sentRouteGeometry.last else {
+                assert(false, "\(mode) navigation sends GPS and route geometry")
+                return
+            }
+            let gpsCoordinate = CLLocationCoordinate2D(
+                latitude: Double(readInt32LE(gps, offset: 0)) / 1_000_000,
+                longitude: Double(readInt32LE(gps, offset: 4)) / 1_000_000
+            )
+            let routeCoordinate = CLLocationCoordinate2D(
+                latitude: Double(readInt32LE(geometry, offset: 0)) / 1_000_000,
+                longitude: Double(readInt32LE(geometry, offset: 4)) / 1_000_000
+            )
+            let expectedLocation = CLLocation(
+                latitude: expectedWGS.latitude,
+                longitude: expectedWGS.longitude
+            )
+            assert(
+                CLLocation(latitude: gpsCoordinate.latitude, longitude: gpsCoordinate.longitude)
+                    .distance(from: expectedLocation) < 2,
+                "\(mode) GPS remains WGS-84 in Shanghai"
+            )
+            assert(
+                CLLocation(latitude: routeCoordinate.latitude, longitude: routeCoordinate.longitude)
+                    .distance(from: expectedLocation) < 3,
+                "\(mode) MAPR geometry is converted from MapKit GCJ-02 into the same WGS-84 space"
+            )
+            let heading = readUInt16LE(gps, offset: 8)
+            assert(heading >= 89 && heading <= 91,
+                   "\(mode) navigation follows the eastbound route instead of north")
+        }
+
+        let normalManager = TestBLEManager()
+        normalManager.isConnected = true
+        normalManager.isNavigationReady = true
+        let normalEngine = NavigationEngine()
+        normalEngine.setBLEManager(normalManager)
+        normalEngine.startNavigation(with: route)
+        let liveWGS = CLLocation(
+            coordinate: wgsStart,
+            altitude: 0,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: -1,
+            speed: 5,
+            timestamp: Date()
+        )
+        assert(normalEngine.processExternalLocation(liveWGS),
+               "normal Shanghai WGS fix is accepted against the MapKit route")
+        assertAligned(normalManager, expectedWGS: wgsStart, mode: "normal")
+        assertEqual(normalEngine.routeCoordinateExtractionCount, 1,
+                    "normal navigation caches the MKRoute polyline")
+        normalEngine.stopNavigation()
+
+        let testManager = TestBLEManager()
+        testManager.isConnected = true
+        testManager.isNavigationReady = true
+        let testEngine = NavigationEngine()
+        testEngine.setBLEManager(testManager)
+        testEngine.startNavigation(with: route, isTestMode: true)
+        testEngine.updateSimulationForTesting(timeInterval: 1)
+        guard let simulatedGCJ = testEngine.simulatedPosition else {
+            assert(false, "test navigation advances along the Shanghai route")
+            testEngine.stopNavigation()
+            return
+        }
+        assertAligned(
+            testManager,
+            expectedWGS: CoordinateConverter.gcj02ToWGS84(coordinate: simulatedGCJ),
+            mode: "test"
+        )
+        assertEqual(testEngine.routeCoordinateExtractionCount, 1,
+                    "test navigation uses the same cached MKRoute polyline")
+        testEngine.stopNavigation()
     }
 
     static func testOfflineMapCustomBBoxRequest() {
@@ -4873,9 +5227,14 @@ struct NavigationProtocolTests {
               "jobId": "job-progress",
               "status": "converting_features",
               "progress": {
+                "phase": "building_preprocessing",
+                "unit": "calibration_cells",
+                "completed": 2,
+                "total": 5,
                 "completedBlocks": 79,
                 "totalBlocks": 100,
-                "fraction": 0.79
+                "fraction": 0.4,
+                "indeterminate": false
               }
             }
             """.utf8
@@ -4888,8 +5247,11 @@ struct NavigationProtocolTests {
 
         assertEqual(progress.completedBlocks, 79, "map progress decodes completed blocks")
         assertEqual(progress.totalBlocks, 100, "map progress decodes total blocks")
-        assertEqual(progress.percentage, 79, "map progress calculates percentage")
+        assertEqual(progress.phase, "building_preprocessing", "map progress decodes phase")
+        assertEqual(progress.unit, "calibration_cells", "map progress decodes unit")
+        assertEqual(progress.percentage, 40, "map progress calculates phase percentage")
         assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
+        assertEqual(progress.detail, "Preparing deterministic building heights", "map progress explains preprocessing")
     }
 
     static func testOfflineMapJobProgressAbsentFallback() {
@@ -5261,6 +5623,12 @@ struct NavigationProtocolTests {
             """.utf8
         )
         let progressJob = try? JSONDecoder().decode(OfflineMapJob.self, from: progressPayload)
+        let cacheWaitPayload = Data(
+            """
+            {"jobId":"cache-wait-job","status":"converting_features","progress":{"phase":"building_preprocessing","unit":"source_cache_wait","completedBlocks":0,"totalBlocks":10,"indeterminate":true}}
+            """.utf8
+        )
+        let cacheWaitJob = try? JSONDecoder().decode(OfflineMapJob.self, from: cacheWaitPayload)
 
         assertEqual(
             OfflineMapProgressPresentation.value(job: legacy, downloadProgress: 0),
@@ -5276,6 +5644,16 @@ struct NavigationProtocolTests {
             OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
             0.4,
             "generation progress takes precedence while conversion is active"
+        )
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: cacheWaitJob, downloadProgress: 0),
+            nil,
+            "source cache waits remain indeterminate"
+        )
+        assertEqual(
+            cacheWaitJob?.progress?.detail,
+            "Waiting for the verified map source",
+            "source cache waits have a distinct progress explanation"
         )
     }
 
@@ -9383,8 +9761,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveCapabilityMask, 1 << 10, "CAP2 bit 10 advertises bird's-eye perspective")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask, 1 << 11, "CAP2 bit 11 advertises stronger bird's-eye perspectives")
         assertEqual(DeviceBLEProtocol.osm3DBuildingsCapabilityMask, 1 << 12, "CAP2 bit 12 advertises OSM 3D buildings")
-        assertEqual(DeviceBLEProtocol.scopedWatchControllerCapabilityMask, 1 << 13, "CAP2 bit 13 advertises scoped Watch control")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 10, "capability version switches to CAP2 without colliding with legacy versions 7 through 9")
+        assertEqual(DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask, 1 << 13, "CAP2 bit 13 advertises explicit invalid GPS headings")
+        assertEqual(DeviceBLEProtocol.scopedWatchControllerCapabilityMask, 1 << 14, "CAP2 bit 14 advertises scoped Watch control")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 12, "capability version negotiates scoped Watch control after explicit invalid headings in version 11")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -10457,17 +10836,26 @@ struct NavigationProtocolTests {
 
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: true,
-            hasNativeWriteWithoutResponse: true
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
         ), .nativeWithResponse,
                     "an acknowledged native workout characteristic is preferred")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: true
-        ), .nativeWithoutResponse,
-                    "the dedicated workout characteristic does not inherit navigation backpressure")
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: true
+        ), .navigationFallback,
+                    "an acknowledged fallback avoids priority-lane no-response head-of-line blocking")
         assertEqual(WorkoutTelemetryWriteRouting.route(
             hasNativeWriteWithResponse: false,
-            hasNativeWriteWithoutResponse: false
+            hasNativeWriteWithoutResponse: true,
+            navigationExpectsWriteResponse: false
+        ), .nativeWithoutResponse,
+                    "native no-response remains available when the command transport is also unacknowledged")
+        assertEqual(WorkoutTelemetryWriteRouting.route(
+            hasNativeWriteWithResponse: false,
+            hasNativeWriteWithoutResponse: false,
+            navigationExpectsWriteResponse: false
         ), .navigationFallback,
                     "firmware without a dedicated workout transport uses navigation fallback")
 
@@ -11028,10 +11416,21 @@ struct NavigationProtocolTests {
                "CAP2 bit 11 preserves stronger bird's-eye perspective support")
         assert(manager.supports3DBuildings,
                "CAP2 bit 12 enables OSM 3D-building maps and controls")
-        assert(manager.supportsScopedWatchController,
-               "CAP2 bit 13 enables scoped Watch enrollment")
+        assert(manager.supportsExplicitInvalidGPSHeading,
+               "CAP2 bit 13 enables the explicit missing-course sentinel")
+        assert(!manager.supportsScopedWatchController,
+               "CAP2 bit 13 does not collide with scoped Watch enrollment")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
+
+        let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x7F, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithScopedWatch),
+               "CAP2 scoped Watch notification should be consumed")
+        assert(manager.supportsExplicitInvalidGPSHeading,
+               "CAP2 bit 13 remains the explicit missing-course sentinel")
+        assert(manager.supportsScopedWatchController,
+               "CAP2 bit 14 enables scoped Watch enrollment")
 
         let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
@@ -11040,12 +11439,20 @@ struct NavigationProtocolTests {
                "CAP2 power configuration TLV is consumed")
         assert(manager.supportsStreetLabels,
                "CAP2 preserves the extended street-label capability")
+        assert(!manager.supportsExplicitInvalidGPSHeading,
+               "CAP2 version 10 firmware without bit 13 keeps legacy heading encoding")
+        assert(!manager.supportsScopedWatchController,
+               "CAP2 firmware without bit 14 keeps scoped Watch control disabled")
 
         let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
         assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
                "malformed CAP2 is consumed for retry")
         assert(!manager.hasReceivedDeviceCapabilities,
                "duplicate CAP2 TLVs are rejected")
+        assert(!manager.supportsExplicitInvalidGPSHeading,
+               "malformed capabilities clear explicit invalid-heading support")
+        assert(!manager.supportsScopedWatchController,
+               "malformed capabilities clear scoped Watch support")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -12168,6 +12575,31 @@ struct NavigationProtocolTests {
                "missing acknowledged completion triggers bounded recovery")
         assert(!watchdogManager.isNavigationReady,
                "stall recovery closes the unusable navigation session")
+
+        let noResponseWatchdogManager = BLEManager()
+        noResponseWatchdogManager.isConnected = true
+        noResponseWatchdogManager.isNavigationReady = true
+        var noResponseRecoveries = 0
+        noResponseWatchdogManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: false,
+                canSend: { false },
+                write: { _ in
+                    assert(false, "backpressured transport must not write")
+                }
+            )
+        )
+        noResponseWatchdogManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { noResponseRecoveries += 1 }
+        )
+        assert(noResponseWatchdogManager.requestDeviceCapabilities(),
+               "no-response watchdog fixture admits the pending write")
+        assert(waitForMainLoop(timeout: 1) { noResponseRecoveries == 1 },
+               "persistent no-response backpressure triggers bounded recovery")
+        assert(!noResponseWatchdogManager.isNavigationReady,
+               "no-response recovery closes the wedged navigation session")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
@@ -13660,6 +14092,36 @@ struct NavigationProtocolTests {
         assertEqual(String(fields[2]), "Turn left onto Test Road", "resent packet keeps current instruction")
     }
 
+    static func testNavigationEngineDefersReconnectGPSUntilReadinessCommits() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 64,
+                expectsWriteResponse: false,
+                canSend: { true },
+                write: { writes.append($0) }
+            )
+        )
+
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.processExternalLocation(
+            CLLocation(latitude: 1.305, longitude: 103.855)
+        )
+        assert(writes.isEmpty,
+               "cached GPS remains unsent before authentication readiness")
+
+        manager.isNavigationReady = true
+        assert(waitForMainLoop(timeout: 1) {
+            writes.contains { data in
+                String(data: data.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.gpsPositionFallbackPrefix
+            }
+        }, "committed readiness resends cached GPS and can open the device map")
+    }
+
     static func testNavigationEngineResendsRouteGeometryNearLastLocation() {
         let manager = TestBLEManager()
         manager.isConnected = true
@@ -14308,9 +14770,9 @@ struct NavigationProtocolTests {
         }
         assertCoordinate(
             replacementStart,
-            latitude: firstManeuver.latitude,
-            longitude: firstManeuver.longitude,
-            "replacement geometry starts near the rider's latest route position"
+            latitude: latest.coordinate.latitude,
+            longitude: latest.coordinate.longitude,
+            "replacement geometry starts at the rider's latest route position"
         )
         assert(
             readUInt32LE(telemetryAfterReplacement, offset: 18) >= distanceBeforeReplacement,

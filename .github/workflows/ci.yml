@@ -230,6 +230,19 @@ jobs:
             tools/tests/test_map_projection.cpp \
             -o /tmp/test_map_projection
           /tmp/test_map_projection
+      - name: Render-ahead map architecture host tests
+        run: |
+          for test in \
+            test_map_render_job \
+            test_map_presentation \
+            test_map_building_admission \
+            test_map_route_geometry \
+            test_map_building_workspace; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
       - name: Map profile protocol host tests
         run: |
           g++ -std=c++17 \
@@ -254,7 +267,7 @@ jobs:
           /tmp/test_scoped_watch_payload_policy
       - name: Filled line rasterizer host tests
         run: |
-          g++ -std=c++17 -Wall -Wextra \
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_line_rasterizer.cpp \
             -o /tmp/test_line_rasterizer
           /tmp/test_line_rasterizer

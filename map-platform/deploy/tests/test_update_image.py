@@ -127,6 +127,16 @@ class UpdateImageTests(unittest.TestCase):
             self.assertEqual(deployment.worker_source_commit, pending_worker_commit)
             self.assertEqual(deployment.worker_digest, pending_worker_digest)
 
+    def test_selected_building_scope_mode_is_wired_to_api_and_worker(self) -> None:
+        compose = self.compose.read_text(encoding="utf-8")
+        self.assertEqual(
+            compose.count(
+                "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE: "
+                "${MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE:-shadow}"
+            ),
+            2,
+        )
+
     def test_update_rejects_mutable_or_malformed_digest(self) -> None:
         for digest in ("latest", "sha256:1234", "sha256:" + "A" * 64):
             with self.subTest(digest=digest), self.assertRaisesRegex(

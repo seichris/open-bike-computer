@@ -97,6 +97,7 @@ static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
+static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
@@ -875,6 +876,8 @@ static bool unwrapOwnerAuthenticatedPayload(
   xSemaphoreGive(deviceOwnershipMutex);
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     bleDebugStats.authenticated = false;
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
@@ -1117,6 +1120,8 @@ static void handleAuthPayload(const std::string &frame) {
     }
     if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
       bleSessionAuthenticated = false;
+      bleSessionSupportsExplicitInvalidGpsHeading.store(
+          false, std::memory_order_release);
       bleDebugStats.authenticated = false;
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
@@ -1157,6 +1162,8 @@ static void handleAuthPayload(const std::string &frame) {
         break;
       case device_ownership::Event::Unpaired:
         bleSessionAuthenticated = false;
+        bleSessionSupportsExplicitInvalidGpsHeading.store(
+            false, std::memory_order_release);
         bleDebugStats.authenticated = false;
         ownershipAdvertisingDirty = true;
         queueOwnershipUiUpdate();
@@ -1214,6 +1221,8 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -1783,7 +1792,14 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
-    if (scopedWatchControllerReady) {
+    if (clientVersion >= device_capabilities_protocol::
+                             EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::
+          EXPLICIT_INVALID_GPS_HEADING_FEATURE;
+    }
+    if (scopedWatchControllerReady &&
+        clientVersion >= device_capabilities_protocol::
+                             SCOPED_WATCH_CONTROLLER_CLIENT_VERSION) {
       featureFlags |=
           device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE;
     }
@@ -1855,6 +1871,10 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsStreetLabels =
         clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
     bleSessionSupports3DBuildings = bleSessionSupportsStreetLabels;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(
+        clientVersion >=
+            device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
+        std::memory_order_release);
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
@@ -2159,8 +2179,16 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
         "BLE route geometry: seeded map start; transitioning to map");
   }
 
+  const bool hadRoute = routeOverlay.hasRoute();
   routeOverlay.parseRouteData(data, len);
-  requestMapRender(map_render_policy::Reason::Route);
+  // Route geometry is a live foreground input, not part of the expensive base
+  // frame. Only a transition into or out of usable route geometry forces a
+  // base request; ordinary sliding-window replacement is picked up on the next
+  // UI tick and must not cancel a long 3D render. The reverse transition also
+  // covers a short/malformed replacement without leaving stale course-up
+  // semantics behind.
+  if (hadRoute != routeOverlay.hasRoute())
+    requestMapRender(map_render_policy::Reason::Route);
 }
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
@@ -2750,6 +2778,8 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -2808,6 +2838,8 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -3331,7 +3363,8 @@ void BLENavigationServer::init(const char *deviceName) {
   // Workout frames are accepted only after the same local authentication
   // handshake as navigation traffic and remain in RAM-only telemetry state.
   pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
-      WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+      WORKOUT_TELEMETRY_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pWorkoutTelemetryCharacteristic->setCallbacks(
       new MyWorkoutTelemetryCharacteristicCallbacks());
 
@@ -3530,6 +3563,11 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
   return stats;
 }
 
+bool BLENavigationServer::supportsExplicitInvalidGpsHeading() const {
+  return bleSessionSupportsExplicitInvalidGpsHeading.load(
+      std::memory_order_acquire);
+}
+
 bool BLENavigationServer::forgetOwner() {
   bool cleared = false;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
@@ -3541,6 +3579,8 @@ bool BLENavigationServer::forgetOwner() {
     return false;
   }
   bleSessionAuthenticated = false;
+  bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                    std::memory_order_release);
   bleDebugStats.authenticated = false;
   ownershipAdvertisingDirty = true;
   queueOwnershipUiUpdate();

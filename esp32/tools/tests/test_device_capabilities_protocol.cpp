@@ -19,13 +19,22 @@ int main() {
   static_assert(device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE ==
                 (1UL << 12));
   static_assert(
-      device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE ==
+      device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION ==
+      11);
+  static_assert(
+      device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_FEATURE ==
       (1UL << 13));
+  static_assert(
+      device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_CLIENT_VERSION ==
+      12);
+  static_assert(
+      device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE ==
+      (1UL << 14));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
-      0x00001fff, power, true, output, sizeof(output));
-  const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x1f,
+      0x00003fff, power, true, output, sizeof(output));
+  const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x3f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
   static_assert(sizeof(expected) == device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));
@@ -41,7 +50,7 @@ int main() {
           device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE,
           nullptr, false, output, sizeof(output));
   const uint8_t expectedScopedController[] = {'C', 'A', 'P', '2', 1,
-                                               0x00, 0x20, 0x00, 0x00};
+                                               0x00, 0x40, 0x00, 0x00};
   assert(scopedControllerSize == sizeof(expectedScopedController));
   for (size_t index = 0; index < scopedControllerSize; ++index)
     assert(output[index] == expectedScopedController[index]);
