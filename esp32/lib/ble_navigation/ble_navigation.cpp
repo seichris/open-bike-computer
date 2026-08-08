@@ -19,6 +19,7 @@
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "device_capabilities_protocol.hpp"
+#include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -843,7 +844,11 @@ static bool requireAuthenticated(const char *payloadName) {
 
 static bool unwrapOwnerAuthenticatedPayload(
     device_ownership::AuthenticatedChannel channel, const std::string &frame,
-    std::string &payload, const char *payloadName) {
+    std::string &payload, const char *payloadName,
+    bool *wasScopedWatchSession = nullptr) {
+  if (wasScopedWatchSession != nullptr) {
+    *wasScopedWatchSession = false;
+  }
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     payload = frame;
@@ -852,10 +857,18 @@ static bool unwrapOwnerAuthenticatedPayload(
   const bool requiresFrame = deviceOwnership.isSessionAuthenticated();
   const bool authenticationStateDiverged =
       bleSessionAuthenticated && !requiresFrame;
-  const bool accepted = !authenticationStateDiverged &&
-                        (!requiresFrame ||
-                         deviceOwnership.unwrapAuthenticatedPayload(
-                             channel, frame, payload));
+  const bool validFrame =
+      !authenticationStateDiverged &&
+      (!requiresFrame ||
+       deviceOwnership.unwrapAuthenticatedPayload(channel, frame, payload));
+  const bool accepted =
+      validFrame &&
+      (!requiresFrame ||
+       channel == device_ownership::AuthenticatedChannel::Auth ||
+       deviceOwnership.authorizeRideWrite(channel, millis()));
+  if (accepted && wasScopedWatchSession != nullptr) {
+    *wasScopedWatchSession = deviceOwnership.isWatchRideSession();
+  }
   if (!requiresFrame) {
     payload = frame;
   }
@@ -869,7 +882,7 @@ static bool unwrapOwnerAuthenticatedPayload(
   if (!accepted) {
     bleDebugStats.rejectedUnauthenticatedCount++;
     bleDebugStats.lastRejectedUnauthenticatedMs = millis();
-    Serial.printf("BLE: Rejected %s: invalid authenticated frame\n",
+    Serial.printf("BLE: Rejected %s: invalid frame, role, or controller lease\n",
                   payloadName == nullptr ? "payload" : payloadName);
   }
   return accepted;
@@ -1126,7 +1139,16 @@ static void handleAuthPayload(const std::string &frame) {
       case device_ownership::Event::Authenticated:
         completeBleSessionAuthentication();
         queueOwnershipUiUpdate();
-        Serial.println("BLE: Owner session authenticated");
+        Serial.println("BLE: Scoped controller session authenticated");
+        break;
+      case device_ownership::Event::WatchControllerStaged:
+        Serial.println("BLE: Watch controller enrollment staged");
+        break;
+      case device_ownership::Event::WatchControllerCommitted:
+        Serial.println("BLE: Watch controller enrollment committed");
+        break;
+      case device_ownership::Event::WatchControllerRevoked:
+        Serial.println("BLE: Watch controller credential revoked");
         break;
       case device_ownership::Event::Renamed:
         ownershipAdvertisingDirty = true;
@@ -1740,13 +1762,31 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   const uint8_t extendedCapabilityFlags =
       map_profile_protocol::extendedCapabilityFlagsForClient(clientVersion);
   if (useCap2) {
-    const uint32_t featureFlags =
+    bool scopedWatchControllerReady = false;
+    if (deviceOwnershipReady &&
+        (deviceOwnershipMutex == nullptr ||
+         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) !=
+             pdTRUE)) {
+      Serial.println(
+          "BLE Capabilities: ownership state unavailable; retry required");
+      return;
+    }
+    if (deviceOwnershipReady) {
+      scopedWatchControllerReady =
+          deviceOwnership.watchControllerSubsystemReady();
+      xSemaphoreGive(deviceOwnershipMutex);
+    }
+    uint32_t featureFlags =
         static_cast<uint32_t>(response[4]) |
         device_capabilities_protocol::STREET_LABELS_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
+    if (scopedWatchControllerReady) {
+      featureFlags |=
+          device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -2817,9 +2857,20 @@ public:
       return;
     }
     std::string value;
+    bool scopedWatchSession = false;
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
-            "navigation characteristic")) {
+            "navigation characteristic", &scopedWatchSession)) {
+      return;
+    }
+
+    if (scopedWatchSession &&
+        !scoped_watch_payload_policy::allowsNavigationPayload(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      bleDebugStats.rejectedUnauthenticatedCount++;
+      bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+      Serial.println(
+          "BLE: Rejected privileged multiplexed command from scoped Watch");
       return;
     }
 

@@ -448,6 +448,7 @@ private struct BikeComputerDetailView: View {
     @State private var editedName = ""
     @State private var showingDeregisterConfirmation = false
     @State private var showingForgetConfirmation = false
+    @State private var showingWatchRevocationConfirmation = false
 
     private var device: KnownBikeComputerDevice? {
         bleManager.knownDevices.first { $0.deviceID == deviceID }
@@ -482,6 +483,11 @@ private struct BikeComputerDetailView: View {
                             }
                         }
                     }
+                }
+
+
+                if !device.isLegacy {
+                    watchControllerSection(device: device)
                 }
 
                 if bleManager.deviceFeedbackDeviceID == device.deviceID,
@@ -562,6 +568,96 @@ private struct BikeComputerDetailView: View {
         .onChange(of: device) { newDevice in
             if newDevice == nil { dismiss() }
         }
+    }
+
+    private func watchControllerStatus(
+        for device: KnownBikeComputerDevice
+    ) -> String {
+        guard bleManager.isConnected(to: device) else {
+            return "Connect to check"
+        }
+        guard bleManager.supportsScopedWatchController else {
+            return "Unsupported"
+        }
+        if bleManager.watchControllerOperationStatus != nil {
+            return "Updating"
+        }
+        if bleManager.watchControllerIDHex != nil,
+           bleManager.watchControllerOperationError != nil {
+            return "Finish on Watch"
+        }
+        return bleManager.watchControllerIDHex == nil
+            ? "Not enabled"
+            : "Enabled"
+    }
+
+    @ViewBuilder
+    private func watchControllerSection(
+        device: KnownBikeComputerDevice
+    ) -> some View {
+        Section {
+            DeviceValueRow(
+                title: "Watch control",
+                value: watchControllerStatus(for: device)
+            )
+            if bleManager.isConnected(to: device),
+               bleManager.supportsScopedWatchController {
+                if bleManager.watchControllerIDHex == nil {
+                    Button("Enable on Apple Watch") {
+                        bleManager.enableWatchController(for: device)
+                    }
+                } else {
+                    Button(
+                        "Revoke Apple Watch Access",
+                        role: .destructive
+                    ) {
+                        showingWatchRevocationConfirmation = true
+                    }
+                }
+            }
+            if let status = bleManager.watchControllerOperationStatus {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text(verbatim: status)
+                }
+            }
+            if let error = bleManager.watchControllerOperationError {
+                Label(
+                    error,
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Apple Watch Navigation")
+        } footer: {
+            Text(watchControllerFooter(for: device))
+        }
+        .disabled(bleManager.watchControllerOperationStatus != nil)
+        .confirmationDialog(
+            "Revoke Apple Watch access?",
+            isPresented: $showingWatchRevocationConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Revoke Access", role: .destructive) {
+                bleManager.revokeWatchController(for: device)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Navigation from this Apple Watch will stop until you enable it again.")
+        }
+    }
+
+    private func watchControllerFooter(
+        for device: KnownBikeComputerDevice
+    ) -> String {
+        if !bleManager.isConnected(to: device) {
+            return "Connect to manage the scoped Apple Watch credential."
+        }
+        if !bleManager.supportsScopedWatchController {
+            return "Install firmware with scoped Apple Watch controller support."
+        }
+        return "The Watch receives ride-only access. It cannot rename, reconfigure, transfer maps to, or deregister this Bike Computer."
     }
 }
 

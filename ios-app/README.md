@@ -95,6 +95,47 @@ If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
 old data as current. Reconnection requests the newest coherent snapshot.
 
+## Watch + Bicino navigation without iPhone
+
+The Watch can own location, route progress, maneuvers, and the direct
+authenticated Bicino connection after setup. The iPhone is not required during
+the ride. Navigation and workout are separate: ending a workout leaves active
+navigation visible and running, while stopping navigation leaves an active
+workout untouched.
+
+Before the first direct ride, connect the iPhone to the Bicino, open its device
+settings, and enroll the paired Apple Watch. The Watch receives a device-local,
+ride-only credential; it never receives the iPhone OwnerKey. Revoking Watch
+access or resetting/deregistering the Bicino invalidates that credential. A
+replacement or reinstalled Watch must be enrolled again.
+
+Offline mode is the default:
+
+1. On iPhone, open **Offline Routes**, choose **Import GPX**, and select a
+   user-owned GPX route or track. The longest usable route/track segment is
+   validated and saved. MapKit alternatives remain active-navigation only;
+   **Save Offline** stays disabled until an approved export-capable provider is
+   configured.
+2. Send the route to Watch and wait for **Ready**. **Queued** does not prove the
+   route is installed.
+3. Leave **Use Watch cellular connection** off in Watch Settings, select the
+   installed route, and start the ride. Leaving the route shows an off-route
+   warning; it never causes an online request or invents a connector route.
+
+For online mode, explicitly enable **Use Watch cellular connection** on the
+Watch. Coordinate-backed iPhone favorites then appear as destinations. The
+Watch asks MapKit for a cycling route from its current GPS position and can
+recalculate after sustained deviation. This setting authorizes online routing;
+it does not force a cellular interface, and watchOS may use Wi-Fi or cellular.
+If connectivity or recalculation fails after a route has loaded, Bicino keeps
+showing the existing route. MapKit routes created on Watch are active-session
+memory only and are not written to the offline route archive.
+
+The physical release matrix—including wrist-down location delivery, Watch BLE
+reconnect, cellular and non-cellular failure behavior, two-hour battery/thermal
+impact, and both supported Bicino targets—is tracked in
+[`../docs/watch-bicino-navigation-validation.md`](../docs/watch-bicino-navigation-validation.md).
+
 ## Cadence and power sensors
 
 Pair compatible Bluetooth cycling sensors in **Apple Watch Settings >

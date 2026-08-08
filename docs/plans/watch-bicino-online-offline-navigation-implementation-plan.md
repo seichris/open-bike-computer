@@ -7,6 +7,11 @@ Prepared from `origin/main` at
 `951a51089197c4ef58374c452d320c73fb3a7f03` with Xcode 26.6 and the
 watchOS 26.5 SDK.
 
+Implementation evidence and the still-open physical/provider gates are tracked
+in [`../watch-bicino-navigation-validation.md`](../watch-bicino-navigation-validation.md).
+Until MapKit durable export is explicitly approved, the implemented offline
+source is user-imported GPX; MapKit routes remain active-session only.
+
 This plan supersedes the route-source, capability-allocation, and automatic
 transport-selection sections of draft PR #119. It preserves that draft's
 security rule: a Watch must receive a scoped ride credential and a
@@ -47,9 +52,9 @@ online routing; it does not promise a particular network interface.
 ### Offline Watch + Bicino
 
 ```text
-iPhone route planner while online
-  -> exact start + destination
-  -> rider selects one route alternative
+iPhone approved export route or user-imported GPX
+  -> exact complete route geometry
+  -> rider selects/imports the intended route
   -> validated route archive
   -> WatchConnectivity file transfer
   -> Watch verifies and persists archive

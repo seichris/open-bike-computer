@@ -25,7 +25,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     @Published private(set) var routeDistanceCapturedAt: Date?
     @Published private(set) var routeSavingFailed = false
 
-    private let locationManager: CLLocationManager
+    private let locationService: WatchLocationService
+    private var cancellables = Set<AnyCancellable>()
     private var routeBuilder: (any WatchWorkoutRouteBuilding)?
     private var workoutStart: Date?
     private var isWorkoutActive = false
@@ -39,23 +40,24 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private var onLocationUpdate: (() -> Void)?
     private var routeGeneration = WorkoutRouteGenerationGate()
 
-    override init() {
-        let locationManager = CLLocationManager()
-        self.locationManager = locationManager
-        self.authorizationState = Self.mapAuthorization(locationManager.authorizationStatus)
+    override convenience init() {
+        self.init(locationService: WatchLocationService())
+    }
+
+    init(locationService: WatchLocationService) {
+        self.locationService = locationService
+        self.authorizationState = locationService.authorizationState
         super.init()
-        locationManager.delegate = self
-        locationManager.activityType = .fitness
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 2
+        locationService.$authorizationState
+            .removeDuplicates()
+            .sink { [weak self] state in
+                self?.authorizationState = state
+            }
+            .store(in: &cancellables)
     }
 
     func requestAuthorizationIfNeeded() {
-        guard locationManager.authorizationStatus == .notDetermined else {
-            authorizationState = Self.mapAuthorization(locationManager.authorizationStatus)
-            return
-        }
-        locationManager.requestWhenInUseAuthorization()
+        locationService.requestAuthorizationIfNeeded()
     }
 
     func begin(
@@ -98,7 +100,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
 
     func stopLocationUpdates() {
         isWorkoutActive = false
-        locationManager.stopUpdatingLocation()
+        locationService.setConsumer(.workout, active: false)
         lastDistanceLocation = nil
         distanceAccumulator?.breakSegment()
     }
@@ -144,8 +146,27 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     private func startLocationUpdatesWhenAuthorized() {
-        guard isWorkoutActive, authorizationState == .authorized else { return }
-        locationManager.startUpdatingLocation()
+        guard isWorkoutActive else {
+            locationService.setConsumer(.workout, active: false)
+            return
+        }
+        locationService.setConsumer(
+            .workout,
+            active: true,
+            handler: { [weak self] locations in
+                self?.receiveServiceLocations(locations)
+            }
+        )
+    }
+
+    private func receiveServiceLocations(_ locations: [CLLocation]) {
+        guard !locations.isEmpty else {
+            lastDistanceLocation = nil
+            latestLocation = nil
+            onLocationUpdate?()
+            return
+        }
+        receive(locations)
     }
 
     private func receive(_ locations: [CLLocation]) {
@@ -317,38 +338,6 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
             .notDetermined
         @unknown default:
             .denied
-        }
-    }
-}
-
-extension WatchRouteRecorder: CLLocationManagerDelegate {
-    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        let status = manager.authorizationStatus
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            authorizationState = Self.mapAuthorization(status)
-            startLocationUpdatesWhenAuthorized()
-        }
-    }
-
-    nonisolated func locationManager(
-        _ manager: CLLocationManager,
-        didUpdateLocations locations: [CLLocation]
-    ) {
-        Task { @MainActor [weak self] in
-            self?.receive(locations)
-        }
-    }
-
-    nonisolated func locationManager(
-        _ manager: CLLocationManager,
-        didFailWithError error: Error
-    ) {
-        guard (error as? CLError)?.code != .locationUnknown else { return }
-        Task { @MainActor [weak self] in
-            self?.lastDistanceLocation = nil
-            self?.latestLocation = nil
-            self?.onLocationUpdate?()
         }
     }
 }

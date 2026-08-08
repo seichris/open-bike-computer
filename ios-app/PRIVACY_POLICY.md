@@ -1,6 +1,6 @@
 # Bicino Privacy Policy
 
-Effective date: July 19, 2026
+Effective date: August 8, 2026
 
 Bicino is a cycling navigation and workout companion. This policy
 explains what information the iPhone app, Apple Watch app, compatible bike
@@ -43,9 +43,26 @@ public APIs do not reveal whether another workout app is active.
 
 The iPhone app uses location to show your position, calculate cycling routes,
 provide turn-by-turn navigation, and track route progress while navigation is
-active. The Apple Watch app uses location during an outdoor workout to record
-the permitted workout route and to provide speed and elevation when a cycling
-sensor does not supply them.
+active. The Apple Watch app uses location to drive navigation and send the
+current position and guidance to an authenticated compatible bike computer. It
+also uses location during an outdoor workout to record the permitted workout
+route and to provide speed and elevation when a cycling sensor does not supply
+them.
+
+When you explicitly enable online Watch routing and choose a coordinate-backed
+favorite, the Watch sends the current coordinate and destination to Apple's
+MapKit service for a real-time cycling-route request. The resulting Watch route
+is kept only for the active navigation session. Bicino does not upload that
+request or route to its own servers. When the setting is off, Watch navigation
+uses only a route you previously transferred for offline use and does not make
+an online route request.
+
+Saved offline routes and coordinate-backed favorite names and coordinates are
+transferred between your paired iPhone and Watch using Apple's WatchConnectivity
+service. They remain within the paired app workflow and are not sent to the
+Bicino backend. Offline route files enforce their provider retention metadata
+and are removed when they expire. You can delete a saved route from the iPhone;
+if it is currently active on Watch, deletion finishes when navigation stops.
 
 Most location processing happens on your devices or through Apple system
 services such as MapKit. We are not responsible for information Apple processes
@@ -104,10 +121,11 @@ policy.
 
 ## Your choices
 
-You can use navigation without starting a HealthKit workout. You can deny or
-later revoke Health, location, Bluetooth, or local-network access in system
-settings, although the related feature will be unavailable or reduced. You can
-delete workouts through Apple's Health or Fitness apps.
+You can use navigation without starting a HealthKit workout. Online Watch
+routing is off by default and can be changed only by you in the Watch app. You
+can deny or later revoke Health, location, Bluetooth, or local-network access
+in system settings, although the related feature will be unavailable or
+reduced. You can delete workouts through Apple's Health or Fitness apps.
 
 To request access to or deletion of offline-map service data, email the contact
 below and identify the saved map or map-job ID if available. We may ask for

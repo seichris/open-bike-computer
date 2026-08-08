@@ -414,11 +414,167 @@ int main() {
          currentName.response[0] == 'R' && currentName.response[1] == '2');
   assert(rebooted.deviceName() == "Road bike");
 
+  const std::string watchControllerId =
+      "102132435465768798a9bacbdcedfe0f";
+  const OwnerKey watchControllerKey = keyFromHex(
+      "a00fa10ea20da30ca40ba50aa609a708b807c906ca05da04ea03fa02ba01ca00");
+  const std::string watchControllerKeyHex =
+      hexEncode(watchControllerKey.data(), watchControllerKey.size());
   assert(rebooted.unwrapAuthenticatedPayload(
       AuthenticatedChannel::Auth,
-      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 3, "UNPAIR"),
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 3,
+                 "WCTRL_STAGE|" + watchControllerId + "|" +
+                     watchControllerKeyHex),
       command));
-  const auto unpaired = rebooted.handle(command, 54);
+  const auto stagedController = rebooted.handle(command, 54);
+  const auto stagedControllerParts = split(stagedController.response);
+  assert(stagedController.event == Event::WatchControllerStaged);
+  assert(stagedControllerParts.size() == 3 &&
+         stagedControllerParts[0] == "WCTRL_STAGED" &&
+         stagedControllerParts[1] == watchControllerId &&
+         stagedControllerParts[2].size() == 32);
+  const std::string enrollmentMessage =
+      "watch-enroll1|" + stableId + "|" + watchControllerId + "|" +
+      stagedControllerParts[2];
+  const std::string commitCommand =
+      "WCTRL_COMMIT|" + watchControllerId + "|" +
+      stagedControllerParts[2] + "|" +
+      proof(watchControllerKey, enrollmentMessage);
+
+  // A reset at the active-pointer write boundary must not activate a partially
+  // committed scoped controller. The staged transaction remains retryable.
+  preferences_test::failPutKey = "wcAct";
+  assert(rebooted.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth,
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 4, commitCommand),
+      command));
+  assert(rebooted.handle(command, 55).response ==
+         "ERROR|watch_controller_commit_persistence_failed");
+  preferences_test::failPutKey.clear();
+  DeviceOwnership beforeControllerCommit;
+  assert(beforeControllerCommit.begin());
+  assert(!beforeControllerCommit.hasWatchController());
+
+  assert(rebooted.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth,
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 5, commitCommand),
+      command));
+  const auto committedController = rebooted.handle(command, 56);
+  assert(committedController.event == Event::WatchControllerCommitted);
+  assert(committedController.response ==
+         "WCTRL_COMMITTED|" + watchControllerId);
+  assert(rebooted.hasWatchController());
+  assert(rebooted.handle("WCTRL_STATUS", 56).response ==
+         "WCTRL_STATUS|" + watchControllerId);
+
+  const auto committedControllerStore = preferences_test::stores;
+  preferences_test::put("bleOwner", "wcAct", {3});
+  DeviceOwnership corruptControllerPointer;
+  assert(corruptControllerPointer.begin());
+  assert(!corruptControllerPointer.watchControllerSubsystemReady());
+  assert(!corruptControllerPointer.hasWatchController());
+  preferences_test::stores = committedControllerStore;
+
+  // A controller orphaned without any owner authority is purged so a new
+  // physical owner can pair and enroll cleanly.
+  auto orphanedControllerStore = committedControllerStore;
+  orphanedControllerStore["bleOwner"].erase("version");
+  orphanedControllerStore["bleOwner"].erase("ownerId");
+  orphanedControllerStore["bleOwner"].erase("ownerKey");
+  orphanedControllerStore["bleOwner"].erase("name");
+  preferences_test::stores = orphanedControllerStore;
+  DeviceOwnership orphanedController;
+  assert(orphanedController.begin());
+  assert(!orphanedController.isClaimed());
+  assert(!orphanedController.hasWatchController());
+  assert(preferences_test::stores["bleOwner"].count("wcAct") == 0);
+  preferences_test::stores = committedControllerStore;
+
+  DeviceOwnership watchDevice;
+  assert(watchDevice.begin());
+  assert(watchDevice.hasWatchController());
+  const std::string watchNonce = "ffeeddccbbaa99887766554433221100";
+  const auto watchServer = watchDevice.handle(
+      "WATCH|" + watchControllerId + "|" + watchNonce, 57);
+  const auto watchServerParts = split(watchServer.response);
+  assert(watchServerParts.size() == 5 && watchServerParts[0] == "WS2" &&
+         watchServerParts[1] == watchControllerId &&
+         watchServerParts[2] == watchNonce &&
+         watchServer.response.size() <= 182);
+  assert(watchServerParts[4] ==
+         proof(watchControllerKey,
+               "watch-server1|" + stableId + "|" + watchControllerId +
+                   "|" + watchNonce + "|" + watchServerParts[3]));
+  const std::string watchClientProof =
+      proof(watchControllerKey,
+            "watch-client1|" + stableId + "|" + watchControllerId + "|" +
+                watchNonce + "|" + watchServerParts[3]);
+  const auto watchAuthenticated = watchDevice.handle(
+      "WATCH_PROOF|" + watchControllerId + "|" + watchNonce + "|" +
+          watchServerParts[3] + "|" + watchClientProof,
+      58);
+  assert(watchAuthenticated.event == Event::Authenticated);
+  assert(watchAuthenticated.response.size() <= 182);
+  assert(watchDevice.isWatchRideSession());
+  assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Navigation,
+                                         59));
+  assert(watchDevice.handle("LEASE_CLAIM", 60).response == "LEASE_OK");
+  assert(watchDevice.authorizeRideWrite(AuthenticatedChannel::Navigation,
+                                        61));
+  assert(watchDevice.authorizeRideWrite(AuthenticatedChannel::Route, 62));
+  assert(watchDevice.authorizeRideWrite(AuthenticatedChannel::Gps, 63));
+  assert(watchDevice.authorizeRideWrite(AuthenticatedChannel::Workout, 64));
+  assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Settings, 65));
+  assert(watchDevice.handle("NAME|5761746368", 66).response ==
+         "ERROR|rename_rejected");
+  assert(watchDevice.handle("UNPAIR", 67).response ==
+         "ERROR|unpair_rejected");
+  assert(watchDevice
+             .handle("WCTRL_STAGE|" + watchControllerId + "|" +
+                         watchControllerKeyHex,
+                     68)
+             .response == "ERROR|watch_controller_stage_rejected");
+  assert(watchDevice.handle("LEASE_RELEASE", 69).response ==
+         "LEASE_RELEASED");
+  assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Navigation,
+                                         70));
+  watchDevice.resetConnection();
+
+  preferences_test::failRemoveKey = "wcAct";
+  assert(rebooted.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth,
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 6,
+                 "WCTRL_REVOKE|" + watchControllerId),
+      command));
+  assert(rebooted.handle(command, 71).response ==
+         "ERROR|watch_controller_revoke_persistence_failed");
+  assert(rebooted.hasWatchController());
+  DeviceOwnership afterFailedControllerRevocation;
+  assert(afterFailedControllerRevocation.begin());
+  assert(afterFailedControllerRevocation.hasWatchController());
+  preferences_test::failRemoveKey.clear();
+  assert(rebooted.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth,
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 7,
+                 "WCTRL_REVOKE|" + watchControllerId),
+      command));
+  const auto revokedController = rebooted.handle(command, 72);
+  assert(revokedController.event == Event::WatchControllerRevoked);
+  assert(!rebooted.hasWatchController());
+  assert(rebooted.handle("WCTRL_STATUS", 73).response ==
+         "WCTRL_STATUS|none");
+  DeviceOwnership afterControllerRevocation;
+  assert(afterControllerRevocation.begin());
+  assert(!afterControllerRevocation.hasWatchController());
+  assert(afterControllerRevocation
+             .handle("WATCH|" + watchControllerId + "|" + watchNonce, 74)
+             .response == "DENIED|" + stableId);
+
+  assert(rebooted.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth,
+      writeFrame(rebootWriteKey, AuthenticatedChannel::Auth, 8, "UNPAIR"),
+      command));
+  const auto unpaired = rebooted.handle(command, 75);
   assert(unpaired.event == Event::Unpaired);
   assert(unpaired.response.size() <= 182);
   assert(!rebooted.isClaimed());

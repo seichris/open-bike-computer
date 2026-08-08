@@ -15,6 +15,7 @@ private enum ContentSheetDestination: String, Identifiable {
     case sensorSettings
     case workoutDashboard
     case rideMetrics
+    case plannedRoutes
 
     var id: String { rawValue }
 }
@@ -40,6 +41,7 @@ struct ContentView: View {
     @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var offlineMapManager = OfflineMapManager()
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var workoutStore: WorkoutMetricsStore
     @ObservedObject private var liveActivityDiagnostics:
         WorkoutLiveActivityDiagnosticStore
@@ -82,6 +84,7 @@ struct ContentView: View {
             CyclingSensorDetectionCoordinator? = nil,
         coordinator: BikeComputerCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
+        routeLibrary: PhoneRouteLibrary? = nil,
         liveActivityDiagnostics:
             WorkoutLiveActivityDiagnosticStore? = nil,
         onApplicationActiveChange:
@@ -89,6 +92,9 @@ struct ContentView: View {
     ) {
         let watchAvailability = watchAvailability
             ?? WorkoutWatchAvailabilityMonitor()
+        let routeLibrary = routeLibrary ?? PhoneRouteLibrary(
+            connectivity: PhoneWatchConnectivityCoordinator()
+        )
         let liveActivityDiagnostics = liveActivityDiagnostics
             ?? WorkoutLiveActivityDiagnosticStore()
         let cyclingSensorStore =
@@ -119,6 +125,7 @@ struct ContentView: View {
             wrappedValue: cyclingSensorDetectionCoordinator
         )
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
+        _routeLibrary = ObservedObject(wrappedValue: routeLibrary)
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
         )
@@ -472,6 +479,11 @@ struct ContentView: View {
             .presentationContentInteraction(.resizes)
             .presentationCornerRadius(32)
             .interactiveDismissDisabled()
+
+        case .plannedRoutes:
+            PlannedRoutesView(routeLibrary: routeLibrary)
+                .presentationDetents([.large])
+                .presentationBackgroundInteraction(.disabled)
         }
     }
 
@@ -672,6 +684,19 @@ struct ContentView: View {
                 onReconnect: { coordinator.reconnect() }
             )
 
+            Button(action: { presentedSheet = .plannedRoutes }) {
+                Image(
+                    systemName:
+                        "point.topleft.down.to.point.bottomright.curvepath"
+                )
+                .font(.title3)
+                .foregroundColor(.primary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Offline routes")
+
             Button(action: { presentedSheet = .settings }) {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
@@ -711,8 +736,13 @@ struct ContentView: View {
                 }
 
                 if !coordinator.routeCalculation.isCalculating {
-                    routeAndWorkoutStartRow(maxHeight: maxHeight)
-                        .padding(.horizontal, 12)
+                    if coordinator.routeAlternatives.isEmpty {
+                        routeAndWorkoutStartRow(maxHeight: maxHeight)
+                            .padding(.horizontal, 12)
+                    } else {
+                        routeAlternativesPanel
+                            .padding(.horizontal, 12)
+                    }
                 }
             }
         }
@@ -769,7 +799,7 @@ struct ContentView: View {
                 maxExpandedHeight: maxHeight,
                 onStartNavigation: { source, destination, transport in
                     isSearchPanelExpanded = false
-                    coordinator.startNavigation(
+                    coordinator.planNavigation(
                         from: source,
                         to: destination,
                         transportType: transport
@@ -806,6 +836,113 @@ struct ContentView: View {
                 .accessibilityLabel("Start workout on Apple Watch")
             }
         }
+    }
+
+    private var routeAlternativesPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Choose a route")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    coordinator.cancelRoutePlan()
+                }
+                .font(.subheadline)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(coordinator.routeAlternatives) { alternative in
+                        let selected =
+                            coordinator.selectedRouteAlternativeID == alternative.id
+                        Button {
+                            coordinator.selectRouteAlternative(alternative.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(alternative.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(routeAlternativeDetails(alternative))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(
+                                selected ? Color.blue.opacity(0.18) :
+                                    Color.secondary.opacity(0.1),
+                                in: RoundedRectangle(cornerRadius: 12)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(
+                                        selected ? Color.blue : Color.clear,
+                                        lineWidth: 2
+                                    )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.startSelectedRoute()
+                } label: {
+                    Label("Start", systemImage: "location.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(coordinator.selectedRouteAlternativeID == nil)
+
+                Button { } label: {
+                    Label("Save Offline", systemImage: "applewatch")
+                }
+                .buttonStyle(.bordered)
+                .disabled(true)
+                .accessibilityHint(
+                    "MapKit routes cannot be stored offline until an approved route provider is configured."
+                )
+            }
+
+            if let selected = coordinator.routeAlternatives.first(where: {
+                $0.id == coordinator.selectedRouteAlternativeID
+            }), !selected.advisoryNotices.isEmpty {
+                Label(
+                    selected.advisoryNotices.joined(separator: " · "),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+            }
+
+            Text("Offline saving needs an approved route source.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.16), radius: 14, y: 6)
+    }
+
+    private func routeAlternativeDetails(
+        _ alternative: NavigationRouteAlternativeV1
+    ) -> String {
+        let distance = Measurement(
+            value: alternative.distanceMeters / 1_000,
+            unit: UnitLength.kilometers
+        )
+        let formatter = MeasurementFormatter()
+        formatter.unitOptions = .providedUnit
+        formatter.numberFormatter.maximumFractionDigits = 1
+        let minutes = max(Int((alternative.expectedTravelTime / 60).rounded()), 1)
+        return "\(formatter.string(from: distance)) · \(minutes) min"
     }
 
     private var shouldShowWorkoutStatusCard: Bool {
@@ -882,7 +1019,7 @@ struct ContentView: View {
 
         return MapViewContainer(
             location: coordinator.currentLocation,
-            route: coordinator.currentRoute,
+            route: coordinator.currentRoute ?? coordinator.routePreview,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,

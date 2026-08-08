@@ -6,6 +6,7 @@
 //
 
 import AppIntents
+import Combine
 import SwiftUI
 
 @main
@@ -22,6 +23,8 @@ struct BikeComputerApp: App {
                 cyclingSensorDetectionCoordinator:
                     appDelegate.cyclingSensorDetectionCoordinator,
                 coordinator: appDelegate.coordinator,
+                watchAvailability: appDelegate.watchAvailability,
+                routeLibrary: appDelegate.routeLibrary,
                 liveActivityDiagnostics:
                     appDelegate.workoutLiveActivityDiagnostics,
                 onApplicationActiveChange: {
@@ -40,14 +43,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let cyclingSensorStore: CyclingSensorStore
     let cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    let watchConnectivityCoordinator: PhoneWatchConnectivityCoordinator
+    let watchAvailability: WorkoutWatchAvailabilityMonitor
+    let routeLibrary: PhoneRouteLibrary
+    let destinationStore: SavedDestinationStore
     let locationManager = CurrentLocationManager()
     let workoutLiveActivityDiagnostics =
         WorkoutLiveActivityDiagnosticStore()
     private var workoutLiveActivityController: AnyObject?
     private var workoutLiveActivityCommandRouter: AnyObject?
     private var workoutLiveActivityIntentDispatcher: AnyObject?
+    private var cancellables = Set<AnyCancellable>()
     lazy var coordinator = BikeComputerCoordinator(
-        destinationStore: SavedDestinationStore(),
+        destinationStore: destinationStore,
         workoutMetricsStore: workoutMirrorManager.store,
         locationManager: locationManager
     )
@@ -59,11 +67,49 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             CyclingSensorDetectionCoordinator(
                 sensorStore: cyclingSensorStore
             )
+        let watchConnectivityCoordinator =
+            PhoneWatchConnectivityCoordinator()
+        let destinationStore = SavedDestinationStore()
         self.workoutMirrorManager = workoutMirrorManager
         self.cyclingSensorStore = cyclingSensorStore
         self.cyclingSensorDetectionCoordinator =
             cyclingSensorDetectionCoordinator
+        self.watchConnectivityCoordinator = watchConnectivityCoordinator
+        self.destinationStore = destinationStore
+        watchAvailability = WorkoutWatchAvailabilityMonitor(
+            connectivityCoordinator: watchConnectivityCoordinator
+        )
+        routeLibrary = PhoneRouteLibrary(
+            connectivity: watchConnectivityCoordinator
+        )
         super.init()
+        destinationStore.$favoriteDestinations
+            .map { destinations in
+                Array(destinations.compactMap { destination in
+                    guard let coordinate = destination.coordinate else {
+                        return nil
+                    }
+                    let normalized =
+                        RouteCoordinateNormalizationV1.mapKitToWGS84(
+                            RouteCoordinateV1(
+                                latitude: coordinate.latitude,
+                                longitude: coordinate.longitude
+                            )
+                        )
+                    return SyncedCoordinateFavoriteV1(
+                        id: destination.id,
+                        name: destination.name,
+                        coordinate: normalized
+                    )
+                }.prefix(CoordinateFavoritesEnvelopeV1.maximumFavorites))
+            }
+            .removeDuplicates()
+            .sink { [weak watchConnectivityCoordinator] favorites in
+                try? watchConnectivityCoordinator?.updateCoordinateFavorites(
+                    favorites
+                )
+            }
+            .store(in: &cancellables)
         cyclingSensorDetectionCoordinator.bind(
             to: workoutMirrorManager.store
         )
@@ -78,6 +124,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // Configure for background location updates
         print("Bicino app launched")
         _ = coordinator
+        coordinator.bleManager.bindWatchConnectivityCoordinator(
+            watchConnectivityCoordinator
+        )
+        watchConnectivityCoordinator.activate()
         workoutMirrorManager.installMirroringHandler()
         if #available(iOS 17.0, *) {
             let controller = WorkoutLiveActivityController(

@@ -574,6 +574,7 @@ struct NavigationProtocolTests {
         testRouteRemainingDistance()
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
+        testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testRideActivityRuntimeIntegration()
@@ -2551,6 +2552,95 @@ struct NavigationProtocolTests {
             ),
             1,
             "the 50-meter accuracy boundary still selects a later step when it is clearly closer"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorPreviewsAndSelectsAlternateRoutes() {
+        let suite = "CoordinatorAlternatives.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        source.name = "Start"
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        destination.name = "Finish"
+        let direct = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        let scenic = TestRoute(
+            instructions: "Bear right",
+            coordinates: [
+                sourceCoordinate,
+                CLLocationCoordinate2D(
+                    latitude: 37.002,
+                    longitude: -122.001
+                ),
+                destinationCoordinate
+            ]
+        )
+
+        coordinator.planNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 1, "route planning creates one request")
+        assert(
+            factory.tasks[0].request.requestsAlternateRoutes,
+            "route planning explicitly requests alternate routes"
+        )
+        factory.tasks[0].succeed(with: [direct, scenic])
+        assertEqual(
+            coordinator.routeAlternatives.count,
+            2,
+            "all valid alternatives are presented before navigation"
+        )
+        assert(!coordinator.isNavigating, "route preview does not start navigation")
+        assert(coordinator.routePreview === direct, "first alternative is previewed")
+        assert(
+            coordinator.selectedRouteAlternativeID == nil,
+            "the rider must explicitly select an alternative"
+        )
+
+        let scenicID = coordinator.routeAlternatives[1].id
+        coordinator.selectRouteAlternative(scenicID)
+        assert(coordinator.routePreview === scenic, "selection updates map preview")
+        coordinator.startSelectedRoute()
+        assert(coordinator.currentRoute === scenic, "explicit start uses selected route")
+        assert(coordinator.isNavigating, "explicit start begins navigation")
+        assert(coordinator.routeAlternatives.isEmpty, "start clears pending alternatives")
+
+        coordinator.stopNavigation()
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 2, "legacy immediate start creates a request")
+        assert(
+            !factory.tasks[1].request.requestsAlternateRoutes,
+            "immediate/device starts retain a single-route request"
         )
     }
 
@@ -9293,6 +9383,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationPerspectiveCapabilityMask, 1 << 10, "CAP2 bit 10 advertises bird's-eye perspective")
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask, 1 << 11, "CAP2 bit 11 advertises stronger bird's-eye perspectives")
         assertEqual(DeviceBLEProtocol.osm3DBuildingsCapabilityMask, 1 << 12, "CAP2 bit 12 advertises OSM 3D buildings")
+        assertEqual(DeviceBLEProtocol.scopedWatchControllerCapabilityMask, 1 << 13, "CAP2 bit 13 advertises scoped Watch control")
         assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 10, "capability version switches to CAP2 without colliding with legacy versions 7 through 9")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
@@ -10924,7 +11015,7 @@ struct NavigationProtocolTests {
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0, 0x1F, 0, 0])
+            Data([1, 0, 0x3F, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2),
                "CAP2 notification should be consumed")
         assert(manager.supportsStreetLabels,
@@ -10937,6 +11028,8 @@ struct NavigationProtocolTests {
                "CAP2 bit 11 preserves stronger bird's-eye perspective support")
         assert(manager.supports3DBuildings,
                "CAP2 bit 12 enables OSM 3D-building maps and controls")
+        assert(manager.supportsScopedWatchController,
+               "CAP2 bit 13 enables scoped Watch enrollment")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 

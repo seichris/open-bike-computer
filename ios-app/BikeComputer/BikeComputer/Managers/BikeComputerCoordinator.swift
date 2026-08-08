@@ -54,6 +54,15 @@ enum NavigationStartOutcome: Equatable {
     case failed(String)
 }
 
+struct NavigationRouteAlternativeV1: Identifiable {
+    let id: UUID
+    let route: MKRoute
+    let title: String
+    let distanceMeters: CLLocationDistance
+    let expectedTravelTime: TimeInterval
+    let advisoryNotices: [String]
+}
+
 /// Main coordinator for the Bike Computer app
 /// Manages BLE, navigation, and location subsystems.
 @MainActor
@@ -86,6 +95,10 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    @Published private(set) var routePreview: MKRoute?
+    @Published private(set) var routeAlternatives:
+        [NavigationRouteAlternativeV1] = []
+    @Published private(set) var selectedRouteAlternativeID: UUID?
     @Published var isSimulationMode: Bool = false
     @Published var simulatedPosition: CLLocationCoordinate2D?
     @Published var routeRemainingDistance: CLLocationDistance?
@@ -122,6 +135,7 @@ class BikeComputerCoordinator: ObservableObject {
         generation: UInt,
         completion: (NavigationStartOutcome) -> Void
     )?
+    private var pendingRoutePlan: PendingRoutePlan?
     private var destinationCatalogGeneration: UInt32?
     private var nextDestinationCatalogGeneration =
         DeviceDestinationCatalogGeneration.initial()
@@ -134,6 +148,14 @@ class BikeComputerCoordinator: ObservableObject {
     private var pendingDeviceDestinationRequestDeadline: DispatchWorkItem?
     private var pendingDeviceDestinationRouteGeneration: UInt?
     private var wasNavigating = false
+
+    private struct PendingRoutePlan {
+        let alternatives: [NavigationRouteAlternativeV1]
+        let destination: MKMapItem
+        let transportType: MKDirectionsTransportType
+        let isTestMode: Bool
+        let initialLocation: CLLocation
+    }
 
     // MARK: - Initialization
 
@@ -458,8 +480,63 @@ class BikeComputerCoordinator: ObservableObject {
             to: destination,
             requestedTransportType: transportType,
             isTestMode: isTestMode,
+            presentsAlternatives: false,
             completion: completion
         )
+    }
+
+    func planNavigation(
+        from source: RouteEndpoint,
+        to destination: RouteEndpoint,
+        transportType: MKDirectionsTransportType,
+        isTestMode: Bool = false
+    ) {
+        calculateRoute(
+            from: source,
+            to: destination,
+            requestedTransportType: transportType,
+            isTestMode: isTestMode,
+            presentsAlternatives: true
+        )
+    }
+
+    func selectRouteAlternative(_ id: UUID) {
+        guard let pendingRoutePlan,
+              let alternative = pendingRoutePlan.alternatives.first(where: {
+                  $0.id == id
+              }) else {
+            return
+        }
+        selectedRouteAlternativeID = id
+        routePreview = alternative.route
+    }
+
+    func startSelectedRoute() {
+        guard let pendingRoutePlan,
+              let selectedID = selectedRouteAlternativeID,
+              let alternative = pendingRoutePlan.alternatives.first(where: {
+                  $0.id == selectedID
+              }) else {
+            return
+        }
+        self.pendingRoutePlan = nil
+        routeAlternatives = []
+        selectedRouteAlternativeID = nil
+        routePreview = nil
+        beginNavigation(
+            with: alternative.route,
+            destination: pendingRoutePlan.destination,
+            transportType: pendingRoutePlan.transportType,
+            isTestMode: pendingRoutePlan.isTestMode,
+            initialLocation: pendingRoutePlan.initialLocation
+        )
+    }
+
+    func cancelRoutePlan() {
+        pendingRoutePlan = nil
+        routeAlternatives = []
+        selectedRouteAlternativeID = nil
+        routePreview = nil
     }
 
     func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
@@ -475,6 +552,7 @@ class BikeComputerCoordinator: ObservableObject {
         lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
         currentRoute = nil
+        cancelRoutePlan()
         if startServices {
             locationManager.setNavigating(false)
         }
@@ -502,7 +580,8 @@ class BikeComputerCoordinator: ObservableObject {
         calculateRoute(
             from: .mapItem(source),
             to: .mapItem(destinationItem),
-            requestedTransportType: RouteTransportTypes.cycling
+            requestedTransportType: RouteTransportTypes.cycling,
+            presentsAlternatives: true
         )
     }
 
@@ -908,9 +987,12 @@ extension BikeComputerCoordinator {
         to destination: RouteEndpoint,
         requestedTransportType: MKDirectionsTransportType,
         isTestMode: Bool = false,
+        presentsAlternatives: Bool = false,
         completion: ((NavigationStartOutcome) -> Void)? = nil
     ) {
         print("Starting route calculation")
+
+        cancelRoutePlan()
 
         // Cancel any ongoing searches
         if let pendingNavigationStart {
@@ -958,6 +1040,7 @@ extension BikeComputerCoordinator {
                     to: destinationItem,
                     requestedTransportType: requestedTransportType,
                     isTestMode: isTestMode,
+                    presentsAlternatives: presentsAlternatives,
                     generation: generation
                 )
             }
@@ -1054,13 +1137,14 @@ extension BikeComputerCoordinator {
         to destinationItem: MKMapItem,
         requestedTransportType: MKDirectionsTransportType,
         isTestMode: Bool,
+        presentsAlternatives: Bool,
         generation: UInt
     ) {
         let request = MKDirections.Request()
         request.source = sourceItem
         request.destination = destinationItem
         request.transportType = requestedTransportType
-        request.requestsAlternateRoutes = false
+        request.requestsAlternateRoutes = presentsAlternatives
 
         print("Calculating route with transport type: \(self.transportType.rawValue)")
 
@@ -1104,30 +1188,74 @@ extension BikeComputerCoordinator {
                     return
                 }
 
+                if presentsAlternatives {
+                    let alternatives = routes.compactMap { candidate ->
+                        NavigationRouteAlternativeV1? in
+                        do {
+                            let normalizedInitialLocation =
+                                MapKitRouteAdapter.normalizedLocation(
+                                    initialLocation
+                                )
+                            _ = try MapKitRouteAdapter.route(
+                                from: candidate,
+                                fallbackSource: RouteCoordinateV1(
+                                    latitude: normalizedInitialLocation.coordinate.latitude,
+                                    longitude: normalizedInitialLocation.coordinate.longitude
+                                ),
+                                sourceLabel: sourceItem.name ?? "Route start",
+                                destinationLabel:
+                                    destinationItem.name ?? "Destination"
+                            )
+                        } catch {
+                            print("Ignoring invalid route alternative: \(error)")
+                            return nil
+                        }
+                        return NavigationRouteAlternativeV1(
+                            id: UUID(),
+                            route: candidate,
+                            title: candidate.name.isEmpty
+                                ? "Route \(routes.firstIndex(where: { $0 === candidate }).map { $0 + 1 } ?? 1)"
+                                : candidate.name,
+                            distanceMeters: candidate.distance,
+                            expectedTravelTime: candidate.expectedTravelTime,
+                            advisoryNotices: candidate.advisoryNotices
+                        )
+                    }
+                    guard let selected = alternatives.first else {
+                        self.routeCalculation.status = "No usable route available"
+                        self.routeCalculation.isCalculating = false
+                        self.alert.message = "The returned routes could not be prepared safely."
+                        self.alert.isShowing = true
+                        return
+                    }
+                    self.pendingRoutePlan = PendingRoutePlan(
+                        alternatives: alternatives,
+                        destination: destinationItem,
+                        transportType: requestedTransportType,
+                        isTestMode: isTestMode,
+                        initialLocation: initialLocation
+                    )
+                    self.routeAlternatives = alternatives
+                    self.selectedRouteAlternativeID = nil
+                    self.routePreview = selected.route
+                    self.routeCalculation.isCalculating = false
+                    self.routeCalculation.status = ""
+                    return
+                }
+
                 print("Route calculated successfully!")
                 print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
                 print("Steps: \(route.steps.count)")
 
                 self.routeCalculation.status = "Starting navigation..."
 
-                // Store the route for map display
-                self.currentRoute = route
-                self.navigationDestination = destinationItem
-                self.transportType = requestedTransportType
-                self.routeDeviationDetector.reset()
-                self.lastRerouteRequestDate = .distantPast
-
-                // Start navigation from the same source MapKit used to calculate the route.
-                self.navEngine.startNavigation(
+                self.beginNavigation(
                     with: route,
+                    destination: destinationItem,
+                    transportType: requestedTransportType,
                     isTestMode: isTestMode,
                     initialLocation: initialLocation
                 )
-
-                // Enable location tracking for navigation
-                if self.startServices {
-                    self.locationManager.setNavigating(!isTestMode)
-                }
 
                 self.completeNavigationStart(.started, generation: generation)
 
@@ -1137,6 +1265,28 @@ extension BikeComputerCoordinator {
                     self.routeCalculation.status = ""
                 }
             }
+        }
+    }
+
+    private func beginNavigation(
+        with route: MKRoute,
+        destination: MKMapItem,
+        transportType: MKDirectionsTransportType,
+        isTestMode: Bool,
+        initialLocation: CLLocation
+    ) {
+        currentRoute = route
+        navigationDestination = destination
+        self.transportType = transportType
+        routeDeviationDetector.reset()
+        lastRerouteRequestDate = .distantPast
+        navEngine.startNavigation(
+            with: route,
+            isTestMode: isTestMode,
+            initialLocation: initialLocation
+        )
+        if startServices {
+            locationManager.setNavigating(!isTestMode)
         }
     }
 

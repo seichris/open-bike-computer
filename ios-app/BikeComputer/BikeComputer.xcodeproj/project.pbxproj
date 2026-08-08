@@ -196,6 +196,11 @@
 			path = WorkoutLiveActivityShared;
 			sourceTree = "<group>";
 		};
+		57B000012F00000100000001 /* RideShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RideShared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -253,6 +258,7 @@
 				57A008022F00000100000001 /* BikeComputerLiveActivity */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
 				57A008122F00000100000001 /* WorkoutLiveActivityShared */,
+				57B000012F00000100000001 /* RideShared */,
 				57A009002F00000100000001 /* WorkoutLiveActivityStateMapper.swift */,
 				57A009012F00000100000001 /* WorkoutLiveActivityController.swift */,
 				57A009022F00000100000001 /* WorkoutLiveActivityCommandRouter.swift */,
@@ -313,6 +319,7 @@
 				83E6EF992EED853C00AE5F9B /* BikeComputer */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
 				57A008122F00000100000001 /* WorkoutLiveActivityShared */,
+				57B000012F00000100000001 /* RideShared */,
 			);
 			name = BikeComputer;
 			packageProductDependencies = (
@@ -338,6 +345,7 @@
 			fileSystemSynchronizedGroups = (
 				57A000022F00000100000001 /* BikeComputerWatch */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
+				57B000012F00000100000001 /* RideShared */,
 			);
 			name = BikeComputerWatch;
 			packageProductDependencies = (

@@ -18,6 +18,9 @@ int main() {
       (1UL << 11));
   static_assert(device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE ==
                 (1UL << 12));
+  static_assert(
+      device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE ==
+      (1UL << 13));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -32,6 +35,16 @@ int main() {
                                                    8) == 0);
   assert(device_capabilities_protocol::encodeCap2(0, nullptr, false, output,
                                                    sizeof(output)) == 9);
+
+  const size_t scopedControllerSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedScopedController[] = {'C', 'A', 'P', '2', 1,
+                                               0x00, 0x20, 0x00, 0x00};
+  assert(scopedControllerSize == sizeof(expectedScopedController));
+  for (size_t index = 0; index < scopedControllerSize; ++index)
+    assert(output[index] == expectedScopedController[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

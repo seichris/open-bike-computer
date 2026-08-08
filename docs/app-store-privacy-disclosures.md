@@ -1,6 +1,6 @@
 # App Store privacy disclosures
 
-Prepared for the Watch workout companion release on July 19, 2026.
+Prepared for the Watch workout and navigation release on August 8, 2026.
 
 This file is the source-of-truth answer sheet for App Store Connect. It does not
 publish or change App Store Connect. Reconfirm the production configuration and
@@ -51,6 +51,15 @@ other identifier as linked even when the app has no account or real-world name.
   or diagnostic-upload SDK.
 - Confirm Health, workout route, and raw workout telemetry are absent from
   backend requests and logs.
+- Confirm Watch online-routing origin/destination and returned MapKit route are
+  used only for the rider's real-time request, remain absent from Bicino backend
+  traffic and logs, and are not written to the offline route store.
+- Confirm paired-device coordinate favorites and offline route archives remain
+  inside WatchConnectivity/local device storage, and that expired archives and
+  rider-requested deletions follow the documented retention behavior.
+- Reconfirm that the approved route provider permits every shipped persistence,
+  attribution, and non-Apple accessory-display use; do not ship a MapKit export
+  path without explicit approval under the current Apple terms.
 - Confirm `maps.8o.vc` stores map geometry only for requested map jobs and does
   not repurpose it for analytics, advertising, or tracking.
 - Confirm custom map names, job/status timestamps, and download receipts remain

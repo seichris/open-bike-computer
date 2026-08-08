@@ -62,6 +62,7 @@ private struct WorkoutContractTestSuite {
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
+        testWorkoutDevicePairGenerationStamp()
         testInvalidEnvelopeIdentityIsRejected()
         testInvalidNumbersAndCoordinatesAreRejected()
         testMetricUnitsAndAvailabilityMustMatchPayload()
@@ -135,6 +136,46 @@ private struct WorkoutContractTestSuite {
         testMainRideControlsComposition()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
         testWatchWorkoutLaunchRequest()
+    }
+
+    private mutating func testWorkoutDevicePairGenerationStamp() {
+        let sample = WorkoutDeviceTelemetrySample(
+            state: .running,
+            sessionToken: 7,
+            hasLiveNumerics: true,
+            isCurrentSnapshot: true,
+            elapsedSeconds: 10,
+            distanceMeters: 20,
+            speedMetersPerSecond: 3,
+            currentHeartRateBPM: 120,
+            averageHeartRateBPM: 110,
+            activeEnergyKilocalories: 5,
+            cyclingPowerWatts: 200,
+            cyclingCadenceRPM: 80,
+            currentHeartRateZone: 2,
+            altitudeMeters: 30,
+            heartRateZoneCount: 5,
+            sourceFlags: [.watchSpeed, .watchAltitude]
+        )
+        guard let frames = WorkoutDeviceFrameBuilder.frames(for: sample) else {
+            expect(false, "workout device frames encode")
+            return
+        }
+        let stamped = WorkoutDeviceFrameBuilder.stampedPair(
+            core: frames.core,
+            extended: frames.extended,
+            generation: 3
+        )
+        expect(
+            stamped.core[1] & 0xC0 == 0xC0 &&
+                stamped.extended[1] & 0xC0 == 0xC0,
+            "workout core and extended frames share one pair generation"
+        )
+        expect(
+            stamped.core[1] & 0x3F == frames.core[1] &&
+                stamped.extended[1] & 0x3F == frames.extended[1],
+            "pair stamping preserves state and source bits"
+        )
     }
 
     private mutating func expect(

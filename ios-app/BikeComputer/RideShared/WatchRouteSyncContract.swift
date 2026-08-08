@@ -1,0 +1,181 @@
+import Foundation
+
+nonisolated enum WatchRouteSyncOperationV1: String, Codable, Equatable, Sendable {
+    case install
+    case delete
+    case acknowledge
+}
+
+nonisolated enum WatchRouteSyncStatusV1: String, Codable, Equatable, Sendable {
+    case ready
+    case deleted
+    case rejected
+}
+
+struct WatchRouteIdentityV1: Codable, Equatable, Hashable, Sendable {
+    let routeID: UUID
+    let revision: UInt32
+    let contentHash: String
+
+    init(routeID: UUID, revision: UInt32, contentHash: String) {
+        self.routeID = routeID
+        self.revision = revision
+        self.contentHash = contentHash
+    }
+
+    init(archive: NavigationRouteArchiveV1) {
+        self.init(
+            routeID: archive.routeID,
+            revision: archive.revision,
+            contentHash: archive.contentHash
+        )
+    }
+}
+
+struct WatchRouteSyncMessageV1: Equatable, Sendable {
+    static let schemaVersion: UInt16 = 1
+
+    let operation: WatchRouteSyncOperationV1
+    let identity: WatchRouteIdentityV1
+    let status: WatchRouteSyncStatusV1?
+    let errorCode: String?
+    let encodedByteCount: Int?
+    let deleteAfter: Date?
+
+    init(
+        operation: WatchRouteSyncOperationV1,
+        identity: WatchRouteIdentityV1,
+        status: WatchRouteSyncStatusV1? = nil,
+        errorCode: String? = nil,
+        encodedByteCount: Int? = nil,
+        deleteAfter: Date? = nil
+    ) {
+        self.operation = operation
+        self.identity = identity
+        self.status = status
+        self.errorCode = errorCode.map { String($0.prefix(128)) }
+        self.encodedByteCount = encodedByteCount
+        self.deleteAfter = deleteAfter
+    }
+
+    var propertyList: [String: Any] {
+        var value: [String: Any] = [
+            Keys.schema: Int(Self.schemaVersion),
+            Keys.operation: operation.rawValue,
+            Keys.routeID: identity.routeID.uuidString.lowercased(),
+            Keys.revision: Int(identity.revision),
+            Keys.contentHash: identity.contentHash
+        ]
+        if let status {
+            value[Keys.status] = status.rawValue
+        }
+        if let errorCode {
+            value[Keys.errorCode] = String(errorCode.prefix(128))
+        }
+        if let encodedByteCount {
+            value[Keys.encodedByteCount] = encodedByteCount
+        }
+        if let deleteAfter {
+            value[Keys.deleteAfter] = deleteAfter
+        }
+        return value
+    }
+
+    init?(propertyList: [String: Any]) {
+        guard let schema = Self.integer(propertyList[Keys.schema]),
+              schema == Int(Self.schemaVersion),
+              let operationRaw = propertyList[Keys.operation] as? String,
+              let operation = WatchRouteSyncOperationV1(rawValue: operationRaw),
+              let routeIDRaw = propertyList[Keys.routeID] as? String,
+              let routeID = UUID(uuidString: routeIDRaw),
+              let revisionValue = Self.integer(propertyList[Keys.revision]),
+              revisionValue > 0,
+              revisionValue <= Int(UInt32.max),
+              let contentHash = propertyList[Keys.contentHash] as? String,
+              contentHash.count == 64,
+              contentHash.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (97...102).contains(byte)
+              }) else {
+            return nil
+        }
+        let status: WatchRouteSyncStatusV1?
+        if let raw = propertyList[Keys.status] as? String {
+            guard let parsed = WatchRouteSyncStatusV1(rawValue: raw) else {
+                return nil
+            }
+            status = parsed
+        } else {
+            status = nil
+        }
+        let errorCode = propertyList[Keys.errorCode] as? String
+        guard errorCode?.utf8.count ?? 0 <= 128 else { return nil }
+        let encodedByteCount = Self.integer(
+            propertyList[Keys.encodedByteCount]
+        )
+        if propertyList[Keys.encodedByteCount] != nil {
+            guard let encodedByteCount,
+                  encodedByteCount > 0,
+                  encodedByteCount <=
+                    NavigationRouteLimitsV1.production.maximumEncodedBytes else {
+                return nil
+            }
+        }
+        let deleteAfter = propertyList[Keys.deleteAfter] as? Date
+        if propertyList[Keys.deleteAfter] != nil {
+            guard let deleteAfter,
+                  deleteAfter.timeIntervalSince1970.isFinite else {
+                return nil
+            }
+        }
+        switch operation {
+        case .install:
+            guard status == nil, errorCode == nil,
+                  encodedByteCount != nil else { return nil }
+        case .delete:
+            guard status == nil, errorCode == nil,
+                  encodedByteCount == nil, deleteAfter == nil else { return nil }
+        case .acknowledge:
+            guard status != nil,
+                  encodedByteCount == nil, deleteAfter == nil else { return nil }
+            if status == .rejected {
+                guard errorCode != nil else { return nil }
+            } else {
+                guard errorCode == nil else { return nil }
+            }
+        }
+        self.init(
+            operation: operation,
+            identity: WatchRouteIdentityV1(
+                routeID: routeID,
+                revision: UInt32(revisionValue),
+                contentHash: contentHash
+            ),
+            status: status,
+            errorCode: errorCode,
+            encodedByteCount: encodedByteCount,
+            deleteAfter: deleteAfter
+        )
+    }
+
+    func matches(_ archive: NavigationRouteArchiveV1) -> Bool {
+        identity == WatchRouteIdentityV1(archive: archive)
+    }
+
+    private enum Keys {
+        static let schema = "bicino.route.schema"
+        static let operation = "bicino.route.operation"
+        static let routeID = "bicino.route.id"
+        static let revision = "bicino.route.revision"
+        static let contentHash = "bicino.route.hash"
+        static let status = "bicino.route.status"
+        static let errorCode = "bicino.route.error"
+        static let encodedByteCount = "bicino.route.bytes"
+        static let deleteAfter = "bicino.route.deleteAfter"
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        return nil
+    }
+}

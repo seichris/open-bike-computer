@@ -17,6 +17,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
@@ -31,9 +32,17 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/RideShared/NavigationRouteContract.swift \
+  ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift \
+  ios-app/BikeComputer/RideShared/RouteProviderContract.swift \
+  ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift \
+  ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
+  ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
+  ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
@@ -97,6 +106,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
@@ -108,6 +118,13 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/RideShared/NavigationRouteContract.swift \
+  ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift \
+  ios-app/BikeComputer/RideShared/RouteProviderContract.swift \
+  ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift \
+  ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
+  ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
+  ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift
 
 "${PREVIEW_CATALYST_OUT}"

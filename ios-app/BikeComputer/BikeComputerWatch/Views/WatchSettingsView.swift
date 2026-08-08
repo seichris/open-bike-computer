@@ -1,8 +1,31 @@
 import SwiftUI
 
 struct WatchSettingsView: View {
+    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+
     var body: some View {
         Form {
+            Section {
+                Toggle(
+                    "Use Watch cellular connection",
+                    isOn: Binding(
+                        get: {
+                            navigationSettings.useWatchCellularConnection
+                        },
+                        set: {
+                            navigationSettings
+                                .setUseWatchCellularConnection($0)
+                        }
+                    )
+                )
+            } header: {
+                Text("Navigation")
+            } footer: {
+                Text(
+                    "Allows online route calculation and rerouting from this Watch. watchOS may use cellular or Wi-Fi when available."
+                )
+            }
+
             Section("About") {
                 LabeledContent("Version", value: versionDescription)
             }
@@ -38,6 +61,8 @@ struct WatchSettingsView: View {
 
 #Preview {
     NavigationStack {
-        WatchSettingsView()
+        WatchSettingsView(
+            navigationSettings: WatchNavigationSettingsStore()
+        )
     }
 }
