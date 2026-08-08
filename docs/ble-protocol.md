@@ -37,11 +37,12 @@ firmware field to wrap.
 
 If iOS has cached an older GATT table and does not discover `2A6F`, `2A72`,
 `2A73`, or the workout characteristic, the app falls back to framed binary
-writes over authenticated `2A6E`. A discovered workout characteristic always
-owns workout traffic; current firmware's write-without-response transport is
-flow-controlled through CoreBluetooth and the app's correlated-pair queue.
-`WTLM` is reserved for firmware whose GATT table does not expose the dedicated
-characteristic.
+writes over authenticated `2A6E`. Current firmware exposes acknowledged and
+unacknowledged workout writes, and iOS prefers the acknowledged native route.
+For earlier firmware whose workout characteristic is unacknowledged, iOS uses
+acknowledged `WTLM` whenever `2A6E` supports responses. Native
+write-without-response remains the compatibility route when the command
+transport is also unacknowledged.
 Fallback frame prefixes:
 
 | Prefix | Payload |
@@ -317,10 +318,12 @@ Workout telemetry is iOS-to-device, RAM-only, and accepted only after the
 existing local authentication handshake. The logical native payload is exactly
 16 bytes. In an ownership-v2 session it is carried in an `S2` frame on protected
 channel `6`, for a 38-byte native wire write. Current firmware exposes the
-native characteristic as write-without-response, so iOS sends through that
-dedicated transport. The bounded queue admits each correlated core-plus-extended
-pair atomically, preserves pair ordering, coalesces obsolete state, and retries
-until the latest state converges. A cached GATT table uses this fallback:
+native characteristic with both write properties, so iOS uses acknowledged
+delivery. The bounded queue admits each correlated core-plus-extended pair
+atomically, preserves pair ordering, coalesces obsolete state, and retries until
+the latest state converges. Earlier firmware with only an unacknowledged native
+workout characteristic uses this fallback whenever the navigation
+characteristic supports acknowledged writes:
 
 ```text
 "WTLM" | 16-byte workout frame
@@ -330,9 +333,11 @@ The fallback plaintext is exactly 20 bytes before ownership-v2 protection and
 the protected fallback wire write is 42 bytes. Native and fallback payloads use
 the same parser after their authenticated channel is unwrapped. The ownership
 handshake already requires an ATT MTU large enough for either protected write.
-iOS prefers an acknowledged native workout characteristic when available,
-otherwise uses native write-without-response. It uses `WTLM` only when the
-dedicated characteristic is unavailable.
+iOS prefers an acknowledged native workout characteristic when available, then
+acknowledged `WTLM`, and uses native write-without-response only when no
+acknowledged route is available. Persistent no-response backpressure triggers a
+bounded reconnect instead of indefinitely blocking GPS, settings, and workout
+state in the shared queue.
 iOS sends no workout frames unless capability bit `7` is present, so older
 firmware continues using the existing GPS ride fields unchanged.
 
