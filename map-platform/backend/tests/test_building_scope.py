@@ -176,7 +176,16 @@ class BuildingScopeTests(unittest.TestCase):
         self.assertEqual(plan.document["metrics"]["requestedApproximateAreaM2"], expected["requestedApproximateAreaM2"])
         self.assertEqual(plan.document["metrics"]["outputAreaM2"], expected["outputAreaM2"])
         self.assertEqual(plan.document["metrics"]["sourceAreaM2"], expected["newSourceAreaM2"])
-        self.assertEqual(legacy["legacySourceAreaM2"], expected["legacySourceAreaM2"])
+        # The legacy diagnostic round-trips integer Web-Mercator cell edges
+        # through floating-point WGS-84 bounds. libm/Python combinations can
+        # move an inverse-projected edge by one metre, so keep only this legacy
+        # comparison approximate; the canonical selected metrics above remain
+        # exact identity inputs.
+        self.assertAlmostEqual(
+            legacy["legacySourceAreaM2"],
+            expected["legacySourceAreaM2"],
+            delta=32_768,
+        )
         self.assertEqual(len(plan.output_blocks), expected["outputBlockCount"])
         self.assertEqual(
             [[block.x, block.y] for block in plan.output_blocks],
