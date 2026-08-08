@@ -72,28 +72,42 @@ struct WorkoutLiveActivityElapsedView: View {
     let font: Font
 
     var body: some View {
-        Group {
-            if state.phase == .running,
-               let timerAnchor = state.timerAnchor {
-                Text(timerAnchor, style: .timer)
-            } else if let elapsedActiveSeconds =
-                state.elapsedActiveSeconds {
-                Text(
-                    WorkoutLiveActivityFormatting.duration(
-                        elapsedActiveSeconds
+        VStack(alignment: .trailing, spacing: 1) {
+            Group {
+                if let timerAnchor = state.wallTimerAnchor,
+                   state.phase == .running || state.phase == .paused {
+                    Text(timerAnchor, style: .timer)
+                } else if let elapsedWallSeconds = state.elapsedWallSeconds {
+                    Text(
+                        WorkoutLiveActivityFormatting.duration(
+                            elapsedWallSeconds
+                        )
                     )
+                } else if let elapsedActiveSeconds =
+                    state.elapsedActiveSeconds {
+                    Text(
+                        WorkoutLiveActivityFormatting.duration(
+                            elapsedActiveSeconds
+                        )
+                    )
+                } else {
+                    Text("—")
+                }
+            }
+            .font(font)
+            if let elapsedActiveSeconds = state.elapsedActiveSeconds,
+               state.elapsedWallSeconds != nil {
+                Text(
+                    "Moving \(WorkoutLiveActivityFormatting.duration(elapsedActiveSeconds))"
                 )
-            } else {
-                Text("—")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
-        .font(font)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
         .accessibilityLabel(
-            state.elapsedActiveSeconds.map {
-                "Active time \(WorkoutLiveActivityFormatting.duration($0))"
-            } ?? "Active time unavailable"
+            state.elapsedAccessibilityLabel
         )
     }
 }
@@ -289,6 +303,22 @@ extension WorkoutLiveActivityAttributes.ContentState {
         }
     }
 
+    var wallTimerAnchor: Date? {
+        elapsedWallSeconds.map {
+            capturedAt.addingTimeInterval(-$0)
+        }
+    }
+
+    var elapsedAccessibilityLabel: String {
+        let elapsed = elapsedWallSeconds.map {
+            "Elapsed \(WorkoutLiveActivityFormatting.duration($0))"
+        }
+        let moving = elapsedActiveSeconds.map {
+            "moving \(WorkoutLiveActivityFormatting.duration($0))"
+        }
+        return [elapsed, moving].compactMap { $0 }.joined(separator: ", ")
+    }
+
     var statusColor: Color {
         switch phase {
         case .running:
@@ -307,7 +337,7 @@ extension WorkoutLiveActivityAttributes.ContentState {
         case .running:
             return "Riding"
         case .paused:
-            return "Paused"
+            return pauseOrigin == .automatic ? "Auto-Paused" : "Paused"
         case .stale:
             return "Delayed"
         case .disconnected:

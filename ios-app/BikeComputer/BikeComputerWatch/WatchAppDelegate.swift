@@ -13,6 +13,19 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
         heartRateZoneSettingsReceiver = WatchHeartRateZoneSettingsReceiver(
             applyMaximumHeartRateBPM: { value in
                 workoutManager.setMaximumHeartRateBPM(value)
+            },
+            applyRideDetectionSettings: { settings, generation in
+                if let settings, let generation {
+                    workoutManager.setRideDetectionSettings(
+                        settings,
+                        generation: generation
+                    )
+                } else {
+                    workoutManager.clearRideDetectionSettings()
+                }
+            },
+            applyPendingAutomaticStart: { context in
+                workoutManager.setPendingAutomaticStartContext(context)
             }
         )
         super.init()

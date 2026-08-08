@@ -16,12 +16,15 @@ xcrun swiftc \
   -o "${OUT}" \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
+  ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
   ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift \
   ios-app/BikeComputerTests/WorkoutContractTests.swift

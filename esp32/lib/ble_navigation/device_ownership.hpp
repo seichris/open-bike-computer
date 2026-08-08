@@ -23,6 +23,7 @@ enum class AuthenticatedChannel : uint8_t {
   Gps = 4,
   Settings = 5,
   Workout = 6,
+  RideAutomation = 7,
 };
 
 enum class Event {
@@ -127,8 +128,8 @@ private:
 
   char pendingAuthNonce_[33] = "";
   char pendingServerAuthNonce_[33] = "";
-  std::array<uint32_t, 7> lastInboundSequence_{};
-  std::array<uint32_t, 7> nextOutboundSequence_{};
+  std::array<uint32_t, 8> lastInboundSequence_{};
+  std::array<uint32_t, 8> nextOutboundSequence_{};
 };
 
 std::string hexEncode(const uint8_t *data, size_t length);

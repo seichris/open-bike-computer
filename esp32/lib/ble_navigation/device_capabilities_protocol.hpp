@@ -12,6 +12,7 @@ constexpr uint32_t BIRDS_EYE_MAP_NAVIGATION_FEATURE = 1UL << 9;
 constexpr uint32_t BIRDS_EYE_PERSPECTIVE_FEATURE = 1UL << 10;
 constexpr uint32_t BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE = 1UL << 11;
 constexpr uint32_t OSM_3D_BUILDINGS_FEATURE = 1UL << 12;
+constexpr uint32_t RIDE_AUTOMATION_V2_FEATURE = 1UL << 13;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;

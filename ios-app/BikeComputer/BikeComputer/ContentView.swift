@@ -47,6 +47,10 @@ struct ContentView: View {
         CyclingSensorStore
     @ObservedObject private var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @ObservedObject private var rideDetectionSettingsStore:
+        RideDetectionSettingsStore
+    @ObservedObject private var rideAutomationCoordinator:
+        RideAutomationCoordinator
     private let workoutMirrorManager: WorkoutMirrorManager
     private let onApplicationActiveChange: (Bool) -> Void
     @Environment(\.scenePhase) private var scenePhase
@@ -81,14 +85,14 @@ struct ContentView: View {
         cyclingSensorDetectionCoordinator:
             CyclingSensorDetectionCoordinator? = nil,
         coordinator: BikeComputerCoordinator? = nil,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
+        rideAutomationCoordinator: RideAutomationCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
         liveActivityDiagnostics:
             WorkoutLiveActivityDiagnosticStore? = nil,
         onApplicationActiveChange:
             @escaping (Bool) -> Void = { _ in }
     ) {
-        let watchAvailability = watchAvailability
-            ?? WorkoutWatchAvailabilityMonitor()
         let liveActivityDiagnostics = liveActivityDiagnostics
             ?? WorkoutLiveActivityDiagnosticStore()
         let cyclingSensorStore =
@@ -102,6 +106,20 @@ struct ContentView: View {
             destinationStore: SavedDestinationStore(),
             workoutMetricsStore: workoutMirrorManager.store
         )
+        let rideDetectionSettingsStore =
+            rideDetectionSettingsStore ?? RideDetectionSettingsStore()
+        let watchAvailability = watchAvailability
+            ?? WorkoutWatchAvailabilityMonitor(
+                heartRateZoneDefaults: .standard,
+                rideDetectionSettingsStore: rideDetectionSettingsStore
+            )
+        let rideAutomationCoordinator =
+            rideAutomationCoordinator ?? RideAutomationCoordinator(
+                bleManager: coordinator.bleManager,
+                workoutManager: workoutMirrorManager,
+                settingsStore: rideDetectionSettingsStore,
+                watchAvailability: watchAvailability
+            )
         coordinator.bleManager.onWorkoutStartRequest = {
             Task { @MainActor [weak workoutMirrorManager] in
                 workoutMirrorManager?.startOutdoorCyclingOnWatch()
@@ -117,6 +135,12 @@ struct ContentView: View {
         )
         _cyclingSensorDetectionCoordinator = ObservedObject(
             wrappedValue: cyclingSensorDetectionCoordinator
+        )
+        _rideDetectionSettingsStore = ObservedObject(
+            wrappedValue: rideDetectionSettingsStore
+        )
+        _rideAutomationCoordinator = ObservedObject(
+            wrappedValue: rideAutomationCoordinator
         )
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _workoutStore = ObservedObject(
@@ -162,12 +186,27 @@ struct ContentView: View {
                             .padding(.top, 8)
                     }
 
+                    if rideAutomationCoordinator.startPrompt != nil {
+                        rideDetectionStartPrompt
+                            .padding(.horizontal, 14)
+                            .padding(.top, 8)
+                    }
+
+                    if let error = rideAutomationCoordinator.lastError {
+                        rideDetectionErrorBanner(error)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 8)
+                    }
+
                     if !offlineMapManager.isMapAreaSelectionActive,
                        shouldShowWorkoutStatusCard {
                         WorkoutCompactCard(
                             store: workoutStore,
                             watchAvailability: watchAvailability,
-                            onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                            onStart: {
+                                _ = workoutMirrorManager
+                                    .startOutdoorCyclingOnWatch()
+                            },
                             onOpen: {
                                 presentedSheet = .workoutDashboard
                             }
@@ -372,6 +411,70 @@ struct ContentView: View {
             .accessibilityIdentifier("liveActivityDiagnostic")
     }
 
+    private var rideDetectionStartPrompt: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Cycling detected", systemImage: "bicycle")
+                .font(.headline)
+            Text("Start an Outdoor Cycling workout on Apple Watch?")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(
+                "Times out in \(rideAutomationCoordinator.promptSecondsRemaining)s"
+            )
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            HStack {
+                Button("Not Now", role: .cancel) {
+                    rideAutomationCoordinator.dismissStartPrompt()
+                }
+                Spacer()
+                Button("Start Ride") {
+                    rideAutomationCoordinator.acceptStartPrompt()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func rideDetectionErrorBanner(
+        _ error: RideAutomationResult
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text(rideDetectionErrorMessage(error))
+                .font(.subheadline)
+            Spacer()
+            Button("Dismiss") {
+                rideAutomationCoordinator.dismissError()
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(12)
+        .foregroundStyle(.orange)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityIdentifier("rideDetectionError")
+    }
+
+    private func rideDetectionErrorMessage(
+        _ error: RideAutomationResult
+    ) -> String {
+        switch error {
+        case .watchUnavailable:
+            return "Open Bicino on iPhone and make sure Apple Watch is reachable."
+        case .sessionMismatch:
+            return "The detected ride no longer matches the active workout."
+        case .rejected:
+            return "The ride action was not accepted."
+        case .stale:
+            return "The ride action expired before it could be confirmed."
+        case .none, .accepted:
+            return "The ride action could not be completed."
+        }
+    }
+
     @ViewBuilder
     private func presentedSheetContent(
         for destination: ContentSheetDestination
@@ -387,6 +490,8 @@ struct ContentView: View {
                 cyclingSensorStore: cyclingSensorStore,
                 cyclingSensorDetectionCoordinator:
                     cyclingSensorDetectionCoordinator,
+                rideDetectionSettingsStore:
+                    rideDetectionSettingsStore,
                 onStartTestNavigation: { destination in
                     coordinator.startNavigation(
                         from: .currentLocation,
@@ -444,7 +549,9 @@ struct ContentView: View {
             WorkoutDashboardView(
                 store: workoutStore,
                 watchAvailability: watchAvailability,
-                onStart: workoutMirrorManager.startOutdoorCyclingOnWatch,
+                onStart: {
+                    _ = workoutMirrorManager.startOutdoorCyclingOnWatch()
+                },
                 onPause: workoutMirrorManager.pause,
                 onResume: workoutMirrorManager.resume,
                 onMarkSegment: workoutMirrorManager.markSegment,
@@ -735,7 +842,9 @@ struct ContentView: View {
             remainingTime: coordinator.routeRemainingTime,
             remainingDistance: coordinator.routeRemainingDistance,
             onStopNavigation: { coordinator.stopNavigation() },
-            onStartWorkout: workoutMirrorManager.startOutdoorCyclingOnWatch,
+            onStartWorkout: {
+                _ = workoutMirrorManager.startOutdoorCyclingOnWatch()
+            },
             onMarkSegment: workoutMirrorManager.markSegment,
             onPauseWorkout: workoutMirrorManager.pause,
             onResumeWorkout: workoutMirrorManager.resume,
@@ -782,7 +891,9 @@ struct ContentView: View {
                workoutStore.presentation.canStartNewWorkout {
                 WorkoutStartButton(
                     watchAvailability: watchAvailability,
-                    action: workoutMirrorManager.startOutdoorCyclingOnWatch
+                    action: {
+                        _ = workoutMirrorManager.startOutdoorCyclingOnWatch()
+                    }
                 ) {
                     Label("Start Workout", systemImage: "figure.outdoor.cycle")
                         .labelStyle(.titleAndIcon)

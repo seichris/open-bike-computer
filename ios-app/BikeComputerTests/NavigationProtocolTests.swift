@@ -9430,7 +9430,12 @@ struct NavigationProtocolTests {
             .healthKitDistance,
             .watchAltitude,
             .liveHeartRateZone,
-        ]
+        ],
+        pauseOrigin: WorkoutTransitionOrigin? = nil,
+        wallElapsedSeconds: Double? = 4_000,
+        sessionIdentityHash: UInt32? = 0x1234_5678,
+        detectorProfileVersion: UInt16? = 1,
+        lastTransitionOrigin: WorkoutTransitionOrigin? = .automatic
     ) -> WorkoutDeviceTelemetrySample {
         WorkoutDeviceTelemetrySample(
             state: state,
@@ -9448,7 +9453,12 @@ struct NavigationProtocolTests {
             currentHeartRateZone: currentHeartRateZone,
             altitudeMeters: altitudeMeters,
             heartRateZoneCount: heartRateZoneCount,
-            sourceFlags: sourceFlags
+            sourceFlags: sourceFlags,
+            pauseOrigin: pauseOrigin,
+            wallElapsedSeconds: wallElapsedSeconds,
+            sessionIdentityHash: sessionIdentityHash,
+            detectorProfileVersion: detectorProfileVersion,
+            lastTransitionOrigin: lastTransitionOrigin
         )
     }
 
@@ -9471,8 +9481,15 @@ struct NavigationProtocolTests {
             0x41, 0x01, 0x6C, 0x03,
             0x04, 0xF4, 0xFF, 0x05,
         ]), "extended workout frame matches the protocol byte vector")
+        assertEqual(frames.origin, Data([
+            0x03, 0x00, 0x34, 0x12,
+            0xA0, 0x0F, 0x00, 0x00,
+            0x78, 0x56, 0x34, 0x12,
+            0x01, 0x00, 0x02, 0x01,
+        ]), "origin workout frame matches the protocol byte vector")
         assertEqual(frames.core.count, 16, "core workout frame is exactly 16 bytes")
         assertEqual(frames.extended.count, 16, "extended workout frame is exactly 16 bytes")
+        assertEqual(frames.origin.count, 16, "origin workout frame is exactly 16 bytes")
 
         let maskedFlags = WorkoutDeviceFrameBuilder.frames(for: workoutDeviceSample(
             sourceFlags: WorkoutDeviceSourceFlags(rawValue: 0xFF)
@@ -9497,6 +9514,8 @@ struct NavigationProtocolTests {
                     "idle frame explicitly clears device workout state")
         assertEqual(readUInt16LE(idle?.core ?? Data(repeating: 0, count: 16), offset: 2), 0,
                     "idle clear frame carries token zero")
+        assert(idle?.originAvailable == false,
+               "idle clear frames never publish a synthetic provenance identity")
     }
 
     static func testWorkoutDeviceFrameSentinelsAndSaturation() {
@@ -9676,6 +9695,11 @@ struct NavigationProtocolTests {
                     "stale mapping preserves active session state")
         assert(stale?.hasLiveNumerics == false,
                "stale mapping strips live numerics")
+        assert(stale?.sessionIdentityHash == nil,
+               "stale mapping strips origin identity with its Watch snapshot")
+        assert(stale.flatMap { WorkoutDeviceFrameBuilder.frames(for: $0) }?
+            .originAvailable == false,
+               "stale relay frames cannot publish zero-identity provenance")
 
         let stoppedAwaitingFinal = WorkoutDeviceTelemetryMapper.sample(
             presentation: presentation(
@@ -9887,12 +9911,12 @@ struct NavigationProtocolTests {
             transportReady: true,
             at: start
         )
-        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
-                    "authentication sends both latest workout frames")
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended, .origin],
+                    "authentication sends workout metrics and provenance")
         assert(schedule.transmissions.first?.prioritized == true,
                "initial core synchronization uses the priority lane")
-        assert(schedule.transmissions.count == 2,
-               "a generated workout update always schedules a complete pair")
+        assert(schedule.transmissions.count == 3,
+               "initial synchronization includes the complete metric pair and provenance")
         let initialPairGeneration = schedule.transmissions[0].data[1] >> 6
         assert(initialPairGeneration > 0,
                "new relay frames carry a non-zero pair generation")
@@ -9909,6 +9933,36 @@ struct NavigationProtocolTests {
                 at: start
             )
         }
+
+        var legacyScheduler = WorkoutDeviceRelayScheduler()
+        let legacyInitial = legacyScheduler.update(
+            frames: initial,
+            transportReady: true,
+            originTransportReady: false,
+            at: start
+        )
+        assertEqual(legacyInitial.transmissions.map(\.kind), [.core, .extended],
+                    "legacy peers receive only the original frame pair")
+        for transmission in legacyInitial.transmissions {
+            legacyScheduler.didWrite(
+                kind: transmission.kind,
+                data: transmission.data,
+                at: start
+            )
+        }
+        let legacyIdle = legacyScheduler.update(
+            frames: initial,
+            transportReady: true,
+            originTransportReady: false,
+            at: start.addingTimeInterval(0.1)
+        )
+        assert(legacyIdle.transmissions.isEmpty,
+               "unsupported provenance does not create phantom work")
+        assertEqual(
+            legacyIdle.nextEvaluationAt,
+            start.addingTimeInterval(5),
+            "legacy scheduling waits for the metric heartbeat"
+        )
 
         schedule = scheduler.update(
             frames: changed,
@@ -9957,7 +10011,7 @@ struct NavigationProtocolTests {
             transportReady: true,
             at: start.addingTimeInterval(1.2)
         )
-        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended, .origin],
                     "fresh-to-stale transition sends sentinels immediately")
         for transmission in schedule.transmissions {
             scheduler.didWrite(
@@ -9977,8 +10031,8 @@ struct NavigationProtocolTests {
             transportReady: true,
             at: start.addingTimeInterval(2.1)
         )
-        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended],
-                    "reconnect resynchronizes both latest frames once")
+        assertEqual(schedule.transmissions.map(\.kind), [.core, .extended, .origin],
+                    "reconnect resynchronizes metrics and provenance once")
 
         var heartbeatScheduler = WorkoutDeviceRelayScheduler()
         let heartbeatStart = heartbeatScheduler.update(
@@ -10093,13 +10147,17 @@ struct NavigationProtocolTests {
             kind: .extended,
             data: partialPair.transmissions[1].data
         )
+        partialPairScheduler.didNotWrite(
+            kind: .origin,
+            data: partialPair.transmissions[2].data
+        )
         let retriedPair = partialPairScheduler.update(
             frames: initial,
             transportReady: true,
             at: start.addingTimeInterval(0.1)
         )
-        assertEqual(retriedPair.transmissions.map(\.kind), [.core, .extended],
-                    "a partial pair retries both frames")
+        assertEqual(retriedPair.transmissions.map(\.kind), [.core, .extended, .origin],
+                    "a partial publication retries metrics and provenance")
         assert(retriedPair.transmissions[0].data[1] >> 6 != initialPairGeneration,
                "a retried pair advances its correlation generation")
 
@@ -10176,11 +10234,29 @@ struct NavigationProtocolTests {
         assert(manager.handleDeviceCapabilitiesNotification(capability),
                "publisher integration accepts workout capability")
         assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
-               "one capability-enable event resynchronizes core and extended frames")
+               "legacy workout capability resynchronizes only supported frames")
         assertEqual(workoutWrites().map { $0[4] }, [1, 2],
-                    "publisher integration sends both fallback frame kinds")
+                    "old firmware never receives the new provenance frame")
         assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.running.rawValue,
                     "readiness publication relays the committed running state")
+
+        writes.removeAll()
+        let rideAutomationCapability =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([
+                1,
+                DeviceBLEProtocol.workoutTelemetryCapabilityMask,
+                0x20,
+                0,
+                0,
+            ])
+        assert(manager.handleDeviceCapabilitiesNotification(
+            rideAutomationCapability
+        ), "CAP2 ride-automation capability is accepted")
+        assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 1 },
+               "new capability publishes the deferred provenance frame")
+        assertEqual(workoutWrites().map { $0[4] }, [3],
+                    "origin telemetry is gated on ride automation support")
 
         writes.removeAll()
         clock.advance(by: 0.1)
@@ -10211,7 +10287,7 @@ struct NavigationProtocolTests {
         assert(manager.handleDeviceCapabilitiesNotification(capability),
                "back-to-back valid capability response reenables telemetry")
         assert(waitForMainLoop(timeout: 1) { workoutWrites().count == 2 },
-               "rapid disable/reenable still resynchronizes both latest frames")
+               "legacy reenable resynchronizes only supported latest frames")
         assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.paused.rawValue,
                     "reconnect resynchronization uses the latest committed state")
         withExtendedLifetime(relay) {}
@@ -10257,7 +10333,7 @@ struct NavigationProtocolTests {
         }
 
         let manager = BLEManager()
-        manager.installNavigationWriteQueueForTesting(maxCount: 2)
+        manager.installNavigationWriteQueueForTesting(maxCount: 3)
         var transportReady = false
         var writes: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
@@ -10283,6 +10359,8 @@ struct NavigationProtocolTests {
                "first ordinary write fills the regular queue")
         assert(manager.requestDeviceCapabilities(),
                "second ordinary write fills the regular queue")
+        assert(manager.requestDeviceCapabilities(),
+               "third ordinary write fills the regular queue")
 
         clock.advance(by: 1)
         let heartRate = WorkoutMetricV1(
@@ -10314,8 +10392,9 @@ struct NavigationProtocolTests {
         manager.completeNavigationWriteForTesting(error: nil)
         manager.completeNavigationWriteForTesting(error: nil)
         manager.completeNavigationWriteForTesting(error: nil)
+        manager.completeNavigationWriteForTesting(error: nil)
         assertEqual(writes.map { String(data: $0.prefix(4), encoding: .utf8) },
-                    ["CAPS", "CAPS"],
+                    ["CAPS", "CAPS", "CAPS"],
                     "failed atomic admission preserves existing regular traffic")
 
         assert(waitForMainLoop(timeout: 1) {
@@ -10323,14 +10402,15 @@ struct NavigationProtocolTests {
                 String(data: $0.prefix(4), encoding: .utf8) ==
                     DeviceBLEProtocol.workoutTelemetryFallbackPrefix
             }.count == 1
-        }, "relay retries the non-prioritized pair after capacity becomes available")
+        }, "relay retries the non-prioritized bundle after capacity becomes available")
+        manager.completeNavigationWriteForTesting(error: nil)
         manager.completeNavigationWriteForTesting(error: nil)
         let workoutWrites = writes.filter {
             String(data: $0.prefix(4), encoding: .utf8) ==
                 DeviceBLEProtocol.workoutTelemetryFallbackPrefix
         }
         assertEqual(workoutWrites.map { $0[4] }, [1, 2],
-                    "regular-lane retry delivers one adjacent correlated pair")
+                    "regular-lane retry delivers one adjacent correlated bundle")
         manager.completeNavigationWriteForTesting(error: nil)
         withExtendedLifetime(relay) {}
     }
@@ -10431,7 +10511,7 @@ struct NavigationProtocolTests {
                     "WTLM fallback preserves the exact frame bytes")
 
         var malformedKind = Data(repeating: 0, count: 16)
-        malformedKind[0] = 3
+        malformedKind[0] = 4
         assert(!fallbackManager.sendWorkoutTelemetryFrame(Data(repeating: 1, count: 15)),
                "short workout frame is rejected")
         assert(!fallbackManager.sendWorkoutTelemetryFrame(malformedKind),

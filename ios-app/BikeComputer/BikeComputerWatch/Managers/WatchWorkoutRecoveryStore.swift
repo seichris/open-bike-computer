@@ -179,6 +179,15 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var sequenceHighWatermark: UInt64
         var remoteControlCheckpoint:
             WorkoutRemoteControlSequenceGate.Checkpoint? = nil
+        var pauseOrigin: WorkoutTransitionOrigin? = nil
+        var lastTransitionOrigin: WorkoutTransitionOrigin? = nil
+        var lastTransitionAt: Date? = nil
+        var detectorProfileVersion: UInt16? = nil
+        /// Persisted before an automatic HealthKit transition is requested and
+        /// cleared only by the matching session-state callback.
+        var pendingTransitionContext: WorkoutControlContextV1? = nil
+        var pendingTransitionPaused: Bool? = nil
+        var pendingTransitionRequestedAt: Date? = nil
         /// A remotely requested segment boundary is journaled with the replay
         /// checkpoint before its HealthKit event write begins. This closes the
         /// crash window where the checkpoint was durable but the event was not.
@@ -577,7 +586,10 @@ nonisolated final class WatchWorkoutRecoveryStore {
         requestedAt: Date? = nil,
         explicitRiderChoice: Bool = true,
         terminalErrorCode: WorkoutSafeErrorCodeV1? = nil,
-        terminalAcknowledgement: RemoteTerminalAcknowledgement? = nil
+        terminalAcknowledgement: RemoteTerminalAcknowledgement? = nil,
+        pendingTransitionContext: WorkoutControlContextV1? = nil,
+        pendingTransitionPaused: Bool? = nil,
+        pendingTransitionRequestedAt: Date? = nil
     ) throws -> WorkoutFinishDisposition? {
         guard checkpoint.isValid,
               (disposition == nil) == (requestedAt == nil),
@@ -603,6 +615,31 @@ nonisolated final class WatchWorkoutRecoveryStore {
             throw RecoveryStoreError.missingOrInvalidIdentity
         }
         identity.remoteControlCheckpoint = checkpoint
+        if let pendingTransitionContext {
+            guard pendingTransitionContext.origin == .automatic,
+                  pendingTransitionContext.automaticReason == .rideDetection,
+                  pendingTransitionContext.rideGeneration.map({ $0 > 0 }) == true,
+                  pendingTransitionContext.decisionSequence.map({ $0 > 0 }) == true,
+                  pendingTransitionContext.detectorProfileVersion.map({ $0 > 0 }) == true else {
+                throw RecoveryStoreError.missingOrInvalidIdentity
+            }
+            identity.pendingTransitionContext = pendingTransitionContext
+            guard let pendingTransitionPaused else {
+                throw RecoveryStoreError.missingOrInvalidIdentity
+            }
+            identity.pendingTransitionPaused = pendingTransitionPaused
+            guard let pendingTransitionRequestedAt,
+                  pendingTransitionRequestedAt
+                    .timeIntervalSinceReferenceDate.isFinite,
+                  pendingTransitionRequestedAt >= identity.startDate else {
+                throw RecoveryStoreError.missingOrInvalidIdentity
+            }
+            identity.pendingTransitionRequestedAt =
+                pendingTransitionRequestedAt
+        } else if pendingTransitionPaused != nil
+                    || pendingTransitionRequestedAt != nil {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
         let effectiveDisposition: WorkoutFinishDisposition?
         var takeoverJournalRequest: (
             disposition: WorkoutFinishDisposition,
@@ -660,6 +697,42 @@ nonisolated final class WatchWorkoutRecoveryStore {
         try persist(identity)
         self.identity = identity
         return effectiveDisposition
+    }
+
+    func confirmRideTransition(
+        origin: WorkoutTransitionOrigin,
+        paused: Bool,
+        at date: Date,
+        detectorProfileVersion: UInt16?
+    ) throws {
+        guard origin != .unknown,
+              date.timeIntervalSinceReferenceDate.isFinite,
+              detectorProfileVersion.map({ $0 > 0 }) ?? true,
+              var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.pauseOrigin = paused ? origin : nil
+        identity.lastTransitionOrigin = origin
+        identity.lastTransitionAt = date
+        identity.detectorProfileVersion = detectorProfileVersion
+            ?? identity.detectorProfileVersion
+        identity.pendingTransitionContext = nil
+        identity.pendingTransitionPaused = nil
+        identity.pendingTransitionRequestedAt = nil
+        try persist(identity)
+        self.identity = identity
+    }
+
+    func clearPendingAutomaticTransitionForManualRequest() throws {
+        guard var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        guard identity.pendingTransitionContext != nil else { return }
+        identity.pendingTransitionContext = nil
+        identity.pendingTransitionPaused = nil
+        identity.pendingTransitionRequestedAt = nil
+        try persist(identity)
+        self.identity = identity
     }
 
     func persistRemoteSegmentControl(
@@ -1201,6 +1274,30 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
               identity.remoteControlCheckpoint?.isValid ?? true,
               identity.remoteSegmentIntent?.isValid ?? true,
+              identity.pauseOrigin != .unknown,
+              identity.lastTransitionOrigin != .unknown,
+              (identity.lastTransitionOrigin == nil)
+                == (identity.lastTransitionAt == nil),
+              identity.lastTransitionAt.map({
+                  $0.timeIntervalSinceReferenceDate.isFinite
+                    && $0 >= identity.startDate
+              }) ?? true,
+              identity.detectorProfileVersion.map({ $0 > 0 }) ?? true,
+              identity.pendingTransitionContext.map({ context in
+                  context.origin == .automatic
+                    && context.automaticReason == .rideDetection
+                    && context.rideGeneration.map({ $0 > 0 }) == true
+                    && context.decisionSequence.map({ $0 > 0 }) == true
+                    && context.detectorProfileVersion.map({ $0 > 0 }) == true
+              }) ?? true,
+              (identity.pendingTransitionContext == nil)
+                == (identity.pendingTransitionPaused == nil),
+              (identity.pendingTransitionContext == nil)
+                == (identity.pendingTransitionRequestedAt == nil),
+              identity.pendingTransitionRequestedAt.map({
+                  $0.timeIntervalSinceReferenceDate.isFinite
+                    && $0 >= identity.startDate
+              }) ?? true,
               heartRateZoneMaximumIsValid,
               identity.finishRequest?.requestedAt.timeIntervalSinceReferenceDate.isFinite
                 ?? true else {

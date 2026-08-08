@@ -34,6 +34,13 @@ constexpr int16_t UNAVAILABLE_ALTITUDE = INT16_MIN;
 enum class FrameKind : uint8_t {
   Core = 1,
   Extended = 2,
+  Origin = 3,
+};
+
+enum class PauseOrigin : uint8_t {
+  None = 0,
+  Manual = 1,
+  Automatic = 2,
 };
 
 enum class SessionState : uint8_t {

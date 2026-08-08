@@ -45,7 +45,10 @@ constexpr uint32_t SYSTEM_TURN_ON_TIMEOUT_MS = 2000;
 constexpr uint32_t SENSOR_SHUTDOWN_DELAY_MS = 20;
 constexpr float ACCEL_LSB_PER_G = 4096.0f;
 constexpr float GYRO_LSB_PER_DPS = 64.0f;
-constexpr uint32_t SAMPLE_INTERVAL_MS = 500;
+// Two six-byte transactions at 5 Hz keep the shared touch/RTC I2C bus load
+// bounded while retaining a two-second RMS motion window.
+constexpr uint32_t SAMPLE_INTERVAL_MS = 200;
+constexpr uint8_t MOTION_WINDOW_SAMPLES = 10;
 constexpr float MOVING_GYRO_THRESHOLD_DPS = 20.0f;
 constexpr float MOVING_ACCEL_DELTA_MG = 180.0f;
 constexpr float ORIENTATION_THRESHOLD_MG = 650.0f;
@@ -66,11 +69,23 @@ bool identifySensorAt(uint8_t address, uint8_t &whoAmI) {
   return true;
 }
 
-#ifdef WAVESHARE_IMU_DIAGNOSTICS
 Status imuStatus;
 Sample latestSample;
 uint32_t lastPollMs = 0;
 uint32_t lastDiagLogMs = 0;
+float motionWindow[MOTION_WINDOW_SAMPLES] = {};
+uint8_t motionWindowCount = 0;
+uint8_t motionWindowIndex = 0;
+
+void resetMotionWindow() {
+  for (float &value : motionWindow) {
+    value = 0.0f;
+  }
+  motionWindowCount = 0;
+  motionWindowIndex = 0;
+  imuStatus.motionScore = 0.0f;
+  imuStatus.motionWindowSamples = 0;
+}
 
 int16_t readInt16Le(const uint8_t *data) {
   return static_cast<int16_t>((static_cast<uint16_t>(data[1]) << 8) | data[0]);
@@ -89,15 +104,12 @@ bool readSequentialBytes(uint8_t firstReg, uint8_t *data, uint8_t len,
   if (data == nullptr || len == 0) {
     return false;
   }
-  for (uint8_t i = 0; i < len; i++) {
-    if (!read8(firstReg + i, data[i], label)) {
-      return false;
-    }
-  }
-  return true;
+  return i2c::readRegisterBlock8(imuStatus.address, firstReg, data, len,
+                                 label, 3);
 }
 
 void logRawDiagnostic(const char *reason) {
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
   if (!imuStatus.present || imuStatus.address == 0) {
     return;
   }
@@ -134,6 +146,9 @@ void logRawDiagnostic(const char *reason) {
                 static_cast<unsigned long>(imuStatus.sampleCount),
                 static_cast<unsigned long>(imuStatus.zeroSamples),
                 static_cast<unsigned long>(imuStatus.failedReads));
+#else
+  (void)reason;
+#endif
 }
 
 bool softReset(uint8_t address) {
@@ -223,6 +238,23 @@ void updateDerivedState(const Sample &sample) {
                       fabsf(imuStatus.accelMagnitudeMg - 1000.0f) >
                           MOVING_ACCEL_DELTA_MG);
   imuStatus.orientation = classifyOrientation(sample);
+
+  const float gravityRemoved =
+      fminf(fabsf(imuStatus.accelMagnitudeMg - 1000.0f) / 400.0f, 1.0f);
+  const float gyroEnergy = fminf(imuStatus.vibrationDps / 60.0f, 1.0f);
+  const float instantaneous = 0.45f * gravityRemoved + 0.55f * gyroEnergy;
+  motionWindow[motionWindowIndex] = instantaneous * instantaneous;
+  motionWindowIndex = (motionWindowIndex + 1) % MOTION_WINDOW_SAMPLES;
+  if (motionWindowCount < MOTION_WINDOW_SAMPLES) {
+    motionWindowCount++;
+  }
+  float energy = 0.0f;
+  for (uint8_t i = 0; i < motionWindowCount; ++i) {
+    energy += motionWindow[i];
+  }
+  imuStatus.motionScore =
+      motionWindowCount > 0 ? sqrtf(energy / motionWindowCount) : 0.0f;
+  imuStatus.motionWindowSamples = motionWindowCount;
 }
 
 bool configureSensor() {
@@ -266,8 +298,6 @@ bool configureSensor() {
   logRawDiagnostic("config-failed");
   return false;
 }
-#endif
-
 } // namespace
 
 bool disable() {
@@ -323,7 +353,6 @@ bool disable() {
   return disabled;
 }
 
-#ifdef WAVESHARE_IMU_DIAGNOSTICS
 const Status &status() { return imuStatus; }
 
 const Sample &lastSample() { return latestSample; }
@@ -351,6 +380,8 @@ const char *orientationName(Orientation orientation) {
 bool begin() {
   imuStatus = Status{};
   latestSample = Sample{};
+  resetMotionWindow();
+  lastPollMs = 0;
 
   uint8_t whoAmI = 0;
   uint8_t revision = 0;
@@ -391,6 +422,7 @@ bool readSample(Sample &sample) {
                            "QMI8658 accel")) {
     imuStatus.dataValid = false;
     imuStatus.failedReads++;
+    resetMotionWindow();
     return false;
   }
 
@@ -399,6 +431,7 @@ bool readSample(Sample &sample) {
                            "QMI8658 gyro")) {
     imuStatus.dataValid = false;
     imuStatus.failedReads++;
+    resetMotionWindow();
     return false;
   }
 
@@ -425,9 +458,11 @@ bool readSample(Sample &sample) {
   imuStatus.dataValid = !allZero;
   if (allZero) {
     imuStatus.zeroSamples++;
+    resetMotionWindow();
+  } else {
+    updateDerivedState(sample);
   }
   imuStatus.lastSampleMs = sample.sampledAtMs;
-  updateDerivedState(sample);
   return true;
 }
 
@@ -453,6 +488,7 @@ void process() {
     logRawDiagnostic("zero-sample");
   }
 
+#ifdef WAVESHARE_IMU_DIAGNOSTICS
   static uint32_t lastLogMs = 0;
   if (now - lastLogMs >= 5000) {
     lastLogMs = now;
@@ -465,8 +501,8 @@ void process() {
                   static_cast<unsigned long>(imuStatus.sampleCount),
                   static_cast<unsigned long>(imuStatus.failedReads));
   }
-}
 #endif
+}
 
 } // namespace waveshare_board::imu
 

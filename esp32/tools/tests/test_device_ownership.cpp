@@ -839,6 +839,17 @@ int main() {
   assert(notification == binary(
       "523200000001a0d24a5355c7de1683c4a586dd2fb19a8c19b6a6c0afe3b4f62e"));
 
+  DeviceOwnership rideAutomationNotifier;
+  rideAutomationNotifier.setAuthenticatedSessionKeysForTesting(
+      goldenWriteKey, goldenNotifyKey);
+  const std::string rideDecision(32, '\x01');
+  assert(rideAutomationNotifier.protectAuthenticatedPayload(
+      AuthenticatedChannel::RideAutomation, rideDecision, notification));
+  assert(notification.size() ==
+         rideDecision.size() + AUTHENTICATED_FRAME_OVERHEAD);
+  assert(static_cast<uint8_t>(notification[0]) == 'R');
+  assert(static_cast<uint8_t>(notification[1]) == '2');
+
   std::cout << "device ownership state tests passed\n";
   return 0;
 }

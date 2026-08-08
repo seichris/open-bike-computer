@@ -22,6 +22,11 @@ struct BikeComputerApp: App {
                 cyclingSensorDetectionCoordinator:
                     appDelegate.cyclingSensorDetectionCoordinator,
                 coordinator: appDelegate.coordinator,
+                rideDetectionSettingsStore:
+                    appDelegate.rideDetectionSettingsStore,
+                rideAutomationCoordinator:
+                    appDelegate.rideAutomationCoordinator,
+                watchAvailability: appDelegate.watchAvailability,
                 liveActivityDiagnostics:
                     appDelegate.workoutLiveActivityDiagnostics,
                 onApplicationActiveChange: {
@@ -40,6 +45,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let cyclingSensorStore: CyclingSensorStore
     let cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    let rideDetectionSettingsStore: RideDetectionSettingsStore
+    let watchAvailability: WorkoutWatchAvailabilityMonitor
     let locationManager = CurrentLocationManager()
     let workoutLiveActivityDiagnostics =
         WorkoutLiveActivityDiagnosticStore()
@@ -51,6 +58,12 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMetricsStore: workoutMirrorManager.store,
         locationManager: locationManager
     )
+    lazy var rideAutomationCoordinator = RideAutomationCoordinator(
+        bleManager: coordinator.bleManager,
+        workoutManager: workoutMirrorManager,
+        settingsStore: rideDetectionSettingsStore,
+        watchAvailability: watchAvailability
+    )
 
     override init() {
         let workoutMirrorManager = WorkoutMirrorManager()
@@ -59,10 +72,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             CyclingSensorDetectionCoordinator(
                 sensorStore: cyclingSensorStore
             )
+        let rideDetectionSettingsStore = RideDetectionSettingsStore()
+        let watchAvailability = WorkoutWatchAvailabilityMonitor(
+            heartRateZoneDefaults: .standard,
+            rideDetectionSettingsStore: rideDetectionSettingsStore
+        )
         self.workoutMirrorManager = workoutMirrorManager
         self.cyclingSensorStore = cyclingSensorStore
         self.cyclingSensorDetectionCoordinator =
             cyclingSensorDetectionCoordinator
+        self.rideDetectionSettingsStore = rideDetectionSettingsStore
+        self.watchAvailability = watchAvailability
         super.init()
         cyclingSensorDetectionCoordinator.bind(
             to: workoutMirrorManager.store
@@ -78,6 +98,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // Configure for background location updates
         print("Bicino app launched")
         _ = coordinator
+        _ = rideAutomationCoordinator
         workoutMirrorManager.installMirroringHandler()
         if #available(iOS 17.0, *) {
             let controller = WorkoutLiveActivityController(

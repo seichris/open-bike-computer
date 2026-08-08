@@ -51,6 +51,11 @@ struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let altitudeMeters: Double?
     let heartRateZoneCount: UInt8?
     let sourceFlags: WorkoutDeviceSourceFlags
+    let pauseOrigin: WorkoutTransitionOrigin?
+    let wallElapsedSeconds: Double?
+    let sessionIdentityHash: UInt32?
+    let detectorProfileVersion: UInt16?
+    let lastTransitionOrigin: WorkoutTransitionOrigin?
 }
 
 struct WorkoutDeviceFrames: Equatable, Sendable {
@@ -63,6 +68,8 @@ struct WorkoutDeviceFrames: Equatable, Sendable {
 
     let core: Data
     let extended: Data
+    let origin: Data
+    let originAvailable: Bool
     let identity: Identity
 }
 
@@ -145,12 +152,30 @@ enum WorkoutDeviceFrameBuilder {
         extended.appendInt16LE(altitude)
         extended.append(zone?.count ?? 0)
 
-        guard core.count == frameLength, extended.count == frameLength else {
+        var origin = Data(capacity: frameLength)
+        origin.append(3)
+        origin.append(sample.pauseOrigin?.rawValue ?? 0)
+        origin.appendUInt16LE(sample.sessionToken)
+        origin.appendUInt32LE(
+            encodeUInt32(sample.wallElapsedSeconds)
+        )
+        origin.appendUInt32LE(sample.sessionIdentityHash ?? 0)
+        origin.appendUInt16LE(sample.detectorProfileVersion ?? 0)
+        origin.append(sample.lastTransitionOrigin?.rawValue ?? 0)
+        origin.append(sample.isCurrentSnapshot ? 1 : 0)
+
+        guard core.count == frameLength, extended.count == frameLength,
+              origin.count == frameLength else {
             return nil
         }
         return WorkoutDeviceFrames(
             core: core,
             extended: extended,
+            origin: origin,
+            originAvailable: sample.state != .idle
+                && sample.sessionToken != 0
+                && sample.sessionIdentityHash != nil
+                && sample.sessionIdentityHash != 0,
             identity: .init(
                 state: sample.state,
                 sessionToken: sample.sessionToken,
@@ -322,7 +347,18 @@ enum WorkoutDeviceTelemetryMapper {
             currentHeartRateZone: snapshot.currentHeartRateZone,
             altitudeMeters: snapshot.location?.altitude,
             heartRateZoneCount: snapshot.heartRateZoneCount,
-            sourceFlags: flags
+            sourceFlags: flags,
+            pauseOrigin: snapshot.pauseOrigin,
+            wallElapsedSeconds: metric(
+                snapshot.wallElapsedTime,
+                unit: .seconds
+            ),
+            sessionIdentityHash:
+                RideAutomationAdmissionPolicy.sessionIdentityHash(
+                    presentation.sessionID
+                ),
+            detectorProfileVersion: snapshot.detectorProfileVersion,
+            lastTransitionOrigin: snapshot.lastTransitionOrigin
         )
     }
 
@@ -347,7 +383,12 @@ enum WorkoutDeviceTelemetryMapper {
             currentHeartRateZone: nil,
             altitudeMeters: nil,
             heartRateZoneCount: nil,
-            sourceFlags: []
+            sourceFlags: [],
+            pauseOrigin: nil,
+            wallElapsedSeconds: nil,
+            sessionIdentityHash: nil,
+            detectorProfileVersion: nil,
+            lastTransitionOrigin: nil
         )
     }
 
@@ -363,6 +404,7 @@ enum WorkoutDeviceTelemetryMapper {
 enum WorkoutDeviceFrameKind: Equatable, Sendable {
     case core
     case extended
+    case origin
 }
 
 struct WorkoutDeviceTransmission: Equatable, Sendable {
@@ -384,11 +426,14 @@ struct WorkoutDeviceRelayScheduler: Sendable {
     private var wasTransportReady = false
     private var lastCoreFrame: Data?
     private var lastExtendedFrame: Data?
+    private var lastOriginFrame: Data?
     private var lastCoreSentAt: Date?
     private var lastExtendedSentAt: Date?
+    private var lastOriginSentAt: Date?
     private var lastCoreIdentity: WorkoutDeviceFrames.Identity?
     private var pendingCoreFrame: Data?
     private var pendingExtendedFrame: Data?
+    private var pendingOriginFrame: Data?
     private var pendingPairIdentity: WorkoutDeviceFrames.Identity?
     private var nextPairGeneration: UInt8 = 1
 
@@ -405,12 +450,14 @@ struct WorkoutDeviceRelayScheduler: Sendable {
     mutating func update(
         frames: WorkoutDeviceFrames?,
         transportReady: Bool,
+        originTransportReady: Bool = true,
         at date: Date
     ) -> WorkoutDeviceRelaySchedule {
         guard transportReady, let frames else {
             wasTransportReady = false
             pendingCoreFrame = nil
             pendingExtendedFrame = nil
+            pendingOriginFrame = nil
             pendingPairIdentity = nil
             return WorkoutDeviceRelaySchedule(
                 transmissions: [],
@@ -420,8 +467,13 @@ struct WorkoutDeviceRelayScheduler: Sendable {
 
         let becameReady = !wasTransportReady
         wasTransportReady = true
+        let originReady = originTransportReady && frames.originAvailable
+        if !originReady {
+            pendingOriginFrame = nil
+        }
         let urgent = becameReady || lastCoreIdentity != frames.identity
-        guard pendingCoreFrame == nil, pendingExtendedFrame == nil else {
+        guard pendingCoreFrame == nil, pendingExtendedFrame == nil,
+              pendingOriginFrame == nil else {
             return WorkoutDeviceRelaySchedule(
                 transmissions: [],
                 nextEvaluationAt: nil
@@ -475,11 +527,36 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             lastSentAt: lastCoreSentAt,
             at: date
         )
-        guard urgent || coreChangedDue || coreHeartbeatDue
-                || extendedChangedDue || extendedHeartbeatDue else {
+        let originChangedDue = isChangedFrameDue(
+            frames.origin,
+            lastFrame: lastOriginFrame,
+            lastSentAt: lastOriginSentAt,
+            at: date
+        )
+        let originDue = originReady
+            && (becameReady || originChangedDue)
+        let pairDue = urgent || coreChangedDue || coreHeartbeatDue
+            || extendedChangedDue || extendedHeartbeatDue
+        guard pairDue || originDue else {
             return WorkoutDeviceRelaySchedule(
                 transmissions: [],
-                nextEvaluationAt: nextEvaluationDate(for: frames, at: date)
+                nextEvaluationAt: nextEvaluationDate(
+                    for: frames,
+                    includeOrigin: originReady,
+                    at: date
+                )
+            )
+        }
+
+        if !pairDue {
+            pendingOriginFrame = frames.origin
+            return WorkoutDeviceRelaySchedule(
+                transmissions: [WorkoutDeviceTransmission(
+                    kind: .origin,
+                    data: frames.origin,
+                    prioritized: true
+                )],
+                nextEvaluationAt: nil
             )
         }
 
@@ -492,21 +569,34 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         )
         pendingCoreFrame = core
         pendingExtendedFrame = extended
+        if originDue {
+            pendingOriginFrame = frames.origin
+        }
         pendingPairIdentity = frames.identity
 
-        return WorkoutDeviceRelaySchedule(
-            transmissions: [
+        var transmissions = [
+            WorkoutDeviceTransmission(
+                kind: .core,
+                data: core,
+                prioritized: urgent
+            ),
+            WorkoutDeviceTransmission(
+                kind: .extended,
+                data: extended,
+                prioritized: false
+            ),
+        ]
+        if originDue {
+            transmissions.append(
                 WorkoutDeviceTransmission(
-                    kind: .core,
-                    data: core,
+                    kind: .origin,
+                    data: frames.origin,
                     prioritized: urgent
-                ),
-                WorkoutDeviceTransmission(
-                    kind: .extended,
-                    data: extended,
-                    prioritized: false
-                ),
-            ],
+                )
+            )
+        }
+        return WorkoutDeviceRelaySchedule(
+            transmissions: transmissions,
             nextEvaluationAt: nil
         )
     }
@@ -526,8 +616,13 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             if pendingExtendedFrame == data { pendingExtendedFrame = nil }
             lastExtendedFrame = canonicalExtended(data)
             lastExtendedSentAt = date
+        case .origin:
+            if pendingOriginFrame == data { pendingOriginFrame = nil }
+            lastOriginFrame = data
+            lastOriginSentAt = date
         }
-        if pendingCoreFrame == nil, pendingExtendedFrame == nil {
+        if pendingCoreFrame == nil, pendingExtendedFrame == nil,
+           pendingOriginFrame == nil {
             pendingPairIdentity = nil
         }
     }
@@ -541,6 +636,11 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             if pendingCoreFrame == data { pendingCoreFrame = nil }
         case .extended:
             if pendingExtendedFrame == data { pendingExtendedFrame = nil }
+        case .origin:
+            if pendingOriginFrame == data { pendingOriginFrame = nil }
+            lastOriginFrame = nil
+            lastOriginSentAt = nil
+            return
         }
         // A partial pair is never a successful publication. Force the next
         // evaluation to resend both correlated frames.
@@ -548,8 +648,11 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         lastExtendedFrame = nil
         lastCoreSentAt = nil
         lastExtendedSentAt = nil
+        lastOriginFrame = nil
+        lastOriginSentAt = nil
         lastCoreIdentity = nil
-        if pendingCoreFrame == nil, pendingExtendedFrame == nil {
+        if pendingCoreFrame == nil, pendingExtendedFrame == nil,
+           pendingOriginFrame == nil {
             pendingPairIdentity = nil
         }
     }
@@ -565,6 +668,7 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         wasTransportReady = false
         pendingCoreFrame = nil
         pendingExtendedFrame = nil
+        pendingOriginFrame = nil
         pendingPairIdentity = nil
     }
 
@@ -589,9 +693,11 @@ struct WorkoutDeviceRelayScheduler: Sendable {
 
     private func nextEvaluationDate(
         for frames: WorkoutDeviceFrames,
+        includeOrigin: Bool,
         at date: Date
     ) -> Date? {
         guard pendingCoreFrame == nil, pendingExtendedFrame == nil,
+              pendingOriginFrame == nil,
               frames.identity.state != .idle else {
             return nil
         }
@@ -612,6 +718,12 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             dates.append(lastExtendedSentAt.addingTimeInterval(
                 extendedHeartbeatInterval
             ))
+        }
+        if includeOrigin, frames.origin != lastOriginFrame {
+            dates.append(
+                lastOriginSentAt?.addingTimeInterval(coalescingInterval)
+                    ?? date
+            )
         }
         return dates.min()
     }
@@ -710,6 +822,13 @@ final class WorkoutDeviceRelay {
             self.requestEvaluation()
         }
         .store(in: &cancellables)
+
+        bleManager.$supportsRideAutomation
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                self?.requestEvaluation()
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
@@ -731,15 +850,19 @@ final class WorkoutDeviceRelay {
         var schedule = scheduler.update(
             frames: frames,
             transportReady: ready,
+            originTransportReady: bleManager.supportsRideAutomation,
             at: date
         )
 
         var needsRetry = false
-        if schedule.transmissions.count == 2,
-           let core = schedule.transmissions.first(where: { $0.kind == .core }),
-           let extended = schedule.transmissions.first(where: {
-               $0.kind == .extended
-           }) {
+        let pairedCore = schedule.transmissions.first(where: {
+            $0.kind == .core
+        })
+        let pairedExtended = schedule.transmissions.first(where: {
+            $0.kind == .extended
+        })
+        if let core = pairedCore,
+           let extended = pairedExtended {
             let transmissionsByData = Dictionary(
                 uniqueKeysWithValues: schedule.transmissions.map {
                     ($0.data, $0)
@@ -748,6 +871,9 @@ final class WorkoutDeviceRelay {
             let accepted = bleManager.sendWorkoutTelemetryPair(
                 core: core.data,
                 extended: extended.data,
+                origin: schedule.transmissions.first(where: {
+                    $0.kind == .origin
+                })?.data,
                 prioritized: core.prioritized || extended.prioritized,
                 onWrite: { [weak self] data in
                     guard let transmission = transmissionsByData[data] else {
@@ -777,8 +903,11 @@ final class WorkoutDeviceRelay {
                 }
                 needsRetry = true
             }
-        } else {
-            for transmission in schedule.transmissions {
+        }
+
+        if pairedCore == nil || pairedExtended == nil {
+            for transmission in schedule.transmissions where
+                transmission.kind != .origin {
                 let accepted = bleManager.sendWorkoutTelemetryFrame(
                     transmission.data,
                     prioritized: transmission.prioritized,
@@ -799,6 +928,31 @@ final class WorkoutDeviceRelay {
                     )
                     needsRetry = true
                 }
+            }
+        }
+
+        for transmission in schedule.transmissions where
+            transmission.kind == .origin
+                && (pairedCore == nil || pairedExtended == nil) {
+            let accepted = bleManager.sendWorkoutTelemetryFrame(
+                transmission.data,
+                prioritized: transmission.prioritized,
+                onWrite: { [weak self] in
+                    self?.completeWrite(transmission)
+                },
+                onDrop: { [weak self] in
+                    self?.dropWrite(transmission)
+                },
+                onWriteFailure: { [weak self] in
+                    self?.failWrite(transmission)
+                }
+            )
+            if !accepted {
+                scheduler.didNotWrite(
+                    kind: transmission.kind,
+                    data: transmission.data
+                )
+                needsRetry = true
             }
         }
 

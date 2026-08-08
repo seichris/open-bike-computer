@@ -56,6 +56,14 @@ nonisolated enum WorkoutLiveActivityStateMapper {
                 unit: .seconds,
                 allowZero: true
             ),
+            elapsedWallSeconds: metric(
+                snapshot.wallElapsedTime,
+                unit: .seconds,
+                allowZero: true
+            ),
+            pauseOrigin: snapshot.state == .paused
+                ? liveActivityPauseOrigin(snapshot.pauseOrigin)
+                : nil,
             currentSpeedKilometersPerHour: hidesInstantaneousMetrics
                 ? nil
                 : metric(
@@ -146,6 +154,17 @@ nonisolated enum WorkoutLiveActivityStateMapper {
             return nil
         case .ended:
             return .final
+        }
+    }
+
+    private static func liveActivityPauseOrigin(
+        _ origin: WorkoutTransitionOrigin?
+    ) -> WorkoutLiveActivityPauseOrigin? {
+        switch origin {
+        case .unknown: return .unknown
+        case .manual: return .manual
+        case .automatic: return .automatic
+        case nil: return nil
         }
     }
 

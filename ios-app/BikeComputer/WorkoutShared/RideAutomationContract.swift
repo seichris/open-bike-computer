@@ -1,0 +1,405 @@
+import Foundation
+
+nonisolated enum RideAutomationKind: UInt8, Codable, Sendable {
+    case decision = 1
+    case acknowledgement
+    case confirmation
+    case configuration
+    case configurationAcknowledgement
+    case resynchronize
+    case promptResponse
+    case cancellation
+}
+
+nonisolated enum RideAutomationTransition: UInt8, Codable, Sendable {
+    case none = 0
+    case start
+    case pause
+    case resume
+}
+
+nonisolated enum RideAutomationOrigin: UInt8, Codable, Sendable {
+    case unknown = 0
+    case manual
+    case automatic
+}
+
+nonisolated enum RideAutomationResult: UInt8, Codable, Sendable {
+    case none = 0
+    case accepted
+    case rejected
+    case watchUnavailable
+    case stale
+    case sessionMismatch
+}
+
+nonisolated enum RideStartMode: UInt8, Codable, Sendable, Hashable {
+    case off = 0
+    case ask
+    case automatic
+}
+
+nonisolated enum RideAutomationSerialNumber {
+    /// RFC 1982-style comparison for persisted UInt32 generations. Exactly
+    /// half the serial space is intentionally unordered.
+    static func isNewer(_ candidate: UInt32, than current: UInt32) -> Bool {
+        let delta = candidate &- current
+        return delta != 0 && delta < 0x8000_0000
+    }
+}
+
+nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
+    static let version: UInt8 = 2
+    static let byteCount = 40
+    static let validSourceHealthMask: UInt16 = 0x000F
+
+    var kind: RideAutomationKind
+    var transition: RideAutomationTransition = .none
+    var origin: RideAutomationOrigin = .unknown
+    var result: RideAutomationResult = .none
+    var rideGeneration: UInt32
+    var decisionSequence: UInt32 = 0
+    var evidenceMask: UInt16 = 0
+    var profileVersion: UInt16 = 1
+    var sessionIdentityHash: UInt32 = 0
+    var watermarkOrConfigGeneration: UInt32 = 0
+    var startMode: RideStartMode = .off
+    var autoPauseEnabled = false
+    var alertMode: UInt8 = 0
+    var candidateBeganSeconds: UInt32 = 0
+    var monotonicSeconds: UInt32 = 0
+    var sourceHealthMask: UInt16 = 0
+    var acknowledgedKind: RideAutomationKind?
+
+    init(
+        kind: RideAutomationKind,
+        transition: RideAutomationTransition = .none,
+        origin: RideAutomationOrigin = .unknown,
+        result: RideAutomationResult = .none,
+        rideGeneration: UInt32,
+        decisionSequence: UInt32 = 0,
+        evidenceMask: UInt16 = 0,
+        profileVersion: UInt16 = 1,
+        sessionIdentityHash: UInt32 = 0,
+        watermarkOrConfigGeneration: UInt32 = 0,
+        startMode: RideStartMode = .off,
+        autoPauseEnabled: Bool = false,
+        alertMode: UInt8 = 0,
+        candidateBeganSeconds: UInt32 = 0,
+        monotonicSeconds: UInt32 = 0,
+        sourceHealthMask: UInt16 = 0,
+        acknowledgedKind: RideAutomationKind? = nil
+    ) {
+        self.kind = kind
+        self.transition = transition
+        self.origin = origin
+        self.result = result
+        self.rideGeneration = rideGeneration
+        self.decisionSequence = decisionSequence
+        self.evidenceMask = evidenceMask
+        self.profileVersion = profileVersion
+        self.sessionIdentityHash = sessionIdentityHash
+        self.watermarkOrConfigGeneration = watermarkOrConfigGeneration
+        self.startMode = startMode
+        self.autoPauseEnabled = autoPauseEnabled
+        self.alertMode = alertMode
+        self.candidateBeganSeconds = candidateBeganSeconds
+        self.monotonicSeconds = monotonicSeconds
+        self.sourceHealthMask = sourceHealthMask
+        self.acknowledgedKind = acknowledgedKind
+    }
+
+    func encoded() -> Data? {
+        guard rideGeneration != 0, profileVersion != 0, alertMode <= 2,
+              sourceHealthMask & ~Self.validSourceHealthMask == 0,
+              isSemanticallyValid else {
+            return nil
+        }
+        if [.decision, .acknowledgement, .confirmation, .promptResponse,
+            .cancellation]
+            .contains(kind),
+           decisionSequence == 0 {
+            return nil
+        }
+        var bytes = [UInt8](repeating: 0, count: Self.byteCount)
+        bytes[0] = Self.version
+        bytes[1] = kind.rawValue
+        bytes[2] = transition.rawValue
+        bytes[3] = origin.rawValue
+        bytes[4] = result.rawValue
+        bytes[5] = startMode.rawValue
+        bytes[6] = autoPauseEnabled ? 1 : 0
+        bytes[7] = alertMode
+        bytes.writeLE(rideGeneration, at: 8)
+        bytes.writeLE(decisionSequence, at: 12)
+        bytes.writeLE(evidenceMask, at: 16)
+        bytes.writeLE(profileVersion, at: 18)
+        bytes.writeLE(sessionIdentityHash, at: 20)
+        bytes.writeLE(watermarkOrConfigGeneration, at: 24)
+        bytes.writeLE(candidateBeganSeconds, at: 28)
+        bytes.writeLE(monotonicSeconds, at: 32)
+        bytes.writeLE(sourceHealthMask, at: 36)
+        bytes[38] = acknowledgedKind?.rawValue ?? 0
+        return Data(bytes)
+    }
+
+    init?(_ data: Data) {
+        guard data.count == Self.byteCount else { return nil }
+        let bytes = [UInt8](data)
+        guard bytes[0] == Self.version,
+              let kind = RideAutomationKind(rawValue: bytes[1]),
+              let transition = RideAutomationTransition(rawValue: bytes[2]),
+              let origin = RideAutomationOrigin(rawValue: bytes[3]),
+              let result = RideAutomationResult(rawValue: bytes[4]),
+              let startMode = RideStartMode(rawValue: bytes[5]),
+              bytes[6] <= 1,
+              bytes[7] <= 2,
+              bytes[39] == 0 else { return nil }
+        let rideGeneration: UInt32 = bytes.readLE(at: 8)
+        let sequence: UInt32 = bytes.readLE(at: 12)
+        let profile: UInt16 = bytes.readLE(at: 18)
+        guard rideGeneration != 0, profile != 0 else { return nil }
+        if [.decision, .acknowledgement, .confirmation, .promptResponse,
+            .cancellation]
+            .contains(kind),
+           sequence == 0 { return nil }
+        self.kind = kind
+        self.transition = transition
+        self.origin = origin
+        self.result = result
+        self.rideGeneration = rideGeneration
+        decisionSequence = sequence
+        evidenceMask = bytes.readLE(at: 16)
+        profileVersion = profile
+        sessionIdentityHash = bytes.readLE(at: 20)
+        watermarkOrConfigGeneration = bytes.readLE(at: 24)
+        self.startMode = startMode
+        autoPauseEnabled = bytes[6] == 1
+        alertMode = bytes[7]
+        candidateBeganSeconds = bytes.readLE(at: 28)
+        monotonicSeconds = bytes.readLE(at: 32)
+        sourceHealthMask = bytes.readLE(at: 36)
+        if bytes[38] == 0 {
+            acknowledgedKind = nil
+        } else {
+            guard let value = RideAutomationKind(rawValue: bytes[38]) else {
+                return nil
+            }
+            acknowledgedKind = value
+        }
+        guard sourceHealthMask & ~Self.validSourceHealthMask == 0 else {
+            return nil
+        }
+        guard isSemanticallyValid else { return nil }
+    }
+
+    private var isSemanticallyValid: Bool {
+        switch kind {
+        case .decision:
+            return transition != .none && origin == .automatic
+                && result == .none && acknowledgedKind == nil
+        case .acknowledgement:
+            return transition != .none && origin == .automatic
+                && result != .none
+                && (acknowledgedKind == .decision
+                    || (acknowledgedKind == .promptResponse
+                        && transition == .start))
+        case .confirmation:
+            return transition != .none && origin == .automatic
+                && result != .none && acknowledgedKind == nil
+        case .configuration:
+            return transition == .none && origin == .unknown
+                && result == .none && decisionSequence == 0
+                && watermarkOrConfigGeneration != 0
+                && acknowledgedKind == nil
+        case .configurationAcknowledgement:
+            return transition == .none && origin == .unknown
+                && (result == .accepted || result == .rejected)
+                && decisionSequence == 0
+                && acknowledgedKind == nil
+        case .resynchronize:
+            return transition == .none && origin == .unknown
+                && result == .none && decisionSequence == 0
+                && acknowledgedKind == nil
+        case .promptResponse:
+            return transition == .start && origin == .automatic
+                && (result == .accepted || result == .rejected)
+                && acknowledgedKind == nil
+        case .cancellation:
+            return transition != .none && origin == .automatic
+                && result == .stale
+                && acknowledgedKind == nil
+        }
+    }
+}
+
+private extension Array where Element == UInt8 {
+    nonisolated mutating func writeLE<T: FixedWidthInteger>(
+        _ value: T,
+        at offset: Int
+    ) {
+        for index in 0..<MemoryLayout<T>.size {
+            self[offset + index] = UInt8(truncatingIfNeeded: value >> (index * 8))
+        }
+    }
+
+    nonisolated func readLE<T: FixedWidthInteger>(at offset: Int) -> T {
+        var value: T = 0
+        for index in 0..<MemoryLayout<T>.size {
+            value |= T(self[offset + index]) << (index * 8)
+        }
+        return value
+    }
+}
+
+nonisolated struct RideDetectionSettings: Codable, Equatable, Sendable {
+    var schemaVersion = 1
+    var startMode: RideStartMode = .ask
+    var autoPauseEnabled = true
+    var alertMode: UInt8 = 0
+
+    mutating func normalize() {
+        schemaVersion = 1
+        alertMode = min(alertMode, 2)
+    }
+}
+
+nonisolated enum RideDetectionSyncContext {
+    static let schemaVersionKey =
+        "BikeComputer.rideDetection.schemaVersion.v1"
+    static let generationKey =
+        "BikeComputer.rideDetection.generation.v1"
+    static let startModeKey =
+        "BikeComputer.rideDetection.startMode.v1"
+    static let autoPauseEnabledKey =
+        "BikeComputer.rideDetection.autoPauseEnabled.v1"
+    static let alertModeKey =
+        "BikeComputer.rideDetection.alertMode.v1"
+    static let automaticStartRideGenerationKey =
+        "BikeComputer.rideDetection.automaticStart.rideGeneration.v1"
+    static let automaticStartDecisionSequenceKey =
+        "BikeComputer.rideDetection.automaticStart.decisionSequence.v1"
+    static let automaticStartProfileVersionKey =
+        "BikeComputer.rideDetection.automaticStart.profileVersion.v1"
+
+    static func adding(
+        settings: RideDetectionSettings,
+        generation: UInt32,
+        to context: [String: Any] = [:]
+    ) -> [String: Any] {
+        var normalized = settings
+        normalized.normalize()
+        var result = context
+        result[schemaVersionKey] = normalized.schemaVersion
+        result[generationKey] = Int(generation)
+        result[startModeKey] = Int(normalized.startMode.rawValue)
+        result[autoPauseEnabledKey] = normalized.autoPauseEnabled
+        result[alertModeKey] = Int(normalized.alertMode)
+        return result
+    }
+
+    static func settings(
+        from context: [String: Any]
+    ) -> (settings: RideDetectionSettings, generation: UInt32)? {
+        guard let schemaVersion = context[schemaVersionKey] as? Int,
+              schemaVersion == 1,
+              let generationNumber = context[generationKey] as? NSNumber,
+              let generation = exactUInt32(generationNumber),
+              let startModeNumber = context[startModeKey] as? NSNumber,
+              let startModeRawValue = exactUInt8(startModeNumber),
+              let startMode = RideStartMode(
+                rawValue: startModeRawValue
+              ),
+              let autoPauseEnabled =
+                context[autoPauseEnabledKey] as? Bool,
+              let alertModeNumber = context[alertModeKey] as? NSNumber,
+              let alertMode = exactUInt8(alertModeNumber),
+              alertMode <= 2 else {
+            return nil
+        }
+        var settings = RideDetectionSettings(
+            startMode: startMode,
+            autoPauseEnabled: autoPauseEnabled,
+            alertMode: alertMode
+        )
+        settings.normalize()
+        return (settings, generation)
+    }
+
+    static func addingPendingAutomaticStart(
+        _ context: WorkoutControlContextV1?,
+        to applicationContext: [String: Any]
+    ) -> [String: Any] {
+        var result = applicationContext
+        result.removeValue(forKey: automaticStartRideGenerationKey)
+        result.removeValue(forKey: automaticStartDecisionSequenceKey)
+        result.removeValue(forKey: automaticStartProfileVersionKey)
+        guard context?.origin == .automatic,
+              context?.automaticReason == .rideDetection,
+              let rideGeneration = context?.rideGeneration,
+              let decisionSequence = context?.decisionSequence,
+              let profileVersion = context?.detectorProfileVersion,
+              rideGeneration > 0, decisionSequence > 0,
+              profileVersion > 0 else {
+            return result
+        }
+        result[automaticStartRideGenerationKey] =
+            NSNumber(value: rideGeneration)
+        result[automaticStartDecisionSequenceKey] =
+            NSNumber(value: decisionSequence)
+        result[automaticStartProfileVersionKey] =
+            NSNumber(value: profileVersion)
+        return result
+    }
+
+    static func pendingAutomaticStart(
+        from applicationContext: [String: Any]
+    ) -> WorkoutControlContextV1? {
+        guard let rideGenerationNumber =
+                applicationContext[automaticStartRideGenerationKey]
+                    as? NSNumber,
+              let rideGeneration = exactUInt32(rideGenerationNumber),
+              let decisionSequenceNumber =
+                applicationContext[automaticStartDecisionSequenceKey]
+                    as? NSNumber,
+              let decisionSequence = exactUInt32(decisionSequenceNumber),
+              let profileVersionNumber =
+                applicationContext[automaticStartProfileVersionKey]
+                    as? NSNumber,
+              let profileVersion = exactUInt16(profileVersionNumber),
+              rideGeneration > 0, decisionSequence > 0,
+              profileVersion > 0 else {
+            return nil
+        }
+        return WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: rideGeneration,
+            decisionSequence: decisionSequence,
+            detectorProfileVersion: profileVersion
+        )
+    }
+
+    private static func exactUInt8(_ number: NSNumber) -> UInt8? {
+        exactUnsigned(number, as: UInt8.self)
+    }
+
+    private static func exactUInt16(_ number: NSNumber) -> UInt16? {
+        exactUnsigned(number, as: UInt16.self)
+    }
+
+    private static func exactUInt32(_ number: NSNumber) -> UInt32? {
+        exactUnsigned(number, as: UInt32.self)
+    }
+
+    private static func exactUnsigned<T: FixedWidthInteger & UnsignedInteger>(
+        _ number: NSNumber,
+        as type: T.Type
+    ) -> T? {
+        let value = number.doubleValue
+        guard value.isFinite, value.rounded(.towardZero) == value else {
+            return nil
+        }
+        return T(exactly: value)
+    }
+}

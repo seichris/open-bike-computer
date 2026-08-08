@@ -55,6 +55,11 @@ private struct WorkoutContractTestSuite {
     private(set) var failureCount = 0
 
     mutating func run() async {
+        testRideAutomationGoldenVectorAndValidation()
+#if WORKOUT_CONTRACT_HOST
+        testRideDetectionSettingsAdoptOnlyNewerDeviceState()
+#endif
+        testRideAutomationAdmissionAndOriginContract()
         testSnapshotRoundTrip()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
@@ -137,6 +142,612 @@ private struct WorkoutContractTestSuite {
         testWatchWorkoutLaunchRequest()
     }
 
+    private mutating func testRideAutomationGoldenVectorAndValidation() {
+        let frame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 0x0102_0304,
+            decisionSequence: 0x1122_3344,
+            evidenceMask: 0x55AA,
+            profileVersion: 1,
+            sessionIdentityHash: 0xAABB_CCDD,
+            watermarkOrConfigGeneration: 7,
+            startMode: .ask,
+            autoPauseEnabled: true,
+            alertMode: 2,
+            candidateBeganSeconds: 88,
+            monotonicSeconds: 99,
+            sourceHealthMask: 0x000F
+        )
+        let expected = Data([
+            2, 1, 2, 2, 0, 1, 1, 2,
+            0x04, 0x03, 0x02, 0x01, 0x44, 0x33, 0x22, 0x11,
+            0xAA, 0x55, 0x01, 0x00, 0xDD, 0xCC, 0xBB, 0xAA,
+            0x07, 0, 0, 0, 0x58, 0, 0, 0,
+            0x63, 0, 0, 0, 0x0F, 0, 0, 0,
+        ])
+        expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
+        expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
+        expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 40 bytes")
+        var invalid = expected
+        invalid[12] = 0
+        invalid[13] = 0
+        invalid[14] = 0
+        invalid[15] = 0
+        expect(RideAutomationFrame(invalid) == nil, "RAUT decisions require a nonzero sequence")
+        invalid = expected
+        invalid[36] = 0x10
+        expect(
+            RideAutomationFrame(invalid) == nil,
+            "RAUT source health must reject undefined bits"
+        )
+        invalid = expected
+        invalid[39] = 1
+        expect(
+            RideAutomationFrame(invalid) == nil,
+            "RAUT reserved bytes must remain zero"
+        )
+
+        var acknowledgement = frame
+        acknowledgement.kind = .acknowledgement
+        acknowledgement.result = .accepted
+        acknowledgement.acknowledgedKind = .decision
+        expect(
+            acknowledgement.encoded().flatMap(RideAutomationFrame.init)
+                == acknowledgement,
+            "RAUT decision acknowledgements must identify their target kind"
+        )
+        acknowledgement.acknowledgedKind = nil
+        expect(
+            acknowledgement.encoded() == nil,
+            "RAUT acknowledgements without a target kind must be rejected"
+        )
+        acknowledgement.transition = .start
+        acknowledgement.acknowledgedKind = .promptResponse
+        expect(
+            acknowledgement.encoded().flatMap(RideAutomationFrame.init)
+                == acknowledgement,
+            "RAUT prompt acknowledgements must remain distinct from decision acknowledgements"
+        )
+
+        var promptResponse = frame
+        promptResponse.kind = .promptResponse
+        promptResponse.transition = .start
+        promptResponse.result = .accepted
+        expect(
+            promptResponse.encoded().flatMap(RideAutomationFrame.init)
+                == promptResponse,
+            "device prompt responses must round trip with their decision identity"
+        )
+        promptResponse.decisionSequence = 0
+        expect(
+            promptResponse.encoded() == nil,
+            "device prompt responses require a nonzero decision sequence"
+        )
+
+        var settings = RideDetectionSettings(alertMode: 99)
+        settings.normalize()
+        expect(settings.alertMode == 2, "ride alert settings must normalize")
+        let syncContext = RideDetectionSyncContext.adding(
+            settings: RideDetectionSettings(
+                startMode: .automatic,
+                autoPauseEnabled: false,
+                alertMode: 1
+            ),
+            generation: 42
+        )
+        let synchronized = RideDetectionSyncContext.settings(
+            from: syncContext
+        )
+        expect(
+            synchronized?.generation == 42
+                && synchronized?.settings.startMode == .automatic
+                && synchronized?.settings.autoPauseEnabled == false
+                && synchronized?.settings.alertMode == 1,
+            "Watch settings context must preserve normalized ride policy and generation"
+        )
+        let automaticStart = WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: 9,
+            decisionSequence: 12,
+            detectorProfileVersion: 1
+        )
+        let withAutomaticStart = RideDetectionSyncContext
+            .addingPendingAutomaticStart(
+                automaticStart,
+                to: syncContext
+            )
+        expect(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: withAutomaticStart
+            ) == automaticStart,
+            "Watch application context must preserve automatic-start identity"
+        )
+        let clearedAutomaticStart = RideDetectionSyncContext
+            .addingPendingAutomaticStart(nil, to: withAutomaticStart)
+        expect(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: clearedAutomaticStart
+            ) == nil,
+            "clearing automatic-start context must remove every identity field"
+        )
+        var invalidSyncContext = syncContext
+        invalidSyncContext[RideDetectionSyncContext.generationKey] = -1
+        expect(
+            RideDetectionSyncContext.settings(from: invalidSyncContext) == nil,
+            "negative settings generations must not wrap"
+        )
+        invalidSyncContext = syncContext
+        invalidSyncContext[RideDetectionSyncContext.startModeKey] = 256
+        expect(
+            RideDetectionSyncContext.settings(from: invalidSyncContext) == nil,
+            "oversized start modes must not truncate"
+        )
+        invalidSyncContext = syncContext
+        invalidSyncContext[RideDetectionSyncContext.alertModeKey] = 1.5
+        expect(
+            RideDetectionSyncContext.settings(from: invalidSyncContext) == nil,
+            "fractional alert modes must be rejected"
+        )
+        var invalidAutomaticStart = withAutomaticStart
+        invalidAutomaticStart[
+            RideDetectionSyncContext.automaticStartDecisionSequenceKey
+        ] = NSNumber(value: UInt64(UInt32.max) + 1)
+        expect(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: invalidAutomaticStart
+            ) == nil,
+            "oversized automatic-start identities must not truncate"
+        )
+        expect(
+            RideAutomationSerialNumber.isNewer(2, than: 1)
+                && RideAutomationSerialNumber.isNewer(
+                    1,
+                    than: UInt32.max
+                )
+                && !RideAutomationSerialNumber.isNewer(1, than: 1)
+                && !RideAutomationSerialNumber.isNewer(
+                    UInt32.max,
+                    than: 1
+                ),
+            "ride setting generations must compare safely across UInt32 wrap"
+        )
+        expect(
+            WorkoutSchemaVersion.current
+                .supportsRideAutomationControlContext
+                && !WorkoutSchemaVersion(major: 1, minor: 4)
+                    .supportsRideAutomationControlContext,
+            "automatic Watch controls must require the 1.5 origin contract"
+        )
+        expect(
+            !RideAutomationMonotonicClock.isExpired(
+                sampleSeconds: 107,
+                latestSeconds: 100,
+                maximumAgeSeconds: 10
+            )
+                && !RideAutomationMonotonicClock.isExpired(
+                    sampleSeconds: 90,
+                    latestSeconds: 100,
+                    maximumAgeSeconds: 10
+                )
+                && RideAutomationMonotonicClock.isExpired(
+                    sampleSeconds: 89,
+                    latestSeconds: 100,
+                    maximumAgeSeconds: 10
+                )
+                && !RideAutomationMonotonicClock.isExpired(
+                    sampleSeconds: UInt32.max - 4,
+                    latestSeconds: 3,
+                    maximumAgeSeconds: 10
+                ),
+            "device monotonic freshness must accept advances and UInt32 wrap"
+        )
+    }
+
+#if WORKOUT_CONTRACT_HOST
+    private mutating func testRideDetectionSettingsAdoptOnlyNewerDeviceState() {
+        let suiteName = "RideDetectionSettingsTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            expect(false, "ride settings test defaults must be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = RideDetectionSettingsStore(defaults: defaults)
+        expect(store.generation == 1, "ride settings begin at generation one")
+
+        store.adoptDeviceSettings(
+            RideDetectionSettings(
+                startMode: .off,
+                autoPauseEnabled: false,
+                alertMode: 2
+            ),
+            generation: 2
+        )
+        expect(
+            store.generation == 2
+                && store.settings.startMode == .off
+                && !store.settings.autoPauseEnabled
+                && store.settings.alertMode == 2,
+            "newer authenticated device settings must be adopted"
+        )
+
+        store.adoptDeviceSettings(
+            RideDetectionSettings(
+                startMode: .ask,
+                autoPauseEnabled: true,
+                alertMode: 0
+            ),
+            generation: 1
+        )
+        expect(
+            store.generation == 2 && store.settings.startMode == .off,
+            "older device settings must not replace newer local state"
+        )
+
+        store.adoptDeviceSettings(
+            RideDetectionSettings(
+                startMode: .automatic,
+                autoPauseEnabled: true,
+                alertMode: 1
+            ),
+            generation: 3
+        )
+#if RIDE_AUTOMATION_AUTOMATIC_START
+        expect(
+            store.generation == 3 && store.settings.startMode == .automatic,
+            "automatic rollout builds may adopt automatic device mode"
+        )
+#else
+        expect(
+            store.generation == 4 && store.settings.startMode == .ask,
+            "closed rollout builds must override automatic mode with a newer Ask generation"
+        )
+#endif
+
+        let restored = RideDetectionSettingsStore(defaults: defaults)
+        expect(
+            restored.generation == store.generation
+                && restored.settings == store.settings,
+            "adopted device settings and generation must survive relaunch"
+        )
+
+        defaults.set(-1, forKey: "rideDetection.settingsGeneration.v1")
+        let corruptGenerationReload = RideDetectionSettingsStore(
+            defaults: defaults
+        )
+        expect(
+            corruptGenerationReload.generation == 1,
+            "negative persisted generations must fail closed instead of wrapping"
+        )
+        defaults.set(
+            [
+                "bike-a": NSNumber(value: UInt64(UInt32.max) + 1),
+                "bike-b": NSNumber(value: 12),
+                "": NSNumber(value: 99),
+            ],
+            forKey: "rideDetection.decisionWatermarks.v1"
+        )
+        expect(
+            corruptGenerationReload.loadDecisionWatermarks()
+                == ["bike-b": 12],
+            "corrupt decision watermarks and empty device identities must be ignored"
+        )
+
+        let startFrame = RideAutomationFrame(
+            kind: .decision,
+            transition: .start,
+            origin: .automatic,
+            rideGeneration: 7,
+            decisionSequence: 11,
+            startMode: .ask,
+            autoPauseEnabled: true
+        )
+        let startIdentity = RideAutomationDecisionIdentity(
+            deviceID: "bike-a",
+            rideGeneration: 7,
+            decisionSequence: 11
+        )
+        let pendingStart = RideAutomationPendingDecision(
+            identity: startIdentity,
+            frame: startFrame,
+            expectedState: nil
+        )
+        expect(
+            pendingStart.isValidForPersistence
+                && pendingStart.isProvenOutstanding(
+                    by: startIdentity,
+                    on: "bike-a"
+                )
+                && !pendingStart.isProvenOutstanding(
+                    by: RideAutomationDecisionIdentity(
+                        deviceID: "bike-a",
+                        rideGeneration: 8,
+                        decisionSequence: 11
+                    ),
+                    on: "bike-a"
+                ),
+            "pending automation may recover only after exact device boot and sequence proof"
+        )
+        store.savePendingDecision(pendingStart)
+        expect(
+            store.loadPendingDecision() == pendingStart,
+            "a valid unresolved prompt must survive relaunch"
+        )
+
+        let mismatchedIdentity = RideAutomationPendingDecision(
+            identity: RideAutomationDecisionIdentity(
+                deviceID: "bike-a",
+                rideGeneration: 7,
+                decisionSequence: 12
+            ),
+            frame: startFrame,
+            expectedState: nil
+        )
+        expect(
+            !mismatchedIdentity.isValidForPersistence,
+            "a recovery cache cannot relabel a detector decision identity"
+        )
+        store.savePendingDecision(mismatchedIdentity)
+        expect(
+            store.loadPendingDecision() == nil,
+            "invalid pending automation must be removed rather than replayed"
+        )
+
+        let pauseFrame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 7,
+            decisionSequence: 12,
+            sessionIdentityHash: 99,
+            startMode: .ask,
+            autoPauseEnabled: true
+        )
+        let pauseIdentity = RideAutomationDecisionIdentity(
+            deviceID: "bike-a",
+            rideGeneration: 7,
+            decisionSequence: 12
+        )
+        let acceptedPause = RideAutomationPendingDecision(
+            identity: pauseIdentity,
+            frame: pauseFrame,
+            expectedState: .paused,
+            resolvedResult: .accepted,
+            resolvedSessionIdentityHash: 99
+        )
+        expect(
+            acceptedPause.isValidForPersistence,
+            "accepted recovery state must retain a nonzero Watch session identity"
+        )
+        let unboundAcceptedPause = RideAutomationPendingDecision(
+            identity: pauseIdentity,
+            frame: pauseFrame,
+            expectedState: .paused,
+            resolvedResult: .accepted,
+            resolvedSessionIdentityHash: 0
+        )
+        expect(
+            !unboundAcceptedPause.isValidForPersistence,
+            "an accepted transition without Watch identity proof must fail closed"
+        )
+    }
+#endif
+
+    private mutating func testRideAutomationAdmissionAndOriginContract() {
+        let sessionID = UUID(uuidString: "6D1ED7F6-8BAA-43E2-94D5-2A0E4FF65A01")!
+        let sessionHash = RideAutomationAdmissionPolicy.sessionIdentityHash(
+            sessionID
+        )!
+        expect(sessionHash != 0,
+               "a real Watch session identity never uses the wire sentinel")
+        var settings = RideDetectionSettings()
+        let start = RideAutomationFrame(
+            kind: .decision,
+            transition: .start,
+            origin: .automatic,
+            rideGeneration: 4,
+            decisionSequence: 1
+        )
+        expect(
+            RideAutomationAdmissionPolicy.resolve(
+                frame: start,
+                settings: settings,
+                workoutState: .idle,
+                pauseOrigin: nil,
+                expectedSessionIdentityHash: nil,
+                highestDecisionSequence: 0
+            ) == .prompt,
+            "Ask mode must admit a prompt rather than starting optimistically"
+        )
+        settings.startMode = .off
+        expect(
+            RideAutomationAdmissionPolicy.resolve(
+                frame: start,
+                settings: settings,
+                workoutState: .idle,
+                pauseOrigin: nil,
+                expectedSessionIdentityHash: nil,
+                highestDecisionSequence: 0
+            ) == .reject(.rejected),
+            "Off mode must reject detected starts"
+        )
+        settings.startMode = .ask
+        let resume = RideAutomationFrame(
+            kind: .decision,
+            transition: .resume,
+            origin: .automatic,
+            rideGeneration: 4,
+            decisionSequence: 2,
+            sessionIdentityHash: sessionHash
+        )
+        expect(
+            RideAutomationAdmissionPolicy.resolve(
+                frame: resume,
+                settings: settings,
+                workoutState: .paused,
+                pauseOrigin: .manual,
+                expectedSessionIdentityHash: sessionHash,
+                highestDecisionSequence: 1
+            ) == .reject(.stale),
+            "automation must never resume a manually paused ride"
+        )
+        expect(
+            RideAutomationAdmissionPolicy.resolve(
+                frame: resume,
+                settings: settings,
+                workoutState: .paused,
+                pauseOrigin: .automatic,
+                expectedSessionIdentityHash: sessionHash,
+                highestDecisionSequence: 1
+            ) == .resume,
+            "matching automatic pauses may auto-resume"
+        )
+        var wrappedStart = start
+        wrappedStart.decisionSequence = 1
+        expect(
+            RideAutomationAdmissionPolicy.resolve(
+                frame: wrappedStart,
+                settings: settings,
+                workoutState: .idle,
+                pauseOrigin: nil,
+                expectedSessionIdentityHash: nil,
+                highestDecisionSequence: UInt32.max
+            ) == .prompt,
+            "decision deduplication must accept the serial after UInt32 wrap"
+        )
+        expect(
+            RideAutomationRecoveryControlPolicy.mayReplay(
+                .pause,
+                sessionState: .paused,
+                pauseOrigin: .automatic,
+                lastTransitionOrigin: .automatic
+            )
+                && !RideAutomationRecoveryControlPolicy.mayReplay(
+                    .pause,
+                    sessionState: .paused,
+                    pauseOrigin: .manual,
+                    lastTransitionOrigin: .manual
+                )
+                && RideAutomationRecoveryControlPolicy.mayReplay(
+                    .resume,
+                    sessionState: .running,
+                    pauseOrigin: nil,
+                    lastTransitionOrigin: .automatic
+                )
+                && !RideAutomationRecoveryControlPolicy.mayReplay(
+                    .resume,
+                    sessionState: .running,
+                    pauseOrigin: nil,
+                    lastTransitionOrigin: .manual
+                ),
+            "recovery must replay only source-state or known automatic transitions"
+        )
+        expect(
+            RideAutomationStartContextPolicy.disposition(
+                sessionState: .idle,
+                awaitingSuppliedStartOrigin: false,
+                hasConfirmedStartOrigin: false,
+                matchesLastConsumedContext: false
+            ) == .queueForNextStart
+                && RideAutomationStartContextPolicy.disposition(
+                    sessionState: .starting,
+                    awaitingSuppliedStartOrigin: true,
+                    hasConfirmedStartOrigin: false,
+                    matchesLastConsumedContext: false
+                ) == .applyToCurrentSuppliedStart
+                && RideAutomationStartContextPolicy.disposition(
+                    sessionState: .running,
+                    awaitingSuppliedStartOrigin: true,
+                    hasConfirmedStartOrigin: false,
+                    matchesLastConsumedContext: false
+                ) == .applyToCurrentSuppliedStart
+                && RideAutomationStartContextPolicy.disposition(
+                    sessionState: .running,
+                    awaitingSuppliedStartOrigin: false,
+                    hasConfirmedStartOrigin: true,
+                    matchesLastConsumedContext: false
+                ) == .ignore
+                && RideAutomationStartContextPolicy.disposition(
+                    sessionState: .paused,
+                    awaitingSuppliedStartOrigin: true,
+                    hasConfirmedStartOrigin: false,
+                    matchesLastConsumedContext: false
+                ) == .ignore
+                && RideAutomationStartContextPolicy.disposition(
+                    sessionState: .idle,
+                    awaitingSuppliedStartOrigin: false,
+                    hasConfirmedStartOrigin: false,
+                    matchesLastConsumedContext: true
+                ) == .ignore,
+            "late automatic-start context must bind only to its current or next eligible launch"
+        )
+
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let context = WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: 4,
+            decisionSequence: 2,
+            detectorProfileVersion: 1
+        )
+        let control = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: sessionID,
+            sequence: 3,
+            capturedAt: now,
+            controlSenderID: UUID(),
+            controlContext: context,
+            control: .resume
+        )
+        let startAnnotation = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: sessionID,
+            sequence: 4,
+            capturedAt: now,
+            controlSenderID: UUID(),
+            controlContext: WorkoutControlContextV1(
+                origin: .automatic,
+                automaticReason: .rideDetection,
+                rideGeneration: 4,
+                decisionSequence: 1,
+                detectorProfileVersion: 1
+            ),
+            control: .requestCurrentSnapshot
+        )
+        expect(
+            (try? WorkoutContractCodec.validate(startAnnotation)) != nil,
+            "an automatic start annotation must use the durable snapshot-control path"
+        )
+        expect(
+            (try? WorkoutContractCodec.validate(control)) != nil,
+            "automatic pause/resume context must validate"
+        )
+        let invalidContext = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: sessionID,
+            sessionToken: 9,
+            transportGenerationID: sessionID,
+            sequence: 4,
+            capturedAt: now,
+            controlSenderID: UUID(),
+            controlContext: WorkoutControlContextV1(origin: .automatic),
+            control: .pause
+        )
+        expectThrows(
+            .invalidEnvelopePayload,
+            "automatic context requires durable decision identity"
+        ) {
+            try WorkoutContractCodec.validate(invalidContext)
+        }
+    }
+
     private mutating func expect(
         _ condition: Bool,
         _ message: String,
@@ -214,6 +825,106 @@ private struct WorkoutContractTestSuite {
             expect(try roundTripWorkoutEnvelope(envelope) == envelope, "snapshot should round-trip")
         } catch {
             expect(false, "snapshot round-trip threw \(error)")
+        }
+
+        let pausedSnapshot = WorkoutSnapshotV1(
+            state: .paused,
+            startDate: now.addingTimeInterval(-120),
+            elapsedTime: metric(90, .seconds, now),
+            availability: [.elapsedTime],
+            pauseOrigin: .automatic,
+            lastTransitionOrigin: .automatic,
+            lastTransitionAt: now.addingTimeInterval(-30),
+            wallElapsedTime: metric(120, .seconds, now),
+            detectorProfileVersion: 1
+        )
+        let pausedEnvelope = makeEnvelope(
+            sequence: 2,
+            capturedAt: now,
+            snapshot: pausedSnapshot
+        )
+        do {
+            expect(
+                try roundTripWorkoutEnvelope(pausedEnvelope).snapshot
+                    == pausedSnapshot,
+                "automatic pause provenance and wall time should round-trip"
+            )
+        } catch {
+            expect(false, "pause-origin snapshot round-trip threw \(error)")
+        }
+
+        let runningPauseProvenance = makeEnvelope(
+            sequence: 3,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: now.addingTimeInterval(-120),
+                pauseOrigin: .automatic
+            )
+        )
+        expectThrows(.invalidEnvelopePayload, "running pause provenance") {
+            try WorkoutContractCodec.validate(runningPauseProvenance)
+        }
+        let unpairedTransitionDate = makeEnvelope(
+            sequence: 4,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .paused,
+                startDate: now.addingTimeInterval(-120),
+                pauseOrigin: .manual,
+                lastTransitionAt: now.addingTimeInterval(-30)
+            )
+        )
+        expectThrows(.invalidEnvelopePayload, "unpaired transition date") {
+            try WorkoutContractCodec.validate(unpairedTransitionDate)
+        }
+        let wallTimeBeforeMovingTime = makeEnvelope(
+            sequence: 5,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .paused,
+                startDate: now.addingTimeInterval(-120),
+                elapsedTime: metric(90, .seconds, now),
+                availability: [.elapsedTime],
+                pauseOrigin: .automatic,
+                wallElapsedTime: metric(89, .seconds, now),
+                detectorProfileVersion: 1
+            )
+        )
+        expectThrows(.invalidMetric, "wall time before moving time") {
+            try WorkoutContractCodec.validate(wallTimeBeforeMovingTime)
+        }
+        let zeroDetectorProfile = makeEnvelope(
+            sequence: 6,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .paused,
+                startDate: now.addingTimeInterval(-120),
+                pauseOrigin: .automatic,
+                detectorProfileVersion: 0
+            )
+        )
+        expectThrows(.invalidEnvelopePayload, "zero detector profile") {
+            try WorkoutContractCodec.validate(zeroDetectorProfile)
+        }
+        let automaticOriginWithoutProfile = makeEnvelope(
+            sequence: 7,
+            capturedAt: now,
+            snapshot: WorkoutSnapshotV1(
+                state: .paused,
+                startDate: now.addingTimeInterval(-120),
+                pauseOrigin: .automatic,
+                lastTransitionOrigin: .automatic,
+                lastTransitionAt: now.addingTimeInterval(-30)
+            )
+        )
+        expectThrows(
+            .invalidEnvelopePayload,
+            "automatic origin without detector profile"
+        ) {
+            try WorkoutContractCodec.validate(
+                automaticOriginWithoutProfile
+            )
         }
     }
 
@@ -3771,6 +4482,115 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "controlled recovery fixture threw \(error)")
         }
+
+        let transitionPersistence = ControllableRecoveryPersistence()
+        do {
+            let transitionStore = WatchWorkoutRecoveryStore(
+                persistence: transitionPersistence
+            )
+            _ = try transitionStore.begin(startDate: start)
+            let senderID = UUID()
+            let checkpoint = WorkoutRemoteControlSequenceGate.Checkpoint(
+                currentSenderID: senderID,
+                highestSequence: 1,
+                seenSenderIDs: [senderID],
+                latestCapturedAt: start.addingTimeInterval(5),
+                legacyHighestSequence: 0
+            )
+            let context = WorkoutControlContextV1(
+                origin: .automatic,
+                automaticReason: .rideDetection,
+                rideGeneration: 21,
+                decisionSequence: 34,
+                detectorProfileVersion: 1
+            )
+            try transitionStore.persistRemoteControlCheckpoint(
+                checkpoint,
+                pendingTransitionContext: context,
+                pendingTransitionPaused: true,
+                pendingTransitionRequestedAt: start.addingTimeInterval(5)
+            )
+            let recoveredPending = WatchWorkoutRecoveryStore(
+                persistence: transitionPersistence
+            )
+            expect(
+                recoveredPending.recoveredIdentity?
+                    .pendingTransitionContext == context
+                    && recoveredPending.recoveredIdentity?
+                        .pendingTransitionPaused == true,
+                "automatic transition intent must be durable before HealthKit state mutation"
+            )
+
+            transitionPersistence.failsSave = true
+            do {
+                try recoveredPending
+                    .clearPendingAutomaticTransitionForManualRequest()
+                expect(false, "manual preemption must report a failed durable clear")
+            } catch {
+                expect(
+                    recoveredPending.recoveredIdentity?
+                        .pendingTransitionContext == context,
+                    "failed manual preemption must not publish an undurable clear"
+                )
+            }
+            transitionPersistence.failsSave = false
+            try recoveredPending
+                .clearPendingAutomaticTransitionForManualRequest()
+            expect(
+                WatchWorkoutRecoveryStore(
+                    persistence: transitionPersistence
+                ).recoveredIdentity?.pendingTransitionContext == nil,
+                "manual pause/resume must durably retire automatic intent before HealthKit changes state"
+            )
+
+            let secondCheckpoint =
+                WorkoutRemoteControlSequenceGate.Checkpoint(
+                    currentSenderID: senderID,
+                    highestSequence: 2,
+                    seenSenderIDs: [senderID],
+                    latestCapturedAt: start.addingTimeInterval(10),
+                    legacyHighestSequence: 0
+                )
+            try recoveredPending.persistRemoteControlCheckpoint(
+                secondCheckpoint,
+                pendingTransitionContext: context,
+                pendingTransitionPaused: true,
+                pendingTransitionRequestedAt: start.addingTimeInterval(10)
+            )
+            try recoveredPending.confirmRideTransition(
+                origin: .automatic,
+                paused: true,
+                at: start.addingTimeInterval(11),
+                detectorProfileVersion: 1
+            )
+            let confirmedPause = WatchWorkoutRecoveryStore(
+                persistence: transitionPersistence
+            ).recoveredIdentity
+            expect(
+                confirmedPause?.pauseOrigin == .automatic
+                    && confirmedPause?.lastTransitionOrigin == .automatic
+                    && confirmedPause?.detectorProfileVersion == 1
+                    && confirmedPause?.pendingTransitionContext == nil,
+                "confirmed automatic pause must atomically replace its pending intent with provenance"
+            )
+            try recoveredPending.confirmRideTransition(
+                origin: .manual,
+                paused: false,
+                at: start.addingTimeInterval(20),
+                detectorProfileVersion: nil
+            )
+            let confirmedManualResume = WatchWorkoutRecoveryStore(
+                persistence: transitionPersistence
+            ).recoveredIdentity
+            expect(
+                confirmedManualResume?.pauseOrigin == nil
+                    && confirmedManualResume?.lastTransitionOrigin == .manual
+                    && confirmedManualResume?.detectorProfileVersion == 1,
+                "manual resume must win while retaining the detector profile audit trail"
+            )
+        } catch {
+            expect(false, "ride-transition recovery fixture threw \(error)")
+        }
     }
 
     private mutating func testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery() {
@@ -6259,10 +7079,10 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:workoutMirrorManager.startOutdoorCyclingOnWatch,onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and inject each production manager action"
         )
@@ -6296,9 +7116,12 @@ private struct WorkoutContractTestSuite {
                     "metric(title:\"Altitude\",value:altitudeValue,unit:\"M\""
                 )
                 && compactLiveWatchView.contains(
-                    "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+                    "workoutTime(\"Elapsed\",manager.snapshot.wallElapsedTime?.value??manager.snapshot.elapsedTime?.value)"
+                )
+                && compactLiveWatchView.contains(
+                    "workoutTime(\"Moving\",manager.snapshot.elapsedTime?.value)"
                 ),
-            "Watch live workout must omit LIVE, expose heart-rate zone and altitude, and retain the elapsed timer"
+            "Watch live workout must omit LIVE, expose heart-rate zone and altitude, and show elapsed plus moving time"
         )
         let expectedWatchMetricTitles = [
             "Speed",
@@ -6317,7 +7140,7 @@ private struct WorkoutContractTestSuite {
             of: "LazyVGrid(columns:columns,spacing:8)"
         )?.upperBound,
            let gridEnd = compactLiveWatchView.range(
-            of: "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+            of: "workoutTime(\"Elapsed\",manager.snapshot.wallElapsedTime?.value??manager.snapshot.elapsedTime?.value)"
            )?.lowerBound,
            gridStart < gridEnd {
             let grid = String(compactLiveWatchView[gridStart..<gridEnd])
@@ -6362,7 +7185,7 @@ private struct WorkoutContractTestSuite {
             of: "LazyVGrid(columns:columns,spacing:8)"
         )?.lowerBound,
            let timerIndex = compactLiveWatchView.range(
-            of: "Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))"
+            of: "workoutTime(\"Elapsed\",manager.snapshot.wallElapsedTime?.value??manager.snapshot.elapsedTime?.value)"
            )?.lowerBound,
            let controlsIndex = compactLiveWatchView.range(
             of: "HStack(spacing:8){Button{manager.markSegment()"
@@ -6452,7 +7275,7 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:workoutMirrorManager.startOutdoorCyclingOnWatch)"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()})"
                 )
                 && compactContent.contains(
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
@@ -6703,9 +7526,12 @@ private struct WorkoutContractTestSuite {
                     "unit:\"BPM\",label:\"Heartrate\""
                 )
                 && compactWorkout.contains(
-                    ".accessibilityLabel(\"Workouttime\")"
+                    "workoutTime(\"Elapsed\",snapshot.wallElapsedTime?.value??snapshot.elapsedTime?.value)"
+                )
+                && compactWorkout.contains(
+                    ".accessibilityLabel(\"\\(label)\\(WorkoutValueFormatter.duration(seconds))\")"
                 ),
-            "every iPhone current-heart-rate surface must use a red heart, and workout time must use the requested accessible label"
+            "every iPhone current-heart-rate surface must use a red heart, and workout time must retain a descriptive accessible label"
         )
         expect(
             compactWatchWorkoutManager.contains(

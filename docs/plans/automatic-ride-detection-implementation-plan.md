@@ -69,9 +69,7 @@ than replace:
 
 Standalone device ride recording, ride history, and GPX/FIT export are not part
 of this implementation. This plan controls and annotates the existing
-Watch-owned HealthKit workout only. Future standalone work can consume the same
-detector and transition-origin types, but issue #103 does not wait for it and
-does not add a second recorder.
+Watch-owned HealthKit workout only and does not add a second recorder.
 
 ### Related issue boundaries
 
@@ -234,7 +232,7 @@ QMI8658 motion windows ----------------+             |
 Watch workout telemetry (when active)-+             v
                                           RideAutomationPolicy
                                                     |
-                                        authenticated RAUT v1
+                                        authenticated RAUT v2
                                                     v
                                       iPhone RideAutomationCoordinator
                                                     |
@@ -487,7 +485,7 @@ separate measured power policy changes it.
 
 ### Capability and transport
 
-Add a `CAP2` feature bit for `RIDE_AUTOMATION_V1` (the next unassigned bit after
+Add a `CAP2` feature bit for `RIDE_AUTOMATION_V2` (the next unassigned bit after
 the current baseline) and keep legacy clients unchanged.
 
 Add a vendor characteristic
@@ -500,7 +498,7 @@ authenticated navigation/settings transport. Native and fallback payloads use
 one parser. Old apps see neither messages nor new settings because the device
 does not advertise the capability to them.
 
-### `RAUT` v1 messages
+### `RAUT` v2 messages
 
 Use fixed-size, explicitly versioned binary frames. Required message kinds are:
 

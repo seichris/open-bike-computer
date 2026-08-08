@@ -36,7 +36,7 @@ struct WorkoutStartView: View {
                 }
 
                 NavigationLink {
-                    WatchSettingsView()
+                    WatchSettingsView(manager: manager)
                 } label: {
                     Image(systemName: "gearshape")
                         .accessibilityLabel("Settings")

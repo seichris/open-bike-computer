@@ -41,6 +41,14 @@ nonisolated enum WorkoutLiveActivityDisplayError:
 }
 
 @available(iOS 17.0, *)
+nonisolated enum WorkoutLiveActivityPauseOrigin:
+    String, Codable, Hashable, Sendable {
+    case unknown
+    case manual
+    case automatic
+}
+
+@available(iOS 17.0, *)
 nonisolated enum WorkoutLiveActivityAction: String, Codable, Hashable, Sendable {
     case segment
     case pause
@@ -54,6 +62,8 @@ nonisolated struct WorkoutLiveActivityAttributes:
         let phase: WorkoutLiveActivityPhase
         let capturedAt: Date
         let elapsedActiveSeconds: TimeInterval?
+        let elapsedWallSeconds: TimeInterval?
+        let pauseOrigin: WorkoutLiveActivityPauseOrigin?
         let currentSpeedKilometersPerHour: Double?
         let cyclingDistanceMeters: Double?
         let currentHeartRateBPM: Double?
@@ -131,6 +141,8 @@ nonisolated struct WorkoutLiveActivityAttributes:
                 phase: .stale,
                 capturedAt: capturedAt,
                 elapsedActiveSeconds: elapsedActiveSeconds,
+                elapsedWallSeconds: elapsedWallSeconds,
+                pauseOrigin: pauseOrigin,
                 currentSpeedKilometersPerHour: nil,
                 cyclingDistanceMeters: cyclingDistanceMeters,
                 currentHeartRateBPM: nil,

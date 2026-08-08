@@ -106,6 +106,21 @@ rejects later mutation or mismatched reuse; it is not a Python dependency lock.
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).
 
+## Internal ride-detection builds
+
+The ordinary Waveshare development profiles compile the detector in shadow
+mode and enable the internal end-to-end RAUT control gate. They can show
+candidate progress, **Start Ride** / **Not Now**, confirmation progress,
+**Auto-Paused**, separate elapsed/moving time, and actionable iPhone/Watch or
+sensor errors on Ride Stats. The corresponding production profiles omit the
+RAUT capability and control macro until both boards pass the physical
+false-start, recovery, touch/I2C/BLE, and long-run soak matrix.
+
+Ride detection controls and annotates the Watch-owned HealthKit workout. It
+does not create standalone device recordings or ride history. Synthetic trace
+replay and trace-scrubbing instructions are in
+[`../docs/ride-automation-traces.md`](../docs/ride-automation-traces.md).
+
 ## License
 
 This firmware retains its existing GNU General Public License version 3 terms.

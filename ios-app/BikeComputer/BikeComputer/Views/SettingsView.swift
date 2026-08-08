@@ -22,6 +22,8 @@ struct SettingsView: View {
         CyclingSensorStore
     @ObservedObject private var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @ObservedObject private var rideDetectionSettingsStore:
+        RideDetectionSettingsStore
     @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorized: Bool
     let currentLocation: CLLocation?
@@ -36,6 +38,7 @@ struct SettingsView: View {
         cyclingSensorStore: CyclingSensorStore? = nil,
         cyclingSensorDetectionCoordinator:
             CyclingSensorDetectionCoordinator? = nil,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
         onStartTestNavigation: @escaping (String) -> Void
     ) {
         let cyclingSensorStore =
@@ -53,6 +56,10 @@ struct SettingsView: View {
                 ?? CyclingSensorDetectionCoordinator(
                     sensorStore: cyclingSensorStore
                 )
+        )
+        _rideDetectionSettingsStore = ObservedObject(
+            wrappedValue:
+                rideDetectionSettingsStore ?? RideDetectionSettingsStore()
         )
         self.onStartTestNavigation = onStartTestNavigation
     }
@@ -111,6 +118,14 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
+                        RideDetectionSettingsView(
+                            store: rideDetectionSettingsStore
+                        )
+                    } label: {
+                        Label("Ride Detection", systemImage: "figure.outdoor.cycle")
+                    }
+
+                    NavigationLink {
                         UICustomizationSettingsView(
                             offlineMapManager: offlineMapManager
                         )
@@ -153,6 +168,99 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
+    }
+}
+
+private struct RideDetectionSettingsView: View {
+    @ObservedObject var store: RideDetectionSettingsStore
+    @State private var showAutomaticStartWarning = false
+
+    var body: some View {
+        Form {
+            Section {
+                Picker(
+                    "Detect Ride Start",
+                    selection: Binding(
+                        get: { store.settings.startMode },
+                        set: { value in
+                            if value == .automatic {
+                                showAutomaticStartWarning = true
+                            } else {
+                                store.setStartMode(value)
+                            }
+                        }
+                    )
+                ) {
+                    Text("Off").tag(RideStartMode.off)
+                    Text("Ask to Start").tag(RideStartMode.ask)
+                    if RideAutomationRollout.allowsAutomaticStart {
+                        Text("Start Automatically")
+                            .tag(RideStartMode.automatic)
+                    }
+                }
+                .pickerStyle(.inline)
+                .alert(
+                    "Start Workouts Automatically?",
+                    isPresented: $showAutomaticStartWarning
+                ) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Enable Automatic Start") {
+                        store.setStartMode(.automatic)
+                    }
+                } message: {
+                    Text(
+                        "A detected ride can start an Outdoor Cycling "
+                        + "workout on Apple Watch without another prompt. "
+                        + "Manual controls always take precedence."
+                    )
+                }
+            } header: {
+                Text("Detect Ride Start")
+            } footer: {
+                Text(rideDetectionFooterText)
+            }
+
+            Section {
+                Toggle(
+                    "Auto-Pause",
+                    isOn: Binding(
+                        get: { store.settings.autoPauseEnabled },
+                        set: store.setAutoPauseEnabled
+                    )
+                )
+            } footer: {
+                Text(
+                    "Stops and resumes the existing Watch-owned Outdoor "
+                    + "Cycling workout. A manually paused ride is never "
+                    + "resumed automatically."
+                )
+            }
+
+            Section("Start Alerts") {
+                Picker(
+                    "Start Alerts",
+                    selection: Binding(
+                        get: { store.settings.alertMode },
+                        set: store.setAlertMode
+                    )
+                ) {
+                    Text("Sound + Haptic").tag(UInt8(0))
+                    Text("Haptic Only").tag(UInt8(1))
+                    Text("Visual Only").tag(UInt8(2))
+                }
+            }
+        }
+        .navigationTitle("Ride Detection")
+    }
+
+    private var rideDetectionFooterText: String {
+        if RideAutomationRollout.allowsAutomaticStart {
+            return "Automatic start requires a separate opt-in and the bike "
+                + "computer, iPhone, and Apple Watch to be reachable."
+        }
+        return "Ask to Start is the current rollout ceiling. Automatic start "
+            + "remains gated until the physical false-start validation is "
+            + "complete."
     }
 }
 

@@ -858,6 +858,41 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
     }
 
+    func testRideDetectionApplicationContextClearsStaleWatchPolicy() {
+        let session = FakeWatchHeartRateZoneConnectivitySession()
+        var receivedSettings: RideDetectionSettings?
+        var receivedGeneration: UInt32?
+        let receiver = WatchHeartRateZoneSettingsReceiver(
+            session: session,
+            applyMaximumHeartRateBPM: { _ in },
+            applyRideDetectionSettings: { settings, generation in
+                receivedSettings = settings
+                receivedGeneration = generation
+            }
+        )
+        let expected = RideDetectionSettings(
+            startMode: .ask,
+            autoPauseEnabled: false,
+            alertMode: 1
+        )
+        receiver.receiveApplicationContext(
+            RideDetectionSyncContext.adding(
+                settings: expected,
+                generation: 12
+            )
+        )
+        XCTAssertEqual(receivedSettings, expected)
+        XCTAssertEqual(receivedGeneration, 12)
+
+        receiver.receiveApplicationContext(
+            WorkoutHeartRateZoneSyncContext.applicationContext(
+                maximumHeartRateBPM: 190
+            )
+        )
+        XCTAssertNil(receivedSettings)
+        XCTAssertNil(receivedGeneration)
+    }
+
     func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
         let persistence = ToggleRecoveryPersistence()
         let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)

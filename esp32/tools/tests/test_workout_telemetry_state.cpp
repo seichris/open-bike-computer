@@ -118,6 +118,10 @@ int main() {
       0x02, 0x3F, 0x34, 0x12, 0x94, 0x00, 0xD7, 0x11,
       0x41, 0x01, 0x6C, 0x03, 0x04, 0xF4, 0xFF, 0x05,
   };
+  const uint8_t origin[workout_telemetry_protocol::FRAME_SIZE] = {
+      0x03, 0x00, 0x34, 0x12, 0xA0, 0x0F, 0x00, 0x00,
+      0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x02, 0x01,
+  };
 
   Reducer reducer;
   assertResultPreservesState(reducer, extended, sizeof(extended), 100, true,
@@ -143,6 +147,22 @@ int main() {
   assert(reducer.state().currentHeartRateZone.value == 4);
   assert(reducer.state().heartRateZoneCount.value == 5);
   assert(reducer.state().altitudeMeters.value == -12);
+  uint8_t unavailableWallOrigin[sizeof(origin)];
+  std::memcpy(unavailableWallOrigin, origin, sizeof(origin));
+  unavailableWallOrigin[4] = unavailableWallOrigin[5] =
+      unavailableWallOrigin[6] = unavailableWallOrigin[7] = 0xFF;
+  assert(reducer.applyFrame(unavailableWallOrigin,
+                            sizeof(unavailableWallOrigin), 349, true) ==
+         ApplyResult::Applied);
+  assert(reducer.state().originReceived);
+  assert(!reducer.state().wallElapsedSeconds.available);
+  assert(reducer.applyFrame(origin, sizeof(origin), 350, true) ==
+         ApplyResult::Applied);
+  assert(reducer.state().originReceived);
+  assert(reducer.state().wallElapsedSeconds.value == 4000);
+  assert(reducer.state().sessionIdentityHash == 0x12345678);
+  assert(reducer.state().lastTransitionOrigin ==
+         workout_telemetry_protocol::PauseOrigin::Automatic);
 
   uint8_t longFrame[17]{};
   uint8_t malformed[sizeof(core)];
@@ -156,7 +176,7 @@ int main() {
                              ApplyResult::RejectedLength);
 
   std::memcpy(malformed, core, sizeof(core));
-  malformed[0] = 3;
+  malformed[0] = 4;
   assertResultPreservesState(reducer, malformed, sizeof(malformed), 310, true,
                              ApplyResult::RejectedKind);
   std::memcpy(malformed, core, sizeof(core));
@@ -243,10 +263,40 @@ int main() {
   pausedCore[1] = static_cast<uint8_t>(SessionState::Paused);
   assert(reducer.applyFrame(pausedCore, sizeof(pausedCore), 400, true) ==
          ApplyResult::Applied);
+  assert(!reducer.state().originReceived);
+  assert(reducer.state().pauseOrigin ==
+         workout_telemetry_protocol::PauseOrigin::None);
   assert(reducer.applyFrame(pausedCore, sizeof(pausedCore), 5000, true) ==
          ApplyResult::Applied);
   assert(reducer.applyFrame(pausedCore, sizeof(pausedCore), 9000, true) ==
          ApplyResult::Applied);
+  uint8_t pendingPausedOrigin[sizeof(origin)];
+  std::memcpy(pendingPausedOrigin, origin, sizeof(origin));
+  pendingPausedOrigin[1] = static_cast<uint8_t>(
+      workout_telemetry_protocol::PauseOrigin::None);
+  writeUInt16LE(pendingPausedOrigin, 12, 0);
+  pendingPausedOrigin[14] = static_cast<uint8_t>(
+      workout_telemetry_protocol::PauseOrigin::None);
+  assert(reducer.applyFrame(pendingPausedOrigin,
+                            sizeof(pendingPausedOrigin), 9001, true) ==
+         ApplyResult::Applied);
+  assert(reducer.state().originReceived);
+  assert(reducer.state().pauseOrigin ==
+         workout_telemetry_protocol::PauseOrigin::None);
+  uint8_t pausedOrigin[sizeof(origin)];
+  std::memcpy(pausedOrigin, origin, sizeof(origin));
+  pausedOrigin[1] = static_cast<uint8_t>(
+      workout_telemetry_protocol::PauseOrigin::Automatic);
+  assert(reducer.applyFrame(pausedOrigin, sizeof(pausedOrigin), 9002, true) ==
+         ApplyResult::Applied);
+  assert(reducer.state().pauseOrigin ==
+         workout_telemetry_protocol::PauseOrigin::Automatic);
+  uint8_t automaticWithoutProfile[sizeof(pausedOrigin)];
+  std::memcpy(automaticWithoutProfile, pausedOrigin, sizeof(pausedOrigin));
+  writeUInt16LE(automaticWithoutProfile, 12, 0);
+  assertResultPreservesState(
+      reducer, automaticWithoutProfile, sizeof(automaticWithoutProfile),
+      9003, true, ApplyResult::RejectedMetric);
   assert(!workout_telemetry::isStale(reducer.state(), 18999));
 
   const ride_telemetry_presenter::LegacyRideTelemetry legacy{
@@ -255,7 +305,8 @@ int main() {
       workout_telemetry::makeSnapshot(reducer.state(), 9001), legacy);
   assert(pausedModel.usesWorkout);
   assert(pausedModel.hasActiveNavigation);
-  assertText(ride_telemetry_presenter::statusLabel(pausedModel), "PAUSED");
+  assertText(ride_telemetry_presenter::statusLabel(pausedModel),
+             "AUTO-PAUSED");
   assert(ride_telemetry_presenter::shouldShowStatus(pausedModel));
   auto runningModel = pausedModel;
   runningModel.sessionState = SessionState::Running;
@@ -280,8 +331,11 @@ int main() {
   assert(ride_telemetry_presenter::fiveZoneIndex(nonFiveZoneModel) == -1);
 
   using ride_telemetry_presenter::BottomMetric;
-  assertBottomMetrics(pausedModel, BottomMetric::Power,
-                      BottomMetric::Cadence);
+  assertBottomMetrics(pausedModel, BottomMetric::WallElapsed,
+                      BottomMetric::Power);
+  ride_telemetry_presenter::formatBottomMetric(
+      BottomMetric::WallElapsed, pausedModel, formatted, sizeof(formatted));
+  assertText(formatted, "1:06:40");
   ride_telemetry_presenter::formatBottomMetric(
       BottomMetric::Power, pausedModel, formatted, sizeof(formatted));
   assertText(formatted, "321");
@@ -292,8 +346,8 @@ int main() {
   auto zeroSensorModel = pausedModel;
   zeroSensorModel.cyclingPowerWatts.value = 0;
   zeroSensorModel.cyclingCadenceTenthsRpm.value = 0;
-  assertBottomMetrics(zeroSensorModel, BottomMetric::Power,
-                      BottomMetric::Cadence);
+  assertBottomMetrics(zeroSensorModel, BottomMetric::WallElapsed,
+                      BottomMetric::Power);
   ride_telemetry_presenter::formatBottomMetric(
       BottomMetric::Power, zeroSensorModel, formatted, sizeof(formatted));
   assertText(formatted, "0");
@@ -304,7 +358,7 @@ int main() {
   auto noSensorModel = pausedModel;
   noSensorModel.cyclingPowerWatts.available = false;
   noSensorModel.cyclingCadenceTenthsRpm.available = false;
-  assertBottomMetrics(noSensorModel, BottomMetric::Altitude,
+  assertBottomMetrics(noSensorModel, BottomMetric::WallElapsed,
                       BottomMetric::RouteRemaining);
   assertText(ride_telemetry_presenter::bottomMetricTitle(
                  BottomMetric::Altitude),
@@ -322,13 +376,13 @@ int main() {
 
   auto powerOnlyModel = pausedModel;
   powerOnlyModel.cyclingCadenceTenthsRpm.available = false;
-  assertBottomMetrics(powerOnlyModel, BottomMetric::Power,
-                      BottomMetric::RouteRemaining);
+  assertBottomMetrics(powerOnlyModel, BottomMetric::WallElapsed,
+                      BottomMetric::Power);
 
   auto cadenceOnlyModel = pausedModel;
   cadenceOnlyModel.cyclingPowerWatts.available = false;
-  assertBottomMetrics(cadenceOnlyModel, BottomMetric::Cadence,
-                      BottomMetric::RouteRemaining);
+  assertBottomMetrics(cadenceOnlyModel, BottomMetric::WallElapsed,
+                      BottomMetric::Cadence);
 
   uint8_t unavailableCore[sizeof(core)]{};
   unavailableCore[0] = 1;
@@ -379,7 +433,7 @@ int main() {
           workout_telemetry::makeSnapshot(reducer.state(), 9501), legacy);
   assert(!ambiguousLegacyModel.stale);
   assertText(ride_telemetry_presenter::statusLabel(ambiguousLegacyModel),
-             "PAUSED");
+             "AUTO-PAUSED");
   ride_telemetry_presenter::formatSpeed(ambiguousLegacyModel, formatted,
                                         sizeof(formatted));
   assertText(formatted, "--");
