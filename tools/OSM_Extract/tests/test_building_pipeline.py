@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from building_height import HeightProvenance, HeightRules
 from building_pipeline import (
     BUILDING_FLAG_FLAT_BASE,
+    _calibration_cell,
     clip_buildings,
     collect_building_features,
     prepare_buildings,
@@ -39,6 +40,17 @@ class BuildingPipelineTests(unittest.TestCase):
     def setUpClass(cls):
         raw = yaml.safe_load((ROOT / "conf" / "building_height_rules.yaml").read_text())
         cls.rules = HeightRules.from_mapping(raw)
+
+    def test_legacy_calibration_keeps_representative_point_anchor(self):
+        geometry = Polygon(
+            [(7000, 0), (9400, 0), (9400, 500), (8000, 500),
+             (8000, 2500), (7000, 2500), (7000, 0)]
+        )
+        self.assertEqual(_calibration_cell(geometry, 8192), (0, 0))
+        self.assertEqual(
+            _calibration_cell(geometry, 8192, bounds_midpoint=True),
+            (1, 0),
+        )
 
     def test_preserves_holes_and_suppresses_only_clip_edges(self):
         geometry = Polygon(
@@ -101,6 +113,85 @@ class BuildingPipelineTests(unittest.TestCase):
 
         self.assertEqual([item.object_key for item in buildings], ["w1", "w2"])
         self.assertEqual(report["partCount"], 1)
+        self.assertEqual(report["relationAssociationCount"], 1)
+
+    def test_explicit_relation_promotes_untagged_parent_and_tagged_parts(self):
+        outline = feature(
+            40,
+            box(0, 0, 100, 100),
+            '"shop"=>"mall"',
+            building=None,
+        )
+        part = feature(
+            41,
+            box(10, 10, 90, 90),
+            "",
+            building="yes",
+        )
+
+        buildings, report, _flat = prepare_buildings(
+            [outline, part],
+            self.rules,
+            {
+                "partParents": {"w41": "w40"},
+                "parentTags": {
+                    "w40": {"type": "building", "height": "30"}
+                },
+            },
+            strict_relations=True,
+        )
+
+        by_key = {item.object_key: item for item in buildings}
+        self.assertEqual(set(by_key), {"w40", "w41"})
+        self.assertTrue(by_key["w41"].is_part)
+        self.assertEqual(by_key["w41"].parent_key, "w40")
+        self.assertEqual(by_key["w41"].resolved.height_dm, 300)
+        self.assertEqual(
+            by_key["w41"].resolved.provenance,
+            HeightProvenance.PARENT_INHERITANCE,
+        )
+        self.assertEqual(report["relationAssociationCount"], 1)
+
+    def test_collects_untagged_explicit_parent_from_gdal_line_layer(self):
+        outline = feature(
+            50,
+            LineString(
+                [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]
+            ),
+            "",
+            building=None,
+        )
+        outline["properties"]["osm_id"] = outline["properties"].pop(
+            "osm_way_id"
+        )
+        part = feature(
+            51,
+            box(10, 10, 90, 90),
+            '"height"=>"12"',
+            building="yes",
+        )
+        relation_index = {
+            "partParents": {"w51": "w50"},
+            "parentTags": {
+                "w50": {"type": "building", "height": "20"}
+            },
+        }
+
+        collected = collect_building_features(
+            [part],
+            [outline],
+            relation_index,
+        )
+        buildings, report, _flat = prepare_buildings(
+            collected,
+            self.rules,
+            relation_index,
+            strict_relations=True,
+        )
+
+        by_key = {item.object_key: item for item in buildings}
+        self.assertEqual(set(by_key), {"w50", "w51"})
+        self.assertEqual(by_key["w51"].parent_key, "w50")
         self.assertEqual(report["relationAssociationCount"], 1)
 
     def test_fractional_mercator_coordinates_preserve_facade_walls(self):

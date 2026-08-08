@@ -657,6 +657,59 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertEqual(response["progress"]["completedBlocks"], 7)
             self.assertEqual(response["progress"]["totalBlocks"], 10)
             self.assertEqual(response["progress"]["fraction"], 0.7)
+            self.assertEqual(response["progress"]["phase"], "block_encoding")
+            self.assertEqual(response["progress"]["unit"], "blocks")
+
+    def test_job_store_persists_optional_building_preprocessing_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp))
+            service = MapJobService(SourceIndex([self.singapore]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+
+            store.update_phase_progress_unless_cancelled(
+                job.job_id,
+                phase="building_preprocessing",
+                unit="calibration_cells",
+                completed=2,
+                total=5,
+                completed_blocks=0,
+                total_blocks=12,
+                indeterminate=False,
+                worker_id="worker-test",
+            )
+            response = service.get_job(job.job_id).to_dict()["progress"]
+            self.assertEqual(
+                response,
+                {
+                    "phase": "building_preprocessing",
+                    "unit": "calibration_cells",
+                    "completed": 2,
+                    "total": 5,
+                    "fraction": 0.4,
+                    "completedBlocks": 0,
+                    "totalBlocks": 12,
+                    "indeterminate": False,
+                },
+            )
+
+            store.update_phase_progress_unless_cancelled(
+                job.job_id,
+                phase="building_preprocessing",
+                unit="source_cache_wait",
+                completed=None,
+                total=None,
+                completed_blocks=0,
+                total_blocks=12,
+                indeterminate=True,
+                worker_id="worker-test",
+            )
+            response = JobStore(Path(tmp)).get(job.job_id).to_dict()["progress"]
+            self.assertEqual(response["unit"], "source_cache_wait")
+            self.assertTrue(response["indeterminate"])
+            self.assertNotIn("completed", response)
+            self.assertNotIn("fraction", response)
 
     def test_create_job_enforces_active_job_limit(self):
         with tempfile.TemporaryDirectory() as tmp:

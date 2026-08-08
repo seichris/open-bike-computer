@@ -492,6 +492,11 @@ struct SavedMapRenameInteraction: Equatable {
 struct OfflineMapJobProgress: Decodable, Equatable {
     let completedBlocks: Int
     let totalBlocks: Int
+    let phase: String?
+    let unit: String?
+    let completed: Int?
+    let total: Int?
+    let indeterminate: Bool?
 
     var fraction: Double {
         guard totalBlocks > 0 else { return 0 }
@@ -499,14 +504,40 @@ struct OfflineMapJobProgress: Decodable, Equatable {
     }
 
     var percentage: Int {
-        Int((fraction * 100).rounded())
+        Int(((displayFraction ?? fraction) * 100).rounded())
+    }
+
+    var displayFraction: Double? {
+        if indeterminate == true { return nil }
+        if phase == "building_preprocessing",
+           let completed,
+           let total,
+           total > 0 {
+            return min(max(Double(completed) / Double(total), 0), 1)
+        }
+        return fraction
+    }
+
+    var detail: String {
+        if phase == "building_preprocessing" {
+            switch unit {
+            case "source_cache_wait": return "Waiting for the verified map source"
+            case "source_index": return "Indexing source buildings and relations"
+            case "relation_closure": return "Resolving boundary building relations"
+            case "calibration_cells", "calibration_cache":
+                return "Preparing deterministic building heights"
+            case "scope_plan": return "Planning the selected map area"
+            default: return "Preparing 3D buildings"
+            }
+        }
+        return "\(completedBlocks) of \(totalBlocks) map blocks"
     }
 }
 
 enum OfflineMapProgressPresentation {
     static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
         if job?.status == "converting_features", let progress = job?.progress {
-            return progress.fraction
+            return progress.displayFraction
         }
         return downloadProgress > 0 ? downloadProgress : nil
     }

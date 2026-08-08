@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from map_platform.geometry import normalize_geometry
-from map_platform.manifest import PipelineMetadata, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
+from map_platform.manifest import PipelineMetadata, build_identity_manifest, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
 from map_platform.map_stream import canonical_manifest_bytes
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
 from map_platform.preview import render_boundary_preview
@@ -34,6 +35,68 @@ def fake_job() -> MapJob:
 
 
 class ManifestTests(unittest.TestCase):
+    def test_derived_identity_must_hash_to_its_primary_key(self):
+        job = fake_job()
+        derivation = {
+            "baseExactKey": "1" * 64,
+            "strategy": "subset",
+            "parentIdentitySha256": "2" * 64,
+            "parentZipSha256": "3" * 64,
+        }
+        job.build_cache_aliases = [derivation["baseExactKey"]]
+        job.build_identity_derivation = derivation
+        job.build_cache_key = "4" * 64
+        job.build_compatibility_key = "5" * 64
+
+        with self.assertRaisesRegex(ValueError, "derived map build identity"):
+            build_identity_manifest(job)
+
+        job.build_cache_key = hashlib.sha256(
+            json.dumps(
+                derivation,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        identity = build_identity_manifest(job)
+        self.assertEqual(identity["aliases"], [derivation["baseExactKey"]])
+
+    def test_retry_identity_must_match_signed_attempt_scope(self):
+        job = fake_job()
+        attempt_scope = {
+            "scopePlanSha256": "1" * 64,
+            "sourceAreaM2": 100,
+            "sourceToOutputAreaBasisPoints": 12_000,
+            "geometryBufferMeters": 512,
+            "sourceBoundsE7": [1, 2, 3, 4],
+            "closurePlanSha256": "2" * 64,
+        }
+        derivation = {
+            "baseExactKey": "3" * 64,
+            "strategy": "bounded_relation_retry",
+            "attemptScope": attempt_scope,
+        }
+        job.build_cache_aliases = [derivation["baseExactKey"]]
+        job.build_identity_derivation = derivation
+        job.build_cache_key = hashlib.sha256(
+            json.dumps(
+                derivation,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        job.build_compatibility_key = "4" * 64
+
+        with self.assertRaisesRegex(ValueError, "does not match preprocessing"):
+            build_identity_manifest(
+                job,
+                {"attemptScope": {**attempt_scope, "geometryBufferMeters": 2048}},
+            )
+
     def test_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
             validate_pack_path("../VECTMAP/map/+0000+0000/1_1.fmb")

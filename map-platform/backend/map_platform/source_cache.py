@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import fcntl
 import time
 import urllib.request
 from contextlib import contextmanager
@@ -15,6 +15,10 @@ from .models import SourceRegion, utc_now_iso
 
 class SourceCacheError(RuntimeError):
     """Raised when an OSM source PBF cannot be cached or verified."""
+
+
+class SourceCacheCancelled(SourceCacheError):
+    """Raised when an in-flight source cache operation is cancelled."""
 
 
 @dataclass(frozen=True)
@@ -73,19 +77,55 @@ class SourceCache:
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_stale_seconds = lock_stale_seconds
 
-    def ensure(self, region: SourceRegion, *, force: bool = False) -> CachedSource:
+    def ensure(
+        self,
+        region: SourceRegion,
+        *,
+        force: bool = False,
+        cancellation_check=None,
+    ) -> CachedSource:
         target = self._target_path(region)
         target.parent.mkdir(parents=True, exist_ok=True)
         lock_path = target.with_suffix(target.suffix + ".lock")
-        with self._lock(lock_path):
+        if target.exists() and not force:
+            with self._lock(
+                lock_path,
+                cancellation_check=cancellation_check,
+                exclusive=False,
+            ):
+                try:
+                    cached = self._cached_source(
+                        region,
+                        target,
+                        cancellation_check=cancellation_check,
+                    )
+                    self._verify_expected_checksum(region, cached.sha256)
+                except SourceCacheCancelled:
+                    raise
+                except SourceCacheError:
+                    pass
+                else:
+                    self._record(cached, cancellation_check=cancellation_check)
+                    return cached
+        with self._lock(
+            lock_path,
+            cancellation_check=cancellation_check,
+            exclusive=True,
+        ):
             if target.exists() and not force:
-                cached = self._cached_source(region, target)
+                cached = self._cached_source(
+                    region,
+                    target,
+                    cancellation_check=cancellation_check,
+                )
                 try:
                     self._verify_expected_checksum(region, cached.sha256)
+                except SourceCacheCancelled:
+                    raise
                 except SourceCacheError:
                     target.unlink()
                 else:
-                    self._record(cached)
+                    self._record(cached, cancellation_check=cancellation_check)
                     return cached
 
             if not region.url:
@@ -96,21 +136,57 @@ class SourceCache:
                 tmp_path.unlink()
 
             try:
-                with urllib.request.urlopen(region.url, timeout=60) as response, tmp_path.open("wb") as output:
-                    shutil.copyfileobj(response, output)
+                with urllib.request.urlopen(
+                    region.url, timeout=60
+                ) as response, tmp_path.open("wb") as output:
+                    while True:
+                        _raise_if_cancelled(cancellation_check)
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                    _raise_if_cancelled(cancellation_check)
             except Exception as exc:
                 tmp_path.unlink(missing_ok=True)
+                if isinstance(exc, SourceCacheError):
+                    raise
                 raise SourceCacheError(f"failed to download source PBF for {region.id}: {exc}") from exc
 
-            cached = self._cached_source(region, tmp_path)
+            cached = self._cached_source(
+                region,
+                tmp_path,
+                cancellation_check=cancellation_check,
+            )
             self._verify_expected_checksum(region, cached.sha256)
             tmp_path.replace(target)
-            cached = self._cached_source(region, target)
-            self._record(cached)
+            cached = self._cached_source(
+                region,
+                target,
+                cancellation_check=cancellation_check,
+            )
+            self._record(cached, cancellation_check=cancellation_check)
             return cached
 
     def refresh(self, regions: list[SourceRegion], *, force: bool = False) -> list[CachedSource]:
         return [self.ensure(region, force=force) for region in regions]
+
+    @contextmanager
+    def verified_lease(self, region: SourceRegion, *, cancellation_check=None):
+        """Hold the source replacement lock while a resolved snapshot is used."""
+        target = self._target_path(region)
+        lock_path = target.with_suffix(target.suffix + ".lock")
+        with self._lock(
+            lock_path,
+            cancellation_check=cancellation_check,
+            exclusive=False,
+        ):
+            cached = self._cached_source(
+                region,
+                target,
+                cancellation_check=cancellation_check,
+            )
+            self._verify_expected_checksum(region, cached.sha256)
+            yield cached
 
     def metadata(self) -> dict[str, object]:
         if not self.metadata_path.exists():
@@ -141,27 +217,43 @@ class SourceCache:
                 path = self.repo_root / path
         return path
 
-    def _cached_source(self, region: SourceRegion, path: Path) -> CachedSource:
+    def _cached_source(
+        self,
+        region: SourceRegion,
+        path: Path,
+        *,
+        cancellation_check=None,
+    ) -> CachedSource:
         if not path.exists():
             raise SourceCacheError(f"cached source is missing: {path}")
         return CachedSource(
             region_id=region.id,
             path=path,
             bytes=path.stat().st_size,
-            sha256=_hash_file(path),
+            sha256=_hash_file(path, cancellation_check=cancellation_check),
             cached_at=utc_now_iso(),
         )
 
-    def _record(self, cached: CachedSource) -> None:
-        metadata = self.metadata()
-        sources = dict(metadata.get("sources", {}))
-        sources[cached.region_id] = {
-            "path": str(cached.path),
-            "bytes": cached.bytes,
-            "sha256": cached.sha256,
-            "cachedAt": cached.cached_at,
-        }
-        self.metadata_path.write_text(json.dumps({"sources": sources}, indent=2, sort_keys=True) + "\n")
+    def _record(self, cached: CachedSource, *, cancellation_check=None) -> None:
+        metadata_lock = self.metadata_path.with_suffix(
+            self.metadata_path.suffix + ".lock"
+        )
+        with self._lock(
+            metadata_lock,
+            cancellation_check=cancellation_check,
+            exclusive=True,
+        ):
+            metadata = self.metadata()
+            sources = dict(metadata.get("sources", {}))
+            sources[cached.region_id] = {
+                "path": str(cached.path),
+                "bytes": cached.bytes,
+                "sha256": cached.sha256,
+                "cachedAt": cached.cached_at,
+            }
+            self.metadata_path.write_text(
+                json.dumps({"sources": sources}, indent=2, sort_keys=True) + "\n"
+            )
 
     def _verify_expected_checksum(self, region: SourceRegion, actual_sha256: str) -> None:
         if region.checksum and region.checksum.lower() != actual_sha256.lower():
@@ -170,38 +262,55 @@ class SourceCache:
             )
 
     @contextmanager
-    def _lock(self, lock_path: Path):
-        deadline = time.monotonic() + 60
-        fd: int | None = None
-        while fd is None:
+    def _lock(
+        self,
+        lock_path: Path,
+        *,
+        cancellation_check=None,
+        exclusive: bool = True,
+        timeout_seconds: float | None = None,
+    ):
+        deadline = (
+            time.monotonic() + timeout_seconds
+            if timeout_seconds is not None
+            else None
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
+        while not acquired:
+            if cancellation_check is not None and cancellation_check():
+                os.close(fd)
+                raise SourceCacheCancelled("source cache wait was cancelled")
             try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode("utf-8"))
-            except FileExistsError:
-                _remove_stale_lock(lock_path, self.lock_stale_seconds)
-                if time.monotonic() > deadline:
+                mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                if deadline is not None and time.monotonic() > deadline:
+                    os.close(fd)
                     raise SourceCacheError(f"timed out waiting for source cache lock: {lock_path}")
                 time.sleep(0.1)
         try:
             yield
         finally:
-            if fd is not None:
-                os.close(fd)
-            lock_path.unlink(missing_ok=True)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
-def _hash_file(path: Path) -> str:
+def _raise_if_cancelled(cancellation_check) -> None:
+    if cancellation_check is not None and cancellation_check():
+        raise SourceCacheCancelled("source cache operation was cancelled")
+
+
+def _hash_file(path: Path, *, cancellation_check=None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+        while True:
+            _raise_if_cancelled(cancellation_check)
+            chunk = file.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
+    _raise_if_cancelled(cancellation_check)
     return digest.hexdigest()
-
-
-def _remove_stale_lock(lock_path: Path, stale_seconds: float) -> None:
-    try:
-        age_seconds = time.time() - lock_path.stat().st_mtime
-    except FileNotFoundError:
-        return
-    if age_seconds > stale_seconds:
-        lock_path.unlink(missing_ok=True)

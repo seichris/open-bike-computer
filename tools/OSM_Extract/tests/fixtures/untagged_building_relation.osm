@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="open-bike-computer-tests">
+  <node id="1" lat="0.0010" lon="0.0010" version="1" />
+  <node id="2" lat="0.0010" lon="0.0100" version="1" />
+  <node id="3" lat="0.0100" lon="0.0100" version="1" />
+  <node id="4" lat="0.0100" lon="0.0010" version="1" />
+  <node id="5" lat="0.0030" lon="0.0030" version="1" />
+  <node id="6" lat="0.0030" lon="0.0080" version="1" />
+  <node id="7" lat="0.0080" lon="0.0080" version="1" />
+  <node id="8" lat="0.0080" lon="0.0030" version="1" />
+  <way id="10" version="1">
+    <nd ref="1" /><nd ref="2" /><nd ref="3" /><nd ref="4" /><nd ref="1" />
+  </way>
+  <way id="20" version="1">
+    <nd ref="5" /><nd ref="6" /><nd ref="7" /><nd ref="8" /><nd ref="5" />
+    <tag k="building" v="yes" />
+    <tag k="height" v="12" />
+  </way>
+  <relation id="100" version="1">
+    <member type="way" ref="10" role="outline" />
+    <member type="way" ref="20" role="part" />
+    <tag k="type" v="building" />
+    <tag k="height" v="20" />
+  </relation>
+</osm>

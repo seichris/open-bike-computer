@@ -1,9 +1,16 @@
 import json
+import hashlib
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from building_calibration_cache import canonical_json  # noqa: E402
+from building_source_index import BuildingSourceIndex  # noqa: E402
+from build_building_source_index import scan_source  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,15 +34,129 @@ class BuildingRelationIngressTests(unittest.TestCase):
                 {
                     "schemaVersion": 1,
                     "partParents": {"w20": "w10"},
+                    "parentTags": {
+                        "w10": {"type": "building"},
+                        "w11": {"type": "building"},
+                    },
                     "relations": 2,
                     "ambiguousParts": 1,
                 },
             )
             self.assertEqual(
                 output.read_text(encoding="utf-8"),
-                '{"ambiguousParts":1,"partParents":{"w20":"w10"},'
+                '{"ambiguousParts":1,"parentTags":{"w10":{"type":"building"},'
+                '"w11":{"type":"building"}},"partParents":{"w20":"w10"},'
                 '"relations":2,"schemaVersion":1}\n',
             )
+
+    def test_source_index_audit_accepts_complete_closure_and_rejects_missing_way(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clean_source = root / "clean.osm"
+            clean_source.write_text(
+                re.sub(
+                    r'\s*<relation id="101".*?</relation>',
+                    "",
+                    FIXTURE.read_text(),
+                    flags=re.DOTALL,
+                )
+            )
+            source_sha = hashlib.sha256(clean_source.read_bytes()).hexdigest()
+            index = BuildingSourceIndex(root / "cache", source_sha)
+            index.build_with_scanner(lambda path: scan_source(clean_source, path))
+            scope = {
+                "schemaVersion": 1,
+                "policy": {
+                    "relationClosureMode": "source_snapshot_index",
+                    "maxRelationObjectsPerJob": 100,
+                },
+                "outputBlocks": [
+                    {
+                        "x": 2821,
+                        "y": 35,
+                        "boundsMeters": [11554816, 143360, 11558912, 147456],
+                    }
+                ],
+                "calibration": {
+                    "cellSizeMeters": 8192,
+                    "haloCells": 1,
+                },
+            }
+            scope_path = root / "scope.json"
+            scope_path.write_bytes(
+                canonical_json(
+                    {
+                        **scope,
+                        "scopePlanSha256": hashlib.sha256(
+                            canonical_json(scope)
+                        ).hexdigest(),
+                    }
+                )
+            )
+            output = root / "complete.json"
+            complete = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(clean_source),
+                    str(output),
+                    "--source-index-manifest", str(index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+            audit = json.loads(output.read_text())["closureAudit"]
+            self.assertEqual(audit["relationRetryCount"], 0)
+            self.assertEqual(audit["closureRelationCount"], 3)
+            self.assertEqual(audit["sourceSnapshotSha256"], source_sha)
+
+            incomplete_fixture = root / "incomplete.osm"
+            incomplete_fixture.write_text(
+                re.sub(
+                    r'\s*<way id="20".*?</way>',
+                    "",
+                    clean_source.read_text(),
+                    flags=re.DOTALL,
+                )
+            )
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(incomplete_fixture),
+                    str(root / "incomplete.json"),
+                    "--source-index-manifest", str(index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(failed.returncode, 2, failed.stdout + failed.stderr)
+            marker = next(
+                line.split(":", 1)[1]
+                for line in failed.stdout.splitlines()
+                if line.startswith("BUILDING_PREPROCESS_FAILURE:")
+            )
+            self.assertEqual(json.loads(marker)["code"], "building_relation_incomplete")
+
+            empty = root / "empty.osm"
+            empty.write_text('<?xml version="1.0"?><osm version="0.6"></osm>')
+            omitted = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(empty),
+                    str(root / "omitted.json"),
+                    "--source-index-manifest", str(index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(omitted.returncode, 2, omitted.stdout + omitted.stderr)
+            self.assertIn("building_relation_incomplete", omitted.stdout)
 
 
 if __name__ == "__main__":

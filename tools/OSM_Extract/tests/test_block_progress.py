@@ -25,7 +25,12 @@ class BlockProgressReporterTests(unittest.TestCase):
         self.assertEqual(progress.completed, 3)
         self.assertEqual(
             [line for line in output.getvalue().splitlines() if line.startswith("MAP_PROGRESS:")],
-            ["MAP_PROGRESS:1:3", "MAP_PROGRESS:2:3", "MAP_PROGRESS:3:3"],
+            [
+                "MAP_PROGRESS:0:3",
+                "MAP_PROGRESS:1:3",
+                "MAP_PROGRESS:2:3",
+                "MAP_PROGRESS:3:3",
+            ],
         )
 
     def test_rejects_invalid_totals_and_overflow(self):

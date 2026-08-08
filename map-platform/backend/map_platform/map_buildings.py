@@ -30,6 +30,7 @@ BUILDING_STATS_KEYS = {
 class BuildingCalibrationWindow:
     cell_size_meters: int
     halo_cells: int
+    minimum_samples: int
 
 
 def load_building_calibration_window(path: Path) -> BuildingCalibrationWindow:
@@ -38,6 +39,7 @@ def load_building_calibration_window(path: Path) -> BuildingCalibrationWindow:
         local = value["localMedian"]
         cell_size = local["cellSizeMeters"]
         halo_cells = local["haloCells"]
+        minimum_samples = local["minimumSamples"]
     except (OSError, TypeError, KeyError, yaml.YAMLError) as exc:
         raise ValueError("building height rules are invalid") from exc
     if (
@@ -47,9 +49,12 @@ def load_building_calibration_window(path: Path) -> BuildingCalibrationWindow:
         or isinstance(halo_cells, bool)
         or not isinstance(halo_cells, int)
         or not 0 <= halo_cells <= 8
+        or isinstance(minimum_samples, bool)
+        or not isinstance(minimum_samples, int)
+        or minimum_samples <= 0
     ):
         raise ValueError("building calibration window is invalid")
-    return BuildingCalibrationWindow(cell_size, halo_cells)
+    return BuildingCalibrationWindow(cell_size, halo_cells, minimum_samples)
 
 
 def building_target3_generation_enabled() -> bool:
@@ -75,6 +80,25 @@ def building_target3_generation_allowlist() -> frozenset[str]:
     if any(not INSTALLATION_ID_PATTERN.fullmatch(value) for value in values):
         raise ValueError("building target 3 allowlist contains an invalid installation ID")
     return frozenset(values)
+
+
+def building_preprocessing_scope_mode() -> str:
+    """Return the rollout mode for target-3 source preprocessing.
+
+    ``shadow`` preserves the legacy artifact while recording the proposed
+    selected-area plan. ``selected`` enables the bounded source/index/cache
+    path. ``legacy`` disables even shadow planning for emergency rollback.
+    """
+    value = os.environ.get(
+        "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE",
+        "shadow",
+    ).strip().lower()
+    if value not in {"legacy", "shadow", "selected"}:
+        raise ValueError(
+            "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE must be "
+            "legacy, shadow, or selected"
+        )
+    return value
 
 
 def manifest_building_summary(stats: dict[str, Any] | None) -> dict[str, int]:

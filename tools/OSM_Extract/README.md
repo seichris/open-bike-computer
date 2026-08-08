@@ -141,8 +141,23 @@ Malformed or contradictory height tags are counted in build diagnostics and
 fall through to the next valid resolution step instead of rejecting the map.
 FMB v4 stores the selected provenance separately from the height value.
 
-The source PBF must include an 8,192-metre halo around the final aligned block
-extent. Buildings are clipped only when FMB blocks are emitted; new clip edges
-receive a cleared wall bit so adjacent blocks do not render artificial seam
-facades. The script emits `BUILDING_STATS` with exact encoded-record provenance
-counts for backend comparison with the final FMB v4 artifacts.
+Legacy format-3 builds use the historical 8,192-metre calibration-cell halo
+around the aligned extent. Plan-aware selected-area builds instead receive the
+exact ordered output-block set, a bounded geometry buffer, source-snapshot
+relation closure, and a sealed full-source calibration generation. Calibration
+therefore stays stable across overlapping requests without expanding each job's
+feature preparation to the calibration halo. No external enrichment is used.
+Selected conversion uses `conf/osmconf-selected-building-closure.ini` after the
+bounded PBF has been merged with that closure. Its `report_all_ways=yes` setting
+keeps completely tagless `type=building` outline/part member geometry visible
+to strict relation processing; ordinary legacy conversions retain GDAL's
+default filtering, and unrelated tagless ways are rejected by building
+collection.
+
+Buildings are clipped only when FMB blocks are emitted; new clip edges receive
+a cleared wall bit so adjacent blocks do not render artificial seam facades.
+Plan-aware runs emit exactly one canonical `BUILDING_SCOPE` marker, structured
+`BUILDING_PREPROCESS_PROGRESS` markers while source/index/calibration work is in
+flight, and final `BUILDING_STATS` with encoded-record provenance and seam
+diagnostics. The backend validates the scope marker against the frozen plan and
+keeps calibration units separate from block progress.

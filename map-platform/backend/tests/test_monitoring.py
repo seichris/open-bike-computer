@@ -279,7 +279,11 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 "negative": -1,
                 "boolean": True,
                 "valid": 1.25,
-            }
+            },
+            "buildingPhaseTimings": {
+                "preprocessing": 2.5,
+                "bad": float("nan"),
+            },
         }
 
         phases = job.phase_timings()
@@ -288,6 +292,10 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 "nan", "infinity", "negative", "boolean", "valid"
             }],
             ["valid"],
+        )
+        self.assertIn(
+            {"status": "building_preprocessing", "durationSeconds": 2.5},
+            phases,
         )
         with tempfile.TemporaryDirectory() as tmp:
             store = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")

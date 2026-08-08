@@ -112,12 +112,77 @@ def validate_pack_path(relative_path: str) -> None:
         raise ValueError(f"map pack path is too long: {relative_path}")
 
 
+def build_identity_manifest(
+    job: MapJob,
+    building_preprocessing: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return and validate the immutable build identity stored in a map pack."""
+    if job.build_cache_key is None and job.build_compatibility_key is None:
+        return None
+    if (
+        not isinstance(job.build_cache_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", job.build_cache_key)
+        or not isinstance(job.build_compatibility_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", job.build_compatibility_key)
+    ):
+        raise ValueError("map build identity is invalid")
+    identity: dict[str, Any] = {
+        "exactKey": job.build_cache_key,
+        "compatibilityKey": job.build_compatibility_key,
+    }
+    aliases = job.build_cache_aliases
+    derivation = job.build_identity_derivation
+    if aliases or derivation is not None:
+        if (
+            not isinstance(aliases, list)
+            or len(aliases) != 1
+            or not re.fullmatch(r"[0-9a-f]{64}", aliases[0])
+            or not isinstance(derivation, dict)
+            or derivation.get("baseExactKey") != aliases[0]
+            or hashlib.sha256(
+                json.dumps(
+                    derivation,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            != job.build_cache_key
+            or derivation.get("strategy")
+            not in {"subset", "bounded_relation_retry"}
+        ):
+            raise ValueError("derived map build identity is invalid")
+        if (
+            derivation["strategy"] == "bounded_relation_retry"
+            and (
+                not isinstance(building_preprocessing, dict)
+                or derivation.get("attemptScope")
+                != building_preprocessing.get("attemptScope")
+            )
+        ):
+            raise ValueError("retry build identity does not match preprocessing")
+        if derivation["strategy"] == "subset" and (
+            not isinstance(derivation.get("parentIdentitySha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", derivation["parentIdentitySha256"]
+            )
+            or not isinstance(derivation.get("parentZipSha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", derivation["parentZipSha256"])
+        ):
+            raise ValueError("subset build identity is invalid")
+        identity["aliases"] = aliases
+        identity["derivation"] = derivation
+    return identity
+
+
 def build_manifest(
     job: MapJob,
     map_root: Path,
     pipeline: PipelineMetadata,
     *,
     building_stats: dict[str, Any] | None = None,
+    building_preprocessing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -152,7 +217,11 @@ def build_manifest(
         "displayName": job.artifact_display_name,
         "geometryType": job.geometry.mode.value,
         "bounds": job.geometry.bounds.to_list(),
-        "createdAt": job.created_at,
+        "createdAt": (
+            job.source_region.published_at or "1970-01-01T00:00:00Z"
+            if building_preprocessing is not None
+            else job.created_at
+        ),
         "target": {
             "renderer": "esp32-fmb",
             "formatVersion": format_version,
@@ -176,6 +245,8 @@ def build_manifest(
         "preview": {
             "type": DEFAULT_PREVIEW_TYPE,
             "path": DEFAULT_PREVIEW_PATH,
+            "bytes": len(preview_bytes),
+            "sha256": hashlib.sha256(preview_bytes).hexdigest(),
             "width": DEFAULT_PREVIEW_WIDTH,
             "height": DEFAULT_PREVIEW_HEIGHT,
             "background": "transparent",
@@ -183,6 +254,9 @@ def build_manifest(
         },
         "files": files,
     }
+    build_identity = build_identity_manifest(job, building_preprocessing)
+    if build_identity is not None:
+        manifest["buildIdentity"] = build_identity
     if format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
@@ -205,8 +279,12 @@ def build_manifest(
             if reported_summary != artifact_summary:
                 raise ValueError("building statistics do not match FMB v4 artifacts")
         manifest["buildings"] = artifact_summary
+        if building_preprocessing is not None:
+            manifest["buildingPreprocessing"] = building_preprocessing
     elif building_stats is not None:
         raise ValueError("building statistics require renderer target 3")
+    elif building_preprocessing is not None:
+        raise ValueError("building preprocessing metadata requires renderer target 3")
     return manifest
 
 
