@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import WatchConnectivity
 
@@ -17,7 +18,7 @@ struct PhoneWatchConnectivityStateV1: Equatable {
 /// queued WatchConnectivity APIs and therefore do not require reachability.
 @MainActor
 final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
-    PhoneWatchControllerTransporting {
+    PhoneWatchControllerTransporting, WorkoutWatchConnectivityCoordinating {
     @Published private(set) var state: PhoneWatchConnectivityStateV1
 
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
@@ -31,6 +32,33 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         "watchController.pendingRevocations.v1"
     private static let coordinateFavoritesDefaultsKey =
         "watchNavigation.coordinateFavoritesEnvelope.v1"
+
+    var workoutState: WorkoutWatchConnectivityStateV1 {
+        WorkoutWatchConnectivityStateV1(
+            isSupported: state.isSupported,
+            isActivated: state.isActivated,
+            activationFailed: state.activationFailed,
+            isPaired: state.isPaired,
+            isWatchAppInstalled: state.isWatchAppInstalled,
+            isReachable: state.isReachable
+        )
+    }
+
+    var workoutStatePublisher:
+        AnyPublisher<WorkoutWatchConnectivityStateV1, Never> {
+        $state
+            .map { state in
+                WorkoutWatchConnectivityStateV1(
+                    isSupported: state.isSupported,
+                    isActivated: state.isActivated,
+                    activationFailed: state.activationFailed,
+                    isPaired: state.isPaired,
+                    isWatchAppInstalled: state.isWatchAppInstalled,
+                    isReachable: state.isReachable
+                )
+            }
+            .eraseToAnyPublisher()
+    }
 
     override convenience init() {
         self.init(
