@@ -142,6 +142,7 @@ extension WatchLocationService: CLLocationManagerDelegate {
     }
 }
 
+#if !WORKOUT_CONTRACT_XCTEST
 extension WatchLocationService: WatchNavigationLocationProviding {
     func setNavigationConsumer(
         active: Bool,
@@ -150,3 +151,4 @@ extension WatchLocationService: WatchNavigationLocationProviding {
         setConsumer(.navigation, active: active, handler: handler)
     }
 }
+#endif
