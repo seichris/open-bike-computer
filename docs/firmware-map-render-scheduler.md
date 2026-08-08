@@ -91,6 +91,11 @@ translates it continuously using the current `PresentedPose`. Course-up rotates
 it by the difference between the frame heading and the current presented
 heading. The route foreground applies the exact same transform, so its first
 point, the route head, the arrow, and the base map remain attached.
+The oversized base object stays LVGL center-aligned. Its style position is an
+offset from the centered origin, not an absolute parent coordinate; the
+presenter explicitly converts the desired parent-space pivot target to that
+offset. This prevents the overscan origin from being applied twice to the base
+while the viewport-sized route foreground and marker apply it once.
 
 iOS does not retain or retransmit a rider-to-route connector. A packet begins
 at the exact route projection and contains only forward route geometry.

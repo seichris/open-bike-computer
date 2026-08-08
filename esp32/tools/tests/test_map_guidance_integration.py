@@ -143,6 +143,20 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertIn("rotatedMarkerPoint", navigation_marker)
 
+    def test_overscan_canvas_position_uses_center_aligned_offset(self):
+        frame = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::updatePresentedFrameTransform"
+        )
+        self.assertIn("centerAlignedOffsetForPoint", frame)
+        self.assertNotIn(
+            "const int16_t targetX = viewportOriginX + screenAnchorX - pivotX",
+            frame,
+        )
+        self.assertNotIn(
+            "const int16_t targetY = viewportOriginY + screenAnchorY - pivotY",
+            frame,
+        )
+
     def test_guidance_session_accepts_route_or_maneuver_packets(self):
         navigation_signature = function_body(
             MAP_RENDERER_SOURCE, "uint64_t Maps::navigationSignature"

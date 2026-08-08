@@ -4412,8 +4412,17 @@ void Maps::updatePresentedFrameTransform() {
       visibleRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
       desiredRotation * 180.0 / 3.14159265358979323846) *
       3.14159265358979323846 / 180.0;
-  const int16_t targetX = viewportOriginX + screenAnchorX - pivotX;
-  const int16_t targetY = viewportOriginY + screenAnchorY - pivotY;
+  // canvasMap remains LV_ALIGN_CENTER. Its style x/y are offsets from the
+  // already-centered 658x658 overscan frame, not absolute parent coordinates.
+  // Converting the desired parent-space pivot target into that aligned offset
+  // prevents applying the 96 px overscan origin twice while the viewport-sized
+  // route foreground and arrow use it once.
+  const int32_t targetX = gui_layout::centerAlignedOffsetForPoint(
+      containerWidth, visibleRenderResult.renderWidth, pivotX,
+      viewportOriginX + screenAnchorX);
+  const int32_t targetY = gui_layout::centerAlignedOffsetForPoint(
+      containerHeight, visibleRenderResult.renderHeight, pivotY,
+      viewportOriginY + screenAnchorY);
   const int16_t targetAngle = mapAngleTenths(rotationDelta);
   uint64_t presentationSignature = 1469598103934665603ULL;
   presentationSignature = fnvMix64(

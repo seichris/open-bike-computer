@@ -56,6 +56,10 @@ use the same pivot, anchor, and rotation delta. Pose/frame/route/style
 signatures make stable ticks no-ops: they do not invalidate the base image or
 clear and redraw the full foreground alpha plane. Dead reckoning is finite
 (1.5 seconds and 30 metres by default) and converges to each new phone fix.
+The overscanned base canvas remains LVGL center-aligned; its position is an
+offset from the resolved centered origin. Presentation converts the desired
+parent-space pivot target to that aligned offset exactly once, so the 96-pixel
+overscan crop cannot become a heading-relative base/route displacement.
 
 ## 3D-building admission
 
