@@ -14,11 +14,14 @@ RGB565 base frame. At the current LVGL-aligned stride:
 | --- | ---: |
 | One 658 x 658 RGB565 base frame | 865,928 |
 | Two base frames (front + worker back) | 1,731,856 |
-| 466 x 466 RGB565+A8 live foreground | 1,298,892 |
-| Persistent surface total | 3,030,748 (2.89 MiB) |
+| 466 x 466 RGB565+A8 live foreground | 651,468 |
+| Persistent surface total | 2,383,324 (2.27 MiB) |
 
-These are static sizes from the implementation based on `origin/main`
-`66692af1`. Free PSRAM, largest-contiguous PSRAM, map-block cache, temporary
+The foreground formula is `466 * 466 * (2 RGB565 + 1 alpha)`; overscan applies
+only to the two base frames. These are static sizes from PR #207 rebased on
+`origin/main` `1e189980`, for `WAVESHARE_AMOLED_175`; they are not a runtime or
+external measurement and use no map/navigation fixture. Free PSRAM,
+largest-contiguous PSRAM, map-block cache, temporary
 building workspace, and SD latency remain runtime concerns. No battery claim is
 derived from these sizes.
 
@@ -29,17 +32,30 @@ foreground, and the arrow. A low-priority worker owns map-block IO, geometry,
 building admission, and raw RGB565 rasterization into the hidden frame. It never
 calls LVGL. A completed frame is published by a short UI-side pointer swap.
 
-Each request carries a monotonic sequence plus route, navigation, style, map,
-and projection epochs. GPS movement requests are coalesced: an active render
+Each request carries a monotonic sequence plus diagnostic route revision and
+navigation, style, map, and projection epochs. GPS movement and route-window
+requests are coalesced: an active render
 may finish and publish when those frame semantics still match, even if newer
 position sequences exist. This prevents a long 3D render from being cancelled
-continuously by the 750 ms intake cadence. Route replacement, style, map-root,
-projection, and screen invalidations cancel at the next cooperative checkpoint.
+continuously by the 750 ms intake cadence. Route geometry is a live foreground
+input; navigation-session, style, map-root, projection, and screen
+invalidations cancel at the next cooperative checkpoint.
 
-The visible frame is translated and rotated every UI tick using one
-`PresentedPose`. The live route head, route line, and arrow use the same pivot,
-anchor, and rotation delta. Dead reckoning is finite (1.5 seconds and 30 metres
-by default) and converges to each new phone fix.
+The request center is led toward the rider's expected position using speed and
+the most recent render duration, capped by the 96-pixel overscan minus the
+16-pixel safety margin. Immediately before publication, all four viewport
+corners are inverse-transformed into the candidate frame. A frame that no
+longer covers the translated and rotated viewport is rejected and replaced;
+an already-uncovered candidate is never newly published. If later presentation
+motion exhausts a visible frame's margin, it immediately schedules a
+replacement while retaining the last complete frame.
+
+While presentation is changing, the visible frame is translated and rotated at
+UI cadence using one `PresentedPose`. The live route head, route line, and arrow
+use the same pivot, anchor, and rotation delta. Pose/frame/route/style
+signatures make stable ticks no-ops: they do not invalidate the base image or
+clear and redraw the full foreground alpha plane. Dead reckoning is finite
+(1.5 seconds and 30 metres by default) and converges to each new phone fix.
 
 ## 3D-building admission
 
@@ -54,20 +70,25 @@ stable rider-distance and block/record identity. The default 8 MiB quotas are:
 
 Nearest records retain 3D; farther admitted records render flat roofs; records
 outside the quota are deferred. Courtyard snapshots are clipped to the raw
-surface and capped at 180,000 pixels. A genuine allocation failure retries with
+surface and capped at 180,000 pixels. A building whose courtyard exceeds that
+workspace remains rendered with its walls and a deterministic solid roof; only
+the courtyard underlay restoration is deferred. A genuine allocation failure retries with
 a smaller deterministic flat-footprint set. A timing checkpoint or GPS update
 does not turn a healthy frame into a flat fallback.
 
 The guidance-screen flag is deliberately separate from route/maneuver
 availability. Bird's-eye and configured 3D buildings therefore remain active on
-the Map + Navigation screen before a route starts.
+the Map + Navigation screen before a route starts. If course-up has no heading
+yet, that idle first frame may be north-up; active guidance still requires a
+measured course, route bearing, or prior valid guidance frame.
 
 ## Validation boundary
 
 The focused host contracts cover worker ownership, semantic invalidation,
 position-only coalescing, shared presentation transforms, heading fallback and
-epoch reset, deterministic building admission, courtyard workspace limits, and
-legacy protocol behavior. The required physical gate is an exact
+epoch reset, pre-publication overscan coverage, deterministic building
+admission, solid-roof courtyard overflow, asynchronous runtime map activation,
+and cross-version heading protocol behavior. The required physical gate is an exact
 `WAVESHARE_AMOLED_175` build followed by device navigation with an FMB v4 pack in
 idle guidance, test navigation, and real navigation. Record UI maximum gap,
 display flush interval, render diagnostics, building counts, and free/largest

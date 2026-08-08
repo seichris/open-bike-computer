@@ -28,12 +28,13 @@ struct Version {
 
   bool operator!=(const Version &other) const { return !(*this == other); }
 
-  // Sequence identifies a submission. The remaining fields identify the
-  // frame contract, so a completed overscanned frame can still be published
-  // after a position-only request supersedes it.
+  // Sequence identifies a submission. Route revision is retained for
+  // diagnostics, but route geometry is drawn in the live foreground and is not
+  // part of the base-frame identity. The remaining epochs identify the base
+  // contract, so a completed overscanned frame can still be published after a
+  // position or route-window-only request supersedes it.
   static bool sameFrame(const Version &left, const Version &right) {
-    return left.routeRevision == right.routeRevision &&
-           left.navigationEpoch == right.navigationEpoch &&
+    return left.navigationEpoch == right.navigationEpoch &&
            left.styleEpoch == right.styleEpoch &&
            left.mapEpoch == right.mapEpoch &&
            left.projectionEpoch == right.projectionEpoch;
@@ -42,6 +43,24 @@ struct Version {
 
 enum class State : uint8_t { Idle, Rendering, Ready };
 enum class StopReason : uint8_t { None, Superseded, Shutdown, Invariant };
+
+inline bool cancellationRequested(uint32_t activeGeneration,
+                                  uint32_t currentGeneration) {
+  return activeGeneration != currentGeneration;
+}
+
+// A storage control operation (map-root probe/switch) shares the sole worker
+// with raster rendering. Camera/style supersession cancels raster work, but it
+// must not abort an activation halfway through. Shutdown remains authoritative
+// so screen/storage teardown can still quiesce the worker.
+inline bool shouldCancelWorkerOperation(bool shutdownRequested,
+                                        bool controlOperation,
+                                        uint32_t activeGeneration,
+                                        uint32_t currentGeneration) {
+  return shutdownRequested ||
+         (!controlOperation &&
+          cancellationRequested(activeGeneration, currentGeneration));
+}
 
 struct Diagnostics {
   uint32_t submitted = 0;

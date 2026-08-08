@@ -26,6 +26,15 @@ inline double signedHeadingDelta(double from, double to) {
   return delta;
 }
 
+/** Marker rotation in screen degrees. Map rotation is negative for course-up,
+ * so adding it to the world heading leaves the marker upright on a course-up
+ * map and points it along the course on a north-up map. */
+inline double markerRotationDegrees(double headingDegrees,
+                                    double displayedMapRotationRad) {
+  return normalizeDegrees(headingDegrees +
+                          displayedMapRotationRad * 180.0 / kPi);
+}
+
 struct WorldPoint {
   double x = 0.0;
   double y = 0.0;
@@ -52,6 +61,43 @@ inline ScreenPoint presentFramePoint(ScreenPoint projected,
   const double sine = std::sin(rotationDeltaRad);
   return {screenAnchor.x + cosine * dx - sine * dy,
           screenAnchor.y + sine * dx + cosine * dy};
+}
+
+/**
+ * Prove that the complete visible viewport inverse-transforms into a finished
+ * overscanned frame. This is checked immediately before publication because a
+ * rider can move or turn while the worker is rendering. Publishing a frame
+ * without this invariant would expose blank edges or spatially stale pixels.
+ */
+inline bool frameCoversViewport(double renderWidth, double renderHeight,
+                                double viewportWidth, double viewportHeight,
+                                ScreenPoint projectedPivot,
+                                ScreenPoint screenAnchor,
+                                double rotationDeltaRad,
+                                double safetyPixels) {
+  if (!(renderWidth > 0.0 && renderHeight > 0.0 && viewportWidth > 0.0 &&
+        viewportHeight > 0.0 && safetyPixels >= 0.0)) {
+    return false;
+  }
+  const double cosine = std::cos(rotationDeltaRad);
+  const double sine = std::sin(rotationDeltaRad);
+  const ScreenPoint corners[] = {{0.0, 0.0},
+                                 {viewportWidth, 0.0},
+                                 {viewportWidth, viewportHeight},
+                                 {0.0, viewportHeight}};
+  for (const ScreenPoint &corner : corners) {
+    const double dx = corner.x - screenAnchor.x;
+    const double dy = corner.y - screenAnchor.y;
+    // Inverse of presentFramePoint's rotation.
+    const double sourceX = projectedPivot.x + cosine * dx + sine * dy;
+    const double sourceY = projectedPivot.y - sine * dx + cosine * dy;
+    if (sourceX < safetyPixels || sourceY < safetyPixels ||
+        sourceX > renderWidth - safetyPixels ||
+        sourceY > renderHeight - safetyPixels) {
+      return false;
+    }
+  }
+  return true;
 }
 
 struct Fix {
@@ -94,13 +140,18 @@ public:
   }
 
   bool resolve(bool measuredValid, double measuredDegrees,
-               bool routeValid, double routeDegrees, double &resolved) {
+               bool routeValid, double routeDegrees, double &resolved,
+               bool preferRoute = false) {
     if (!active_) {
       valid_ = false;
       source_ = Source::None;
       return false;
     }
-    if (measuredValid && std::isfinite(measuredDegrees) &&
+    if (preferRoute && routeValid && std::isfinite(routeDegrees)) {
+      heading_ = normalizeDegrees(routeDegrees);
+      valid_ = true;
+      source_ = Source::Route;
+    } else if (measuredValid && std::isfinite(measuredDegrees) &&
         measuredDegrees >= 0.0) {
       heading_ = normalizeDegrees(measuredDegrees);
       valid_ = true;
@@ -154,6 +205,28 @@ public:
     current_ = {};
     previousPresented_ = {};
     convergenceStartMs_ = 0;
+  }
+
+  /** Start a new heading epoch without teleporting the presented position.
+   * Both sides of heading convergence are cleared so an invalid first fix in
+   * the new epoch cannot inherit the prior route's direction. */
+  void resetHeading(uint32_t nowMs) {
+    if (!hasFix_)
+      return;
+    // Freeze the exact pose that is currently on screen before removing its
+    // direction. Clearing current_.headingValid by itself would make
+    // present() fall back to the last raw GPS coordinate and visibly jump
+    // backwards by as much as the prediction horizon.
+    const PresentedPose frozen = present(nowMs);
+    current_.position = frozen.position;
+    current_.timestampMs = frozen.sourceTimestampMs;
+    current_.headingDegrees = 0.0;
+    current_.headingValid = false;
+    previousPresented_ = frozen;
+    previousPresented_.headingDegrees = 0.0;
+    previousPresented_.headingValid = false;
+    receivedAtMs_ = nowMs;
+    convergenceStartMs_ = nowMs;
   }
 
   void observe(const Fix &fix, uint32_t receivedAtMs) {

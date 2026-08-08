@@ -628,6 +628,7 @@ struct RouteGeometryProjection {
     let fraction: Double
     let coordinate: CLLocationCoordinate2D
     let distanceSquared: Double
+    let distanceMeters: CLLocationDistance
 }
 
 enum RouteGeometryMath {
@@ -644,14 +645,20 @@ enum RouteGeometryMath {
 
     static func nearestProjection(
         to coordinate: CLLocationCoordinate2D,
-        on points: [CLLocationCoordinate2D]
+        on points: [CLLocationCoordinate2D],
+        segmentRange: ClosedRange<Int>? = nil
     ) -> RouteGeometryProjection? {
         guard points.count >= 2 else { return nil }
         let referenceLatitude = coordinate.latitude
         let target = projectedXY(coordinate, referenceLatitude: referenceLatitude)
         var best: RouteGeometryProjection?
 
-        for index in 0..<(points.count - 1) {
+        let lastSegmentIndex = points.count - 2
+        let lowerBound = max(0, segmentRange?.lowerBound ?? 0)
+        let upperBound = min(lastSegmentIndex, segmentRange?.upperBound ?? lastSegmentIndex)
+        guard lowerBound <= upperBound else { return nil }
+
+        for index in lowerBound...upperBound {
             let start = projectedXY(points[index], referenceLatitude: referenceLatitude)
             let end = projectedXY(points[index + 1], referenceLatitude: referenceLatitude)
             let segmentX = end.x - start.x
@@ -673,15 +680,37 @@ enum RouteGeometryMath {
                     (points[index + 1].longitude - points[index].longitude) * fraction
             )
             if best == nil || distanceSquared < best!.distanceSquared {
+                let distanceMeters = CLLocation(
+                    latitude: coordinate.latitude,
+                    longitude: coordinate.longitude
+                ).distance(from: CLLocation(
+                    latitude: projectedCoordinate.latitude,
+                    longitude: projectedCoordinate.longitude
+                ))
                 best = RouteGeometryProjection(
                     segmentIndex: index,
                     fraction: fraction,
                     coordinate: projectedCoordinate,
-                    distanceSquared: distanceSquared
+                    distanceSquared: distanceSquared,
+                    distanceMeters: distanceMeters
                 )
             }
         }
         return best
+    }
+
+    static func bearing(
+        for projection: RouteGeometryProjection,
+        routePoints: [CLLocationCoordinate2D]
+    ) -> CLLocationDirection? {
+        guard projection.segmentIndex >= 0,
+              projection.segmentIndex + 1 < routePoints.count else {
+            return nil
+        }
+        return NavigationHeading.bearing(
+            from: routePoints[projection.segmentIndex],
+            to: routePoints[projection.segmentIndex + 1]
+        )
     }
 
     static func bearingNear(
@@ -691,42 +720,35 @@ enum RouteGeometryMath {
         guard let projection = nearestProjection(to: coordinate, on: routePoints) else {
             return nil
         }
-        let start = routePoints[projection.segmentIndex]
-        let end = routePoints[projection.segmentIndex + 1]
-        return NavigationHeading.bearing(from: start, to: end)
+        return bearing(for: projection, routePoints: routePoints)
     }
 
-    /// The first point is always the live rider coordinate.  The exact route
-    /// projection follows when needed, then future route vertices.  This keeps
-    /// the device route head attached to the arrow without discarding the
-    /// route's projection space.
+    /// The retained packet contains route geometry only: the exact projection
+    /// followed by future route vertices. The firmware prepends its *current*
+    /// presented rider pose every frame. Including the rider here would retain
+    /// a stale off-route connector until the next window refresh and could
+    /// make closest-segment heading resolution jump away from the route.
     static func slidingWindow(
         riderCoordinate: CLLocationCoordinate2D,
         routePoints: [CLLocationCoordinate2D],
-        maximumPointCount: Int
+        maximumPointCount: Int,
+        projection knownProjection: RouteGeometryProjection? = nil
     ) -> [CLLocationCoordinate2D] {
         guard maximumPointCount > 0 else { return [] }
-        guard routePoints.count >= 2,
-              let projection = nearestProjection(
-                to: riderCoordinate,
-                on: routePoints
-              ) else {
-            return [riderCoordinate]
+        guard routePoints.count >= 2 else { return [] }
+        let projection: RouteGeometryProjection
+        if let knownProjection {
+            projection = knownProjection
+        } else if let nearest = nearestProjection(
+            to: riderCoordinate,
+            on: routePoints
+        ) {
+            projection = nearest
+        } else {
+            return []
         }
 
-        var result = [riderCoordinate]
-        let projectedLocation = CLLocation(
-            latitude: projection.coordinate.latitude,
-            longitude: projection.coordinate.longitude
-        )
-        let riderLocation = CLLocation(
-            latitude: riderCoordinate.latitude,
-            longitude: riderCoordinate.longitude
-        )
-        if result.count < maximumPointCount,
-           riderLocation.distance(from: projectedLocation) > 0.25 {
-            result.append(projection.coordinate)
-        }
+        var result = [projection.coordinate]
 
         var nextIndex = projection.segmentIndex + 1
         while nextIndex < routePoints.count && result.count < maximumPointCount {
@@ -746,12 +768,70 @@ enum RouteGeometryMath {
     }
 }
 
+/// Epoch-scoped, bounded route matching. Once a rider has established forward
+/// progress, self-intersections and nearby return lanes cannot snap the match
+/// to an arbitrarily old segment. A fix far from the bounded window performs a
+/// global reacquisition, which preserves deliberate large backtracking and
+/// off-route recovery. Replacing a route must reset the matcher.
+struct RouteProgressMatcher {
+    private(set) var segmentIndex: Int?
+    let lookBehindSegments: Int
+    let lookAheadSegments: Int
+    let reacquireDistanceMeters: CLLocationDistance
+
+    init(
+        lookBehindSegments: Int = 3,
+        lookAheadSegments: Int = 48,
+        reacquireDistanceMeters: CLLocationDistance = 75
+    ) {
+        self.lookBehindSegments = max(lookBehindSegments, 0)
+        self.lookAheadSegments = max(lookAheadSegments, 1)
+        self.reacquireDistanceMeters = max(reacquireDistanceMeters, 1)
+    }
+
+    mutating func reset() {
+        segmentIndex = nil
+    }
+
+    mutating func projection(
+        to coordinate: CLLocationCoordinate2D,
+        on points: [CLLocationCoordinate2D]
+    ) -> RouteGeometryProjection? {
+        guard points.count >= 2 else {
+            segmentIndex = nil
+            return nil
+        }
+
+        if let segmentIndex {
+            let lastSegment = points.count - 2
+            let localRange = ClosedRange(
+                uncheckedBounds: (
+                    lower: max(0, segmentIndex - lookBehindSegments),
+                    upper: min(lastSegment, segmentIndex + lookAheadSegments)
+                )
+            )
+            if let local = RouteGeometryMath.nearestProjection(
+                to: coordinate,
+                on: points,
+                segmentRange: localRange
+            ), local.distanceMeters <= reacquireDistanceMeters {
+                self.segmentIndex = local.segmentIndex
+                return local
+            }
+        }
+
+        let global = RouteGeometryMath.nearestProjection(to: coordinate, on: points)
+        segmentIndex = global?.segmentIndex
+        return global
+    }
+}
+
 enum RouteGeometryTransmissionPolicy {
-    /// Keep the already-sent route window while it still contains useful
-    /// forward geometry. The device anchors that immutable geometry at every
-    /// presented GPS pose, so retransmitting merely because the first rider
-    /// coordinate moved would only churn the firmware route revision and
-    /// starve a longer render job.
+    /// Refresh when the bounded matcher advances to another segment. The
+    /// caller rate-limits this decision, so short segments are coalesced while
+    /// loops and self-intersections promptly receive a new unambiguous forward
+    /// window. Firmware treats route revisions as live-foreground input, not a
+    /// reason to cancel an in-flight 3D base render.
     static func shouldSend(
         currentSegmentIndex: Int,
         lastSentSegmentIndex: Int?,
@@ -759,11 +839,7 @@ enum RouteGeometryTransmissionPolicy {
     ) -> Bool {
         guard maximumPointCount > 0, currentSegmentIndex >= 0 else { return false }
         guard let lastSentSegmentIndex else { return true }
-        if currentSegmentIndex < lastSentSegmentIndex {
-            return true
-        }
-        let refreshStride = max(1, maximumPointCount * 2 / 3)
-        return currentSegmentIndex - lastSentSegmentIndex >= refreshStride
+        return currentSegmentIndex != lastSentSegmentIndex
     }
 }
 
@@ -818,6 +894,23 @@ enum DeviceGPSPacketBuilder {
         withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
         return data
+    }
+}
+
+/// Compatibility boundary for the GPS heading field. Firmware that did not
+/// advertise the explicit invalid-heading capability interprets every UInt16
+/// as a real heading, so preserve its historical zero fallback. Once bit 13
+/// is negotiated, nil can use DeviceGPSPacketBuilder.invalidHeadingDegrees and
+/// the firmware is free to resolve course from the route instead of north.
+enum DeviceGPSHeadingWirePolicy {
+    static func heading(
+        _ heading: CLLocationDirection?,
+        supportsExplicitInvalidHeading: Bool
+    ) -> CLLocationDirection? {
+        if supportsExplicitInvalidHeading {
+            return NavigationHeading.normalized(heading)
+        }
+        return NavigationHeading.normalized(heading) ?? 0
     }
 }
 

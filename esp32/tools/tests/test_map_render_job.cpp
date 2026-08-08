@@ -7,6 +7,13 @@
 int main() {
   using namespace map_render_job;
 
+  assert(!cancellationRequested(7, 7));
+  assert(cancellationRequested(7, 8));
+  assert(!shouldCancelWorkerOperation(false, false, 7, 7));
+  assert(shouldCancelWorkerOperation(false, false, 7, 8));
+  assert(!shouldCancelWorkerOperation(false, true, 7, 8));
+  assert(shouldCancelWorkerOperation(true, true, 7, 7));
+
   LatestWins jobs;
   Version first{1, 10, 20, 30, 40, 50};
   assert(jobs.submit(first) == first);
@@ -14,14 +21,11 @@ int main() {
   assert(jobs.state() == State::Rendering);
   assert(jobs.checkpoint() == StopReason::None);
 
-  // A newer route revision cancels the active frame at the next bounded unit.
+  // A newer route window does not cancel the active base frame because route
+  // geometry is a live foreground input.
   Version second{2, 11, 20, 30, 40, 50};
   jobs.submit(second);
-  assert(jobs.checkpoint() == StopReason::Superseded);
-  jobs.cancelActive();
-  assert(jobs.diagnostics().cancelled == 1);
-
-  assert(jobs.beginLatest());
+  assert(jobs.checkpoint() == StopReason::None);
   for (uint32_t elapsed : {120U, 450U, 900U, 1500U})
     jobs.noteSlice(elapsed, 2000);
   assert(!jobs.sliceBudgetExceeded());
@@ -30,8 +34,12 @@ int main() {
 
   Version published;
   assert(jobs.takeReady(published));
-  assert(published == second);
+  assert(published == first);
   assert(jobs.diagnostics().published == 1);
+  assert(jobs.beginLatest());
+  assert(jobs.completeActive());
+  assert(jobs.takeReady(published));
+  assert(published == second);
 
   // Position-only supersession must not cancel a complete overscanned frame:
   // the UI can present it with the live pose while the newest request waits

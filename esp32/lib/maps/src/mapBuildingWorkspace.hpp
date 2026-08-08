@@ -9,6 +9,19 @@
 
 namespace map_building_workspace {
 
+enum class CourtyardPolicy : uint8_t {
+  PreserveUnderlay,
+  SolidRoofFallback,
+};
+
+inline CourtyardPolicy courtyardPolicy(size_t projectedPixels,
+                                       size_t maximumWorkspacePixels,
+                                       size_t surfacePixels) {
+  const size_t available = std::min(maximumWorkspacePixels, surfacePixels);
+  return projectedPixels <= available ? CourtyardPolicy::PreserveUnderlay
+                                      : CourtyardPolicy::SolidRoofFallback;
+}
+
 struct Region {
   int32_t x = 0;
   int32_t y = 0;

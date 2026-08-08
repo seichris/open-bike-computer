@@ -12,6 +12,11 @@ struct Point {
 }
 
 int main() {
+  using map_building_workspace::CourtyardPolicy;
+  assert(map_building_workspace::courtyardPolicy(180000, 180000, 658 * 658) ==
+         CourtyardPolicy::PreserveUnderlay);
+  assert(map_building_workspace::courtyardPolicy(180001, 180000, 658 * 658) ==
+         CourtyardPolicy::SolidRoofFallback);
   constexpr int width = 12;
   constexpr int height = 10;
   std::vector<uint16_t> frame(width * height);

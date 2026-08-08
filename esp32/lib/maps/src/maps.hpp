@@ -177,6 +177,7 @@ private:
     uint16_t overscanPixels = 0;
     size_t renderStridePixels = 0;
     double rotationRad = 0.0;
+    uint32_t cancellationGeneration = 0;
     bool birdsEye = false;
   };
 
@@ -325,8 +326,23 @@ private:
   RenderContext captureRenderContext(uint32_t nowMs = 0);
   static void renderWorkerTaskThunk(void *argument);
   void renderWorkerLoop();
+  struct VectorMapActivationRequest {
+    uint32_t sequence = 0;
+    std::string folder;
+  };
+  struct VectorMapActivationCompletion {
+    uint32_t sequence = 0;
+    std::string folder;
+    bool loaded = false;
+  };
+  bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
+  bool processPendingVectorMapActivation();
+  bool probeVectorMapFolderOnStorageOwner(const std::string &folder);
+  bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
+  void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
   bool stopRenderWorker();
+  bool recoverRenderWorkerIfNeeded();
   bool buildRenderRequest(uint8_t zoom, uint32_t nowMs,
                           RenderRequest &request);
   bool submitRenderRequest(const RenderRequest &request);
@@ -338,7 +354,8 @@ private:
   void updatePresentedPose(uint32_t nowMs);
   void updatePresentedFrameTransform();
   void renderLiveForeground();
-  void invalidateRenderSemantics();
+  void invalidateRenderSemantics(uint32_t nowMs);
+  bool presentationGestureOwnsTransforms() const;
   uint64_t styleSignature(const ScreenMapRenderSettings &style) const;
   uint64_t navigationSignature() const;
   uint64_t projectionSignature(uint8_t zoom, uint16_t viewportWidth,
@@ -358,8 +375,14 @@ private:
   bool readyRenderResultValid = false;
   bool framePublicationPending = false;
   bool renderFailurePending = false;
+  VectorMapActivationRequest pendingVectorMapActivation{};
+  VectorMapActivationCompletion completedVectorMapActivation{};
+  bool pendingVectorMapActivationValid = false;
+  bool completedVectorMapActivationValid = false;
+  uint32_t vectorMapActivationSequence = 0;
   bool publishedMapFrame = false;
   bool publishedMapFound = false;
+  uint32_t lastCompletedRenderDurationMs = 1000;
   uint32_t navigationEpoch = 1;
   uint32_t styleEpoch = 1;
   uint32_t mapEpoch = 1;
@@ -374,9 +397,12 @@ private:
   map_presentation::HeadingResolver headingResolver;
   map_presentation::PresentedPose presentedPose{};
   bool hasPresentedPose = false;
+  uint64_t lastFramePresentationSignature = 0;
+  uint64_t lastForegroundPresentationSignature = 0;
   RenderResult visibleRenderResult{};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
+  std::atomic<bool> renderWorkerRestartAfterExit{false};
 
   // Common
   static const uint16_t tileHeight = 466;        // Tile 9x9 Height Size
@@ -502,6 +528,10 @@ private:
   void resetDragPresentationVisuals();
 
 public:
+  struct VectorMapActivationResult {
+    std::string folder;
+    bool loaded = false;
+  };
   uint16_t mapScrHeight;  // Screen map size height
   uint16_t mapScrWidth;   // Screen map size width
   uint16_t mapScrFull;    // Screen map size in full screen
@@ -526,6 +556,8 @@ public:
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
   bool setVectorMapFolder(const std::string &folder);
   bool probeVectorMapFolder(const std::string &folder);
+  bool requestVectorMapFolderActivation(const std::string &folder);
+  bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);

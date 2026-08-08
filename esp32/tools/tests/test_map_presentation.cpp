@@ -9,6 +9,8 @@ int main() {
   assert(normalizeDegrees(-1.0) == 359.0);
   assert(std::fabs(signedHeadingDelta(359.0, 1.0) - 2.0) < 1e-9);
   assert(std::fabs(signedHeadingDelta(1.0, 359.0) + 2.0) < 1e-9);
+  assert(std::fabs(markerRotationDegrees(90.0, 0.0) - 90.0) < 1e-9);
+  assert(std::fabs(markerRotationDegrees(90.0, -kPi / 2.0)) < 1e-9);
 
 
   // Base pixels, route geometry, and current-position markers share one affine
@@ -28,6 +30,15 @@ int main() {
       presentFramePoint({210.0, 260.0}, pivot, anchor, 0.0);
   assert(std::fabs(translatedOnly.x - 114.0) < 1e-9);
   assert(std::fabs(translatedOnly.y - 144.0) < 1e-9);
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {329.0, 329.0}, {233.0, 233.0}, 0.0, 16.0));
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {405.0, 329.0}, {233.0, 233.0}, 0.0, 16.0));
+  assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                              {420.0, 329.0}, {233.0, 233.0}, 0.0, 16.0));
+  assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                              {329.0, 329.0}, {233.0, 233.0}, kPi / 4.0,
+                              16.0));
 
   HeadingResolver resolver;
   double heading = -1.0;
@@ -41,6 +52,12 @@ int main() {
   assert(resolver.resolve(false, -1.0, false, 0.0, heading));
   assert(heading == 2.0);
   assert(resolver.source() == HeadingResolver::Source::Remembered);
+
+  // Version-10 apps encoded a missing course as zero. New firmware detects
+  // that legacy negotiation and resolves route-first instead of facing north.
+  assert(resolver.resolve(true, 0.0, true, 90.0, heading, true));
+  assert(heading == 90.0);
+  assert(resolver.source() == HeadingResolver::Source::Route);
 
   // A mode/session epoch change cannot inherit a stale heading and silently
   // turn an invalid course into north-up.
@@ -92,6 +109,31 @@ int main() {
   const PresentedPose missingCoursePose = missingCourse.present(1400);
   assert(missingCoursePose.headingValid);
   assert(std::fabs(missingCoursePose.headingDegrees - 90.0) < 1e-6);
+  missingCourse.resetHeading(1500);
+  missingCourse.observe({{2.0, 0.0}, 0.0, false, 0.0, 1.0, 1500}, 1500);
+  const PresentedPose resetMissingCourse = missingCourse.present(1900);
+  assert(!resetMissingCourse.headingValid);
+  missingCourse.observe({{3.0, 0.0}, 180.0, true, 0.0, 1.0, 2000}, 2000);
+  const PresentedPose newEpochHeading = missingCourse.present(2400);
+  assert(newEpochHeading.headingValid);
+  assert(std::fabs(newEpochHeading.headingDegrees - 180.0) < 1e-6);
+
+  // Resetting a heading epoch freezes the currently presented prediction. It
+  // must not jump back to the raw fix before the replacement heading/fix can
+  // converge.
+  Presenter headingEpoch(config);
+  headingEpoch.observe({{0.0, 0.0}, 90.0, true, 10.0, 1.0, 0}, 0);
+  const PresentedPose predictedBeforeReset = headingEpoch.present(500);
+  assert(std::fabs(predictedBeforeReset.position.x - 5.0) < 1e-6);
+  headingEpoch.resetHeading(500);
+  const PresentedPose frozenAfterReset = headingEpoch.present(500);
+  assert(!frozenAfterReset.headingValid);
+  assert(std::fabs(frozenAfterReset.position.x -
+                   predictedBeforeReset.position.x) < 1e-6);
+  headingEpoch.observe({{0.0, 0.0}, 180.0, true, 0.0, 1.0, 500}, 500);
+  const PresentedPose resetConvergenceStart = headingEpoch.present(500);
+  assert(std::fabs(resetConvergenceStart.position.x -
+                   predictedBeforeReset.position.x) < 1e-6);
 
   assert(std::fabs(refreshLeadPixels(10.0, 2.0, 1200, 16.0, 32.0, 96.0) -
                    40.0) < 1e-9);

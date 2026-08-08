@@ -36,6 +36,9 @@ Building summaries include the same internal-heap fields plus the existing
 PSRAM fields. They also report:
 
 - `courtyardSnapshots`: number of courtyard underlay captures in the pass;
+- `courtyardDeferred`: number of admitted buildings rendered with the
+  solid-roof fallback because courtyard restoration exceeded its bounded
+  workspace;
 - `courtyardMaxBytes`: largest allocated underlay-vector capacity in bytes;
 - `freeInternalHeap` and `largestInternalHeap`: internal 8-bit heap
   availability at the end of the pass;

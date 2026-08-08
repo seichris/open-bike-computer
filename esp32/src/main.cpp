@@ -367,6 +367,23 @@ static uint32_t pendingUiWakeReasons = 0;
 static uint32_t lastBleHousekeepingMs = 0;
 static uint32_t lastShutdownHousekeepingMs = 0;
 static uint32_t lastTransferHousekeepingMs = 0;
+enum class PendingMapRendererActivationSource : uint8_t {
+  None,
+  Transfer,
+  LabelRollback,
+};
+struct PendingMapRendererActivation {
+  PendingMapRendererActivationSource source =
+      PendingMapRendererActivationSource::None;
+  std::string rendererRoot;
+  std::string transferRoot;
+  std::string labelFailure;
+  std::string rollbackCode;
+  bool rendererQueued = false;
+  uint32_t queueAttemptStartedMs = 0;
+};
+static PendingMapRendererActivation pendingMapRendererActivation;
+static constexpr uint32_t kMapRendererActivationQueueTimeoutMs = 10000U;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static display_inactivity::Policy displayInactivityPolicy;
 static display_inactivity::Mode currentDisplayMode =
@@ -1440,38 +1457,102 @@ void loop() {
           lastTransferHousekeepingMs, kStaticHousekeepingPeriodMs);
   if (transferHousekeepingDue) {
     lastTransferHousekeepingMs = now;
-    std::string activatedMapRoot;
-    if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
-      const std::string rendererRoot =
-          std::string("/sdcard") + activatedMapRoot;
-      const bool loaded = mapView.probeVectorMapFolder(rendererRoot) &&
-                          mapView.setVectorMapFolder(rendererRoot);
-      mapTransferHttp.acknowledgeActivatedMapRoot(activatedMapRoot, loaded);
+    Maps::VectorMapActivationResult rendererResult;
+    if (mapView.takeVectorMapFolderActivationResult(rendererResult)) {
+      const bool matchesPending =
+          pendingMapRendererActivation.source !=
+              PendingMapRendererActivationSource::None &&
+          pendingMapRendererActivation.rendererQueued &&
+          rendererResult.folder == pendingMapRendererActivation.rendererRoot;
+      const bool loaded = matchesPending && rendererResult.loaded;
+      if (pendingMapRendererActivation.source ==
+          PendingMapRendererActivationSource::Transfer) {
+        mapTransferHttp.acknowledgeActivatedMapRoot(
+            pendingMapRendererActivation.transferRoot, loaded);
+      } else if (pendingMapRendererActivation.source ==
+                 PendingMapRendererActivationSource::LabelRollback) {
+        Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
+                      "restored=%d\n",
+                      pendingMapRendererActivation.labelFailure.c_str(),
+                      pendingMapRendererActivation.rollbackCode.c_str(),
+                      loaded);
+      } else {
+        Serial.printf("MAP_TRANSFER: unexpected renderer activation result "
+                      "root=%s loaded=%d\n",
+                      rendererResult.folder.c_str(), rendererResult.loaded);
+      }
+      pendingMapRendererActivation = {};
     }
+
+    if (pendingMapRendererActivation.source ==
+        PendingMapRendererActivationSource::None) {
+      std::string activatedMapRoot;
+      if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
+        const std::string rendererRoot =
+            std::string("/sdcard") + activatedMapRoot;
+        pendingMapRendererActivation = {
+            PendingMapRendererActivationSource::Transfer, rendererRoot,
+            activatedMapRoot, {}, {}, false, now};
+      }
+    }
+
     std::string labelRuntimeFailure;
-    if (mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure)) {
+    if (pendingMapRendererActivation.source ==
+            PendingMapRendererActivationSource::None &&
+        mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure)) {
       map_transfer::MapTransferInstaller mapInstaller("/sdcard");
       map_transfer::ActiveMapSelection failedSelection;
       const map_transfer::InstallStatus activeStatus =
           mapInstaller.readActiveMap(failedSelection);
       map_transfer::InstallStatus rollbackStatus{
           false, "active_rollback_unavailable", "active map is unavailable"};
-      bool restoredLoaded = false;
+      bool restorationAvailable = false;
+      std::string restoredRoot;
       if (activeStatus.ok && !failedSelection.sessionId.empty()) {
         rollbackStatus =
             mapInstaller.rollbackActiveMap(failedSelection.sessionId);
         map_transfer::ActiveMapSelection restored;
         if (rollbackStatus.ok && mapInstaller.readActiveMap(restored).ok) {
-          const std::string restoredRoot =
-              std::string("/sdcard") + restored.root;
-          restoredLoaded = mapView.probeVectorMapFolder(restoredRoot) &&
-                           mapView.setVectorMapFolder(restoredRoot);
+          restoredRoot = std::string("/sdcard") + restored.root;
+          restorationAvailable = true;
+          pendingMapRendererActivation = {
+              PendingMapRendererActivationSource::LabelRollback,
+              restoredRoot, {}, labelRuntimeFailure, rollbackStatus.code,
+              false, now};
         }
       }
-      Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
-                    "restored=%d\n",
-                    labelRuntimeFailure.c_str(), rollbackStatus.code.c_str(),
-                    restoredLoaded);
+      if (!restorationAvailable) {
+        Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
+                      "restored=0\n",
+                      labelRuntimeFailure.c_str(), rollbackStatus.code.c_str());
+      }
+    }
+
+    // A worker restart handoff or a briefly-held render mutex can make the
+    // non-blocking enqueue fail. Keep ownership of the activation and retry on
+    // subsequent transfer ticks; a transient 5 ms miss must not falsely mark a
+    // successfully installed map as unusable.
+    if (pendingMapRendererActivation.source !=
+            PendingMapRendererActivationSource::None &&
+        !pendingMapRendererActivation.rendererQueued) {
+      if (mapView.requestVectorMapFolderActivation(
+              pendingMapRendererActivation.rendererRoot)) {
+        pendingMapRendererActivation.rendererQueued = true;
+      } else if (static_cast<uint32_t>(
+                     now - pendingMapRendererActivation.queueAttemptStartedMs) >=
+                 kMapRendererActivationQueueTimeoutMs) {
+        if (pendingMapRendererActivation.source ==
+            PendingMapRendererActivationSource::Transfer) {
+          mapTransferHttp.acknowledgeActivatedMapRoot(
+              pendingMapRendererActivation.transferRoot, false);
+        } else {
+          Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
+                        "restored=0 queue_timeout=1\n",
+                        pendingMapRendererActivation.labelFailure.c_str(),
+                        pendingMapRendererActivation.rollbackCode.c_str());
+        }
+        pendingMapRendererActivation = {};
+      }
     }
     if (mapTransferHttp.takeAutomaticExitRequest()) {
       const bool disabled = mapTransferHttp.setEnabled(false);

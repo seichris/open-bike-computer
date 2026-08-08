@@ -256,6 +256,15 @@ DeltaLon: Int16 microdegrees
 
 Coordinates are WGS-84. The iOS app converts Apple Maps route coordinates from
 GCJ-02 to WGS-84 before writing route geometry so it aligns with OSM map blocks.
+The first point is the rider's exact projection onto the route, followed only
+by forward route vertices. The retained packet never contains a rider-to-route
+connector: firmware prepends its current `PresentedPose` while drawing, so the
+blue head stays attached to the arrow without leaving a stale closest segment.
+The app's epoch-scoped bounded matcher sends a new forward window when its
+matched segment changes, subject to a two-second rate limit. This prevents
+loops or self-intersections from making firmware reacquire an older segment;
+ordinary window revisions update the live foreground and do not cancel a 3D
+base render.
 
 A zero-length route geometry packet clears the route overlay on the ESP32. The
 iOS app sends this when navigation stops so stale route geometry is not used for
@@ -268,7 +277,7 @@ Little-endian binary packet:
 ```text
 Lat: Int32 microdegrees
 Lon: Int32 microdegrees
-Heading: UInt16 degrees, 0...359
+Heading: UInt16 degrees, 0...359; 0xFFFF invalid when CAP2 bit 13 is negotiated
 UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
 Speed: UInt16 centimeters/second, 0xFFFF invalid (optional)
 Altitude: Int16 meters (optional)
@@ -282,6 +291,12 @@ coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+
+Client version `11` and CAP2 feature bit `13` negotiate the explicit invalid
+heading sentinel. Without that bit, the app preserves the legacy missing-course
+value `0`; version-11 firmware knows version-10 clients are ambiguous and uses
+the live route bearing before that zero during guidance. Thus new app/old
+firmware, old app/new firmware, and new app/new firmware remain interoperable.
 
 The iOS sender treats GPS as replaceable state, not an ordered history. At most
 one unsent native or `GPSP` position is retained; a newer position replaces only
@@ -718,8 +733,10 @@ TLV = Type: UInt8 | Length: UInt8 | Value: Length bytes
 
 Schema `1` assigns feature bit `8` to street-label profiles, bit `9` to the
 bird's-eye projection, bit `10` to its first three perspective presets, bit
-`11` to the Very Strong and Maximum presets, and bit `12` to OSM 3D buildings
-and renderer target 3. Bits `0...7` retain their legacy
+`11` to the Very Strong and Maximum presets, bit `12` to OSM 3D buildings
+and renderer target 3, and bit `13` to the explicit invalid GPS-heading
+sentinel. Client version `11` requests bit `13`; version `10` remains a valid
+CAP2 client without it. Bits `0...7` retain their legacy
 meanings above. TLV type `1` carries the persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
@@ -730,8 +747,8 @@ clients accept either envelope.
 Golden vectors:
 
 ```text
-CAP2 schema 1, flags 0x00001fff, PWR enabled/sound 4/volume 80:
-43 41 50 32 01 ff 1f 00 00 01 03 01 04 50
+CAP2 schema 1, flags 0x00003fff, PWR enabled/sound 4/volume 80:
+43 41 50 32 01 ff 3f 00 00 01 03 01 04 50
 
 CAP2 schema 1, flags 0, no TLVs:
 43 41 50 32 01 00 00 00 00

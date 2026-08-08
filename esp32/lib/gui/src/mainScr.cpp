@@ -552,15 +552,29 @@ static int16_t mapInteractionAnchorY() {
 }
 
 static bool currentCourseUpHeading(uint16_t &headingDegrees) {
-  // A measured course is authoritative. Core Location test navigation often
-  // reports an invalid/negative course; the BLE sentinel preserves that
-  // invalidity instead of silently converting it to north.
+  uint16_t routeHeading = 0;
+  const bool routeHeadingValid = routeOverlay.headingNear(
+      gps.gpsData.latitude, gps.gpsData.longitude, routeHeading);
+
+  // Client protocol versions before explicit-invalid-heading support encoded
+  // an unavailable Core Location course as 0 degrees. Prefer the route for
+  // those sessions so both normal and test navigation cannot be pinned north
+  // by an ambiguous legacy value. New clients preserve invalidity with the BLE
+  // sentinel, so a real measured course remains authoritative.
+  if (!bleNavServer.supportsExplicitInvalidGpsHeading() &&
+      routeHeadingValid) {
+    headingDegrees = routeHeading;
+    return true;
+  }
   if (gps.gpsData.headingValid) {
     headingDegrees = gps.gpsData.heading % 360U;
     return true;
   }
-  return routeOverlay.headingNear(gps.gpsData.latitude,
-                                  gps.gpsData.longitude, headingDegrees);
+  if (routeHeadingValid) {
+    headingDegrees = routeHeading;
+    return true;
+  }
+  return false;
 }
 
 static bool isMapBackedTile(uint8_t tile) {
@@ -1077,7 +1091,15 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
       updateMapGuidanceOverlay();
   }
 
-  if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
+  // A route window can change the resolved course even when the phone has not
+  // sent a new GPS fix. Feed that observation through the normal 12-degree
+  // policy instead of forcing every sliding route packet to cancel/rebuild the
+  // base frame.
+  const bool gpsChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Gps);
+  const bool routeChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Route);
+  if (gpsChanged || routeChanged) {
     mapRenderScheduler.observe(currentMapFix());
   }
 
@@ -1206,10 +1228,10 @@ void updateMainScreen(lv_timer_t *t) {
     }
   }
 
-  // Route and settings handlers already set the concrete map redraw flags or
-  // apply screen settings. Consuming their signatures prevents stale work from
-  // being mistaken for a later visible-widget change.
-  (void)uiChangeTracker.take(ui_update_policy::Source::Route);
+  // Settings handlers already apply the concrete map redraw flags. Consuming
+  // the signature prevents stale work from being mistaken for a later visible
+  // widget change. Route changes are consumed by prepareVisibleMapUpdate so a
+  // material course change can pass through the normal render policy.
   (void)uiChangeTracker.take(ui_update_policy::Source::Settings);
 
   // Keep maneuver/foreground presentation ahead of render-job submission
