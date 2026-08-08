@@ -66,9 +66,30 @@ size_t emitAnchored(map_transform::WorldPoint current, size_t count,
   size_t emitted = 0;
   emit(current);
   ++emitted;
+
+  // Keep the live rider attached to the route even when the GPS fix is a
+  // little off the polyline (which is common after a coordinate-space
+  // conversion or during a fresh fix).  Omitting this point makes the first
+  // segment run directly from the off-route rider to the next vertex, which
+  // visibly skews the blue line across nearby roads.  The projection is in
+  // the same Web-Mercator world space as the route, so inserting it preserves
+  // the route's actual direction before continuing with forward vertices.
+  constexpr double kProjectionEqualitySquared = 1e-12;
+  const double projectionDeltaX = match.projected.x - current.x;
+  const double projectionDeltaY = match.projected.y - current.y;
+  if (projectionDeltaX * projectionDeltaX +
+          projectionDeltaY * projectionDeltaY >
+      kProjectionEqualitySquared) {
+    emit(match.projected);
+    ++emitted;
+  }
+
   for (size_t index = match.index + 1; index < count; ++index) {
     const auto next = pointAt(index);
-    if (next.x == current.x && next.y == current.y)
+    const double deltaX = next.x - match.projected.x;
+    const double deltaY = next.y - match.projected.y;
+    if (deltaX * deltaX + deltaY * deltaY <=
+        kProjectionEqualitySquared)
       continue;
     emit(next);
     ++emitted;
