@@ -21,7 +21,31 @@
     <nd ref="1" />
     <tag k="building" v="yes" />
   </way>
+  <way id="12" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building" v="yes" />
+  </way>
   <way id="20" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building:part" v="yes" />
+  </way>
+  <way id="21" version="1">
+    <nd ref="1" />
+    <nd ref="2" />
+    <nd ref="3" />
+    <nd ref="4" />
+    <nd ref="1" />
+    <tag k="building:part" v="yes" />
+  </way>
+  <way id="22" version="1">
     <nd ref="1" />
     <nd ref="2" />
     <nd ref="3" />
@@ -46,6 +70,12 @@
   </relation>
   <relation id="103" version="1">
     <member type="way" ref="10" role="outline" />
+    <tag k="type" v="building" />
+  </relation>
+  <relation id="104" version="1">
+    <member type="way" ref="12" role="outer" />
+    <member type="way" ref="21" role="part" />
+    <member type="way" ref="22" role="building:part" />
     <tag k="type" v="building" />
   </relation>
 </osm>

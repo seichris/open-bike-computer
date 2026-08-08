@@ -77,10 +77,23 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             for member in relation.members
             if member.role == "outline" and member.type in {"w", "r"}
         )
+        if not outlines:
+            outer_aliases = sorted(
+                member_key(member)
+                for member in relation.members
+                if member.role == "outer" and member.type in {"w", "r"}
+            )
+            # Some real-world type=building relations use multipolygon-style
+            # roles. A single outer is an unambiguous outline alias; multiple
+            # outers may be ring fragments or separate outlines and must keep
+            # failing closed instead of selecting an arbitrary parent.
+            if len(outer_aliases) == 1:
+                outlines = outer_aliases
         parts = sorted(
             member_key(member)
             for member in relation.members
-            if member.role == "part" and member.type in {"w", "r"}
+            if member.role in {"part", "building:part"}
+            and member.type in {"w", "r"}
         )
         if not outlines or not parts:
             if self.audit_enabled and parts and not outlines:
