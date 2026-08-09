@@ -63,13 +63,32 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
         )
         super.init()
         connectivityCoordinator.onApplicationContext = {
-            [weak heartRateZoneSettingsReceiver, weak favoriteStore] context in
+            [weak heartRateZoneSettingsReceiver, weak favoriteStore,
+             weak routeLibrary, weak deviceLink] context in
             heartRateZoneSettingsReceiver?.receiveApplicationContext(context)
             favoriteStore?.receiveApplicationContext(context)
+            routeLibrary?.receiveApplicationContext(context)
+            deviceLink?.receiveApplicationContext(context)
         }
         connectivityCoordinator.onControllerCredentialsChanged = {
             [weak deviceLink] in
             deviceLink?.controllerCredentialsDidChange()
+        }
+        connectivityCoordinator.onDirectRidePreparationResponse = {
+            [weak deviceLink] request, response in
+            deviceLink?.directRidePreparationDidRespond(
+                request: request,
+                response: response
+            )
+        }
+        deviceLink.onDirectRidePreparationChange = {
+            [weak connectivityCoordinator] operation, deviceID,
+                preparationID in
+            connectivityCoordinator?.sendDirectRidePreparation(
+                operation: operation,
+                deviceID: deviceID,
+                preparationID: preparationID
+            )
         }
         connectivityCoordinator.activate()
         navigationManager.recoverIfNeeded()

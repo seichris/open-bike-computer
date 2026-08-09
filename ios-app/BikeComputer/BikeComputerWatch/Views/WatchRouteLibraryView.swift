@@ -22,7 +22,7 @@ struct WatchRouteLibraryView: View {
                         pendingRoute = route
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(route.name)
+                            Text(routeLibrary.displayName(for: route))
                                 .font(.headline)
                                 .lineLimit(2)
                             Text(
@@ -63,7 +63,7 @@ struct WatchRouteLibraryView: View {
         ) { route in
             Button("Start Navigation") {
                 pendingRoute = nil
-                navigationManager.startConfirmedOffline(routeID: route.id)
+                navigationManager.startInstalledRoute(routeID: route.id)
             }
             Button("Cancel", role: .cancel) {
                 pendingRoute = nil

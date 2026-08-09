@@ -7,7 +7,54 @@ enum WatchOfflineNavigationTests {
         try testActiveRoutePinAndDeferredDeletion()
         try testNavigationJournalRoundTripAndValidation()
         try testExpiryAndDowngradeFailClosed()
+        try testEvictionReportsExactIdentity()
         print("WatchOfflineNavigationTests passed")
+    }
+
+    private static func testEvictionReportsExactIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "watch-route-eviction-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "watch-route-eviction-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let library = WatchRouteLibrary(
+            store: NavigationRouteFileStoreV1(
+                rootDirectory: root,
+                limits: NavigationRouteFileStoreLimitsV1(
+                    maximumArchiveCount: 1,
+                    maximumTotalEncodedBytes: 4 * 1_024 * 1_024
+                )
+            ),
+            now: { now },
+            defaults: defaults
+        )
+        let first = try archive(revision: 1, now: now)
+        _ = try library.install(
+            first.encoded(purpose: .offlineNavigation, now: now),
+            expectedIdentity: WatchRouteIdentityV1(archive: first)
+        )
+        let second = try archive(
+            routeID: UUID(
+                uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            )!,
+            revision: 1,
+            now: now.addingTimeInterval(1)
+        )
+        let result = try library.install(
+            second.encoded(
+                purpose: .offlineNavigation,
+                now: now.addingTimeInterval(1)
+            ),
+            expectedIdentity: WatchRouteIdentityV1(archive: second)
+        )
+        expect(
+            result.evictedIdentities == [WatchRouteIdentityV1(archive: first)],
+            "Watch eviction reports the exact receipt the iPhone must clear"
+        )
     }
 
     private static func testExpiryAndDowngradeFailClosed() throws {
@@ -133,6 +180,34 @@ enum WatchOfflineNavigationTests {
             expectedIdentity: WatchRouteIdentityV1(archive: first)
         )
         let identity = WatchRouteIdentityV1(archive: first)
+        let renamed = try WatchRouteDisplayNamesEnvelopeV1(
+            revision: 1,
+            entries: [
+                try WatchRouteDisplayNameV1(
+                    identity: identity,
+                    name: "Shanghai Morning Ride"
+                )
+            ]
+        )
+        library.receiveApplicationContext([
+            WatchRouteDisplayNamesEnvelopeV1.applicationContextKey:
+                try renamed.encoded()
+        ])
+        expect(
+            library.displayName(for: library.routes[0]) ==
+                "Shanghai Morning Ride",
+            "an exact iPhone route rename is rendered on Watch"
+        )
+        let restoredLibrary = WatchRouteLibrary(
+            store: store,
+            now: { now },
+            defaults: defaults
+        )
+        expect(
+            restoredLibrary.displayName(for: restoredLibrary.routes[0]) ==
+                "Shanghai Morning Ride",
+            "the synced route display name survives Watch relaunch"
+        )
         _ = try library.activate(identity)
 
         let replacement = try archive(revision: 2, now: now)
@@ -263,6 +338,9 @@ enum WatchOfflineNavigationTests {
     }
 
     private static func archive(
+        routeID: UUID = UUID(
+            uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )!,
         revision: UInt32,
         now: Date,
         deleteAfter: Date? = nil
@@ -272,9 +350,7 @@ enum WatchOfflineNavigationTests {
             RouteCoordinateV1(latitude: 1, longitude: 2.001),
         ]
         let route = NavigationRouteV1(
-            id: UUID(
-                uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-            )!,
+            id: routeID,
             revision: revision,
             provider: RouteProviderPolicyV1.importedGPX,
             localeIdentifier: "en_US",

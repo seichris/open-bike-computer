@@ -13,16 +13,27 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     @Published private(set) var state: PhoneWatchConnectivityStateV1
 
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
+    var onDirectRidePreparationRequest:
+        ((WatchDirectRidePreparationRequestV1) ->
+            WatchDirectRidePreparationResponseV1)?
 
     private let session: WCSession?
     private let defaults: UserDefaults
     private var hasActivated = false
     private var pendingControllerRevocations: [WatchControllerRequestV1] = []
     private var coordinateFavoritesEnvelope: CoordinateFavoritesEnvelopeV1?
+    private var routeDisplayNamesEnvelope:
+        WatchRouteDisplayNamesEnvelopeV1?
+    private var selectedBikeComputerEnvelope:
+        WatchSelectedBikeComputerV1?
     private static let pendingControllerRevocationsDefaultsKey =
         "watchController.pendingRevocations.v1"
     private static let coordinateFavoritesDefaultsKey =
         "watchNavigation.coordinateFavoritesEnvelope.v1"
+    private static let routeDisplayNamesDefaultsKey =
+        "watchNavigation.routeDisplayNamesEnvelope.v1"
+    private static let selectedBikeComputerDefaultsKey =
+        "watchNavigation.selectedBikeComputerEnvelope.v1"
 
     var workoutState: WorkoutWatchConnectivityStateV1 {
         WorkoutWatchConnectivityStateV1(
@@ -71,6 +82,18 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         ) {
             coordinateFavoritesEnvelope = try?
                 CoordinateFavoritesEnvelopeV1.decode(data)
+        }
+        if let data = defaults.data(
+            forKey: Self.routeDisplayNamesDefaultsKey
+        ) {
+            routeDisplayNamesEnvelope = try?
+                WatchRouteDisplayNamesEnvelopeV1.decode(data)
+        }
+        if let data = defaults.data(
+            forKey: Self.selectedBikeComputerDefaultsKey
+        ) {
+            selectedBikeComputerEnvelope = try?
+                WatchSelectedBikeComputerV1.decode(data)
         }
     }
 
@@ -129,6 +152,94 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     ) throws {
         try updateApplicationContextMerging([
             CoordinateFavoritesEnvelopeV1.applicationContextKey:
+                try envelope.encoded(),
+        ])
+    }
+
+    func updateRouteDisplayNames(
+        _ entries: [WatchRouteDisplayNameV1]
+    ) throws {
+        let normalized = try WatchRouteDisplayNamesEnvelopeV1(
+            revision: routeDisplayNamesEnvelope?.revision ?? 1,
+            entries: entries
+        ).entries
+        if routeDisplayNamesEnvelope?.entries == normalized,
+           let envelope = routeDisplayNamesEnvelope {
+            try publishRouteDisplayNames(envelope)
+            return
+        }
+        let revision: UInt64
+        if let current = routeDisplayNamesEnvelope?.revision {
+            guard current < UInt64.max else {
+                throw WatchRouteDisplayNameContractErrorV1.invalidRevision
+            }
+            revision = current + 1
+        } else {
+            revision = 1
+        }
+        let envelope = try WatchRouteDisplayNamesEnvelopeV1(
+            revision: revision,
+            entries: normalized
+        )
+        let data = try envelope.encoded()
+        routeDisplayNamesEnvelope = envelope
+        defaults.set(data, forKey: Self.routeDisplayNamesDefaultsKey)
+        try publishRouteDisplayNames(envelope)
+    }
+
+    private func publishRouteDisplayNames(
+        _ envelope: WatchRouteDisplayNamesEnvelopeV1
+    ) throws {
+        try updateApplicationContextMerging([
+            WatchRouteDisplayNamesEnvelopeV1.applicationContextKey:
+                try envelope.encoded(),
+        ])
+    }
+
+    func updateSelectedBikeComputer(deviceID: String?) throws {
+        let normalizedDeviceID: String?
+        if let deviceID,
+           deviceID.count == 32,
+           deviceID.utf8.allSatisfy({
+               ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) ||
+                   ($0 >= 97 && $0 <= 102)
+           }) {
+            normalizedDeviceID = deviceID.lowercased()
+        } else {
+            // Legacy peripherals have no ownership-v2 Watch credential and
+            // are deliberately represented by the explicit no-selection
+            // tombstone.
+            normalizedDeviceID = nil
+        }
+        if selectedBikeComputerEnvelope?.deviceID == normalizedDeviceID,
+           let envelope = selectedBikeComputerEnvelope {
+            try publishSelectedBikeComputer(envelope)
+            return
+        }
+        let revision: UInt64
+        if let current = selectedBikeComputerEnvelope?.revision {
+            guard current < UInt64.max else {
+                throw WatchControllerContractError.invalidEnvelope
+            }
+            revision = current + 1
+        } else {
+            revision = 1
+        }
+        let envelope = try WatchSelectedBikeComputerV1(
+            revision: revision,
+            deviceID: normalizedDeviceID
+        )
+        let data = try envelope.encoded()
+        selectedBikeComputerEnvelope = envelope
+        defaults.set(data, forKey: Self.selectedBikeComputerDefaultsKey)
+        try publishSelectedBikeComputer(envelope)
+    }
+
+    private func publishSelectedBikeComputer(
+        _ envelope: WatchSelectedBikeComputerV1
+    ) throws {
+        try updateApplicationContextMerging([
+            WatchSelectedBikeComputerV1.applicationContextKey:
                 try envelope.encoded(),
         ])
     }
@@ -383,16 +494,59 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             if let coordinateFavoritesEnvelope {
                 try? publishCoordinateFavorites(coordinateFavoritesEnvelope)
             }
+            if let routeDisplayNamesEnvelope {
+                try? publishRouteDisplayNames(routeDisplayNamesEnvelope)
+            }
+            if let selectedBikeComputerEnvelope {
+                try? publishSelectedBikeComputer(
+                    selectedBikeComputerEnvelope
+                )
+            }
         }
     }
 
     fileprivate func receiveAcknowledgement(_ userInfo: [String: Any]) {
+        if let payload = userInfo[
+            WatchDirectRidePreparationRequestV1.userInfoPayloadKey
+        ] as? Data {
+            _ = receiveDirectRidePreparationRequest(payload)
+            return
+        }
         guard let message = WatchRouteSyncMessageV1(propertyList: userInfo),
               message.operation == .acknowledge,
               message.status != nil else {
             return
         }
         onRouteAcknowledgement?(message)
+    }
+
+    fileprivate func receiveDirectRidePreparationRequest(
+        _ data: Data
+    ) -> Data {
+        let request: WatchDirectRidePreparationRequestV1
+        do {
+            request = try WatchDirectRidePreparationRequestV1.decode(data)
+        } catch {
+            return (try? WatchDirectRidePreparationResponseV1(
+                requestID: UUID(),
+                accepted: false,
+                errorCode: "invalid_request"
+            ).encoded()) ?? Data()
+        }
+        let response = onDirectRidePreparationRequest?(request) ??
+            WatchDirectRidePreparationResponseV1(
+                requestID: request.requestID,
+                accepted: false,
+                errorCode: "handler_unavailable"
+            )
+        guard response.requestID == request.requestID else {
+            return (try? WatchDirectRidePreparationResponseV1(
+                requestID: request.requestID,
+                accepted: false,
+                errorCode: "invalid_response"
+            ).encoded()) ?? Data()
+        }
+        return (try? response.encoded()) ?? Data()
     }
 
     fileprivate func finishFileTransfer(
@@ -453,6 +607,22 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
         didReceiveApplicationContext applicationContext: [String: Any]
     ) {
         Task { @MainActor [weak self] in self?.refreshState() }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveMessageData messageData: Data,
+        replyHandler: @escaping (Data) -> Void
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self else {
+                replyHandler(Data())
+                return
+            }
+            replyHandler(
+                self.receiveDirectRidePreparationRequest(messageData)
+            )
+        }
     }
 
     nonisolated func session(

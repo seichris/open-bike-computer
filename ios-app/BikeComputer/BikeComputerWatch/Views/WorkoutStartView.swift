@@ -5,6 +5,7 @@ struct WorkoutStartView: View {
     @ObservedObject var routeLibrary: WatchRouteLibrary
     @ObservedObject var navigationManager: WatchNavigationManager
     @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+    @ObservedObject var favoriteStore: WatchFavoriteStore
     @State private var showingRecoveryResetConfirmation = false
 
     var body: some View {
@@ -51,7 +52,9 @@ struct WorkoutStartView: View {
 
                 NavigationLink {
                     WatchSettingsView(
-                        navigationSettings: navigationSettings
+                        navigationSettings: navigationSettings,
+                        favoriteStore: favoriteStore,
+                        navigationManager: navigationManager
                     )
                 } label: {
                     Image(systemName: "gearshape")

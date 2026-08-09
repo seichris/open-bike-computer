@@ -250,6 +250,23 @@ Owner sessions claim during authentication and may reclaim an expired lease on
 their first ride write for compatibility with iPhone versions predating the
 lease commands. A scoped Watch never receives that compatibility bypass.
 
+The iPhone publishes the active ownership-v2 DeviceID to Watch in a versioned
+`applicationContext` field. Watch filters its device-local Keychain credentials
+to that exact DeviceID; if the field has not arrived, only a single
+unambiguous credential may be used. Changing or clearing the iPhone selection
+disconnects any different direct session before another credential is tried.
+
+At the start of a Watch-direct ride, Watch sends a versioned preparation
+request over interactive WatchConnectivity. The request binds a random
+preparation ID, the selected DeviceID, and `prepare` or `release`. An idle
+iPhone disables reconnect and yields its BLE connection. Active iPhone
+navigation, map/device transfer, pairing, or ownership administration rejects
+the request. Release is also queued durably; iPhone resumes only when DeviceID
+and preparation ID both match, so a delayed release from an older ride cannot
+cancel a newer preparation. This coordination does not grant write authority:
+the authenticated firmware lease remains final. A persisted iPhone yield
+expires after 24 hours if its release never arrives.
+
 ### Rename, deregistration, and recovery
 
 Inside protected `S2` frames, iOS can rename with `NAME|<UTF8NameHex>`; ESP32
@@ -908,6 +925,11 @@ When a row is tapped, firmware notifies iOS on `2A6E`:
 
 The device immediately displays an animated white spinner with
 `Starting navigation...` and suppresses repeat requests while one is pending.
+iPhone-owner sessions receive the request normally. A scoped Watch ride
+session does not support the device favorite picker, so firmware fails the tap
+locally with `Open iPhone to start navigation` and emits no `DREQ`. If the
+session role cannot be read safely, firmware applies the same fail-closed
+behavior.
 iOS accepts the request only when generation and token match its active catalog,
 the device is authenticated, navigation is idle, and a fresh, reasonably
 accurate current location is available. It calculates a cycling route from that

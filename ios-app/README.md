@@ -111,22 +111,30 @@ iPhone OwnerKey. Resetting or deregistering the Bicino invalidates that
 credential. Replacing or reinstalling a Watch requires resetting or
 deregistering and adding the Bicino again for now.
 
+The iPhone also syncs its currently selected Bicino to Watch. Starting a
+Watch-direct ride asks an idle iPhone app to yield that Bicino connection
+automatically. The iPhone refuses while it owns active navigation, a transfer,
+pairing, or device administration; in those cases Watch reports that Bicino is
+busy. When the Watch-direct ride ends, the phone resumes its previous reconnect
+behavior.
+
 Offline mode is the default:
 
-1. On iPhone, open **Settings**, find **Offline Routes**, choose **Import GPX**,
+1. On iPhone, open **Settings**, find **Saved Routes**, choose **Import GPX**,
    and select a user-owned GPX route or track. The longest usable route/track
    segment is validated and saved. MapKit alternatives remain
    active-navigation only; **Save Offline** stays disabled until an approved
    export-capable provider is configured.
-2. Send the route to Watch and wait for **Ready**. **Queued** does not prove the
-   route is installed.
-3. Leave **Use Watch cellular connection** off in Watch Settings, select the
-   installed route, and start the ride. Leaving the route shows an off-route
-   warning; it never causes an online request or invents a connector route.
+2. Send the route to Watch and wait for its green Watch status icon. **Queued**
+   does not prove the route is installed.
+3. On Watch, open **Offline Navigation**, select the installed route, and
+   confirm navigation. Leaving the route shows an off-route warning; it never
+   causes an online request or invents a connector route.
 
 For online mode, explicitly enable **Use Watch cellular connection** on the
-Watch. Coordinate-backed iPhone favorites then appear as destinations. The
-Watch asks MapKit for a cycling route from its current GPS position and can
+Watch. Coordinate-backed iPhone favorites then appear under **Online
+Navigation** in Watch Settings. The Watch asks MapKit for a cycling route from
+its current GPS position and can
 recalculate after sustained deviation. This setting authorizes online routing;
 it does not force a cellular interface, and watchOS may use Wi-Fi or cellular.
 If connectivity or recalculation fails after a route has loaded, Bicino keeps

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct WatchNavigationStatusView: View {
     @ObservedObject var navigationManager: WatchNavigationManager
+    @ObservedObject var deviceLink: WatchDeviceLink
     let farStartCancelTitle: String
 
     @ViewBuilder
@@ -88,7 +89,65 @@ struct WatchNavigationStatusView: View {
                         color: .green
                     )
                 }
+
+                if let routingNotice {
+                    Label(routingNotice, systemImage: "network")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                if let routeAttribution {
+                    Text("Route by \(routeAttribution)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let deviceFailureMessage {
+                    Label(
+                        deviceFailureMessage,
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                }
             }
+        }
+    }
+
+    private var routingNotice: String? {
+        switch navigationManager.onlineStatus {
+        case .noConnection, .continuingCachedRoute, .rerouting,
+                .rerouteFailed:
+            navigationManager.onlineStatus.userDescription
+        case .idle, .offlinePolicy, .waitingForLocation, .calculating,
+                .routeFailed, .online:
+            nil
+        }
+    }
+
+    private var routeAttribution: String? {
+        guard let attribution = navigationManager.routeAttribution,
+              attribution != RouteProviderPolicyV1.importedGPX.attribution else {
+            return nil
+        }
+        return attribution
+    }
+
+    private var deviceFailureMessage: String? {
+        switch deviceLink.state {
+        case .notEnrolled:
+            "Set up Apple Watch for this Bicino on iPhone"
+        case .bluetoothUnavailable:
+            "Bicino Bluetooth unavailable"
+        case .busy:
+            deviceLink.lastError ?? "Bicino is controlled by iPhone"
+        case .failed:
+            deviceLink.lastError ?? "Bicino connection failed"
+        case .idle, .scanning, .connecting, .discovering, .authenticating,
+                .claimingLease, .ready:
+            nil
         }
     }
 

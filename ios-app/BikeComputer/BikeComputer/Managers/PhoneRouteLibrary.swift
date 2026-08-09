@@ -145,6 +145,7 @@ final class PhoneRouteLibrary: ObservableObject {
         guard updated != displayNames else { return name }
         displayNames = updated
         displayNames.persist(to: defaults)
+        publishRouteDisplayNames()
         return name
     }
 
@@ -189,6 +190,7 @@ final class PhoneRouteLibrary: ObservableObject {
                 )
             }
         )
+        publishRouteDisplayNames()
     }
 
     private func receive(_ message: WatchRouteSyncMessageV1) {
@@ -220,10 +222,34 @@ final class PhoneRouteLibrary: ObservableObject {
             persistPendingDeletions()
             persistPendingInstalls()
             reload()
+        case .evicted:
+            let key = Self.receiptKey(message.identity)
+            readyReceiptKeys.remove(key)
+            pendingDeletionKeys.remove(key)
+            pendingInstallKeys.remove(key)
+            persistReadyReceipts()
+            persistPendingDeletions()
+            persistPendingInstalls()
+            if watchSyncState[message.identity] != nil {
+                watchSyncState[message.identity] = .localOnly
+            }
         case .rejected:
             guard watchSyncState[message.identity] != nil else { return }
             let key = Self.receiptKey(message.identity)
-            let wasDeleting = pendingDeletionKeys.remove(key) != nil
+            let wasDeleting = pendingDeletionKeys.contains(key)
+            if WatchRouteAcknowledgementReconciliationV1
+                .preservesReadyReceipt(
+                    hasReadyReceipt: readyReceiptKeys.contains(key),
+                    isPendingDeletion: wasDeleting
+                ) {
+                pendingInstallKeys.remove(key)
+                persistPendingInstalls()
+                watchSyncState[message.identity] = .ready
+                return
+            }
+            if wasDeleting {
+                pendingDeletionKeys.remove(key)
+            }
             if !wasDeleting {
                 readyReceiptKeys.remove(key)
             }
@@ -284,6 +310,16 @@ final class PhoneRouteLibrary: ObservableObject {
         guard updated.remove(routeID: routeID) else { return }
         displayNames = updated
         displayNames.persist(to: defaults)
+    }
+
+    private func publishRouteDisplayNames() {
+        let entries = routes.compactMap { summary in
+            try? WatchRouteDisplayNameV1(
+                identity: identity(for: summary),
+                name: displayName(for: summary)
+            )
+        }
+        try? connectivity.updateRouteDisplayNames(entries)
     }
 
     private func syncState(

@@ -15,6 +15,9 @@ private enum WorkoutFinishPrompt {
 struct LiveWorkoutView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var navigationManager: WatchNavigationManager
+    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+    @ObservedObject var favoriteStore: WatchFavoriteStore
+    @ObservedObject var deviceLink: WatchDeviceLink
     @State private var finishPrompt: WorkoutFinishPrompt?
     @State private var segmentToast: WorkoutCompletedSegmentV1?
     @State private var observedSegmentIndex: UInt32?
@@ -76,6 +79,7 @@ struct LiveWorkoutView: View {
 
                 WatchNavigationStatusView(
                     navigationManager: navigationManager,
+                    deviceLink: deviceLink,
                     farStartCancelTitle: "Workout Only"
                 )
 
@@ -285,6 +289,18 @@ struct LiveWorkoutView: View {
                     )
                     .accessibilityLabel("End ride")
                 }
+
+                NavigationLink {
+                    WatchSettingsView(
+                        navigationSettings: navigationSettings,
+                        favoriteStore: favoriteStore,
+                        navigationManager: navigationManager
+                    )
+                } label: {
+                    Image(systemName: "gearshape")
+                        .accessibilityLabel("Navigation Settings")
+                }
+                .buttonStyle(.borderless)
             }
             .padding(.horizontal, 6)
         }

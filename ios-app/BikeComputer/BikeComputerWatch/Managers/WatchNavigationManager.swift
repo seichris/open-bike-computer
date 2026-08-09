@@ -240,17 +240,6 @@ final class WatchNavigationManager: ObservableObject {
         )
     }
 
-    /// Starts a route after the rider explicitly confirmed it in the offline
-    /// route library. That confirmation also covers joining a route away from
-    /// its first point, so the Watch does not immediately ask a second time.
-    func startConfirmedOffline(routeID: UUID) {
-        startInstalledRoute(
-            routeID: routeID,
-            allowsOnlineRerouting: false,
-            acceptsFarStart: true
-        )
-    }
-
     func startInstalledRoute(routeID: UUID) {
         startInstalledRoute(
             routeID: routeID,

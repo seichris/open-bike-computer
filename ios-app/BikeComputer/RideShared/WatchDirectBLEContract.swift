@@ -318,6 +318,27 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     }
 }
 
+enum WatchNavigationNotificationV1: Equatable {
+    case capabilities(WatchDeviceCapabilitiesV1)
+    case ignoredDeviceRequest
+    case invalidCapabilities
+
+    static func decode(_ data: Data) -> Self {
+        if data.prefix(4) == Data("CAP2".utf8) {
+            guard let capabilities = WatchDeviceCapabilitiesV1.decode(data) else {
+                return .invalidCapabilities
+            }
+            return .capabilities(capabilities)
+        }
+        // Destination-picker and future owner-only requests share 2A6E. A
+        // scoped Watch must ignore them without tearing down its ride link.
+        if data.count == 10, data.prefix(4) == Data("DREQ".utf8) {
+            return .ignoredDeviceRequest
+        }
+        return .invalidCapabilities
+    }
+}
+
 enum WatchBLEOutboundTargetV1: Equatable, Sendable {
     case navigation
     case route
@@ -331,6 +352,58 @@ enum WatchBLEOutboundTargetV1: Equatable, Sendable {
         case .gps: .gps
         case .workout: .workout
         }
+    }
+}
+
+/// Separates active ride demand from the final clear that must survive a
+/// temporary disconnect. A pending release continues to require a BLE
+/// connection until its clear frames have drained.
+struct WatchRideDemandStateV1: Equatable, Sendable {
+    private(set) var navigationActive = false
+    private(set) var workoutActive = false
+    private(set) var navigationReleasePending = false
+    private(set) var workoutReleasePending = false
+
+    var requiresConnection: Bool {
+        navigationActive || workoutActive ||
+            navigationReleasePending || workoutReleasePending
+    }
+
+    var requiresWorkoutChannel: Bool {
+        workoutActive || workoutReleasePending
+    }
+
+    var hasPendingRelease: Bool {
+        navigationReleasePending || workoutReleasePending
+    }
+
+    mutating func setNavigationActive(_ active: Bool) {
+        navigationActive = active
+        if active { navigationReleasePending = false }
+    }
+
+    mutating func setWorkoutActive(_ active: Bool) {
+        workoutActive = active
+        if active { workoutReleasePending = false }
+    }
+
+    mutating func beginNavigationRelease() {
+        navigationActive = false
+        navigationReleasePending = true
+    }
+
+    mutating func beginWorkoutRelease() {
+        workoutActive = false
+        workoutReleasePending = true
+    }
+
+    mutating func completePendingReleases() {
+        navigationReleasePending = false
+        workoutReleasePending = false
+    }
+
+    mutating func reset() {
+        self = Self()
     }
 }
 

@@ -3,6 +3,9 @@ import SwiftUI
 struct WatchNavigationOnlyView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var navigationManager: WatchNavigationManager
+    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+    @ObservedObject var favoriteStore: WatchFavoriteStore
+    @ObservedObject var deviceLink: WatchDeviceLink
 
     var body: some View {
         ScrollView {
@@ -16,6 +19,7 @@ struct WatchNavigationOnlyView: View {
 
                 WatchNavigationStatusView(
                     navigationManager: navigationManager,
+                    deviceLink: deviceLink,
                     farStartCancelTitle: "Cancel Navigation"
                 )
 
@@ -45,6 +49,18 @@ struct WatchNavigationOnlyView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .tint(.orange)
+
+                NavigationLink {
+                    WatchSettingsView(
+                        navigationSettings: navigationSettings,
+                        favoriteStore: favoriteStore,
+                        navigationManager: navigationManager
+                    )
+                } label: {
+                    Image(systemName: "gearshape")
+                        .accessibilityLabel("Navigation Settings")
+                }
+                .buttonStyle(.borderless)
             }
             .padding(.horizontal, 8)
         }

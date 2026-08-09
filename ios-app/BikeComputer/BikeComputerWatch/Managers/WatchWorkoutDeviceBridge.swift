@@ -6,7 +6,7 @@ final class WatchWorkoutDeviceBridge {
     private let manager: WatchWorkoutManager
     private let deviceLink: WatchDeviceLink
     private var cancellables = Set<AnyCancellable>()
-    private var releaseTask: Task<Void, Never>?
+    private var hasForwardedActiveWorkout = false
 
     init(manager: WatchWorkoutManager, deviceLink: WatchDeviceLink) {
         self.manager = manager
@@ -18,18 +18,13 @@ final class WatchWorkoutDeviceBridge {
             .store(in: &cancellables)
     }
 
-    deinit {
-        releaseTask?.cancel()
-    }
-
     private func receive(_ snapshot: WorkoutSnapshotV1) {
-        releaseTask?.cancel()
-        releaseTask = nil
         if snapshot.state.isActive,
            let token = manager.activeSessionToken,
            let frames = WorkoutDeviceFrameBuilder.frames(
                for: Self.sample(snapshot: snapshot, token: token)
-            ) {
+           ) {
+            hasForwardedActiveWorkout = true
             deviceLink.setWorkoutDemand(true)
             deviceLink.updateWorkout(
                 frames,
@@ -38,17 +33,12 @@ final class WatchWorkoutDeviceBridge {
             return
         }
 
+        guard hasForwardedActiveWorkout else { return }
+        hasForwardedActiveWorkout = false
         guard let idle = WorkoutDeviceFrameBuilder.frames(
             for: Self.idleSample
         ) else { return }
-        deviceLink.clearWorkout(idle)
-        // Give a workout-only link one bounded interval to deliver its clear
-        // frame. Navigation demand, when present, independently retains BLE.
-        releaseTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            self?.deviceLink.setWorkoutDemand(false)
-        }
+        deviceLink.endWorkoutDemandAfterClearing(idle)
     }
 
     private static func sample(

@@ -5916,6 +5916,15 @@ private struct WorkoutContractTestSuite {
             "manager": watchDirectory.appendingPathComponent(
                 "Managers/WatchNavigationManager.swift"
             ),
+            "settings": watchDirectory.appendingPathComponent(
+                "Views/WatchSettingsView.swift"
+            ),
+            "root": watchDirectory.appendingPathComponent(
+                "Views/WatchWorkoutRootView.swift"
+            ),
+            "live": watchDirectory.appendingPathComponent(
+                "Views/LiveWorkoutView.swift"
+            ),
         ]
         var sources: [String: String] = [:]
         for (name, url) in sourceURLs {
@@ -5941,8 +5950,7 @@ private struct WorkoutContractTestSuite {
                     separatedBy: ".frame(maxWidth: .infinity, minHeight: 52)"
                 ).count - 1 == 2
                 && !start.contains("Picker(\"Navigation\"")
-                && !start.contains("selectedNavigation")
-                && !start.contains("favoriteStore"),
+                && !start.contains("selectedNavigation"),
             "Watch home must offer equal-height Ride and backgroundless Offline Navigation actions without a navigation picker"
         )
 
@@ -5953,15 +5961,14 @@ private struct WorkoutContractTestSuite {
                 && library.contains(".confirmationDialog(")
                 && library.contains("\"Start Navigation?\"")
                 && library.contains(
-                    "navigationManager.startConfirmedOffline(routeID: route.id)"
+                    "navigationManager.startInstalledRoute(routeID: route.id)"
                 )
                 && manager.contains(
-                    "func startConfirmedOffline(routeID: UUID)"
+                    "func startInstalledRoute(routeID: UUID)"
                 )
-                && manager.contains(
-                    "pendingAcceptsFarStart = acceptsFarStart"
-                ),
-            "selecting an offline route must require one explicit confirmation and then start even when joining away from its first point"
+                && manager.contains("case .awaitingStartConfirmation")
+                && manager.contains("func startAnyway()"),
+            "selecting an offline route must confirm intent and retain the measured far-start warning"
         )
 
         let status = sources["status"] ?? ""
@@ -5972,12 +5979,12 @@ private struct WorkoutContractTestSuite {
                 )
                 && status.contains("snapshot.routeRemainingDistanceMeters")
                 && status.contains(".background(.quaternary")
-                && !status.contains("routeAttribution")
-                && !status.contains("onlineStatus.userDescription")
-                && !status.contains("bicinoNavigationStatus")
-                && !status.contains("Route by")
+                && status.contains("navigationManager.routeAttribution")
+                && status.contains("RouteProviderPolicyV1.importedGPX")
+                && status.contains("navigationManager.onlineStatus")
+                && status.contains("Bicino is controlled by iPhone")
                 && !status.contains("Rerouting unavailable offline"),
-            "active Watch guidance must keep only the maneuver and the two workout-style distance tiles"
+            "active Watch guidance keeps the compact offline layout while surfacing online attribution and actionable Bicino failures"
         )
 
         let navigationOnly = sources["navigationOnly"] ?? ""
@@ -5992,8 +5999,23 @@ private struct WorkoutContractTestSuite {
                 && navigationOnly.contains(
                     "navigationManager.stopNavigation()"
                 )
-                && !navigationOnly.contains("Watch cellular"),
-            "navigation-only mode must independently start a workout or end navigation"
+                && navigationOnly.contains("WatchSettingsView("),
+            "navigation-only mode must independently start a workout, end navigation, or open live navigation settings"
+        )
+
+        let settings = sources["settings"] ?? ""
+        let root = sources["root"] ?? ""
+        let live = sources["live"] ?? ""
+        expect(
+            settings.contains("WatchOnlineDestinationListView(")
+                && settings.contains("favoriteStore.favorites")
+                && settings.contains(
+                    "navigationManager.startOnline(destination: destination)"
+                )
+                && settings.contains("navigationManager.recalculateOnlineRoute()")
+                && root.contains("favoriteStore: favoriteStore")
+                && live.contains("WatchSettingsView("),
+            "synced online destinations and the policy toggle must remain reachable before and during a ride"
         )
     }
 

@@ -29,6 +29,8 @@ enum WatchDeviceLinkState: Equatable {
 final class WatchDeviceLink: NSObject, ObservableObject {
     @Published private(set) var state: WatchDeviceLinkState = .idle
     @Published private(set) var lastError: String?
+    var onDirectRidePreparationChange:
+        ((WatchDirectRidePreparationOperationV1, String, UUID) -> Void)?
 
     private let credentialStore: WatchControllerCredentialStore
     private let defaults: UserDefaults
@@ -59,8 +61,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         ]
     )
 
-    private var navigationDemand = false
-    private var workoutDemand = false
+    private var demand = WatchRideDemandStateV1()
+    private var selectedBikeComputerEnvelope:
+        WatchSelectedBikeComputerV1?
     private var credentials: [WatchControllerCredentialV1] = []
     private var credential: WatchControllerCredentialV1?
     private var peripheral: CBPeripheral?
@@ -81,17 +84,19 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var operationTimeoutTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var disconnectingForBusyLease = false
-    private var navigationReleasePending = false
-
     private var latestWorkoutFrames: WorkoutDeviceFrames?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
     private var latestRouteWindow = Data()
+    private var preparedPhoneDeviceID: String?
+    private var preparedPhonePreparationID: UUID?
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
+    private let selectedBikeComputerKey =
+        "watchDeviceLink.selectedBikeComputer.v1"
 
     init(
         credentialStore: WatchControllerCredentialStore,
@@ -99,22 +104,86 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     ) {
         self.credentialStore = credentialStore
         self.defaults = defaults
+        if let data = defaults.data(forKey: selectedBikeComputerKey) {
+            selectedBikeComputerEnvelope = try?
+                WatchSelectedBikeComputerV1.decode(data)
+        }
         super.init()
     }
 
+    func receiveApplicationContext(_ context: [String: Any]) {
+        guard let data = context[
+            WatchSelectedBikeComputerV1.applicationContextKey
+        ] as? Data else { return }
+        let incoming: WatchSelectedBikeComputerV1
+        do {
+            incoming = try WatchSelectedBikeComputerV1.decode(data)
+        } catch {
+            failClosedSelection("Selected Bike Computer sync is invalid")
+            return
+        }
+        if let current = selectedBikeComputerEnvelope {
+            if incoming.revision < current.revision { return }
+            if incoming.revision == current.revision {
+                guard incoming == current else {
+                    failClosedSelection(
+                        "Selected Bike Computer sync conflicts"
+                    )
+                    return
+                }
+                return
+            }
+        }
+
+        let previousDeviceID = selectedBikeComputerEnvelope?.deviceID
+        selectedBikeComputerEnvelope = incoming
+        defaults.set(data, forKey: selectedBikeComputerKey)
+        guard previousDeviceID != incoming.deviceID else { return }
+
+        releasePhonePreparationIfNeeded()
+
+        let canRetainReadySession = state.isReady &&
+            credential?.deviceID == incoming.deviceID
+        if !canRetainReadySession {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            operationTimeoutTask?.cancel()
+            operationTimeoutTask = nil
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            if state.isReady {
+                writeProtectedAuth("LEASE_RELEASE")
+            }
+            if let peripheral {
+                central.cancelPeripheralConnection(peripheral)
+            }
+            connectionGeneration &+= 1
+            resetTransport(keepingPeripheral: false)
+        }
+        credentials = eligibleCredentials(from: credentials)
+        requestPhonePreparationIfNeeded()
+        guard hasDemand else {
+            if !canRetainReadySession { state = .idle }
+            return
+        }
+        guard !canRetainReadySession else { return }
+        state = .idle
+        beginIfNeeded()
+    }
+
     func setDemand(navigation: Bool, workout: Bool) {
-        navigationDemand = navigation
-        workoutDemand = workout
+        demand.setNavigationActive(navigation)
+        demand.setWorkoutActive(workout)
         reconcileDemand()
     }
 
     func setNavigationDemand(_ active: Bool) {
-        navigationDemand = active
+        demand.setNavigationActive(active)
         reconcileDemand()
     }
 
     func setWorkoutDemand(_ active: Bool) {
-        workoutDemand = active
+        demand.setWorkoutActive(active)
         reconcileDemand()
     }
 
@@ -146,7 +215,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 ? nil
                 : saved.deviceID
         }
-        credentials = refreshed
+        credentials = eligibleCredentials(from: refreshed)
         if !removedDeviceIDs.isEmpty {
             var map = peripheralMap()
             for deviceID in removedDeviceIDs {
@@ -182,7 +251,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         }
 
         guard hasDemand else { return }
-        if refreshed.isEmpty {
+        if credentials.isEmpty {
             state = .notEnrolled
         } else if !state.isReady {
             beginIfNeeded()
@@ -191,14 +260,43 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func reconcileDemand() {
         guard hasDemand else {
-            if navigationReleasePending {
-                finishNavigationReleaseIfPossible()
-                return
-            }
             stop()
             return
         }
+        requestPhonePreparationIfNeeded()
         beginIfNeeded()
+    }
+
+    func directRidePreparationDidRespond(
+        request: WatchDirectRidePreparationRequestV1,
+        response: WatchDirectRidePreparationResponseV1
+    ) {
+        guard request.operation == .prepare,
+              request.deviceID == selectedBikeComputerEnvelope?.deviceID,
+              hasDemand,
+              !state.isReady,
+              !response.accepted else { return }
+        if state == .scanning {
+            central.stopScan()
+        }
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        let message: String
+        switch response.errorCode {
+        case "phone_navigation_active":
+            message = "Bicino is controlled by iPhone navigation"
+        case "device_transfer_active":
+            message = "Bicino is busy transferring data from iPhone"
+        case "device_admin_active":
+            message = "Bicino setup is active on iPhone"
+        case "different_device":
+            message = "Select the same Bicino on iPhone"
+        default:
+            message = "Bicino is controlled by iPhone"
+        }
+        lastError = message
+        state = .busy
+        scheduleReconnect()
     }
 
     func updateNavigation(
@@ -238,14 +336,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     func endNavigationDemandAfterClearing() {
-        navigationDemand = false
-        guard state.isReady else {
-            reconcileDemand()
-            return
-        }
-        navigationReleasePending = true
+        demand.beginNavigationRelease()
         clearNavigation()
-        finishNavigationReleaseIfPossible()
+        finishPendingReleasesIfPossible()
+        reconcileDemand()
     }
 
     func updateWorkout(
@@ -268,8 +362,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         drainQueue()
     }
 
+    func endWorkoutDemandAfterClearing(_ frames: WorkoutDeviceFrames) {
+        demand.beginWorkoutRelease()
+        clearWorkout(frames)
+        finishPendingReleasesIfPossible()
+        reconcileDemand()
+    }
+
     private var hasDemand: Bool {
-        navigationDemand || workoutDemand
+        demand.requiresConnection
     }
 
     private struct CredentialIdentity: Hashable {
@@ -279,6 +380,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func beginIfNeeded() {
         guard hasDemand, !state.isReady else { return }
+        if state == .busy {
+            requestPhonePreparationIfNeeded(force: true)
+        } else {
+            requestPhonePreparationIfNeeded()
+        }
         switch state {
         case .scanning, .connecting, .discovering, .authenticating,
                 .claimingLease:
@@ -287,7 +393,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             break
         }
         do {
-            credentials = try credentialStore.allActiveCredentials()
+            credentials = eligibleCredentials(
+                from: try credentialStore.allActiveCredentials()
+            )
         } catch {
             fail("Watch credential could not be read")
             return
@@ -324,6 +432,63 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         return true
     }
 
+    private func eligibleCredentials(
+        from allCredentials: [WatchControllerCredentialV1]
+    ) -> [WatchControllerCredentialV1] {
+        guard let selectedBikeComputerEnvelope else {
+            // Backward compatibility while an older paired iPhone has not yet
+            // published the versioned selected-device field. A single
+            // credential is unambiguous; multiple credentials fail closed.
+            return allCredentials.count == 1 ? allCredentials : []
+        }
+        return allCredentials.filter(selectedBikeComputerEnvelope.selects)
+    }
+
+    private func requestPhonePreparationIfNeeded(force: Bool = false) {
+        guard hasDemand,
+              let deviceID = selectedBikeComputerEnvelope?.deviceID else {
+            return
+        }
+        guard force || preparedPhoneDeviceID != deviceID else { return }
+        if preparedPhoneDeviceID != deviceID {
+            releasePhonePreparationIfNeeded()
+            preparedPhoneDeviceID = deviceID
+            preparedPhonePreparationID = UUID()
+        }
+        guard let preparationID = preparedPhonePreparationID else { return }
+        onDirectRidePreparationChange?(.prepare, deviceID, preparationID)
+    }
+
+    private func releasePhonePreparationIfNeeded() {
+        guard let deviceID = preparedPhoneDeviceID,
+              let preparationID = preparedPhonePreparationID else { return }
+        preparedPhoneDeviceID = nil
+        preparedPhonePreparationID = nil
+        onDirectRidePreparationChange?(.release, deviceID, preparationID)
+    }
+
+    private func failClosedSelection(_ message: String) {
+        lastError = message
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        if state == .scanning { central.stopScan() }
+        if state.isReady {
+            writeProtectedAuth("LEASE_RELEASE")
+        }
+        if let peripheral {
+            central.cancelPeripheralConnection(peripheral)
+        }
+        connectionGeneration &+= 1
+        resetTransport(keepingPeripheral: false)
+        credentials = []
+        releasePhonePreparationIfNeeded()
+        state = .failed(message)
+    }
+
     private func startScan() {
         guard hasDemand, central.state == .poweredOn else { return }
         state = .scanning
@@ -331,6 +496,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
+        startOperationTimeout(generation: connectionGeneration)
     }
 
     private func connect(
@@ -356,7 +522,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         disconnectingForBusyLease = false
-        navigationReleasePending = false
+        demand.reset()
         if state.isReady {
             writeProtectedAuth("LEASE_RELEASE")
         }
@@ -365,6 +531,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         }
         connectionGeneration &+= 1
         resetTransport(keepingPeripheral: false)
+        releasePhonePreparationIfNeeded()
         state = .idle
         lastError = nil
     }
@@ -500,12 +667,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             fail("Bike Computer sent invalid protected navigation data")
             return
         }
-        guard let capabilities = WatchDeviceCapabilitiesV1.decode(payload),
-              capabilities.supportsScopedController else {
+        let capabilities: WatchDeviceCapabilitiesV1
+        switch WatchNavigationNotificationV1.decode(payload) {
+        case .ignoredDeviceRequest:
+            return
+        case .invalidCapabilities:
+            fail("Bike Computer sent invalid capability data")
+            return
+        case .capabilities(let decoded):
+            capabilities = decoded
+        }
+        guard capabilities.supportsScopedController else {
             fail("Bike Computer firmware does not support Watch navigation")
             return
         }
-        if workoutDemand {
+        if demand.requiresWorkoutChannel {
             guard capabilities.supportsWorkoutTelemetry,
                   workoutCharacteristic != nil else {
                 fail("Bike Computer firmware lacks Watch workout telemetry")
@@ -627,8 +803,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func enqueueWorkoutGPSIfNeeded() {
-        guard workoutDemand,
-              !navigationDemand,
+        guard demand.workoutActive,
+              !demand.navigationActive,
               let latestWorkoutGPS else { return }
         _ = queue.enqueue(.init(
             target: .gps,
@@ -721,14 +897,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             )
             if writeType == .withResponse { return }
         }
-        finishNavigationReleaseIfPossible()
+        finishPendingReleasesIfPossible()
     }
 
-    private func finishNavigationReleaseIfPossible() {
-        guard navigationReleasePending,
+    private func finishPendingReleasesIfPossible() {
+        guard state.isReady,
+              demand.hasPendingRelease,
               queue.isEmpty,
               !writeWithResponseInFlight else { return }
-        navigationReleasePending = false
+        demand.completePendingReleases()
         if !hasDemand {
             stop()
         }
@@ -800,8 +977,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func fail(_ message: String) {
+        let wasScanning = state == .scanning
         lastError = message
         state = .failed(message)
+        if wasScanning { central.stopScan() }
         if let peripheral {
             central.cancelPeripheralConnection(peripheral)
         } else {

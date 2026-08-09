@@ -9,6 +9,7 @@ nonisolated enum WatchRouteSyncOperationV1: String, Codable, Equatable, Sendable
 nonisolated enum WatchRouteSyncStatusV1: String, Codable, Equatable, Sendable {
     case ready
     case deleted
+    case evicted
     case rejected
 }
 
@@ -191,6 +192,128 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
             return UInt32(exactly: unsigned)
         }
         return nil
+    }
+}
+
+nonisolated enum WatchRouteFilePayloadErrorV1: String, Error, Equatable,
+    Sendable {
+    case fileRead = "file_read"
+    case byteCount = "byte_count"
+}
+
+nonisolated enum WatchRouteFilePayloadV1 {
+    static func validate(
+        request: WatchRouteSyncMessageV1,
+        resourceByteCount: Int?,
+        data: Data?
+    ) -> Result<Data, WatchRouteFilePayloadErrorV1> {
+        guard request.operation == .install,
+              let expectedByteCount = request.encodedByteCount,
+              let resourceByteCount,
+              resourceByteCount > 0,
+              resourceByteCount <=
+                NavigationRouteLimitsV1.production.maximumEncodedBytes else {
+            return .failure(.fileRead)
+        }
+        guard resourceByteCount == expectedByteCount else {
+            return .failure(.byteCount)
+        }
+        guard let data else { return .failure(.fileRead) }
+        guard data.count == resourceByteCount else {
+            return .failure(.byteCount)
+        }
+        return .success(data)
+    }
+}
+
+nonisolated enum WatchRouteAcknowledgementReconciliationV1 {
+    static func preservesReadyReceipt(
+        hasReadyReceipt: Bool,
+        isPendingDeletion: Bool
+    ) -> Bool {
+        hasReadyReceipt && !isPendingDeletion
+    }
+}
+
+nonisolated enum WatchRouteDisplayNameContractErrorV1: Error, Equatable {
+    case invalidRevision
+    case invalidName
+    case duplicateIdentity
+    case tooManyEntries
+    case invalidEnvelope
+}
+
+nonisolated struct WatchRouteDisplayNameV1: Codable, Equatable, Sendable {
+    let identity: WatchRouteIdentityV1
+    let name: String
+
+    init(identity: WatchRouteIdentityV1, name: String) throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard identity.routeID != UUID(
+            uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        ), identity.revision > 0,
+              identity.contentHash.count == 64,
+              identity.contentHash.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (97...102).contains(byte)
+              }),
+              !name.isEmpty, name.utf8.count <= 128 else {
+            throw WatchRouteDisplayNameContractErrorV1.invalidName
+        }
+        self.identity = identity
+        self.name = name
+    }
+}
+
+nonisolated struct WatchRouteDisplayNamesEnvelopeV1: Codable, Equatable,
+    Sendable {
+    static let applicationContextKey = "bicino.route.displayNames.v1"
+    static let maximumEntryCount = 50
+
+    let revision: UInt64
+    let entries: [WatchRouteDisplayNameV1]
+
+    init(revision: UInt64, entries: [WatchRouteDisplayNameV1]) throws {
+        guard revision > 0 else {
+            throw WatchRouteDisplayNameContractErrorV1.invalidRevision
+        }
+        guard entries.count <= Self.maximumEntryCount else {
+            throw WatchRouteDisplayNameContractErrorV1.tooManyEntries
+        }
+        let entries = try entries.map {
+            try WatchRouteDisplayNameV1(identity: $0.identity, name: $0.name)
+        }
+        guard Set(entries.map(\.identity)).count == entries.count else {
+            throw WatchRouteDisplayNameContractErrorV1.duplicateIdentity
+        }
+        self.revision = revision
+        self.entries = entries.sorted(by: Self.precedes)
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(self)
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        let decoded: Self
+        do {
+            decoded = try PropertyListDecoder().decode(Self.self, from: data)
+        } catch {
+            throw WatchRouteDisplayNameContractErrorV1.invalidEnvelope
+        }
+        return try Self(revision: decoded.revision, entries: decoded.entries)
+    }
+
+    private static func precedes(
+        _ left: WatchRouteDisplayNameV1,
+        _ right: WatchRouteDisplayNameV1
+    ) -> Bool {
+        let leftID = left.identity.routeID.uuidString
+        let rightID = right.identity.routeID.uuidString
+        if leftID != rightID { return leftID < rightID }
+        if left.identity.revision != right.identity.revision {
+            return left.identity.revision < right.identity.revision
+        }
+        return left.identity.contentHash < right.identity.contentHash
     }
 }
 

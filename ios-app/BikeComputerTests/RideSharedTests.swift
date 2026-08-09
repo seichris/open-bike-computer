@@ -314,6 +314,61 @@ enum RideSharedTests {
             WatchDeviceCapabilitiesV1.decode(malformed) == nil,
             "malformed capability TLVs are rejected"
         )
+        expect(
+            WatchNavigationNotificationV1.decode(cap2) ==
+                .capabilities(capabilities!),
+            "a protected CAP2 notification advances Watch setup"
+        )
+        expect(
+            WatchNavigationNotificationV1.decode(Data("DREQ".utf8) +
+                Data(repeating: 0, count: 6)) == .ignoredDeviceRequest,
+            "an owner-only destination request cannot tear down a Watch ride"
+        )
+        expect(
+            WatchNavigationNotificationV1.decode(Data("CAP2".utf8)) ==
+                .invalidCapabilities,
+            "a malformed capability response still fails closed"
+        )
+        expect(
+            WatchNavigationNotificationV1.decode(Data("NOPE".utf8)) ==
+                .invalidCapabilities,
+            "an unknown navigation notification fails closed"
+        )
+
+        var demand = WatchRideDemandStateV1()
+        demand.setNavigationActive(true)
+        demand.beginNavigationRelease()
+        expect(
+            demand.requiresConnection &&
+                demand.navigationReleasePending &&
+                !demand.navigationActive,
+            "a disconnected navigation clear retains BLE demand"
+        )
+        demand.setWorkoutActive(true)
+        demand.completePendingReleases()
+        expect(
+            demand.requiresConnection &&
+                demand.workoutActive &&
+                !demand.navigationReleasePending,
+            "draining a navigation clear preserves independent workout demand"
+        )
+        demand.beginWorkoutRelease()
+        expect(
+            demand.requiresConnection && demand.requiresWorkoutChannel &&
+                demand.workoutReleasePending,
+            "a disconnected workout clear retains its channel and BLE demand"
+        )
+        demand.completePendingReleases()
+        expect(
+            !demand.requiresConnection && !demand.requiresWorkoutChannel,
+            "the direct link can stop only after every clear has drained"
+        )
+        demand.beginNavigationRelease()
+        demand.setNavigationActive(true)
+        expect(
+            demand.navigationActive && !demand.navigationReleasePending,
+            "new navigation supersedes an undelivered stale clear"
+        )
 
         var queue = WatchBLEOutboundQueueV1(capacity: 3)
         expect(queue.enqueue(.init(
@@ -486,6 +541,118 @@ enum RideSharedTests {
                 systemVersion: "26.0"
             )
         }
+
+        let selectedBikeComputer = try WatchSelectedBikeComputerV1(
+            revision: 7,
+            deviceID: deviceID.uppercased()
+        )
+        try expect(
+            try WatchSelectedBikeComputerV1.decode(
+                selectedBikeComputer.encoded()
+            ) == selectedBikeComputer &&
+                selectedBikeComputer.selects(credential),
+            "the Watch targets the exact normalized iPhone-selected device"
+        )
+        let otherCredential = try WatchControllerCredentialV1(
+            deviceID: "ffeeddccbbaa99887766554433221100",
+            controllerID: Data(repeating: 0x22, count: 16),
+            key: Data(repeating: 0x33, count: 32)
+        )
+        expect(
+            !selectedBikeComputer.selects(otherCredential),
+            "another enrolled Bike Computer cannot be selected implicitly"
+        )
+        let clearedSelection = try WatchSelectedBikeComputerV1(
+            revision: 8,
+            deviceID: nil
+        )
+        expect(
+            !clearedSelection.selects(credential),
+            "an explicit cleared selection is a fail-closed tombstone"
+        )
+        let preparationRequest = try WatchDirectRidePreparationRequestV1(
+            requestID: UUID(
+                uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )!,
+            preparationID: UUID(
+                uuidString: "11111111-aaaa-bbbb-cccc-222222222222"
+            )!,
+            operation: .prepare,
+            deviceID: deviceID.uppercased()
+        )
+        try expect(
+            try WatchDirectRidePreparationRequestV1.decode(
+                preparationRequest.encoded()
+            ) == preparationRequest,
+            "Watch-direct preparation requests are exact and versioned"
+        )
+        let preparationResponse = WatchDirectRidePreparationResponseV1(
+            requestID: preparationRequest.requestID,
+            accepted: false,
+            errorCode: "phone_navigation_active"
+        )
+        try expect(
+            try WatchDirectRidePreparationResponseV1.decode(
+                preparationResponse.encoded()
+            ) == preparationResponse,
+            "Watch-direct preparation responses bind the request identity"
+        )
+        expect(
+            WatchDirectRidePreparationPolicyV1.rejectionCode(
+                requestedDeviceID: deviceID,
+                selectedDeviceID: deviceID,
+                phoneNavigationActive: false,
+                transferActive: false,
+                administrationActive: false
+            ) == nil,
+            "an idle iPhone may yield the selected Bicino"
+        )
+        expect(
+            WatchDirectRidePreparationPolicyV1.rejectionCode(
+                requestedDeviceID: deviceID,
+                selectedDeviceID: deviceID,
+                phoneNavigationActive: true,
+                transferActive: false,
+                administrationActive: false
+            ) == "phone_navigation_active",
+            "active iPhone navigation cannot be yielded to Watch"
+        )
+        expect(
+            WatchDirectRidePreparationPolicyV1.rejectionCode(
+                requestedDeviceID: deviceID,
+                selectedDeviceID: otherCredential.deviceID,
+                phoneNavigationActive: false,
+                transferActive: false,
+                administrationActive: false
+            ) == "different_device",
+            "a preparation request cannot retarget the iPhone"
+        )
+        let currentRelease = try WatchDirectRidePreparationRequestV1(
+            preparationID: preparationRequest.preparationID,
+            operation: .release,
+            deviceID: deviceID
+        )
+        expect(
+            WatchDirectRidePreparationPolicyV1.releaseMatches(
+                preparedDeviceID: deviceID,
+                preparedPreparationID: preparationRequest.preparationID,
+                request: currentRelease
+            ),
+            "the matching durable release resumes the iPhone"
+        )
+        let staleRelease = try WatchDirectRidePreparationRequestV1(
+            preparationID: UUID(),
+            operation: .release,
+            deviceID: deviceID
+        )
+        expect(
+            !WatchDirectRidePreparationPolicyV1.releaseMatches(
+                preparedDeviceID: deviceID,
+                preparedPreparationID: preparationRequest.preparationID,
+                request: staleRelease
+            ),
+            "a delayed release from an older ride cannot cancel a new yield"
+        )
 
         let availableWatch = WatchControllerAvailabilityV1(
             isSupported: true,
@@ -898,6 +1065,26 @@ enum RideSharedTests {
             mode: .offline,
             initialLocation: sample(latitude: 0, longitude: 0)
         )
+
+        var skippedFixRuntime = NavigationRuntimeV1()
+        _ = try skippedFixRuntime.start(
+            route: route,
+            contentHash: "fixture",
+            mode: .offline,
+            initialLocation: sample(latitude: 0, longitude: 0)
+        )
+        let skippedFixSnapshot = try skippedFixRuntime.process(
+            sample(
+                latitude: 0,
+                longitude: 0.0014,
+                timestamp: 1_700_000_001
+            )
+        )
+        expect(
+            skippedFixSnapshot.currentStepIndex == 1,
+            "an on-route GPS gap beyond the arrival band advances the maneuver"
+        )
+
         let first = try runtime.process(sample(latitude: 0, longitude: 0.0004))
         _ = try runtime.process(sample(latitude: 0, longitude: 0.0010))
         let second = try runtime.process(sample(latitude: 0, longitude: 0.0014))
@@ -1047,6 +1234,71 @@ enum RideSharedTests {
         expect(
             WatchRouteSyncMessageV1(propertyList: message.propertyList) == message,
             "route transfer metadata round-trips through property-list values"
+        )
+        let renamedEntry = try WatchRouteDisplayNameV1(
+            identity: identity,
+            name: "  Morning Loop  "
+        )
+        let displayNames = try WatchRouteDisplayNamesEnvelopeV1(
+            revision: 1,
+            entries: [renamedEntry]
+        )
+        try expect(
+            try WatchRouteDisplayNamesEnvelopeV1.decode(
+                displayNames.encoded()
+            ).entries.first?.name == "Morning Loop",
+            "exact route display names round-trip in canonical form"
+        )
+        expectThrows(
+            WatchRouteDisplayNameContractErrorV1.duplicateIdentity,
+            "a route display-name revision cannot equivocate"
+        ) {
+            _ = try WatchRouteDisplayNamesEnvelopeV1(
+                revision: 2,
+                entries: [renamedEntry, renamedEntry]
+            )
+        }
+        switch WatchRouteFilePayloadV1.validate(
+            request: message,
+            resourceByteCount: data.count,
+            data: data
+        ) {
+        case .success(let validated):
+            expect(validated == data, "an exact queued route file is accepted")
+        case .failure:
+            expect(false, "an exact queued route file must not be rejected")
+        }
+        switch WatchRouteFilePayloadV1.validate(
+            request: message,
+            resourceByteCount: data.count,
+            data: nil
+        ) {
+        case .failure(.fileRead):
+            break
+        default:
+            expect(false, "a valid route identity receives a file-read rejection")
+        }
+        switch WatchRouteFilePayloadV1.validate(
+            request: message,
+            resourceByteCount: data.count - 1,
+            data: Data(data.dropLast())
+        ) {
+        case .failure(.byteCount):
+            break
+        default:
+            expect(false, "a truncated queued route receives a byte-count rejection")
+        }
+        expect(
+            WatchRouteAcknowledgementReconciliationV1.preservesReadyReceipt(
+                hasReadyReceipt: true,
+                isPendingDeletion: false
+            ) &&
+                !WatchRouteAcknowledgementReconciliationV1
+                    .preservesReadyReceipt(
+                        hasReadyReceipt: true,
+                        isPendingDeletion: true
+                    ),
+            "a late install failure cannot downgrade Ready, but deletion failures remain visible"
         )
         let maximumRevisionMessage = WatchRouteSyncMessageV1(
             operation: .delete,
@@ -1259,6 +1511,45 @@ enum RideSharedTests {
                     now: now
                 ),
                 now: now
+            )
+        }
+
+        _ = try boundedStore.install(
+            try secondArchive.encoded(
+                purpose: .offlineNavigation,
+                now: now
+            ),
+            now: now,
+            evictingOldestUnprotected: []
+        )
+        expect(
+            boundedStore.records(now: now).map(\.archive.routeID) ==
+                [secondRoute.id],
+            "Watch capacity evicts the deterministic oldest unused route"
+        )
+
+        let thirdRoute = fixtureRoute(
+            provider: RouteProviderPolicyV1.importedGPX,
+            routeID: UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        )
+        let thirdArchive = try NavigationRouteArchiveV1.create(
+            route: thirdRoute,
+            createdAt: now.addingTimeInterval(1),
+            purpose: .offlineNavigation
+        )
+        expectThrows(
+            NavigationRouteFileStoreError.capacityExceeded,
+            "an active Watch route remains pinned when capacity is full"
+        ) {
+            _ = try boundedStore.install(
+                try thirdArchive.encoded(
+                    purpose: .offlineNavigation,
+                    now: now.addingTimeInterval(1)
+                ),
+                now: now.addingTimeInterval(1),
+                evictingOldestUnprotected: [
+                    WatchRouteIdentityV1(archive: secondArchive)
+                ]
             )
         }
     }

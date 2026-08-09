@@ -128,10 +128,31 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         bleManager.bindWatchConnectivityCoordinator(
             watchConnectivityCoordinator
         )
+        watchConnectivityCoordinator.onDirectRidePreparationRequest = {
+            [weak self, weak bleManager] request in
+            guard let self, let bleManager else {
+                return WatchDirectRidePreparationResponseV1(
+                    requestID: request.requestID,
+                    accepted: false,
+                    errorCode: "handler_unavailable"
+                )
+            }
+            return bleManager.handleWatchDirectRidePreparationRequest(
+                request,
+                phoneNavigationActive: self.coordinator.isNavigating
+            )
+        }
         watchConnectivityCoordinator.$state
             .removeDuplicates()
             .sink { [weak bleManager] state in
                 bleManager?.updateWatchConnectivityState(state)
+            }
+            .store(in: &cancellables)
+        bleManager.$activeDeviceID
+            .removeDuplicates()
+            .sink { [weak watchConnectivityCoordinator] deviceID in
+                try? watchConnectivityCoordinator?
+                    .updateSelectedBikeComputer(deviceID: deviceID)
             }
             .store(in: &cancellables)
         watchConnectivityCoordinator.activate()

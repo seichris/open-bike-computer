@@ -10,7 +10,9 @@ struct BikeComputerWatchApp: App {
                 manager: appDelegate.workoutManager,
                 routeLibrary: appDelegate.routeLibrary,
                 navigationManager: appDelegate.navigationManager,
-                navigationSettings: appDelegate.navigationSettings
+                navigationSettings: appDelegate.navigationSettings,
+                favoriteStore: appDelegate.favoriteStore,
+                deviceLink: appDelegate.deviceLink
             )
                 .onOpenURL { url in
                     appDelegate.workoutManager.handleLaunchURL(url)

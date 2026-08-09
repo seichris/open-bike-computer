@@ -222,6 +222,124 @@ enum WatchControllerTransportV1 {
     static let userInfoPayloadKey = "watchControllerRequestV1"
 }
 
+enum WatchDirectRidePreparationOperationV1: String, Codable, Equatable,
+    Sendable {
+    case prepare
+    case release
+}
+
+struct WatchDirectRidePreparationRequestV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    static let userInfoPayloadKey = "watchDirectRidePreparationRequestV1"
+
+    let schema: Int
+    let requestID: UUID
+    let preparationID: UUID
+    let operation: WatchDirectRidePreparationOperationV1
+    let deviceID: String
+
+    init(
+        requestID: UUID = UUID(),
+        preparationID: UUID,
+        operation: WatchDirectRidePreparationOperationV1,
+        deviceID: String
+    ) throws {
+        let deviceID = deviceID.lowercased()
+        guard deviceID.count == 32,
+              deviceID.utf8.allSatisfy({
+                  ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+              }) else {
+            throw WatchControllerContractError.invalidDeviceID
+        }
+        schema = Self.schemaVersion
+        self.requestID = requestID
+        self.preparationID = preparationID
+        self.operation = operation
+        self.deviceID = deviceID
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return try Self(
+            requestID: requestID,
+            preparationID: preparationID,
+            operation: operation,
+            deviceID: deviceID
+        )
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+
+    let schema: Int
+    let requestID: UUID
+    let accepted: Bool
+    let errorCode: String?
+
+    init(requestID: UUID, accepted: Bool, errorCode: String? = nil) {
+        schema = Self.schemaVersion
+        self.requestID = requestID
+        self.accepted = accepted
+        self.errorCode = errorCode.map { String($0.prefix(64)) }
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion,
+              accepted ? errorCode == nil : errorCode?.isEmpty == false,
+              errorCode?.utf8.count ?? 0 <= 64 else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return self
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+enum WatchDirectRidePreparationPolicyV1 {
+    static func rejectionCode(
+        requestedDeviceID: String,
+        selectedDeviceID: String?,
+        phoneNavigationActive: Bool,
+        transferActive: Bool,
+        administrationActive: Bool
+    ) -> String? {
+        guard requestedDeviceID == selectedDeviceID else {
+            return "different_device"
+        }
+        guard !phoneNavigationActive else { return "phone_navigation_active" }
+        guard !transferActive else { return "device_transfer_active" }
+        guard !administrationActive else { return "device_admin_active" }
+        return nil
+    }
+
+    static func releaseMatches(
+        preparedDeviceID: String?,
+        preparedPreparationID: UUID?,
+        request: WatchDirectRidePreparationRequestV1
+    ) -> Bool {
+        request.operation == .release &&
+            preparedDeviceID == request.deviceID &&
+            preparedPreparationID == request.preparationID
+    }
+}
+
 struct WatchDeviceMetadataV1: Codable, Equatable, Sendable {
     static let schemaVersion = 1
     static let applicationContextKey = "watchDeviceMetadataV1"
@@ -291,6 +409,56 @@ struct WatchDeviceMetadataV1: Codable, Equatable, Sendable {
             throw WatchControllerContractError.invalidEnvelope
         }
         return normalized
+    }
+}
+
+/// Identifies the iPhone-selected Bike Computer that direct Watch rides must
+/// target. A versioned tombstone (`deviceID == nil`) is retained so changing
+/// or removing the active device cannot make the Watch fall back to an
+/// arbitrary enrolled credential.
+struct WatchSelectedBikeComputerV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    static let applicationContextKey = "watchSelectedBikeComputerV1"
+
+    let schema: Int
+    let revision: UInt64
+    let deviceID: String?
+
+    init(revision: UInt64, deviceID: String?) throws {
+        guard revision > 0 else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        let normalizedDeviceID = deviceID?.lowercased()
+        if let normalizedDeviceID {
+            guard normalizedDeviceID.count == 32,
+                  normalizedDeviceID.utf8.allSatisfy({
+                      ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+                  }) else {
+                throw WatchControllerContractError.invalidDeviceID
+            }
+        }
+        schema = Self.schemaVersion
+        self.revision = revision
+        self.deviceID = normalizedDeviceID
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return try Self(revision: revision, deviceID: deviceID)
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+
+    func selects(_ credential: WatchControllerCredentialV1) -> Bool {
+        deviceID == credential.deviceID
     }
 }
 

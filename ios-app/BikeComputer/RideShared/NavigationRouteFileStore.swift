@@ -53,7 +53,9 @@ final class NavigationRouteFileStoreV1 {
     @discardableResult
     func install(
         _ data: Data,
-        now: Date = Date()
+        now: Date = Date(),
+        evictingOldestUnprotected protectedIdentities:
+            Set<WatchRouteIdentityV1>? = nil
     ) throws -> InstalledNavigationRouteV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
@@ -82,11 +84,27 @@ final class NavigationRouteFileStoreV1 {
             }
         }
 
-        let retained = current.filter { $0.archive.routeID != archive.routeID }
-        guard retained.count + 1 <= limits.maximumArchiveCount,
-              retained.reduce(data.count, { $0 + $1.encodedSize }) <=
-                limits.maximumTotalEncodedBytes else {
-            throw NavigationRouteFileStoreError.capacityExceeded
+        var retained = current.filter {
+            $0.archive.routeID != archive.routeID
+        }
+        var recordsToEvict: [InstalledNavigationRouteV1] = []
+        while retained.count + 1 > limits.maximumArchiveCount ||
+                retained.reduce(data.count, { $0 + $1.encodedSize }) >
+                limits.maximumTotalEncodedBytes {
+            guard let protectedIdentities else {
+                throw NavigationRouteFileStoreError.capacityExceeded
+            }
+            let evictionCandidates = retained.indices.filter { index in
+                !protectedIdentities.contains(
+                    WatchRouteIdentityV1(archive: retained[index].archive)
+                )
+            }
+            guard let evictionIndex = evictionCandidates.min(by: {
+                Self.isOlder(retained[$0], than: retained[$1])
+            }) else {
+                throw NavigationRouteFileStoreError.capacityExceeded
+            }
+            recordsToEvict.append(retained.remove(at: evictionIndex))
         }
 
         try prepareDirectory()
@@ -116,6 +134,7 @@ final class NavigationRouteFileStoreV1 {
         }
 
         try removeSuperseded(sameRoute, keeping: destination)
+        try removeSuperseded(recordsToEvict, keeping: destination)
         return InstalledNavigationRouteV1(
             archive: archive,
             fileURL: destination,
@@ -340,6 +359,19 @@ final class NavigationRouteFileStoreV1 {
             "\(identity.routeID.uuidString.lowercased())-r\(identity.revision)-\(identity.contentHash).routev1",
             isDirectory: false
         ).standardizedFileURL
+    }
+
+    private static func isOlder(
+        _ left: InstalledNavigationRouteV1,
+        than right: InstalledNavigationRouteV1
+    ) -> Bool {
+        if left.archive.createdAt != right.archive.createdAt {
+            return left.archive.createdAt < right.archive.createdAt
+        }
+        let leftID = left.archive.routeID.uuidString
+        let rightID = right.archive.routeID.uuidString
+        if leftID != rightID { return leftID < rightID }
+        return left.archive.revision < right.archive.revision
     }
 
     private func synchronizeRootDirectory() throws {

@@ -7,6 +7,9 @@ import WatchKit
 final class WatchConnectivityCoordinator: NSObject {
     var onApplicationContext: (([String: Any]) -> Void)?
     var onControllerCredentialsChanged: (() -> Void)?
+    var onDirectRidePreparationResponse:
+        ((WatchDirectRidePreparationRequestV1,
+          WatchDirectRidePreparationResponseV1) -> Void)?
 
     private let session: WCSession?
     private let routeLibrary: WatchRouteLibrary
@@ -41,6 +44,42 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let session,
               session.activationState == .activated else { return }
         publishDeviceMetadata(using: session)
+    }
+
+    func sendDirectRidePreparation(
+        operation: WatchDirectRidePreparationOperationV1,
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        guard let session,
+              session.activationState == .activated,
+              let request = try? WatchDirectRidePreparationRequestV1(
+                preparationID: preparationID,
+                operation: operation,
+                deviceID: deviceID
+              ),
+              let payload = try? request.encoded() else { return }
+
+        if operation == .release {
+            // The release is idempotent and durable so an iPhone that was
+            // temporarily unreachable can resume its prior reconnect policy.
+            session.transferUserInfo([
+                WatchDirectRidePreparationRequestV1.userInfoPayloadKey:
+                    payload,
+            ])
+        }
+        guard session.isReachable else { return }
+        session.sendMessageData(payload) { [weak self] responseData in
+            guard let response = try?
+                    WatchDirectRidePreparationResponseV1.decode(responseData),
+                  response.requestID == request.requestID else { return }
+            Task { @MainActor [weak self] in
+                self?.onDirectRidePreparationResponse?(request, response)
+            }
+        } errorHandler: { _ in
+            // The firmware lease remains authoritative when the iPhone is
+            // absent, and release also has the queued fallback above.
+        }
     }
 
     fileprivate func activationDidComplete(
@@ -110,10 +149,13 @@ final class WatchConnectivityCoordinator: NSObject {
                     error: "retention_mismatch"
                 )
             }
-            _ = try routeLibrary.install(
+            let result = try routeLibrary.install(
                 data,
                 expectedIdentity: request.identity
             )
+            for evictedIdentity in result.evictedIdentities {
+                acknowledge(evictedIdentity, status: .evicted)
+            }
             return routeAcknowledgement(request.identity, status: .ready)
         } catch {
             let code = Self.errorCode(for: error)
@@ -122,6 +164,27 @@ final class WatchConnectivityCoordinator: NSObject {
                 request.identity,
                 status: .rejected,
                 error: code
+            )
+        }
+    }
+
+    fileprivate func routeFileInstallResponse(
+        resourceByteCount: Int?,
+        data: Data?,
+        request: WatchRouteSyncMessageV1
+    ) -> WatchRouteSyncMessageV1 {
+        switch WatchRouteFilePayloadV1.validate(
+            request: request,
+            resourceByteCount: resourceByteCount,
+            data: data
+        ) {
+        case .success(let validatedData):
+            routeInstallResponse(data: validatedData, request: request)
+        case .failure(let error):
+            routeAcknowledgement(
+                request.identity,
+                status: .rejected,
+                error: error.rawValue
             )
         }
     }
@@ -333,18 +396,27 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
     ) {
         // WCSession owns this temporary URL only for the callback duration.
         guard let metadata = file.metadata,
-              let resourceBytes = try? file.fileURL.resourceValues(
-                forKeys: [.fileSizeKey]
-              ).fileSize,
-              resourceBytes > 0,
-              resourceBytes <= 4 * 1_024 * 1_024 else { return }
-        let data = try? Data(contentsOf: file.fileURL)
-        Task { @MainActor [weak self] in
-            guard let request = WatchRouteSyncMessageV1(
+              let request = WatchRouteSyncMessageV1(
                 propertyList: metadata
-            ), request.operation == .install,
-               request.encodedByteCount == resourceBytes else { return }
-            self?.receiveRouteFile(data: data, request: request)
+              ), request.operation == .install else { return }
+        let resourceBytes = try? file.fileURL.resourceValues(
+            forKeys: [.fileSizeKey]
+        ).fileSize
+        let data: Data? = if let resourceBytes,
+            resourceBytes > 0,
+            resourceBytes <=
+                NavigationRouteLimitsV1.production.maximumEncodedBytes {
+            try? Data(contentsOf: file.fileURL)
+        } else {
+            nil
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.acknowledge(self.routeFileInstallResponse(
+                resourceByteCount: resourceBytes,
+                data: data,
+                request: request
+            ))
         }
     }
 

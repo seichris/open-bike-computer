@@ -520,6 +520,19 @@ static bool destinationCatalogContains(uint32_t generation, uint16_t token) {
   return found;
 }
 
+static bool isScopedWatchRideSession() {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    // Destination requests are owner-only. If role state cannot be read,
+    // suppress the request instead of sending an owner command to an
+    // unverified or scoped session.
+    return true;
+  }
+  const bool scopedWatch = deviceOwnership.isWatchRideSession();
+  xSemaphoreGive(deviceOwnershipMutex);
+  return scopedWatch;
+}
+
 bool requestDestinationRoute(uint32_t generation, uint16_t token) {
   if (!destinationCatalogContains(generation, token)) {
     setDestinationPickerStatus(DestinationPickerStatusCode::Stale, generation,
@@ -530,6 +543,11 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
       mapTransferStatusCharacteristic == nullptr) {
     setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
                                token, "Open app to start navigation");
+    return false;
+  }
+  if (isScopedWatchRideSession()) {
+    setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
+                               token, "Open iPhone to start navigation");
     return false;
   }
   if (!beginDestinationRequest(millis())) {

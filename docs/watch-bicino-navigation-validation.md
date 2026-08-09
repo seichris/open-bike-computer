@@ -312,3 +312,37 @@ accessory-display and durable-export determination also remains unapproved.
 Issue #106 has therefore not been updated with completion evidence. Phase 6
 software work is complete, but the release gate remains open until those
 external and physical checks pass.
+
+### Phase 7 pre-merge convergence review
+
+Review profile: deep. Review base: `1cfc1f32b963bd7a653b82d07a5bc9ec8cfacbe2`.
+The earlier physical matrix remains useful functional evidence, but every
+physical check affected by the fixes below must be repeated from one exact
+firmware/iPhone/Watch SHA before release.
+
+| ID | Severity | Finding | Resolution |
+| --- | --- | --- | --- |
+| P7-701 | P1 | The PWR-honk retry test advanced through wall-clock sleeps and could observe a retry before the main queue executed it. | Inject the retry scheduler under host testing, capture work items, advance each retry explicitly, and stress-run the helper without sleeps. |
+| P7-702 | P1 | Removing the old Watch navigation picker also removed every production path to online favorites and the Watch-local policy during a ride. | Keep the requested minimal home screen, expose online destinations inside Watch Settings, and make the same settings reachable from workout and navigation-only live views. |
+| P7-703 | P1 | A sparse GPS update beyond a maneuver could strand the old step, while accepting arbitrary later-route progress would suppress required rerouting after a corner cut. | Advance one step only when the maneuver radius is reached or the observed GPS travel chord crosses the endpoint; preserve current-step deviation and rerouting for shortcuts. |
+| P7-704 | P1 | Stopping navigation or workout while disconnected discarded the clear frame before Bicino could receive it. | Retain independent navigation/workout release demand, reconnect with the needed characteristics, drain the clear, then release the BLE lease. |
+| P7-705 | P1 | Watch selected the first stored controller credential and could drive a different Bicino when several devices were enrolled. | Sync the iPhone-selected ownership-v2 DeviceID in monotonic application context, filter credentials exactly, reconnect on selection changes, and fail closed when an older context leaves multiple credentials ambiguous. |
+| P7-706 | P1 | The planned explicit Watch-direct preparation message was absent, so an idle iPhone could retain BLE and leave Watch scanning indefinitely. | Bind prepare/retry/release to the selected DeviceID and a stable preparation ID; idle iPhone yields and persists the suspension, active navigation/transfer/admin rejects, releases are durable and stale releases cannot cancel newer rides. |
+| P7-707 | P1 | A scoped Watch session could receive the owner-only device destination request; Watch treated the unexpected protected notification as fatal. | Firmware suppresses `DREQ` for scoped or unreadable roles, while Watch ignores a valid owner-only `DREQ` but still fails closed on malformed `CAP2`. |
+| P7-708 | P2 | A route file callback could fail before acknowledging an otherwise parseable install identity, and a redundant queued failure could downgrade an exact Ready receipt. | Validate bounded resource/data sizes separately, acknowledge every valid identity, and retain an exact Ready receipt unless deletion is pending. |
+| P7-709 | P2 | Watch route capacity rejected all new files instead of evicting the deterministic oldest unused route; silent eviction would leave iPhone Ready state stale. | Evict only unprotected identities, report every exact eviction receipt to iPhone, clear Watch readiness without deleting the phone-owned route, and keep active/pending-deletion routes pinned. |
+| P7-710 | P2 | iPhone route renames were local aliases and did not reach the exact installed Watch revision. | Publish a bounded, monotonic exact-identity display-name envelope; Watch persists and renders the alias without changing archive bytes or content hash. |
+| P7-711 | P2 | Direct-link failures, online degradation, and provider attribution were hidden by the minimal offline status design. | Preserve the requested three-line imported-GPX presentation, but render actionable Bicino failures plus online degraded state and attribution where applicable. |
+| P7-712 | P2 | Starting an offline route used a confirmation bypass, so a far-from-start route could begin without the required warning. | Route every selection through the shared start assessment and confirmation path. |
+| P7-713 | P1 | Watch classified every non-`CAP2` protected navigation notification as an ignorable owner request, allowing malformed or unknown payloads to bypass the fail-closed capability handshake. | Ignore only the exact ten-byte `DREQ` frame; reject malformed `CAP2` and every unknown protected notification. |
+| P7-714 | P1 | Watch uses an interactive prepare and durable release, so WCSession could deliver release first and a delayed prepare could yield the iPhone connection again after the ride ended. | Persist a bounded 24-hour ledger of released DeviceID/preparation-ID pairs and make any matching delayed prepare an accepted no-op across iPhone relaunches. |
+
+The deterministic shared ride, Watch offline, Watch online, workout contract,
+and full portable navigation suites pass. The full unsigned Watch/iPhone app
+container and exact CI-shaped Release container build successfully against the
+device SDK, including the embedded Watch app, complication, Live Activity,
+privacy manifests, and identifiers. The reproducible three-pass
+`WAVESHARE_AMOLED_175` firmware build passes. Relevant firmware
+capability, ride-lease, scoped-payload, and destination-picker host tests pass.
+The complete exact-head GitHub matrix was green at the review base; a new matrix
+is required after these convergence fixes are published.

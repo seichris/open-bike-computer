@@ -10,7 +10,7 @@ has passed with release-build evidence.
 - Navigate and drive the Bicino display directly from Apple Watch while the
   iPhone is off or out of range.
 - Import a user-owned GPX route on iPhone, send it to Watch, and ride it offline
-  after Watch reports **Ready**.
+  after the route shows its green Watch status icon.
 - Explicitly enable **Use Watch cellular connection** on Watch to calculate a
   cycling route to a coordinate-backed favorite and recalculate after leaving
   the route. watchOS chooses the available Wi-Fi or cellular interface.
@@ -25,8 +25,8 @@ has passed with release-build evidence.
 
 - Online Watch routing is off by default and no hardware or reachability signal
   changes the setting.
-- **Queued** means a route transfer is pending. Only **Ready on Watch** confirms
-  exact hash-verified installation.
+- **Queued** means a route transfer is pending. Only the green Watch status icon
+  confirms exact hash-verified installation.
 - Offline deviation shows distance from the route and never makes a network
   request or creates a replacement route.
 - MapKit-created routes are held in active-session memory only. MapKit durable
@@ -34,6 +34,9 @@ has passed with release-build evidence.
   approval under the current Apple terms.
 - **My Bike Computers** shows the Watch-provided display name and whether
   direct rides are ready. The display name is not used as a security identity.
+- Watch follows the Bicino selected on iPhone. A Watch-started ride asks an idle
+  iPhone to yield BLE automatically, but never interrupts active iPhone
+  navigation, transfers, pairing, or device administration.
 - Replacing or reinstalling a Watch, deregistering Bicino, or performing a
   physical ownership reset requires setup again.
 

@@ -1,6 +1,11 @@
 import Combine
 import Foundation
 
+struct WatchRouteInstallResultV1 {
+    let installed: InstalledNavigationRouteV1
+    let evictedIdentities: [WatchRouteIdentityV1]
+}
+
 @MainActor
 final class WatchRouteLibrary: ObservableObject {
     @Published private(set) var routes: [PlannedRouteSummaryV1] = []
@@ -14,6 +19,10 @@ final class WatchRouteLibrary: ObservableObject {
     private let defaults: UserDefaults
     private let pendingDeletionKey =
         "watchRouteLibrary.pendingDeletion.v1"
+    private let displayNamesKey =
+        "watchRouteLibrary.displayNames.v1"
+    private var displayNamesEnvelope:
+        WatchRouteDisplayNamesEnvelopeV1?
 
     convenience init() {
         let base = FileManager.default.urls(
@@ -42,6 +51,8 @@ final class WatchRouteLibrary: ObservableObject {
         pendingDeletionIdentity = Self.decodeIdentity(
             defaults.data(forKey: pendingDeletionKey)
         )
+        displayNamesEnvelope = defaults.data(forKey: displayNamesKey)
+            .flatMap { try? WatchRouteDisplayNamesEnvelopeV1.decode($0) }
         reload()
     }
 
@@ -49,7 +60,7 @@ final class WatchRouteLibrary: ObservableObject {
     func install(
         _ data: Data,
         expectedIdentity: WatchRouteIdentityV1
-    ) throws -> InstalledNavigationRouteV1 {
+    ) throws -> WatchRouteInstallResultV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
             purpose: .offlineNavigation,
@@ -63,10 +74,38 @@ final class WatchRouteLibrary: ObservableObject {
            activeIdentity != expectedIdentity {
             throw WatchRouteLibraryError.activeRoutePinned
         }
-        let installed = try store.install(data, now: now())
+        let protectedIdentities = Set(
+            [activeIdentity, pendingDeletionIdentity].compactMap { $0 }
+        )
+        let previousIdentities = Set(store.records(now: now()).map {
+            WatchRouteIdentityV1(archive: $0.archive)
+        })
+        let installed = try store.install(
+            data,
+            now: now(),
+            evictingOldestUnprotected: protectedIdentities
+        )
         lastSyncError = nil
         reload()
-        return installed
+        let currentIdentities = Set(store.records(now: now()).map {
+            WatchRouteIdentityV1(archive: $0.archive)
+        })
+        let evicted = previousIdentities
+            .subtracting(currentIdentities)
+            .filter { $0.routeID != expectedIdentity.routeID }
+            .sorted {
+                if $0.routeID != $1.routeID {
+                    return $0.routeID.uuidString < $1.routeID.uuidString
+                }
+                if $0.revision != $1.revision {
+                    return $0.revision < $1.revision
+                }
+                return $0.contentHash < $1.contentHash
+            }
+        return WatchRouteInstallResultV1(
+            installed: installed,
+            evictedIdentities: evicted
+        )
     }
 
     func delete(_ identity: WatchRouteIdentityV1) throws {
@@ -89,6 +128,36 @@ final class WatchRouteLibrary: ObservableObject {
         matching identity: WatchRouteIdentityV1
     ) throws -> InstalledNavigationRouteV1 {
         try store.record(matching: identity, now: now())
+    }
+
+    func displayName(for summary: PlannedRouteSummaryV1) -> String {
+        let identity = WatchRouteIdentityV1(
+            routeID: summary.id,
+            revision: summary.revision,
+            contentHash: summary.contentHash
+        )
+        return displayNamesEnvelope?.entries.first {
+            $0.identity == identity
+        }?.name ?? summary.name
+    }
+
+    func receiveApplicationContext(_ context: [String: Any]) {
+        guard let data = context[
+            WatchRouteDisplayNamesEnvelopeV1.applicationContextKey
+        ] as? Data,
+              let envelope = try?
+                WatchRouteDisplayNamesEnvelopeV1.decode(data),
+              envelope.revision >= (displayNamesEnvelope?.revision ?? 0)
+        else { return }
+        if envelope.revision == displayNamesEnvelope?.revision,
+           envelope != displayNamesEnvelope {
+            lastSyncError = "display_name_revision_conflict"
+            return
+        }
+        displayNamesEnvelope = envelope
+        defaults.set(data, forKey: displayNamesKey)
+        lastSyncError = nil
+        objectWillChange.send()
     }
 
     func record(

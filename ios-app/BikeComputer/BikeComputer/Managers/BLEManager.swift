@@ -851,6 +851,12 @@ class BLEManager: NSObject, ObservableObject {
     private var locallyForgottenPeripheralIdentifiers: Set<UUID> = []
     
     private var autoReconnect: Bool = true
+    private var watchDirectRidePreparedDeviceID: String?
+    private var watchDirectRidePreparationID: UUID?
+    private var watchDirectRidePreviousAutoReconnect: Bool?
+    private var watchDirectRidePreparationExpiryTimer: Timer?
+    private var watchDirectRideReleaseTombstones:
+        [WatchDirectRideReleaseTombstone] = []
     private var lastConnectedPeripheralIdentifier: UUID?
     
     // MARK: - Reconnection with Exponential Backoff (Optimization #14)
@@ -981,6 +987,22 @@ class BLEManager: NSObject, ObservableObject {
         static let legacyShowNature = "mapSettings.showNature"
         static let legacyShowMinorRoads = "mapSettings.showMinorRoads"
         static let lastPeripheralIdentifier = "ble.lastPeripheralIdentifier"
+        static let watchDirectRidePreparedDeviceID =
+            "ble.watchDirectRidePreparedDeviceID.v1"
+        static let watchDirectRidePreviousAutoReconnect =
+            "ble.watchDirectRidePreviousAutoReconnect.v1"
+        static let watchDirectRidePreparationID =
+            "ble.watchDirectRidePreparationID.v1"
+        static let watchDirectRidePreparationExpiresAt =
+            "ble.watchDirectRidePreparationExpiresAt.v1"
+        static let watchDirectRideReleaseTombstones =
+            "ble.watchDirectRideReleaseTombstones.v1"
+    }
+
+    private struct WatchDirectRideReleaseTombstone: Codable {
+        let deviceID: String
+        let preparationID: UUID
+        let expiresAt: Date
     }
     
     // MARK: - Initialization
@@ -1006,6 +1028,7 @@ class BLEManager: NSObject, ObservableObject {
         loadLastPeripheralIdentifier()
         migrateLegacyPeripheralIfNeeded()
         refreshKnownDevices()
+        restoreWatchDirectRidePreparation()
         updateTrustedPeripheralDescription()
 #if canImport(UIKit) && !HOST_TESTING
         // Load the active-device registry before CoreBluetooth can deliver a
@@ -1535,6 +1558,276 @@ class BLEManager: NSObject, ObservableObject {
         stopMonitoringRSSI()
         centralManager.cancelPeripheralConnection(peripheral)
         log("Disconnecting from peripheral")
+    }
+
+    func handleWatchDirectRidePreparationRequest(
+        _ request: WatchDirectRidePreparationRequestV1,
+        phoneNavigationActive: Bool
+    ) -> WatchDirectRidePreparationResponseV1 {
+        switch request.operation {
+        case .release:
+            rememberReleasedWatchDirectRidePreparation(request)
+            if WatchDirectRidePreparationPolicyV1.releaseMatches(
+                preparedDeviceID: watchDirectRidePreparedDeviceID,
+                preparedPreparationID: watchDirectRidePreparationID,
+                request: request
+            ) {
+                endWatchDirectRidePreparation(
+                    deviceID: request.deviceID,
+                    preparationID: request.preparationID
+                )
+            }
+            return WatchDirectRidePreparationResponseV1(
+                requestID: request.requestID,
+                accepted: true
+            )
+        case .prepare:
+            if request.deviceID == activeDeviceID,
+               wasWatchDirectRidePreparationReleased(request) {
+                // WCSession's durable release and interactive prepare use
+                // different delivery paths. A release may therefore arrive
+                // first; its tombstone makes the delayed prepare a safe no-op.
+                return WatchDirectRidePreparationResponseV1(
+                    requestID: request.requestID,
+                    accepted: true
+                )
+            }
+            let rejection = WatchDirectRidePreparationPolicyV1.rejectionCode(
+                requestedDeviceID: request.deviceID,
+                selectedDeviceID: activeDeviceID,
+                phoneNavigationActive: phoneNavigationActive,
+                transferActive: mapTransferModeEnabled ||
+                    !deviceTransferMode.isEmpty,
+                administrationActive:
+                    deviceOperationDeviceID != nil ||
+                    pendingWatchControllerOperation != nil ||
+                    pendingPairingSession != nil ||
+                    isDiscoveringDevices || isPairingMode
+            )
+            if let rejection {
+                return WatchDirectRidePreparationResponseV1(
+                    requestID: request.requestID,
+                    accepted: false,
+                    errorCode: rejection
+                )
+            }
+
+            beginWatchDirectRidePreparation(
+                deviceID: request.deviceID,
+                preparationID: request.preparationID
+            )
+            return WatchDirectRidePreparationResponseV1(
+                requestID: request.requestID,
+                accepted: true
+            )
+        }
+    }
+
+    private func beginWatchDirectRidePreparation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        if watchDirectRidePreparedDeviceID == nil {
+            watchDirectRidePreviousAutoReconnect = autoReconnect
+        }
+        watchDirectRidePreparedDeviceID = deviceID
+        watchDirectRidePreparationID = preparationID
+        autoReconnect = false
+        resetReconnectionState()
+        pendingConnectionAfterDisconnect = nil
+        pendingScannedConnectionIdentifier = nil
+        if isScanning { stopScanning() }
+        persistWatchDirectRidePreparation(
+            deviceID: deviceID,
+            preparationID: preparationID
+        )
+        if let peripheral = connectedPeripheral {
+            stopMonitoringRSSI()
+            centralManager.cancelPeripheralConnection(peripheral)
+            log("Yielding BLE connection to Apple Watch direct ride")
+        }
+    }
+
+    private func endWatchDirectRidePreparation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        guard watchDirectRidePreparedDeviceID == deviceID,
+              watchDirectRidePreparationID == preparationID else { return }
+        let shouldReconnect = watchDirectRidePreviousAutoReconnect ?? true
+        clearWatchDirectRidePreparationPersistence()
+        watchDirectRidePreparedDeviceID = nil
+        watchDirectRidePreparationID = nil
+        watchDirectRidePreviousAutoReconnect = nil
+        autoReconnect = shouldReconnect
+        guard shouldReconnect else { return }
+        resetReconnectionState()
+        resumeAutoReconnectIfNeeded()
+    }
+
+    private func persistWatchDirectRidePreparation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        let defaults = UserDefaults.standard
+        let expiresAt = Date().addingTimeInterval(24 * 60 * 60)
+        defaults.set(
+            deviceID,
+            forKey: SettingsKeys.watchDirectRidePreparedDeviceID
+        )
+        defaults.set(
+            preparationID.uuidString,
+            forKey: SettingsKeys.watchDirectRidePreparationID
+        )
+        defaults.set(
+            watchDirectRidePreviousAutoReconnect ?? true,
+            forKey: SettingsKeys.watchDirectRidePreviousAutoReconnect
+        )
+        defaults.set(
+            expiresAt,
+            forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
+        )
+        scheduleWatchDirectRidePreparationExpiry(
+            deviceID: deviceID,
+            preparationID: preparationID,
+            expiresAt: expiresAt
+        )
+    }
+
+    private func restoreWatchDirectRidePreparation() {
+        let defaults = UserDefaults.standard
+        restoreWatchDirectRideReleaseTombstones(from: defaults)
+        guard let deviceID = defaults.string(
+                forKey: SettingsKeys.watchDirectRidePreparedDeviceID
+              ),
+              deviceID == activeDeviceID,
+              let preparationIDRaw = defaults.string(
+                forKey: SettingsKeys.watchDirectRidePreparationID
+              ),
+              let preparationID = UUID(uuidString: preparationIDRaw),
+              let expiresAt = defaults.object(
+                forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
+              ) as? Date,
+              expiresAt > Date() else {
+            clearWatchDirectRidePreparationPersistence()
+            return
+        }
+        watchDirectRidePreparedDeviceID = deviceID
+        watchDirectRidePreparationID = preparationID
+        watchDirectRidePreviousAutoReconnect = defaults.object(
+            forKey: SettingsKeys.watchDirectRidePreviousAutoReconnect
+        ) as? Bool ?? true
+        autoReconnect = false
+        scheduleWatchDirectRidePreparationExpiry(
+            deviceID: deviceID,
+            preparationID: preparationID,
+            expiresAt: expiresAt
+        )
+    }
+
+    private func scheduleWatchDirectRidePreparationExpiry(
+        deviceID: String,
+        preparationID: UUID,
+        expiresAt: Date
+    ) {
+        watchDirectRidePreparationExpiryTimer?.invalidate()
+        let interval = max(expiresAt.timeIntervalSinceNow, 0.1)
+        watchDirectRidePreparationExpiryTimer = Timer.scheduledTimer(
+            withTimeInterval: interval,
+            repeats: false
+        ) { [weak self] _ in
+            self?.endWatchDirectRidePreparation(
+                deviceID: deviceID,
+                preparationID: preparationID
+            )
+        }
+    }
+
+    private func clearWatchDirectRidePreparationPersistence() {
+        watchDirectRidePreparationExpiryTimer?.invalidate()
+        watchDirectRidePreparationExpiryTimer = nil
+        let defaults = UserDefaults.standard
+        defaults.removeObject(
+            forKey: SettingsKeys.watchDirectRidePreparedDeviceID
+        )
+        defaults.removeObject(
+            forKey: SettingsKeys.watchDirectRidePreparationID
+        )
+        defaults.removeObject(
+            forKey: SettingsKeys.watchDirectRidePreviousAutoReconnect
+        )
+        defaults.removeObject(
+            forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
+        )
+    }
+
+    private func rememberReleasedWatchDirectRidePreparation(
+        _ request: WatchDirectRidePreparationRequestV1
+    ) {
+        pruneWatchDirectRideReleaseTombstones()
+        watchDirectRideReleaseTombstones.removeAll {
+            $0.deviceID == request.deviceID &&
+                $0.preparationID == request.preparationID
+        }
+        watchDirectRideReleaseTombstones.append(.init(
+            deviceID: request.deviceID,
+            preparationID: request.preparationID,
+            expiresAt: Date().addingTimeInterval(24 * 60 * 60)
+        ))
+        if watchDirectRideReleaseTombstones.count > 16 {
+            watchDirectRideReleaseTombstones.removeFirst(
+                watchDirectRideReleaseTombstones.count - 16
+            )
+        }
+        persistWatchDirectRideReleaseTombstones()
+    }
+
+    private func wasWatchDirectRidePreparationReleased(
+        _ request: WatchDirectRidePreparationRequestV1
+    ) -> Bool {
+        pruneWatchDirectRideReleaseTombstones()
+        return watchDirectRideReleaseTombstones.contains {
+            $0.deviceID == request.deviceID &&
+                $0.preparationID == request.preparationID
+        }
+    }
+
+    private func restoreWatchDirectRideReleaseTombstones(
+        from defaults: UserDefaults
+    ) {
+        guard let data = defaults.data(
+            forKey: SettingsKeys.watchDirectRideReleaseTombstones
+        ), let decoded = try? PropertyListDecoder().decode(
+            [WatchDirectRideReleaseTombstone].self,
+            from: data
+        ) else { return }
+        watchDirectRideReleaseTombstones = decoded
+        pruneWatchDirectRideReleaseTombstones()
+    }
+
+    private func pruneWatchDirectRideReleaseTombstones() {
+        let previousCount = watchDirectRideReleaseTombstones.count
+        watchDirectRideReleaseTombstones.removeAll { $0.expiresAt <= Date() }
+        if watchDirectRideReleaseTombstones.count != previousCount {
+            persistWatchDirectRideReleaseTombstones()
+        }
+    }
+
+    private func persistWatchDirectRideReleaseTombstones() {
+        let defaults = UserDefaults.standard
+        if watchDirectRideReleaseTombstones.isEmpty {
+            defaults.removeObject(
+                forKey: SettingsKeys.watchDirectRideReleaseTombstones
+            )
+            return
+        }
+        guard let data = try? PropertyListEncoder().encode(
+            watchDirectRideReleaseTombstones
+        ) else { return }
+        defaults.set(
+            data,
+            forKey: SettingsKeys.watchDirectRideReleaseTombstones
+        )
     }
 
     func reconnect() {

@@ -2,6 +2,8 @@ import SwiftUI
 
 struct WatchSettingsView: View {
     @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+    @ObservedObject var favoriteStore: WatchFavoriteStore
+    @ObservedObject var navigationManager: WatchNavigationManager
 
     var body: some View {
         Form {
@@ -18,6 +20,23 @@ struct WatchSettingsView: View {
                         }
                     )
                 )
+
+                if navigationSettings.useWatchCellularConnection {
+                    NavigationLink {
+                        WatchOnlineDestinationListView(
+                            favoriteStore: favoriteStore,
+                            navigationManager: navigationManager
+                        )
+                    } label: {
+                        Label("Online Navigation", systemImage: "network")
+                    }
+
+                    if navigationManager.canRecalculateOnline {
+                        Button("Recalculate Route") {
+                            navigationManager.recalculateOnlineRoute()
+                        }
+                    }
+                }
             } header: {
                 Text("Navigation")
             } footer: {
@@ -59,10 +78,62 @@ struct WatchSettingsView: View {
     }
 }
 
-#Preview {
-    NavigationStack {
-        WatchSettingsView(
-            navigationSettings: WatchNavigationSettingsStore()
+private struct WatchOnlineDestinationListView: View {
+    @ObservedObject var favoriteStore: WatchFavoriteStore
+    @ObservedObject var navigationManager: WatchNavigationManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var pendingDestination: SyncedCoordinateFavoriteV1?
+
+    var body: some View {
+        List {
+            if favoriteStore.favorites.isEmpty {
+                ContentUnavailableView(
+                    "No Destinations",
+                    systemImage: "mappin.slash",
+                    description: Text(
+                        "Add a coordinate favorite in Bicino on iPhone."
+                    )
+                )
+            } else {
+                ForEach(favoriteStore.favorites) { destination in
+                    Button(destination.name) {
+                        pendingDestination = destination
+                    }
+                }
+            }
+
+            if let error = favoriteStore.lastSyncError {
+                Text("Last sync failed: \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .navigationTitle("Online Navigation")
+        .confirmationDialog(
+            "Start Online Navigation?",
+            isPresented: pendingDestinationPresented,
+            titleVisibility: .visible,
+            presenting: pendingDestination
+        ) { destination in
+            Button("Start Navigation") {
+                pendingDestination = nil
+                navigationManager.startOnline(destination: destination)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDestination = nil
+            }
+        } message: { destination in
+            Text("Navigate to \(destination.name) using this Watch?")
+        }
+    }
+
+    private var pendingDestinationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingDestination != nil },
+            set: { isPresented in
+                if !isPresented { pendingDestination = nil }
+            }
         )
     }
 }

@@ -439,8 +439,43 @@ struct NavigationRuntimeV1 {
             from: sample.coordinate,
             to: route.points[step.geometryEndIndex]
         )
-        guard endpointDistance < 20,
-              distanceAlong >= stepEndDistance - 20 else { return }
+        let reachedEndpoint = endpointDistance < 20 &&
+            distanceAlong >= stepEndDistance - 20
+        // A delayed GPS fix can land well into the next route segment without
+        // ever entering the endpoint radius. Only accept that gap when the
+        // observed travel chord crossed the maneuver endpoint. Progress along
+        // a later route segment alone is insufficient: on a corner it can be
+        // a shortcut that intentionally needs off-route/reroute handling.
+        let passedEndpointOnRoute: Bool = {
+            guard distanceAlong >= stepEndDistance + 20,
+                  let previousSample = lastProcessedSample else {
+                return false
+            }
+            let observedTravel = [
+                previousSample.coordinate,
+                sample.coordinate
+            ]
+            let observedDistances = NavigationGeometryV1.cumulativeDistances(
+                for: observedTravel
+            )
+            guard observedDistances.last ?? 0 > 0 else { return false }
+            let endpointProjections = NavigationGeometryV1.projections(
+                of: route.points[step.geometryEndIndex],
+                onto: observedTravel,
+                cumulativeDistances: observedDistances
+            )
+            let crossingTolerance = max(
+                20,
+                max(
+                    previousSample.horizontalAccuracyMeters,
+                    sample.horizontalAccuracyMeters
+                )
+            )
+            return endpointProjections.contains {
+                $0.crossTrackDistanceMeters <= crossingTolerance
+            }
+        }()
+        guard reachedEndpoint || passedEndpointOnRoute else { return }
         // Never consume multiple maneuvers from one GPS fix. Loopbacks and
         // short adjacent steps can put several endpoints inside the arrival
         // radius, but each instruction must still become observable.
