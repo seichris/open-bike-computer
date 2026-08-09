@@ -888,6 +888,9 @@ class BLEManager: NSObject, ObservableObject {
     private var nextDestinationCatalogTransferID: UInt8 = 1
     private var destinationStatusSequence: UInt64 = 0
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
+    private var powerButtonHonkRetryScheduler: (TimeInterval, DispatchWorkItem) -> Void = { delay, workItem in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
     private var powerButtonHonkAckTimeout: TimeInterval = 1.0
     private var powerButtonHonkFailureRetryDelay: TimeInterval = 0.1
     private var hasSentMapProfileForConnection = false
@@ -3200,7 +3203,7 @@ class BLEManager: NSObject, ObservableObject {
             }
         }
         powerButtonHonkRetryWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        powerButtonHonkRetryScheduler(delay, workItem)
     }
 
     private func reportPowerButtonHonkConfigurationFailure(_ logMessage: String) {
@@ -3767,6 +3770,14 @@ class BLEManager: NSObject, ObservableObject {
         powerButtonHonkAckTimeout = max(0, ackTimeout)
         powerButtonHonkFailureRetryDelay = max(0, failureRetryDelay)
     }
+
+#if HOST_TESTING
+    func installPowerButtonHonkRetrySchedulerForTesting(
+        _ scheduler: @escaping (TimeInterval, DispatchWorkItem) -> Void
+    ) {
+        powerButtonHonkRetryScheduler = scheduler
+    }
+#endif
 
     private func scheduleAuthenticationRetry(for peripheral: CBPeripheral) {
         authRetryTimer?.invalidate()
