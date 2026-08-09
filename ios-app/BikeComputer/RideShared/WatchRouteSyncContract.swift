@@ -63,7 +63,9 @@ struct WatchRouteSyncMessageV1: Equatable, Sendable {
             Keys.schema: Int(Self.schemaVersion),
             Keys.operation: operation.rawValue,
             Keys.routeID: identity.routeID.uuidString.lowercased(),
-            Keys.revision: Int(identity.revision),
+            // Keep the fixed-width revision intact on 32-bit watchOS. An
+            // `Int` cannot represent every valid UInt32 value there.
+            Keys.revision: NSNumber(value: identity.revision),
             Keys.contentHash: identity.contentHash
         ]
         if let status {
@@ -88,9 +90,8 @@ struct WatchRouteSyncMessageV1: Equatable, Sendable {
               let operation = WatchRouteSyncOperationV1(rawValue: operationRaw),
               let routeIDRaw = propertyList[Keys.routeID] as? String,
               let routeID = UUID(uuidString: routeIDRaw),
-              let revisionValue = Self.integer(propertyList[Keys.revision]),
-              revisionValue > 0,
-              revisionValue <= Int(UInt32.max),
+              let revision = Self.revision(propertyList[Keys.revision]),
+              revision > 0,
               let contentHash = propertyList[Keys.contentHash] as? String,
               contentHash.count == 64,
               contentHash.utf8.allSatisfy({ byte in
@@ -147,7 +148,7 @@ struct WatchRouteSyncMessageV1: Equatable, Sendable {
             operation: operation,
             identity: WatchRouteIdentityV1(
                 routeID: routeID,
-                revision: UInt32(revisionValue),
+                revision: revision,
                 contentHash: contentHash
             ),
             status: status,
@@ -176,6 +177,19 @@ struct WatchRouteSyncMessageV1: Equatable, Sendable {
     private static func integer(_ value: Any?) -> Int? {
         if let value = value as? Int { return value }
         if let value = value as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    private static func revision(_ value: Any?) -> UInt32? {
+        if let value = value as? UInt32 { return value }
+        if let value = value as? UInt64 { return UInt32(exactly: value) }
+        if let value = value as? UInt { return UInt32(exactly: value) }
+        if let value = value as? Int64 { return UInt32(exactly: value) }
+        if let value = value as? Int { return UInt32(exactly: value) }
+        if let value = value as? NSNumber {
+            guard let unsigned = UInt64(value.stringValue) else { return nil }
+            return UInt32(exactly: unsigned)
+        }
         return nil
     }
 }

@@ -1048,6 +1048,28 @@ enum RideSharedTests {
             WatchRouteSyncMessageV1(propertyList: message.propertyList) == message,
             "route transfer metadata round-trips through property-list values"
         )
+        let maximumRevisionMessage = WatchRouteSyncMessageV1(
+            operation: .delete,
+            identity: WatchRouteIdentityV1(
+                routeID: identity.routeID,
+                revision: .max,
+                contentHash: identity.contentHash
+            )
+        )
+        expect(
+            WatchRouteSyncMessageV1(
+                propertyList: maximumRevisionMessage.propertyList
+            ) == maximumRevisionMessage,
+            "route revisions remain fixed-width across 32-bit Watch decoding"
+        )
+        var overflowingRevision = maximumRevisionMessage.propertyList
+        overflowingRevision["bicino.route.revision"] = NSNumber(
+            value: UInt64(UInt32.max) + 1
+        )
+        expect(
+            WatchRouteSyncMessageV1(propertyList: overflowingRevision) == nil,
+            "route revisions above UInt32 remain rejected"
+        )
         let immediate = WatchRouteImmediateTransferV1.message(
             install: message,
             archiveData: data
