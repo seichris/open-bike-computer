@@ -21,6 +21,7 @@ final class PhoneRouteLibrary: ObservableObject {
     @Published private(set) var routes: [PlannedRouteSummaryV1] = []
     @Published private(set) var watchSyncState:
         [WatchRouteIdentityV1: PhoneRouteWatchSyncStateV1] = [:]
+    @Published private var displayNames: SavedRouteDisplayNames
 
     private let store: NavigationRouteFileStoreV1
     private let connectivity: PhoneWatchConnectivityCoordinator
@@ -61,6 +62,7 @@ final class PhoneRouteLibrary: ObservableObject {
         self.connectivity = connectivity
         self.defaults = defaults
         self.now = now
+        displayNames = SavedRouteDisplayNames(defaults: defaults)
         readyReceiptKeys = Set(
             defaults.stringArray(forKey: readyReceiptKey) ?? []
         )
@@ -122,6 +124,30 @@ final class PhoneRouteLibrary: ObservableObject {
         connectivity.sendRouteImmediately(record)
     }
 
+    func displayName(for summary: PlannedRouteSummaryV1) -> String {
+        displayNames.displayName(
+            routeID: summary.id,
+            defaultName: summary.name
+        )
+    }
+
+    @discardableResult
+    func rename(
+        _ summary: PlannedRouteSummaryV1,
+        to proposedName: String
+    ) -> String {
+        var updated = displayNames
+        let name = updated.rename(
+            routeID: summary.id,
+            defaultName: summary.name,
+            to: proposedName
+        )
+        guard updated != displayNames else { return name }
+        displayNames = updated
+        displayNames.persist(to: defaults)
+        return name
+    }
+
     func delete(_ summary: PlannedRouteSummaryV1) throws {
         let identity = identity(for: summary)
         let key = Self.receiptKey(identity)
@@ -131,6 +157,7 @@ final class PhoneRouteLibrary: ObservableObject {
         guard readyReceiptKeys.contains(key) ||
                 pendingDeletionKeys.contains(key) else {
             try store.delete(matching: identity, now: now())
+            removeDisplayName(routeID: summary.id)
             watchSyncState.removeValue(forKey: identity)
             reload()
             return
@@ -180,7 +207,12 @@ final class PhoneRouteLibrary: ObservableObject {
             persistPendingInstalls()
             watchSyncState[message.identity] = .ready
         case .deleted:
-            try? store.delete(matching: message.identity, now: now())
+            if (try? store.delete(
+                matching: message.identity,
+                now: now()
+            )) != nil {
+                removeDisplayName(routeID: message.identity.routeID)
+            }
             readyReceiptKeys.remove(Self.receiptKey(message.identity))
             pendingDeletionKeys.remove(Self.receiptKey(message.identity))
             pendingInstallKeys.remove(Self.receiptKey(message.identity))
@@ -245,6 +277,13 @@ final class PhoneRouteLibrary: ObservableObject {
             pendingInstallKeys.sorted(),
             forKey: pendingInstallKey
         )
+    }
+
+    private func removeDisplayName(routeID: UUID) {
+        var updated = displayNames
+        guard updated.remove(routeID: routeID) else { return }
+        displayNames = updated
+        displayNames.persist(to: defaults)
     }
 
     private func syncState(

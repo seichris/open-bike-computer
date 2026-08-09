@@ -707,6 +707,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
+        testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
@@ -7643,6 +7644,117 @@ struct NavigationProtocolTests {
                 managerSource.contains("catch is CancellationError") &&
                 managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
             "preview ZIPs retain resumable background upload through a sanitized archive"
+        )
+    }
+
+    static func testSavedRouteNamingAndViewWiring() {
+        let suite = "saved-route-name-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "route rename test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let firstRouteID = UUID()
+        let secondRouteID = UUID()
+        var names = SavedRouteDisplayNames(defaults: defaults)
+        assertEqual(
+            names.displayName(routeID: firstRouteID, defaultName: "Original"),
+            "Original",
+            "a route starts with its archive name"
+        )
+        assertEqual(
+            names.rename(
+                routeID: firstRouteID,
+                defaultName: "Original",
+                to: "  Riverside Ride  "
+            ),
+            "Riverside Ride",
+            "route rename trims surrounding whitespace"
+        )
+        names.persist(to: defaults)
+        var restoredNames = SavedRouteDisplayNames(defaults: defaults)
+        assertEqual(
+            restoredNames.displayName(
+                routeID: firstRouteID,
+                defaultName: "Original"
+            ),
+            "Riverside Ride",
+            "route rename survives app restart"
+        )
+        assertEqual(
+            restoredNames.rename(
+                routeID: firstRouteID,
+                defaultName: "Original",
+                to: "  \n "
+            ),
+            "Riverside Ride",
+            "blank route rename preserves the existing name"
+        )
+        _ = restoredNames.rename(
+            routeID: secondRouteID,
+            defaultName: "Second",
+            to: "Second Ride"
+        )
+        assert(restoredNames.remove(routeID: secondRouteID),
+               "deleting a route removes its local display name")
+        assertEqual(
+            restoredNames.displayName(
+                routeID: secondRouteID,
+                defaultName: "Second"
+            ),
+            "Second",
+            "pruned routes fall back to their archive name"
+        )
+
+        var interaction = SavedRouteRenameInteraction()
+        assertEqual(
+            interaction.begin(routeID: firstRouteID, currentName: "Original"),
+            nil,
+            "starting a route rename has no previous draft"
+        )
+        interaction.updateDraft("Morning Ride")
+        assertEqual(
+            interaction.finishIfFocusMoved(to: firstRouteID),
+            nil,
+            "focus inside the active route field keeps editing"
+        )
+        assertEqual(
+            interaction.finishIfFocusMoved(to: nil),
+            SavedRouteRenameCommit(
+                routeID: firstRouteID,
+                proposedName: "Morning Ride"
+            ),
+            "moving focus commits the matching route rename"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ) else {
+            assert(false, "Saved Routes source should be available")
+            return
+        }
+        assert(
+            source.contains("Text(\"Saved Routes\")") &&
+                source.contains(
+                    "Save GPX route files to your Apple watch for offline navigation"
+                ),
+            "Saved Routes uses the requested title and explanatory copy"
+        )
+        assert(
+            source.contains("TextField(\n                \"Route name\"") &&
+                source.contains("SavedRouteRenameInteraction()"),
+            "saved route names are editable inline"
+        )
+        assert(
+            source.contains("case .ready:") &&
+                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+                !source.contains("Ready on Watch"),
+            "Watch-ready routes use an inline green status icon without a second-row label"
         )
     }
 

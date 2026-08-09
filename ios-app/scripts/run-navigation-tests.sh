@@ -27,6 +27,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
+  ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \

@@ -95,7 +95,7 @@ struct SettingsView: View {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
 
-                OfflineRoutesSettingsSection(routeLibrary: routeLibrary)
+                SavedRoutesSettingsSection(routeLibrary: routeLibrary)
 
                 Section {
                     NavigationLink {
