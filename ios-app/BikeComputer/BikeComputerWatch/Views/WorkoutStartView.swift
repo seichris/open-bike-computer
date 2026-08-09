@@ -190,21 +190,28 @@ struct WorkoutStartView: View {
     private var navigationSelection: some View {
         VStack(spacing: 5) {
             Picker("Navigation", selection: $selectedNavigation) {
-                Text("None").tag(WatchNavigationSelection.none)
+                Text("None")
+                    .padding(.vertical, 6)
+                    .tag(WatchNavigationSelection.none)
                 ForEach(routeLibrary.routes) { route in
-                    Text(route.name).tag(
-                        WatchNavigationSelection.route(route.id)
-                    )
+                    Text(route.name)
+                        .lineLimit(2)
+                        .padding(.vertical, 6)
+                        .tag(WatchNavigationSelection.route(route.id))
                 }
                 if navigationSettings.policy == .onlineAllowed {
                     ForEach(favoriteStore.favorites) { favorite in
-                        Text("★ \(favorite.name)").tag(
-                            WatchNavigationSelection.favorite(favorite.id)
-                        )
+                        Text("★ \(favorite.name)")
+                            .lineLimit(2)
+                            .padding(.vertical, 6)
+                            .tag(
+                                WatchNavigationSelection.favorite(favorite.id)
+                            )
                     }
                 }
             }
-            .font(.caption)
+            .pickerStyle(.navigationLink)
+            .frame(maxWidth: .infinity, minHeight: 52)
 
             HStack {
                 Label(
