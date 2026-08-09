@@ -4750,6 +4750,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
                     from: try XCTUnwrap(recoveryStore.recoveredIdentity)
                 )
             )
+            try await waitUntil { manager.latestEnvelope != nil }
 
             manager.handleSessionReadyForFinalization(
                 at: startDate.addingTimeInterval(31)
@@ -6786,6 +6787,11 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertTrue(manager.isTerminalPublicationPending)
         XCTAssertEqual(confirmedSnapshot.elapsedTime?.value, 123)
         XCTAssertTrue(confirmedSnapshot.availability.contains(.elapsedTime))
+        XCTAssertEqual(confirmedSnapshot.wallElapsedTime?.value, 123)
+        XCTAssertEqual(
+            confirmedSnapshot.wallElapsedTime?.capturedAt,
+            endedAt
+        )
 
         persistence.failOnSaveCall = nil
         manager.retryDetachedSessionCleanup()

@@ -3065,12 +3065,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )?.sessionID
         self.summary = terminalSummary
         _ = lifecycle.apply(.sessionEnded)
+        let terminalCapturedAt = max(Date(), terminalSummary.endedAt)
         let terminalSnapshot = makeTerminalSnapshot(
             summary: terminalSummary,
-            capturedAt: Date()
+            capturedAt: terminalCapturedAt
         )
         confirmedTerminalSnapshot = terminalSnapshot
-        guard publishSnapshotImmediately(snapshotOverride: terminalSnapshot) else {
+        guard publishSnapshotImmediately(
+            snapshotOverride: terminalSnapshot,
+            envelopeCapturedAt: terminalCapturedAt
+        ) else {
             // Keep the durable identity until a transportable terminal
             // envelope exists. HealthKit finalization is already complete,
             // so release only its runtime objects and expose cleanup retry.
@@ -3145,6 +3149,17 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let cyclingDistance = reconciledSavedWorkout == nil
             ? base.cyclingDistance ?? summaryCyclingDistance
             : summaryCyclingDistance ?? base.cyclingDistance
+        let terminalWallElapsedTime = base.startDate.flatMap { startDate in
+            let value = summary.endedAt.timeIntervalSince(startDate)
+            guard value.isFinite, value >= 0 else {
+                return base.wallElapsedTime
+            }
+            return WorkoutMetricV1(
+                value: value,
+                unit: .seconds,
+                capturedAt: summary.endedAt
+            )
+        } ?? base.wallElapsedTime
 
         return WorkoutSnapshotV1(
             state: base.state,
@@ -3168,7 +3183,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             pauseOrigin: base.pauseOrigin,
             lastTransitionOrigin: base.lastTransitionOrigin,
             lastTransitionAt: base.lastTransitionAt,
-            wallElapsedTime: base.wallElapsedTime,
+            wallElapsedTime: terminalWallElapsedTime,
             detectorProfileVersion: base.detectorProfileVersion
         )
     }
@@ -3220,7 +3235,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         identity = durableIdentity
         finishRequestError = nil
         lastErrorCode = nil
-        guard publishSnapshotImmediately(snapshotOverride: terminalSnapshot) else {
+        guard publishSnapshotImmediately(
+            snapshotOverride: terminalSnapshot,
+            envelopeCapturedAt: max(Date(), terminalSummary.endedAt)
+        ) else {
             isTerminalPublicationPending = true
             finishRequestError = .reconciliationFailed
             return
@@ -5713,12 +5731,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     @discardableResult
     private func publishSnapshotImmediately(
-        snapshotOverride: WorkoutSnapshotV1? = nil
+        snapshotOverride: WorkoutSnapshotV1? = nil,
+        envelopeCapturedAt: Date? = nil
     ) -> Bool {
         guard let identity else { return false }
         coalescedSnapshotTask?.cancel()
         coalescedSnapshotTask = nil
-        let capturedAt = Date()
+        let capturedAt = envelopeCapturedAt ?? Date()
         let snapshot = snapshotOverride ?? makeSnapshot(capturedAt: capturedAt)
         self.snapshot = snapshot
         lastSnapshotPublishedAt = capturedAt
