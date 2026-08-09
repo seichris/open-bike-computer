@@ -2,7 +2,6 @@ import SwiftUI
 
 struct WatchNavigationStatusView: View {
     @ObservedObject var navigationManager: WatchNavigationManager
-    @ObservedObject var deviceLink: WatchDeviceLink
     let farStartCancelTitle: String
 
     @ViewBuilder
@@ -64,90 +63,72 @@ struct WatchNavigationStatusView: View {
     }
 
     private func activeStatus(offRouteDistance: Double?) -> some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             if let snapshot = navigationManager.snapshot {
-                Label(
-                    snapshot.instruction,
-                    systemImage: "arrow.triangle.turn.up.right.diamond.fill"
-                )
-                .font(.caption)
-                .multilineTextAlignment(.center)
                 Text(
-                    "\(Int(snapshot.distanceToManeuverMeters.rounded())) m · " +
-                    "\(distanceText(snapshot.routeRemainingDistanceMeters)) left"
+                    "\(instructionText(snapshot.instruction)) in " +
+                    compactDistance(snapshot.distanceToManeuverMeters)
                 )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            if let offRouteDistance {
-                Text(offRouteDescription(distance: offRouteDistance))
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .multilineTextAlignment(.center)
-            }
-            if !navigationManager.onlineStatus.userDescription.isEmpty {
-                Text(navigationManager.onlineStatus.userDescription)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            if let attribution = navigationManager.routeAttribution {
-                Text("Route by \(attribution)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Text(bicinoNavigationStatus)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            if navigationManager.canRecalculateOnline {
-                Button("Recalculate Route") {
-                    navigationManager.recalculateOnlineRoute()
+                .font(.headline)
+                .multilineTextAlignment(.center)
+
+                HStack(spacing: 8) {
+                    navigationTile(
+                        text: offRouteDistance.map {
+                            "Off route by \(compactDistance($0))"
+                        } ?? "On route",
+                        icon: offRouteDistance == nil
+                            ? "checkmark.circle.fill"
+                            : "location.slash.fill",
+                        color: offRouteDistance == nil ? .green : .orange
+                    )
+                    navigationTile(
+                        text: "\(compactDistance(snapshot.routeRemainingDistanceMeters)) left",
+                        icon: "point.topleft.down.to.point.bottomright.curvepath",
+                        color: .green
+                    )
                 }
+            }
+        }
+    }
+
+    private func navigationTile(
+        text: String,
+        icon: String,
+        color: Color
+    ) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
                 .font(.caption2)
-            }
-            Button("Stop Navigation") {
-                navigationManager.stopNavigation()
-            }
-            .font(.caption2)
-            .tint(.orange)
+                .foregroundStyle(color)
+            Text(text)
+                .font(.system(.caption, design: .rounded, weight: .semibold))
+                .monospacedDigit()
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .minimumScaleFactor(0.75)
         }
+        .frame(maxWidth: .infinity, minHeight: 58)
+        .padding(.vertical, 5)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
     }
 
-    private func offRouteDescription(distance: Double) -> String {
-        let prefix = "Off route by \(Int(distance.rounded())) m · "
-        switch navigationManager.onlineStatus {
-        case .rerouting:
-            return prefix + "Rerouting"
-        case .rerouteFailed:
-            return prefix + "Reroute failed - continuing route"
-        case .continuingCachedRoute, .noConnection:
-            return prefix + "Offline - continuing route"
-        case .online:
-            return prefix + "Waiting to reroute"
-        case .waitingForLocation, .calculating:
-            return prefix + "Preparing reroute"
-        case .routeFailed:
-            return prefix + "Route calculation failed"
-        case .offlinePolicy, .idle:
-            return prefix + "Rerouting unavailable offline"
-        }
-    }
-
-    private func distanceText(_ meters: Double) -> String {
+    private func compactDistance(_ meters: Double) -> String {
         meters >= 1_000
-            ? String(format: "%.1f km", meters / 1_000)
-            : "\(Int(meters.rounded())) m"
+            ? String(format: "%.1fkm", meters / 1_000)
+            : "\(Int(meters.rounded()))m"
     }
 
-    private var bicinoNavigationStatus: String {
-        switch deviceLink.state {
-        case .ready: "Bicino connected"
-        case .busy: "Bicino is controlled by iPhone"
-        case .notEnrolled: "Bicino not enrolled for Watch"
-        case .scanning, .connecting, .discovering, .authenticating,
-                .claimingLease:
-            "Connecting Bicino…"
-        case .bluetoothUnavailable: "Watch Bluetooth unavailable"
-        case .failed, .idle: "Bicino not connected"
+    private func instructionText(_ instruction: String) -> String {
+        let trimmed = instruction.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let suffix = " checkpoint"
+        guard trimmed.lowercased().hasSuffix(suffix) else {
+            return trimmed
         }
+        return String(trimmed.dropLast(suffix.count))
     }
 }

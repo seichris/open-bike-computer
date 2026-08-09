@@ -1,19 +1,13 @@
 import SwiftUI
 
 struct WatchNavigationOnlyView: View {
+    @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var navigationManager: WatchNavigationManager
-    @ObservedObject var deviceLink: WatchDeviceLink
-    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
-    let hasPendingWorkoutSummary: Bool
 
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
-                Label("Navigation", systemImage: "location.fill")
-                    .font(.headline)
-                    .foregroundStyle(.green)
-
-                if hasPendingWorkoutSummary {
+                if manager.summary != nil {
                     Text("Workout ended. Navigation is still running.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -22,30 +16,35 @@ struct WatchNavigationOnlyView: View {
 
                 WatchNavigationStatusView(
                     navigationManager: navigationManager,
-                    deviceLink: deviceLink,
                     farStartCancelTitle: "Cancel Navigation"
                 )
 
-                Toggle(
-                    "Watch cellular",
-                    isOn: Binding(
-                        get: {
-                            navigationSettings.useWatchCellularConnection
-                        },
-                        set: {
-                            navigationSettings
-                                .setUseWatchCellularConnection($0)
-                        }
-                    )
-                )
-                .font(.caption2)
-
-                if hasPendingWorkoutSummary {
+                if manager.summary != nil {
                     Text("Stop navigation to view the workout summary.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                } else {
+                    Button {
+                        manager.startOutdoorCycling()
+                    } label: {
+                        Label("Start Workout", systemImage: "bicycle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tint(.green)
+                    .disabled(
+                        manager.setupState != .ready ||
+                            manager.state == .failed
+                    )
                 }
+
+                Button {
+                    navigationManager.stopNavigation()
+                } label: {
+                    Label("End Navigation", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .tint(.orange)
             }
             .padding(.horizontal, 8)
         }

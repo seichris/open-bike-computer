@@ -4,9 +4,7 @@ struct WatchWorkoutRootView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var routeLibrary: WatchRouteLibrary
     @ObservedObject var navigationManager: WatchNavigationManager
-    @ObservedObject var deviceLink: WatchDeviceLink
     @ObservedObject var navigationSettings: WatchNavigationSettingsStore
-    @ObservedObject var favoriteStore: WatchFavoriteStore
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -21,16 +19,12 @@ struct WatchWorkoutRootView: View {
             } else if manager.state.isActive {
                 LiveWorkoutView(
                     manager: manager,
-                    navigationManager: navigationManager,
-                    deviceLink: deviceLink,
-                    navigationSettings: navigationSettings
+                    navigationManager: navigationManager
                 )
             } else if navigationManager.shouldPresentNavigation {
                 WatchNavigationOnlyView(
-                    navigationManager: navigationManager,
-                    deviceLink: deviceLink,
-                    navigationSettings: navigationSettings,
-                    hasPendingWorkoutSummary: manager.summary != nil
+                    manager: manager,
+                    navigationManager: navigationManager
                 )
             } else if let summary = manager.summary,
                       manager.state == .ended {
@@ -46,9 +40,7 @@ struct WatchWorkoutRootView: View {
                         manager: manager,
                         routeLibrary: routeLibrary,
                         navigationManager: navigationManager,
-                        deviceLink: deviceLink,
-                        navigationSettings: navigationSettings,
-                        favoriteStore: favoriteStore
+                        navigationSettings: navigationSettings
                     )
                 }
             }

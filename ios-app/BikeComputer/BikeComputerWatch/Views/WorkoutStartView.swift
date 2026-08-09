@@ -1,20 +1,11 @@
 import SwiftUI
 
-private enum WatchNavigationSelection: Hashable {
-    case none
-    case route(UUID)
-    case favorite(UUID)
-}
-
 struct WorkoutStartView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var routeLibrary: WatchRouteLibrary
     @ObservedObject var navigationManager: WatchNavigationManager
-    @ObservedObject var deviceLink: WatchDeviceLink
     @ObservedObject var navigationSettings: WatchNavigationSettingsStore
-    @ObservedObject var favoriteStore: WatchFavoriteStore
     @State private var showingRecoveryResetConfirmation = false
-    @State private var selectedNavigation: WatchNavigationSelection = .none
 
     var body: some View {
         ScrollView {
@@ -26,8 +17,6 @@ struct WorkoutStartView: View {
 
                 Text("Outdoor Cycle")
                     .font(.headline)
-
-                navigationSelection
 
                 setupContent
 
@@ -50,10 +39,13 @@ struct WorkoutStartView: View {
                 }
 
                 NavigationLink {
-                    WatchRouteLibraryView(routeLibrary: routeLibrary)
+                    WatchRouteLibraryView(
+                        routeLibrary: routeLibrary,
+                        navigationManager: navigationManager
+                    )
                 } label: {
-                    Label("Offline Routes", systemImage: "map")
-                        .font(.caption)
+                    Label("Offline Navigation", systemImage: "map")
+                        .frame(maxWidth: .infinity, minHeight: 52)
                 }
                 .buttonStyle(.borderless)
 
@@ -68,24 +60,6 @@ struct WorkoutStartView: View {
                 .buttonStyle(.borderless)
             }
             .padding(.horizontal, 8)
-        }
-        .onChange(of: routeLibrary.routes.map(\.id)) { _, routeIDs in
-            if case .route(let selectedRouteID) = selectedNavigation,
-               !routeIDs.contains(selectedRouteID) {
-                selectedNavigation = .none
-            }
-        }
-        .onChange(of: favoriteStore.favorites.map(\.id)) { _, favoriteIDs in
-            if case .favorite(let selectedID) = selectedNavigation,
-               !favoriteIDs.contains(selectedID) {
-                selectedNavigation = .none
-            }
-        }
-        .onChange(of: navigationSettings.policy) { _, policy in
-            if policy == .offlineOnly,
-               case .favorite = selectedNavigation {
-                selectedNavigation = .none
-            }
         }
         .alert(
             "Reset Workout Recovery?",
@@ -121,22 +95,10 @@ struct WorkoutStartView: View {
                 .font(.caption)
         case .ready:
             Button {
-                switch selectedNavigation {
-                case .none:
-                    navigationManager.stopNavigation()
-                case .route(let routeID):
-                    navigationManager.startInstalledRoute(routeID: routeID)
-                case .favorite(let favoriteID):
-                    if let favorite = favoriteStore.favorites.first(where: {
-                        $0.id == favoriteID
-                    }) {
-                        navigationManager.startOnline(destination: favorite)
-                    }
-                }
                 manager.startOutdoorCycling()
             } label: {
                 Label("Start Ride", systemImage: "play.fill")
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 52)
             }
             .tint(.green)
             .disabled(manager.state == .failed)
@@ -184,76 +146,6 @@ struct WorkoutStartView: View {
                     manager.retrySetup()
                 }
             }
-        }
-    }
-
-    private var navigationSelection: some View {
-        VStack(spacing: 5) {
-            Picker("Navigation", selection: $selectedNavigation) {
-                Text("None")
-                    .padding(.vertical, 6)
-                    .tag(WatchNavigationSelection.none)
-                ForEach(routeLibrary.routes) { route in
-                    Text(route.name)
-                        .lineLimit(2)
-                        .padding(.vertical, 6)
-                        .tag(WatchNavigationSelection.route(route.id))
-                }
-                if navigationSettings.policy == .onlineAllowed {
-                    ForEach(favoriteStore.favorites) { favorite in
-                        Text("★ \(favorite.name)")
-                            .lineLimit(2)
-                            .padding(.vertical, 6)
-                            .tag(
-                                WatchNavigationSelection.favorite(favorite.id)
-                            )
-                    }
-                }
-            }
-            .pickerStyle(.navigationLink)
-            .frame(maxWidth: .infinity, minHeight: 52)
-
-            HStack {
-                Label(
-                    navigationSettings.policy == .onlineAllowed
-                        ? "Online"
-                        : "Offline",
-                    systemImage: navigationSettings.policy == .onlineAllowed
-                        ? "antenna.radiowaves.left.and.right"
-                        : "arrow.down.circle"
-                )
-                Spacer()
-                Text(bicinoStatus)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-
-            if routeLibrary.routes.isEmpty &&
-                (navigationSettings.policy == .offlineOnly ||
-                    favoriteStore.favorites.isEmpty) {
-                Text(
-                    navigationSettings.policy == .offlineOnly
-                        ? "Transfer a planned route from iPhone for offline navigation."
-                        : "Add a coordinate-backed favorite on iPhone or transfer a planned route."
-                )
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-    }
-
-    private var bicinoStatus: String {
-        switch deviceLink.state {
-        case .ready: "Bicino ready"
-        case .notEnrolled: "Bicino not enrolled"
-        case .busy: "Bicino busy"
-        case .connecting, .discovering, .authenticating, .claimingLease,
-                .scanning:
-            "Connecting Bicino"
-        case .bluetoothUnavailable: "Bluetooth unavailable"
-        case .failed: "Bicino disconnected"
-        case .idle: "Bicino on ride start"
         }
     }
 

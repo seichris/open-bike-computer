@@ -15,8 +15,6 @@ private enum WorkoutFinishPrompt {
 struct LiveWorkoutView: View {
     @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var navigationManager: WatchNavigationManager
-    @ObservedObject var deviceLink: WatchDeviceLink
-    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
     @State private var finishPrompt: WorkoutFinishPrompt?
     @State private var segmentToast: WorkoutCompletedSegmentV1?
     @State private var observedSegmentIndex: UInt32?
@@ -78,23 +76,16 @@ struct LiveWorkoutView: View {
 
                 WatchNavigationStatusView(
                     navigationManager: navigationManager,
-                    deviceLink: deviceLink,
                     farStartCancelTitle: "Workout Only"
                 )
 
-                Toggle(
-                    "Watch cellular",
-                    isOn: Binding(
-                        get: {
-                            navigationSettings.useWatchCellularConnection
-                        },
-                        set: {
-                            navigationSettings
-                                .setUseWatchCellularConnection($0)
-                        }
-                    )
-                )
-                .font(.caption2)
+                if navigationManager.shouldPresentNavigation {
+                    Button("End Navigation") {
+                        navigationManager.stopNavigation()
+                    }
+                    .font(.caption2)
+                    .tint(.orange)
+                }
 
                 if let finishError = manager.finishRequestError {
                     VStack(spacing: 5) {

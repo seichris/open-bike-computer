@@ -130,6 +130,7 @@ private struct WorkoutContractTestSuite {
         testDiscardedWorkoutSummaryDismissalPolicy()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
+        testWatchOfflineNavigationUIFlow()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
@@ -5891,6 +5892,108 @@ private struct WorkoutContractTestSuite {
             !watchSource.contains("Max HR")
                 && !watchSource.contains("heartRateZoneSettings"),
             "maximum-heart-rate configuration must not remain on the Watch start screen"
+        )
+    }
+
+    private mutating func testWatchOfflineNavigationUIFlow() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let sourceURLs = [
+            "start": watchDirectory.appendingPathComponent(
+                "Views/WorkoutStartView.swift"
+            ),
+            "library": watchDirectory.appendingPathComponent(
+                "Views/WatchRouteLibraryView.swift"
+            ),
+            "status": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationStatusView.swift"
+            ),
+            "navigationOnly": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationOnlyView.swift"
+            ),
+            "manager": watchDirectory.appendingPathComponent(
+                "Managers/WatchNavigationManager.swift"
+            ),
+        ]
+        var sources: [String: String] = [:]
+        for (name, url) in sourceURLs {
+            guard let source = try? String(
+                contentsOf: url,
+                encoding: .utf8
+            ) else {
+                expect(
+                    false,
+                    "Watch offline-navigation source must exist: \(name)"
+                )
+                return
+            }
+            sources[name] = source
+        }
+
+        let start = sources["start"] ?? ""
+        expect(
+            start.contains(
+                "Label(\"Offline Navigation\", systemImage: \"map\")"
+            )
+                && start.components(
+                    separatedBy: ".frame(maxWidth: .infinity, minHeight: 52)"
+                ).count - 1 == 2
+                && !start.contains("Picker(\"Navigation\"")
+                && !start.contains("selectedNavigation")
+                && !start.contains("favoriteStore"),
+            "Watch home must offer equal-height Ride and backgroundless Offline Navigation actions without a navigation picker"
+        )
+
+        let library = sources["library"] ?? ""
+        let manager = sources["manager"] ?? ""
+        expect(
+            library.contains("pendingRoute = route")
+                && library.contains(".confirmationDialog(")
+                && library.contains("\"Start Navigation?\"")
+                && library.contains(
+                    "navigationManager.startConfirmedOffline(routeID: route.id)"
+                )
+                && manager.contains(
+                    "func startConfirmedOffline(routeID: UUID)"
+                )
+                && manager.contains(
+                    "pendingAcceptsFarStart = acceptsFarStart"
+                ),
+            "selecting an offline route must require one explicit confirmation and then start even when joining away from its first point"
+        )
+
+        let status = sources["status"] ?? ""
+        expect(
+            status.contains("let suffix = \" checkpoint\"")
+                && status.contains(
+                    "\"Off route by \\(compactDistance($0))\""
+                )
+                && status.contains("snapshot.routeRemainingDistanceMeters")
+                && status.contains(".background(.quaternary")
+                && !status.contains("routeAttribution")
+                && !status.contains("onlineStatus.userDescription")
+                && !status.contains("bicinoNavigationStatus")
+                && !status.contains("Route by")
+                && !status.contains("Rerouting unavailable offline"),
+            "active Watch guidance must keep only the maneuver and the two workout-style distance tiles"
+        )
+
+        let navigationOnly = sources["navigationOnly"] ?? ""
+        expect(
+            navigationOnly.contains(
+                "Label(\"Start Workout\", systemImage: \"bicycle\")"
+            )
+                && navigationOnly.contains("manager.startOutdoorCycling()")
+                && navigationOnly.contains(
+                    "Label(\"End Navigation\", systemImage: \"stop.fill\")"
+                )
+                && navigationOnly.contains(
+                    "navigationManager.stopNavigation()"
+                )
+                && !navigationOnly.contains("Watch cellular"),
+            "navigation-only mode must independently start a workout or end navigation"
         )
     }
 

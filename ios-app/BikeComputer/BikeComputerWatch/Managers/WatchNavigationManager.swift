@@ -123,6 +123,7 @@ final class WatchNavigationManager: ObservableObject {
     private var runtime = NavigationRuntimeV1()
     private var pendingRecord: InstalledNavigationRouteV1?
     private var pendingMode: NavigationModeV1 = .offline
+    private var pendingAcceptsFarStart = false
     private var pendingFavorite: SyncedCoordinateFavoriteV1?
     private var activeRecord: InstalledNavigationRouteV1?
     private var activeDestination: RouteEndpointV1?
@@ -232,13 +233,29 @@ final class WatchNavigationManager: ObservableObject {
     }
 
     func startOffline(routeID: UUID) {
-        startInstalledRoute(routeID: routeID, allowsOnlineRerouting: false)
+        startInstalledRoute(
+            routeID: routeID,
+            allowsOnlineRerouting: false,
+            acceptsFarStart: false
+        )
+    }
+
+    /// Starts a route after the rider explicitly confirmed it in the offline
+    /// route library. That confirmation also covers joining a route away from
+    /// its first point, so the Watch does not immediately ask a second time.
+    func startConfirmedOffline(routeID: UUID) {
+        startInstalledRoute(
+            routeID: routeID,
+            allowsOnlineRerouting: false,
+            acceptsFarStart: true
+        )
     }
 
     func startInstalledRoute(routeID: UUID) {
         startInstalledRoute(
             routeID: routeID,
-            allowsOnlineRerouting: settingsStore.policy == .onlineAllowed
+            allowsOnlineRerouting: settingsStore.policy == .onlineAllowed,
+            acceptsFarStart: false
         )
     }
 
@@ -316,6 +333,7 @@ final class WatchNavigationManager: ObservableObject {
         snapshot = nil
         lastLocation = nil
         pendingRecord = nil
+        pendingAcceptsFarStart = false
         pendingFavorite = nil
         activeRecord = nil
         activeDestination = nil
@@ -335,13 +353,15 @@ final class WatchNavigationManager: ObservableObject {
 
     private func startInstalledRoute(
         routeID: UUID,
-        allowsOnlineRerouting: Bool
+        allowsOnlineRerouting: Bool,
+        acceptsFarStart: Bool
     ) {
         guard stopNavigation() else { return }
         do {
             let record = try routeLibrary.record(routeID: routeID)
             advanceLifecycleGeneration()
             pendingRecord = record
+            pendingAcceptsFarStart = acceptsFarStart
             pendingMode = if allowsOnlineRerouting {
                 networkMonitor.availability == .unavailable
                     ? .onlineUsingCachedRoute
@@ -445,6 +465,8 @@ final class WatchNavigationManager: ObservableObject {
             )
             if assessment.requiresConfirmation {
                 runtime = candidate
+            }
+            if assessment.requiresConfirmation && !pendingAcceptsFarStart {
                 state = .awaitingStartConfirmation(
                     routeID: record.archive.routeID,
                     distanceMeters: assessment.distanceToRouteStartMeters
@@ -454,9 +476,10 @@ final class WatchNavigationManager: ObservableObject {
             activate(
                 record,
                 initialLocation: initialLocation,
-                acceptsFarStart: false
+                acceptsFarStart: assessment.requiresConfirmation
             )
         } catch {
+            pendingAcceptsFarStart = false
             state = .unavailable("Route not installed on this Watch")
         }
     }
@@ -485,6 +508,7 @@ final class WatchNavigationManager: ObservableObject {
             activeDestination = record.archive.route.destination
             routeAttribution = record.archive.route.provider.attribution
             pendingRecord = nil
+            pendingAcceptsFarStart = false
             startedAt = now()
             guard let snapshot = runtime.snapshot else {
                 throw NavigationRuntimeError.noActiveRoute
@@ -496,6 +520,7 @@ final class WatchNavigationManager: ObservableObject {
             )
         } catch {
             if didActivate { routeLibrary.deactivate(identity) }
+            pendingAcceptsFarStart = false
             state = .unavailable("Navigation unavailable")
         }
     }
