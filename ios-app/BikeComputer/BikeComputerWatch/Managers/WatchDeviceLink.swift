@@ -84,6 +84,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var navigationReleasePending = false
 
     private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -232,6 +233,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             payload: WatchRidePacketEncoderV1.maneuver(nil),
             priority: 3
         ))
+        enqueueWorkoutGPSIfNeeded()
         drainQueue()
     }
 
@@ -246,15 +248,24 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         finishNavigationReleaseIfPossible()
     }
 
-    func updateWorkout(_ frames: WorkoutDeviceFrames) {
+    func updateWorkout(
+        _ frames: WorkoutDeviceFrames,
+        gps: WorkoutDeviceGPSUpdate?
+    ) {
         latestWorkoutFrames = frames
+        latestWorkoutGPS = gps
         guard state.isReady else { return }
         enqueueWorkoutFrames(frames)
+        enqueueWorkoutGPSIfNeeded()
         drainQueue()
     }
 
     func clearWorkout(_ frames: WorkoutDeviceFrames) {
-        updateWorkout(frames)
+        latestWorkoutFrames = frames
+        latestWorkoutGPS = nil
+        guard state.isReady else { return }
+        enqueueWorkoutFrames(frames)
+        drainQueue()
     }
 
     private var hasDemand: Bool {
@@ -528,6 +539,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 priority: 1,
                 coalescingKey: "gps"
             ))
+        } else {
+            enqueueWorkoutGPSIfNeeded()
         }
         _ = queue.enqueue(.init(
             target: .route,
@@ -611,6 +624,36 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 priority: 0
             ))
         }
+    }
+
+    private func enqueueWorkoutGPSIfNeeded() {
+        guard workoutDemand,
+              !navigationDemand,
+              let latestWorkoutGPS else { return }
+        _ = queue.enqueue(.init(
+            target: .gps,
+            payload: WatchRidePacketEncoderV1.gps(
+                NavigationLocationSampleV1(
+                    coordinate: RouteCoordinateV1(
+                        latitude: latestWorkoutGPS.latitude,
+                        longitude: latestWorkoutGPS.longitude
+                    ),
+                    horizontalAccuracyMeters:
+                        latestWorkoutGPS.horizontalAccuracyMeters,
+                    courseDegrees: latestWorkoutGPS.courseDegrees ?? -1,
+                    speedMetersPerSecond:
+                        latestWorkoutGPS.speedMetersPerSecond ?? -1,
+                    altitudeMeters: latestWorkoutGPS.altitudeMeters ?? 0,
+                    timestamp: latestWorkoutGPS.capturedAt
+                ),
+                snapshot: nil,
+                distanceTraveledMeters:
+                    latestWorkoutGPS.distanceTraveledMeters,
+                elapsedSeconds: latestWorkoutGPS.elapsedSeconds
+            ),
+            priority: 1,
+            coalescingKey: "gps"
+        ))
     }
 
     private func enqueueProtected(

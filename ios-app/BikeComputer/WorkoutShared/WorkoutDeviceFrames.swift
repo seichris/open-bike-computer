@@ -53,6 +53,18 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let sourceFlags: WorkoutDeviceSourceFlags
 }
 
+nonisolated struct WorkoutDeviceGPSUpdate: Equatable, Sendable {
+    let latitude: Double
+    let longitude: Double
+    let capturedAt: Date
+    let horizontalAccuracyMeters: Double
+    let courseDegrees: Double?
+    let speedMetersPerSecond: Double?
+    let altitudeMeters: Double?
+    let distanceTraveledMeters: Double?
+    let elapsedSeconds: TimeInterval?
+}
+
 nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     struct Identity: Equatable, Sendable {
         let state: WorkoutDeviceSessionState
@@ -171,6 +183,44 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         )
     }
 
+    static func gpsUpdate(
+        for snapshot: WorkoutSnapshotV1
+    ) -> WorkoutDeviceGPSUpdate? {
+        guard snapshot.state.isActive,
+              let location = snapshot.location,
+              location.latitude.isFinite,
+              (-90...90).contains(location.latitude),
+              location.longitude.isFinite,
+              (-180...180).contains(location.longitude),
+              location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0 else {
+            return nil
+        }
+        return WorkoutDeviceGPSUpdate(
+            latitude: location.latitude,
+            longitude: location.longitude,
+            capturedAt: location.capturedAt,
+            horizontalAccuracyMeters: location.horizontalAccuracy,
+            courseDegrees: finiteValue(
+                location.course,
+                acceptedBy: { (0..<360).contains($0) }
+            ),
+            speedMetersPerSecond: finiteValue(
+                location.speed,
+                acceptedBy: { $0 >= 0 }
+            ),
+            altitudeMeters: finiteValue(location.altitude),
+            distanceTraveledMeters: finiteValue(
+                snapshot.cyclingDistance?.value,
+                acceptedBy: { $0 >= 0 }
+            ),
+            elapsedSeconds: finiteValue(
+                snapshot.elapsedTime?.value,
+                acceptedBy: { $0 >= 0 }
+            )
+        )
+    }
+
     static func stampedPair(
         core: Data,
         extended: Data,
@@ -220,6 +270,14 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         let scaled = value * scale
         guard scaled.isFinite else { return UInt16.max - 1 }
         return UInt16(min(scaled.rounded(), Double(UInt16.max - 1)))
+    }
+
+    private static func finiteValue(
+        _ value: Double?,
+        acceptedBy predicate: (Double) -> Bool = { _ in true }
+    ) -> Double? {
+        guard let value, value.isFinite, predicate(value) else { return nil }
+        return value
     }
 
     private static func encodeUInt32(_ value: Double?) -> UInt32 {

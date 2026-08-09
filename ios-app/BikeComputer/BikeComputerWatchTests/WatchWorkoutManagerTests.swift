@@ -85,6 +85,80 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertNotEqual(payloads[0][1] >> 6, 0)
     }
 
+    func testWorkoutGPSUpdateCarriesFreshWatchLocationAndRideProgress()
+        throws
+    {
+        let capturedAt = Date(timeIntervalSince1970: 1_786_249_600)
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            elapsedTime: WorkoutMetricV1(
+                value: 42,
+                unit: .seconds,
+                capturedAt: capturedAt
+            ),
+            cyclingDistance: WorkoutMetricV1(
+                value: 123,
+                unit: .meters,
+                capturedAt: capturedAt
+            ),
+            location: WorkoutLocationV1(
+                latitude: 31.2304,
+                longitude: 121.4737,
+                capturedAt: capturedAt,
+                horizontalAccuracy: 7,
+                altitude: 12,
+                verticalAccuracy: 4,
+                course: nil,
+                speed: 3.5
+            )
+        )
+
+        let update = try XCTUnwrap(
+            WorkoutDeviceFrameBuilder.gpsUpdate(for: snapshot)
+        )
+
+        XCTAssertEqual(update.latitude, 31.2304)
+        XCTAssertEqual(update.longitude, 121.4737)
+        XCTAssertEqual(update.horizontalAccuracyMeters, 7)
+        XCTAssertNil(update.courseDegrees)
+        XCTAssertEqual(update.speedMetersPerSecond, 3.5)
+        XCTAssertEqual(update.altitudeMeters, 12)
+        XCTAssertEqual(update.distanceTraveledMeters, 123)
+        XCTAssertEqual(update.elapsedSeconds, 42)
+    }
+
+    func testWorkoutGPSUpdateRejectsInactiveAndInvalidLocation() {
+        let capturedAt = Date()
+        let location = WorkoutLocationV1(
+            latitude: 91,
+            longitude: 121.4737,
+            capturedAt: capturedAt,
+            horizontalAccuracy: 7,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: nil
+        )
+
+        XCTAssertNil(WorkoutDeviceFrameBuilder.gpsUpdate(for: .init(
+            state: .running,
+            location: location
+        )))
+        XCTAssertNil(WorkoutDeviceFrameBuilder.gpsUpdate(for: .init(
+            state: .idle,
+            location: WorkoutLocationV1(
+                latitude: 31.2304,
+                longitude: 121.4737,
+                capturedAt: capturedAt,
+                horizontalAccuracy: 7,
+                altitude: nil,
+                verticalAccuracy: nil,
+                course: nil,
+                speed: nil
+            )
+        )))
+    }
+
     func testLocalSegmentsRecordSequentialHealthKitEventsAndCloseAtFinish()
         async throws {
         let startDate = Date().addingTimeInterval(-60)

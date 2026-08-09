@@ -354,6 +354,23 @@ enum RideSharedTests {
             ).count == 30,
             "Watch GPS payload matches the firmware binary schema"
         )
+        let invalidCourse = NavigationLocationSampleV1(
+            coordinate: location.coordinate,
+            horizontalAccuracyMeters: location.horizontalAccuracyMeters,
+            courseDegrees: -1,
+            speedMetersPerSecond: location.speedMetersPerSecond,
+            altitudeMeters: location.altitudeMeters,
+            timestamp: location.timestamp
+        )
+        let invalidCoursePacket = WatchRidePacketEncoderV1.gps(
+            invalidCourse,
+            snapshot: nil
+        )
+        expect(
+            invalidCoursePacket[8] == 0xFF &&
+                invalidCoursePacket[9] == 0xFF,
+            "Watch GPS uses the version-11 explicit invalid-heading sentinel"
+        )
     }
 
     private static func testWatchControllerContract() throws {

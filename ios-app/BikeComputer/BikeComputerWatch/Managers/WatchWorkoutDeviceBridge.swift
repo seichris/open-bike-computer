@@ -31,7 +31,10 @@ final class WatchWorkoutDeviceBridge {
                for: Self.sample(snapshot: snapshot, token: token)
             ) {
             deviceLink.setWorkoutDemand(true)
-            deviceLink.updateWorkout(frames)
+            deviceLink.updateWorkout(
+                frames,
+                gps: WorkoutDeviceFrameBuilder.gpsUpdate(for: snapshot)
+            )
             return
         }
 

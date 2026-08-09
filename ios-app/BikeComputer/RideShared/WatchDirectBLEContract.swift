@@ -445,9 +445,12 @@ enum WatchRidePacketEncoderV1 {
         var result = Data()
         result.appendInt32LE(Int32(sample.coordinate.latitude * 1_000_000))
         result.appendInt32LE(Int32(sample.coordinate.longitude * 1_000_000))
-        let heading = sample.courseDegrees >= 0
-            ? UInt16(min(sample.courseDegrees, 359))
-            : 0
+        let heading: UInt16 = if sample.courseDegrees.isFinite,
+            (0..<360).contains(sample.courseDegrees) {
+            UInt16(sample.courseDegrees.rounded()) % 360
+        } else {
+            .max
+        }
         result.appendUInt16LE(heading)
         let seconds = sample.timestamp.timeIntervalSince1970
         result.appendUInt32LE(UInt32(max(min(seconds, Double(UInt32.max)), 0)))
