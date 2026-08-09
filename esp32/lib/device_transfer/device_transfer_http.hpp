@@ -41,6 +41,10 @@ public:
   virtual ~HttpRequestHandler() = default;
   virtual bool handleRequest(const HttpRequest &request,
                              WiFiClient &client) = 0;
+  virtual bool allowShortUnauthenticatedResponseCompletion(
+      const HttpRequest &request) const {
+    return false;
+  }
   virtual void responseDidComplete(const HttpRequest &request,
                                    bool peerClosedCleanly) {}
 };
@@ -98,8 +102,17 @@ private:
   void unlockState() const;
 };
 
-bool sendHttpHead(WiFiClient &client, int status,
-                  uint64_t contentLength = 0);
+struct HttpResponseHeader {
+  const char *name = nullptr;
+  const char *value = nullptr;
+};
+
+bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength = 0,
+                  const char *contentType = nullptr,
+                  const HttpResponseHeader *additionalHeaders = nullptr,
+                  size_t additionalHeaderCount = 0);
+bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+                    uint32_t timeoutMs = 5000);
 bool sendHttpJson(WiFiClient &client, int status, const std::string &body);
 bool sendHttpError(WiFiClient &client, int status, const std::string &code,
                    const std::string &message);

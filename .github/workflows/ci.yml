@@ -14,11 +14,13 @@ jobs:
       matrix:
         target:
           - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_175_REMOTE_DEBUG
           - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_175_POWER_METRICS
           - WAVESHARE_AMOLED_175_LIGHT_SLEEP
           - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_REMOTE_DEBUG
           - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_206_DISPLAY_TEST
           - WAVESHARE_AMOLED_206_POWER_METRICS
@@ -36,6 +38,18 @@ jobs:
         run: python -m pip install --upgrade platformio
       - name: Build firmware
         run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.target }}"
+      - name: Verify remote-debug artifact includes the browser service
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        run: |
+          grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"
+          grep -aFq "Bicino real-device debugger" ".pio/build/${{ matrix.target }}/firmware.elf"
+      - name: Verify ordinary artifacts exclude remote-debug routes
+        if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
+        run: |
+          if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then
+            echo "Non-debug firmware contains remote-debug routes"
+            exit 1
+          fi
 
   ios:
     name: iOS
@@ -97,6 +111,12 @@ jobs:
           bash ./scripts/verify-release-container.sh
           "$RUNNER_TEMP/bike-computer-release/Build/Products/Release-iphoneos/BikeComputer.app"
         working-directory: ios-app
+      - name: Verify Release app excludes remote-debug settings
+        run: |
+          if grep -aFq "Start Remote Debugging" "$RUNNER_TEMP/bike-computer-release/Build/Products/Release-iphoneos/BikeComputer.app/BikeComputer"; then
+            echo "Release app contains the Debug-only remote device settings"
+            exit 1
+          fi
 
   esp32-host:
     name: ESP32 Host Tests
@@ -265,6 +285,24 @@ jobs:
             tools/tests/test_scoped_watch_payload_policy.cpp \
             -o /tmp/test_scoped_watch_payload_policy
           /tmp/test_scoped_watch_payload_policy
+      - name: Remote device debug host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_debug_protocol.cpp \
+            -o /tmp/test_device_debug_protocol
+          /tmp/test_device_debug_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_debug_input.cpp \
+            -o /tmp/test_device_debug_input
+          /tmp/test_device_debug_input
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_transfer_control_dispatch.cpp \
+            -o /tmp/test_transfer_control_dispatch
+          /tmp/test_transfer_control_dispatch
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_device_debug_cli \
+            tools.tests.test_device_debug_http_contract \
+            tools.tests.test_device_debug_page
       - name: Filled line rasterizer host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

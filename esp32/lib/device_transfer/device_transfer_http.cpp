@@ -46,6 +46,8 @@ static const char *httpReason(int status) {
     return "OK";
   case 202:
     return "Accepted";
+  case 204:
+    return "No Content";
   case 400:
     return "Bad Request";
   case 401:
@@ -62,6 +64,8 @@ static const char *httpReason(int status) {
     return "Payload Too Large";
   case 415:
     return "Unsupported Media Type";
+  case 429:
+    return "Too Many Requests";
   case 431:
     return "Request Header Fields Too Large";
   case 503:
@@ -124,25 +128,25 @@ static std::string jsonEscape(const std::string &value) {
 
 constexpr uint32_t kHttpResponseCloseTimeoutMs = 5000;
 
-static bool writeHttpResponse(WiFiClient &client,
-                              const std::string &response) {
+static bool writeHttpResponse(WiFiClient &client, const std::string &response) {
   if (response.empty())
     return false;
-  return client.write(reinterpret_cast<const uint8_t *>(response.data()),
-                      response.size()) == response.size();
+  return writeHttpBytes(client,
+                        reinterpret_cast<const uint8_t *>(response.data()),
+                        response.size());
 }
 
 // HTTP responses use Connection: close. A write only hands bytes to lwIP; it
 // does not prove the peer received them. Half-closing the write side queues a
 // FIN after the response, then waiting for the peer's close provides a real
 // response-consumption boundary before a handler may tear down the AP.
-static bool finishHttpResponse(WiFiClient &client) {
+static bool finishHttpResponse(WiFiClient &client, uint32_t timeoutMs) {
   const int socket = client.fd();
   if (socket < 0 || ::shutdown(socket, SHUT_WR) != 0)
     return false;
 
   const uint32_t started = millis();
-  while (millis() - started < kHttpResponseCloseTimeoutMs) {
+  while (millis() - started < timeoutMs) {
     uint8_t byte = 0;
     errno = 0;
     const int received =
@@ -469,9 +473,9 @@ bool HttpTransferServer::isRequestAuthorized(
       isHttpTransferGenerationCurrent(enabled, transferGeneration,
                                       request.transferGeneration) &&
       !sessionToken.empty() && request.transferToken == sessionToken;
+  currentRequestAuthorized_ = authorized;
   if (authorized) {
     lastUsefulTrafficMs_ = millis();
-    currentRequestAuthorized_ = true;
   }
   unlockState();
   return authorized;
@@ -578,7 +582,13 @@ void HttpTransferServer::handleClient(WiFiClient &client) {
     // An unauthenticated client must not occupy the single transfer worker for
     // the graceful-close deadline. Authenticated requests receive the durable
     // response boundary needed before a handler may change transfer state.
-    const bool peerClosedCleanly = authorized && finishHttpResponse(client);
+    const bool shortUnauthenticatedCompletion =
+        !authorized &&
+        handler->allowShortUnauthenticatedResponseCompletion(request);
+    const bool peerClosedCleanly =
+        (authorized || shortUnauthenticatedCompletion) &&
+        finishHttpResponse(client, authorized ? kHttpResponseCloseTimeoutMs
+                                              : 250U);
     client.stop();
     handler->responseDidComplete(request, peerClosedCleanly);
     return;
@@ -642,12 +652,54 @@ void HttpTransferServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength) {
-  const std::string response =
-      std::string("HTTP/1.1 ") + std::to_string(status) + " " +
-      httpReason(status) + "\r\nConnection: close\r\nContent-Length: " +
-      std::to_string(contentLength) + "\r\n\r\n";
+bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength,
+                  const char *contentType,
+                  const HttpResponseHeader *additionalHeaders,
+                  size_t additionalHeaderCount) {
+  std::string response = std::string("HTTP/1.1 ") + std::to_string(status) +
+                         " " + httpReason(status) + "\r\n";
+  if (contentType != nullptr && contentType[0] != '\0') {
+    const std::string value(contentType);
+    if (value.find('\r') != std::string::npos ||
+        value.find('\n') != std::string::npos)
+      return false;
+    response += "Content-Type: " + value + "\r\n";
+  }
+  for (size_t index = 0; index < additionalHeaderCount; ++index) {
+    if (additionalHeaders == nullptr || additionalHeaders[index].name == nullptr ||
+        additionalHeaders[index].value == nullptr)
+      return false;
+    const std::string name(additionalHeaders[index].name);
+    const std::string value(additionalHeaders[index].value);
+    if (!validHttpHeaderName(name) || value.find('\r') != std::string::npos ||
+        value.find('\n') != std::string::npos)
+      return false;
+    response += name + ": " + value + "\r\n";
+  }
+  response += "Connection: close\r\nContent-Length: " +
+              std::to_string(contentLength) + "\r\n\r\n";
   return writeHttpResponse(client, response);
+}
+
+bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+                    uint32_t timeoutMs) {
+  if (data == nullptr && length != 0)
+    return false;
+  size_t offset = 0;
+  uint32_t lastProgressMs = millis();
+  while (offset < length && millis() - lastProgressMs < timeoutMs) {
+    if (!client.connected())
+      return false;
+    const size_t chunk = std::min<size_t>(4096, length - offset);
+    const size_t written = client.write(data + offset, chunk);
+    if (written == 0) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+    offset += written;
+    lastProgressMs = millis();
+  }
+  return offset == length;
 }
 
 bool sendHttpJson(WiFiClient &client, int status, const std::string &body) {

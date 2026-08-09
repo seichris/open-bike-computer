@@ -11,6 +11,7 @@ enum class Action : uint8_t {
   EnableFirmware = 2,
   DisableMap = 3,
   DisableAll = 4,
+  EnableDebug = 5,
 };
 
 enum Notification : uint8_t {

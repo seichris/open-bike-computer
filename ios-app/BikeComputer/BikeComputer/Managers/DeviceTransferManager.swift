@@ -14,12 +14,67 @@ struct DeviceTransferSession: Equatable {
     enum Mode: String, Equatable {
         case map
         case firmware
+        case debug
     }
 
     let mode: Mode
     let baseURL: URL
     let accessPointSSID: String?
     let sessionToken: String?
+}
+
+enum RemoteDeviceDebugError: LocalizedError, Equatable {
+    case deviceNotReady
+    case unsupportedFirmware
+    case transferCommandNotSent
+    case rejected(String)
+    case missingSession
+
+    var errorDescription: String? {
+        switch self {
+        case .deviceNotReady:
+            return "The Bike Computer is not authenticated and ready."
+        case .unsupportedFirmware:
+            return "The connected firmware does not support remote device debugging."
+        case .transferCommandNotSent:
+            return "The remote-debug request could not be sent."
+        case .rejected(let message):
+            return message
+        case .missingSession:
+            return "The device did not return a fresh remote-debug session."
+        }
+    }
+}
+
+enum RemoteDeviceDebugSessionPolicy {
+    static func browserURL(for session: DeviceTransferSession) -> URL? {
+        guard session.mode == .debug,
+              let token = session.sessionToken,
+              !token.isEmpty else { return nil }
+        let pageURL = session.baseURL
+            .appendingPathComponent("device-debug", isDirectory: true)
+        guard var components = URLComponents(
+            url: pageURL,
+            resolvingAgainstBaseURL: false
+        ) else { return nil }
+        components.fragment = token
+        return components.url
+    }
+
+    static func sessionDetails(
+        for session: DeviceTransferSession,
+        target: String,
+        deviceName: String
+    ) -> String {
+        [
+            "Mode: \(session.mode.rawValue)",
+            "Target: \(target.isEmpty ? "unknown" : target)",
+            "Device: \(deviceName.isEmpty ? "unknown" : deviceName)",
+            "SSID: \(session.accessPointSSID ?? "not provided")",
+            "Base URL: \(session.baseURL.absoluteString)",
+            "Token: present (not copied)",
+        ].joined(separator: "\n")
+    }
 }
 
 enum DeviceTransferHandshakePolicy {
@@ -228,6 +283,59 @@ final class DeviceTransferManager {
     func exitFirmwareTransfer(bleManager: BLEManager) {
         bleManager.requestDeviceTransferExit()
         removeJoinedAccessPointIfNeeded()
+    }
+
+    func enterRemoteDebug(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        status("requesting remote debug mode")
+        guard bleManager.isNavigationReady else {
+            throw RemoteDeviceDebugError.deviceNotReady
+        }
+        guard bleManager.supportsRemoteDeviceDebug else {
+            throw RemoteDeviceDebugError.unsupportedFirmware
+        }
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferMode(.debug) else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
+
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision,
+               bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
+               let baseURL = bleManager.deviceTransferBaseURL,
+               let token = bleManager.deviceTransferSessionToken,
+               !token.isEmpty {
+                status("remote debug session ready")
+                return DeviceTransferSession(
+                    mode: .debug,
+                    baseURL: baseURL,
+                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+                    sessionToken: token
+                )
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        if bleManager.deviceTransferStatusRevision != initialRevision,
+           let code = bleManager.deviceTransferLastErrorCode,
+           !code.isEmpty {
+            let message = bleManager.deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 } ?? code
+            throw RemoteDeviceDebugError.rejected(message)
+        }
+        throw RemoteDeviceDebugError.missingSession
+    }
+
+    func exitRemoteDebug(bleManager: BLEManager) async {
+        guard bleManager.requestDeviceTransferExit() else { return }
+        _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
+        _ = bleManager.requestDeviceTransferStatus()
     }
 
     private func joinDeviceNetworkIfNeeded(

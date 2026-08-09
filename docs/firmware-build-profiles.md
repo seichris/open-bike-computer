@@ -1,6 +1,6 @@
 # Firmware build profiles
 
-The Waveshare firmware has four intentional profile classes for each display
+The Waveshare firmware has five intentional profile classes for each display
 target:
 
 - `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` are developer/diagnostic
@@ -8,6 +8,13 @@ target:
   to two seconds during boot so a serial monitor can attach.
 - `*_POWER_METRICS` adds the structured `PWRMET` stream and optional timing
   pulse to the corresponding diagnostic build.
+- `*_REMOTE_DEBUG` extends the ordinary developer build with
+  `DEVICE_REMOTE_DEBUG=1`. It adds the authenticated, session-scoped real-device
+  framebuffer and synthetic-pointer service described in
+  [Remote device debugging](remote-device-debugging.md). It is built in CI but
+  never selected by a release workflow. Ordinary developer and production
+  firmware do not advertise CAP2 bit `15` and cannot enter `debug` transfer
+  mode.
 - `*_LIGHT_SLEEP` is the opt-in Phase 7B validation image. It inherits power
   metrics, enables tickless idle and automatic light sleep, and activates the
   application-managed display, map, storage, transfer, audio, and I2C locks.
@@ -42,3 +49,10 @@ Use `WAVESHARE_AMOLED_175_LIGHT_SLEEP` or
 `WAVESHARE_AMOLED_206_LIGHT_SLEEP` only for the dedicated physical validation
 matrix. Ordinary and production profiles intentionally keep tickless idle and
 automatic light sleep disabled until that matrix passes.
+
+Use `WAVESHARE_AMOLED_175_REMOTE_DEBUG` or
+`WAVESHARE_AMOLED_206_REMOTE_DEBUG` only when browser/automation control of the
+currently tested firmware is required. Build and flash the profile matching the
+physical panel through `esp32/tools/build_firmware.py`; the debug service is
+compiled into that complete firmware image rather than installed alongside an
+unmodified image.

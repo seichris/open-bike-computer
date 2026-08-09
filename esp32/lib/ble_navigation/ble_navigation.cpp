@@ -31,6 +31,7 @@
 #include "../gui/src/mapRenderPolicy.hpp"
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
+#include "../device_debug/device_debug_http.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #endif
@@ -67,6 +68,9 @@ extern Gps gps;
 extern device_transfer::HttpTransferServer deviceTransferHttp;
 extern map_transfer::MapTransferHttpServer mapTransferHttp;
 extern firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
+extern device_debug::DeviceDebugHttp deviceDebugHttp;
+extern bool startRemoteDeviceDebugSession();
+extern bool stopActiveDeviceTransfer();
 extern Maps mapView;
 extern Storage storage;
 
@@ -1720,6 +1724,23 @@ static void processPendingTransferControl() {
     }
     break;
   }
+  case ble_transfer::Action::EnableDebug: {
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && transferStatus.mode != "debug") {
+      deviceTransferHttp.setLastError("transfer_busy",
+                                      "another transfer mode is active");
+      Serial.println(
+          "BLE Device Transfer: debug enter rejected, transfer is busy");
+    } else if (transferStatus.enabled && transferStatus.mode == "debug") {
+      Serial.println("BLE Device Transfer: debug enter already applied");
+    } else {
+      const bool enabled = startRemoteDeviceDebugSession();
+      Serial.printf("BLE Device Transfer: debug enter applied, enabled=%d\n",
+                    enabled);
+    }
+    break;
+  }
   case ble_transfer::Action::DisableMap: {
     bool disabled = true;
     if (deviceTransferHttp.status().mode == "map") {
@@ -1729,7 +1750,7 @@ static void processPendingTransferControl() {
     break;
   }
   case ble_transfer::Action::DisableAll: {
-    const bool disabled = deviceTransferHttp.setEnabled(false);
+    const bool disabled = stopActiveDeviceTransfer();
     Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
                   disabled);
     break;
@@ -1821,6 +1842,14 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE;
     }
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.initialized() &&
+        clientVersion >= device_capabilities_protocol::
+                             REMOTE_DEVICE_DEBUG_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::REMOTE_DEVICE_DEBUG_FEATURE;
+    }
+#endif
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -2128,6 +2157,29 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::EnableFirmware,
                          ble_transfer::NotifyGeneric);
     Serial.println("BLE Device Transfer: firmware enter queued");
+    return;
+  }
+
+  if (command == "enter|debug") {
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.initialized()) {
+      queueTransferControl(ble_transfer::Action::EnableDebug,
+                           ble_transfer::NotifyGeneric);
+      Serial.println("BLE Device Transfer: debug enter queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "remote_debug_unavailable",
+          "remote debug service did not initialize on this device");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "remote_debug_unsupported",
+        "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
     return;
   }
 

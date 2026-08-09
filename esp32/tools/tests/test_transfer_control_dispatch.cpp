@@ -18,6 +18,12 @@ int main() {
   auto request = pending.take();
   assert(request.action == Action::EnableMap);
   assert(request.notifications == (NotifyMap | NotifyGeneric));
+
+  pending.merge(Action::EnableMap, NotifyMap);
+  pending.merge(Action::EnableDebug, NotifyGeneric);
+  request = pending.take();
+  assert(request.action == Action::EnableDebug);
+  assert(request.notifications == (NotifyMap | NotifyGeneric));
   assert(pending.take().empty());
 
   pending.merge(Action::EnableMap, NotifyMap);

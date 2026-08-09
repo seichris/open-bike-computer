@@ -1548,6 +1548,208 @@ private struct TestNavigationSettingsSection: View {
     }
 }
 
+#if DEBUG
+@MainActor
+private struct RemoteDeviceDebugSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @State private var isWorking = false
+    @State private var statusMessage = "Idle"
+    @State private var errorMessage: String?
+    @State private var copiedBrowserURL: String?
+
+    var body: some View {
+        Section {
+            SettingsValueRow(title: "Status", value: sessionStatus)
+            SettingsValueRow(
+                title: "Target",
+                value: bleManager.firmwareTarget.isEmpty
+                    ? (bleManager.hardwareLabel.isEmpty ? "Unknown" : bleManager.hardwareLabel)
+                    : bleManager.firmwareTarget
+            )
+            if let session = activeSession {
+                SettingsValueRow(
+                    title: "SSID",
+                    value: session.accessPointSSID ?? "Not provided"
+                )
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Base URL")
+                    Text(session.baseURL.absoluteString)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Button(action: copyBrowserURL) {
+                    Label("Copy Browser URL", systemImage: "safari")
+                }
+                .disabled(isWorking || browserURL == nil)
+
+                Button(action: copySessionDetails) {
+                    Label("Copy Session Details", systemImage: "doc.on.doc")
+                }
+                .disabled(isWorking)
+
+                Button(role: .destructive, action: endSession) {
+                    Label("End Debug Session", systemImage: "stop.circle")
+                }
+                .disabled(isWorking)
+            } else {
+                Button(action: startSession) {
+                    if isWorking {
+                        HStack {
+                            ProgressView()
+                            Text("Starting Remote Debugging…")
+                        }
+                    } else {
+                        Label("Start Remote Debugging", systemImage: "rectangle.connected.to.line.below")
+                    }
+                }
+                .disabled(!canStart || isWorking)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Remote Device Debugging")
+        } footer: {
+            Text(footerText)
+        }
+        .onChange(of: bleManager.deviceTransferMode) { mode in
+            if mode != DeviceTransferSession.Mode.debug.rawValue {
+                clearCopiedBrowserURLIfOwned()
+                if !isWorking {
+                    statusMessage = "Idle"
+                    errorMessage = nil
+                }
+            }
+        }
+        .onChange(of: bleManager.deviceTransferSessionToken) { _ in
+            if copiedBrowserURL != browserURL?.absoluteString {
+                clearCopiedBrowserURLIfOwned()
+            }
+        }
+        .task(id: bleManager.deviceTransferMode) {
+            guard bleManager.deviceTransferMode ==
+                    DeviceTransferSession.Mode.debug.rawValue else { return }
+            while !Task.isCancelled,
+                  bleManager.deviceTransferMode ==
+                    DeviceTransferSession.Mode.debug.rawValue {
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+        }
+    }
+
+    private var activeSession: DeviceTransferSession? {
+        guard bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
+              let baseURL = bleManager.deviceTransferBaseURL,
+              let token = bleManager.deviceTransferSessionToken,
+              !token.isEmpty else { return nil }
+        return DeviceTransferSession(
+            mode: .debug,
+            baseURL: baseURL,
+            accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+            sessionToken: token
+        )
+    }
+
+    private var browserURL: URL? {
+        activeSession.flatMap {
+            RemoteDeviceDebugSessionPolicy.browserURL(for: $0)
+        }
+    }
+
+    private var canStart: Bool {
+        bleManager.isNavigationReady &&
+            bleManager.hasReceivedDeviceCapabilities &&
+            bleManager.supportsRemoteDeviceDebug &&
+            bleManager.deviceTransferMode.isEmpty
+    }
+
+    private var sessionStatus: String {
+        if activeSession != nil { return "Ready for browser" }
+        if !bleManager.isNavigationReady { return "Device not ready" }
+        if !bleManager.hasReceivedDeviceCapabilities { return "Checking firmware" }
+        if !bleManager.supportsRemoteDeviceDebug { return "Unsupported firmware" }
+        if !bleManager.deviceTransferMode.isEmpty {
+            return "Busy: \(bleManager.deviceTransferMode)"
+        }
+        return statusMessage
+    }
+
+    private var footerText: String {
+        if activeSession != nil {
+            return "Join the shown device Wi-Fi on the Mac, then open the copied URL. The URL fragment is the session secret; do not paste it into logs."
+        }
+        return "Requires an opt-in remote-debug firmware build. This starts the real device framebuffer and synthetic-pointer service; it is not a simulator."
+    }
+
+    private func startSession() {
+        isWorking = true
+        errorMessage = nil
+        statusMessage = "Requesting session"
+        Task {
+            defer { isWorking = false }
+            do {
+                _ = try await DeviceTransferManager().enterRemoteDebug(
+                    bleManager: bleManager,
+                    status: { statusMessage = $0 }
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+                statusMessage = "Failed"
+            }
+        }
+    }
+
+    private func copyBrowserURL() {
+        guard let browserURL else { return }
+        UIPasteboard.general.string = browserURL.absoluteString
+        copiedBrowserURL = browserURL.absoluteString
+        statusMessage = "Browser URL copied"
+    }
+
+    private func copySessionDetails() {
+        guard let session = activeSession else { return }
+        UIPasteboard.general.string = RemoteDeviceDebugSessionPolicy.sessionDetails(
+            for: session,
+            target: bleManager.firmwareTarget,
+            deviceName: bleManager.peripheralName
+        )
+        statusMessage = "Secret-free details copied"
+    }
+
+    private func endSession() {
+        clearCopiedBrowserURLIfOwned()
+        isWorking = true
+        errorMessage = nil
+        statusMessage = "Ending session"
+        Task {
+            await DeviceTransferManager().exitRemoteDebug(bleManager: bleManager)
+            statusMessage = "Session ended"
+            isWorking = false
+        }
+    }
+
+    private func clearCopiedBrowserURLIfOwned() {
+        guard let copiedBrowserURL else { return }
+        if UIPasteboard.general.string == copiedBrowserURL {
+            UIPasteboard.general.string = ""
+        }
+        self.copiedBrowserURL = nil
+    }
+}
+#endif
+
 private struct DeveloperSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var offlineMapManager: OfflineMapManager
@@ -1606,6 +1808,9 @@ private struct DeveloperSettingsView: View {
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
+#if DEBUG
+            RemoteDeviceDebugSettingsSection()
+#endif
             TestNavigationSettingsSection(
                 currentLocation: currentLocation,
                 onStartNavigation: onStartTestNavigation

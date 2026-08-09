@@ -5,6 +5,8 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#include "../device_debug/device_debug_frame_store.hpp"
+#include "../device_debug/device_debug_input.hpp"
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
 #include "../power_management/active_low_wake_interrupt_gate.hpp"
 #endif
@@ -35,6 +37,7 @@
 #include "waveshare_board.hpp"
 
 extern void appDisplayFlushCompleted();
+extern void appRemoteDebugPointerActivity();
 
 // Define Global Variables declared extern in hal.hpp
 uint8_t GPS_TX = GPIO_NUM_43;
@@ -241,6 +244,14 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   // Notify application policy only after the physical panel write (including
   // the 2.06-inch commit write) has completed.
   appDisplayFlushCompleted();
+
+  // Remote debugging captures the exact panel-oriented bytes only while its
+  // opt-in session is active. The producer never waits for a network reader.
+#if DEVICE_REMOTE_DEBUG
+  device_debug::frameStore().offerPanelFrame(
+      pixels, static_cast<uint16_t>(targetW), static_cast<uint16_t>(targetH),
+      static_cast<uint16_t>(targetW * sizeof(uint16_t)), millis());
+#endif
 
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);
@@ -1031,30 +1042,43 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
   publishTouchFrame(singleContactFrame, millis());
 #endif
 
+  device_debug::PointerSample remotePointer{};
+#if DEVICE_REMOTE_DEBUG
+  remotePointer = device_debug::pointerInput().sample(touchPressed, millis());
+  if (remotePointer.changed)
+    appRemoteDebugPointerActivity();
+#endif
+
   if (touchPressed && !isPrimaryTouchSuppressed()) {
     data->state = LV_INDEV_STATE_PRESSED;
-    // Rotate touch coordinates to match display rotation
-    uint16_t rotatedX = touchX;
-    uint16_t rotatedY = touchY;
-    switch (displayRotation) {
-    case 1: // Inverse of the clockwise framebuffer rotation
-      rotatedX = touchY;
-      rotatedY = waveshare_board::touch::MAX_Y - touchX;
-      break;
-    case 2: // 180°: flip both
-      rotatedX = waveshare_board::touch::MAX_X - touchX;
-      rotatedY = waveshare_board::touch::MAX_Y - touchY;
-      break;
-    case 3: // 270° CCW: swap X/Y and flip new Y
-      rotatedX = waveshare_board::touch::MAX_X - touchY;
-      rotatedY = touchX;
-      break;
-    }
-    data->point.x = rotatedX;
-    data->point.y = rotatedY;
+    const device_debug::TargetGeometry physicalGeometry{
+        waveshare_board::display::ACTIVE_WIDTH,
+        waveshare_board::display::ACTIVE_HEIGHT, displayRotation};
+    const device_debug::Point rotated =
+        device_debug::panelToLvgl(physicalGeometry, {touchX, touchY});
+    data->point.x = rotated.x;
+    data->point.y = rotated.y;
+  } else if (!touchPressed && remotePointer.pressed) {
+    data->state = LV_INDEV_STATE_PRESSED;
+    data->point.x = remotePointer.point.x;
+    data->point.y = remotePointer.point.y;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
+    if (!touchPressed && remotePointer.changed) {
+      // Preserve the final panel coordinate carried by up/cancel even though
+      // the sample is released; LVGL gesture recognition observes this point.
+      data->point.x = remotePointer.point.x;
+      data->point.y = remotePointer.point.y;
+    }
   }
+}
+
+bool hasFullScreenRgb565Buffer() {
+  return display != nullptr && disp_draw_buf != nullptr &&
+         (displayRotation != waveshare_board::display::ROTATION_90 ||
+          disp_rotation_buf != nullptr) &&
+         lv_display_get_color_format(display) == LV_COLOR_FORMAT_RGB565 &&
+         lv_display_get_render_mode(display) == LV_DISPLAY_RENDER_MODE_FULL;
 }
 
 // ============================================================================

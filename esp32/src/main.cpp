@@ -68,6 +68,7 @@ extern xSemaphoreHandle gpsMutex;
 
 #include "maps.hpp"
 #include "device_transfer_http.hpp"
+#include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
@@ -106,6 +107,7 @@ extern Maps mapView;
 device_transfer::HttpTransferServer deviceTransferHttp;
 map_transfer::MapTransferHttpServer mapTransferHttp;
 firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
+device_debug::DeviceDebugHttp deviceDebugHttp;
 
 static lv_obj_t *mapActivationProgressPanel = nullptr;
 static lv_obj_t *mapActivationProgressLabel = nullptr;
@@ -390,6 +392,94 @@ static display_inactivity::Mode currentDisplayMode =
     display_inactivity::Mode::Active;
 static uint32_t lastPowerButtonHousekeepingMs = 0;
 #endif
+
+static const char *remoteDebugStartErrorCode(
+    device_debug::FrameStoreStartResult result) {
+  switch (result) {
+  case device_debug::FrameStoreStartResult::Started:
+    return "";
+  case device_debug::FrameStoreStartResult::UnsupportedBuild:
+    return "remote_debug_unsupported";
+  case device_debug::FrameStoreStartResult::InvalidGeometry:
+    return "remote_debug_geometry";
+  case device_debug::FrameStoreStartResult::FullFrameUnavailable:
+    return "remote_debug_full_frame_unavailable";
+  case device_debug::FrameStoreStartResult::MutexAllocationFailed:
+    return "remote_debug_runtime_allocation";
+  case device_debug::FrameStoreStartResult::InsufficientPsram:
+    return "remote_debug_insufficient_psram";
+  }
+  return "remote_debug_setup";
+}
+
+bool startRemoteDeviceDebugSession() {
+#if !DEVICE_REMOTE_DEBUG
+  deviceTransferHttp.setLastError("remote_debug_unsupported",
+                                  "this firmware has no remote debug service");
+  return false;
+#else
+  const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
+  if (status.enabled)
+    return status.mode == "debug";
+  if (!deviceTransferHttp.waitUntilStopped(2000)) {
+    deviceTransferHttp.setLastError("transfer_stopping",
+                                    "previous transfer worker is still stopping");
+    return false;
+  }
+  if (device_debug::frameStore().active()) {
+    // Complete any deferred cleanup from a prior slow client before a fresh
+    // transfer generation allocates session state.
+    deviceDebugHttp.cancelSession();
+    deviceDebugHttp.finishSessionTeardown();
+  }
+  const device_debug::FrameStoreStartResult started =
+      deviceDebugHttp.beginSession(hasFullScreenRgb565Buffer());
+  if (started != device_debug::FrameStoreStartResult::Started) {
+    deviceTransferHttp.setLastError(remoteDebugStartErrorCode(started),
+                                    "remote debug session could not start");
+    return false;
+  }
+  if (!deviceTransferHttp.setEnabled(true, "debug")) {
+    deviceDebugHttp.cancelSession();
+    deviceDebugHttp.finishSessionTeardown();
+    return false;
+  }
+  device_debug::frameStore().requestNextFrame();
+  if (lv_screen_active() != nullptr)
+    lv_obj_invalidate(lv_screen_active());
+  return true;
+#endif
+}
+
+bool stopActiveDeviceTransfer() {
+  const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
+  if (status.mode == "map")
+    return mapTransferHttp.setEnabled(false);
+  if (status.mode == "firmware")
+    return firmwareUpdateHttp.setEnabled(false);
+  if (status.mode == "debug" || device_debug::frameStore().active()) {
+    // setEnabled(false) revokes the authorization generation before the debug
+    // state and snapshot are reclaimed.
+    const bool revoked = deviceTransferHttp.setEnabled(false);
+    deviceDebugHttp.cancelSession();
+    const bool stopped = deviceTransferHttp.waitUntilStopped(5500);
+    if (stopped)
+      deviceDebugHttp.finishSessionTeardown();
+    else
+      deviceTransferHttp.setLastError(
+          "remote_debug_worker_stopping",
+          "remote debug HTTP worker did not stop before cleanup deadline");
+    return revoked && stopped;
+  }
+  return deviceTransferHttp.setEnabled(false);
+}
+
+void appRemoteDebugPointerActivity() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  displayInactivityPolicy.noteMeaningfulActivity(millis());
+#endif
+}
+
 #include "lvglSetup.hpp"
 #include "settings.hpp"
 #include "tasks.hpp"
@@ -474,14 +564,7 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
     return false;
   }
 
-  bool disabled = false;
-  if (transferStatus.mode == "map") {
-    disabled = mapTransferHttp.setEnabled(false);
-  } else if (transferStatus.mode == "firmware") {
-    disabled = firmwareUpdateHttp.setEnabled(false);
-  } else {
-    disabled = deviceTransferHttp.setEnabled(false);
-  }
+  const bool disabled = stopActiveDeviceTransfer();
   Serial.printf(
       "DEVICE_TRANSFER_HTTP: inactivity timeout mode=%s disabled=%d\n",
       transferStatus.mode.empty() ? "unknown" : transferStatus.mode.c_str(),
@@ -1312,6 +1395,7 @@ void setup() {
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
   firmwareUpdateHttp.configure(&deviceTransferHttp);
+  deviceDebugHttp.configure(&deviceTransferHttp);
 
   createGpxFolders();
 
@@ -1432,6 +1516,12 @@ void loop() {
   const uint32_t wakeReasons =
       pendingUiWakeReasons | ui_scheduler::wait(0);
   pendingUiWakeReasons = 0;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (ui_scheduler::hasReason(wakeReasons,
+                              ui_scheduler::WakeReason::RemoteDebug)) {
+    displayInactivityPolicy.noteMeaningfulActivity(now);
+  }
+#endif
 #if BLE_RADIO_CHARACTERIZATION
   if (ui_scheduler::hasReason(wakeReasons,
                               ui_scheduler::WakeReason::Touch) ||
@@ -1559,6 +1649,34 @@ void loop() {
       Serial.printf("MAP_TRANSFER_HTTP: automatic exit applied disabled=%d\n",
                     disabled);
     }
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.takeWakeRequest()) {
+      device_debug::frameStore().requestNextFrame();
+      if (lv_screen_active() != nullptr)
+        lv_obj_invalidate(lv_screen_active());
+    }
+    if (deviceDebugHttp.takeAutomaticExitRequest()) {
+      const bool disabled = stopActiveDeviceTransfer();
+      Serial.printf("REMOTE_DEBUG_HTTP: automatic exit applied disabled=%d\n",
+                    disabled);
+    }
+    // A slow browser can outlive the synchronous teardown deadline. Reclaim
+    // the session as soon as the single HTTP worker has actually stopped.
+    if (device_debug::frameStore().active() &&
+        deviceTransferHttp.status().mode.empty() &&
+        deviceTransferHttp.waitUntilStopped(0)) {
+      deviceDebugHttp.cancelSession();
+      deviceDebugHttp.finishSessionTeardown();
+    }
+    if (device_debug::frameStore().uiRefreshDue(now) &&
+        displayPowerManager.state() != display_power::State::Off &&
+        lv_screen_active() != nullptr) {
+      // Frame polling may request a redraw of an active/dimmed panel, but it
+      // never records meaningful activity and therefore cannot wake an off
+      // display or extend its inactivity policy.
+      lv_obj_invalidate(lv_screen_active());
+    }
+#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
     processTransferInactivityTimeout(now);
 #endif

@@ -159,7 +159,8 @@ enum DeviceBLEProtocol {
     static let osm3DBuildingsCapabilityMask: UInt32 = 1 << 12
     static let explicitInvalidGPSHeadingCapabilityMask: UInt32 = 1 << 13
     static let scopedWatchControllerCapabilityMask: UInt32 = 1 << 14
-    static let deviceCapabilitiesVersion: UInt8 = 12
+    static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 15
+    static let deviceCapabilitiesVersion: UInt8 = 13
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
     static let workoutTelemetryExtendedCoalescingKey =
@@ -625,6 +626,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var watchControllerOperationError: String?
     @Published private(set) var watchConnectivityState =
         PhoneWatchConnectivityStateV1()
+    @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -3195,6 +3197,7 @@ class BLEManager: NSObject, ObservableObject {
         watchControllerIDHex = nil
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -3951,6 +3954,7 @@ class BLEManager: NSObject, ObservableObject {
         isWatchControllerPromotionInFlight = false
         pendingWatchControllerOperation = nil
         watchControllerOperationStatus = nil
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -6260,6 +6264,7 @@ extension BLEManager: CBPeripheralDelegate {
         watchControllerIDHex = nil
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -6375,6 +6380,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
+        let hasRemoteDeviceDebug =
+            flags & DeviceBLEProtocol.remoteDeviceDebugCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -6453,6 +6460,7 @@ extension BLEManager: CBPeripheralDelegate {
         supports3DBuildings = has3DBuildings
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController
+        supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
