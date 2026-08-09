@@ -1,86 +1,58 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct PlannedRoutesView: View {
+struct OfflineRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
-    @Environment(\.dismiss) private var dismiss
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
 
     var body: some View {
-        NavigationStack {
-            List {
-                if routeLibrary.routes.isEmpty {
-                    emptyState
-                } else {
-                    ForEach(routeLibrary.routes) { route in
-                        routeRow(route)
-                    }
-                }
-            }
-            .navigationTitle("Offline Routes")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        isImportingGPX = true
-                    } label: {
-                        Label("Import GPX", systemImage: "square.and.arrow.down")
-                    }
-                }
-            }
-            .alert(
-                "Route Sync Error",
-                isPresented: Binding(
-                    get: { errorMessage != nil },
-                    set: { if !$0 { errorMessage = nil } }
+        Section {
+            if routeLibrary.routes.isEmpty {
+                Label(
+                    "No Saved Routes",
+                    systemImage:
+                        "point.topleft.down.to.point.bottomright.curvepath"
                 )
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "Unknown error")
+                .foregroundStyle(.secondary)
+            } else {
+                ForEach(routeLibrary.routes) { route in
+                    routeRow(route)
+                }
             }
-            .onAppear { routeLibrary.reload() }
-            .fileImporter(
-                isPresented: $isImportingGPX,
-                allowedContentTypes: [
-                    UTType(filenameExtension: "gpx") ?? .xml,
-                ],
-                allowsMultipleSelection: false
-            ) { result in
-                importGPX(result)
-            }
-        }
-    }
 
-    @ViewBuilder
-    private var emptyState: some View {
-        if #available(iOS 17.0, *) {
-            ContentUnavailableView(
-                "No Saved Routes",
-                systemImage: "point.topleft.down.to.point.bottomright.curvepath",
-                description: Text(
-                    "Import a GPX route to prepare offline Watch navigation."
-                )
-            )
-        } else {
-            VStack(spacing: 8) {
-                Image(systemName:
-                    "point.topleft.down.to.point.bottomright.curvepath")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                Text("No Saved Routes")
-                    .font(.headline)
-                Text("Import a GPX route to prepare offline Watch navigation.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            Button {
+                isImportingGPX = true
+            } label: {
+                Label("Import GPX", systemImage: "square.and.arrow.down")
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 24)
-            .listRowBackground(Color.clear)
+        } header: {
+            Text("Offline Routes")
+        } footer: {
+            Text(
+                "Import a user-owned GPX route, then send it to Apple Watch for offline navigation."
+            )
+        }
+        .alert(
+            "Route Sync Error",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "Unknown error")
+        }
+        .onAppear { routeLibrary.reload() }
+        .fileImporter(
+            isPresented: $isImportingGPX,
+            allowedContentTypes: [
+                UTType(filenameExtension: "gpx") ?? .xml,
+            ],
+            allowsMultipleSelection: false
+        ) { result in
+            importGPX(result)
         }
     }
 

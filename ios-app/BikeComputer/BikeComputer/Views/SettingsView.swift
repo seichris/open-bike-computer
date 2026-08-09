@@ -16,6 +16,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
+    @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var watchAvailability:
         WorkoutWatchAvailabilityMonitor
     @ObservedObject private var cyclingSensorStore:
@@ -32,6 +33,7 @@ struct SettingsView: View {
         currentLocation: CLLocation?,
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
+        routeLibrary: PhoneRouteLibrary,
         watchAvailability: WorkoutWatchAvailabilityMonitor,
         cyclingSensorStore: CyclingSensorStore? = nil,
         cyclingSensorDetectionCoordinator:
@@ -44,6 +46,7 @@ struct SettingsView: View {
         self.currentLocation = currentLocation
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
+        self.routeLibrary = routeLibrary
         self.watchAvailability = watchAvailability
         _cyclingSensorStore = ObservedObject(
             wrappedValue: cyclingSensorStore
@@ -91,6 +94,8 @@ struct SettingsView: View {
                 ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
+
+                OfflineRoutesSettingsSection(routeLibrary: routeLibrary)
 
                 Section {
                     NavigationLink {
@@ -1737,6 +1742,9 @@ private struct StatusValueRow: View {
         currentLocation: nil,
         offlineMapManager: OfflineMapManager(),
         firmwareUpdateManager: FirmwareUpdateManager(),
+        routeLibrary: PhoneRouteLibrary(
+            connectivity: PhoneWatchConnectivityCoordinator(session: nil)
+        ),
         watchAvailability: WorkoutWatchAvailabilityMonitor(),
         onStartTestNavigation: { _ in }
     )

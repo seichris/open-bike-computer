@@ -15,7 +15,6 @@ private enum ContentSheetDestination: String, Identifiable {
     case sensorSettings
     case workoutDashboard
     case rideMetrics
-    case plannedRoutes
 
     var id: String { rawValue }
 }
@@ -390,6 +389,7 @@ struct ContentView: View {
                 currentLocation: coordinator.currentLocation,
                 offlineMapManager: offlineMapManager,
                 firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                routeLibrary: routeLibrary,
                 watchAvailability: watchAvailability,
                 cyclingSensorStore: cyclingSensorStore,
                 cyclingSensorDetectionCoordinator:
@@ -480,10 +480,6 @@ struct ContentView: View {
             .presentationCornerRadius(32)
             .interactiveDismissDisabled()
 
-        case .plannedRoutes:
-            PlannedRoutesView(routeLibrary: routeLibrary)
-                .presentationDetents([.large])
-                .presentationBackgroundInteraction(.disabled)
         }
     }
 
@@ -683,19 +679,6 @@ struct ContentView: View {
                 isConnected: coordinator.isConnected,
                 onReconnect: { coordinator.reconnect() }
             )
-
-            Button(action: { presentedSheet = .plannedRoutes }) {
-                Image(
-                    systemName:
-                        "point.topleft.down.to.point.bottomright.curvepath"
-                )
-                .font(.title3)
-                .foregroundColor(.primary)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Offline routes")
 
             Button(action: { presentedSheet = .settings }) {
                 Image(systemName: "gearshape.fill")

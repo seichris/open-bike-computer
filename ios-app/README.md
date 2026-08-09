@@ -113,11 +113,11 @@ deregistering and adding the Bicino again for now.
 
 Offline mode is the default:
 
-1. On iPhone, open **Offline Routes**, choose **Import GPX**, and select a
-   user-owned GPX route or track. The longest usable route/track segment is
-   validated and saved. MapKit alternatives remain active-navigation only;
-   **Save Offline** stays disabled until an approved export-capable provider is
-   configured.
+1. On iPhone, open **Settings**, find **Offline Routes**, choose **Import GPX**,
+   and select a user-owned GPX route or track. The longest usable route/track
+   segment is validated and saved. MapKit alternatives remain
+   active-navigation only; **Save Offline** stays disabled until an approved
+   export-capable provider is configured.
 2. Send the route to Watch and wait for **Ready**. **Queued** does not prove the
    route is installed.
 3. Leave **Use Watch cellular connection** off in Watch Settings, select the
