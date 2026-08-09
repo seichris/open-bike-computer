@@ -17,8 +17,9 @@ has passed with release-build evidence.
 - Continue the loaded route if Watch connectivity or recalculation fails.
 - Keep workout and navigation independent: either can end while the other
   remains active.
-- Enroll Watch with a scoped ride credential. Bicino permits only one active
-  iPhone or Watch writer at a time.
+- Automatically set up the paired Watch with a scoped ride credential when the
+  iPhone is securely connected to Bicino and the Watch app is open. Bicino
+  permits only one active iPhone or Watch writer at a time.
 
 ## Important behavior
 
@@ -31,8 +32,10 @@ has passed with release-build evidence.
 - MapKit-created routes are held in active-session memory only. MapKit durable
   export and non-Apple accessory-display use remain blocked pending explicit
   approval under the current Apple terms.
-- Replacing or reinstalling a Watch, revoking Watch access, deregistering
-  Bicino, or performing a physical ownership reset requires enrollment again.
+- **My Bike Computers** shows the Watch-provided display name and whether
+  direct rides are ready. The display name is not used as a security identity.
+- Replacing or reinstalling a Watch, deregistering Bicino, or performing a
+  physical ownership reset requires setup again.
 
 ## Release evidence required
 

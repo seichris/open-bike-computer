@@ -1,5 +1,6 @@
 import Foundation
 import WatchConnectivity
+import WatchKit
 
 /// The sole production owner of `WCSession.default` on Apple Watch.
 @MainActor
@@ -24,10 +25,22 @@ final class WatchConnectivityCoordinator: NSObject {
     }
 
     func activate() {
-        guard let session, !hasActivated else { return }
+        guard let session else { return }
+        if hasActivated {
+            if session.activationState == .activated {
+                publishDeviceMetadata(using: session)
+            }
+            return
+        }
         hasActivated = true
         session.delegate = self
         session.activate()
+    }
+
+    func refreshDeviceMetadata() {
+        guard let session,
+              session.activationState == .activated else { return }
+        publishDeviceMetadata(using: session)
     }
 
     fileprivate func activationDidComplete(
@@ -35,7 +48,25 @@ final class WatchConnectivityCoordinator: NSObject {
         error: Error?
     ) {
         guard error == nil, state == .activated, let session else { return }
+        publishDeviceMetadata(using: session)
         onApplicationContext?(session.receivedApplicationContext)
+    }
+
+    private func publishDeviceMetadata(using session: WCSession) {
+        let device = WKInterfaceDevice.current()
+        let fallbackName = device.localizedModel.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty ? "Apple Watch" : device.localizedModel
+        guard let metadata = try? WatchDeviceMetadataV1(
+            name: device.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty ? fallbackName : device.name,
+            localizedModel: fallbackName,
+            systemName: device.systemName,
+            systemVersion: device.systemVersion
+        ), let data = try? metadata.encoded() else { return }
+        var merged = session.applicationContext
+        merged[WatchDeviceMetadataV1.applicationContextKey] = data
+        try? session.updateApplicationContext(merged)
     }
 
     fileprivate func receiveRouteFile(

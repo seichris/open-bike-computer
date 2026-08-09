@@ -124,10 +124,16 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         
         // Configure for background location updates
         print("Bicino app launched")
-        _ = coordinator
-        coordinator.bleManager.bindWatchConnectivityCoordinator(
+        let bleManager = coordinator.bleManager
+        bleManager.bindWatchConnectivityCoordinator(
             watchConnectivityCoordinator
         )
+        watchConnectivityCoordinator.$state
+            .removeDuplicates()
+            .sink { [weak bleManager] state in
+                bleManager?.updateWatchConnectivityState(state)
+            }
+            .store(in: &cancellables)
         watchConnectivityCoordinator.activate()
         workoutMirrorManager.installMirroringHandler()
         if #available(iOS 17.0, *) {

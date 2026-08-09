@@ -2,15 +2,6 @@ import Combine
 import Foundation
 import WatchConnectivity
 
-struct PhoneWatchConnectivityStateV1: Equatable {
-    var isSupported = false
-    var isActivated = false
-    var activationFailed = false
-    var isPaired = false
-    var isWatchAppInstalled = false
-    var isReachable = false
-}
-
 /// The sole production owner of `WCSession.default` on iPhone.
 ///
 /// Application-context fields are merged so independently evolving features
@@ -330,13 +321,25 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             return
         }
         let activated = session.activationState == .activated
+        let paired = activated && session.isPaired
+        let watchAppInstalled = paired && session.isWatchAppInstalled
+        let watchMetadata: WatchDeviceMetadataV1?
+        if watchAppInstalled,
+           let data = session.receivedApplicationContext[
+               WatchDeviceMetadataV1.applicationContextKey
+           ] as? Data {
+            watchMetadata = try? WatchDeviceMetadataV1.decode(data)
+        } else {
+            watchMetadata = nil
+        }
         state = PhoneWatchConnectivityStateV1(
             isSupported: true,
             isActivated: activated,
             activationFailed: activationFailed ?? state.activationFailed,
-            isPaired: activated && session.isPaired,
-            isWatchAppInstalled: activated && session.isWatchAppInstalled,
-            isReachable: activated && session.isReachable
+            isPaired: paired,
+            isWatchAppInstalled: watchAppInstalled,
+            isReachable: activated && session.isReachable,
+            watchMetadata: watchMetadata
         )
         if activated {
             flushPendingControllerRevocations()
@@ -405,6 +408,13 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
     }
 
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        Task { @MainActor [weak self] in self?.refreshState() }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveApplicationContext applicationContext: [String: Any]
+    ) {
         Task { @MainActor [weak self] in self?.refreshState() }
     }
 

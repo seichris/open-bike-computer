@@ -103,11 +103,13 @@ the ride. Navigation and workout are separate: ending a workout leaves active
 navigation visible and running, while stopping navigation leaves an active
 workout untouched.
 
-Before the first direct ride, connect the iPhone to the Bicino, open its device
-settings, and enroll the paired Apple Watch. The Watch receives a device-local,
-ride-only credential; it never receives the iPhone OwnerKey. Revoking Watch
-access or resetting/deregistering the Bicino invalidates that credential. A
-replacement or reinstalled Watch must be enrolled again.
+Before the first direct ride, connect the iPhone to the Bicino, unlock Apple
+Watch, and open its Bicino app. Setup then happens automatically. **My Bike
+Computers** shows the Watch name and whether **Direct rides** are ready. The
+Watch receives a device-local, ride-only credential; it never receives the
+iPhone OwnerKey. Resetting or deregistering the Bicino invalidates that
+credential. Replacing or reinstalling a Watch requires resetting or
+deregistering and adding the Bicino again for now.
 
 Offline mode is the default:
 

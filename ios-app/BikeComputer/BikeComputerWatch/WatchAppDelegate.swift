@@ -79,6 +79,10 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
         workoutManager.handleActiveWorkoutRecovery()
     }
 
+    func applicationDidBecomeActive() {
+        connectivityCoordinator.refreshDeviceMetadata()
+    }
+
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         workoutManager.handleWorkoutConfiguration(workoutConfiguration)
     }

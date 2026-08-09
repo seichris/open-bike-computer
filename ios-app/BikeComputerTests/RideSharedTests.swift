@@ -450,6 +450,96 @@ enum RideSharedTests {
                 key: Data(repeating: 0, count: 32)
             )
         }
+
+        let metadata = try WatchDeviceMetadataV1(
+            name: "Chris’s Apple Watch",
+            localizedModel: "Apple Watch Ultra 2",
+            systemName: "watchOS",
+            systemVersion: "26.0"
+        )
+        try expect(
+            try WatchDeviceMetadataV1.decode(metadata.encoded()) == metadata,
+            "Watch display metadata round-trips"
+        )
+        expectThrows(
+            WatchControllerContractError.invalidEnvelope,
+            "empty Watch names are rejected"
+        ) {
+            _ = try WatchDeviceMetadataV1(
+                name: "  ",
+                localizedModel: "Apple Watch",
+                systemName: "watchOS",
+                systemVersion: "26.0"
+            )
+        }
+        expectThrows(
+            WatchControllerContractError.invalidEnvelope,
+            "oversized Watch names are rejected"
+        ) {
+            _ = try WatchDeviceMetadataV1(
+                name: String(
+                    repeating: "a",
+                    count: WatchDeviceMetadataV1.maximumDisplayValueBytes + 1
+                ),
+                localizedModel: "Apple Watch",
+                systemName: "watchOS",
+                systemVersion: "26.0"
+            )
+        }
+
+        let availableWatch = WatchControllerAvailabilityV1(
+            isSupported: true,
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: true
+        )
+        expect(
+            WatchControllerAutomaticEnrollmentPolicyV1.shouldStart(
+                firmwareSupportsScopedController: true,
+                deviceConnectedAndAuthenticated: true,
+                controllerStatusKnown: true,
+                hasController: false,
+                operationInFlight: false,
+                availability: availableWatch
+            ),
+            "automatic enrollment starts only after all trust boundaries are ready"
+        )
+        expect(
+            !WatchControllerAutomaticEnrollmentPolicyV1.shouldStart(
+                firmwareSupportsScopedController: true,
+                deviceConnectedAndAuthenticated: true,
+                controllerStatusKnown: false,
+                hasController: false,
+                operationInFlight: false,
+                availability: availableWatch
+            ),
+            "automatic enrollment waits for authoritative firmware status"
+        )
+        expect(
+            !WatchControllerAutomaticEnrollmentPolicyV1.shouldStart(
+                firmwareSupportsScopedController: true,
+                deviceConnectedAndAuthenticated: true,
+                controllerStatusKnown: true,
+                hasController: true,
+                operationInFlight: false,
+                availability: availableWatch
+            ),
+            "automatic enrollment never overwrites an existing controller"
+        )
+        var unreachableWatch = availableWatch
+        unreachableWatch.isReachable = false
+        expect(
+            !WatchControllerAutomaticEnrollmentPolicyV1.shouldStart(
+                firmwareSupportsScopedController: true,
+                deviceConnectedAndAuthenticated: true,
+                controllerStatusKnown: true,
+                hasController: false,
+                operationInFlight: false,
+                availability: unreachableWatch
+            ),
+            "automatic enrollment waits for a live Watch app"
+        )
     }
 
     private static func testArchiveIntegrityAndRetention() throws {

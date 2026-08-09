@@ -222,6 +222,129 @@ enum WatchControllerTransportV1 {
     static let userInfoPayloadKey = "watchControllerRequestV1"
 }
 
+struct WatchDeviceMetadataV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    static let applicationContextKey = "watchDeviceMetadataV1"
+    static let maximumDisplayValueBytes = 256
+    static let maximumSystemValueBytes = 64
+
+    let schema: Int
+    let name: String
+    let localizedModel: String
+    let systemName: String
+    let systemVersion: String
+
+    init(
+        name: String,
+        localizedModel: String,
+        systemName: String,
+        systemVersion: String
+    ) throws {
+        schema = Self.schemaVersion
+        self.name = try Self.validatedValue(
+            name,
+            maximumBytes: Self.maximumDisplayValueBytes
+        )
+        self.localizedModel = try Self.validatedValue(
+            localizedModel,
+            maximumBytes: Self.maximumDisplayValueBytes
+        )
+        self.systemName = try Self.validatedValue(
+            systemName,
+            maximumBytes: Self.maximumSystemValueBytes
+        )
+        self.systemVersion = try Self.validatedValue(
+            systemVersion,
+            maximumBytes: Self.maximumSystemValueBytes
+        )
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return try Self(
+            name: name,
+            localizedModel: localizedModel,
+            systemName: systemName,
+            systemVersion: systemVersion
+        )
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+
+    private static func validatedValue(
+        _ value: String,
+        maximumBytes: Int
+    ) throws -> String {
+        let normalized = value.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalized.isEmpty,
+              normalized.lengthOfBytes(using: .utf8) <= maximumBytes else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return normalized
+    }
+}
+
+struct WatchControllerAvailabilityV1: Equatable, Sendable {
+    var isSupported = false
+    var isActivated = false
+    var isPaired = false
+    var isWatchAppInstalled = false
+    var isReachable = false
+
+    var canPerformLiveEnrollment: Bool {
+        isSupported && isActivated && isPaired && isWatchAppInstalled &&
+            isReachable
+    }
+}
+
+struct PhoneWatchConnectivityStateV1: Equatable, Sendable {
+    var isSupported = false
+    var isActivated = false
+    var activationFailed = false
+    var isPaired = false
+    var isWatchAppInstalled = false
+    var isReachable = false
+    var watchMetadata: WatchDeviceMetadataV1?
+
+    var controllerAvailability: WatchControllerAvailabilityV1 {
+        WatchControllerAvailabilityV1(
+            isSupported: isSupported,
+            isActivated: isActivated,
+            isPaired: isPaired,
+            isWatchAppInstalled: isWatchAppInstalled,
+            isReachable: isReachable
+        )
+    }
+}
+
+enum WatchControllerAutomaticEnrollmentPolicyV1 {
+    static func shouldStart(
+        firmwareSupportsScopedController: Bool,
+        deviceConnectedAndAuthenticated: Bool,
+        controllerStatusKnown: Bool,
+        hasController: Bool,
+        operationInFlight: Bool,
+        availability: WatchControllerAvailabilityV1
+    ) -> Bool {
+        firmwareSupportsScopedController &&
+            deviceConnectedAndAuthenticated &&
+            controllerStatusKnown &&
+            !hasController &&
+            !operationInFlight &&
+            availability.canPerformLiveEnrollment
+    }
+}
+
 extension Data {
     var watchControllerHex: String {
         map { String(format: "%02x", $0) }.joined()

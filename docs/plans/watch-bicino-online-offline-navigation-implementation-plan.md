@@ -556,7 +556,7 @@ workout:
 
 - **Navigation** row: `None`, installed route, or favorite allowed by policy;
 - **Route mode** badge: `Offline` or `Online` derived from the user setting;
-- **Bicino** row: enrollment, connection, authentication, and lease status;
+- **Bicino** row: automatic setup, connection, authentication, and lease status;
 - existing **Start Ride** action.
 
 When the policy is offline, show installed routes only. When online, show
@@ -731,8 +731,8 @@ standalone product has a different data owner and acceptance matrix under #97.
 - refactor `Managers/NavigationEngine.swift` behind the shared runtime;
 - replace direct WatchConnectivity ownership in
   `WorkoutWatchAvailabilityMonitor.swift` with `PhoneWatchSyncCoordinator`;
-- extend `BikeComputersSettingsView.swift` with direct-Watch enrollment and
-  revocation;
+- extend `BikeComputersSettingsView.swift` with the Watch-provided display name
+  and read-only automatic direct-ride setup status;
 - extend `BLEManager.swift` for controller administration, `CAP2` bit 14, and
   lease-aware iPhone writes.
 
@@ -802,7 +802,8 @@ iPhone/Watch app relaunch, and reports Ready only after hash-verified install.
 
 1. Add firmware controller persistence, auth, role checks, and lease.
 2. Allocate and document `CAP2` feature bit 14 and client version 12.
-3. Add iPhone enrollment/revocation and Watch Keychain storage.
+3. Add automatic iPhone enrollment, read-only Watch status, revocation
+   internals, and Watch Keychain storage.
 4. Add adversarial dual-controller, reset, and power-loss tests.
 
 Gate: no test can make iPhone and Watch writes both succeed; older firmware and

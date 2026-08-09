@@ -623,6 +623,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var watchControllerIDHex: String?
     @Published private(set) var watchControllerOperationStatus: String?
     @Published private(set) var watchControllerOperationError: String?
+    @Published private(set) var watchConnectivityState =
+        PhoneWatchConnectivityStateV1()
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -837,6 +839,8 @@ class BLEManager: NSObject, ObservableObject {
     }
     private var pendingWatchControllerOperation:
         PendingWatchControllerOperation?
+    private var hasReceivedWatchControllerStatus = false
+    private var isWatchControllerPromotionInFlight = false
     private var pendingDeregistrationDeviceID: String?
     private var pendingRenameDeviceID: String?
     private var deviceOperationTimeoutTimer: Timer?
@@ -1789,6 +1793,93 @@ class BLEManager: NSObject, ObservableObject {
         _ coordinator: any PhoneWatchControllerTransporting
     ) {
         watchConnectivityCoordinator = coordinator
+    }
+
+    func updateWatchConnectivityState(
+        _ state: PhoneWatchConnectivityStateV1
+    ) {
+        let wasReady = watchConnectivityState.controllerAvailability
+            .canPerformLiveEnrollment
+        watchConnectivityState = state
+        if !wasReady && state.controllerAvailability.canPerformLiveEnrollment {
+            if watchControllerIDHex == nil {
+                attemptAutomaticWatchControllerEnrollment()
+            } else {
+                attemptWatchControllerPromotion()
+            }
+        }
+    }
+
+    func isWatchControllerConfigured(
+        for device: KnownBikeComputerDevice
+    ) -> Bool {
+        if connectedDeviceID == device.deviceID,
+           hasReceivedWatchControllerStatus {
+            return watchControllerIDHex != nil
+        }
+        return rememberedWatchControllerID(deviceID: device.deviceID) != nil
+    }
+
+    private func attemptAutomaticWatchControllerEnrollment() {
+        guard let deviceID = connectedDeviceID,
+              let device = knownDevices.first(where: {
+                  $0.deviceID == deviceID
+              }) else { return }
+        let shouldStart = WatchControllerAutomaticEnrollmentPolicyV1
+            .shouldStart(
+                firmwareSupportsScopedController:
+                    supportsScopedWatchController,
+                deviceConnectedAndAuthenticated:
+                    isConnected(to: device) &&
+                    authenticatedWriteSession != nil,
+                controllerStatusKnown: hasReceivedWatchControllerStatus,
+                hasController: watchControllerIDHex != nil,
+                operationInFlight: pendingWatchControllerOperation != nil,
+                availability:
+                    watchConnectivityState.controllerAvailability
+            )
+        guard shouldStart else { return }
+        enableWatchController(for: device)
+    }
+
+    private func attemptWatchControllerPromotion() {
+        guard hasReceivedWatchControllerStatus,
+              pendingWatchControllerOperation == nil,
+              !isWatchControllerPromotionInFlight,
+              watchConnectivityState.controllerAvailability
+                .canPerformLiveEnrollment,
+              let deviceID = connectedDeviceID,
+              let controllerIDHex = watchControllerIDHex,
+              let controllerID = Data(ownershipHex: controllerIDHex),
+              controllerID.count == 16,
+              let watchConnectivityCoordinator else { return }
+        let request = WatchControllerRequestV1(
+            operation: .promote,
+            deviceID: deviceID,
+            controllerID: controllerID
+        )
+        isWatchControllerPromotionInFlight = true
+        let callbackBox = WeakBLEManagerSendableBox(self)
+        watchConnectivityCoordinator.sendWatchControllerRequest(request) {
+            result in
+            DispatchQueue.main.async {
+                guard let manager = callbackBox.value else { return }
+                manager.isWatchControllerPromotionInFlight = false
+                guard manager.connectedDeviceID == deviceID,
+                      manager.watchControllerIDHex == controllerIDHex else {
+                    return
+                }
+                switch result {
+                case .success:
+                    manager.watchControllerOperationError = nil
+                case .failure(.rejected("credential_store")):
+                    manager.watchControllerOperationError =
+                        "This Bike Computer is linked to a different or reset Apple Watch. Replacing a Watch requires resetting or deregistering this Bike Computer for now."
+                case .failure:
+                    break
+                }
+            }
+        }
     }
 
     func enableWatchController(for device: KnownBikeComputerDevice) {
@@ -2806,6 +2897,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
         watchControllerIDHex = nil
+        hasReceivedWatchControllerStatus = false
+        isWatchControllerPromotionInFlight = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -3558,6 +3651,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
         watchControllerIDHex = nil
+        hasReceivedWatchControllerStatus = false
+        isWatchControllerPromotionInFlight = false
         pendingWatchControllerOperation = nil
         watchControllerOperationStatus = nil
         updateWorkoutTelemetryCapability(false)
@@ -4172,10 +4267,14 @@ class BLEManager: NSObject, ObservableObject {
         ).map(String.init)
         guard parts.count == 2 else { return }
         if parts[1] == "none" {
+            hasReceivedWatchControllerStatus = true
+            isWatchControllerPromotionInFlight = false
             watchControllerIDHex = nil
+            watchControllerOperationError = nil
             if let deviceID = connectedDeviceID {
                 queueRememberedWatchControllerDeletion(deviceID: deviceID)
             }
+            attemptAutomaticWatchControllerEnrollment()
             return
         }
         guard let controllerID = Data(ownershipHex: parts[1]),
@@ -4183,25 +4282,12 @@ class BLEManager: NSObject, ObservableObject {
               let deviceID = connectedDeviceID else {
             return
         }
+        hasReceivedWatchControllerStatus = true
         watchControllerIDHex = controllerID.ownershipHex
         rememberWatchControllerID(controllerID, deviceID: deviceID)
-        guard pendingWatchControllerOperation == nil,
-              let watchConnectivityCoordinator else { return }
         // Idempotently repairs an app termination or unreachable Watch between
         // the firmware commit and the Watch Keychain promotion.
-        let request = WatchControllerRequestV1(
-            operation: .promote,
-            deviceID: deviceID,
-            controllerID: controllerID
-        )
-        let callbackBox = WeakBLEManagerSendableBox(self)
-        watchConnectivityCoordinator.sendWatchControllerRequest(request) {
-            result in
-            guard case .success = result else { return }
-            DispatchQueue.main.async {
-                callbackBox.value?.watchControllerOperationError = nil
-            }
-        }
+        attemptWatchControllerPromotion()
     }
 
     private func failWatchControllerOperation(_ message: String) {
@@ -5868,6 +5954,8 @@ extension BLEManager: CBPeripheralDelegate {
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
         watchControllerIDHex = nil
+        hasReceivedWatchControllerStatus = false
+        isWatchControllerPromotionInFlight = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -6068,9 +6156,11 @@ extension BLEManager: CBPeripheralDelegate {
         hasReceivedDeviceCapabilities = true
         if hasScopedWatchController,
            pendingWatchControllerOperation == nil {
+            hasReceivedWatchControllerStatus = false
             enqueueAuthMessage("WCTRL_STATUS")
         } else if !hasScopedWatchController {
             watchControllerIDHex = nil
+            hasReceivedWatchControllerStatus = false
         }
         log("Device capabilities: schema=\(prefix) flags=0x\(String(format: "%08X", flags)) legacyExtended=0x\(String(format: "%02X", legacyExtendedFlags))")
         sendScreenSettingsAfterCapabilityNegotiation()
