@@ -73,13 +73,27 @@ final class WatchConnectivityCoordinator: NSObject {
         data: Data?,
         request: WatchRouteSyncMessageV1
     ) {
+        let response = routeInstallResponse(data: data, request: request)
+        acknowledge(response)
+    }
+
+    fileprivate func routeInstallResponse(
+        data: Data?,
+        request: WatchRouteSyncMessageV1
+    ) -> WatchRouteSyncMessageV1 {
         guard let data else {
-            acknowledge(request.identity, status: .rejected, error: "file_read")
-            return
+            return routeAcknowledgement(
+                request.identity,
+                status: .rejected,
+                error: "file_read"
+            )
         }
         guard request.encodedByteCount == data.count else {
-            acknowledge(request.identity, status: .rejected, error: "byte_count")
-            return
+            return routeAcknowledgement(
+                request.identity,
+                status: .rejected,
+                error: "byte_count"
+            )
         }
         do {
             let archive = try NavigationRouteArchiveV1.decode(
@@ -90,22 +104,25 @@ final class WatchConnectivityCoordinator: NSObject {
                 throw WatchRouteLibraryError.metadataMismatch
             }
             guard archive.deleteAfter == request.deleteAfter else {
-                acknowledge(
+                return routeAcknowledgement(
                     request.identity,
                     status: .rejected,
                     error: "retention_mismatch"
                 )
-                return
             }
             _ = try routeLibrary.install(
                 data,
                 expectedIdentity: request.identity
             )
-            acknowledge(request.identity, status: .ready)
+            return routeAcknowledgement(request.identity, status: .ready)
         } catch {
             let code = Self.errorCode(for: error)
             routeLibrary.reportSyncError(code)
-            acknowledge(request.identity, status: .rejected, error: code)
+            return routeAcknowledgement(
+                request.identity,
+                status: .rejected,
+                error: code
+            )
         }
     }
 
@@ -206,15 +223,29 @@ final class WatchConnectivityCoordinator: NSObject {
         status: WatchRouteSyncStatusV1,
         error: String? = nil
     ) {
+        acknowledge(routeAcknowledgement(
+            identity,
+            status: status,
+            error: error
+        ))
+    }
+
+    private func acknowledge(_ message: WatchRouteSyncMessageV1) {
         guard let session,
               session.activationState == .activated else { return }
-        session.transferUserInfo(
-            WatchRouteSyncMessageV1(
-                operation: .acknowledge,
-                identity: identity,
-                status: status,
-                errorCode: error
-            ).propertyList
+        session.transferUserInfo(message.propertyList)
+    }
+
+    private func routeAcknowledgement(
+        _ identity: WatchRouteIdentityV1,
+        status: WatchRouteSyncStatusV1,
+        error: String? = nil
+    ) -> WatchRouteSyncMessageV1 {
+        WatchRouteSyncMessageV1(
+            operation: .acknowledge,
+            identity: identity,
+            status: status,
+            errorCode: error
         )
     }
 
@@ -261,6 +292,29 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             replyHandler(self.receiveControllerRequest(messageData))
+        }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveMessage message: [String: Any],
+        replyHandler: @escaping ([String: Any]) -> Void
+    ) {
+        guard let immediate = WatchRouteImmediateTransferV1.decode(
+            message
+        ) else {
+            replyHandler([:])
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                replyHandler([:])
+                return
+            }
+            replyHandler(self.routeInstallResponse(
+                data: immediate.archiveData,
+                request: immediate.install
+            ).propertyList)
         }
     }
 

@@ -179,3 +179,48 @@ struct WatchRouteSyncMessageV1: Equatable, Sendable {
         return nil
     }
 }
+
+/// A high-priority route install used only while the counterpart is reachable.
+/// The durable `transferFile` delivery remains authoritative for larger routes
+/// and for times when the Watch app is not active.
+nonisolated enum WatchRouteImmediateTransferV1 {
+    static let maximumEncodedByteCount = 48 * 1_024
+    private static let archiveDataKey = "bicino.route.archive"
+
+    static func message(
+        install: WatchRouteSyncMessageV1,
+        archiveData: Data
+    ) -> [String: Any]? {
+        guard install.operation == .install,
+              install.encodedByteCount == archiveData.count,
+              !archiveData.isEmpty,
+              archiveData.count <= maximumEncodedByteCount,
+              WatchRouteSyncMessageV1(
+                  propertyList: install.propertyList
+              ) == install else {
+            return nil
+        }
+        var message = install.propertyList
+        message[archiveDataKey] = archiveData
+        return message
+    }
+
+    static func decode(
+        _ message: [String: Any]
+    ) -> (install: WatchRouteSyncMessageV1, archiveData: Data)? {
+        guard let archiveData = message[archiveDataKey] as? Data,
+              !archiveData.isEmpty,
+              archiveData.count <= maximumEncodedByteCount else {
+            return nil
+        }
+        var metadata = message
+        metadata.removeValue(forKey: archiveDataKey)
+        guard let install = WatchRouteSyncMessageV1(
+            propertyList: metadata
+        ), install.operation == .install,
+           install.encodedByteCount == archiveData.count else {
+            return nil
+        }
+        return (install, archiveData)
+    }
+}

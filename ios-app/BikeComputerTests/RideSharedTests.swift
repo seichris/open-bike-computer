@@ -1048,6 +1048,35 @@ enum RideSharedTests {
             WatchRouteSyncMessageV1(propertyList: message.propertyList) == message,
             "route transfer metadata round-trips through property-list values"
         )
+        let immediate = WatchRouteImmediateTransferV1.message(
+            install: message,
+            archiveData: data
+        )
+        let decodedImmediate = immediate.flatMap {
+            WatchRouteImmediateTransferV1.decode($0)
+        }
+        expect(
+            decodedImmediate?.install == message &&
+                decodedImmediate?.archiveData == data,
+            "reachable-Watch route messages bind metadata to exact bytes"
+        )
+        var mismatchedImmediate = immediate ?? [:]
+        mismatchedImmediate["bicino.route.archive"] = data + Data([0])
+        expect(
+            WatchRouteImmediateTransferV1.decode(mismatchedImmediate) == nil,
+            "reachable-Watch route messages reject byte-count mismatches"
+        )
+        expect(
+            WatchRouteImmediateTransferV1.message(
+                install: message,
+                archiveData: Data(
+                    repeating: 0,
+                    count: WatchRouteImmediateTransferV1
+                        .maximumEncodedByteCount + 1
+                )
+            ) == nil,
+            "large route archives stay on the durable file-transfer path"
+        )
         var malformed = message.propertyList
         malformed["bicino.route.hash"] = identity.contentHash.uppercased()
         expect(

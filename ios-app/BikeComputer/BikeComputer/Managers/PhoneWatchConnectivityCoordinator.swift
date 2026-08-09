@@ -297,6 +297,43 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
     }
 
+    /// Attempts the high-priority route path while Watch is reachable. The
+    /// caller always queues `transferRoute` first so a failed live message
+    /// still has a durable background fallback.
+    @discardableResult
+    func sendRouteImmediately(
+        _ record: InstalledNavigationRouteV1
+    ) -> Bool {
+        guard let session,
+              session.activationState == .activated,
+              session.isPaired,
+              session.isWatchAppInstalled,
+              session.isReachable,
+              record.encodedSize <=
+                WatchRouteImmediateTransferV1.maximumEncodedByteCount,
+              let archiveData = try? Data(contentsOf: record.fileURL) else {
+            return false
+        }
+        let install = WatchRouteSyncMessageV1(
+            operation: .install,
+            identity: WatchRouteIdentityV1(archive: record.archive),
+            encodedByteCount: record.encodedSize,
+            deleteAfter: record.archive.deleteAfter
+        )
+        guard let message = WatchRouteImmediateTransferV1.message(
+            install: install,
+            archiveData: archiveData
+        ) else { return false }
+        session.sendMessage(message) { [weak self] response in
+            Task { @MainActor [weak self] in
+                self?.receiveAcknowledgement(response)
+            }
+        } errorHandler: { _ in
+            // The already-queued file transfer remains the durable fallback.
+        }
+        return true
+    }
+
     @discardableResult
     func requestRouteDeletion(
         _ identity: WatchRouteIdentityV1

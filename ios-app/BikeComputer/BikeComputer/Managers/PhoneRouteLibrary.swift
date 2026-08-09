@@ -32,6 +32,7 @@ final class PhoneRouteLibrary: ObservableObject {
     private var readyReceiptKeys: Set<String>
     private var pendingDeletionKeys: Set<String>
     private var pendingInstallKeys: Set<String>
+    private var cancellables = Set<AnyCancellable>()
 
     convenience init(connectivity: PhoneWatchConnectivityCoordinator) {
         let base = FileManager.default.urls(
@@ -72,6 +73,16 @@ final class PhoneRouteLibrary: ObservableObject {
         connectivity.onRouteAcknowledgement = { [weak self] message in
             self?.receive(message)
         }
+        connectivity.$state
+            .map(\.isReachable)
+            .removeDuplicates()
+            .sink { [weak self] isReachable in
+                guard isReachable else { return }
+                Task { @MainActor [weak self] in
+                    self?.retryPendingInstallsImmediately()
+                }
+            }
+            .store(in: &cancellables)
         reload()
     }
 
@@ -108,6 +119,7 @@ final class PhoneRouteLibrary: ObservableObject {
         pendingInstallKeys.insert(Self.receiptKey(identity))
         persistPendingInstalls()
         watchSyncState[identity] = .transferring
+        connectivity.sendRouteImmediately(record)
     }
 
     func delete(_ summary: PlannedRouteSummaryV1) throws {
@@ -192,6 +204,18 @@ final class PhoneRouteLibrary: ObservableObject {
             )
         case nil:
             break
+        }
+    }
+
+    private func retryPendingInstallsImmediately() {
+        for summary in routes {
+            let identity = identity(for: summary)
+            guard pendingInstallKeys.contains(Self.receiptKey(identity)),
+                  let record = try? store.record(
+                      matching: identity,
+                      now: now()
+                  ) else { continue }
+            connectivity.sendRouteImmediately(record)
         }
     }
 
