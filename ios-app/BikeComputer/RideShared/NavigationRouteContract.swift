@@ -10,12 +10,12 @@ nonisolated struct RouteCoordinateV1: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-struct RouteEndpointV1: Codable, Equatable {
+nonisolated struct RouteEndpointV1: Codable, Equatable {
     let coordinate: RouteCoordinateV1
     let label: String
 }
 
-struct RouteBoundsV1: Codable, Equatable {
+nonisolated struct RouteBoundsV1: Codable, Equatable {
     let south: Double
     let west: Double
     let north: Double
@@ -48,11 +48,11 @@ struct RouteBoundsV1: Codable, Equatable {
     }
 }
 
-enum RouteTransportTypeV1: String, Codable, Equatable {
+nonisolated enum RouteTransportTypeV1: String, Codable, Equatable {
     case cycling
 }
 
-enum ManeuverV1: String, Codable, CaseIterable, Equatable {
+nonisolated enum ManeuverV1: String, Codable, CaseIterable, Equatable {
     case straight
     case slightLeft
     case left
@@ -111,7 +111,7 @@ enum ManeuverV1: String, Codable, CaseIterable, Equatable {
     }
 }
 
-struct NavigationRouteStepV1: Codable, Equatable, Identifiable {
+nonisolated struct NavigationRouteStepV1: Codable, Equatable, Identifiable {
     let id: UInt32
     let geometryStartIndex: Int
     let geometryEndIndex: Int
@@ -120,18 +120,18 @@ struct NavigationRouteStepV1: Codable, Equatable, Identifiable {
     let distanceMeters: Double
 }
 
-enum RouteStorageScopeV1: String, Codable, Equatable {
+nonisolated enum RouteStorageScopeV1: String, Codable, Equatable {
     case activeOnly
     case durable
 }
 
-struct RouteProviderMetadataV1: Codable, Equatable {
+nonisolated struct RouteProviderMetadataV1: Codable, Equatable {
     let providerID: String
     let attribution: String
     let storageScope: RouteStorageScopeV1
 }
 
-struct NavigationRouteV1: Codable, Equatable, Identifiable {
+nonisolated struct NavigationRouteV1: Codable, Equatable, Identifiable {
     static let schemaVersion: UInt16 = 1
 
     let id: UUID
@@ -152,7 +152,7 @@ struct NavigationRouteV1: Codable, Equatable, Identifiable {
     var routeID: UUID { id }
 }
 
-struct NavigationRouteLimitsV1: Equatable {
+nonisolated struct NavigationRouteLimitsV1: Equatable {
     static let production = NavigationRouteLimitsV1(
         maximumPoints: 50_000,
         maximumSteps: 2_000,
@@ -164,7 +164,7 @@ struct NavigationRouteLimitsV1: Equatable {
     let maximumEncodedBytes: Int
 }
 
-enum NavigationRouteValidationError: Error, Equatable, CustomStringConvertible {
+nonisolated enum NavigationRouteValidationError: Error, Equatable, CustomStringConvertible {
     case invalidRouteID
     case invalidRevision
     case invalidProvider
@@ -220,7 +220,7 @@ enum NavigationRouteValidationError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-extension NavigationRouteV1 {
+nonisolated extension NavigationRouteV1 {
     func validate(limits: NavigationRouteLimitsV1 = .production) throws {
         guard id != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) else {
             throw NavigationRouteValidationError.invalidRouteID

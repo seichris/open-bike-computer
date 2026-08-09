@@ -14,7 +14,7 @@ protocol NavigationRouteProvider: AnyObject {
     func cancel()
 }
 
-enum RouteProviderPolicyV1 {
+nonisolated enum RouteProviderPolicyV1 {
     static let mapKit = RouteProviderMetadataV1(
         providerID: "apple.mapkit",
         attribution: "Apple Maps",

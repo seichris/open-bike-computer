@@ -12906,7 +12906,8 @@ struct NavigationProtocolTests {
         let failedStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 0)
         assert(manager.handleNavigationCharacteristicNotification(failedStatus),
                "failed PWR honk acknowledgement should be consumed")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 2 },
+               "failed PWR honk acknowledgement retry should be observed")
         assertEqual(sentPackets.count, 2,
                     "failed PWR honk acknowledgement retries the configuration")
 
@@ -12928,13 +12929,17 @@ struct NavigationProtocolTests {
         for expectedSendCount in 2...3 {
             assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
                    "failed PWR honk acknowledgement should be consumed")
-            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            assert(waitForMainLoop(timeout: 1) {
+                sentPackets.count == expectedSendCount
+            }, "failed acknowledgement retry should be observed")
             assertEqual(sentPackets.count, expectedSendCount,
                         "failed acknowledgement advances the bounded retry sequence")
         }
         assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
                "terminal failed PWR honk acknowledgement should be consumed")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assert(waitForMainLoop(timeout: 1) {
+            manager.powerButtonHonkConfigurationError != nil
+        }, "terminal failed acknowledgement should surface an error")
         assertEqual(sentPackets.count, 3,
                     "PWR honk acknowledgement retries stop after three total attempts")
         assert(manager.powerButtonHonkConfigurationError != nil,
@@ -12966,7 +12971,8 @@ struct NavigationProtocolTests {
         assert(manager.handlePowerButtonHonkStatusNotification(
             powerButtonHonkStatus(for: secondA, applied: 0)
         ), "current second-A failure should still control retry state")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        assert(waitForMainLoop(timeout: 1) { sentPackets.count == 4 },
+               "current second-A retry should be observed")
         assertEqual(sentPackets.count, 4,
                     "delayed first-A acknowledgement cannot suppress second-A retry")
         assert(manager.handlePowerButtonHonkStatusNotification(

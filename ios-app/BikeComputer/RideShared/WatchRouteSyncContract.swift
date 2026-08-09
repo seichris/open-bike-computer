@@ -12,7 +12,7 @@ nonisolated enum WatchRouteSyncStatusV1: String, Codable, Equatable, Sendable {
     case rejected
 }
 
-struct WatchRouteIdentityV1: Codable, Equatable, Hashable, Sendable {
+nonisolated struct WatchRouteIdentityV1: Codable, Equatable, Hashable, Sendable {
     let routeID: UUID
     let revision: UInt32
     let contentHash: String
@@ -32,7 +32,7 @@ struct WatchRouteIdentityV1: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-struct WatchRouteSyncMessageV1: Equatable, Sendable {
+nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
     static let schemaVersion: UInt16 = 1
 
     let operation: WatchRouteSyncOperationV1

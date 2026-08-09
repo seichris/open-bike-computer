@@ -1,13 +1,13 @@
 import CryptoKit
 import Foundation
 
-enum NavigationRouteArchivePurposeV1: Equatable {
+nonisolated enum NavigationRouteArchivePurposeV1: Equatable {
     case activeUse
     case durableStorage
     case offlineNavigation
 }
 
-enum NavigationRouteArchiveError: Error, Equatable, CustomStringConvertible {
+nonisolated enum NavigationRouteArchiveError: Error, Equatable, CustomStringConvertible {
     case durableStorageNotAllowed(providerID: String)
     case invalidDeletionDate
     case expired
@@ -36,7 +36,7 @@ enum NavigationRouteArchiveError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-struct NavigationRouteArchiveV1: Codable, Equatable {
+nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
     static let schemaVersion: UInt16 = 1
 
     let schemaVersion: UInt16

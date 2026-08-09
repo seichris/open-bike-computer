@@ -1,6 +1,6 @@
 import Foundation
 
-enum NavigationGeometryV1 {
+nonisolated enum NavigationGeometryV1 {
     static let earthRadiusMeters = 6_371_008.8
 
     struct Projection: Equatable {
