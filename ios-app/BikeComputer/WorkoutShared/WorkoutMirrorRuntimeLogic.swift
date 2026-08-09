@@ -1057,7 +1057,9 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     mutating func preemptPendingControlForManualAction() {
         pendingControl = nil
         pendingControlSequence = nil
-        commandErrorCode = nil
+        if timedOutTerminalControl == nil {
+            commandErrorCode = nil
+        }
     }
 
     mutating func failPendingControl(

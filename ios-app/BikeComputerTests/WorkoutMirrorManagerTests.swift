@@ -2401,7 +2401,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
 
         manager.pause()
 
-        XCTAssertEqual(transport.pauseCallCount, 1)
+        XCTAssertEqual(transport.pauseCallCount, 0)
         XCTAssertEqual(transport.sentData.count, 1)
         XCTAssertEqual(
             try WorkoutContractCodec.decode(transport.sentData[0]).control,
@@ -2416,6 +2416,14 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             try WorkoutContractCodec.decode(transport.sentData[1]),
             originalControl
         )
+
+        transport.completeNext(succeeded: true)
+        try await waitUntil { transport.sentData.count == 3 }
+        let pauseControl = try WorkoutContractCodec.decode(
+            transport.sentData[2]
+        )
+        XCTAssertEqual(pauseControl.control, .pause)
+        XCTAssertEqual(pauseControl.controlContext?.origin, .manual)
     }
 
     func testProductionReconnectResendsControlBeforeSnapshotRequest() async throws {
@@ -2463,7 +2471,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
     }
 
-    func testProductionNativePauseResumeWaitsForConfirmation() async {
+    func testProductionManualPauseResumeUsesDurableControlsAndWaitsForConfirmation()
+        async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_500)
         let manager = WorkoutMirrorManager(now: { now })
         let transport = FakeMirroredSessionTransport()
@@ -2475,7 +2484,13 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
 
         manager.pause()
-        XCTAssertEqual(transport.pauseCallCount, 1)
+        XCTAssertEqual(transport.pauseCallCount, 0)
+        XCTAssertEqual(transport.sentData.count, 1)
+        let pauseControl = try WorkoutContractCodec.decode(
+            transport.sentData[0]
+        )
+        XCTAssertEqual(pauseControl.control, .pause)
+        XCTAssertEqual(pauseControl.controlContext?.origin, .manual)
         XCTAssertEqual(manager.store.presentation.pendingControl, .pause)
         XCTAssertEqual(manager.store.presentation.sessionState, .running)
         manager.applyNativeSessionState(
@@ -2487,7 +2502,19 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(manager.store.presentation.sessionState, .paused)
 
         manager.resume()
-        XCTAssertEqual(transport.resumeCallCount, 1)
+        XCTAssertEqual(transport.resumeCallCount, 0)
+        XCTAssertEqual(
+            transport.sentData.count,
+            1,
+            "Resume must remain ordered behind the outstanding Pause send"
+        )
+        transport.completeNext(succeeded: true)
+        try await waitUntil { transport.sentData.count == 2 }
+        let resumeControl = try WorkoutContractCodec.decode(
+            transport.sentData[1]
+        )
+        XCTAssertEqual(resumeControl.control, .resume)
+        XCTAssertEqual(resumeControl.controlContext?.origin, .manual)
         manager.applyNativeSessionState(
             .running,
             at: now.addingTimeInterval(2),
@@ -2960,10 +2987,16 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
 
     func testTerminalTimeoutBeforeNativeEndIsReclassifiedHonestly() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_401_000)
+        let controlWaiter = ControlledWorkoutTimeoutWaiter()
+        let finalWaiter = ControlledWorkoutTimeoutWaiter()
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02,
-            finalSnapshotTimeout: 0.2
+            controlConfirmationWait: { timeout in
+                try await controlWaiter.wait(timeout)
+            },
+            finalSnapshotWait: { timeout in
+                try await finalWaiter.wait(timeout)
+            }
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
@@ -2978,7 +3011,9 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
 
         manager.endAndSave()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { controlWaiter.waitCallCount == 1 }
+        controlWaiter.completeWait(at: 0)
+        try await waitUntil { controlWaiter.hasReturned(at: 0) }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -3004,6 +3039,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             at: now.addingTimeInterval(1),
             from: transport
         )
+        try await waitUntil { finalWaiter.waitCallCount == 1 }
         XCTAssertEqual(manager.store.presentation.connectionState, .ended)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -3030,7 +3066,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
         XCTAssertNil(manager.store.presentation.errorCode)
         XCTAssertTrue(manager.store.canResetTerminalPresentation)
-        try await Task.sleep(for: .milliseconds(250))
+        finalWaiter.completeWait(at: 0)
+        try await waitUntil { finalWaiter.hasReturned(at: 0) }
         XCTAssertNil(
             manager.store.presentation.errorCode,
             "late timeout continuation must not replace authoritative final truth"
@@ -3054,9 +3091,12 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
                 timeIntervalSinceReferenceDate: 800_401_020
                     + TimeInterval(index * 10)
             )
+            let waiter = ControlledWorkoutTimeoutWaiter()
             let manager = WorkoutMirrorManager(
                 now: { now },
-                controlConfirmationTimeout: 0.02
+                controlConfirmationWait: { timeout in
+                    try await waiter.wait(timeout)
+                }
             )
             let transport = FakeMirroredSessionTransport()
             manager.acceptMirroredTransport(transport)
@@ -3077,7 +3117,9 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             } else {
                 manager.discard()
             }
-            try await Task.sleep(for: .milliseconds(50))
+            try await waitUntil { waiter.waitCallCount == 1 }
+            waiter.completeWait(at: 0)
+            try await waitUntil { waiter.hasReturned(at: 0) }
             XCTAssertEqual(
                 manager.store.presentation.errorCode,
                 .terminalChoiceUnconfirmed
@@ -3098,8 +3140,13 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
                     at: now.addingTimeInterval(0.5),
                     from: transport
                 )
+                try await waitUntil { waiter.waitCallCount == 2 }
+                waiter.completeWait(at: 1)
+                try await waitUntil { waiter.hasReturned(at: 1) }
             } else {
-                try await Task.sleep(for: .milliseconds(50))
+                try await waitUntil { waiter.waitCallCount == 2 }
+                waiter.completeWait(at: 1)
+                try await waitUntil { waiter.hasReturned(at: 1) }
             }
             XCTAssertNil(manager.store.presentation.pendingControl)
             XCTAssertEqual(

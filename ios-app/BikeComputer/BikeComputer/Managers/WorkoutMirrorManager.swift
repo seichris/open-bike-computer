@@ -334,7 +334,10 @@ final class WorkoutMirrorManager: NSObject {
             prioritizeRemoteQueue: false
         )
         preemptAutomaticControlForManualAction()
-        _ = enqueueStateChangingControl(.pause)
+        _ = enqueueStateChangingControl(
+            .pause,
+            controlContext: WorkoutControlContextV1(origin: .manual)
+        )
     }
 
     func resume() {
@@ -346,7 +349,10 @@ final class WorkoutMirrorManager: NSObject {
             prioritizeRemoteQueue: false
         )
         preemptAutomaticControlForManualAction()
-        _ = enqueueStateChangingControl(.resume)
+        _ = enqueueStateChangingControl(
+            .resume,
+            controlContext: WorkoutControlContextV1(origin: .manual)
+        )
     }
 
     /// Sends an automatic detector transition through the durable mirrored
