@@ -83,7 +83,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var disconnectingForBusyLease = false
     private var navigationReleasePending = false
 
-    private var latestWorkoutPair: (core: Data, extended: Data)?
+    private var latestWorkoutFrames: WorkoutDeviceFrames?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -246,16 +246,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         finishNavigationReleaseIfPossible()
     }
 
-    func updateWorkoutPair(core: Data, extended: Data) {
-        guard core.count == 16, extended.count == 16 else { return }
-        latestWorkoutPair = (core, extended)
+    func updateWorkout(_ frames: WorkoutDeviceFrames) {
+        latestWorkoutFrames = frames
         guard state.isReady else { return }
-        enqueueWorkoutPair(core: core, extended: extended)
+        enqueueWorkoutFrames(frames)
         drainQueue()
     }
 
-    func clearWorkout(core: Data, extended: Data) {
-        updateWorkoutPair(core: core, extended: extended)
+    func clearWorkout(_ frames: WorkoutDeviceFrames) {
+        updateWorkout(frames)
     }
 
     private var hasDemand: Bool {
@@ -516,11 +515,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func enqueueFullResynchronization() {
         queue.removeAll()
-        if let latestWorkoutPair {
-            enqueueWorkoutPair(
-                core: latestWorkoutPair.core,
-                extended: latestWorkoutPair.extended
-            )
+        if let latestWorkoutFrames {
+            enqueueWorkoutFrames(latestWorkoutFrames)
         }
         if let latestLocation {
             _ = queue.enqueue(.init(
@@ -599,24 +595,22 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             ) >= 10
     }
 
-    private func enqueueWorkoutPair(core: Data, extended: Data) {
+    private func enqueueWorkoutFrames(_ frames: WorkoutDeviceFrames) {
         queue.removeAll(target: .workout)
-        workoutPairGeneration = (workoutPairGeneration + 1) & 0x03
-        let stamped = WorkoutDeviceFrameBuilder.stampedPair(
-            core: core,
-            extended: extended,
+        workoutPairGeneration = workoutPairGeneration == 3
+            ? 1
+            : workoutPairGeneration + 1
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
             generation: workoutPairGeneration
         )
-        _ = queue.enqueue(.init(
-            target: .workout,
-            payload: stamped.core,
-            priority: 0
-        ))
-        _ = queue.enqueue(.init(
-            target: .workout,
-            payload: stamped.extended,
-            priority: 0
-        ))
+        for payload in payloads {
+            _ = queue.enqueue(.init(
+                target: .workout,
+                payload: payload,
+                priority: 0
+            ))
+        }
     }
 
     private func enqueueProtected(

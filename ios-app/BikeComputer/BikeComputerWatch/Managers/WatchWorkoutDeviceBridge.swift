@@ -29,21 +29,18 @@ final class WatchWorkoutDeviceBridge {
            let token = manager.activeSessionToken,
            let frames = WorkoutDeviceFrameBuilder.frames(
                for: Self.sample(snapshot: snapshot, token: token)
-           ) {
+            ) {
             deviceLink.setWorkoutDemand(true)
-            deviceLink.updateWorkoutPair(
-                core: frames.core,
-                extended: frames.extended
-            )
+            deviceLink.updateWorkout(frames)
             return
         }
 
         guard let idle = WorkoutDeviceFrameBuilder.frames(
             for: Self.idleSample
         ) else { return }
-        deviceLink.clearWorkout(core: idle.core, extended: idle.extended)
+        deviceLink.clearWorkout(idle)
         // Give a workout-only link one bounded interval to deliver its clear
-        // pair. Navigation demand, when present, independently retains BLE.
+        // frame. Navigation demand, when present, independently retains BLE.
         releaseTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }

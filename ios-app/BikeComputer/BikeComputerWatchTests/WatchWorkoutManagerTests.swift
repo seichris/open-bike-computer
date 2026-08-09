@@ -21,6 +21,70 @@ private enum SegmentEventProbeError: Error {
 
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testWorkoutTransportSendsIdleAsOneUnstampedCoreFrame() throws {
+        let frames = try XCTUnwrap(WorkoutDeviceFrameBuilder.frames(
+            for: WorkoutDeviceTelemetrySample(
+                state: .idle,
+                sessionToken: 0,
+                hasLiveNumerics: false,
+                isCurrentSnapshot: true,
+                elapsedSeconds: nil,
+                distanceMeters: nil,
+                speedMetersPerSecond: nil,
+                currentHeartRateBPM: nil,
+                averageHeartRateBPM: nil,
+                activeEnergyKilocalories: nil,
+                cyclingPowerWatts: nil,
+                cyclingCadenceRPM: nil,
+                currentHeartRateZone: nil,
+                altitudeMeters: nil,
+                heartRateZoneCount: nil,
+                sourceFlags: []
+            )
+        ))
+
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
+            generation: 2
+        )
+
+        XCTAssertEqual(payloads, [frames.core])
+        XCTAssertEqual(payloads[0][1] >> 6, 0)
+    }
+
+    func testWorkoutTransportStampsActiveCoreAndExtendedPair() throws {
+        let frames = try XCTUnwrap(WorkoutDeviceFrameBuilder.frames(
+            for: WorkoutDeviceTelemetrySample(
+                state: .running,
+                sessionToken: 42,
+                hasLiveNumerics: true,
+                isCurrentSnapshot: true,
+                elapsedSeconds: 10,
+                distanceMeters: 20,
+                speedMetersPerSecond: 3,
+                currentHeartRateBPM: 120,
+                averageHeartRateBPM: 110,
+                activeEnergyKilocalories: 5,
+                cyclingPowerWatts: 200,
+                cyclingCadenceRPM: 80,
+                currentHeartRateZone: 2,
+                altitudeMeters: 15,
+                heartRateZoneCount: 5,
+                sourceFlags: [.currentSnapshot]
+            )
+        ))
+
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
+            generation: 2
+        )
+
+        XCTAssertEqual(payloads.count, 2)
+        XCTAssertEqual(payloads[0][1] >> 6, 2)
+        XCTAssertEqual(payloads[1][1] >> 6, 2)
+        XCTAssertNotEqual(payloads[0][1] >> 6, 0)
+    }
+
     func testLocalSegmentsRecordSequentialHealthKitEventsAndCloseAtFinish()
         async throws {
         let startDate = Date().addingTimeInterval(-60)

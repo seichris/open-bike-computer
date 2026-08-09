@@ -187,6 +187,25 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         return (core, extended)
     }
 
+    /// Produces the firmware transport transaction for one canonical sample.
+    /// Idle is a reset command, not a correlated metric snapshot: firmware
+    /// requires one generation-zero core frame and rejects an idle extended
+    /// frame. Active samples remain an atomically stamped core/extended pair.
+    static func transportFrames(
+        for frames: WorkoutDeviceFrames,
+        generation: UInt8
+    ) -> [Data] {
+        if frames.identity.state == .idle {
+            return [frames.core]
+        }
+        let stamped = stampedPair(
+            core: frames.core,
+            extended: frames.extended,
+            generation: generation
+        )
+        return [stamped.core, stamped.extended]
+    }
+
     private static func encodeUInt16(
         _ value: Double?,
         scale: Double = 1,
