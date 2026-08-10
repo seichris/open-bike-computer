@@ -31,6 +31,12 @@ LVGL_SETUP_SOURCE = (
     ESP32_ROOT / "lib" / "lvgl" / "src" / "lvglSetup.cpp"
 ).read_text(encoding="utf-8")
 MAIN_SOURCE = (ESP32_ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
+SCHEDULER_DOC = (
+    ESP32_ROOT.parent / "docs" / "firmware-map-render-scheduler.md"
+).read_text(encoding="utf-8")
+PSRAM_DOC = (
+    ESP32_ROOT.parent / "docs" / "firmware-map-rendering-psram.md"
+).read_text(encoding="utf-8")
 
 
 def function_body(source: str, signature: str) -> str:
@@ -213,6 +219,16 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             MAIN_SOURCE,
         )
         self.assertIn('"gpsGapMs=%lu/%lu] "', MAIN_SOURCE)
+
+        for documentation in (SCHEDULER_DOC, PSRAM_DOC):
+            for term in (
+                "1 Hz",
+                "1.5",
+                "2.5",
+                "30 metres",
+                "missed heartbeat",
+            ):
+                self.assertIn(term, documentation)
 
     def test_live_presentation_does_not_overwrite_gesture_transforms(self):
         service = function_body(
