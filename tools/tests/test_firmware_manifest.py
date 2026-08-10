@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import base64
+import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,28 +25,41 @@ SPEC.loader.exec_module(firmware_manifest)
 class FirmwareManifestTests(unittest.TestCase):
     def test_canonical_payload_requires_and_orders_signed_fields(self) -> None:
         manifest = {
-            field: index
-            for index, field in enumerate(reversed(firmware_manifest.SIGNATURE_FIELDS))
+            "schemaVersion": 1,
+            "target": "WAVESHARE_AMOLED_175",
+            "version": "2.3.4",
+            "build": 57,
+            "gitSha": "0123456789ab",
+            "size": 18,
+            "sha256": "abc123",
+            "url": "https://example.invalid/firmware.bin",
+            "minUpdaterProtocol": 1,
         }
 
         payload = firmware_manifest.canonical_payload(manifest).decode("utf-8")
 
         self.assertEqual(
-            "".join(
-                f"{field}={manifest[field]}\n"
-                for field in firmware_manifest.SIGNATURE_FIELDS
-            ),
+            "schemaVersion=1\n"
+            "target=WAVESHARE_AMOLED_175\n"
+            "version=2.3.4\n"
+            "build=57\n"
+            "gitSha=0123456789ab\n"
+            "size=18\n"
+            "sha256=abc123\n"
+            "url=https://example.invalid/firmware.bin\n"
+            "minUpdaterProtocol=1\n",
             payload,
         )
         del manifest["sha256"]
         with self.assertRaisesRegex(ValueError, "manifest is missing sha256"):
             firmware_manifest.canonical_payload(manifest)
 
-    def test_write_manifest_hashes_and_signs_release_metadata(self) -> None:
+    def test_release_cli_emits_complete_hash_and_signature_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             firmware = root / "firmware.bin"
-            firmware.write_bytes(b"open-bike-firmware")
+            firmware_bytes = b"open-bike-firmware"
+            firmware.write_bytes(firmware_bytes)
             platformio_ini = root / "platformio.ini"
             platformio_ini.write_text(
                 "[common]\nversion = 2.3.4\nrevision = 57\n",
@@ -54,48 +68,72 @@ class FirmwareManifestTests(unittest.TestCase):
             output = root / "public" / "manifest.json"
             private_scalar = (1).to_bytes(32, byteorder="big")
             private_key_base64 = base64.b64encode(private_scalar).decode("ascii")
-            args = argparse.Namespace(
-                firmware=firmware,
-                target="WAVESHARE_AMOLED_175",
-                repository="owner/repository",
-                git_sha="0123456789ab",
-                private_key_base64=private_key_base64,
-                output=output,
-                platformio_ini=platformio_ini,
-                version=None,
-                build=None,
-                tag="v2.3.4",
-                asset_name=None,
-                min_updater_protocol=2,
+            subprocess.run(
+                (
+                    sys.executable,
+                    str(SCRIPT),
+                    "--firmware",
+                    str(firmware),
+                    "--target",
+                    "WAVESHARE_AMOLED_175",
+                    "--repository",
+                    "owner/repository",
+                    "--tag",
+                    "v2.3.4",
+                    "--git-sha",
+                    "0123456789ab",
+                    "--private-key-base64",
+                    private_key_base64,
+                    "--output",
+                    str(output),
+                    "--platformio-ini",
+                    str(platformio_ini),
+                ),
+                check=True,
             )
-
-            firmware_manifest.write_manifest(args)
 
             manifest = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual("2.3.4", manifest["version"])
-            self.assertEqual(57, manifest["build"])
-            self.assertEqual(len(b"open-bike-firmware"), manifest["size"])
             self.assertEqual(
-                "https://github.com/owner/repository/releases/download/"
-                "v2.3.4/WAVESHARE_AMOLED_175.bin",
-                manifest["url"],
+                {
+                    "schemaVersion": 1,
+                    "target": "WAVESHARE_AMOLED_175",
+                    "version": "2.3.4",
+                    "build": 57,
+                    "gitSha": "0123456789ab",
+                    "size": len(firmware_bytes),
+                    "sha256": hashlib.sha256(firmware_bytes).hexdigest(),
+                    "url": (
+                        "https://github.com/owner/repository/releases/download/"
+                        "v2.3.4/WAVESHARE_AMOLED_175.bin"
+                    ),
+                    "minUpdaterProtocol": 1,
+                },
+                {key: value for key, value in manifest.items() if key != "signature"},
             )
+            expected_payload = (
+                "schemaVersion=1\n"
+                "target=WAVESHARE_AMOLED_175\n"
+                "version=2.3.4\n"
+                "build=57\n"
+                "gitSha=0123456789ab\n"
+                f"size={len(firmware_bytes)}\n"
+                f"sha256={hashlib.sha256(firmware_bytes).hexdigest()}\n"
+                "url=https://github.com/owner/repository/releases/download/"
+                "v2.3.4/WAVESHARE_AMOLED_175.bin\n"
+                "minUpdaterProtocol=1\n"
+            ).encode("utf-8")
             public_key = ec.derive_private_key(1, ec.SECP256R1()).public_key()
             public_key.verify(
                 base64.b64decode(manifest["signature"], validate=True),
-                firmware_manifest.canonical_payload(manifest),
+                expected_payload,
                 ec.ECDSA(hashes.SHA256()),
             )
 
     def test_signing_rejects_a_zero_private_scalar(self) -> None:
-        manifest = {
-            field: index
-            for index, field in enumerate(firmware_manifest.SIGNATURE_FIELDS)
-        }
         zero_scalar = base64.b64encode(bytes(32)).decode("ascii")
 
         with self.assertRaisesRegex(ValueError, "greater than zero"):
-            firmware_manifest.sign_manifest(manifest, zero_scalar)
+            firmware_manifest.sign_manifest({}, zero_scalar)
 
 
 if __name__ == "__main__":

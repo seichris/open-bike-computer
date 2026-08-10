@@ -103,6 +103,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('      - "tools/firmware_manifest.py"', general_ci)
         self.assertIn('      - "tools/tests/**"', general_ci)
 
+    def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
+        agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("Merge only after **CI Gate**", agent_instructions)
+        self.assertNotIn("Merge only after **Map Backend**", agent_instructions)
+
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
         for workflow in (
             "ci.yml",

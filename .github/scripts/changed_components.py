@@ -27,7 +27,10 @@ FIRMWARE_CONTRACT_PATHS = {
     "docs/firmware-map-memory-diagnostics.md",
     "docs/firmware-map-render-scheduler.md",
     "docs/firmware-map-rendering-psram.md",
+}
+FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
+    "tools/tests/test_firmware_manifest.py",
 }
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
@@ -59,13 +62,17 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if (
             path.startswith("esp32/")
-            or path.startswith("tools/tests/")
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
         ):
             selected["firmware"] = True
 
         if path.startswith("ios-app/") or path in IOS_CONTRACT_PATHS:
+            selected["ios"] = True
+
+        if path in FIRMWARE_MANIFEST_PATHS:
+            # The release producer and the shipped iOS verifier share this contract.
+            selected["firmware"] = True
             selected["ios"] = True
 
         if path == ".dockerignore" or path.startswith("map-platform/"):

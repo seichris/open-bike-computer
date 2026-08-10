@@ -114,7 +114,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 self.assertTrue(selected["ios"])
                 self.assertFalse(selected["firmware"])
 
-    def test_firmware_manifest_generator_and_tests_select_firmware(self) -> None:
+    def test_firmware_manifest_generator_and_tests_select_both_consumers(self) -> None:
         for path in (
             "tools/firmware_manifest.py",
             "tools/tests/test_firmware_manifest.py",
@@ -123,7 +123,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 self.assertEqual(
                     {
                         "firmware": True,
-                        "ios": False,
+                        "ios": True,
                         "map_backend": False,
                         "osm": False,
                     },
