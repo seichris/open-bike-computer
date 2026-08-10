@@ -59,7 +59,18 @@ change must fail closed and requires a new full build. Never bypass a failed
 upload-only validation with raw esptool or PlatformIO.
 
 Use `tools/build_firmware.py` for build-only checks, upload, and CI. A clean
-pioarduino installation first converts content-pinned tool wrappers into the
+invocation first validates `tools/firmware-runtime/lock-v1.json`, selects the
+supported host target, verifies or downloads its exact immutable bundle, and
+re-executes under the project-private CPython/PlatformIO runtime. There is no
+`--pio`, `PLATFORMIO_CMD`, ambient pip/uv, other-worktree, or `/tmp` fallback.
+Use `--repair-runtime` only to recreate the exact lock/target subtree; dependency
+updates belong to the manual runtime-refresh workflow. Runtime bundle transport
+cache is user-level, content-addressed, rehashed, and read-only; mutable host,
+PlatformIO, build, and manifest state stays below this worktree's
+`.pio/open-bike-build/`.
+
+After the locked runtime handoff, a clean pioarduino installation first
+converts content-pinned tool wrappers into the
 host compiler/runtime packages, then compiles a custom core against a generated
 `.dummy` sketch. The helper detects both bootstrap transitions, switches to a
 steady verified config after tool conversion, forces pioarduino's recursive
