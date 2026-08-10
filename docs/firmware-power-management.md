@@ -25,8 +25,9 @@ responsive. Power saving is therefore layered:
 - Disconnected deep sleep is enabled according to the user's timeout setting.
 - Automatic light sleep and FreeRTOS tickless idle are **not** enabled in
   ordinary or production builds.
-- The `*_LIGHT_SLEEP` profiles are built in CI for continued validation but are
-  never selected by the firmware release workflow.
+- The `*_LIGHT_SLEEP` profiles are built by the weekly/manual **Firmware
+  Diagnostic Builds** workflow for continued validation, but are never selected
+  by the firmware release workflow.
 - The Phase 9 light-sleep interaction gate has passed on the available
   1.75-inch board. The 2.06-inch path is build-tested only.
 - No battery-life percentage or runtime improvement has been measured yet.
@@ -268,7 +269,7 @@ Each board has four profile classes:
 | --- | --- | --- | --- | --- | --- |
 | `WAVESHARE_AMOLED_175` / `206` | Yes | No | No | Low-rate developer diagnostics; USB CDC at boot | No |
 | `*_POWER_METRICS` | Yes | No | No | Structured `PWRMET` and optional timing pulse | No |
-| `*_LIGHT_SLEEP` | Yes | Yes | Yes | `PWRMET`, wake capture, and PM-lock telemetry | No; CI validation only |
+| `*_LIGHT_SLEEP` | Yes | Yes | Yes | `PWRMET`, wake capture, and PM-lock telemetry | No; scheduled/manual validation only |
 | `*_PRODUCTION` | Yes | No | No | Disabled; USB CDC not started at application boot | Yes |
 
 Production retains native USB hardware support for ROM download recovery, but

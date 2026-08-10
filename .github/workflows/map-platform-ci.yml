@@ -1,20 +1,16 @@
 name: Map Platform CI
 
 on:
-  push:
-    paths:
-      - ".dockerignore"
-      - ".github/workflows/map-platform-ci.yml"
-      - ".github/workflows/map-platform-image.yml"
-      - "map-platform/backend/**"
-      - "map-platform/config/map-stream-hardware-gate.json"
-      - "map-platform/config/map-stream-rollout-approvals.json"
-      - "map-platform/config/map-stream-trust.json"
-      - "map-platform/deploy/**"
-      - "tools/OSM_Extract/**"
-  # Keep the Map Backend check present on every pull request because repository
-  # protection requires that status. Push builds remain path-filtered.
-  pull_request:
+  workflow_call:
+    inputs:
+      run_backend:
+        description: Validate the backend, deployment, and production image
+        required: true
+        type: boolean
+      run_osm:
+        description: Validate the OSM extraction toolchain
+        required: true
+        type: boolean
   workflow_dispatch:
 
 permissions:
@@ -23,13 +19,14 @@ permissions:
 jobs:
   osm:
     name: OSM Pipeline
+    if: github.event_name != 'workflow_call' || inputs.run_osm
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: tools/OSM_Extract
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install validation dependencies
@@ -75,6 +72,7 @@ jobs:
 
   backend:
     name: Map Backend
+    if: github.event_name != 'workflow_call' || inputs.run_backend
     runs-on: ubuntu-latest
     permissions:
       attestations: read
@@ -84,8 +82,8 @@ jobs:
       run:
         working-directory: map-platform/backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@v3
