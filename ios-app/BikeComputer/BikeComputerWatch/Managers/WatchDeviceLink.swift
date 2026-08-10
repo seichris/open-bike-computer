@@ -1,0 +1,1293 @@
+@preconcurrency import CoreBluetooth
+import Combine
+import Foundation
+import Security
+
+enum WatchDeviceLinkState: Equatable {
+    case idle
+    case notEnrolled
+    case bluetoothUnavailable
+    case scanning
+    case connecting
+    case discovering
+    case authenticating
+    case claimingLease
+    case ready(deviceID: String)
+    case busy
+    case failed(String)
+
+    var isReady: Bool {
+        if case .ready = self { return true }
+        return false
+    }
+}
+
+/// Focused Watch Core Bluetooth central for scoped ride traffic. Administrative
+/// ownership remains on iPhone; this link can authenticate only the Watch ride
+/// credential, hold the exclusive lease, and write live ride channels.
+@MainActor
+final class WatchDeviceLink: NSObject, ObservableObject {
+    @Published private(set) var state: WatchDeviceLinkState = .idle
+    @Published private(set) var lastError: String?
+    var onDirectRidePreparationChange:
+        ((WatchDirectRidePreparationOperationV1, String, UUID) -> Void)?
+
+    private let credentialStore: WatchControllerCredentialStore
+    private let defaults: UserDefaults
+    private let serviceUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.serviceUUID
+    )
+    private let authUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.authUUID
+    )
+    private let navigationUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.navigationUUID
+    )
+    private let routeUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.routeUUID
+    )
+    private let gpsUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.gpsUUID
+    )
+    private let workoutUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.workoutUUID
+    )
+    private lazy var central = CBCentralManager(
+        delegate: self,
+        queue: .main,
+        options: [
+            CBCentralManagerOptionRestoreIdentifierKey:
+                "com.openbikecomputer.watch.direct-ble.v1",
+        ]
+    )
+
+    private var demand = WatchRideDemandStateV1()
+    private var selectedBikeComputerEnvelope:
+        WatchSelectedBikeComputerV1?
+    private var credentials: [WatchControllerCredentialV1] = []
+    private var credential: WatchControllerCredentialV1?
+    private var peripheral: CBPeripheral?
+    private var authCharacteristic: CBCharacteristic?
+    private var navigationCharacteristic: CBCharacteristic?
+    private var routeCharacteristic: CBCharacteristic?
+    private var gpsCharacteristic: CBCharacteristic?
+    private var workoutCharacteristic: CBCharacteristic?
+    private var authentication: WatchScopedAuthenticationV1?
+    private var challenge: WatchScopedAuthenticationChallengeV1?
+    private var protectedSession: WatchAuthenticatedBLESessionV1?
+    private var capabilities: WatchDeviceCapabilitiesV1?
+    private var connectionGeneration: UInt64 = 0
+    private var queue = WatchBLEOutboundQueueV1(capacity: 32)
+    private var writeWithResponseInFlight = false
+    private var heartbeatTimer: Timer?
+    private var reconnectTask: Task<Void, Never>?
+    private var operationTimeoutTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var disconnectingForBusyLease = false
+    private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
+    private var workoutPairGeneration: UInt8 = 0
+    private var latestLocation: NavigationLocationSampleV1?
+    private var latestNavigationSnapshot: NavigationSnapshotV1?
+    private var latestRouteWindow = Data()
+    private var preparedPhoneDeviceID: String?
+    private var preparedPhonePreparationID: UUID?
+
+    private let peripheralMapKey =
+        "watchDeviceLink.peripheralByDeviceID.v1"
+    private let selectedBikeComputerKey =
+        "watchDeviceLink.selectedBikeComputer.v1"
+
+    init(
+        credentialStore: WatchControllerCredentialStore,
+        defaults: UserDefaults = .standard
+    ) {
+        self.credentialStore = credentialStore
+        self.defaults = defaults
+        if let data = defaults.data(forKey: selectedBikeComputerKey) {
+            selectedBikeComputerEnvelope = try?
+                WatchSelectedBikeComputerV1.decode(data)
+        }
+        super.init()
+    }
+
+    func receiveApplicationContext(_ context: [String: Any]) {
+        guard let data = context[
+            WatchSelectedBikeComputerV1.applicationContextKey
+        ] as? Data else { return }
+        let incoming: WatchSelectedBikeComputerV1
+        do {
+            incoming = try WatchSelectedBikeComputerV1.decode(data)
+        } catch {
+            failClosedSelection("Selected Bike Computer sync is invalid")
+            return
+        }
+        if let current = selectedBikeComputerEnvelope {
+            if incoming.revision < current.revision { return }
+            if incoming.revision == current.revision {
+                guard incoming == current else {
+                    failClosedSelection(
+                        "Selected Bike Computer sync conflicts"
+                    )
+                    return
+                }
+                return
+            }
+        }
+
+        let previousDeviceID = selectedBikeComputerEnvelope?.deviceID
+        selectedBikeComputerEnvelope = incoming
+        defaults.set(data, forKey: selectedBikeComputerKey)
+        guard previousDeviceID != incoming.deviceID else { return }
+
+        releasePhonePreparationIfNeeded()
+
+        let canRetainReadySession = state.isReady &&
+            credential?.deviceID == incoming.deviceID
+        if !canRetainReadySession {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            operationTimeoutTask?.cancel()
+            operationTimeoutTask = nil
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            if state.isReady {
+                writeProtectedAuth("LEASE_RELEASE")
+            }
+            if let peripheral {
+                central.cancelPeripheralConnection(peripheral)
+            }
+            connectionGeneration &+= 1
+            resetTransport(keepingPeripheral: false)
+        }
+        credentials = eligibleCredentials(from: credentials)
+        requestPhonePreparationIfNeeded()
+        guard hasDemand else {
+            if !canRetainReadySession { state = .idle }
+            return
+        }
+        guard !canRetainReadySession else { return }
+        state = .idle
+        beginIfNeeded()
+    }
+
+    func setDemand(navigation: Bool, workout: Bool) {
+        demand.setNavigationActive(navigation)
+        demand.setWorkoutActive(workout)
+        reconcileDemand()
+    }
+
+    func setNavigationDemand(_ active: Bool) {
+        demand.setNavigationActive(active)
+        reconcileDemand()
+    }
+
+    func setWorkoutDemand(_ active: Bool) {
+        demand.setWorkoutActive(active)
+        reconcileDemand()
+    }
+
+    /// Reconciles an enrollment promotion or revocation delivered over the
+    /// durable phone/Watch control channel. In particular, a revoked active
+    /// credential must not remain usable merely because its BLE session was
+    /// already authenticated before Keychain deletion.
+    func controllerCredentialsDidChange() {
+        let refreshed: [WatchControllerCredentialV1]
+        do {
+            refreshed = try credentialStore.allActiveCredentials()
+        } catch {
+            fail("Watch credential could not be read")
+            return
+        }
+
+        let refreshedIdentities = Set(refreshed.map {
+            CredentialIdentity(
+                deviceID: $0.deviceID,
+                controllerID: $0.controllerID
+            )
+        })
+        let removedDeviceIDs = credentials.compactMap { saved -> String? in
+            let identity = CredentialIdentity(
+                deviceID: saved.deviceID,
+                controllerID: saved.controllerID
+            )
+            return refreshedIdentities.contains(identity)
+                ? nil
+                : saved.deviceID
+        }
+        credentials = eligibleCredentials(from: refreshed)
+        if !removedDeviceIDs.isEmpty {
+            var map = peripheralMap()
+            for deviceID in removedDeviceIDs {
+                map.removeValue(forKey: deviceID)
+            }
+            defaults.set(map, forKey: peripheralMapKey)
+        }
+
+        let activeWasRevoked = credential.map { active in
+            !refreshedIdentities.contains(CredentialIdentity(
+                deviceID: active.deviceID,
+                controllerID: active.controllerID
+            ))
+        } ?? false
+        if activeWasRevoked {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            operationTimeoutTask?.cancel()
+            operationTimeoutTask = nil
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            if state.isReady {
+                writeProtectedAuth("LEASE_RELEASE")
+            }
+            if let peripheral {
+                central.cancelPeripheralConnection(peripheral)
+            }
+            connectionGeneration &+= 1
+            resetTransport(keepingPeripheral: false)
+            state = refreshed.isEmpty
+                ? .notEnrolled
+                : .failed("Watch controller enrollment changed")
+        }
+
+        guard hasDemand else { return }
+        if credentials.isEmpty {
+            state = .notEnrolled
+        } else if !state.isReady {
+            beginIfNeeded()
+        }
+    }
+
+    private func reconcileDemand() {
+        guard hasDemand else {
+            stop()
+            return
+        }
+        requestPhonePreparationIfNeeded()
+        beginIfNeeded()
+    }
+
+    func directRidePreparationDidRespond(
+        request: WatchDirectRidePreparationRequestV1,
+        response: WatchDirectRidePreparationResponseV1
+    ) {
+        guard request.operation == .prepare,
+              request.deviceID == selectedBikeComputerEnvelope?.deviceID,
+              hasDemand,
+              !state.isReady,
+              !response.accepted else { return }
+        if state == .scanning {
+            central.stopScan()
+        }
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        let message: String
+        switch response.errorCode {
+        case "phone_navigation_active":
+            message = "Bicino is controlled by iPhone navigation"
+        case "device_transfer_active":
+            message = "Bicino is busy transferring data from iPhone"
+        case "device_admin_active":
+            message = "Bicino setup is active on iPhone"
+        case "different_device":
+            message = "Select the same Bicino on iPhone"
+        default:
+            message = "Bicino is controlled by iPhone"
+        }
+        lastError = message
+        state = .busy
+        scheduleReconnect()
+    }
+
+    func updateNavigation(
+        location: NavigationLocationSampleV1,
+        snapshot: NavigationSnapshotV1
+    ) {
+        let previousSnapshot = latestNavigationSnapshot
+        latestLocation = location
+        latestNavigationSnapshot = snapshot
+        latestRouteWindow = snapshot.routeWindow
+        guard state.isReady else { return }
+        enqueueLiveNavigation(
+            location: location,
+            snapshot: snapshot,
+            previousSnapshot: previousSnapshot
+        )
+    }
+
+    func clearNavigation() {
+        latestLocation = nil
+        latestNavigationSnapshot = nil
+        latestRouteWindow = Data()
+        guard state.isReady else { return }
+        _ = queue.enqueue(.init(
+            target: .route,
+            payload: Data(),
+            priority: 2,
+            coalescingKey: "route"
+        ))
+        _ = queue.enqueue(.init(
+            target: .navigation,
+            payload: WatchRidePacketEncoderV1.maneuver(nil),
+            priority: 3
+        ))
+        enqueueWorkoutGPSIfNeeded()
+        drainQueue()
+    }
+
+    func endNavigationDemandAfterClearing() {
+        demand.beginNavigationRelease()
+        clearNavigation()
+        finishPendingReleasesIfPossible()
+        reconcileDemand()
+    }
+
+    func updateWorkout(
+        _ frames: WorkoutDeviceFrames,
+        gps: WorkoutDeviceGPSUpdate?
+    ) {
+        latestWorkoutFrames = frames
+        latestWorkoutGPS = gps
+        guard state.isReady else { return }
+        enqueueWorkoutFrames(frames)
+        enqueueWorkoutGPSIfNeeded()
+        drainQueue()
+    }
+
+    func clearWorkout(_ frames: WorkoutDeviceFrames) {
+        latestWorkoutFrames = frames
+        latestWorkoutGPS = nil
+        guard state.isReady else { return }
+        enqueueWorkoutFrames(frames)
+        drainQueue()
+    }
+
+    func endWorkoutDemandAfterClearing(_ frames: WorkoutDeviceFrames) {
+        demand.beginWorkoutRelease()
+        clearWorkout(frames)
+        finishPendingReleasesIfPossible()
+        reconcileDemand()
+    }
+
+    private var hasDemand: Bool {
+        demand.requiresConnection
+    }
+
+    private struct CredentialIdentity: Hashable {
+        let deviceID: String
+        let controllerID: Data
+    }
+
+    private func beginIfNeeded() {
+        guard hasDemand, !state.isReady else { return }
+        if state == .busy {
+            requestPhonePreparationIfNeeded(force: true)
+        } else {
+            requestPhonePreparationIfNeeded()
+        }
+        switch state {
+        case .scanning, .connecting, .discovering, .authenticating,
+                .claimingLease:
+            return
+        default:
+            break
+        }
+        do {
+            credentials = eligibleCredentials(
+                from: try credentialStore.allActiveCredentials()
+            )
+        } catch {
+            fail("Watch credential could not be read")
+            return
+        }
+        guard !credentials.isEmpty else {
+            state = .notEnrolled
+            return
+        }
+        _ = central
+        guard central.state == .poweredOn else {
+            state = .bluetoothUnavailable
+            return
+        }
+        if connectRetrievedPeripheral() { return }
+        startScan()
+    }
+
+    private func connectRetrievedPeripheral() -> Bool {
+        let saved = peripheralMap()
+        let candidates = credentials.compactMap { credential -> UUID? in
+            guard let value = saved[credential.deviceID] else { return nil }
+            return UUID(uuidString: value)
+        }
+        guard !candidates.isEmpty,
+              let retrieved = central.retrievePeripherals(
+                withIdentifiers: candidates
+              ).first,
+              let matchedCredential = credentials.first(where: {
+                  saved[$0.deviceID] == retrieved.identifier.uuidString
+              }) else {
+            return false
+        }
+        connect(retrieved, credential: matchedCredential)
+        return true
+    }
+
+    private func eligibleCredentials(
+        from allCredentials: [WatchControllerCredentialV1]
+    ) -> [WatchControllerCredentialV1] {
+        guard let selectedBikeComputerEnvelope else {
+            // Backward compatibility while an older paired iPhone has not yet
+            // published the versioned selected-device field. A single
+            // credential is unambiguous; multiple credentials fail closed.
+            return allCredentials.count == 1 ? allCredentials : []
+        }
+        return allCredentials.filter(selectedBikeComputerEnvelope.selects)
+    }
+
+    private func requestPhonePreparationIfNeeded(force: Bool = false) {
+        guard hasDemand,
+              let deviceID = selectedBikeComputerEnvelope?.deviceID else {
+            return
+        }
+        guard force || preparedPhoneDeviceID != deviceID else { return }
+        if preparedPhoneDeviceID != deviceID {
+            releasePhonePreparationIfNeeded()
+            preparedPhoneDeviceID = deviceID
+            preparedPhonePreparationID = UUID()
+        }
+        guard let preparationID = preparedPhonePreparationID else { return }
+        onDirectRidePreparationChange?(.prepare, deviceID, preparationID)
+    }
+
+    private func releasePhonePreparationIfNeeded() {
+        guard let deviceID = preparedPhoneDeviceID,
+              let preparationID = preparedPhonePreparationID else { return }
+        preparedPhoneDeviceID = nil
+        preparedPhonePreparationID = nil
+        onDirectRidePreparationChange?(.release, deviceID, preparationID)
+    }
+
+    private func failClosedSelection(_ message: String) {
+        lastError = message
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        if state == .scanning { central.stopScan() }
+        if state.isReady {
+            writeProtectedAuth("LEASE_RELEASE")
+        }
+        if let peripheral {
+            central.cancelPeripheralConnection(peripheral)
+        }
+        connectionGeneration &+= 1
+        resetTransport(keepingPeripheral: false)
+        credentials = []
+        releasePhonePreparationIfNeeded()
+        state = .failed(message)
+    }
+
+    private func startScan() {
+        guard hasDemand, central.state == .poweredOn else { return }
+        state = .scanning
+        central.scanForPeripherals(
+            withServices: [serviceUUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+        startOperationTimeout(generation: connectionGeneration)
+    }
+
+    private func connect(
+        _ candidate: CBPeripheral,
+        credential: WatchControllerCredentialV1
+    ) {
+        central.stopScan()
+        resetTransport(keepingPeripheral: false)
+        connectionGeneration &+= 1
+        self.credential = credential
+        peripheral = candidate
+        candidate.delegate = self
+        state = .connecting
+        central.connect(candidate)
+        startOperationTimeout(generation: connectionGeneration)
+    }
+
+    private func stop() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        disconnectingForBusyLease = false
+        demand.reset()
+        if state.isReady {
+            writeProtectedAuth("LEASE_RELEASE")
+        }
+        if let peripheral {
+            central.cancelPeripheralConnection(peripheral)
+        }
+        connectionGeneration &+= 1
+        resetTransport(keepingPeripheral: false)
+        releasePhonePreparationIfNeeded()
+        state = .idle
+        lastError = nil
+    }
+
+    private func resetTransport(keepingPeripheral: Bool) {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        authentication = nil
+        challenge = nil
+        protectedSession = nil
+        capabilities = nil
+        authCharacteristic = nil
+        navigationCharacteristic = nil
+        routeCharacteristic = nil
+        gpsCharacteristic = nil
+        workoutCharacteristic = nil
+        writeWithResponseInFlight = false
+        queue.removeAll()
+        if !keepingPeripheral {
+            peripheral = nil
+            credential = nil
+        }
+    }
+
+    private func beginAuthentication() {
+        guard authentication == nil,
+              let credential,
+              let nonce = Self.randomNonce() else {
+            fail("Could not begin Watch authentication")
+            return
+        }
+        do {
+            let authentication = try WatchScopedAuthenticationV1(
+                credential: credential,
+                clientNonce: nonce
+            )
+            self.authentication = authentication
+            state = .authenticating
+            startOperationTimeout(generation: connectionGeneration)
+            writeRawAuth(authentication.hello)
+        } catch {
+            fail("Watch credential is invalid")
+        }
+    }
+
+    private func handleAuthNotification(_ raw: Data) {
+        if raw.prefix(2) == Data([0x52, 0x32]) {
+            guard let protectedSession,
+                  let payload = protectedSession.notificationPayload(
+                    from: raw,
+                    channel: .auth
+                  ),
+                  let message = String(data: payload, encoding: .utf8) else {
+                fail("Bike Computer sent invalid protected auth data")
+                return
+            }
+            handleProtectedAuthMessage(message)
+            return
+        }
+        guard let message = String(
+            data: raw.trimmingTrailingTransportBytes(),
+            encoding: .utf8
+        ), let authentication else {
+            failAuthentication(
+                "Bike Computer sent invalid authentication data"
+            )
+            return
+        }
+        do {
+            if message.hasPrefix("WS2|") {
+                let challenge = try authentication.acceptServer(message)
+                self.challenge = challenge
+                writeRawAuth(challenge.proofCommand)
+            } else if message.hasPrefix("WOK2|"), let challenge {
+                protectedSession = try authentication.finish(
+                    message,
+                    challenge: challenge
+                )
+                state = .claimingLease
+                writeProtectedAuth("LEASE_CLAIM")
+            } else if message.hasPrefix("DENIED|") {
+                failAuthentication("Watch controller was rejected")
+            }
+        } catch {
+            failAuthentication(
+                "Bike Computer authentication proof was invalid"
+            )
+        }
+    }
+
+    private func handleProtectedAuthMessage(_ message: String) {
+        switch message {
+        case "LEASE_OK":
+            if state == .claimingLease {
+                requestCapabilities()
+            }
+        case "LEASE_RELEASED":
+            break
+        case "ERROR|lease_busy":
+            state = .busy
+            lastError = "Bicino is controlled by iPhone"
+            disconnectingForBusyLease = true
+            if let peripheral {
+                central.cancelPeripheralConnection(peripheral)
+            }
+        case "ERROR|lease_not_held", "ERROR|lease_rejected":
+            fail("Bike Computer ride lease was lost")
+        default:
+            break
+        }
+    }
+
+    private func requestCapabilities() {
+        var request = Data("CAPS".utf8)
+        request.append(WatchDirectBLEProtocolV1.capabilityClientVersion)
+        enqueueProtected(
+            target: .navigation,
+            payload: request,
+            priority: 0,
+            coalescingKey: "capabilities"
+        )
+        drainQueue()
+    }
+
+    private func handleNavigationNotification(_ raw: Data) {
+        guard let protectedSession,
+              let payload = protectedSession.notificationPayload(
+                from: raw,
+                channel: .navigation
+              ) else {
+            fail("Bike Computer sent invalid protected navigation data")
+            return
+        }
+        let capabilities: WatchDeviceCapabilitiesV1
+        switch WatchNavigationNotificationV1.decode(payload) {
+        case .ignoredDeviceRequest:
+            return
+        case .invalidCapabilities:
+            fail("Bike Computer sent invalid capability data")
+            return
+        case .capabilities(let decoded):
+            capabilities = decoded
+        }
+        guard capabilities.supportsScopedController else {
+            fail("Bike Computer firmware does not support Watch navigation")
+            return
+        }
+        if demand.requiresWorkoutChannel {
+            guard capabilities.supportsWorkoutTelemetry,
+                  workoutCharacteristic != nil else {
+                fail("Bike Computer firmware lacks Watch workout telemetry")
+                return
+            }
+        }
+        self.capabilities = capabilities
+        reconnectAttempt = 0
+        lastError = nil
+        state = .ready(deviceID: credential?.deviceID ?? "")
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = nil
+        persistCurrentPeripheral()
+        startHeartbeat()
+        enqueueFullResynchronization()
+        drainQueue()
+    }
+
+    private func enqueueFullResynchronization() {
+        queue.removeAll()
+        if let latestWorkoutFrames {
+            enqueueWorkoutFrames(latestWorkoutFrames)
+        }
+        if let latestLocation {
+            _ = queue.enqueue(.init(
+                target: .gps,
+                payload: WatchRidePacketEncoderV1.gps(
+                    latestLocation,
+                    snapshot: latestNavigationSnapshot
+                ),
+                priority: 1,
+                coalescingKey: "gps"
+            ))
+        } else {
+            enqueueWorkoutGPSIfNeeded()
+        }
+        _ = queue.enqueue(.init(
+            target: .route,
+            payload: latestRouteWindow,
+            priority: 2,
+            coalescingKey: "route"
+        ))
+        _ = queue.enqueue(.init(
+            target: .navigation,
+            payload: WatchRidePacketEncoderV1.maneuver(
+                latestNavigationSnapshot
+            ),
+            priority: 3
+        ))
+    }
+
+    private func enqueueLiveNavigation(
+        location: NavigationLocationSampleV1,
+        snapshot: NavigationSnapshotV1,
+        previousSnapshot: NavigationSnapshotV1?
+    ) {
+        _ = queue.enqueue(.init(
+            target: .gps,
+            payload: WatchRidePacketEncoderV1.gps(
+                location,
+                snapshot: snapshot
+            ),
+            priority: 1,
+            coalescingKey: "gps"
+        ))
+        _ = queue.enqueue(.init(
+            target: .route,
+            payload: snapshot.routeWindow,
+            priority: 2,
+            coalescingKey: "route"
+        ))
+        if Self.shouldSendManeuver(
+            snapshot,
+            after: previousSnapshot
+        ) {
+            _ = queue.enqueue(.init(
+                target: .navigation,
+                payload: WatchRidePacketEncoderV1.maneuver(snapshot),
+                priority: 3
+            ))
+        }
+        drainQueue()
+    }
+
+    private static func shouldSendManeuver(
+        _ snapshot: NavigationSnapshotV1,
+        after previous: NavigationSnapshotV1?
+    ) -> Bool {
+        guard let previous else { return true }
+        return snapshot.navigationGeneration != previous.navigationGeneration ||
+            snapshot.routeID != previous.routeID ||
+            snapshot.revision != previous.revision ||
+            snapshot.currentStepIndex != previous.currentStepIndex ||
+            snapshot.maneuver != previous.maneuver ||
+            snapshot.instruction != previous.instruction ||
+            snapshot.offRouteDistanceMeters != previous.offRouteDistanceMeters ||
+            abs(
+                snapshot.distanceToManeuverMeters -
+                    previous.distanceToManeuverMeters
+            ) >= 10
+    }
+
+    private func enqueueWorkoutFrames(_ frames: WorkoutDeviceFrames) {
+        queue.removeAll(target: .workout)
+        workoutPairGeneration = workoutPairGeneration == 3
+            ? 1
+            : workoutPairGeneration + 1
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
+            generation: workoutPairGeneration
+        )
+        for payload in payloads {
+            _ = queue.enqueue(.init(
+                target: .workout,
+                payload: payload,
+                priority: 0
+            ))
+        }
+    }
+
+    private func enqueueWorkoutGPSIfNeeded() {
+        guard demand.workoutActive,
+              !demand.navigationActive,
+              let latestWorkoutGPS else { return }
+        _ = queue.enqueue(.init(
+            target: .gps,
+            payload: WatchRidePacketEncoderV1.gps(
+                NavigationLocationSampleV1(
+                    coordinate: RouteCoordinateV1(
+                        latitude: latestWorkoutGPS.latitude,
+                        longitude: latestWorkoutGPS.longitude
+                    ),
+                    horizontalAccuracyMeters:
+                        latestWorkoutGPS.horizontalAccuracyMeters,
+                    courseDegrees: latestWorkoutGPS.courseDegrees ?? -1,
+                    speedMetersPerSecond:
+                        latestWorkoutGPS.speedMetersPerSecond ?? -1,
+                    altitudeMeters: latestWorkoutGPS.altitudeMeters ?? 0,
+                    timestamp: latestWorkoutGPS.capturedAt
+                ),
+                snapshot: nil,
+                distanceTraveledMeters:
+                    latestWorkoutGPS.distanceTraveledMeters,
+                elapsedSeconds: latestWorkoutGPS.elapsedSeconds
+            ),
+            priority: 1,
+            coalescingKey: "gps"
+        ))
+    }
+
+    private func enqueueProtected(
+        target: WatchBLEOutboundTargetV1,
+        payload: Data,
+        priority: UInt8,
+        coalescingKey: String? = nil
+    ) {
+        guard queue.enqueue(.init(
+            target: target,
+            payload: payload,
+            priority: priority,
+            coalescingKey: coalescingKey
+        )) else {
+            fail("Watch BLE queue is full")
+            return
+        }
+    }
+
+    private func drainQueue() {
+        guard protectedSession != nil,
+              let peripheral,
+              !writeWithResponseInFlight else { return }
+        while let write = queue.dequeue() {
+            guard let characteristic = characteristic(for: write.target),
+                  let session = protectedSession else {
+                fail("Bike Computer characteristic disappeared")
+                return
+            }
+            let frame: Data
+            do {
+                frame = try session.frame(
+                    payload: write.payload,
+                    channel: write.target.channel
+                )
+            } catch {
+                fail("Could not protect Watch ride data")
+                return
+            }
+            let writeType: CBCharacteristicWriteType
+            if characteristic.properties.contains(.write) {
+                writeType = .withResponse
+            } else if characteristic.properties.contains(
+                .writeWithoutResponse
+            ) {
+                guard peripheral.canSendWriteWithoutResponse else {
+                    _ = queue.enqueue(write)
+                    return
+                }
+                writeType = .withoutResponse
+            } else {
+                fail("Bike Computer characteristic is not writable")
+                return
+            }
+            let maximum = peripheral.maximumWriteValueLength(for: writeType)
+            guard frame.count <= maximum else {
+                fail("Watch ride packet exceeds the BLE write limit")
+                return
+            }
+            writeWithResponseInFlight = writeType == .withResponse
+            peripheral.writeValue(
+                frame,
+                for: characteristic,
+                type: writeType
+            )
+            if writeType == .withResponse { return }
+        }
+        finishPendingReleasesIfPossible()
+    }
+
+    private func finishPendingReleasesIfPossible() {
+        guard state.isReady,
+              demand.hasPendingRelease,
+              queue.isEmpty,
+              !writeWithResponseInFlight else { return }
+        demand.completePendingReleases()
+        if !hasDemand {
+            stop()
+        }
+    }
+
+    private func characteristic(
+        for target: WatchBLEOutboundTargetV1
+    ) -> CBCharacteristic? {
+        switch target {
+        case .navigation: navigationCharacteristic
+        case .route: routeCharacteristic
+        case .gps: gpsCharacteristic
+        case .workout: workoutCharacteristic
+        }
+    }
+
+    private func writeRawAuth(_ message: String) {
+        guard let data = message.data(using: .utf8),
+              let peripheral,
+              let authCharacteristic else {
+            fail("Watch auth characteristic is unavailable")
+            return
+        }
+        let type: CBCharacteristicWriteType =
+            authCharacteristic.properties.contains(.write)
+                ? .withResponse
+                : .withoutResponse
+        guard data.count <= peripheral.maximumWriteValueLength(for: type) else {
+            fail("Watch auth command exceeds the BLE write limit")
+            return
+        }
+        peripheral.writeValue(data, for: authCharacteristic, type: type)
+    }
+
+    private func writeProtectedAuth(_ message: String) {
+        guard let session = protectedSession,
+              let data = message.data(using: .utf8),
+              let peripheral,
+              let authCharacteristic else { return }
+        do {
+            let frame = try session.frame(payload: data, channel: .auth)
+            let type: CBCharacteristicWriteType =
+                authCharacteristic.properties.contains(.write)
+                    ? .withResponse
+                    : .withoutResponse
+            guard frame.count <= peripheral.maximumWriteValueLength(
+                for: type
+            ) else {
+                fail("Protected Watch auth command is too large")
+                return
+            }
+            peripheral.writeValue(frame, for: authCharacteristic, type: type)
+        } catch {
+            fail("Could not protect Watch auth command")
+        }
+    }
+
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(
+            withTimeInterval: 5,
+            repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard self?.state.isReady == true else { return }
+                self?.writeProtectedAuth("LEASE_HEARTBEAT")
+            }
+        }
+    }
+
+    private func fail(_ message: String) {
+        let wasScanning = state == .scanning
+        lastError = message
+        state = .failed(message)
+        if wasScanning { central.stopScan() }
+        if let peripheral {
+            central.cancelPeripheralConnection(peripheral)
+        } else {
+            scheduleReconnect()
+        }
+    }
+
+    private func failAuthentication(_ message: String) {
+        if let credential {
+            var map = peripheralMap()
+            map.removeValue(forKey: credential.deviceID)
+            defaults.set(map, forKey: peripheralMapKey)
+        }
+        fail(message)
+    }
+
+    private func startOperationTimeout(generation: UInt64) {
+        operationTimeoutTask?.cancel()
+        operationTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard !Task.isCancelled, let self,
+                  self.connectionGeneration == generation,
+                  !self.state.isReady else { return }
+            self.operationTimeoutTask = nil
+            self.fail("Bike Computer connection timed out")
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard hasDemand, reconnectTask == nil else { return }
+        reconnectAttempt = min(reconnectAttempt + 1, 6)
+        let delay = min(pow(2, Double(reconnectAttempt - 1)), 30)
+        let generation = connectionGeneration
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(
+                for: .seconds(delay)
+            )
+            guard !Task.isCancelled, let self else { return }
+            self.reconnectTask = nil
+            guard self.hasDemand,
+                  self.connectionGeneration == generation else { return }
+            self.resetTransport(keepingPeripheral: false)
+            self.beginIfNeeded()
+        }
+    }
+
+    private func persistCurrentPeripheral() {
+        guard let credential, let peripheral else { return }
+        var map = peripheralMap()
+        map[credential.deviceID] = peripheral.identifier.uuidString
+        defaults.set(map, forKey: peripheralMapKey)
+    }
+
+    private func peripheralMap() -> [String: String] {
+        defaults.dictionary(forKey: peripheralMapKey) as? [String: String]
+            ?? [:]
+    }
+
+    private static func randomNonce() -> Data? {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(
+            kSecRandomDefault,
+            bytes.count,
+            &bytes
+        ) == errSecSuccess else { return nil }
+        return Data(bytes)
+    }
+
+    private static func advertisedSuffix(
+        _ advertisementData: [String: Any]
+    ) -> String? {
+        guard let data = advertisementData[
+            CBAdvertisementDataManufacturerDataKey
+        ] as? Data,
+              data.count == 8,
+              data[0] == 0xFF,
+              data[1] == 0xFF,
+              data[2] == 2 else { return nil }
+        return data.subdata(in: 4..<8).map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+}
+
+extension WatchDeviceLink: @preconcurrency CBCentralManagerDelegate {
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard hasDemand else { return }
+        if central.state == .poweredOn {
+            beginIfNeeded()
+        } else {
+            state = .bluetoothUnavailable
+            resetTransport(keepingPeripheral: false)
+        }
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        willRestoreState dict: [String: Any]
+    ) {
+        guard hasDemand,
+              let restored = (dict[
+                CBCentralManagerRestoredStatePeripheralsKey
+              ] as? [CBPeripheral])?.first,
+              let matched = credentials.first(where: {
+                  peripheralMap()[$0.deviceID] == restored.identifier.uuidString
+              }) else { return }
+        connect(restored, credential: matched)
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDiscover candidate: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi RSSI: NSNumber
+    ) {
+        guard state == .scanning,
+              let suffix = Self.advertisedSuffix(advertisementData) else {
+            return
+        }
+        let matches = credentials.filter {
+            $0.deviceID.hasSuffix(suffix)
+        }
+        guard matches.count == 1, let matched = matches.first else {
+            if matches.count > 1 {
+                fail("Two enrolled Bike Computers share an ambiguous code")
+            }
+            return
+        }
+        connect(candidate, credential: matched)
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didConnect connected: CBPeripheral
+    ) {
+        guard peripheral?.identifier == connected.identifier else {
+            central.cancelPeripheralConnection(connected)
+            return
+        }
+        state = .discovering
+        connected.discoverServices([serviceUUID])
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didFailToConnect failed: CBPeripheral,
+        error: Error?
+    ) {
+        guard peripheral?.identifier == failed.identifier else { return }
+        resetTransport(keepingPeripheral: false)
+        state = .failed("Could not connect to Bicino")
+        scheduleReconnect()
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDisconnectPeripheral disconnected: CBPeripheral,
+        timestamp: CFAbsoluteTime,
+        isReconnecting: Bool,
+        error: Error?
+    ) {
+        guard peripheral?.identifier == disconnected.identifier else { return }
+        connectionGeneration &+= 1
+        resetTransport(keepingPeripheral: false)
+        guard hasDemand else {
+            disconnectingForBusyLease = false
+            state = .idle
+            return
+        }
+        if disconnectingForBusyLease {
+            state = .busy
+            disconnectingForBusyLease = false
+        } else {
+            state = .failed("Bicino disconnected")
+        }
+        scheduleReconnect()
+    }
+}
+
+extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didDiscoverServices error: Error?
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier,
+              error == nil,
+              let service = peripheral.services?.first(where: {
+                  $0.uuid == serviceUUID
+              }) else {
+            fail("Bike Computer navigation service is unavailable")
+            return
+        }
+        peripheral.discoverCharacteristics(
+            [
+                authUUID,
+                navigationUUID,
+                routeUUID,
+                gpsUUID,
+                workoutUUID,
+            ],
+            for: service
+        )
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didDiscoverCharacteristicsFor service: CBService,
+        error: Error?
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier,
+              error == nil else {
+            fail("Bike Computer characteristics are unavailable")
+            return
+        }
+        for characteristic in service.characteristics ?? [] {
+            switch characteristic.uuid {
+            case authUUID: authCharacteristic = characteristic
+            case navigationUUID: navigationCharacteristic = characteristic
+            case routeUUID: routeCharacteristic = characteristic
+            case gpsUUID: gpsCharacteristic = characteristic
+            case workoutUUID: workoutCharacteristic = characteristic
+            default: break
+            }
+        }
+        guard let authCharacteristic,
+              let navigationCharacteristic,
+              routeCharacteristic != nil,
+              gpsCharacteristic != nil else {
+            fail("Bike Computer firmware is missing Watch ride channels")
+            return
+        }
+        peripheral.setNotifyValue(true, for: authCharacteristic)
+        peripheral.setNotifyValue(true, for: navigationCharacteristic)
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier else {
+            return
+        }
+        guard error == nil, characteristic.isNotifying else {
+            fail("Bike Computer notifications could not be enabled")
+            return
+        }
+        if authCharacteristic?.isNotifying == true,
+           navigationCharacteristic?.isNotifying == true {
+            beginAuthentication()
+        }
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier,
+              error == nil,
+              let value = characteristic.value else { return }
+        if characteristic.uuid == authUUID {
+            handleAuthNotification(value)
+        } else if characteristic.uuid == navigationUUID {
+            handleNavigationNotification(value)
+        }
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier else {
+            return
+        }
+        if error != nil {
+            fail("Bike Computer rejected a Watch BLE write")
+            return
+        }
+        if characteristic.uuid != authUUID {
+            writeWithResponseInFlight = false
+            drainQueue()
+        }
+    }
+
+    func peripheralIsReady(
+        toSendWriteWithoutResponse peripheral: CBPeripheral
+    ) {
+        guard self.peripheral?.identifier == peripheral.identifier else {
+            return
+        }
+        drainQueue()
+    }
+}
+
+extension WatchDeviceLink: WatchNavigationDeviceLinking {}
+
+private extension Data {
+    func trimmingTrailingTransportBytes() -> Data {
+        var end = endIndex
+        while end > startIndex {
+            let byte = self[index(before: end)]
+            guard byte == 0 || byte == 0x0A || byte == 0x0D || byte == 0x20
+            else { break }
+            end = index(before: end)
+        }
+        return self[startIndex..<end]
+    }
+}

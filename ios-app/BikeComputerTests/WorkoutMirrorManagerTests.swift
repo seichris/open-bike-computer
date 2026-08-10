@@ -35,6 +35,39 @@ private final class FakeWorkoutWatchConnectivitySession:
 }
 
 @MainActor
+private final class FakeWorkoutWatchConnectivityCoordinator:
+    WorkoutWatchConnectivityCoordinating
+{
+    @Published var workoutState = WorkoutWatchConnectivityStateV1(
+        isSupported: true
+    )
+    private(set) var activationCount = 0
+    private(set) var applicationContexts: [[String: Any]] = []
+
+    var workoutStatePublisher:
+        AnyPublisher<WorkoutWatchConnectivityStateV1, Never> {
+        $workoutState.eraseToAnyPublisher()
+    }
+
+    func activate() {
+        activationCount += 1
+        workoutState = WorkoutWatchConnectivityStateV1(
+            isSupported: true,
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false
+        )
+    }
+
+    func updateApplicationContextMerging(
+        _ fields: [String: Any]
+    ) throws {
+        applicationContexts.append(fields)
+    }
+}
+
+@MainActor
 private final class ManualWorkoutWatchSyncRetryScheduler {
     private(set) var delays: [TimeInterval] = []
     private var actions: [@MainActor () -> Void] = []
@@ -55,6 +88,36 @@ private final class ManualWorkoutWatchSyncRetryScheduler {
 
 @MainActor
 final class WorkoutWatchAvailabilityMonitorProductionTests: XCTestCase {
+    func testSharedCoordinatorAdapterPublishesAndSyncs() throws {
+        let suiteName = "WorkoutWatchAvailabilityMonitorCoordinatorTests"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let coordinator = FakeWorkoutWatchConnectivityCoordinator()
+        let scheduler = ManualWorkoutWatchSyncRetryScheduler()
+        let monitor = WorkoutWatchAvailabilityMonitor(
+            heartRateZoneDefaults: defaults,
+            session: nil,
+            connectivityCoordinator: coordinator,
+            syncRetryScheduler: scheduler.schedule
+        )
+
+        monitor.setMaximumHeartRateBPM(202)
+        XCTAssertTrue(coordinator.applicationContexts.isEmpty)
+
+        monitor.activate()
+
+        XCTAssertEqual(coordinator.activationCount, 1)
+        XCTAssertEqual(monitor.availability, .ready(isReachable: false))
+        XCTAssertEqual(coordinator.applicationContexts.count, 1)
+        XCTAssertEqual(
+            WorkoutHeartRateZoneSyncContext.maximumHeartRateBPM(
+                from: try XCTUnwrap(coordinator.applicationContexts.last)
+            ),
+            202
+        )
+    }
+
     func testPersistedMaximumHeartRatePublishesAfterActivationAndInstall() async throws {
         let suiteName = "WorkoutWatchAvailabilityMonitorActivationTests"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

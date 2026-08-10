@@ -15,6 +15,7 @@
 		57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003002F00000100000001 /* WatchWorkoutManager.swift */; };
 		57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003012F00000100000001 /* WatchRouteRecorder.swift */; };
 		57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */; };
+		57A003062F00000100000001 /* WatchLocationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A003072F00000100000001 /* WatchLocationService.swift */; };
 		57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004002F00000100000001 /* WorkoutMirrorManager.swift */; };
 		57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004012F00000100000001 /* WorkoutMetricsStore.swift */; };
 		57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */; };
@@ -103,6 +104,7 @@
 		57A003002F00000100000001 /* WatchWorkoutManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutManager.swift (Tests)"; path = BikeComputerWatch/Managers/WatchWorkoutManager.swift; sourceTree = "<group>"; };
 		57A003012F00000100000001 /* WatchRouteRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchRouteRecorder.swift (Tests)"; path = BikeComputerWatch/Managers/WatchRouteRecorder.swift; sourceTree = "<group>"; };
 		57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputerWatchTests/WatchWorkoutManagerTests.swift; sourceTree = "<group>"; };
+		57A003072F00000100000001 /* WatchLocationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchLocationService.swift (Tests)"; path = BikeComputerWatch/Managers/WatchLocationService.swift; sourceTree = "<group>"; };
 		57A004002F00000100000001 /* WorkoutMirrorManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMirrorManager.swift; sourceTree = "<group>"; };
 		57A004012F00000100000001 /* WorkoutMetricsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutMetricsStore.swift; sourceTree = "<group>"; };
 		57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/WorkoutMirrorManagerTests.swift; sourceTree = "<group>"; };
@@ -196,6 +198,11 @@
 			path = WorkoutLiveActivityShared;
 			sourceTree = "<group>";
 		};
+		57B000012F00000100000001 /* RideShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RideShared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -253,6 +260,7 @@
 				57A008022F00000100000001 /* BikeComputerLiveActivity */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
 				57A008122F00000100000001 /* WorkoutLiveActivityShared */,
+				57B000012F00000100000001 /* RideShared */,
 				57A009002F00000100000001 /* WorkoutLiveActivityStateMapper.swift */,
 				57A009012F00000100000001 /* WorkoutLiveActivityController.swift */,
 				57A009022F00000100000001 /* WorkoutLiveActivityCommandRouter.swift */,
@@ -266,6 +274,7 @@
 				57A003002F00000100000001 /* WatchWorkoutManager.swift */,
 				57A003012F00000100000001 /* WatchRouteRecorder.swift */,
 				57A003022F00000100000001 /* WatchWorkoutManagerTests.swift */,
+				57A003072F00000100000001 /* WatchLocationService.swift */,
 				57A004002F00000100000001 /* WorkoutMirrorManager.swift */,
 				57A004012F00000100000001 /* WorkoutMetricsStore.swift */,
 				57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */,
@@ -313,6 +322,7 @@
 				83E6EF992EED853C00AE5F9B /* BikeComputer */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
 				57A008122F00000100000001 /* WorkoutLiveActivityShared */,
+				57B000012F00000100000001 /* RideShared */,
 			);
 			name = BikeComputer;
 			packageProductDependencies = (
@@ -338,6 +348,7 @@
 			fileSystemSynchronizedGroups = (
 				57A000022F00000100000001 /* BikeComputerWatch */,
 				57A0000F2F00000100000001 /* WorkoutShared */,
+				57B000012F00000100000001 /* RideShared */,
 			);
 			name = BikeComputerWatch;
 			packageProductDependencies = (
@@ -580,6 +591,7 @@
 				57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */,
 				57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */,
 				57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */,
+				57A003062F00000100000001 /* WatchLocationService.swift in Sources */,
 				57A006032F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

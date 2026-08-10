@@ -1,6 +1,7 @@
 #pragma once
 
 #include "device_ownership_crypto.hpp"
+#include "ride_controller_lease.hpp"
 
 #include <array>
 #include <cstdint>
@@ -32,6 +33,15 @@ enum class Event {
   Authenticated,
   Renamed,
   Unpaired,
+  WatchControllerStaged,
+  WatchControllerCommitted,
+  WatchControllerRevoked,
+};
+
+enum class SessionRole : uint8_t {
+  None = 0,
+  Owner = 1,
+  WatchRide = 2,
 };
 
 struct CommandResult {
@@ -56,6 +66,18 @@ public:
   bool protectAuthenticatedPayload(AuthenticatedChannel channel,
                                    const std::string &payload,
                                    std::string &frame);
+  bool authorizeRideWrite(AuthenticatedChannel channel, uint32_t nowMs);
+  bool isOwnerSession() const {
+    return sessionAuthenticated_ && sessionRole_ == SessionRole::Owner;
+  }
+  bool isWatchRideSession() const {
+    return sessionAuthenticated_ && sessionRole_ == SessionRole::WatchRide;
+  }
+  SessionRole sessionRole() const { return sessionRole_; }
+  bool hasWatchController() const { return watchControllerActive_; }
+  bool watchControllerSubsystemReady() const {
+    return watchControllerStorageValid_;
+  }
 #ifdef DEVICE_OWNERSHIP_HOST_TEST
   void setAuthenticatedSessionKeysForTesting(const OwnerKey &writeKey,
                                              const OwnerKey &notifyKey) {
@@ -64,6 +86,11 @@ public:
     lastInboundSequence_.fill(0);
     nextOutboundSequence_.fill(0);
     sessionAuthenticated_ = true;
+    sessionRole_ = SessionRole::Owner;
+    sessionControllerId_.fill(0);
+    sessionControllerId_[0] = 1;
+    sessionId_ = 1;
+    rideLease_.claim(currentControllerIdentity(), 0);
   }
 #endif
 
@@ -86,6 +113,23 @@ private:
   bool loadOrCreateDeviceId();
   bool loadOwner();
   bool persistOwner();
+  bool loadWatchController();
+  bool persistStagedWatchController();
+  bool commitStagedWatchController();
+  bool revokeWatchController(const std::array<uint8_t, 16> &controllerId);
+  bool clearWatchControllerStorage(Preferences &preferences);
+  void clearStagedWatchControllerMemory();
+  void clearActiveWatchControllerMemory();
+  void clearAuthenticatedSession(bool releaseLease);
+  ride_controller_lease::ControllerIdentity currentControllerIdentity() const;
+  bool beginAuthenticatedSession(SessionRole role,
+                                 const std::array<uint8_t, 16> &controllerId,
+                                 const OwnerKey &credentialKey,
+                                 const char *writeLabel,
+                                 const char *notifyLabel,
+                                 const std::string &sessionContext,
+                                 bool claimOwnerLease,
+                                 uint32_t nowMs);
   bool clearOwnerStorage(bool preserveSession, bool preserveRevocationReceipt);
   bool persistRevocationReceipt(const OwnerId &ownerId,
                                 const std::array<uint8_t, 16> &nonce,
@@ -105,7 +149,23 @@ private:
   bool ownerRecordValid_ = false;
   bool legacyAuthenticationAllowed_ = false;
   bool sessionAuthenticated_ = false;
+  SessionRole sessionRole_ = SessionRole::None;
+  std::array<uint8_t, 16> sessionControllerId_{};
+  uint64_t sessionId_ = 0;
   bool deviceIdIntegrityValid_ = true;
+
+  std::array<uint8_t, 16> watchControllerId_{};
+  OwnerKey watchControllerKey_{};
+  std::array<uint8_t, 16> stagedWatchControllerId_{};
+  OwnerKey stagedWatchControllerKey_{};
+  std::array<uint8_t, 16> stagedWatchChallenge_{};
+  bool watchControllerActive_ = false;
+  bool stagedWatchControllerValid_ = false;
+  bool watchControllerStorageValid_ = true;
+  uint8_t activeWatchControllerSlot_ = 0;
+  ride_controller_lease::RideControllerLease rideLease_{};
+  SessionRole pendingAuthenticationRole_ = SessionRole::None;
+  std::array<uint8_t, 16> pendingAuthenticationControllerId_{};
 
   PairingKeyAgreement pairingKey_;
   PairingMaterial pendingPairing_{};

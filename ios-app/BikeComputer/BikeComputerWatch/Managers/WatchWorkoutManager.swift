@@ -481,6 +481,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var heartRateZoneRuntimeMaximumHeartRateBPM: Int?
 
     override convenience init() {
+        self.init(locationService: WatchLocationService())
+    }
+
+    convenience init(locationService: WatchLocationService) {
 #if DEBUG
         let isAppStoreScreenshotPreview = ProcessInfo.processInfo.arguments
             .contains("--app-store-screenshot-live-workout")
@@ -489,7 +493,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 #endif
         self.init(
             healthStore: HKHealthStore(),
-            routeRecorder: WatchRouteRecorder(),
+            routeRecorder: WatchRouteRecorder(
+                locationService: locationService
+            ),
             recoveryStore: WatchWorkoutRecoveryStore(),
             recoverActiveWorkoutSession: nil,
             requestAuthorization: nil,
@@ -669,6 +675,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     var activeSessionID: UUID? {
         guard isWorkoutActive else { return nil }
         return recoveryStore.recoveredIdentity?.sessionID ?? identity?.sessionID
+    }
+    var activeSessionToken: UInt16? {
+        guard isWorkoutActive else { return nil }
+        return recoveryStore.recoveredIdentity?.sessionToken
+            ?? identity?.sessionToken
     }
     var isAwaitingDetachedSessionCleanup: Bool {
         if isTerminalPublicationPending

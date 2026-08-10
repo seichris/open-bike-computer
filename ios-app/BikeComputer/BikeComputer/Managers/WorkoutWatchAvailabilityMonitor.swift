@@ -17,6 +17,25 @@ protocol WorkoutWatchConnectivitySession: AnyObject {
 
 extension WCSession: WorkoutWatchConnectivitySession {}
 
+struct WorkoutWatchConnectivityStateV1: Equatable {
+    var isSupported = false
+    var isActivated = false
+    var activationFailed = false
+    var isPaired = false
+    var isWatchAppInstalled = false
+    var isReachable = false
+}
+
+@MainActor
+protocol WorkoutWatchConnectivityCoordinating: AnyObject {
+    var workoutState: WorkoutWatchConnectivityStateV1 { get }
+    var workoutStatePublisher:
+        AnyPublisher<WorkoutWatchConnectivityStateV1, Never> { get }
+
+    func activate()
+    func updateApplicationContextMerging(_ fields: [String: Any]) throws
+}
+
 /// Publishes Apple Watch pairing and companion-app installation state for the
 /// iPhone workout start surfaces. Reachability is intentionally informational:
 /// HealthKit can wake an installed Watch app even when WatchConnectivity cannot
@@ -27,6 +46,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     @Published private(set) var maximumHeartRateBPM: Int
 
     private let session: WorkoutWatchConnectivitySession?
+    private let connectivityCoordinator: WorkoutWatchConnectivityCoordinating?
     private let heartRateZoneDefaults: UserDefaults
     private let syncRetryScheduler: (
         TimeInterval,
@@ -37,6 +57,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     private var syncRetryAttempt = 0
     private var nextSyncRetryID: UInt64 = 0
     private var scheduledSyncRetryID: UInt64?
+    private var connectivityCancellables = Set<AnyCancellable>()
 
     override convenience init() {
         self.init(heartRateZoneDefaults: .standard)
@@ -64,15 +85,36 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         )
     }
 
+    convenience init(
+        heartRateZoneDefaults: UserDefaults = .standard,
+        connectivityCoordinator: WorkoutWatchConnectivityCoordinating
+    ) {
+        self.init(
+            heartRateZoneDefaults: heartRateZoneDefaults,
+            session: nil,
+            connectivityCoordinator: connectivityCoordinator,
+            syncRetryScheduler: { delay, action in
+                Task { @MainActor in
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(delay * 1_000_000_000)
+                    )
+                    action()
+                }
+            }
+        )
+    }
+
     init(
         heartRateZoneDefaults: UserDefaults,
         session: WorkoutWatchConnectivitySession?,
+        connectivityCoordinator: WorkoutWatchConnectivityCoordinating? = nil,
         syncRetryScheduler: @escaping (
             TimeInterval,
             @escaping @MainActor () -> Void
         ) -> Void
     ) {
         self.session = session
+        self.connectivityCoordinator = connectivityCoordinator
         self.heartRateZoneDefaults = heartRateZoneDefaults
         self.syncRetryScheduler = syncRetryScheduler
         maximumHeartRateBPM = WorkoutHeartRateZoneSettings
@@ -85,6 +127,12 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             isReachable: false
         )
         super.init()
+        connectivityCoordinator?.workoutStatePublisher
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.refreshSessionState()
+            }
+            .store(in: &connectivityCancellables)
     }
 
     func setMaximumHeartRateBPM(_ value: Int) {
@@ -103,6 +151,13 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     }
 
     func activate() {
+        if let connectivityCoordinator {
+            maximumHeartRateSyncPending = true
+            connectivityCoordinator.activate()
+            publishAvailability()
+            syncMaximumHeartRateToWatch()
+            return
+        }
         guard let session else {
             publishAvailability()
             return
@@ -117,7 +172,17 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
 
     private func publishAvailability() {
         let availability: WorkoutWatchAvailabilityV1
-        if let session {
+        if let connectivityCoordinator {
+            let state = connectivityCoordinator.workoutState
+            availability = WorkoutWatchAvailabilityPolicyV1.resolve(
+                isSupported: state.isSupported,
+                isActivated: state.isActivated,
+                activationFailed: state.activationFailed,
+                isPaired: state.isPaired,
+                isCompanionAppInstalled: state.isWatchAppInstalled,
+                isReachable: state.isReachable
+            )
+        } else if let session {
             let isActivated = session.activationState == .activated
             availability = WorkoutWatchAvailabilityPolicyV1.resolve(
                 isSupported: true,
@@ -137,6 +202,28 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     }
 
     private func syncMaximumHeartRateToWatch() {
+        if let connectivityCoordinator {
+            let state = connectivityCoordinator.workoutState
+            guard maximumHeartRateSyncPending,
+                  state.isActivated,
+                  state.isPaired,
+                  state.isWatchAppInstalled else {
+                return
+            }
+            do {
+                try connectivityCoordinator.updateApplicationContextMerging(
+                    WorkoutHeartRateZoneSyncContext.applicationContext(
+                        maximumHeartRateBPM: maximumHeartRateBPM
+                    )
+                )
+                maximumHeartRateSyncPending = false
+                syncRetryAttempt = 0
+                scheduledSyncRetryID = nil
+            } catch {
+                scheduleMaximumHeartRateSyncRetry()
+            }
+            return
+        }
         guard maximumHeartRateSyncPending,
               let session,
               session.activationState == .activated,

@@ -25,7 +25,8 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published var expectedArrivalDate: Date?
     
     // MARK: - Private Properties
-    private var currentRoute: MKRoute?
+    private var currentRoute: NavigationRouteV1?
+    private var navigationRuntime = NavigationRuntimeV1()
     private var currentStepIndex: Int = 0
     private var currentSnapshot: NavigationManeuverSnapshot?
     private var lastManeuverStepIndex: Int?
@@ -62,7 +63,6 @@ class NavigationEngine: NSObject, ObservableObject {
     private var bleManager: BLEManager?
     private var cancellables = Set<AnyCancellable>()
     private let liveLocationStartTolerance: CLLocationDistance = 150
-    private let maneuverArrivalRadius: CLLocationDistance = 20
 
     init(now: @escaping () -> Date = Date.init) {
         self.now = now
@@ -108,11 +108,10 @@ class NavigationEngine: NSObject, ObservableObject {
     func processExternalLocation(_ location: CLLocation) -> Bool {
         latestExternalGpsLocation = location
         guard !isSimulationMode else { return false }
-        let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location)
         let acceptedRouteLocation: CLLocation?
-        if shouldAcceptLiveLocation(routeLocation) {
-            processLocation(routeLocation)
-            acceptedRouteLocation = routeLocation
+        if shouldAcceptLiveLocation(location) {
+            processLocation(location)
+            acceptedRouteLocation = location
         } else {
             acceptedRouteLocation = nil
         }
@@ -129,8 +128,26 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Start navigation with a given route
     func startNavigation(with route: MKRoute, isTestMode: Bool = false, initialLocation: CLLocation? = nil) {
-        currentRoute = route
-        cacheRouteCoordinates(from: route)
+        let normalizedInitialLocation = initialLocation.map(
+            MapKitRouteAdapter.normalizedLocation
+        )
+        let sharedRoute: NavigationRouteV1
+        do {
+            sharedRoute = try MapKitRouteAdapter.route(
+                from: route,
+                fallbackSource: normalizedInitialLocation.map {
+                    RouteCoordinateV1(
+                        latitude: $0.coordinate.latitude,
+                        longitude: $0.coordinate.longitude
+                    )
+                }
+            )
+        } catch {
+            print("Navigation route conversion failed: \(error)")
+            return
+        }
+        currentRoute = sharedRoute
+        cacheRouteCoordinates(from: sharedRoute)
         currentStepIndex = 0
         isSimulationMode = isTestMode
         isNavigating = true
@@ -141,24 +158,62 @@ class NavigationEngine: NSObject, ObservableObject {
         lastManeuverStepIndex = nil
         lastManeuverRemainingDistance = nil
         sendTracker.reset()
-        initialNavigationLocation = initialLocation
-        hasAcceptedLiveLocation = initialLocation == nil
+        initialNavigationLocation = normalizedInitialLocation
+        hasAcceptedLiveLocation = normalizedInitialLocation == nil
         lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
-        resetRideTelemetry(startingAt: initialLocation)
-        updateNavigationSummary(route: route, remainingDistance: route.distance)
+        resetRideTelemetry(startingAt: normalizedInitialLocation)
+        let runtimeInitialLocation: CLLocation? = {
+            if let normalizedInitialLocation {
+                return normalizedInitialLocation
+            }
+            guard isTestMode, let first = sharedRoute.points.first else {
+                return nil
+            }
+            return CLLocation(latitude: first.latitude, longitude: first.longitude)
+        }()
+        do {
+            _ = try navigationRuntime.start(
+                route: sharedRoute,
+                mode: .online,
+                initialStepStrategy: .first,
+                initialLocation: runtimeInitialLocation.map(
+                    NavigationLocationSampleV1.init(location:)
+                )
+            )
+        } catch {
+            print("Navigation runtime failed to start: \(error)")
+            stopNavigation()
+            return
+        }
+        updateNavigationSummary(
+            route: sharedRoute,
+            remainingDistance: sharedRoute.distanceMeters
+        )
         
-        print("Navigation started with \(route.steps.count) steps (Test Mode: \(isTestMode))")
+        print("Navigation started with \(sharedRoute.steps.count) steps (Test Mode: \(isTestMode))")
         
         if isTestMode {
             startSimulation()
         } else {
             startRideTelemetryTimer()
-            if let initialLocation {
-                sendRouteGeometryIfNeeded(currentLocation: initialLocation)
-                processLocation(initialLocation)
-                updateRideTelemetry(gpsLocation: initialLocation, routeLocation: initialLocation)
-                sendInitialDeviceGpsPosition(initialLocation, convertFromMapKitRoute: true)
+            if let normalizedInitialLocation {
+                if let initialSnapshot = navigationRuntime.snapshot {
+                    applyRuntimeSnapshot(
+                        initialSnapshot,
+                        route: sharedRoute,
+                        currentLocation: normalizedInitialLocation
+                    )
+                }
+                guard isNavigating else { return }
+                updateRideTelemetry(
+                    gpsLocation: normalizedInitialLocation,
+                    routeLocation: normalizedInitialLocation
+                )
+                sendInitialDeviceGpsPosition(
+                    normalizedInitialLocation,
+                    convertFromMapKitRoute: false
+                )
             }
         }
     }
@@ -170,14 +225,40 @@ class NavigationEngine: NSObject, ObservableObject {
     ) {
         guard isNavigating, !isSimulationMode else { return }
 
-        currentRoute = route
-        cacheRouteCoordinates(from: route)
+        let normalizedCurrentLocation = MapKitRouteAdapter.normalizedLocation(
+            currentLocation
+        )
+        let sharedRoute: NavigationRouteV1
+        do {
+            sharedRoute = try MapKitRouteAdapter.route(
+                from: route,
+                fallbackSource: RouteCoordinateV1(
+                    latitude: normalizedCurrentLocation.coordinate.latitude,
+                    longitude: normalizedCurrentLocation.coordinate.longitude
+                )
+            )
+        } catch {
+            print("Replacement route conversion failed: \(error)")
+            return
+        }
+
+        let replacementSnapshot: NavigationSnapshotV1
+        do {
+            replacementSnapshot = try navigationRuntime.replaceRoute(
+                sharedRoute,
+                mode: .online,
+                currentLocation: NavigationLocationSampleV1(
+                    location: normalizedCurrentLocation
+                )
+            )
+        } catch {
+            print("Navigation runtime failed to replace route: \(error)")
+            return
+        }
+        currentRoute = sharedRoute
+        cacheRouteCoordinates(from: sharedRoute)
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
-        currentStepIndex = RouteStepSelection.closestNavigableStepIndex(
-            to: currentLocation,
-            in: route
-        ) ?? 0
         currentSnapshot = nil
         lastManeuverStepIndex = nil
         lastManeuverRemainingDistance = nil
@@ -186,23 +267,36 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = true
         lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
-
-        let remainingDistance = RouteProgress.remainingDistance(from: currentLocation, in: route) ?? route.distance
-        lastRouteRemainingMeters = remainingDistance
-        updateNavigationSummary(route: route, remainingDistance: remainingDistance)
-        processLocation(currentLocation)
+        applyRuntimeSnapshot(
+            replacementSnapshot,
+            route: sharedRoute,
+            currentLocation: normalizedCurrentLocation
+        )
+        guard isNavigating else { return }
         resendCurrentDeviceGpsPosition()
 
-        print("Navigation route replaced with \(route.steps.count) steps")
+        print("Navigation route replaced with \(sharedRoute.steps.count) steps")
     }
 
     func distanceToCurrentStep(from location: CLLocation) -> CLLocationDistance? {
         guard let route = currentRoute,
-              currentStepIndex < route.steps.count else { return nil }
-
-        return route.steps[currentStepIndex...].lazy.compactMap {
-            RouteDeviation.distance(from: location, to: $0.polyline)
-        }.first
+              route.steps.indices.contains(currentStepIndex) else { return nil }
+        let normalized = MapKitRouteAdapter.normalizedLocation(location)
+        let step = route.steps[currentStepIndex]
+        let stepPoints = Array(
+            route.points[step.geometryStartIndex...step.geometryEndIndex]
+        )
+        let projections = NavigationGeometryV1.projections(
+            of: RouteCoordinateV1(
+                latitude: normalized.coordinate.latitude,
+                longitude: normalized.coordinate.longitude
+            ),
+            onto: stepPoints,
+            cumulativeDistances: NavigationGeometryV1.cumulativeDistances(
+                for: stepPoints
+            )
+        )
+        return projections.map(\.crossTrackDistanceMeters).min()
     }
     
     /// Stop navigation
@@ -216,6 +310,7 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         bleManager?.clearRouteGeometry()
         isNavigating = false
+        navigationRuntime.stop()
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
@@ -283,7 +378,7 @@ class NavigationEngine: NSObject, ObservableObject {
         
         // Calculate distance covered in this time step
         let distanceCovered = simulationSpeed * timeDelta
-        let totalDistance = route.distance
+        let totalDistance = route.distanceMeters
         
         // Update progress
         let progressDelta = distanceCovered / totalDistance
@@ -298,7 +393,12 @@ class NavigationEngine: NSObject, ObservableObject {
         
         // Calculate position
         if let position = interpolatePositionAlongRoute(progress: simulationProgress) {
-            simulatedPosition = position
+            // The shared runtime and device transport stay in WGS-84. Expose
+            // only the MapKit presentation coordinate through the UI-facing
+            // simulatedPosition property, matching live/test navigation.
+            simulatedPosition = CoordinateConverter.wgs84ToGCJ02(
+                coordinate: position
+            )
 
             let location = CLLocation(
                 coordinate: position,
@@ -314,7 +414,7 @@ class NavigationEngine: NSObject, ObservableObject {
             processLocation(location)
             guard isNavigating, isSimulationMode else { return }
             updateRideTelemetry(gpsLocation: location, routeLocation: location)
-            sendDeviceGpsPosition(location, convertFromMapKitRoute: true)
+            sendDeviceGpsPosition(location, convertFromMapKitRoute: false)
         }
     }
     
@@ -329,12 +429,18 @@ class NavigationEngine: NSObject, ObservableObject {
         let pointCount = points.count
         guard pointCount > 1 else { return nil }
 
-        let targetDistance = progress * route.distance
+        let targetDistance = progress * route.distanceMeters
         var currentDist = 0.0
         
         for i in 0..<(pointCount - 1) {
-            let p1 = CLLocation(latitude: points[i].latitude, longitude: points[i].longitude)
-            let p2 = CLLocation(latitude: points[i+1].latitude, longitude: points[i+1].longitude)
+            let p1 = CLLocation(
+                latitude: points[i].latitude,
+                longitude: points[i].longitude
+            )
+            let p2 = CLLocation(
+                latitude: points[i + 1].latitude,
+                longitude: points[i + 1].longitude
+            )
             let dist = p1.distance(from: p2)
             
             if currentDist + dist >= targetDistance {
@@ -342,8 +448,10 @@ class NavigationEngine: NSObject, ObservableObject {
                 let remaining = targetDistance - currentDist
                 let ratio = remaining / dist
                 
-                let lat = points[i].latitude + (points[i+1].latitude - points[i].latitude) * ratio
-                let lon = points[i].longitude + (points[i+1].longitude - points[i].longitude) * ratio
+                let lat = points[i].latitude +
+                    (points[i + 1].latitude - points[i].latitude) * ratio
+                let lon = points[i].longitude +
+                    (points[i + 1].longitude - points[i].longitude) * ratio
                 
                 return CLLocationCoordinate2D(latitude: lat, longitude: lon)
             }
@@ -351,7 +459,11 @@ class NavigationEngine: NSObject, ObservableObject {
             currentDist += dist
         }
         
-        return points.last
+        guard let last = points.last else { return nil }
+        return CLLocationCoordinate2D(
+            latitude: last.latitude,
+            longitude: last.longitude
+        )
     }
 
     /// Send test navigation data for BLE testing
@@ -386,124 +498,69 @@ class NavigationEngine: NSObject, ObservableObject {
     /// Process location update and extract navigation data
     private func processLocation(_ location: CLLocation) {
         guard let route = currentRoute, isNavigating else { return }
-        sendRouteGeometryIfNeeded(currentLocation: location)
-        
-        // Check if we've completed all steps
-        if currentStepIndex >= route.steps.count {
+        let runtimeSnapshot: NavigationSnapshotV1
+        do {
+            runtimeSnapshot = try navigationRuntime.process(
+                NavigationLocationSampleV1(location: location)
+            )
+        } catch {
+            print("Navigation location rejected: \(error)")
+            return
+        }
+
+        applyRuntimeSnapshot(runtimeSnapshot, route: route, currentLocation: location)
+    }
+
+    private func applyRuntimeSnapshot(
+        _ runtimeSnapshot: NavigationSnapshotV1,
+        route: NavigationRouteV1,
+        currentLocation: CLLocation
+    ) {
+        if runtimeSnapshot.maneuver == .arrive,
+           runtimeSnapshot.distanceToManeuverMeters < 20 {
             print("Navigation complete!")
             stopNavigation()
             return
         }
-
-        guard advanceToNextNavigableStep(in: route) else {
-            print("Navigation route has no navigable steps")
-            return
-        }
-        
-        let currentStep = route.steps[currentStepIndex]
-        guard let stepEndLocation = endpointLocation(for: currentStep) else { return }
-
-        let preferredRemainingDistance = lastManeuverStepIndex == currentStepIndex
-            ? lastManeuverRemainingDistance
-            : initialRemainingDistance(for: currentStep)
-        guard var remainingDistance = distanceToManeuver(
-            from: location,
-            in: currentStep,
-            preferredRemainingDistance: preferredRemainingDistance
-        ) else { return }
-
-        // Reaching the maneuver requires both physical endpoint proximity and
-        // route progress. The second condition prevents a long U-shaped step
-        // whose endpoint is nearby from being skipped at its start.
-        let endpointDistance = location.distance(from: stepEndLocation)
-        if endpointDistance < maneuverArrivalRadius,
-           remainingDistance < maneuverArrivalRadius,
-           currentStepIndex < route.steps.count - 1 {
-            currentStepIndex += 1
-            guard advanceToNextNavigableStep(in: route) else {
-                print("Navigation complete!")
-                stopNavigation()
-                return
-            }
+        if runtimeSnapshot.currentStepIndex != currentStepIndex {
+            currentStepIndex = runtimeSnapshot.currentStepIndex
             print("Advanced to step \(currentStepIndex)")
-
-            guard let recalculatedDistance = distanceToManeuver(
-                from: location,
-                in: route.steps[currentStepIndex],
-                preferredRemainingDistance: initialRemainingDistance(
-                    for: route.steps[currentStepIndex]
-                )
-            ) else { return }
-            remainingDistance = recalculatedDistance
         }
-        
-        // Update current navigation data
-        let newStep = route.steps[currentStepIndex]
-        let newInstruction = extractInstruction(from: newStep)
-        let newIconID = mapInstructionToIconID(newInstruction)
-
-        let newDistance = Int(remainingDistance)
-        let snapshot = NavigationManeuverSnapshot(iconID: newIconID, distance: newDistance, instruction: newInstruction)
-        currentSnapshot = snapshot
+        let instruction = displayInstruction(runtimeSnapshot.instruction)
+        let maneuverSnapshot = NavigationManeuverSnapshot(
+            iconID: runtimeSnapshot.maneuver.deviceIconID,
+            distance: Int(runtimeSnapshot.distanceToManeuverMeters),
+            instruction: instruction
+        )
+        currentSnapshot = maneuverSnapshot
         lastManeuverStepIndex = currentStepIndex
-        lastManeuverRemainingDistance = remainingDistance
+        lastManeuverRemainingDistance = runtimeSnapshot.distanceToManeuverMeters
         
         // Update published properties
-        currentInstruction = snapshot.instruction
-        distanceToManeuver = snapshot.distance
-        currentIconID = snapshot.iconID
+        currentInstruction = maneuverSnapshot.instruction
+        distanceToManeuver = maneuverSnapshot.distance
+        currentIconID = maneuverSnapshot.iconID
+        lastRouteRemainingMeters = runtimeSnapshot.routeRemainingDistanceMeters
+        updateNavigationSummary(
+            route: route,
+            remainingDistance: runtimeSnapshot.routeRemainingDistanceMeters
+        )
         
         // Determine if we should send update to ESP32
-        if sendTracker.shouldSend(snapshot) {
-            sendNavigationDataToESP32(snapshot)
+        if sendTracker.shouldSend(maneuverSnapshot) {
+            sendNavigationDataToESP32(maneuverSnapshot)
         }
 
-        sendRouteGeometryIfNeeded(currentLocation: location)
+        sendRouteGeometryIfNeeded(currentLocation: currentLocation)
     }
 
-    private func endpointLocation(for step: MKRoute.Step) -> CLLocation? {
-        RoutePolylineEndpoint.location(for: step.polyline)
-    }
-
-    private func initialRemainingDistance(for step: MKRoute.Step) -> CLLocationDistance? {
-        let distance = step.distance
-        return distance.isFinite && distance > 0 ? distance : nil
-    }
-
-    private func distanceToManeuver(
-        from location: CLLocation,
-        in step: MKRoute.Step,
-        preferredRemainingDistance: CLLocationDistance?
-    ) -> CLLocationDistance? {
-        guard let endpoint = endpointLocation(for: step) else { return nil }
-        let endpointDistance = location.distance(from: endpoint)
-
-        if let remainingDistance = RouteProgress.remainingDistance(
-            from: location,
-            in: step,
-            preferredRemainingDistance: preferredRemainingDistance,
-            ambiguityTolerance: maneuverArrivalRadius
-        ) {
-            // A projection beyond the final segment clamps to zero. If the
-            // rider is not actually at the maneuver, report the distance back
-            // to its endpoint instead of leaving stale "0 m" guidance.
-            if remainingDistance <= 0, endpointDistance >= maneuverArrivalRadius {
-                return endpointDistance
-            }
-            return remainingDistance
-        }
-
-        return endpointDistance
-    }
-
-    private func advanceToNextNavigableStep(in route: MKRoute) -> Bool {
-        while currentStepIndex < route.steps.count,
-              endpointLocation(for: route.steps[currentStepIndex]) == nil {
-            print("Skipping route step without geometry at index \(currentStepIndex)")
-            currentStepIndex += 1
-        }
-
-        return currentStepIndex < route.steps.count
+    private func displayInstruction(_ instruction: String) -> String {
+        let cleaned = instruction
+            .replacingOccurrences(of: "Continue on ", with: "")
+            .replacingOccurrences(of: "Turn on ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "Continue" }
+        return cleaned.count > 30 ? String(cleaned.prefix(30)) + "..." : cleaned
     }
 
     private func shouldAcceptLiveLocation(_ location: CLLocation) -> Bool {
@@ -528,24 +585,28 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     private func resendCurrentRouteGeometry() {
-        guard isNavigating, let route = currentRoute, route.polyline.pointCount > 0 else { return }
+        guard isNavigating, let route = currentRoute, !route.points.isEmpty else { return }
 
         lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         sendRouteGeometryIfNeeded(currentLocation: routeGeometryResendLocation(for: route))
     }
 
-    private func routeGeometryResendLocation(for route: MKRoute) -> CLLocation {
+    private func routeGeometryResendLocation(for route: NavigationRouteV1) -> CLLocation {
         if let lastDeviceGpsLocation {
             if lastDeviceGpsLocation.convertFromMapKitRoute {
-                return lastDeviceGpsLocation.location
+                return MapKitRouteAdapter.normalizedLocation(
+                    lastDeviceGpsLocation.location
+                )
             }
-            return CoordinateConverter.mapKitRouteLocation(fromGPSLocation: lastDeviceGpsLocation.location)
+            return lastDeviceGpsLocation.location
         }
 
-        var startCoordinate = CLLocationCoordinate2D()
-        route.polyline.getCoordinates(&startCoordinate, range: NSRange(location: 0, length: 1))
-        return CLLocation(latitude: startCoordinate.latitude, longitude: startCoordinate.longitude)
+        let startCoordinate = route.points[0]
+        return CLLocation(
+            latitude: startCoordinate.latitude,
+            longitude: startCoordinate.longitude
+        )
     }
 
     private func resendCurrentDeviceGpsPosition() {
@@ -607,59 +668,38 @@ class NavigationEngine: NSObject, ObservableObject {
         }
         lastRideLocation = gpsLocation
 
-        if isNavigating, let route = currentRoute, let routeLocation {
-            let remaining = RouteProgress.remainingDistance(from: routeLocation, in: route)
+        if isNavigating, let route = currentRoute, routeLocation != nil,
+           let runtimeSnapshot = navigationRuntime.snapshot {
+            let remaining = runtimeSnapshot.routeRemainingDistanceMeters
             lastRouteRemainingMeters = remaining
-            if let remaining {
-                updateNavigationSummary(route: route, remainingDistance: remaining)
-            }
+            updateNavigationSummary(route: route, remainingDistance: remaining)
         } else {
             lastRouteRemainingMeters = nil
         }
     }
 
-    private func updateNavigationSummary(route: MKRoute, remainingDistance: CLLocationDistance) {
-        let clampedDistance = min(max(remainingDistance, 0), max(route.distance, 0))
+    private func updateNavigationSummary(
+        route: NavigationRouteV1,
+        remainingDistance: CLLocationDistance
+    ) {
+        let clampedDistance = min(
+            max(remainingDistance, 0),
+            max(route.distanceMeters, 0)
+        )
         routeRemainingDistance = clampedDistance
 
-        guard route.distance > 0, route.expectedTravelTime > 0 else {
+        guard route.distanceMeters > 0,
+              let expectedTravelTime = route.expectedTravelTimeSeconds,
+              expectedTravelTime > 0 else {
             routeRemainingTime = nil
             expectedArrivalDate = nil
             return
         }
 
-        let fractionRemaining = clampedDistance / route.distance
-        let remainingTime = max(route.expectedTravelTime * fractionRemaining, 0)
+        let fractionRemaining = clampedDistance / route.distanceMeters
+        let remainingTime = max(expectedTravelTime * fractionRemaining, 0)
         routeRemainingTime = remainingTime
         expectedArrivalDate = now().addingTimeInterval(remainingTime)
-    }
-    
-    /// Extract clean instruction text from MKRoute.Step
-    private func extractInstruction(from step: MKRoute.Step) -> String {
-        let instructions = step.instructions
-        
-        // Clean up the instruction (remove extra details if needed)
-        let cleaned = instructions
-            .replacingOccurrences(of: "Continue on ", with: "")
-            .replacingOccurrences(of: "Turn on ", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !cleaned.isEmpty else {
-            return "Continue"
-        }
-        
-        // Limit length for display
-        let maxLength = 30
-        if cleaned.count > maxLength {
-            return String(cleaned.prefix(maxLength)) + "..."
-        }
-        
-        return cleaned
-    }
-    
-    /// Map instruction text to icon ID for ESP32 display
-    private func mapInstructionToIconID(_ instruction: String) -> Int {
-        NavigationInstructionMapper.iconID(for: instruction)
     }
     
     /// Send navigation data to ESP32 via BLE
@@ -684,12 +724,9 @@ class NavigationEngine: NSObject, ObservableObject {
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate
-        let routeCoordinate = convertFromMapKitRoute
-            ? location.coordinate
-            : CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate
         let routeProjection = isNavigating
             ? routeProgressMatcher.projection(
-                to: routeCoordinate,
+                to: wgsCoordinate,
                 on: routeCoordinatesCache
             )
             : nil
@@ -729,22 +766,18 @@ class NavigationEngine: NSObject, ObservableObject {
 // MARK: - Route Geometry for Device Map
 
 extension NavigationEngine {
-    private func cacheRouteCoordinates(from route: MKRoute) {
-        let pointCount = route.polyline.pointCount
-        guard pointCount > 0 else {
+    private func cacheRouteCoordinates(from route: NavigationRouteV1) {
+        guard !route.points.isEmpty else {
             routeCoordinatesCache = []
             routeProgressMatcher.reset()
             return
         }
-        var points = [CLLocationCoordinate2D](
-            repeating: CLLocationCoordinate2D(),
-            count: pointCount
-        )
-        route.polyline.getCoordinates(
-            &points,
-            range: NSRange(location: 0, length: pointCount)
-        )
-        routeCoordinatesCache = points
+        routeCoordinatesCache = route.points.map {
+            CLLocationCoordinate2D(
+                latitude: $0.latitude,
+                longitude: $0.longitude
+            )
+        }
         routeProgressMatcher.reset()
         routeCoordinateExtractionCount += 1
     }
@@ -780,19 +813,17 @@ extension NavigationEngine {
     private func compressRoutePoints(_ points: [CLLocationCoordinate2D]) -> Data {
         guard let first = points.first else { return Data() }
 
-        let firstConverted = CoordinateConverter.gcj02ToWGS84(coordinate: first)
         var data = Data()
-        let startLat = Int32(firstConverted.latitude * 1_000_000)
-        let startLon = Int32(firstConverted.longitude * 1_000_000)
+        let startLat = Int32(first.latitude * 1_000_000)
+        let startLon = Int32(first.longitude * 1_000_000)
         withUnsafeBytes(of: startLat.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: startLon.littleEndian) { data.append(contentsOf: $0) }
 
         var previousLat = startLat
         var previousLon = startLon
         for point in points.dropFirst() {
-            let converted = CoordinateConverter.gcj02ToWGS84(coordinate: point)
-            let lat = Int32(converted.latitude * 1_000_000)
-            let lon = Int32(converted.longitude * 1_000_000)
+            let lat = Int32(point.latitude * 1_000_000)
+            let lon = Int32(point.longitude * 1_000_000)
             let deltaLat = Int16(clamping: lat - previousLat)
             let deltaLon = Int16(clamping: lon - previousLon)
             withUnsafeBytes(of: deltaLat.littleEndian) { data.append(contentsOf: $0) }

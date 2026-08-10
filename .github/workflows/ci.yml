@@ -48,6 +48,15 @@ jobs:
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
+      - name: Run shared route and Watch BLE contract tests
+        run: ./scripts/run-ride-shared-tests.sh
+        working-directory: ios-app
+      - name: Run Watch offline navigation persistence tests
+        run: ./scripts/run-watch-offline-navigation-tests.sh
+        working-directory: ios-app
+      - name: Run Watch online navigation policy tests
+        run: ./scripts/run-watch-online-navigation-tests.sh
+        working-directory: ios-app
       - name: Run workout contract tests
         run: ./scripts/run-workout-contract-tests.sh
         working-directory: ios-app
@@ -246,6 +255,16 @@ jobs:
             tools/tests/test_device_capabilities_protocol.cpp \
             -o /tmp/test_device_capabilities_protocol
           /tmp/test_device_capabilities_protocol
+      - name: Ride controller lease host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_controller_lease.cpp \
+            -o /tmp/test_ride_controller_lease
+          /tmp/test_ride_controller_lease
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_scoped_watch_payload_policy.cpp \
+            -o /tmp/test_scoped_watch_payload_policy
+          /tmp/test_scoped_watch_payload_policy
       - name: Filled line rasterizer host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

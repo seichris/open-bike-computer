@@ -6,7 +6,14 @@ struct BikeComputerWatchApp: App {
 
     var body: some Scene {
         WindowGroup {
-            WatchWorkoutRootView(manager: appDelegate.workoutManager)
+            WatchWorkoutRootView(
+                manager: appDelegate.workoutManager,
+                routeLibrary: appDelegate.routeLibrary,
+                navigationManager: appDelegate.navigationManager,
+                navigationSettings: appDelegate.navigationSettings,
+                favoriteStore: appDelegate.favoriteStore,
+                deviceLink: appDelegate.deviceLink
+            )
                 .onOpenURL { url in
                     appDelegate.workoutManager.handleLaunchURL(url)
                 }

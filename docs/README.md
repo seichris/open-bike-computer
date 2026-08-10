@@ -23,6 +23,8 @@
 | [Cycling sensor settings and workout tile gating](plans/cycling-sensor-settings-implementation-plan.md) | Implemented slice; direct ESP32 sensor support remains in [issue #85](https://github.com/seichris/open-bike-computer/issues/85) |
 | [iPhone interactive workout Live Activity](plans/iphone-workout-live-activity-implementation-plan.md) | Implemented |
 | [Two-finger map zoom](plans/two-finger-map-zoom-implementation-plan.md) | Implemented; physical two-contact acceptance remains documented in the plan |
+| [Watch + Bicino online and offline navigation](plans/watch-bicino-online-offline-navigation-implementation-plan.md) | Implemented in software; physical and provider-policy release gates remain open; tracks [issue #106](https://github.com/seichris/open-bike-computer/issues/106) |
+| [Watch + Bicino navigation release notes](watch-bicino-navigation-release-notes.md) | Draft release copy and release blockers |
 | [watchOS workout companion](plans/watchos-workout-companion-implementation-plan.md) | Implemented |
 
 ## Releases

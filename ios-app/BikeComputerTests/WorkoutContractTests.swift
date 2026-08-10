@@ -62,6 +62,7 @@ private struct WorkoutContractTestSuite {
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
+        testWorkoutDevicePairGenerationStamp()
         testInvalidEnvelopeIdentityIsRejected()
         testInvalidNumbersAndCoordinatesAreRejected()
         testMetricUnitsAndAvailabilityMustMatchPayload()
@@ -129,12 +130,53 @@ private struct WorkoutContractTestSuite {
         testDiscardedWorkoutSummaryDismissalPolicy()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
+        testWatchOfflineNavigationUIFlow()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testMainRideControlsComposition()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
         testWatchWorkoutLaunchRequest()
+    }
+
+    private mutating func testWorkoutDevicePairGenerationStamp() {
+        let sample = WorkoutDeviceTelemetrySample(
+            state: .running,
+            sessionToken: 7,
+            hasLiveNumerics: true,
+            isCurrentSnapshot: true,
+            elapsedSeconds: 10,
+            distanceMeters: 20,
+            speedMetersPerSecond: 3,
+            currentHeartRateBPM: 120,
+            averageHeartRateBPM: 110,
+            activeEnergyKilocalories: 5,
+            cyclingPowerWatts: 200,
+            cyclingCadenceRPM: 80,
+            currentHeartRateZone: 2,
+            altitudeMeters: 30,
+            heartRateZoneCount: 5,
+            sourceFlags: [.watchSpeed, .watchAltitude]
+        )
+        guard let frames = WorkoutDeviceFrameBuilder.frames(for: sample) else {
+            expect(false, "workout device frames encode")
+            return
+        }
+        let stamped = WorkoutDeviceFrameBuilder.stampedPair(
+            core: frames.core,
+            extended: frames.extended,
+            generation: 3
+        )
+        expect(
+            stamped.core[1] & 0xC0 == 0xC0 &&
+                stamped.extended[1] & 0xC0 == 0xC0,
+            "workout core and extended frames share one pair generation"
+        )
+        expect(
+            stamped.core[1] & 0x3F == frames.core[1] &&
+                stamped.extended[1] & 0x3F == frames.extended[1],
+            "pair stamping preserves state and source bits"
+        )
     }
 
     private mutating func expect(
@@ -5850,6 +5892,130 @@ private struct WorkoutContractTestSuite {
             !watchSource.contains("Max HR")
                 && !watchSource.contains("heartRateZoneSettings"),
             "maximum-heart-rate configuration must not remain on the Watch start screen"
+        )
+    }
+
+    private mutating func testWatchOfflineNavigationUIFlow() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let sourceURLs = [
+            "start": watchDirectory.appendingPathComponent(
+                "Views/WorkoutStartView.swift"
+            ),
+            "library": watchDirectory.appendingPathComponent(
+                "Views/WatchRouteLibraryView.swift"
+            ),
+            "status": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationStatusView.swift"
+            ),
+            "navigationOnly": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationOnlyView.swift"
+            ),
+            "manager": watchDirectory.appendingPathComponent(
+                "Managers/WatchNavigationManager.swift"
+            ),
+            "settings": watchDirectory.appendingPathComponent(
+                "Views/WatchSettingsView.swift"
+            ),
+            "root": watchDirectory.appendingPathComponent(
+                "Views/WatchWorkoutRootView.swift"
+            ),
+            "live": watchDirectory.appendingPathComponent(
+                "Views/LiveWorkoutView.swift"
+            ),
+        ]
+        var sources: [String: String] = [:]
+        for (name, url) in sourceURLs {
+            guard let source = try? String(
+                contentsOf: url,
+                encoding: .utf8
+            ) else {
+                expect(
+                    false,
+                    "Watch offline-navigation source must exist: \(name)"
+                )
+                return
+            }
+            sources[name] = source
+        }
+
+        let start = sources["start"] ?? ""
+        expect(
+            start.contains(
+                "Label(\"Offline Navigation\", systemImage: \"map\")"
+            )
+                && start.components(
+                    separatedBy: ".frame(maxWidth: .infinity, minHeight: 52)"
+                ).count - 1 == 2
+                && !start.contains("Picker(\"Navigation\"")
+                && !start.contains("selectedNavigation"),
+            "Watch home must offer equal-height Ride and backgroundless Offline Navigation actions without a navigation picker"
+        )
+
+        let library = sources["library"] ?? ""
+        let manager = sources["manager"] ?? ""
+        expect(
+            library.contains("pendingRoute = route")
+                && library.contains(".confirmationDialog(")
+                && library.contains("\"Start Navigation?\"")
+                && library.contains(
+                    "navigationManager.startInstalledRoute(routeID: route.id)"
+                )
+                && manager.contains(
+                    "func startInstalledRoute(routeID: UUID)"
+                )
+                && manager.contains("case .awaitingStartConfirmation")
+                && manager.contains("func startAnyway()"),
+            "selecting an offline route must confirm intent and retain the measured far-start warning"
+        )
+
+        let status = sources["status"] ?? ""
+        expect(
+            status.contains("let suffix = \" checkpoint\"")
+                && status.contains(
+                    "\"Off route by \\(compactDistance($0))\""
+                )
+                && status.contains("snapshot.routeRemainingDistanceMeters")
+                && status.contains(".background(.quaternary")
+                && status.contains("navigationManager.routeAttribution")
+                && status.contains("RouteProviderPolicyV1.importedGPX")
+                && status.contains("navigationManager.onlineStatus")
+                && status.contains("Bicino is controlled by iPhone")
+                && !status.contains("Rerouting unavailable offline"),
+            "active Watch guidance keeps the compact offline layout while surfacing online attribution and actionable Bicino failures"
+        )
+
+        let navigationOnly = sources["navigationOnly"] ?? ""
+        expect(
+            navigationOnly.contains(
+                "Label(\"Start Workout\", systemImage: \"bicycle\")"
+            )
+                && navigationOnly.contains("manager.startOutdoorCycling()")
+                && navigationOnly.contains(
+                    "Label(\"End Navigation\", systemImage: \"stop.fill\")"
+                )
+                && navigationOnly.contains(
+                    "navigationManager.stopNavigation()"
+                )
+                && navigationOnly.contains("WatchSettingsView("),
+            "navigation-only mode must independently start a workout, end navigation, or open live navigation settings"
+        )
+
+        let settings = sources["settings"] ?? ""
+        let root = sources["root"] ?? ""
+        let live = sources["live"] ?? ""
+        expect(
+            settings.contains("WatchOnlineDestinationListView(")
+                && settings.contains("favoriteStore.favorites")
+                && settings.contains(
+                    "navigationManager.startOnline(destination: destination)"
+                )
+                && settings.contains("navigationManager.recalculateOnlineRoute()")
+                && root.contains("favoriteStore: favoriteStore")
+                && live.contains("WatchSettingsView("),
+            "synced online destinations and the policy toggle must remain reachable before and during a ride"
         )
     }
 

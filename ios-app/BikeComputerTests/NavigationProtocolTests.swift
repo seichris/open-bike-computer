@@ -574,6 +574,7 @@ struct NavigationProtocolTests {
         testRouteRemainingDistance()
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
+        testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testRideActivityRuntimeIntegration()
@@ -706,6 +707,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
+        testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
@@ -2557,6 +2559,95 @@ struct NavigationProtocolTests {
             ),
             1,
             "the 50-meter accuracy boundary still selects a later step when it is clearly closer"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorPreviewsAndSelectsAlternateRoutes() {
+        let suite = "CoordinatorAlternatives.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        source.name = "Start"
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        destination.name = "Finish"
+        let direct = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        let scenic = TestRoute(
+            instructions: "Bear right",
+            coordinates: [
+                sourceCoordinate,
+                CLLocationCoordinate2D(
+                    latitude: 37.002,
+                    longitude: -122.001
+                ),
+                destinationCoordinate
+            ]
+        )
+
+        coordinator.planNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 1, "route planning creates one request")
+        assert(
+            factory.tasks[0].request.requestsAlternateRoutes,
+            "route planning explicitly requests alternate routes"
+        )
+        factory.tasks[0].succeed(with: [direct, scenic])
+        assertEqual(
+            coordinator.routeAlternatives.count,
+            2,
+            "all valid alternatives are presented before navigation"
+        )
+        assert(!coordinator.isNavigating, "route preview does not start navigation")
+        assert(coordinator.routePreview === direct, "first alternative is previewed")
+        assert(
+            coordinator.selectedRouteAlternativeID == nil,
+            "the rider must explicitly select an alternative"
+        )
+
+        let scenicID = coordinator.routeAlternatives[1].id
+        coordinator.selectRouteAlternative(scenicID)
+        assert(coordinator.routePreview === scenic, "selection updates map preview")
+        coordinator.startSelectedRoute()
+        assert(coordinator.currentRoute === scenic, "explicit start uses selected route")
+        assert(coordinator.isNavigating, "explicit start begins navigation")
+        assert(coordinator.routeAlternatives.isEmpty, "start clears pending alternatives")
+
+        coordinator.stopNavigation()
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 2, "legacy immediate start creates a request")
+        assert(
+            !factory.tasks[1].request.requestsAlternateRoutes,
+            "immediate/device starts retain a single-route request"
         )
     }
 
@@ -7556,6 +7647,117 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testSavedRouteNamingAndViewWiring() {
+        let suite = "saved-route-name-test-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "route rename test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let firstRouteID = UUID()
+        let secondRouteID = UUID()
+        var names = SavedRouteDisplayNames(defaults: defaults)
+        assertEqual(
+            names.displayName(routeID: firstRouteID, defaultName: "Original"),
+            "Original",
+            "a route starts with its archive name"
+        )
+        assertEqual(
+            names.rename(
+                routeID: firstRouteID,
+                defaultName: "Original",
+                to: "  Riverside Ride  "
+            ),
+            "Riverside Ride",
+            "route rename trims surrounding whitespace"
+        )
+        names.persist(to: defaults)
+        var restoredNames = SavedRouteDisplayNames(defaults: defaults)
+        assertEqual(
+            restoredNames.displayName(
+                routeID: firstRouteID,
+                defaultName: "Original"
+            ),
+            "Riverside Ride",
+            "route rename survives app restart"
+        )
+        assertEqual(
+            restoredNames.rename(
+                routeID: firstRouteID,
+                defaultName: "Original",
+                to: "  \n "
+            ),
+            "Riverside Ride",
+            "blank route rename preserves the existing name"
+        )
+        _ = restoredNames.rename(
+            routeID: secondRouteID,
+            defaultName: "Second",
+            to: "Second Ride"
+        )
+        assert(restoredNames.remove(routeID: secondRouteID),
+               "deleting a route removes its local display name")
+        assertEqual(
+            restoredNames.displayName(
+                routeID: secondRouteID,
+                defaultName: "Second"
+            ),
+            "Second",
+            "pruned routes fall back to their archive name"
+        )
+
+        var interaction = SavedRouteRenameInteraction()
+        assertEqual(
+            interaction.begin(routeID: firstRouteID, currentName: "Original"),
+            nil,
+            "starting a route rename has no previous draft"
+        )
+        interaction.updateDraft("Morning Ride")
+        assertEqual(
+            interaction.finishIfFocusMoved(to: firstRouteID),
+            nil,
+            "focus inside the active route field keeps editing"
+        )
+        assertEqual(
+            interaction.finishIfFocusMoved(to: nil),
+            SavedRouteRenameCommit(
+                routeID: firstRouteID,
+                proposedName: "Morning Ride"
+            ),
+            "moving focus commits the matching route rename"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ) else {
+            assert(false, "Saved Routes source should be available")
+            return
+        }
+        assert(
+            source.contains("Text(\"Saved Routes\")") &&
+                source.contains(
+                    "Save GPX route files to your Apple watch for offline navigation"
+                ),
+            "Saved Routes uses the requested title and explanatory copy"
+        )
+        assert(
+            source.contains("TextField(\n                \"Route name\"") &&
+                source.contains("SavedRouteRenameInteraction()"),
+            "saved route names are editable inline"
+        )
+        assert(
+            source.contains("case .ready:") &&
+                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+                !source.contains("Ready on Watch"),
+            "Watch-ready routes use an inline green status icon without a second-row label"
+        )
+    }
+
     @MainActor
     static func testOfflineMapManagerRestoresLastTransferIdentity() {
         let suite = "offline-map-transfer-test-\(UUID().uuidString)"
@@ -9672,7 +9874,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.birdsEyeMapNavigationStrongerPerspectiveCapabilityMask, 1 << 11, "CAP2 bit 11 advertises stronger bird's-eye perspectives")
         assertEqual(DeviceBLEProtocol.osm3DBuildingsCapabilityMask, 1 << 12, "CAP2 bit 12 advertises OSM 3D buildings")
         assertEqual(DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask, 1 << 13, "CAP2 bit 13 advertises explicit invalid GPS headings")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 11, "capability version negotiates explicit invalid GPS headings after CAP2 version 10")
+        assertEqual(DeviceBLEProtocol.scopedWatchControllerCapabilityMask, 1 << 14, "CAP2 bit 14 advertises scoped Watch control")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 12, "capability version negotiates scoped Watch control after explicit invalid headings in version 11")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -11327,8 +11530,19 @@ struct NavigationProtocolTests {
                "CAP2 bit 12 enables OSM 3D-building maps and controls")
         assert(manager.supportsExplicitInvalidGPSHeading,
                "CAP2 bit 13 enables the explicit missing-course sentinel")
+        assert(!manager.supportsScopedWatchController,
+               "CAP2 bit 13 does not collide with scoped Watch enrollment")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
+
+        let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x7F, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithScopedWatch),
+               "CAP2 scoped Watch notification should be consumed")
+        assert(manager.supportsExplicitInvalidGPSHeading,
+               "CAP2 bit 13 remains the explicit missing-course sentinel")
+        assert(manager.supportsScopedWatchController,
+               "CAP2 bit 14 enables scoped Watch enrollment")
 
         let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
@@ -11339,6 +11553,8 @@ struct NavigationProtocolTests {
                "CAP2 preserves the extended street-label capability")
         assert(!manager.supportsExplicitInvalidGPSHeading,
                "CAP2 version 10 firmware without bit 13 keeps legacy heading encoding")
+        assert(!manager.supportsScopedWatchController,
+               "CAP2 firmware without bit 14 keeps scoped Watch control disabled")
 
         let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
         assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
@@ -11347,6 +11563,8 @@ struct NavigationProtocolTests {
                "duplicate CAP2 TLVs are rejected")
         assert(!manager.supportsExplicitInvalidGPSHeading,
                "malformed capabilities clear explicit invalid-heading support")
+        assert(!manager.supportsScopedWatchController,
+               "malformed capabilities clear scoped Watch support")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -12637,6 +12855,30 @@ struct NavigationProtocolTests {
         manager.isConnected = true
         manager.isNavigationReady = true
 
+        var scheduledRetries: [DispatchWorkItem] = []
+        manager.installPowerButtonHonkRetrySchedulerForTesting { _, workItem in
+            scheduledRetries.append(workItem)
+        }
+
+        func runNextScheduledRetry(_ message: String) {
+            while !scheduledRetries.isEmpty {
+                let workItem = scheduledRetries.removeFirst()
+                guard !workItem.isCancelled else { continue }
+                workItem.perform()
+                return
+            }
+            assert(false, message)
+        }
+
+        func runAllScheduledRetries() {
+            while !scheduledRetries.isEmpty {
+                let workItem = scheduledRetries.removeFirst()
+                if !workItem.isCancelled {
+                    workItem.perform()
+                }
+            }
+        }
+
         var sentPackets: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 20,
@@ -12688,7 +12930,9 @@ struct NavigationProtocolTests {
         let failedStatus = powerButtonHonkStatus(for: sentPackets[0], applied: 0)
         assert(manager.handleNavigationCharacteristicNotification(failedStatus),
                "failed PWR honk acknowledgement should be consumed")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        runNextScheduledRetry(
+            "failed PWR honk acknowledgement should schedule a retry"
+        )
         assertEqual(sentPackets.count, 2,
                     "failed PWR honk acknowledgement retries the configuration")
 
@@ -12697,7 +12941,7 @@ struct NavigationProtocolTests {
                "successful PWR honk acknowledgement should be consumed")
         assert(manager.handlePowerButtonHonkStatusNotification(failedStatus),
                "stale PWR honk acknowledgement should still be consumed")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        runAllScheduledRetries()
         assertEqual(sentPackets.count, 2,
                     "successful acknowledgement cancels further PWR retries")
         assert(manager.powerButtonHonkConfigurationError == nil,
@@ -12710,13 +12954,17 @@ struct NavigationProtocolTests {
         for expectedSendCount in 2...3 {
             assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
                    "failed PWR honk acknowledgement should be consumed")
-            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            runNextScheduledRetry(
+                "failed acknowledgement should schedule the next bounded retry"
+            )
             assertEqual(sentPackets.count, expectedSendCount,
                         "failed acknowledgement advances the bounded retry sequence")
         }
         assert(manager.handlePowerButtonHonkStatusNotification(terminalFailedStatus),
                "terminal failed PWR honk acknowledgement should be consumed")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        runNextScheduledRetry(
+            "terminal failed acknowledgement should schedule terminal handling"
+        )
         assertEqual(sentPackets.count, 3,
                     "PWR honk acknowledgement retries stop after three total attempts")
         assert(manager.powerButtonHonkConfigurationError != nil,
@@ -12748,7 +12996,9 @@ struct NavigationProtocolTests {
         assert(manager.handlePowerButtonHonkStatusNotification(
             powerButtonHonkStatus(for: secondA, applied: 0)
         ), "current second-A failure should still control retry state")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        runNextScheduledRetry(
+            "current second-A failure should schedule its own retry"
+        )
         assertEqual(sentPackets.count, 4,
                     "delayed first-A acknowledgement cannot suppress second-A retry")
         assert(manager.handlePowerButtonHonkStatusNotification(

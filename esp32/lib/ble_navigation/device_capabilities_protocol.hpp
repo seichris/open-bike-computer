@@ -7,6 +7,7 @@ namespace device_capabilities_protocol {
 
 constexpr uint8_t CAP2_CLIENT_VERSION = 10;
 constexpr uint8_t EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION = 11;
+constexpr uint8_t SCOPED_WATCH_CONTROLLER_CLIENT_VERSION = 12;
 constexpr uint8_t CAP2_SCHEMA_VERSION = 1;
 constexpr uint32_t STREET_LABELS_FEATURE = 1UL << 8;
 constexpr uint32_t BIRDS_EYE_MAP_NAVIGATION_FEATURE = 1UL << 9;
@@ -14,6 +15,10 @@ constexpr uint32_t BIRDS_EYE_PERSPECTIVE_FEATURE = 1UL << 10;
 constexpr uint32_t BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE = 1UL << 11;
 constexpr uint32_t OSM_3D_BUILDINGS_FEATURE = 1UL << 12;
 constexpr uint32_t EXPLICIT_INVALID_GPS_HEADING_FEATURE = 1UL << 13;
+// Complete scoped Watch-controller authentication and exclusive writer-lease
+// contract. Runtime capability encoding keeps this bit clear if the durable
+// controller store does not boot cleanly.
+constexpr uint32_t SCOPED_WATCH_CONTROLLER_FEATURE = 1UL << 14;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;
