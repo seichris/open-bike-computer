@@ -44,10 +44,18 @@ from generated_sdkconfig import (
 )
 from record_flash_plan import record_flash_plan
 from pioarduino_custom_core import (
+    IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
     UPSTREAM_EDITABLE_ESPTOOL,
+    UPSTREAM_ESPTOOL_MATCH,
+    UPSTREAM_EXTERNAL_UV_INSTALL,
+    UPSTREAM_IDF_INSTALL_COMMAND,
+    UPSTREAM_INTERNET_INSTALL_GATE,
     UPSTREAM_NESTED_PIO_BLOCK,
+    UPSTREAM_PENV_INSTALL_GUARD,
     UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+    UPSTREAM_PLATFORMIO_REQUIREMENT,
+    UPSTREAM_ROOT_INSTALL_COMMAND,
 )
 
 
@@ -98,9 +106,16 @@ def platform_archive_bytes() -> bytes:
     output = io.BytesIO()
     penv_source = "\n".join(
         (
+            UPSTREAM_PLATFORMIO_REQUIREMENT,
             UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+            UPSTREAM_EXTERNAL_UV_INSTALL,
+            UPSTREAM_PENV_INSTALL_GUARD,
+            UPSTREAM_ROOT_INSTALL_COMMAND,
+            UPSTREAM_INTERNET_INSTALL_GATE,
             UPSTREAM_AMBIENT_UV_FALLBACK,
             UPSTREAM_AMBIENT_UV_FALLBACK,
+            UPSTREAM_ESPTOOL_MATCH,
+            UPSTREAM_ESPTOOL_MATCH,
             UPSTREAM_EDITABLE_ESPTOOL,
             UPSTREAM_EDITABLE_ESPTOOL,
         )
@@ -108,7 +123,16 @@ def platform_archive_bytes() -> bytes:
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr(
             "platform-espressif32-test/builder/frameworks/espidf.py",
-            f"before\n{UPSTREAM_NESTED_PIO_BLOCK}\nafter\n",
+            "\n".join(
+                (
+                    "before",
+                    UPSTREAM_NESTED_PIO_BLOCK,
+                    *(stale for stale, _ in IDF_EXACT_REQUIREMENTS),
+                    UPSTREAM_IDF_INSTALL_COMMAND,
+                    "after",
+                )
+            )
+            + "\n",
         )
         archive.writestr(
             "platform-espressif32-test/builder/penv_setup.py",

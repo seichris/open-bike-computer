@@ -52,7 +52,7 @@ from firmware_runtime import (
     runtime_pio_path,
 )
 from pioarduino_custom_core import (
-    correct_nested_pio_command,
+    correct_espidf_text,
     correct_penv_setup_text,
 )
 
@@ -598,8 +598,8 @@ def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
         patches = (
             (
                 extraction_root / "builder/frameworks/espidf.py",
-                correct_nested_pio_command,
-                "nested PlatformIO command",
+                correct_espidf_text,
+                "nested PlatformIO and ESP-IDF resolver",
             ),
             (
                 extraction_root / "builder/penv_setup.py",

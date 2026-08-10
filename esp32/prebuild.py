@@ -22,7 +22,7 @@ from firmware_build_identity import (
 )
 from generated_sdkconfig import recognized_generated_sdkconfigs
 from pioarduino_custom_core import (
-    correct_nested_pio_command,
+    correct_espidf_text,
     correct_penv_setup_text,
     correct_sections_text,
 )
@@ -152,8 +152,8 @@ def ensure_verified_nested_build_config():
     patches = (
         (
             platform_dir / "builder/frameworks/espidf.py",
-            correct_nested_pio_command,
-            "nested-build",
+            correct_espidf_text,
+            "nested-build and ESP-IDF resolver",
         ),
         (
             platform_dir / "builder/penv_setup.py",

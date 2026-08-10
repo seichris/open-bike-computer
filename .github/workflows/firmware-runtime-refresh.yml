@@ -2,44 +2,88 @@ name: Firmware runtime refresh candidate
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/firmware-runtime-refresh.yml"
+      - "esp32/tools/firmware-runtime/**"
+      - "esp32/tools/firmware_runtime.py"
+      - "esp32/tools/pioarduino_custom_core.py"
+      - "esp32/tools/refresh_firmware_runtime.py"
+      - "esp32/tools/tests/test_firmware_runtime.py"
+      - "esp32/tools/tests/test_pioarduino_custom_core.py"
+      - "esp32/tools/tests/test_refresh_firmware_runtime.py"
 
 permissions:
   contents: read
 
+concurrency:
+  group: firmware-runtime-refresh-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   candidate:
-    name: Candidate (${{ matrix.runner }})
+    name: Candidate (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             target: linux-x86_64-cp313
           - runner: macos-15
             target: macos-arm64-cp313
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: esp32
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Validate tracked candidate inputs and verifier tests
-        working-directory: esp32
+      - name: Validate host and tracked inputs
         run: |
-          PYTHONPATH=tools python -m unittest tools.tests.test_firmware_runtime
-          mkdir -p runtime-evidence
-          python tools/refresh_firmware_runtime.py inspect-inputs > runtime-evidence/inputs.json
-          python tools/refresh_firmware_runtime.py verify-python \
+          test "$(uname -m)" = "$(test '${{ matrix.target }}' = linux-x86_64-cp313 && echo x86_64 || echo arm64)"
+          PYTHONPATH=tools python -m unittest \
+            tools.tests.test_firmware_runtime \
+            tools.tests.test_pioarduino_custom_core \
+            tools.tests.test_refresh_firmware_runtime
+          mkdir -p runtime-candidate-a runtime-candidate-b
+          python tools/refresh_firmware_runtime.py inspect-inputs > runtime-candidate-a/inputs.json
+      - name: Build independent candidate A
+        run: |
+          python tools/refresh_firmware_runtime.py build-candidate \
             --target "${{ matrix.target }}" \
-            --output "${RUNNER_TEMP}/${{ matrix.target }}-python.tar.gz" \
-            > runtime-evidence/python.json
+            --output-dir runtime-candidate-a \
+            --release-tag firmware-runtime-2026-08-10-1 \
+            > runtime-candidate-a/build.json
+      - name: Build independent candidate B
+        run: |
+          python tools/refresh_firmware_runtime.py build-candidate \
+            --target "${{ matrix.target }}" \
+            --output-dir runtime-candidate-b \
+            --release-tag firmware-runtime-2026-08-10-1 \
+            > runtime-candidate-b/build.json
+      - name: Require byte-identical clean rebuilds
+        run: |
+          for name in \
+            "open-bike-firmware-runtime-${{ matrix.target }}.tar.gz" \
+            "contract-${{ matrix.target }}.json" \
+            "evidence-${{ matrix.target }}.json" \
+            "licenses-${{ matrix.target }}.json"; do
+            cmp "runtime-candidate-a/${name}" "runtime-candidate-b/${name}"
+          done
+      - name: Replay nested environments offline with an empty cache
+        run: |
+          python tools/refresh_firmware_runtime.py verify-candidate \
+            --target "${{ matrix.target }}" \
+            --output-dir runtime-candidate-a \
+            > "runtime-candidate-a/offline-replay-${{ matrix.target }}.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-runtime-bootstrap-${{ matrix.target }}
-          path: esp32/runtime-evidence
+          name: firmware-runtime-candidate-${{ matrix.target }}
+          path: |
+            esp32/runtime-candidate-a/*.json
+            esp32/runtime-candidate-a/*.tar.gz
           if-no-files-found: error
-      - name: Explain acceptance gate
-        run: |
-          echo "This workflow currently verifies the tracked CPython bootstrap artifact and schemas."
-          echo "A complete accepted bundle still requires wheel closure, offline replay, both-board builds, and immutable release publication."
-          echo "It never commits, pushes, opens a PR, or marks a bundle accepted."
+          retention-days: 14
