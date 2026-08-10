@@ -76,10 +76,10 @@ BLE capability bit 7.
 - Old app + ownership-v2 firmware: authentication is intentionally rejected;
   update the app before installing the firmware.
 - New app + new firmware: the app uses the dedicated workout characteristic.
-  Current firmware's native write-without-response transport is protected by
-  CoreBluetooth flow control and the app's atomic, convergent correlated-pair
-  queue. The documented 20-byte plaintext `WTLM` fallback is retained only for
-  a cached or older GATT table without the dedicated characteristic.
+  Current firmware supports acknowledged native writes. For earlier firmware
+  with an unacknowledged workout characteristic, the app prefers acknowledged
+  `WTLM` and retains native no-response delivery only when no acknowledged route
+  exists. Persistent no-response backpressure causes a bounded reconnect.
 
 Do not advertise capability bit 7 in any firmware release that lacks the frame
 parser, RAM-only workout state, staleness handling, and Ride Stats UI.

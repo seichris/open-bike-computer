@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import HealthKit
 import UIKit
 
@@ -1456,5 +1457,17 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         @unknown default:
             return .failed
         }
+    }
+}
+
+@MainActor
+extension WorkoutMirrorManager: RideAutomationWorkoutControlling {
+    var rideAutomationPresentation: WorkoutMirrorPresentationV1 {
+        store.presentation
+    }
+
+    var rideAutomationPresentationPublisher:
+        AnyPublisher<WorkoutMirrorPresentationV1, Never> {
+        store.$presentation.eraseToAnyPublisher()
     }
 }

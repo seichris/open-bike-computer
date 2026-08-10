@@ -10,6 +10,9 @@
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
 #include "mapBuildingRenderer.hpp"
+#include "mapBuildingAdmission.hpp"
+#include "mapBuildingWorkspace.hpp"
+#include "mapSurface.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapLabelRasterizer.hpp"
 #include "mapLabelSelection.hpp"
@@ -22,6 +25,7 @@
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
+#include "../../ui_scheduler/ui_scheduler.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
@@ -47,6 +51,7 @@ const char *TAG PROGMEM = "Maps";
 #include "../../gui/src/mainScr.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include <algorithm>
+#include <atomic>
 #include <esp_heap_caps.h>
 #include <cstdlib>
 #include <cstring>
@@ -59,10 +64,9 @@ const char *TAG PROGMEM = "Maps";
 
 namespace {
 
-// Keep memory samples behind the existing map timing/diagnostics switch.  The
-// fields are deliberately stable and machine-readable so a source-monitor
-// capture can correlate heap fragmentation with a map-render phase without
-// changing the renderer's allocation or scheduling policy.
+// Keep the main-branch memory diagnostics stable while moving raster work off
+// the LVGL task. These samples are observational only and do not alter the
+// renderer's allocation or scheduling policy.
 static void logMapMemorySnapshot(const char *phase) {
 #if defined(WAVESHARE_MAPIO_TIMING_LOG) || defined(WAVESHARE_TOUCH_DIAGNOSTICS)
   constexpr uint32_t kMapMemorySnapshotMinIntervalMs = 250;
@@ -101,6 +105,58 @@ static void logMapMemorySnapshot(const char *phase) {
 #else
   (void)phase;
 #endif
+}
+
+// The map renderer has exactly one non-LVGL worker.  Rendering helpers use
+// this task identity to turn their existing cooperative checkpoints into
+// latest-wins cancellation points without changing non-worker callers.
+TaskHandle_t gMapRenderWorkerTaskHandle = nullptr;
+std::atomic<uint32_t> gMapRenderLatestSequence{0};
+std::atomic<uint32_t> gMapRenderActiveSequence{0};
+std::atomic<uint32_t> gMapRenderCancellationGeneration{0};
+std::atomic<uint32_t> gMapRenderActiveCancellationGeneration{0};
+std::atomic<bool> gMapRenderWorkerShutdown{false};
+std::atomic<bool> gMapRenderControlOperation{false};
+std::atomic<uint32_t> gMapRenderSliceCount{0};
+std::atomic<uint32_t> gMapRenderLongestSliceUs{0};
+uint32_t gMapRenderLastCheckpointUs = 0;
+
+inline bool onMapRenderWorkerTask() {
+  return gMapRenderWorkerTaskHandle != nullptr &&
+         xTaskGetCurrentTaskHandle() == gMapRenderWorkerTaskHandle;
+}
+
+bool shouldCancelMapRenderWork() {
+  if (onMapRenderWorkerTask()) {
+    const uint32_t nowUs = micros();
+    if (gMapRenderLastCheckpointUs != 0) {
+      const uint32_t elapsedUs = nowUs - gMapRenderLastCheckpointUs;
+      gMapRenderSliceCount.fetch_add(1, std::memory_order_relaxed);
+      uint32_t longest =
+          gMapRenderLongestSliceUs.load(std::memory_order_relaxed);
+      while (elapsedUs > longest &&
+             !gMapRenderLongestSliceUs.compare_exchange_weak(
+                 longest, elapsedUs, std::memory_order_relaxed)) {
+      }
+      if (elapsedUs >= 2000U)
+        taskYIELD();
+    }
+    gMapRenderLastCheckpointUs = micros();
+    return map_render_job::shouldCancelWorkerOperation(
+        gMapRenderWorkerShutdown.load(std::memory_order_acquire),
+        gMapRenderControlOperation.load(std::memory_order_acquire),
+        gMapRenderActiveCancellationGeneration.load(
+            std::memory_order_acquire),
+        gMapRenderCancellationGeneration.load(std::memory_order_acquire));
+  }
+  return shouldInterruptMapRenderForScreenCycle();
+}
+
+constexpr uint16_t rgb565FromRgb888(uint32_t rgb) {
+  const uint16_t red = static_cast<uint16_t>((rgb >> 19U) & 0x1FU);
+  const uint16_t green = static_cast<uint16_t>((rgb >> 10U) & 0x3FU);
+  const uint16_t blue = static_cast<uint16_t>((rgb >> 3U) & 0x1FU);
+  return static_cast<uint16_t>((red << 11U) | (green << 5U) | blue);
 }
 
 bool findMapBlock(const std::string &directory, std::string &basePath,
@@ -151,7 +207,7 @@ bool validateMapBlockCooperatively(const std::string &path,
   map_block_format::StreamValidator validator(path);
   size_t offset = 0;
   while (offset < size) {
-    if (shouldInterruptMapRenderForScreenCycle()) {
+    if (shouldCancelMapRenderWork()) {
       interrupted = true;
       return false;
     }
@@ -433,6 +489,48 @@ static bool ensureMapForegroundBuffer(uint16_t width, uint16_t height) {
                          rgb565A8BufferSize(width, height), "foreground");
 }
 
+static map_surface::Rgb565Surface rgb565SurfaceForCanvas(lv_obj_t *canvas) {
+  if (canvas == nullptr)
+    return {};
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
+  if (drawBuffer == nullptr || drawBuffer->data == nullptr ||
+      drawBuffer->header.cf != LV_COLOR_FORMAT_RGB565)
+    return {};
+  return {reinterpret_cast<uint16_t *>(drawBuffer->data),
+          static_cast<int32_t>(drawBuffer->header.w),
+          static_cast<int32_t>(drawBuffer->header.h),
+          static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t))};
+}
+
+static map_surface::LabelSurface labelSurfaceForCanvas(
+    lv_obj_t *canvas, const map_surface::Rgb565Surface *contrast = nullptr,
+    int32_t contrastOffsetX = 0, int32_t contrastOffsetY = 0) {
+  if (canvas == nullptr)
+    return {};
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
+  if (drawBuffer == nullptr || drawBuffer->data == nullptr)
+    return {};
+  const bool transparent = drawBuffer->header.cf == LV_COLOR_FORMAT_RGB565A8;
+  if (!transparent && drawBuffer->header.cf != LV_COLOR_FORMAT_RGB565)
+    return {};
+  map_surface::LabelSurface surface;
+  surface.color = {
+      reinterpret_cast<uint16_t *>(drawBuffer->data),
+      static_cast<int32_t>(drawBuffer->header.w),
+      static_cast<int32_t>(drawBuffer->header.h),
+      static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t))};
+  if (transparent) {
+    surface.alpha = static_cast<uint8_t *>(drawBuffer->data) +
+                    static_cast<size_t>(drawBuffer->header.stride) *
+                        drawBuffer->header.h;
+    surface.alphaStrideBytes = drawBuffer->header.stride / sizeof(uint16_t);
+  }
+  surface.contrast = contrast;
+  surface.contrastOffsetX = contrastOffsetX;
+  surface.contrastOffsetY = contrastOffsetY;
+  return surface;
+}
+
 static void bindMapForegroundCanvas(lv_obj_t *canvas, uint16_t width,
                                     uint16_t height) {
   lv_canvas_set_buffer(canvas, bufMapForeground, width, height,
@@ -536,30 +634,41 @@ static lv_value_precise_t markerCoord(int32_t origin, int16_t size,
           navigation_visual_style::POSITION_MARKER_BASE_SIZE);
 }
 
-static lv_value_precise_t markerEdgeXAtY(const lv_point_precise_t &start,
-                                         const lv_point_precise_t &end,
-                                         lv_value_precise_t y) {
-  if (start.y == end.y)
-    return start.x;
+static double currentMarkerRotationDegrees = 0.0;
 
-  return start.x +
-         (end.x - start.x) * (y - start.y) / (end.y - start.y);
+static lv_point_precise_t rotatedMarkerPoint(const lv_area_t &bounds,
+                                             int16_t size,
+                                             int16_t baseX, int16_t baseY,
+                                             double rotationDegrees) {
+  constexpr double kDegreesToRadians =
+      3.14159265358979323846 / 180.0;
+  const double centerX = bounds.x1 + size / 2.0;
+  const double centerY = bounds.y1 + size / 2.0;
+  const double x = markerCoord(bounds.x1, size, baseX) - centerX;
+  const double y = markerCoord(bounds.y1, size, baseY) - centerY;
+  const double angle = rotationDegrees * kDegreesToRadians;
+  const double cosine = std::cos(angle);
+  const double sine = std::sin(angle);
+  // Screen Y grows downward, so this positive-angle matrix rotates the
+  // north-facing glyph clockwise: heading 90 points east/right.
+  return {static_cast<lv_value_precise_t>(
+              std::round(centerX + x * cosine - y * sine)),
+          static_cast<lv_value_precise_t>(
+              std::round(centerY + x * sine + y * cosine))};
 }
 
 static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
-                                 int16_t size, lv_color_t color) {
+                                 int16_t size, lv_color_t color,
+                                 double rotationDegrees) {
   // Filled Lucide navigation-2 polygon. Render horizontal spans at the final
   // on-screen size because this target's software renderer does not reliably
   // fill LVGL triangle draw tasks. The rounded outline softens the three outer
   // points without magnifying a bitmap.
-  const lv_point_precise_t top = {
-      markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 4)};
-  const lv_point_precise_t right = {
-      markerCoord(bounds.x1, size, 38), markerCoord(bounds.y1, size, 42)};
-  const lv_point_precise_t notch = {
-      markerCoord(bounds.x1, size, 24), markerCoord(bounds.y1, size, 34)};
-  const lv_point_precise_t left = {
-      markerCoord(bounds.x1, size, 10), markerCoord(bounds.y1, size, 42)};
+  const std::array<lv_point_precise_t, 4> points = {
+      rotatedMarkerPoint(bounds, size, 24, 4, rotationDegrees),
+      rotatedMarkerPoint(bounds, size, 38, 42, rotationDegrees),
+      rotatedMarkerPoint(bounds, size, 24, 34, rotationDegrees),
+      rotatedMarkerPoint(bounds, size, 10, 42, rotationDegrees)};
 
   lv_draw_line_dsc_t fill;
   lv_draw_line_dsc_init(&fill);
@@ -567,20 +676,33 @@ static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
   fill.opa = LV_OPA_COVER;
   fill.width = 1;
 
-  for (lv_value_precise_t y = top.y; y <= notch.y; ++y) {
-    fill.p1 = {markerEdgeXAtY(top, left, y), y};
-    fill.p2 = {markerEdgeXAtY(top, right, y), y};
-    lv_draw_line(layer, &fill);
+  lv_value_precise_t minimumY = points.front().y;
+  lv_value_precise_t maximumY = points.front().y;
+  for (const auto &point : points) {
+    minimumY = std::min(minimumY, point.y);
+    maximumY = std::max(maximumY, point.y);
   }
-
-  for (lv_value_precise_t y = notch.y + 1; y <= left.y; ++y) {
-    fill.p1 = {markerEdgeXAtY(top, left, y), y};
-    fill.p2 = {markerEdgeXAtY(notch, left, y), y};
-    lv_draw_line(layer, &fill);
-
-    fill.p1 = {markerEdgeXAtY(notch, right, y), y};
-    fill.p2 = {markerEdgeXAtY(top, right, y), y};
-    lv_draw_line(layer, &fill);
+  for (lv_value_precise_t y = minimumY; y <= maximumY; ++y) {
+    std::array<lv_value_precise_t, 4> intersections{};
+    size_t count = 0;
+    for (size_t index = 0; index < points.size(); ++index) {
+      const auto &start = points[index];
+      const auto &end = points[(index + 1U) % points.size()];
+      if (!((start.y <= y && end.y > y) ||
+            (end.y <= y && start.y > y))) {
+        continue;
+      }
+      intersections[count++] = static_cast<lv_value_precise_t>(std::round(
+          start.x + static_cast<double>(end.x - start.x) *
+                        static_cast<double>(y - start.y) /
+                        static_cast<double>(end.y - start.y)));
+    }
+    std::sort(intersections.begin(), intersections.begin() + count);
+    for (size_t index = 1; index < count; index += 2U) {
+      fill.p1 = {intersections[index - 1U], y};
+      fill.p2 = {intersections[index], y};
+      lv_draw_line(layer, &fill);
+    }
   }
 
   lv_draw_line_dsc_t outline;
@@ -592,10 +714,9 @@ static void drawNavigationMarker(lv_layer_t *layer, const lv_area_t &bounds,
   outline.round_start = 1;
   outline.round_end = 1;
 
-  const lv_point_precise_t outlinePoints[] = {top, right, notch, left, top};
-  for (uint8_t i = 1; i < 5; ++i) {
-    outline.p1 = outlinePoints[i - 1];
-    outline.p2 = outlinePoints[i];
+  for (size_t index = 0; index < points.size(); ++index) {
+    outline.p1 = points[index];
+    outline.p2 = points[(index + 1U) % points.size()];
     lv_draw_line(layer, &outline);
   }
 }
@@ -629,34 +750,44 @@ static void drawCurrentPositionMarker(lv_event_t *event) {
   const lv_color_t color =
       lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
 
-  if (routeOverlay.hasRoute()) {
-    drawNavigationMarker(layer, bounds, size, color);
+  if (routeOverlay.hasRoute() || hasCurrentNavigationData()) {
+    drawNavigationMarker(layer, bounds, size, color,
+                         currentMarkerRotationDegrees);
   } else {
     drawPositionDotMarker(layer, bounds, size, color);
   }
 }
 
-static void updateCurrentPositionMarker(lv_obj_t *marker, bool force = false) {
+static void updateCurrentPositionMarker(lv_obj_t *marker,
+                                        double rotationDegrees = 0.0,
+                                        bool force = false) {
   if (!marker)
     return;
 
   static bool hasLastShape = false;
   static bool lastWasNavigating = false;
   static uint8_t lastScale = 0;
+  static int16_t lastRotationTenths = 0;
 
-  const bool isNavigating = routeOverlay.hasRoute();
+  const bool isNavigating =
+      routeOverlay.hasRoute() || hasCurrentNavigationData();
   const uint8_t scale = currentMarkerScale();
+  const int16_t rotationTenths = static_cast<int16_t>(
+      std::round(map_presentation::normalizeDegrees(rotationDegrees) * 10.0));
   if (!force && hasLastShape && lastWasNavigating == isNavigating &&
-      lastScale == scale) {
+      lastScale == scale &&
+      (!isNavigating || lastRotationTenths == rotationTenths)) {
     return;
   }
 
+  currentMarkerRotationDegrees = rotationTenths / 10.0;
   const int16_t size = currentMarkerSize();
   lv_obj_set_size(marker, size, size);
   lv_obj_invalidate(marker);
   hasLastShape = true;
   lastWasNavigating = isNavigating;
   lastScale = scale;
+  lastRotationTenths = rotationTenths;
   log_i("Position marker updated: %s scale=%u",
         isNavigating ? "navigation arrow" : "location dot", scale);
 }
@@ -687,8 +818,11 @@ static void setPinchCanvasScale(void *object, int32_t scale) {
 static void completePinchCanvasSettlement(lv_anim_t *animation) {
   auto *canvas = static_cast<lv_obj_t *>(animation->var);
   if (canvas != nullptr) {
+    // The render-ahead presenter owns the image pivot. Resetting it here runs
+    // after publication has already installed the live map transform and can
+    // leave the settled frame rotating around the top-left corner. Animation
+    // completion owns only the temporary scale.
     lv_image_set_scale(canvas, LV_SCALE_NONE);
-    lv_image_set_pivot(canvas, 0, 0);
     lv_obj_invalidate(canvas);
   }
 }
@@ -1003,7 +1137,7 @@ bool Maps::parseCoords(char *file,
   Point16 point;
   while (true) {
     if ((points.size() & 0x1F) == 0 &&
-        shouldInterruptMapRenderForScreenCycle()) {
+        shouldCancelMapRenderWork()) {
       return false;
     }
     try {
@@ -1118,7 +1252,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     size_t bytesRead = 0;
     bool readInterrupted = false;
     while (bytesRead < fileSize) {
-      if (shouldInterruptMapRenderForScreenCycle()) {
+      if (shouldCancelMapRenderWork()) {
         readInterrupted = true;
         break;
       }
@@ -1153,7 +1287,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       return mblock;
     }
 
-    if (shouldInterruptMapRenderForScreenCycle()) {
+    if (shouldCancelMapRenderWork()) {
       free(file);
       Maps::isMapFound = false;
       return mblock;
@@ -1180,7 +1314,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     size_t normalizedSize = 0;
     for (size_t index = 0; index < fileSize; ++index) {
       if ((index & 0x0FFF) == 0 &&
-          shouldInterruptMapRenderForScreenCycle()) {
+          shouldCancelMapRenderWork()) {
         free(file);
         Maps::isMapFound = false;
         return mblock;
@@ -1237,7 +1371,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     Polygon polygon;
     Point16 p;
     while (count > 0) {
-      if (shouldInterruptMapRenderForScreenCycle()) {
+      if (shouldCancelMapRenderWork()) {
         free(file);
         Maps::isMapFound = false;
         return mblock;
@@ -1299,7 +1433,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
       Polyline polyline;
       while (count > 0) {
-        if (shouldInterruptMapRenderForScreenCycle()) {
+        if (shouldCancelMapRenderWork()) {
           free(file);
           Maps::isMapFound = false;
           return mblock;
@@ -1351,7 +1485,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     // Build spatial grid for polygon culling optimization
     const uint32_t gridStartMs = MAPIO_TIME_MS();
     if (!buildPolygonGrid(mblock)) {
-      if (shouldInterruptMapRenderForScreenCycle()) {
+      if (shouldCancelMapRenderWork()) {
         free(file);
         Maps::isMapFound = false;
         delete mblock;
@@ -1423,7 +1557,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   mblock->polygons.reserve(polyCount);
 
   for (int i = 0; i < polyCount; i++) {
-    if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+    if ((i & 0x1F) == 0 && shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
       delete mblock;
       return new MapBlock();
@@ -1465,7 +1599,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   mblock->polylines.reserve(lineCount);
 
   for (int i = 0; i < lineCount; i++) {
-    if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+    if ((i & 0x1F) == 0 && shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
       delete mblock;
       return new MapBlock();
@@ -1530,7 +1664,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
   if (!buildPolygonGrid(mblock)) {
-    if (shouldInterruptMapRenderForScreenCycle()) {
+    if (shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
       delete mblock;
       return new MapBlock();
@@ -1583,7 +1717,7 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
 
     size_t totalEntries = 0;
     for (uint16_t i = 0; i < mblock->polygons.size(); i++) {
-      if ((i & 0x1F) == 0 && shouldInterruptMapRenderForScreenCycle()) {
+      if ((i & 0x1F) == 0 && shouldCancelMapRenderWork()) {
         mblock->polygonGrid.clear();
         return false;
       }
@@ -1642,138 +1776,74 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
  * @param points
  * @param color
  */
-bool Maps::fillPolygon(const Polygon &p, lv_obj_t *canvas,
-                       uint32_t deadlineStartMs,
-                       uint32_t deadlineDurationMs) // scanline fill algorithm
-{
-  int16_t maxY = p.bbox.max.y;
-  int16_t minY = p.bbox.min.y;
-
-  // Retrieve canvas buffer and dimensions
-  lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
-  if (draw_buf == NULL)
+bool Maps::fillPolygon(const Polygon &p,
+                       map_surface::Rgb565Surface surface) {
+  if (!surface.valid() || p.points.size() < 2)
     return true;
-  uint16_t *buf =
-      (uint16_t *)draw_buf->data; // Assuming RGB565 and direct access
-  int32_t buf_w = draw_buf->header.w;
-  int32_t buf_h = draw_buf->header.h;
-  uint32_t stride_pixels =
-      draw_buf->header.stride / 2; // Stride in uint16 pixels
 
-  // Clip to actual buffer dimensions, not mapScrHeight (critical for FULL
-  // render mode)
-  if (maxY >= buf_h)
-    maxY = buf_h - 1;
-  if (minY < 0)
-    minY = 0;
+  int16_t maxY = std::min<int32_t>(p.bbox.max.y, surface.height - 1);
+  int16_t minY = std::max<int32_t>(p.bbox.min.y, 0);
   if (minY >= maxY)
     return true;
 
-  int16_t nodeX[p.points.size()], pixelY;
+  std::vector<int16_t, PsramAllocator<int16_t>> nodeX;
+  try {
+    nodeX.resize(p.points.size());
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
 
-  //  Loop through the rows of the image.
-  int16_t nodes, i, swap;
-
-  if (p.points.size() < 2)
-    return true;
-
-  for (pixelY = minY; pixelY <= maxY; pixelY++) { //  Build a list of nodes.
+  for (int16_t pixelY = minY; pixelY <= maxY; ++pixelY) {
     if ((pixelY & 0x0F) == 0) {
-      if (shouldInterruptMapRenderForScreenCycle())
-        return false;
-      if (deadlineDurationMs != 0 &&
-          millis() - deadlineStartMs >= deadlineDurationMs)
+      if (shouldCancelMapRenderWork())
         return false;
     }
-    nodes = 0;
-    for (int i = 0; i < (int)p.points.size() - 1; i++) {
-      if ((p.points[i].y < pixelY && p.points[i + 1].y >= pixelY) ||
-          (p.points[i].y >= pixelY && p.points[i + 1].y < pixelY)) {
-        nodeX[nodes++] =
-            p.points[i].x + double(pixelY - p.points[i].y) /
-                                double(p.points[i + 1].y - p.points[i].y) *
-                                double(p.points[i + 1].x - p.points[i].x);
+    int16_t nodes = 0;
+    for (size_t index = 0; index + 1 < p.points.size(); ++index) {
+      const Point16 &start = p.points[index];
+      const Point16 &end = p.points[index + 1];
+      if ((start.y < pixelY && end.y >= pixelY) ||
+          (start.y >= pixelY && end.y < pixelY)) {
+        if (nodes >= static_cast<int16_t>(nodeX.size()))
+          return false;
+        nodeX[nodes++] = static_cast<int16_t>(
+            start.x + static_cast<double>(pixelY - start.y) /
+                          static_cast<double>(end.y - start.y) *
+                          static_cast<double>(end.x - start.x));
       }
     }
-    assert(nodes < p.points.size());
-
-    //  Sort the nodes, via a simple “Bubble” sort.
-    i = 0;
-    while (i < nodes - 1) { // TODO: rework
-      if (nodeX[i] > nodeX[i + 1]) {
-        swap = nodeX[i];
-        nodeX[i] = nodeX[i + 1];
-        nodeX[i + 1] = swap;
-        i = 0;
-      } else
-        i++;
-    }
-
-    //  Fill the pixels between node pairs.
-    for (i = 0; i <= nodes - 2; i += 2) {
-      if (nodeX[i] > buf_w)
-        break;
-      if (nodeX[i + 1] < 0)
+    std::sort(nodeX.begin(), nodeX.begin() + nodes);
+    uint16_t *row = surface.row(pixelY);
+    if (row == nullptr)
+      continue;
+    for (int16_t index = 0; index + 1 < nodes; index += 2) {
+      int32_t startX = std::max<int32_t>(0, nodeX[index]);
+      int32_t endX = std::min<int32_t>(surface.width, nodeX[index + 1]);
+      if (startX >= endX)
         continue;
-      if (nodeX[i] < 0)
-        nodeX[i] = 0;
-      if (nodeX[i + 1] > buf_w)
-        nodeX[i + 1] = buf_w;
-
-      // Draw horizontal line directly to buffer (RGB565)
-      int32_t y = pixelY;
-
-      // CRITICAL FIX: Clip y to buffer height
-      if (y < 0 || y >= buf_h)
-        continue;
-
-      int32_t startX = nodeX[i];
-      int32_t endX = nodeX[i + 1];
-
-      // Horizontal clipping
-      if (startX >= buf_w)
-        continue;
-      if (endX <= 0)
-        continue;
-
-      if (endX > buf_w)
-        endX = buf_w;
-      if (startX < 0)
-        startX = 0;
-
-      uint16_t color = p.color; // Use color directly (RGB565)
-
-      uint32_t row_offset = y * stride_pixels;
-
-      for (int cx = startX; cx < endX; cx++) {
-        buf[row_offset + cx] = color; // Use stride and swapped color
-      }
+      std::fill(row + startX, row + endX, p.color);
     }
   }
   return true;
 }
 
-/**
- * @brief Draw an opaque filled line directly to the canvas buffer
- *
- * @param canvas
- * @param x1
- * @param y1
- * @param x2
- * @param y2
- * @param color (Already swapped for RGB565 if needed)
- */
+bool Maps::fillPolygon(const Polygon &p, lv_obj_t *canvas) {
+  return fillPolygon(p, rgb565SurfaceForCanvas(canvas));
+}
+
+void Maps::drawLine(map_surface::Rgb565Surface surface, int16_t x1,
+                    int16_t y1, int16_t x2, int16_t y2, uint16_t color,
+                    uint8_t width) {
+  if (!surface.valid())
+    return;
+  line_rasterizer::drawFilledLine(surface.pixels, surface.width, surface.height,
+                                  surface.stridePixels, x1, y1, x2, y2, color,
+                                  width);
+}
+
 void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
                     int16_t y2, uint16_t color, uint8_t width) {
-  lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
-  if (draw_buf == NULL)
-    return;
-  uint16_t *buf = (uint16_t *)draw_buf->data;
-  int32_t buf_w = draw_buf->header.w;
-  int32_t buf_h = draw_buf->header.h;
-  uint32_t stride_pixels = draw_buf->header.stride / 2;
-  line_rasterizer::drawFilledLine(buf, buf_w, buf_h, stride_pixels, x1, y1,
-                                  x2, y2, color, width);
+  drawLine(rgb565SurfaceForCanvas(canvas), x1, y1, x2, y2, color, width);
 }
 
 /**
@@ -1784,13 +1854,14 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
  */
 bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   ESP_LOGI(TAG, "getMapBlocks %i", millis());
-  if (shouldInterruptMapRenderForScreenCycle()) {
+  if (shouldCancelMapRenderWork()) {
     return false;
   }
   const uint32_t blocksStartMs = MAPIO_TIME_MS();
   uint16_t cacheHits = 0;
   uint16_t loadedBlocks = 0;
   uint16_t evictedBlocks = 0;
+  cachedBlockCount.store(memCache.blocks.size(), std::memory_order_release);
   for (MapBlock *block : memCache.blocks) {
     block->inView = false;
   }
@@ -1830,7 +1901,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
   // 3. Load missing blocks
   for (const auto &req : requiredOffsets) {
-    if (shouldInterruptMapRenderForScreenCycle()) {
+    if (shouldCancelMapRenderWork()) {
       return false;
     }
 
@@ -1872,6 +1943,8 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
                    (*it)->offset.y);
           delete *it;
           memCache.blocks.erase(it);
+          cachedBlockCount.store(memCache.blocks.size(),
+                                 std::memory_order_release);
           evictedBlocks++;
           evicted = true;
           break;
@@ -1883,18 +1956,22 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
         ESP_LOGW(TAG, "Cache full and all blocks inView! Evicting front.");
         delete memCache.blocks.front();
         memCache.blocks.erase(memCache.blocks.begin());
+        cachedBlockCount.store(memCache.blocks.size(),
+                               std::memory_order_release);
         evictedBlocks++;
       }
     }
 
     MapBlock *newBlock = Maps::readMapBlock(fileName);
-    if (Maps::isMapFound) {
+    if (Maps::isMapFound.load(std::memory_order_acquire)) {
       newBlock->inView = true;
       newBlock->offset = req;
       newBlock->mercatorScale = map_projection::mercatorScaleForLatitude(
           Maps::mercatorY2lat(static_cast<double>(req.y) +
                               (1 << (MAPBLOCK_SIZE_BITS - 1))));
       memCache.blocks.push_back(newBlock);
+      cachedBlockCount.store(memCache.blocks.size(),
+                             std::memory_order_release);
       loadedBlocks++;
 
       ESP_LOGI(TAG, "Block loaded: %p, offset(%d, %d)", newBlock, req.x, req.y);
@@ -1903,7 +1980,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
       delete newBlock;
     }
 
-    if (shouldInterruptMapRenderForScreenCycle()) {
+    if (shouldCancelMapRenderWork()) {
       return false;
     }
   }
@@ -1920,6 +1997,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     }
   }
   Maps::isMapFound = hasVisibleMapBlock;
+  cachedBlockCount.store(memCache.blocks.size(), std::memory_order_release);
 
   ESP_LOGI(TAG, "memCache size: %i %i", memCache.blocks.size(), millis());
   MAPIO_LOG("MAPIO: blocks required=%u cacheHit=%u loaded=%u evicted=%u "
@@ -1933,8 +2011,9 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 }
 
 bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
-                            lv_obj_t *canvas, uint8_t zoom, double rotation,
-                            const ScreenMapRenderSettings &style) {
+                            map_surface::LabelSurface surface, uint8_t zoom,
+                            double rotation, const RenderContext &context) {
+  const ScreenMapRenderSettings &style = context.style;
   if (style.labelDensity == 0 || !labelFontAsset.healthy())
     return true;
   const uint32_t labelStartMs = MAPIO_TIME_MS();
@@ -1942,34 +2021,28 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   const uint32_t cacheMissesBefore = labelFontAsset.cacheMisses();
   const uint32_t cacheEvictionsBefore = labelFontAsset.cacheEvictions();
   size_t peakDecodedLabelBytes = 0;
-  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
-  if (drawBuffer == nullptr || drawBuffer->data == nullptr)
+  if (!surface.valid())
     return true;
-  const bool transparentSurface =
-      drawBuffer->header.cf == LV_COLOR_FORMAT_RGB565A8;
-  if (!transparentSurface &&
-      drawBuffer->header.cf != LV_COLOR_FORMAT_RGB565) {
-    ESP_LOGE(TAG, "Street labels require an RGB565 or RGB565A8 surface");
-    return true;
-  }
-
-  const int32_t screenWidth = drawBuffer->header.w;
-  const int32_t screenHeight = drawBuffer->header.h;
+  const bool transparentSurface = surface.transparent();
+  const int32_t screenWidth = surface.color.width;
+  const int32_t screenHeight = surface.color.height;
   const int16_t screenAnchorX = mapAnchorXForWidth(screenWidth);
   const int16_t screenAnchorY = mapAnchorYForHeight(screenHeight);
   float markerX = screenAnchorX;
   float markerY = screenAnchorY;
   bool markerVisible = false;
-  if (isCurrentPositionVisible(mapRenderSettings)) {
-    if (!followGps) {
+  if (context.showCurrentPosition) {
+    if (!context.followPosition) {
       const auto markerDelta = map_transform::worldToScreen(
-          {lon2x(gps.gpsData.longitude) - viewPort.center.x,
-           lat2y(gps.gpsData.latitude) - viewPort.center.y},
+          {context.measuredGpsWorld.x - viewPort.center.x,
+           context.measuredGpsWorld.y - viewPort.center.y},
           zoom, rotation);
       markerX += markerDelta.x;
       markerY += markerDelta.y;
     }
-    const float markerHalf = currentMarkerSize() * 0.5F;
+    const float markerHalf =
+        navigation_visual_style::POSITION_MARKER_BASE_SIZE *
+        std::max<uint8_t>(1, context.markerScale) * 0.5F;
     markerVisible = markerX + markerHalf >= 0 && markerY + markerHalf >= 0 &&
                     markerX - markerHalf < screenWidth &&
                     markerY - markerHalf < screenHeight;
@@ -2010,7 +2083,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     mixSignature(block->labelData.profileFingerprint);
     mixSignature(static_cast<uint32_t>(block->labelData.labels.size()));
   }
-  const bool guidance = isMapGuidanceScreenActive();
+  const bool guidance = context.guidanceScreenActive;
   const LabelLayoutCacheKey cacheKey{
       labelCenter.x,
       labelCenter.y,
@@ -2100,7 +2173,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
            options.size() < MAX_GATHERED_CANDIDATES;
            ++labelIndex) {
         if ((labelIndex & 0x3fU) == 0 &&
-            shouldInterruptMapRenderForScreenCycle())
+            shouldCancelMapRenderWork())
           return false;
         const auto &label = block->labelData.labels[labelIndex];
         if (label.rank != rankBucket || zoom < label.minZoom ||
@@ -2178,7 +2251,9 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     return true;
   std::vector<map_label_layout::ReservedRegion> reserved;
   if (markerVisible) {
-    const float markerSize = static_cast<float>(currentMarkerSize());
+    const float markerSize = static_cast<float>(
+        navigation_visual_style::POSITION_MARKER_BASE_SIZE *
+        std::max<uint8_t>(1, context.markerScale));
     reserved.push_back({markerX, markerY, markerSize, markerSize});
   }
   if (guidance)
@@ -2206,31 +2281,16 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   const uint32_t layoutMs = MAPIO_TIME_MS() - layoutStartMs;
   const uint32_t drawLabelsStartMs = MAPIO_TIME_MS();
 
-  uint16_t *pixels = reinterpret_cast<uint16_t *>(drawBuffer->data);
-  const uint32_t stride = drawBuffer->header.stride / sizeof(uint16_t);
-  uint8_t *alphaPixels =
-      transparentSurface
-          ? static_cast<uint8_t *>(drawBuffer->data) +
-                static_cast<size_t>(drawBuffer->header.stride) * screenHeight
-          : nullptr;
-  const uint32_t alphaStride = transparentSurface ? stride : 0;
-  const lv_draw_buf_t *contrastBuffer = nullptr;
-  int32_t contrastOffsetX = 0;
-  int32_t contrastOffsetY = 0;
-  if (transparentSurface && Maps::canvasMap != nullptr) {
-    contrastBuffer = lv_canvas_get_draw_buf(Maps::canvasMap);
-    if (contrastBuffer == nullptr || contrastBuffer->data == nullptr ||
-        contrastBuffer->header.cf != LV_COLOR_FORMAT_RGB565) {
-      contrastBuffer = nullptr;
-    } else {
-      contrastOffsetX = lv_obj_get_x_aligned(canvas) -
-                        lv_obj_get_x_aligned(Maps::canvasMap);
-      contrastOffsetY = lv_obj_get_y_aligned(canvas) -
-                        lv_obj_get_y_aligned(Maps::canvasMap);
-    }
-  }
+  uint16_t *pixels = surface.color.pixels;
+  const uint32_t stride = surface.color.stridePixels;
+  uint8_t *alphaPixels = transparentSurface ? surface.alpha : nullptr;
+  const uint32_t alphaStride =
+      transparentSurface ? surface.alphaStrideBytes : 0U;
+  const map_surface::Rgb565Surface *contrastSurface = surface.contrast;
+  const int32_t contrastOffsetX = surface.contrastOffsetX;
+  const int32_t contrastOffsetY = surface.contrastOffsetY;
   for (const auto &placement : placements) {
-    if (shouldInterruptMapRenderForScreenCycle())
+    if (shouldCancelMapRenderWork())
       return false;
     const auto itemPosition = itemByKey.find(placement.option.labelKey);
     if (itemPosition == itemByKey.end())
@@ -2248,18 +2308,13 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     if (!transparentSurface) {
       background = pixels[centerY * stride + centerX];
       hasBackgroundSample = true;
-    } else if (contrastBuffer != nullptr) {
+    } else if (contrastSurface != nullptr && contrastSurface->valid()) {
       const int32_t contrastX = centerX + contrastOffsetX;
       const int32_t contrastY = centerY + contrastOffsetY;
-      if (contrastX >= 0 && contrastY >= 0 &&
-          contrastX < contrastBuffer->header.w &&
-          contrastY < contrastBuffer->header.h) {
-        const auto *contrastPixels =
-            reinterpret_cast<const uint16_t *>(contrastBuffer->data);
-        const uint32_t contrastStride =
-            contrastBuffer->header.stride / sizeof(uint16_t);
-        background =
-            contrastPixels[contrastY * contrastStride + contrastX];
+      if (contrastSurface->contains(contrastX, contrastY)) {
+        background = contrastSurface->pixels[
+            static_cast<size_t>(contrastY) * contrastSurface->stridePixels +
+            static_cast<size_t>(contrastX)];
         hasBackgroundSample = true;
       }
     }
@@ -2304,8 +2359,9 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                       error, (unsigned)labelFontAsset.consecutiveFailures(),
                       (unsigned)labelFontAsset.healthy());
             if (!labelFontAsset.healthy()) {
-              streetLabelRuntimeFailurePending = true;
-              streetLabelRuntimeFailureCode = error;
+              streetLabelFontHealthy.store(false, std::memory_order_release);
+              streetLabelRuntimeFailure.store(labelFontAsset.runtimeError(),
+                                              std::memory_order_release);
               labelLayoutCache.clear();
             }
             return true; // Keep the base map visible on any asset I/O failure.
@@ -2321,12 +2377,12 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                         stride, alphaStride, bitmap.fill, bitmap.distance,
                         bitmap.width, bitmap.height, glyphX26_6, glyphY26_6,
                         transform, pass, fillColor, haloColor,
-                        shouldInterruptMapRenderForScreenCycle)
+                        shouldCancelMapRenderWork)
                   : map_label_rasterizer::drawGlyphPass(
                         pixels, screenWidth, screenHeight, stride, bitmap.fill,
                         bitmap.distance, bitmap.width, bitmap.height,
                         glyphX26_6, glyphY26_6, transform, pass, fillColor,
-                        haloColor, shouldInterruptMapRenderForScreenCycle);
+                        haloColor, shouldCancelMapRenderWork);
           if (!drawn)
             return false;
           penX26_6 += glyph.xAdvance26_6;
@@ -2358,6 +2414,30 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   return true;
 }
 
+bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
+                            lv_obj_t *canvas, uint8_t zoom, double rotation,
+                            const ScreenMapRenderSettings &style) {
+  RenderContext context = captureRenderContext();
+  context.style = style;
+  map_surface::Rgb565Surface contrast{};
+  int32_t offsetX = 0;
+  int32_t offsetY = 0;
+  if (canvas != nullptr && canvasMap != nullptr) {
+    contrast = rgb565SurfaceForCanvas(canvasMap);
+    offsetX = lv_obj_get_x_aligned(canvas) - lv_obj_get_x_aligned(canvasMap);
+    offsetY = lv_obj_get_y_aligned(canvas) - lv_obj_get_y_aligned(canvasMap);
+  }
+  const map_surface::Rgb565Surface *contrastPtr =
+      contrast.valid() ? &contrast : nullptr;
+  return drawStreetLabels(
+      viewPort, memCache,
+      labelSurfaceForCanvas(canvas, contrastPtr, offsetX, offsetY), zoom,
+      rotation, context);
+}
+
+
+
+
 /**
  * @brief Generate vectorized map
  *
@@ -2366,16 +2446,229 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
  * @param map -> Map Sprite
  * @param zoom -> Zoom Level
  */
-bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
-                         lv_obj_t *canvas, uint8_t zoom, double rotation,
-                         const map_projection::Projection &projection,
-                         bool drawLabels, bool suppressBuildings) {
-  (void)rotation;
-  Polygon newPolygon;
+bool Maps::readVectorMap(
+    ViewPort &viewPort, MemCache &memCache,
+    map_surface::Rgb565Surface surface, uint8_t zoom, double rotation,
+    const map_projection::Projection &projection, const RenderContext &context,
+    bool drawLabels, bool suppressBuildings,
+    RasterDiagnostics *diagnostics) {
+  if (diagnostics != nullptr)
+    *diagnostics = {};
+  if (!surface.valid())
+    return false;
+
+  const ScreenMapRenderSettings &style = context.style;
+  const bool mapNavigationActive = context.guidanceScreenActive;
+  const uint32_t drawStartMs = MAPIO_TIME_MS();
+  surface.clear(BACKGROUND_COLOR);
+
+  if (!Maps::isMapFound.load(std::memory_order_acquire) ||
+      memCache.blocks.empty()) {
+    MAPIO_LOG("MAPIO: raw-map ok=1 mapFound=0 blocks=%u totalMs=%lu\n",
+              (unsigned)memCache.blocks.size(),
+              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
+    return true;
+  }
+
+  Polygon projectedPolygon;
   std::vector<map_projection::GroundPoint> groundPolygon;
   std::vector<map_projection::GroundPoint> clippedGroundPolygon;
-  const ScreenMapRenderSettings &style = currentMapStyleSettings();
-  const bool mapNavigationActive = isMapGuidanceScreenActive();
+  uint32_t projectionClippedCount = 0;
+  uint32_t projectionRejectedCount = 0;
+
+  for (MapBlock *block : memCache.blocks) {
+    if (shouldCancelMapRenderWork())
+      return false;
+    if (block == nullptr || !block->inView)
+      continue;
+
+    ScreenMapRenderSettings blockStyle = style;
+    blockStyle.visibilityMask =
+        map_profile_protocol::visibilityMaskForMapVersion(
+            style.visibilityMask, block->formatVersion);
+    const BBox localViewport = viewPort.bbox - block->offset;
+    const auto worldPoint = [&](Point16 point) -> map_transform::WorldPoint {
+      return {static_cast<double>(point.x) + block->offset.x,
+              static_cast<double>(point.y) + block->offset.y};
+    };
+
+    const size_t polygonCount = block->polygons.size();
+    std::vector<bool> visited(polygonCount, false);
+    const int minCellX =
+        std::max(0, static_cast<int>(localViewport.min.x >> CELL_SHIFT));
+    const int maxCellX = std::min(
+        GRID_SIZE - 1,
+        static_cast<int>(localViewport.max.x >> CELL_SHIFT));
+    const int minCellY =
+        std::max(0, static_cast<int>(localViewport.min.y >> CELL_SHIFT));
+    const int maxCellY = std::min(
+        GRID_SIZE - 1,
+        static_cast<int>(localViewport.max.y >> CELL_SHIFT));
+    size_t polygonChecks = 0;
+
+    const auto drawPolygonRecord = [&](size_t polygonIndex) -> bool {
+      if (polygonIndex >= polygonCount || visited[polygonIndex])
+        return true;
+      visited[polygonIndex] = true;
+      if ((polygonChecks++ & 0x0fU) == 0 && shouldCancelMapRenderWork())
+        return false;
+      const Polygon &polygon = block->polygons[polygonIndex];
+      if (zoom > polygon.maxZoom || !polygon.bbox.intersects(localViewport) ||
+          !isPolygonVisible(polygon.typeId, polygon.color, blockStyle)) {
+        return true;
+      }
+
+      groundPolygon.clear();
+      groundPolygon.reserve(polygon.points.size());
+      for (size_t pointIndex = 0; pointIndex < polygon.points.size();
+           ++pointIndex) {
+        if ((pointIndex & 0x1fU) == 0 && shouldCancelMapRenderWork())
+          return false;
+        groundPolygon.push_back(
+            projection.groundForWorld(worldPoint(polygon.points[pointIndex])));
+      }
+      const auto *projectedGround = &groundPolygon;
+      if (projection.isBirdsEye()) {
+        map_projection::clipPolygonToNearPlane(
+            projection, groundPolygon, clippedGroundPolygon);
+        projectedGround = &clippedGroundPolygon;
+        if (clippedGroundPolygon.size() != groundPolygon.size())
+          ++projectionClippedCount;
+      }
+      if (projectedGround->size() < 3) {
+        ++projectionRejectedCount;
+        return true;
+      }
+
+      projectedPolygon.points.clear();
+      projectedPolygon.points.reserve(projectedGround->size() + 1U);
+      projectedPolygon.color = polygon.color;
+      int16_t minX = 32767;
+      int16_t minY = 32767;
+      int16_t maxX = -32768;
+      int16_t maxY = -32768;
+      for (const auto &ground : *projectedGround) {
+        const auto projected = projection.projectGround(ground);
+        if (!projected.valid)
+          continue;
+        const Point16 point(
+            static_cast<int16_t>(map_transform::quantizePixel(projected.x)),
+            static_cast<int16_t>(map_transform::quantizePixel(projected.y)));
+        projectedPolygon.points.push_back(point);
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+      }
+      if (projectedPolygon.points.size() < 3)
+        return true;
+      if (!(projectedPolygon.points.front().x ==
+                projectedPolygon.points.back().x &&
+            projectedPolygon.points.front().y ==
+                projectedPolygon.points.back().y)) {
+        projectedPolygon.points.push_back(projectedPolygon.points.front());
+      }
+      projectedPolygon.bbox.min = Point16(minX, minY);
+      projectedPolygon.bbox.max = Point16(maxX, maxY);
+      const uint8_t minimumSize = effectiveMinPolygonSize(blockStyle);
+      const int32_t area = static_cast<int32_t>(maxX - minX) *
+                           static_cast<int32_t>(maxY - minY);
+      if (minimumSize != 0 &&
+          area < static_cast<int32_t>(minimumSize) * minimumSize) {
+        return true;
+      }
+      return fillPolygon(projectedPolygon, surface);
+    };
+
+    if (!block->polygonGrid.empty()) {
+      for (int cellY = minCellY; cellY <= maxCellY; ++cellY) {
+        for (int cellX = minCellX; cellX <= maxCellX; ++cellX) {
+          const int cellIndex = cellY * GRID_SIZE + cellX;
+          if (cellIndex < 0 ||
+              cellIndex >= static_cast<int>(block->polygonGrid.size())) {
+            continue;
+          }
+          for (const uint16_t polygonIndex : block->polygonGrid[cellIndex]) {
+            if (!drawPolygonRecord(polygonIndex))
+              return false;
+          }
+        }
+      }
+    } else {
+      for (size_t polygonIndex = 0; polygonIndex < polygonCount;
+           ++polygonIndex) {
+        if (!drawPolygonRecord(polygonIndex))
+          return false;
+      }
+    }
+
+    for (const Polyline &line : block->polylines) {
+      if (shouldCancelMapRenderWork())
+        return false;
+      if (zoom > line.maxZoom || line.points.size() < 2 ||
+          !line.bbox.intersects(localViewport) ||
+          !isLineVisible(line.typeId, line.color, line.width, blockStyle)) {
+        continue;
+      }
+      const uint16_t displayColor = map_line_style::displayColor(
+          line.typeId, line.color, line.width, mapNavigationActive);
+      const uint8_t baseWidth =
+          shouldBoostLineWidth(line.typeId, line.width)
+              ? blockStyle.streetLineWidth
+              : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
+      for (size_t index = 0; index + 1 < line.points.size(); ++index) {
+        if ((index & 0x0fU) == 0 && shouldCancelMapRenderWork())
+          return false;
+        auto start = projection.groundForWorld(worldPoint(line.points[index]));
+        auto end =
+            projection.groundForWorld(worldPoint(line.points[index + 1]));
+        if (!projection.clipSegmentToNearPlane(start, end)) {
+          ++projectionRejectedCount;
+          continue;
+        }
+        const auto projectedStart = projection.projectGround(start);
+        const auto projectedEnd = projection.projectGround(end);
+        if (!projectedStart.valid || !projectedEnd.valid) {
+          ++projectionRejectedCount;
+          continue;
+        }
+        const uint8_t width = projection.scaledLineWidth(
+            baseWidth,
+            (projectedStart.depthScale + projectedEnd.depthScale) * 0.5, 24);
+        drawLine(
+            surface,
+            static_cast<int16_t>(
+                map_transform::quantizePixel(projectedStart.x)),
+            static_cast<int16_t>(
+                map_transform::quantizePixel(projectedStart.y)),
+            static_cast<int16_t>(map_transform::quantizePixel(projectedEnd.x)),
+            static_cast<int16_t>(map_transform::quantizePixel(projectedEnd.y)),
+            displayColor, width);
+      }
+    }
+  }
+
+  struct BuildingItem {
+    MapBlock *block = nullptr;
+    const map_building_block::Building *building = nullptr;
+    uint16_t recordIndex = 0;
+    double painterDepth = 0.0;
+    bool extruded = false;
+  };
+  map_building_admission::Diagnostics admissionDiagnostics{};
+  uint32_t renderedBuildings = 0;
+  uint32_t courtyardDeferred = 0;
+  uint32_t buildingProjectionMs = 0;
+  uint32_t buildingDrawMs = 0;
+  uint32_t metadataDeferredBuildings = 0;
+  bool buildingAllocationFailed = false;
+  uint32_t courtyardSnapshotCount = 0;
+  size_t largestCourtyardBytes = 0;
+  uint32_t buildingFailureInternalHeapFree = 0;
+  uint32_t buildingFailureInternalHeapLargest = 0;
+  uint32_t buildingFailurePsramFree = 0;
+  uint32_t buildingFailurePsramLargest = 0;
+
   uint64_t buildingContextSignature = 1469598103934665603ULL;
   const auto mixBuildingContext = [&](uint64_t value) {
     buildingContextSignature ^= value;
@@ -2384,972 +2677,795 @@ bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
   mixBuildingContext(zoom);
   mixBuildingContext(projection.isBirdsEye() ? 1U : 0U);
   mixBuildingContext(style.visibilityMask);
-  mixBuildingContext(mapRenderSettings.mapNavigation3DBuildingsEnabled ? 1U
-                                                                      : 0U);
-  mixBuildingContext(mapRenderSettings.mapNavigationBirdsEyePerspective);
-  for (const MapBlock *block : memCache.blocks) {
-    if (!block->inView || block->formatVersion < 4)
-      continue;
-    mixBuildingContext(static_cast<uint32_t>(block->offset.x));
-    mixBuildingContext(static_cast<uint32_t>(block->offset.y));
-    mixBuildingContext(block->formatVersion);
-    mixBuildingContext(block->buildingData.stats.records);
-    mixBuildingContext(block->buildingData.stats.points);
-  }
+  mixBuildingContext(context.buildings3DEnabled ? 1U : 0U);
+  mixBuildingContext(context.birdsEyePerspective);
   const map_building_renderer::RenderRegion buildingRenderRegion{
       viewPort.bbox.min.x, viewPort.bbox.min.y, viewPort.bbox.max.x,
       viewPort.bbox.max.y};
-  const bool buildingsSuppressed =
+  const bool flatFallbackOnly =
       suppressBuildings || buildingFailureRetryCooldown.shouldSuppress(
                                millis(), buildingContextSignature,
                                buildingRenderRegion);
-  uint32_t projectionClippedCount = 0;
-  uint32_t projectionRejectedCount = 0;
-  const uint32_t drawStartMs = MAPIO_TIME_MS();
-  const uint32_t fillStartMs = MAPIO_TIME_MS();
-  lv_canvas_fill_bg(canvas, lv_color_hex(BACKGROUND_COLOR), LV_OPA_COVER);
-  const uint32_t fillMs = MAPIO_TIME_MS() - fillStartMs;
+  const bool buildingsVisible =
+      (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
+  const bool extrusionRequested =
+      !flatFallbackOnly &&
+      navigation_content_mode::extrudesMapGuidanceBuildings(
+          buildingsVisible, context.guidanceScreenActive,
+          projection.isBirdsEye(),
+          context.buildings3DEnabled);
 
-  uint32_t totalTime = millis();
-  log_i("readVectorMap: Draw start. isMapFound=%d, Blocks=%d", Maps::isMapFound,
-        memCache.blocks.size());
+  if (buildingsVisible) {
+    if (flatFallbackOnly) {
+      // FMB v4 removes extrudable buildings from the generic polygon stream,
+      // so suppressing the 3D pass must not suppress every building.  This
+      // exceptional path keeps a small deterministic nearest set of flat
+      // footprints without allocating the normal candidate/sort workspace.
+      // It intentionally omits courtyard restoration if memory is already in
+      // a failed/cooldown state; preserving a useful flat city is preferable
+      // to recursively failing or publishing a building-free frame.
+      constexpr size_t kFallbackCandidateLimit = 48;
+      constexpr size_t kFallbackPointLimit = 4096;
+      constexpr uint64_t kFallbackPixelLimit = 120000;
+      std::array<map_building_admission::Candidate,
+                 kFallbackCandidateLimit>
+          fallbackCandidates{};
+      size_t fallbackCandidateCount = 0;
+      size_t fallbackVisible = 0;
 
-  if (!Maps::isMapFound || memCache.blocks.empty()) {
-    log_w("readVectorMap: No map data found for this location!");
-    Maps::showNoMap(canvas, storage.getSdLoaded());
-    MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
-              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
-              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
-    logMapMemorySnapshot("canvas-no-map");
-    return true;
-  }
-
-  int16_t p1x, p1y, p2x, p2y;
-  if (Maps::isMapFound) {
-    for (MapBlock *mblock : memCache.blocks) {
-      if (shouldInterruptMapRenderForScreenCycle()) {
-        return false;
-      }
-      uint32_t blockTime = millis();
-      if (!mblock->inView)
-        continue;
-
-      ScreenMapRenderSettings blockStyle = style;
-      blockStyle.visibilityMask =
-          map_profile_protocol::visibilityMaskForMapVersion(
-              style.visibilityMask, mblock->formatVersion);
-
-      ESP_LOGI(TAG, "Drawing cached map block");
-
-      BBox screen_bbox_mc =
-          viewPort.bbox -
-          mblock->offset; // screen boundaries with features coordinates
-
-      ////// Polygons - Grid-based spatial culling for performance
-      const uint32_t polygonStartMs = millis();
-      int poly_total = mblock->polygons.size();
-      int poly_drawn = 0;
-      int poly_checked = 0;
-
-      // Calculate which grid cells overlap the viewport bounding box
-      // screen_bbox_mc is in block-local coordinates (0-4095 range)
-      int minCX = std::max(0, (int)(screen_bbox_mc.min.x >> CELL_SHIFT));
-      int maxCX =
-          std::min(GRID_SIZE - 1, (int)(screen_bbox_mc.max.x >> CELL_SHIFT));
-      int minCY = std::max(0, (int)(screen_bbox_mc.min.y >> CELL_SHIFT));
-      int maxCY =
-          std::min(GRID_SIZE - 1, (int)(screen_bbox_mc.max.y >> CELL_SHIFT));
-
-      // Bitset to track visited polygons (avoid processing same polygon twice
-      // if it spans multiple cells)
-      std::vector<bool> visited(poly_total, false);
-
-      auto worldPoint = [&](Point16 p) -> map_transform::WorldPoint {
-        return {static_cast<double>(p.x) + mblock->offset.x,
-                static_cast<double>(p.y) + mblock->offset.y};
-      };
-      auto projectedPoint = [&](map_projection::GroundPoint ground) -> Point16 {
-        const auto projected = projection.projectGround(ground);
-        return Point16(
-            static_cast<int16_t>(map_transform::quantizePixel(projected.x)),
-            static_cast<int16_t>(map_transform::quantizePixel(projected.y)));
-      };
-
-      // Iterate only through cells that overlap the viewport
-      for (int cy = minCY; cy <= maxCY; cy++) {
-        for (int cx = minCX; cx <= maxCX; cx++) {
-          int cellIdx = cy * GRID_SIZE + cx;
-
-          // Check bounds on polygonGrid access
-          if (cellIdx < 0 || cellIdx >= (int)mblock->polygonGrid.size())
-            continue;
-
-          for (uint16_t polyIdx : mblock->polygonGrid[cellIdx]) {
-            if ((poly_checked & 0x0F) == 0 &&
-                shouldInterruptMapRenderForScreenCycle()) {
-              return false;
+      const auto retainFallbackCandidate =
+          [&](const map_building_admission::Candidate &candidate) {
+            if (fallbackCandidateCount < kFallbackCandidateLimit) {
+              fallbackCandidates[fallbackCandidateCount++] = candidate;
+              return;
             }
-            // Skip if already processed (polygon spans multiple cells)
-            if (visited[polyIdx])
-              continue;
-            visited[polyIdx] = true;
-            poly_checked++;
-
-            const auto &polygon = mblock->polygons[polyIdx];
-
-            // Fine-grained intersection test with viewport
-            if (!polygon.bbox.intersects(screen_bbox_mc)) {
-              continue;
+            size_t farthest = 0;
+            for (size_t index = 1; index < fallbackCandidateCount; ++index) {
+              if (map_building_admission::nearer(
+                      fallbackCandidates[farthest].key,
+                      fallbackCandidates[index].key)) {
+                farthest = index;
+              }
             }
-
-            // Skip if type is hidden by visibility mask
-            if (!isPolygonVisible(polygon.typeId, polygon.color, blockStyle)) {
-              continue;
+            if (map_building_admission::nearer(
+                    candidate.key, fallbackCandidates[farthest].key)) {
+              fallbackCandidates[farthest] = candidate;
             }
+          };
 
-            poly_drawn++;
-            newPolygon.color = polygon.color;
-
-            // Transform points to screen coordinates
-            newPolygon.points.clear();
-            int16_t minX = 32000, maxX = -32000, minY = 32000, maxY = -32000;
-
-            groundPolygon.clear();
-            groundPolygon.reserve(polygon.points.size());
-            for (const auto &p : polygon.points)
-              groundPolygon.push_back(projection.groundForWorld(worldPoint(p)));
-            const auto *projectedPolygon = &groundPolygon;
-            if (projection.isBirdsEye()) {
-              map_projection::clipPolygonToNearPlane(
-                  projection, groundPolygon, clippedGroundPolygon);
-              projectedPolygon = &clippedGroundPolygon;
-              if (clippedGroundPolygon.size() != groundPolygon.size())
-                projectionClippedCount++;
-            }
-            if (projectedPolygon->size() < 3) {
-              projectionRejectedCount++;
-              poly_drawn--;
-              continue;
-            }
-
-            for (const auto &ground : *projectedPolygon) {
-              Point16 tp = projectedPoint(ground);
-              newPolygon.points.push_back(tp);
-              if (tp.x < minX)
-                minX = tp.x;
-              if (tp.x > maxX)
-                maxX = tp.x;
-              if (tp.y < minY)
-                minY = tp.y;
-              if (tp.y > maxY)
-                maxY = tp.y;
-            }
-
-            newPolygon.bbox.min.x = minX;
-            newPolygon.bbox.max.x = maxX;
-            newPolygon.bbox.min.y = minY;
-            newPolygon.bbox.max.y = maxY;
-
-            // Skip tiny polygons based on explicit min size plus detail density.
-            const uint8_t minPolygonSize =
-                effectiveMinPolygonSize(blockStyle);
-            int16_t polyWidth = maxX - minX;
-            int16_t polyHeight = maxY - minY;
-            if (minPolygonSize > 0 &&
-                polyWidth * polyHeight < minPolygonSize * minPolygonSize) {
-              poly_drawn--; // Don't count as drawn
-              continue;
-            }
-
-            if (!Maps::fillPolygon(newPolygon, canvas)) {
-              return false;
-            }
-          }
-        }
-      }
-#if FIRMWARE_DIAGNOSTICS
-      Serial.printf("[Maps] Block polygons: Total=%d, Checked=%d, Drawn=%d\n",
-                    poly_total, poly_checked, poly_drawn);
-#endif
-      const uint32_t polygonMs = millis() - polygonStartMs;
-      log_i("Block polygons done %i ms", polygonMs);
-      const uint32_t lineStartMs = millis();
-
-      ////// Lines
-      // Removed lv_draw_line usage to fix crash
-      for (const auto &line : mblock->polylines) {
-        if (shouldInterruptMapRenderForScreenCycle()) {
-          return false;
-        }
-        if (zoom > line.maxZoom)
-          continue;
-        if (!line.bbox.intersects(screen_bbox_mc))
-          continue;
-
-        if (line.points.size() < 2)
-          continue;
-
-        // Skip if type is hidden by visibility mask
-        if (!isLineVisible(line.typeId, line.color, line.width, blockStyle))
-          continue;
-
-        const uint16_t color_swapped = map_line_style::displayColor(
-            line.typeId, line.color, line.width, mapNavigationActive);
-
-        const uint8_t baseLineWidth =
-            shouldBoostLineWidth(line.typeId, line.width)
-                ? blockStyle.streetLineWidth
-                : static_cast<uint8_t>(std::max<int32_t>(line.width, 1));
-
-        for (int i = 0; i < (int)line.points.size() - 1; i++) {
-          if ((i & 0x0F) == 0 &&
-              shouldInterruptMapRenderForScreenCycle()) {
-            return false;
-          }
-          auto ground1 = projection.groundForWorld(worldPoint(line.points[i]));
-          auto ground2 =
-              projection.groundForWorld(worldPoint(line.points[i + 1]));
-          if (!projection.clipSegmentToNearPlane(ground1, ground2)) {
-            projectionRejectedCount++;
-            continue;
-          }
-          if (projection.isBirdsEye() &&
-              (ground1.forward == projection.nearPlaneForward() ||
-               ground2.forward == projection.nearPlaneForward())) {
-            projectionClippedCount++;
-          }
-          const auto projected1 = projection.projectGround(ground1);
-          const auto projected2 = projection.projectGround(ground2);
-          if (!projected1.valid || !projected2.valid) {
-            projectionRejectedCount++;
-            continue;
-          }
-          const uint8_t lineWidth = projection.scaledLineWidth(
-              baseLineWidth,
-              (projected1.depthScale + projected2.depthScale) / 2.0, 24);
-          Maps::drawLine(
-              canvas,
-              static_cast<int16_t>(map_transform::quantizePixel(projected1.x)),
-              static_cast<int16_t>(map_transform::quantizePixel(projected1.y)),
-              static_cast<int16_t>(map_transform::quantizePixel(projected2.x)),
-              static_cast<int16_t>(map_transform::quantizePixel(projected2.y)),
-              color_swapped, lineWidth);
-        }
-      }
-      const uint32_t lineMs = millis() - lineStartMs;
-      ESP_LOGI(TAG, "Block lines done %i ms", lineMs);
-      MAPIO_LOG("MAPIO: draw-block offset=%d,%d polygons=%d "
-                "checked=%d drawn=%d lines=%u polygonMs=%lu lineMs=%lu "
-                "totalMs=%lu\n",
-                mblock->offset.x, mblock->offset.y, poly_total, poly_checked,
-                poly_drawn, (unsigned)mblock->polylines.size(),
-                (unsigned long)polygonMs, (unsigned long)lineMs,
-                (unsigned long)(MAPIO_TIME_MS() - blockTime));
-    }
-    struct BuildingRenderItem {
-      MapBlock *block = nullptr;
-      const map_building_block::Building *building = nullptr;
-      double depth = 0.0;
-      uint16_t recordIndex = 0;
-      size_t pointCount = 0;
-      bool render = false;
-      bool extrude = false;
-      bool extrusionCandidate = false;
-
-      uint8_t buildingFlags() const { return building->flags; }
-      bool eligibleForExtrusion() const { return extrusionCandidate; }
-    };
-    bool buildingAllocationFailed = false;
-    bool buildingDeadlineAborted = false;
-    bool buildingPrepassDeadlineExceeded = false;
-    size_t visibleBuildingCount = 0;
-    uint64_t buildingPointCount = 0;
-    size_t renderTimeOverflow = 0;
-    uint32_t renderedBuildings = 0;
-    uint32_t extrudedBuildings = 0;
-    uint32_t buildingProjectionMs = 0;
-    uint32_t buildingSortMs = 0;
-    uint32_t buildingDrawMs = 0;
-    uint32_t buildingFailurePsramUsed = 0;
-    uint32_t buildingFailurePsramFree = 0;
-    uint32_t buildingFailurePsramLargest = 0;
-    uint32_t buildingFailureInternalHeapFree = 0;
-    uint32_t buildingFailureInternalHeapLargest = 0;
-    bool buildingFailurePsramSamplePostCleanup = false;
-    const auto captureBuildingFailureMemory = [&]() {
-      constexpr uint32_t internalHeapCaps =
-          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-      buildingFailureInternalHeapFree =
-          heap_caps_get_free_size(internalHeapCaps);
-      buildingFailureInternalHeapLargest =
-          heap_caps_get_largest_free_block(internalHeapCaps);
-      buildingFailurePsramFree =
-          heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-      buildingFailurePsramLargest =
-          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-      buildingFailurePsramUsed =
-          ESP.getPsramSize() - buildingFailurePsramFree;
-    };
-    std::vector<BuildingRenderItem, PsramAllocator<BuildingRenderItem>>
-        buildingQueue;
-    map_building_renderer::RenderSelection renderSelection;
-    map_building_renderer::ExtrusionSelection buildingSelection;
-    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityGround;
-    MapBuildingVector<map_projection::GroundPoint> buildingEligibilityClipped;
-    Polygon buildingPolygon;
-    std::vector<Point16, PsramAllocator<Point16>> buildingSurfacePoints;
-    std::vector<uint16_t, PsramAllocator<uint16_t>> courtyardUnderlay;
-    std::vector<int32_t, PsramAllocator<int32_t>> courtyardScanlineNodes;
-    size_t largestCourtyardUnderlayBytes = 0;
-    uint32_t courtyardSnapshotCount = 0;
-    map_building_renderer::SurfaceStats buildingSurfaceStats;
-    const auto releaseBuildingFailureWorkspace = [&]() {
-      decltype(buildingQueue){}.swap(buildingQueue);
-      decltype(buildingEligibilityGround){}.swap(buildingEligibilityGround);
-      decltype(buildingEligibilityClipped){}.swap(buildingEligibilityClipped);
-      decltype(buildingPolygon.points){}.swap(buildingPolygon.points);
-      decltype(buildingSurfacePoints){}.swap(buildingSurfacePoints);
-      decltype(courtyardUnderlay){}.swap(courtyardUnderlay);
-      decltype(courtyardScanlineNodes){}.swap(courtyardScanlineNodes);
-    };
-    static uint64_t renderTimeOverflowTotal = 0;
-    map_building_block::Stats loadedBuildingStats;
-    for (const MapBlock *block : memCache.blocks) {
-      if (!block->inView || block->formatVersion < 4)
-        continue;
-      loadedBuildingStats.records += block->buildingData.stats.records;
-      loadedBuildingStats.rings += block->buildingData.stats.rings;
-      loadedBuildingStats.points += block->buildingData.stats.points;
-      for (size_t index = 0; index < loadedBuildingStats.provenance.size();
-           ++index) {
-        loadedBuildingStats.provenance[index] +=
-            block->buildingData.stats.provenance[index];
-      }
-    }
-    enum class BuildingPassPhase : uint8_t { Projection, Sort, Draw, Complete };
-    BuildingPassPhase buildingPassPhase = BuildingPassPhase::Projection;
-    uint32_t buildingPhaseStartMs = millis();
-    const uint32_t buildingPassStartMs = buildingPhaseStartMs;
-    const auto finishBuildingPhaseTiming = [&]() {
-      const uint32_t elapsed = millis() - buildingPhaseStartMs;
-      switch (buildingPassPhase) {
-      case BuildingPassPhase::Projection:
-        buildingProjectionMs = elapsed;
-        break;
-      case BuildingPassPhase::Sort:
-        buildingSortMs = elapsed;
-        break;
-      case BuildingPassPhase::Draw:
-        buildingDrawMs = elapsed;
-        break;
-      case BuildingPassPhase::Complete:
-        break;
-      }
-      buildingPassPhase = BuildingPassPhase::Complete;
-    };
-    bool buildingScreenInterrupted = false;
-    const bool buildingPassCompleted =
-        map_building_renderer::runAllocationSafe(
-            [&]() -> bool {
-    const auto buildingRendersBefore =
-        [](const BuildingRenderItem &left, const BuildingRenderItem &right) {
-          return map_building_renderer::rendersBefore(
-              {left.depth, left.block->offset.x, left.block->offset.y,
-               left.recordIndex},
-              {right.depth, right.block->offset.x, right.block->offset.y,
-               right.recordIndex});
-        };
-    const bool buildingsVisible =
-        !buildingsSuppressed &&
-        (style.visibilityMask & MAP_VISIBILITY_BUILDINGS) != 0;
-    bool extrudeBuildings =
-        navigation_content_mode::extrudesMapGuidanceBuildings(
-            buildingsVisible, mapNavigationActive, projection.isBirdsEye(),
-            mapRenderSettings.mapNavigation3DBuildingsEnabled);
-    size_t boundedBuildingCandidateCount = 0;
-    size_t oversizedBuildingCount = 0;
-    size_t renderRecordLimitOverflow = 0;
-    uint64_t visibleWallCandidateCount = 0;
-    bool buildingBudgetFallback = false;
-    bool buildingDeadlineExceeded = false;
-    static uint64_t renderRecordOverflowTotal = 0;
-    static uint64_t renderPointOverflowTotal = 0;
-    static uint64_t renderOversizedOverflowTotal = 0;
-    static uint64_t extrusionRecordOverflowTotal = 0;
-    static uint64_t extrusionPointOverflowTotal = 0;
-    const auto buildingDeadlineReached = [&]() {
-      return millis() - buildingPassStartMs >=
-             map_building_renderer::kMaximumBuildingRenderTimeMs;
-    };
-    const auto shouldStopBuildingWork = [&]() {
-      if (shouldInterruptMapRenderForScreenCycle()) {
-        buildingScreenInterrupted = true;
-        return true;
-      }
-      if (buildingDeadlineReached()) {
-        buildingDeadlineExceeded = true;
-        return true;
-      }
-      return false;
-    };
-    const auto abortStoppedBuildingWork = [&](size_t timeOverflow) -> bool {
-      finishBuildingPhaseTiming();
-      if (buildingDeadlineExceeded) {
-        captureBuildingFailureMemory();
-        buildingDeadlineAborted = true;
-        const size_t countedOverflow = std::max<size_t>(1, timeOverflow);
-        renderTimeOverflow += countedOverflow;
-        renderTimeOverflowTotal += countedOverflow;
-      }
-      return false;
-    };
-    if (buildingsVisible) {
-      buildingPassPhase = BuildingPassPhase::Projection;
-      buildingPhaseStartMs = millis();
-      bool stopBuildingPrepass = false;
       for (MapBlock *block : memCache.blocks) {
-        if (shouldStopBuildingWork()) {
-          stopBuildingPrepass = true;
-          break;
-        }
-        if (!block->inView || block->formatVersion < 4)
+        if (shouldCancelMapRenderWork())
+          return false;
+        if (block == nullptr || !block->inView || block->formatVersion < 4)
           continue;
-        const BBox screenBbox = viewPort.bbox - block->offset;
+        const BBox localViewport = viewPort.bbox - block->offset;
         for (size_t recordIndex = 0;
              recordIndex < block->buildingData.buildings.size();
              ++recordIndex) {
-          if ((recordIndex & 0x1FU) == 0 && shouldStopBuildingWork()) {
-            stopBuildingPrepass = true;
+          if ((recordIndex & 0x1fU) == 0 && shouldCancelMapRenderWork())
+            return false;
+          const auto &building = block->buildingData.buildings[recordIndex];
+          const BBox bounds(Point32(building.minX, building.minY),
+                            Point32(building.maxX, building.maxY));
+          if (!bounds.intersects(localViewport))
+            continue;
+          size_t pointCount = 0;
+          for (const auto &ring : building.rings)
+            pointCount += ring.points.size();
+          if (pointCount < 3 ||
+              pointCount >
+                  map_building_renderer::kMaximumRenderedBuildingPointsPerRecord)
+            continue;
+
+          const double centerX = static_cast<double>(block->offset.x) +
+                                 (building.minX + building.maxX) * 0.5;
+          const double centerY = static_cast<double>(block->offset.y) +
+                                 (building.minY + building.maxY) * 0.5;
+          const double dx = centerX - context.presentedWorld.x;
+          const double dy = centerY - context.presentedWorld.y;
+
+          double minX = std::numeric_limits<double>::infinity();
+          double minY = std::numeric_limits<double>::infinity();
+          double maxX = -std::numeric_limits<double>::infinity();
+          double maxY = -std::numeric_limits<double>::infinity();
+          const std::array<map_transform::WorldPoint, 4> corners{{
+              {static_cast<double>(block->offset.x + building.minX),
+               static_cast<double>(block->offset.y + building.minY)},
+              {static_cast<double>(block->offset.x + building.maxX),
+               static_cast<double>(block->offset.y + building.minY)},
+              {static_cast<double>(block->offset.x + building.maxX),
+               static_cast<double>(block->offset.y + building.maxY)},
+              {static_cast<double>(block->offset.x + building.minX),
+               static_cast<double>(block->offset.y + building.maxY)},
+          }};
+          size_t validCorners = 0;
+          for (const auto &corner : corners) {
+            const auto projected = projection.projectWorld(corner);
+            if (!projected.valid)
+              continue;
+            ++validCorners;
+            minX = std::min(minX, projected.x);
+            minY = std::min(minY, projected.y);
+            maxX = std::max(maxX, projected.x);
+            maxY = std::max(maxY, projected.y);
+          }
+          if (validCorners < 2)
+            continue;
+          const uint64_t projectedPixels = static_cast<uint64_t>(std::max(
+              1.0, std::ceil(std::max(0.0, maxX - minX) *
+                             std::max(0.0, maxY - minY))));
+          map_building_admission::Candidate candidate;
+          candidate.key = {dx * dx + dy * dy, block->offset.x,
+                           block->offset.y,
+                           static_cast<uint32_t>(recordIndex)};
+          candidate.pointCount = pointCount;
+          candidate.projectedPixels = projectedPixels;
+          retainFallbackCandidate(candidate);
+          ++fallbackVisible;
+        }
+      }
+
+      std::sort(fallbackCandidates.begin(),
+                fallbackCandidates.begin() + fallbackCandidateCount,
+                [](const auto &left, const auto &right) {
+                  return map_building_admission::nearer(left.key, right.key);
+                });
+
+      const auto rgb565 = [](uint32_t rgb) -> uint16_t {
+        return static_cast<uint16_t>(((rgb >> 8U) & 0xf800U) |
+                                     ((rgb >> 5U) & 0x07e0U) |
+                                     ((rgb >> 3U) & 0x001fU));
+      };
+      const uint16_t roofColor = rgb565(0xB9B2A8);
+      size_t selectedRecords = 0;
+      size_t selectedPoints = 0;
+      uint64_t selectedPixels = 0;
+      Polygon buildingPolygon;
+      std::vector<Point16, PsramAllocator<Point16>> screenPoints;
+      map_building_renderer::SurfaceStats fallbackSurfaceStats{};
+      for (size_t candidateIndex = 0;
+           candidateIndex < fallbackCandidateCount; ++candidateIndex) {
+        if (shouldCancelMapRenderWork())
+          return false;
+        const auto &candidate = fallbackCandidates[candidateIndex];
+        if (candidate.pointCount > kFallbackPointLimit - selectedPoints ||
+            candidate.projectedPixels >
+                kFallbackPixelLimit - selectedPixels) {
+          continue;
+        }
+        MapBlock *block = nullptr;
+        for (MapBlock *item : memCache.blocks) {
+          if (item != nullptr && item->offset.x == candidate.key.blockX &&
+              item->offset.y == candidate.key.blockY) {
+            block = item;
             break;
           }
+        }
+        if (block == nullptr ||
+            candidate.key.recordIndex >=
+                block->buildingData.buildings.size()) {
+          continue;
+        }
+        const auto &building =
+            block->buildingData.buildings[candidate.key.recordIndex];
+        bool rendered = false;
+        bool drewFootprint = false;
+        try {
+          rendered = map_building_renderer::renderSurfaces(
+              building, block->offset.x, block->offset.y,
+              block->mercatorScale, projection, false,
+              [&](map_building_renderer::Surface kind,
+                  const auto &points) -> bool {
+                if (shouldCancelMapRenderWork())
+                  return false;
+                if (kind != map_building_renderer::Surface::Roof ||
+                    points.size() < 3) {
+                  return true;
+                }
+                screenPoints.clear();
+                screenPoints.reserve(points.size() + 1U);
+                int16_t polygonMinX = 32767;
+                int16_t polygonMinY = 32767;
+                int16_t polygonMaxX = -32768;
+                int16_t polygonMaxY = -32768;
+                for (const auto &point : points) {
+                  const Point16 converted(static_cast<int16_t>(point.x),
+                                          static_cast<int16_t>(point.y));
+                  screenPoints.push_back(converted);
+                  polygonMinX = std::min(polygonMinX, converted.x);
+                  polygonMinY = std::min(polygonMinY, converted.y);
+                  polygonMaxX = std::max(polygonMaxX, converted.x);
+                  polygonMaxY = std::max(polygonMaxY, converted.y);
+                }
+                screenPoints.push_back(screenPoints.front());
+                buildingPolygon.points = screenPoints;
+                buildingPolygon.color = roofColor;
+                buildingPolygon.bbox.min = Point16(polygonMinX, polygonMinY);
+                buildingPolygon.bbox.max = Point16(polygonMaxX, polygonMaxY);
+                // A false result can mean cancellation or a small workspace
+                // allocation failure. Cancellation aborts the job; otherwise
+                // skip this footprint and preserve the rest of the flat city.
+                const bool filled = fillPolygon(buildingPolygon, surface);
+                drewFootprint = drewFootprint || filled;
+                return filled || !shouldCancelMapRenderWork();
+              },
+              &fallbackSurfaceStats, shouldCancelMapRenderWork);
+        } catch (const std::bad_alloc &) {
+          rendered = false;
+        }
+        if (!rendered && shouldCancelMapRenderWork())
+          return false;
+        if (!rendered || !drewFootprint)
+          continue;
+        ++selectedRecords;
+        selectedPoints += candidate.pointCount;
+        selectedPixels += candidate.projectedPixels;
+      }
+      admissionDiagnostics.candidates = fallbackVisible;
+      admissionDiagnostics.selected = selectedRecords;
+      admissionDiagnostics.flat = selectedRecords;
+      admissionDiagnostics.deferred = fallbackVisible - selectedRecords;
+      admissionDiagnostics.selectedPoints = selectedPoints;
+      admissionDiagnostics.selectedPixels = selectedPixels;
+      MAPIO_LOG(
+          "MAPIO: buildings fallback=flat candidates=%u retained=%u "
+          "selected=%u deferred=%u points=%u pixels=%llu\n",
+          (unsigned)fallbackVisible, (unsigned)fallbackCandidateCount,
+          (unsigned)selectedRecords,
+          (unsigned)(fallbackVisible - selectedRecords),
+          (unsigned)selectedPoints,
+          (unsigned long long)selectedPixels);
+    } else {
+    try {
+      const uint32_t projectionStartMs = millis();
+      // Candidate metadata is bounded independently of scene density and kept
+      // in PSRAM. Selection still visits every visible FMB v4 record and
+      // retains the globally nearest set, so cache/block iteration order cannot
+      // change which buildings survive.
+      constexpr size_t kMaximumCandidateMetadata = 384;
+      std::vector<map_building_admission::Candidate,
+                  PsramAllocator<map_building_admission::Candidate>>
+          candidates;
+      candidates.reserve(kMaximumCandidateMetadata);
+      size_t visibleRecords = 0;
+      size_t oversizedRecords = 0;
+
+      for (MapBlock *block : memCache.blocks) {
+        if (shouldCancelMapRenderWork())
+          return false;
+        if (block == nullptr || !block->inView || block->formatVersion < 4)
+          continue;
+        const BBox localViewport = viewPort.bbox - block->offset;
+        for (size_t recordIndex = 0;
+             recordIndex < block->buildingData.buildings.size();
+             ++recordIndex) {
+          if ((recordIndex & 0x1fU) == 0 && shouldCancelMapRenderWork())
+            return false;
           const auto &building = block->buildingData.buildings[recordIndex];
           const bool mayExtrude =
-              extrudeBuildings &&
-              map_building_renderer::usesExtrusion(true, building.flags);
-          // A roof can project into the frame even when its ground footprint is
-          // just outside it. Expand conservatively in world space before
-          // excluding the record from the queue and its geometry budget.
-          const int32_t elevationMargin = mayExtrude
+              extrusionRequested && map_building_renderer::usesExtrusion(
+                                        true, building.flags);
+          const int32_t heightMargin = mayExtrude
               ? static_cast<int32_t>(std::ceil(
                     building.heightDm / 10.0 * block->mercatorScale))
               : 0;
-          const BBox buildingBbox(
-              Point32(building.minX - elevationMargin,
-                      building.minY - elevationMargin),
-              Point32(building.maxX + elevationMargin,
-                      building.maxY + elevationMargin));
-          if (!buildingBbox.intersects(screenBbox))
+          const BBox bounds(
+              Point32(building.minX - heightMargin,
+                      building.minY - heightMargin),
+              Point32(building.maxX + heightMargin,
+                      building.maxY + heightMargin));
+          if (!bounds.intersects(localViewport))
             continue;
+
           size_t pointCount = 0;
-          bool stopBuildingRecord = false;
-          for (const auto &ring : building.rings) {
-            for (size_t pointIndex = 0; pointIndex < ring.points.size();
-                 ++pointIndex) {
-              if ((pointIndex & 0x1FU) == 0 && shouldStopBuildingWork()) {
-                stopBuildingRecord = true;
+          for (const auto &ring : building.rings)
+            pointCount += ring.points.size();
+          if (pointCount < 3 ||
+              pointCount >
+                  map_building_renderer::kMaximumRenderedBuildingPointsPerRecord) {
+            ++oversizedRecords;
+            continue;
+          }
+          // Discovery must stay independent of ring complexity. FMB v4
+          // already carries validated record bounds, so use their projected
+          // screen extent for the global nearest prepass and reserve exact
+          // ring projection for the bounded retained set below.
+          double projectedMinX = std::numeric_limits<double>::infinity();
+          double projectedMinY = std::numeric_limits<double>::infinity();
+          double projectedMaxX = -std::numeric_limits<double>::infinity();
+          double projectedMaxY = -std::numeric_limits<double>::infinity();
+          const std::array<map_transform::WorldPoint, 4> corners{{
+              {static_cast<double>(block->offset.x + building.minX),
+               static_cast<double>(block->offset.y + building.minY)},
+              {static_cast<double>(block->offset.x + building.maxX),
+               static_cast<double>(block->offset.y + building.minY)},
+              {static_cast<double>(block->offset.x + building.maxX),
+               static_cast<double>(block->offset.y + building.maxY)},
+              {static_cast<double>(block->offset.x + building.minX),
+               static_cast<double>(block->offset.y + building.maxY)},
+          }};
+          size_t validCorners = 0;
+          for (const auto &corner : corners) {
+            const auto projected = projection.projectWorld(corner);
+            if (!projected.valid)
+              continue;
+            ++validCorners;
+            projectedMinX = std::min(projectedMinX, projected.x);
+            projectedMinY = std::min(projectedMinY, projected.y);
+            projectedMaxX = std::max(projectedMaxX, projected.x);
+            projectedMaxY = std::max(projectedMaxY, projected.y);
+          }
+          if (validCorners < 2)
+            continue;
+          const double projectedArea =
+              std::max(1.0, std::ceil(
+                                std::max(0.0, projectedMaxX - projectedMinX) *
+                                std::max(0.0, projectedMaxY - projectedMinY)));
+
+          ++visibleRecords;
+          const double centerX = static_cast<double>(block->offset.x) +
+                                 (building.minX + building.maxX) * 0.5;
+          const double centerY = static_cast<double>(block->offset.y) +
+                                 (building.minY + building.maxY) * 0.5;
+          const double dx = centerX - context.presentedWorld.x;
+          const double dy = centerY - context.presentedWorld.y;
+          map_building_admission::Candidate candidate;
+          candidate.key = {dx * dx + dy * dy, block->offset.x,
+                           block->offset.y,
+                           static_cast<uint32_t>(recordIndex)};
+          candidate.pointCount = pointCount;
+          candidate.projectedPixels = static_cast<uint64_t>(
+              std::max(1.0, std::ceil(projectedArea)));
+          candidate.extrusionEligible =
+              mayExtrude &&
+              map_building_renderer::eligibleExtrusionZoom(zoom) &&
+              projectedArea >=
+                  map_building_renderer::kMinimumBuildingExtrusionAreaPixels;
+          map_building_admission::retainNearest(
+              candidates, candidate, kMaximumCandidateMetadata);
+        }
+      }
+      buildingProjectionMs = millis() - projectionStartMs;
+
+      // Exact ring projection is deliberately after nearest retention. At
+      // most kMaximumCandidateMetadata records can reach this phase, no matter
+      // how many building records intersect the loaded blocks.
+      MapBuildingVector<map_projection::GroundPoint> areaGround;
+      MapBuildingVector<map_projection::GroundPoint> areaClipped;
+      size_t usefulCandidateCount = 0;
+      for (size_t candidateIndex = 0; candidateIndex < candidates.size();
+           ++candidateIndex) {
+        if (shouldCancelMapRenderWork())
+          return false;
+        auto candidate = candidates[candidateIndex];
+        MapBlock *candidateBlock = nullptr;
+        for (MapBlock *block : memCache.blocks) {
+          if (block != nullptr && block->offset.x == candidate.key.blockX &&
+              block->offset.y == candidate.key.blockY) {
+            candidateBlock = block;
+            break;
+          }
+        }
+        if (candidateBlock == nullptr ||
+            candidate.key.recordIndex >=
+                candidateBlock->buildingData.buildings.size()) {
+          continue;
+        }
+        const auto &building = candidateBlock->buildingData.buildings[
+            candidate.key.recordIndex];
+        const double projectedArea =
+            map_building_renderer::projectedFootprintAreaPixels(
+                building, candidateBlock->offset.x, candidateBlock->offset.y,
+                projection, areaGround, areaClipped,
+                shouldCancelMapRenderWork);
+        if (shouldCancelMapRenderWork())
+          return false;
+        if (!(projectedArea > 0.0))
+          continue;
+        candidate.projectedPixels = static_cast<uint64_t>(
+            std::max(1.0, std::ceil(projectedArea)));
+        candidate.extrusionEligible =
+            extrusionRequested &&
+            map_building_renderer::usesExtrusion(true, building.flags) &&
+            map_building_renderer::eligibleExtrusionZoom(zoom) &&
+            projectedArea >=
+                map_building_renderer::kMinimumBuildingExtrusionAreaPixels;
+        candidates[usefulCandidateCount++] = candidate;
+      }
+      candidates.resize(usefulCandidateCount);
+      buildingProjectionMs = millis() - projectionStartMs;
+
+      std::sort(candidates.begin(), candidates.end(),
+                [](const auto &left, const auto &right) {
+                  return map_building_admission::nearer(left.key, right.key);
+                });
+      for (size_t index = 0; index < candidates.size(); ++index)
+        candidates[index].sourceIndex = index;
+
+      // These fixed quotas are intentionally conservative for the 8 MiB PSRAM
+      // target. Nearest records keep 3D; farther admitted records degrade to
+      // flat roofs, and records beyond the quota are explicitly deferred.
+      const map_building_admission::Quotas quotas;
+      const auto decisions = map_building_admission::select(
+          candidates, quotas, &admissionDiagnostics);
+      const size_t metadataDeferred =
+          visibleRecords > candidates.size() ? visibleRecords - candidates.size()
+                                             : 0U;
+      metadataDeferredBuildings = static_cast<uint32_t>(metadataDeferred);
+      std::vector<uint8_t> admission(candidates.size(), 0);
+      for (const auto &decision : decisions) {
+        if (decision.sourceIndex >= admission.size())
+          continue;
+        admission[decision.sourceIndex] =
+            decision.admitted ? (decision.extruded ? 2U : 1U) : 0U;
+      }
+
+      std::vector<BuildingItem, PsramAllocator<BuildingItem>> items;
+      items.reserve(admissionDiagnostics.selected);
+      for (size_t candidateIndex = 0; candidateIndex < candidates.size();
+           ++candidateIndex) {
+        if (admission[candidateIndex] == 0)
+          continue;
+        const auto &candidate = candidates[candidateIndex];
+        MapBlock *selectedBlock = nullptr;
+        for (MapBlock *block : memCache.blocks) {
+          if (block != nullptr && block->offset.x == candidate.key.blockX &&
+              block->offset.y == candidate.key.blockY) {
+            selectedBlock = block;
+            break;
+          }
+        }
+        if (selectedBlock == nullptr ||
+            candidate.key.recordIndex >=
+                selectedBlock->buildingData.buildings.size()) {
+          continue;
+        }
+        const auto &building = selectedBlock->buildingData.buildings[
+            candidate.key.recordIndex];
+        const map_transform::WorldPoint center{
+            static_cast<double>(selectedBlock->offset.x) +
+                (building.minX + building.maxX) * 0.5,
+            static_cast<double>(selectedBlock->offset.y) +
+                (building.minY + building.maxY) * 0.5};
+        items.push_back({selectedBlock, &building,
+                         static_cast<uint16_t>(candidate.key.recordIndex),
+                         projection.groundForWorld(center).forward,
+                         admission[candidateIndex] == 2U});
+      }
+      std::sort(items.begin(), items.end(),
+                [](const BuildingItem &left, const BuildingItem &right) {
+                  return map_building_renderer::rendersBefore(
+                      {left.painterDepth, left.block->offset.x,
+                       left.block->offset.y, left.recordIndex},
+                      {right.painterDepth, right.block->offset.x,
+                       right.block->offset.y, right.recordIndex});
+                });
+
+      const auto rgb565 = [](uint32_t rgb) -> uint16_t {
+        return static_cast<uint16_t>(((rgb >> 8U) & 0xf800U) |
+                                     ((rgb >> 5U) & 0x07e0U) |
+                                     ((rgb >> 3U) & 0x001fU));
+      };
+      const uint16_t roofColor = rgb565(0xB9B2A8);
+      const uint16_t wallLight = rgb565(0x958E84);
+      const uint16_t wallMiddle = rgb565(0x827B72);
+      const uint16_t wallDark = rgb565(0x6D665E);
+      constexpr size_t kMaximumCourtyardWorkspacePixels = 180000;
+
+      Polygon buildingPolygon;
+      std::vector<Point16, PsramAllocator<Point16>> screenPoints;
+      std::vector<int32_t, PsramAllocator<int32_t>> scanlineNodes;
+      MapBuildingVector<map_projection::GroundPoint> holeGround;
+      MapBuildingVector<map_projection::GroundPoint> holeClipped;
+      MapBuildingVector<map_building_renderer::ScreenPoint> holeScreen;
+      map_building_renderer::SurfaceStats surfaceStats{};
+      const uint32_t buildingDrawStartMs = millis();
+
+      struct CourtyardSnapshot {
+        map_building_workspace::Region region{};
+        std::vector<uint16_t, PsramAllocator<uint16_t>> pixels;
+        bool ready = false;
+      };
+
+      for (const BuildingItem &item : items) {
+        if (shouldCancelMapRenderWork())
+          return false;
+
+        size_t projectedCourtyardPixels = 0;
+        const double roofHeight = item.extruded
+                                      ? item.building->heightDm / 10.0
+                                      : 0.0;
+        bool courtyardFits = true;
+        for (const auto &ring : item.building->rings) {
+          if (!ring.hole)
+            continue;
+          holeGround.clear();
+          holeGround.reserve(ring.points.size());
+          for (const auto &point : ring.points) {
+            holeGround.push_back(projection.groundForWorld(
+                {static_cast<double>(item.block->offset.x + point.x),
+                 static_cast<double>(item.block->offset.y + point.y)}));
+          }
+          const auto *roof = &holeGround;
+          if (projection.isBirdsEye()) {
+            map_projection::clipPolygonToNearPlane(
+                projection, holeGround, holeClipped);
+            roof = &holeClipped;
+          }
+          holeScreen.clear();
+          for (const auto &ground : *roof) {
+            const auto point = projection.projectElevatedGround(
+                ground, roofHeight, item.block->mercatorScale);
+            if (point.valid) {
+              holeScreen.push_back(
+                  {map_transform::quantizePixel(point.x),
+                   map_transform::quantizePixel(point.y)});
+            }
+          }
+          const auto region = map_building_workspace::clippedRegion(
+              holeScreen, surface.width, surface.height);
+          if (region.valid())
+            projectedCourtyardPixels += region.pixels();
+          if (map_building_workspace::courtyardPolicy(
+                  projectedCourtyardPixels,
+                  kMaximumCourtyardWorkspacePixels,
+                  static_cast<std::size_t>(surface.width) *
+                      static_cast<std::size_t>(surface.height)) ==
+              map_building_workspace::CourtyardPolicy::SolidRoofFallback) {
+            courtyardFits = false;
+            break;
+          }
+        }
+        const bool preserveCourtyards = courtyardFits;
+        if (!preserveCourtyards) {
+          // Keep the admitted building and its walls/roof. Only the underlay
+          // restoration is degraded, producing a deterministic solid roof
+          // instead of making a large stadium or mall disappear entirely.
+          ++courtyardDeferred;
+        }
+
+        std::vector<CourtyardSnapshot, PsramAllocator<CourtyardSnapshot>>
+            courtyardSnapshots;
+        if (preserveCourtyards)
+          courtyardSnapshots.reserve(item.building->rings.size());
+        size_t restoreIndex = 0;
+        const bool rendered = map_building_renderer::renderSurfaces(
+            *item.building, item.block->offset.x, item.block->offset.y,
+            item.block->mercatorScale, projection, item.extruded,
+            [&](map_building_renderer::Surface kind,
+                const auto &points) -> bool {
+              if (shouldCancelMapRenderWork())
+                return false;
+              if (kind ==
+                  map_building_renderer::Surface::CourtyardCapture) {
+                if (!preserveCourtyards)
+                  return true;
+                CourtyardSnapshot snapshot;
+                snapshot.region = map_building_workspace::clippedRegion(
+                    points, surface.width, surface.height);
+                if (snapshot.region.valid()) {
+                  snapshot.ready = map_building_workspace::captureRegion(
+                      surface, snapshot.region, snapshot.pixels,
+                      kMaximumCourtyardWorkspacePixels);
+                  if (!snapshot.ready)
+                    throw std::bad_alloc();
+                  ++courtyardSnapshotCount;
+                  largestCourtyardBytes = std::max(
+                      largestCourtyardBytes,
+                      snapshot.pixels.capacity() * sizeof(uint16_t));
+                }
+                courtyardSnapshots.push_back(std::move(snapshot));
+                return true;
+              }
+              if (kind == map_building_renderer::Surface::Courtyard) {
+                if (!preserveCourtyards)
+                  return true;
+                if (restoreIndex >= courtyardSnapshots.size())
+                  return false;
+                const auto &snapshot = courtyardSnapshots[restoreIndex++];
+                if (!snapshot.ready)
+                  return true;
+                return map_building_workspace::restorePolygon(
+                    points, surface, snapshot.region, snapshot.pixels,
+                    scanlineNodes, shouldCancelMapRenderWork);
+              }
+
+              uint16_t color = roofColor;
+              switch (kind) {
+              case map_building_renderer::Surface::WallLight:
+                color = wallLight;
+                break;
+              case map_building_renderer::Surface::WallMiddle:
+                color = wallMiddle;
+                break;
+              case map_building_renderer::Surface::WallDark:
+                color = wallDark;
+                break;
+              case map_building_renderer::Surface::Roof:
+              case map_building_renderer::Surface::CourtyardCapture:
+              case map_building_renderer::Surface::Courtyard:
                 break;
               }
-              ++pointCount;
-              if (mayExtrude && pointIndex < ring.walls.size() &&
-                  ring.walls[pointIndex] != 0) {
-                ++visibleWallCandidateCount;
+              if (points.size() < 3)
+                return true;
+              screenPoints.clear();
+              screenPoints.reserve(points.size() + 1U);
+              int16_t minX = 32767;
+              int16_t minY = 32767;
+              int16_t maxX = -32768;
+              int16_t maxY = -32768;
+              for (const auto &point : points) {
+                const Point16 converted(
+                    static_cast<int16_t>(point.x),
+                    static_cast<int16_t>(point.y));
+                screenPoints.push_back(converted);
+                minX = std::min(minX, converted.x);
+                minY = std::min(minY, converted.y);
+                maxX = std::max(maxX, converted.x);
+                maxY = std::max(maxY, converted.y);
               }
-            }
-            if (stopBuildingRecord)
-              break;
-          }
-          if (stopBuildingRecord) {
-            stopBuildingPrepass = true;
-            break;
-          }
-          ++visibleBuildingCount;
-          buildingPointCount += pointCount;
-          if (pointCount > map_building_renderer::
-                               kMaximumRenderedBuildingPointsPerRecord) {
-            ++oversizedBuildingCount;
-            continue;
-          }
-          ++boundedBuildingCandidateCount;
-          const map_transform::WorldPoint center{
-              static_cast<double>(block->offset.x) +
-                  (static_cast<double>(building.minX) + building.maxX) / 2.0,
-              static_cast<double>(block->offset.y) +
-                  (static_cast<double>(building.minY) + building.maxY) / 2.0};
-          const auto centerGround = projection.groundForWorld(center);
-          const bool extrusionZoomEligible =
-              map_building_renderer::eligibleExtrusionZoom(zoom);
-          double projectedArea = 0.0;
-          if (mayExtrude && extrusionZoomEligible) {
-            projectedArea =
-                map_building_renderer::projectedFootprintAreaPixels(
-                    building, block->offset.x, block->offset.y, projection,
-                    buildingEligibilityGround, buildingEligibilityClipped,
-                    shouldStopBuildingWork);
-          }
-          if (buildingScreenInterrupted || buildingDeadlineExceeded) {
-            stopBuildingPrepass = true;
-            break;
-          }
-          BuildingRenderItem candidate{
-              block,
-              &building,
-              centerGround.forward,
-              static_cast<uint16_t>(recordIndex),
-              pointCount,
-              false,
-              false,
-              mayExtrude && extrusionZoomEligible &&
-                  projectedArea >= map_building_renderer::
-                                       kMinimumBuildingExtrusionAreaPixels};
-          map_building_renderer::retainNearestCandidate(
-              buildingQueue, candidate,
-              map_building_renderer::kMaximumRenderedBuildingRecords,
-              buildingRendersBefore);
-        }
-        if (stopBuildingPrepass)
-          break;
+              screenPoints.push_back(screenPoints.front());
+              buildingPolygon.points = screenPoints;
+              buildingPolygon.color = color;
+              buildingPolygon.bbox.min = Point16(minX, minY);
+              buildingPolygon.bbox.max = Point16(maxX, maxY);
+              const bool filled = fillPolygon(buildingPolygon, surface);
+              if (!filled && !shouldCancelMapRenderWork()) {
+                // fillPolygon uses a bounded PSRAM node workspace and reports
+                // allocation failure as false. Promote that result into the
+                // surrounding allocation-safe building pass so it can render
+                // the deterministic flat fallback instead of retrying the
+                // same failing 3D job forever.
+                throw std::bad_alloc();
+              }
+              return filled;
+            },
+            &surfaceStats, shouldCancelMapRenderWork);
+        if (!rendered)
+          return false;
+        ++renderedBuildings;
       }
-      buildingProjectionMs = millis() - buildingPhaseStartMs;
-      buildingPassPhase = BuildingPassPhase::Sort;
-      buildingPhaseStartMs = millis();
-      renderRecordLimitOverflow =
-          boundedBuildingCandidateCount - buildingQueue.size();
-      if (!stopBuildingPrepass) {
-        std::sort(buildingQueue.begin(), buildingQueue.end(),
-                  buildingRendersBefore);
-        buildingSortMs = millis() - buildingPhaseStartMs;
-        if (!shouldStopBuildingWork()) {
-          renderSelection = map_building_renderer::selectNearestForRendering(
-              buildingQueue.rbegin(), buildingQueue.rend(),
-              shouldStopBuildingWork);
-          if (!buildingDeadlineExceeded && !buildingScreenInterrupted &&
-              extrudeBuildings) {
-            // The painter queue is far-to-near. Reserve in reverse so the
-            // geometry nearest the rider keeps its walls when a dense city
-            // exceeds the bounded extrusion workspace; overflow roofs remain
-            // visible and flat.
-            buildingSelection =
-                map_building_renderer::selectNearestForExtrusion(
-                    buildingQueue.rbegin(), buildingQueue.rend(),
-                    shouldStopBuildingWork);
-            buildingBudgetFallback = buildingSelection.usedFallback();
-            extrusionRecordOverflowTotal +=
-                buildingSelection.recordLimitOverflow;
-            extrusionPointOverflowTotal +=
-                buildingSelection.pointLimitOverflow;
-          }
-        }
-      }
-      if (buildingDeadlineExceeded) {
-        buildingPrepassDeadlineExceeded = true;
-        return abortStoppedBuildingWork(buildingQueue.size());
-      }
-      if (buildingScreenInterrupted)
-        return false;
-      renderRecordOverflowTotal += renderRecordLimitOverflow;
-      renderPointOverflowTotal += renderSelection.pointLimitOverflow;
-      renderOversizedOverflowTotal += oversizedBuildingCount;
+      buildingDrawMs = millis() - buildingDrawStartMs;
+
+      MAPIO_LOG(
+          "MAPIO: buildings candidates=%u retained=%u selected=%u "
+          "extruded=%u flat=%u deferred=%u visible=%u oversized=%u "
+          "rendered=%u courtyardDeferred=%u projectionMs=%lu drawMs=%lu "
+          "courtyardSnapshots=%u courtyardMaxBytes=%u "
+          "freeInternalHeap=%u largestInternalHeap=%u "
+          "psramFree=%u psramLargest=%u wallFaces=%u suppressedWalls=%u\n",
+          (unsigned)admissionDiagnostics.candidates,
+          (unsigned)candidates.size(),
+          (unsigned)admissionDiagnostics.selected,
+          (unsigned)admissionDiagnostics.extruded,
+          (unsigned)admissionDiagnostics.flat,
+          (unsigned)(admissionDiagnostics.deferred + metadataDeferred),
+          (unsigned)visibleRecords,
+          (unsigned)oversizedRecords, (unsigned)renderedBuildings,
+          (unsigned)courtyardDeferred, (unsigned long)buildingProjectionMs,
+          (unsigned long)buildingDrawMs,
+          (unsigned)courtyardSnapshotCount,
+          (unsigned)largestCourtyardBytes,
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                            MALLOC_CAP_8BIT),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                     MALLOC_CAP_8BIT),
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+          (unsigned)surfaceStats.generatedWallFaces,
+          (unsigned)surfaceStats.suppressedWallFaces);
+    } catch (const std::bad_alloc &) {
+      buildingAllocationFailed = true;
+      buildingFailureInternalHeapFree =
+          heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      buildingFailureInternalHeapLargest = heap_caps_get_largest_free_block(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      buildingFailurePsramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+      buildingFailurePsramLargest =
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     }
-
-    buildingPassPhase = BuildingPassPhase::Draw;
-    buildingPhaseStartMs = millis();
-    const uint16_t roofColor = lv_color_to_u16(lv_color_hex(0xB9B2A8));
-    const uint16_t wallLight = lv_color_to_u16(lv_color_hex(0x958E84));
-    const uint16_t wallMiddle = lv_color_to_u16(lv_color_hex(0x827B72));
-    const uint16_t wallDark = lv_color_to_u16(lv_color_hex(0x6D665E));
-    const auto fillScreenPolygon = [&](const auto &points,
-                                       uint16_t color) -> bool {
-      if (points.size() < 3)
-        return true;
-      buildingPolygon.points.clear();
-      buildingPolygon.color = color;
-      int16_t minX = 32767, minY = 32767, maxX = -32768, maxY = -32768;
-      for (const Point16 &point : points) {
-        buildingPolygon.points.push_back(point);
-        minX = std::min(minX, point.x);
-        minY = std::min(minY, point.y);
-        maxX = std::max(maxX, point.x);
-        maxY = std::max(maxY, point.y);
-      }
-      buildingPolygon.points.push_back(points.front());
-      buildingPolygon.bbox.min = Point16(minX, minY);
-      buildingPolygon.bbox.max = Point16(maxX, maxY);
-      const bool completed = Maps::fillPolygon(
-          buildingPolygon, canvas, buildingPassStartMs,
-          map_building_renderer::kMaximumBuildingRenderTimeMs);
-      if (!completed)
-        shouldStopBuildingWork();
-      return completed;
-    };
-    const auto countRenderTimeOverflowFrom = [&](size_t itemIndex) {
-      size_t overflow = 0;
-      for (size_t remaining = itemIndex; remaining < buildingQueue.size();
-           ++remaining) {
-        if (buildingQueue[remaining].render)
-          ++overflow;
-      }
-      return overflow;
-    };
-    for (size_t itemIndex = 0;
-         !buildingDeadlineExceeded && itemIndex < buildingQueue.size();
-         ++itemIndex) {
-      const auto &item = buildingQueue[itemIndex];
-      if (!item.render)
-        continue;
-      if (shouldStopBuildingWork()) {
-        return abortStoppedBuildingWork(
-            countRenderTimeOverflowFrom(itemIndex));
-      }
-      bool courtyardUnderlayReady = false;
-      bool courtyardUnderlayUnavailable = false;
-      const bool surfacesRendered = map_building_renderer::renderSurfaces(
-          *item.building, item.block->offset.x, item.block->offset.y,
-          item.block->mercatorScale, projection, item.extrude,
-          [&](map_building_renderer::Surface surface,
-              const auto &points) -> bool {
-            buildingSurfacePoints.clear();
-            for (size_t pointIndex = 0; pointIndex < points.size();
-                 ++pointIndex) {
-              if ((pointIndex & 0x1FU) == 0 && shouldStopBuildingWork())
-                return false;
-              const auto &point = points[pointIndex];
-              buildingSurfacePoints.push_back(Point16(point.x, point.y));
-            }
-
-            if (surface ==
-                map_building_renderer::Surface::CourtyardCapture) {
-              if (buildingSurfacePoints.size() < 3 ||
-                  courtyardUnderlayUnavailable) {
-                return true;
-              }
-              try {
-                if (courtyardScanlineNodes.size() <
-                    buildingSurfacePoints.size()) {
-                  courtyardScanlineNodes.resize(buildingSurfacePoints.size());
-                }
-              } catch (const std::bad_alloc &) {
-                courtyardUnderlayUnavailable = true;
-                return true;
-              }
-              if (courtyardUnderlayReady)
-                return true;
-              lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
-              if (drawBuffer == nullptr) {
-                courtyardUnderlayUnavailable = true;
-                return true;
-              }
-              const size_t stridePixels = drawBuffer->header.stride / 2U;
-              const size_t pixelCount =
-                  stridePixels * drawBuffer->header.h;
-              try {
-                courtyardUnderlay.resize(pixelCount);
-              } catch (const std::bad_alloc &) {
-                courtyardUnderlayUnavailable = true;
-                return true;
-              }
-              std::memcpy(courtyardUnderlay.data(), drawBuffer->data,
-                          pixelCount * sizeof(uint16_t));
-              largestCourtyardUnderlayBytes = std::max(
-                  largestCourtyardUnderlayBytes,
-                  courtyardUnderlay.capacity() * sizeof(uint16_t));
-              ++courtyardSnapshotCount;
-              if (shouldStopBuildingWork())
-                return false;
-              courtyardUnderlayReady = true;
-              return true;
-            }
-            if (courtyardUnderlayUnavailable &&
-                (surface == map_building_renderer::Surface::Roof ||
-                 surface == map_building_renderer::Surface::Courtyard)) {
-              // Preserve the real underlay instead of painting a false solid
-              // roof if the bounded snapshot cannot be allocated.
-              return true;
-            }
-            if (surface == map_building_renderer::Surface::Courtyard) {
-              if (!courtyardUnderlayReady ||
-                  buildingSurfacePoints.size() < 3) {
-                return true;
-              }
-              lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
-              if (drawBuffer == nullptr)
-                return false;
-              return map_building_renderer::restoreCourtyardUnderlay(
-                  buildingSurfacePoints,
-                  reinterpret_cast<uint16_t *>(drawBuffer->data),
-                  drawBuffer->header.w, drawBuffer->header.h,
-                  drawBuffer->header.stride / 2U,
-                  courtyardUnderlay.data(), courtyardUnderlay.size(),
-                  courtyardScanlineNodes,
-                  shouldStopBuildingWork);
-            }
-
-            uint16_t color = roofColor;
-            switch (surface) {
-            case map_building_renderer::Surface::WallLight:
-              color = wallLight;
-              break;
-            case map_building_renderer::Surface::WallMiddle:
-              color = wallMiddle;
-              break;
-            case map_building_renderer::Surface::WallDark:
-              color = wallDark;
-              break;
-            case map_building_renderer::Surface::CourtyardCapture:
-            case map_building_renderer::Surface::Courtyard:
-              break;
-            case map_building_renderer::Surface::Roof:
-              break;
-            }
-            return fillScreenPolygon(buildingSurfacePoints, color);
-          },
-          &buildingSurfaceStats, shouldStopBuildingWork);
-      if (!surfacesRendered) {
-        shouldStopBuildingWork();
-        if (buildingDeadlineExceeded) {
-          return abortStoppedBuildingWork(
-              countRenderTimeOverflowFrom(itemIndex));
-        }
-        return false;
-      }
-      ++renderedBuildings;
-      if (item.extrude)
-        ++extrudedBuildings;
     }
-    const uint64_t generatedWallFaces =
-        buildingSurfaceStats.generatedWallFaces;
-    const uint64_t suppressedWallFaces =
-        visibleWallCandidateCount > generatedWallFaces
-            ? visibleWallCandidateCount - generatedWallFaces
-            : 0;
+  }
 
-    buildingDrawMs = millis() - buildingPhaseStartMs;
-    buildingPassPhase = BuildingPassPhase::Complete;
-    MAPIO_LOG("MAPIO: buildings parsedRecords=%u parsedRings=%u "
-              "parsedPoints=%u heightExplicit=%u heightLevels=%u "
-              "heightInherited=%u heightLocalMedian=%u heightClassDefault=%u "
-              "suppressed=%u visibleRecords=%u visiblePoints=%llu "
-              "queuedRecords=%u rendered=%u extruded=%u flatOverflow=%u "
-              "renderRecordOverflow=%u renderPointOverflow=%u "
-              "renderOversizedOverflow=%u renderTimeOverflow=%u "
-              "extrusionRecordOverflow=%u extrusionPointOverflow=%u "
-              "wallCandidates=%llu generatedWallFaces=%llu "
-              "suppressedWallFaces=%llu "
-              "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
+  if (diagnostics != nullptr) {
+    diagnostics->selectedBuildings =
+        static_cast<uint32_t>(admissionDiagnostics.selected);
+    diagnostics->extrudedBuildings =
+        static_cast<uint32_t>(admissionDiagnostics.extruded);
+    diagnostics->flatBuildings =
+        static_cast<uint32_t>(admissionDiagnostics.flat);
+    diagnostics->deferredBuildings = static_cast<uint32_t>(
+        admissionDiagnostics.deferred + metadataDeferredBuildings +
+        courtyardDeferred);
+    diagnostics->allocationFallback = buildingAllocationFailed;
+  }
+
+  if (buildingAllocationFailed) {
+    buildingFailureRetryCooldown.recordFailure(
+        millis(), buildingContextSignature, buildingRenderRegion);
+    MAPIO_LOG("MAPIO: buildings failure=allocation fallback=bounded-flat "
               "courtyardSnapshots=%u courtyardMaxBytes=%u "
               "freeInternalHeap=%u largestInternalHeap=%u "
-              "deadlineExceeded=%u prepassDeadlineExceeded=%u "
-              "psramUsed=%u psramFree=%u psramLargest=%u "
-              "budgetFallback=%u renderRecordOverflowTotal=%llu "
-              "renderPointOverflowTotal=%llu "
-              "renderOversizedOverflowTotal=%llu renderTimeOverflowTotal=%llu "
-              "extrusionRecordOverflowTotal=%llu "
-              "extrusionPointOverflowTotal=%llu decodedBytes=%u\n",
-              (unsigned)loadedBuildingStats.records,
-              (unsigned)loadedBuildingStats.rings,
-              (unsigned)loadedBuildingStats.points,
-              (unsigned)loadedBuildingStats.provenance[0],
-              (unsigned)loadedBuildingStats.provenance[1],
-              (unsigned)loadedBuildingStats.provenance[2],
-              (unsigned)loadedBuildingStats.provenance[3],
-              (unsigned)loadedBuildingStats.provenance[4],
-              buildingsSuppressed ? 1U : 0U, (unsigned)visibleBuildingCount,
-              (unsigned long long)buildingPointCount,
-              (unsigned)buildingQueue.size(),
-              (unsigned)renderedBuildings,
-              (unsigned)extrudedBuildings,
-              (unsigned)buildingSelection.flatOverflow(),
-              (unsigned)renderRecordLimitOverflow,
-              (unsigned)renderSelection.pointLimitOverflow,
-              (unsigned)oversizedBuildingCount,
-              (unsigned)renderTimeOverflow,
-              (unsigned)buildingSelection.recordLimitOverflow,
-              (unsigned)buildingSelection.pointLimitOverflow,
-              (unsigned long long)visibleWallCandidateCount,
-              (unsigned long long)generatedWallFaces,
-              (unsigned long long)suppressedWallFaces,
-              (unsigned long)buildingProjectionMs,
-              (unsigned long)buildingSortMs,
-              (unsigned long)buildingDrawMs,
+              "buildingFailureInternalHeapFree=%u "
+              "buildingFailureInternalHeapLargest=%u "
+              "psramFree=%u psramLargest=%u\n",
               (unsigned)courtyardSnapshotCount,
-              (unsigned)largestCourtyardUnderlayBytes,
+              (unsigned)largestCourtyardBytes,
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
                                                 MALLOC_CAP_8BIT),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                                          MALLOC_CAP_8BIT),
-              buildingDeadlineExceeded ? 1U : 0U,
-              buildingPrepassDeadlineExceeded ? 1U : 0U,
-              (unsigned)(ESP.getPsramSize() -
-                         heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
-              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
-              buildingBudgetFallback ? 1U : 0U,
-              (unsigned long long)renderRecordOverflowTotal,
-              (unsigned long long)renderPointOverflowTotal,
-              (unsigned long long)renderOversizedOverflowTotal,
-              (unsigned long long)renderTimeOverflowTotal,
-              (unsigned long long)extrusionRecordOverflowTotal,
-              (unsigned long long)extrusionPointOverflowTotal,
-              (unsigned)std::accumulate(
-                  memCache.blocks.begin(), memCache.blocks.end(), size_t{0},
-                  [](size_t total, const MapBlock *block) {
-                    return total + block->buildingData.decodedBytes();
-                  }));
-
-              return true;
-            },
-            [&]() {
-              finishBuildingPhaseTiming();
-              buildingAllocationFailed = true;
-              // The large render workspaces live outside the guarded callable,
-              // so this catch samples them before the fallback releases them.
-              captureBuildingFailureMemory();
-            });
-    if (!buildingPassCompleted) {
-      const char *failureReason = buildingAllocationFailed
-                                      ? "allocation"
-                                      : (buildingDeadlineAborted ? "deadline"
-                                                                 : "interrupt");
-      const bool screenCycleInterrupted =
-          buildingScreenInterrupted || shouldInterruptMapRenderForScreenCycle();
-      if (buildingAllocationFailed || buildingDeadlineAborted) {
-        MAPIO_LOG(
-            "MAPIO: buildings aborted reason=%s fallback=buildings-hidden "
-            "parsedRecords=%u parsedRings=%u parsedPoints=%u "
-            "heightExplicit=%u heightLevels=%u heightInherited=%u "
-            "heightLocalMedian=%u heightClassDefault=%u "
-            "visibleRecords=%u visiblePoints=%llu rendered=%u extruded=%u "
-            "renderTimeOverflow=%u renderTimeOverflowTotal=%llu "
-            "projectionMs=%lu sortMs=%lu buildingDrawMs=%lu "
-            "courtyardSnapshots=%u courtyardMaxBytes=%u "
-            "freeInternalHeap=%u largestInternalHeap=%u "
-            "prepassDeadlineExceeded=%u psramUsed=%u psramFree=%u "
-            "psramLargest=%u psramSamplePostCleanup=%u\n",
-            failureReason, (unsigned)loadedBuildingStats.records,
-            (unsigned)loadedBuildingStats.rings,
-            (unsigned)loadedBuildingStats.points,
-            (unsigned)loadedBuildingStats.provenance[0],
-            (unsigned)loadedBuildingStats.provenance[1],
-            (unsigned)loadedBuildingStats.provenance[2],
-            (unsigned)loadedBuildingStats.provenance[3],
-            (unsigned)loadedBuildingStats.provenance[4],
-            (unsigned)visibleBuildingCount,
-            (unsigned long long)buildingPointCount,
-            (unsigned)renderedBuildings, (unsigned)extrudedBuildings,
-            (unsigned)renderTimeOverflow,
-            (unsigned long long)renderTimeOverflowTotal,
-            (unsigned long)buildingProjectionMs,
-            (unsigned long)buildingSortMs, (unsigned long)buildingDrawMs,
-            (unsigned)courtyardSnapshotCount,
-            (unsigned)largestCourtyardUnderlayBytes,
-            (unsigned)buildingFailureInternalHeapFree,
-            (unsigned)buildingFailureInternalHeapLargest,
-            buildingPrepassDeadlineExceeded ? 1U : 0U,
-            (unsigned)buildingFailurePsramUsed,
-            (unsigned)buildingFailurePsramFree,
-            (unsigned)buildingFailurePsramLargest,
-            buildingFailurePsramSamplePostCleanup ? 1U : 0U);
-        buildingFailureRetryCooldown.recordFailure(
-            millis(), buildingContextSignature, buildingRenderRegion);
-      } else if (screenCycleInterrupted) {
-        captureBuildingFailureMemory();
-        MAPIO_LOG(
-            "MAPIO: buildings aborted reason=interrupt fallback=deferred "
-            "courtyardSnapshots=%u courtyardMaxBytes=%u "
-            "freeInternalHeap=%u largestInternalHeap=%u "
-            "psramUsed=%u psramFree=%u psramLargest=%u\n",
-            (unsigned)courtyardSnapshotCount,
-            (unsigned)largestCourtyardUnderlayBytes,
-            (unsigned)buildingFailureInternalHeapFree,
-            (unsigned)buildingFailureInternalHeapLargest,
-            (unsigned)buildingFailurePsramUsed,
-            (unsigned)buildingFailurePsramFree,
-            (unsigned)buildingFailurePsramLargest);
-      }
-      if (buildingAllocationFailed || buildingDeadlineAborted ||
-          screenCycleInterrupted) {
-        releaseBuildingFailureWorkspace();
-        if (map_building_renderer::shouldRetryWithoutBuildings(
-                buildingsSuppressed, buildingAllocationFailed,
-                buildingDeadlineAborted, screenCycleInterrupted)) {
-          return Maps::readVectorMap(viewPort, memCache, canvas, zoom, rotation,
-                                     projection, drawLabels, true);
-        }
-      }
-      return false;
+              (unsigned)buildingFailureInternalHeapFree,
+              (unsigned)buildingFailureInternalHeapLargest,
+              (unsigned)buildingFailurePsramFree,
+              (unsigned)buildingFailurePsramLargest);
+    // reason=interrupt fallback=deferred: semantic invalidation keeps the
+    // last complete frame visible and schedules the newest request.
+    if (!suppressBuildings && !shouldCancelMapRenderWork()) {
+      RasterDiagnostics fallbackDiagnostics{};
+      const bool fallbackRendered = readVectorMap(
+          viewPort, memCache, surface, zoom, rotation, projection, context,
+          drawLabels, true, &fallbackDiagnostics);
+      fallbackDiagnostics.allocationFallback = true;
+      if (diagnostics != nullptr)
+        *diagnostics = fallbackDiagnostics;
+      return fallbackRendered;
     }
-
-    // Failure diagnostics need the live allocations, but labels do not. Drop
-    // the building workspace at the phase boundary so dense geometry and the
-    // label candidate/layout reserves never overlap on a successful frame.
-    releaseBuildingFailureWorkspace();
-    if (drawLabels &&
-        !drawStreetLabels(viewPort, memCache, canvas, zoom, rotation, style))
-      return false;
-    ESP_LOGI(TAG, "Total %i ms", millis() - totalTime);
-
-    // TODO: paint only in NAV mode
-    // map.fillTriangle(...)
-    ESP_LOGI(TAG, "Draw done! %i", millis());
-
-    // NOTE: Block caching is now handled by getMapBlocks() eviction logic.
-    // Previously, this code deleted the first block after every render,
-    // which defeated caching and forced SD card reads every frame.
-
-    Maps::totalBounds.lat_min = Maps::mercatorY2lat(viewPort.bbox.min.y);
-    Maps::totalBounds.lat_max = Maps::mercatorY2lat(viewPort.bbox.max.y);
-    Maps::totalBounds.lon_min = Maps::mercatorX2lon(viewPort.bbox.min.x);
-    Maps::totalBounds.lon_max = Maps::mercatorX2lon(viewPort.bbox.max.x);
-
-    ESP_LOGI(TAG, "Updated rendered map bounds");
-
-    if (Maps::isCoordInBounds(Maps::destLat, Maps::destLon, Maps::totalBounds))
-      Maps::coords2map(Maps::destLat, Maps::destLon, Maps::totalBounds,
-                       &(Maps::wptPosX), &(Maps::wptPosY));
-    else {
-      Maps::wptPosX = -1;
-      Maps::wptPosY = -1;
-    }
-
-    lv_layer_t track_layer;
-    lv_canvas_init_layer(canvas, &track_layer);
-    lv_draw_line_dsc_t track_dsc;
-    lv_draw_line_dsc_init(&track_dsc);
-    track_dsc.width = 2;
-    track_dsc.color = lv_color_hex(
-        TFT_BLUE); // Assuming TFT_BLUE is defined, else use LVGL color
-    track_dsc.opa = LV_OPA_COVER;
-
-    for (size_t i = 1; i < trackData.size(); ++i) {
-      if (trackData[i - 1].lon > Maps::totalBounds.lon_min &&
-          trackData[i - 1].lon < Maps::totalBounds.lon_max &&
-          trackData[i - 1].lat > Maps::totalBounds.lat_min &&
-          trackData[i - 1].lat < Maps::totalBounds.lat_max &&
-          trackData[i].lon > Maps::totalBounds.lon_min &&
-          trackData[i].lon < Maps::totalBounds.lon_max &&
-          trackData[i].lat > Maps::totalBounds.lat_min &&
-          trackData[i].lat < Maps::totalBounds.lat_max) {
-        uint16_t x, y, x2, y2;
-      }
-    }
-    MAPIO_LOG("MAPIO: canvas-draw ok=1 mode=%s clipped=%lu rejected=%lu "
-              "blocks=%u fillMs=%lu totalMs=%lu\n",
-              projection.isBirdsEye() ? "birds-eye" : "flat",
-              (unsigned long)projectionClippedCount,
-              (unsigned long)projectionRejectedCount,
-              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
-              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
-    logMapMemorySnapshot("canvas-draw");
-  } else {
-    Maps::isMapFound = false;
-    lv_canvas_fill_bg(canvas, lv_color_hex(TFT_BLACK), LV_OPA_COVER);
-    MAPIO_LOG("MAPIO: canvas-draw ok=0 blocks=%u fillMs=%lu totalMs=%lu\n",
-              (unsigned)memCache.blocks.size(), (unsigned long)fillMs,
-              (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
-    logMapMemorySnapshot("canvas-draw-empty");
-    //    Maps::showNoMap(map);
-    //    ESP_LOGE(TAG, "Map doesn't exist");
+    return false;
   }
+
+  if (drawLabels) {
+    map_surface::LabelSurface labelSurface;
+    labelSurface.color = surface;
+    if (!drawStreetLabels(viewPort, memCache, labelSurface, zoom, rotation,
+                          context)) {
+      return false;
+    }
+  }
+
+  MAPIO_LOG("MAPIO: raw-map ok=1 mode=%s clipped=%lu rejected=%lu "
+            "blocks=%u totalMs=%lu\n",
+            projection.isBirdsEye() ? "birds-eye" : "flat",
+            (unsigned long)projectionClippedCount,
+            (unsigned long)projectionRejectedCount,
+            (unsigned)memCache.blocks.size(),
+            (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
   return true;
+}
+
+Maps::RenderContext Maps::captureRenderContext(uint32_t nowMs) {
+  RenderContext context;
+  context.style = currentMapStyleSettings();
+  context.measuredGpsWorld = {lon2x(gps.gpsData.longitude),
+                              lat2y(gps.gpsData.latitude)};
+  if (nowMs != 0)
+    updatePresentedPose(nowMs);
+  context.presentedWorld = hasPresentedPose
+                               ? map_transform::WorldPoint{
+                                     presentedPose.position.x,
+                                     presentedPose.position.y}
+                               : context.measuredGpsWorld;
+  context.guidanceScreenActive = isMapGuidanceScreenActive();
+  context.navigationSessionActive =
+      routeOverlay.hasRoute() || hasCurrentNavigationData();
+  context.followPosition = followGps || isMapGuidanceScreenActive();
+  context.showCurrentPosition = isCurrentPositionVisible(mapRenderSettings);
+  context.buildings3DEnabled =
+      mapRenderSettings.mapNavigation3DBuildingsEnabled;
+  context.markerScale = currentMarkerScale();
+  context.birdsEyePerspective =
+      mapRenderSettings.mapNavigationBirdsEyePerspective;
+  return context;
+}
+
+bool Maps::readVectorMap(ViewPort &viewPort, MemCache &memCache,
+                         lv_obj_t *canvas, uint8_t zoom, double rotation,
+                         const map_projection::Projection &projection,
+                         bool drawLabels, bool suppressBuildings) {
+  RenderContext context = captureRenderContext();
+  return readVectorMap(viewPort, memCache, rgb565SurfaceForCanvas(canvas), zoom,
+                       rotation, projection, context, drawLabels,
+                       suppressBuildings);
 }
 
 void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
@@ -3399,6 +3515,1159 @@ void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
  * @param lat
  * @param lon
  */
+namespace {
+
+uint64_t fnvMix64(uint64_t hash, uint64_t value) {
+  hash ^= value;
+  return hash * 1099511628211ULL;
+}
+
+uint64_t doubleBits(double value) {
+  uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value), "unexpected double size");
+  memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+int16_t mapAngleTenths(double radians) {
+  constexpr double kRadiansToTenths = 1800.0 / 3.14159265358979323846;
+  double tenths = radians * kRadiansToTenths;
+  while (tenths > 1800.0)
+    tenths -= 3600.0;
+  while (tenths < -1800.0)
+    tenths += 3600.0;
+  return static_cast<int16_t>(std::round(tenths));
+}
+
+} // namespace
+
+uint64_t Maps::styleSignature(const ScreenMapRenderSettings &style) const {
+  uint64_t hash = 1469598103934665603ULL;
+  hash = fnvMix64(hash, style.minPolygonSize);
+  hash = fnvMix64(hash, style.detailLevel);
+  hash = fnvMix64(hash, style.routeLineWidth);
+  hash = fnvMix64(hash, style.streetLineWidth);
+  hash = fnvMix64(hash, style.positionMarkerScale);
+  hash = fnvMix64(hash, style.zoomLevel);
+  hash = fnvMix64(hash, style.visibilityMask);
+  hash = fnvMix64(hash, style.labelDensity);
+  hash = fnvMix64(hash, style.labelLanguageMode);
+  hash = fnvMix64(hash, style.labelTextSize);
+  hash = fnvMix64(hash, style.labelOrientation);
+  hash = fnvMix64(hash, mapRenderSettings.navigationOverlayVisibilityMask);
+  hash = fnvMix64(hash,
+                  mapRenderSettings.mapNavigation3DBuildingsEnabled ? 1U : 0U);
+  hash = fnvMix64(hash,
+                  mapRenderSettings.mapNavigationBirdsEyeEnabled ? 1U : 0U);
+  hash = fnvMix64(hash,
+                  mapRenderSettings.mapNavigationBirdsEyePerspective);
+  return hash;
+}
+
+uint64_t Maps::navigationSignature() const {
+  // Only state that changes the base-frame contract belongs here. Maneuver
+  // text/distance remains a lightweight LVGL overlay and must not cancel an
+  // expensive base render every time its packet advances.
+  uint64_t hash = 1469598103934665603ULL;
+  const bool guidanceSession =
+      routeOverlay.hasRoute() || hasCurrentNavigationData();
+  hash = fnvMix64(hash, guidanceSession ? 1U : 0U);
+  hash = fnvMix64(hash, isMapGuidanceScreenActive() ? 1U : 0U);
+  hash = fnvMix64(hash, static_cast<uint8_t>(rotationMode));
+  return hash;
+}
+
+uint64_t Maps::projectionSignature(uint8_t requestedZoom,
+                                   uint16_t viewportWidth,
+                                   uint16_t viewportHeight, bool birdsEye,
+                                   uint8_t perspective) const {
+  uint64_t hash = 1469598103934665603ULL;
+  hash = fnvMix64(hash, requestedZoom);
+  hash = fnvMix64(hash, viewportWidth);
+  hash = fnvMix64(hash, viewportHeight);
+  hash = fnvMix64(hash, birdsEye ? 1U : 0U);
+  hash = fnvMix64(hash, perspective);
+  hash = fnvMix64(hash, MAP_RENDER_OVERSCAN_PIXELS);
+  return hash;
+}
+
+void Maps::invalidateRenderSemantics(uint32_t nowMs) {
+  bool semanticChanged = false;
+  const ScreenMapRenderSettings &style = currentMapStyleSettings();
+  const uint64_t currentStyle = styleSignature(style);
+  if (lastStyleSignature == 0) {
+    lastStyleSignature = currentStyle;
+  } else if (lastStyleSignature != currentStyle) {
+    lastStyleSignature = currentStyle;
+    ++styleEpoch;
+    isPosMoved = true;
+    redrawMap = true;
+    semanticChanged = true;
+  }
+
+  const uint64_t currentNavigation = navigationSignature();
+  if (lastNavigationSignature == 0) {
+    lastNavigationSignature = currentNavigation;
+  } else if (lastNavigationSignature != currentNavigation) {
+    lastNavigationSignature = currentNavigation;
+    ++navigationEpoch;
+    isPosMoved = true;
+    redrawMap = true;
+    semanticChanged = true;
+  }
+
+  // Heading memory belongs to an explicit presentation session. Ordinary
+  // sliding-window replacements are deliberately excluded: route geometry is
+  // live foreground state, and resetting prediction on every packet makes the
+  // rider jump back to the last raw GPS coordinate. A newly received route
+  // bearing still replaces remembered heading through resolve().
+  uint64_t headingSession = 1469598103934665603ULL;
+  const bool mapVisible = isMapScreenActive() || isMapGuidanceScreenActive();
+  const bool routeActive = routeOverlay.hasRoute();
+  const bool maneuverActive = hasCurrentNavigationData();
+  headingSession = fnvMix64(headingSession, mapVisible ? 1U : 0U);
+  headingSession = fnvMix64(headingSession,
+                            isMapGuidanceScreenActive() ? 1U : 0U);
+  headingSession = fnvMix64(
+      headingSession, (routeActive || maneuverActive) ? 1U : 0U);
+  headingSession = fnvMix64(headingSession,
+                            static_cast<uint8_t>(rotationMode));
+  if (lastHeadingSessionSignature == 0) {
+    lastHeadingSessionSignature = headingSession;
+  } else if (lastHeadingSessionSignature != headingSession) {
+    lastHeadingSessionSignature = headingSession;
+    ++headingSessionEpoch;
+    headingResolver.setNavigationSession(false, headingSessionEpoch);
+    posePresenter.resetHeading(nowMs);
+    presentedPose.headingDegrees = 0.0;
+    presentedPose.headingValid = false;
+    // Re-run the latest physical fix through the new heading epoch even when
+    // its coordinate, speed, and newly resolved bearing are byte-identical.
+    lastGpsSignature = 0;
+  }
+
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? mapScrFull : mapScrHeight;
+  const bool birdsEye = navigation_content_mode::usesMapGuidanceBirdsEye(
+      isMapGuidanceScreenActive(),
+      mapRenderSettings.mapNavigationBirdsEyeEnabled);
+  const uint64_t currentProjection = projectionSignature(
+      zoom, mapScrWidth, viewportHeight, birdsEye,
+      mapRenderSettings.mapNavigationBirdsEyePerspective);
+  if (lastProjectionSignature == 0) {
+    lastProjectionSignature = currentProjection;
+  } else if (lastProjectionSignature != currentProjection) {
+    lastProjectionSignature = currentProjection;
+    ++projectionEpoch;
+    isPosMoved = true;
+    redrawMap = true;
+    semanticChanged = true;
+  }
+
+  if (semanticChanged)
+    cancelActiveRenderWork();
+}
+
+void Maps::cancelActiveRenderWork() {
+  if (renderStateMutex == nullptr) {
+    gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    return;
+  }
+  if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+    // The cooperative token and LatestWins generation cross one mutex
+    // boundary. A worker can therefore only capture the generation before or
+    // after this cancellation, never the new atomic token with old job state.
+    gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    renderJobs.requestCancellation();
+    xSemaphoreGive(renderStateMutex);
+  }
+}
+
+void Maps::updatePresentedPose(uint32_t nowMs) {
+  const bool routeActive = routeOverlay.hasRoute();
+  const bool maneuverActive = hasCurrentNavigationData();
+  const bool mapVisible = isMapScreenActive() || isMapGuidanceScreenActive();
+  // The session is explicit and screen-scoped. A route window or a maneuver
+  // snapshot is independently sufficient to make guidance course-up valid.
+  const bool sessionActive =
+      mapVisible &&
+      (rotationMode == ROT_COURSE_UP || routeActive || maneuverActive);
+  headingResolver.setNavigationSession(sessionActive, headingSessionEpoch);
+
+  double routeDegrees = 0.0;
+  uint16_t routeHeading = 0;
+  const bool routeValid =
+      routeActive &&
+      routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
+                               routeHeading);
+  if (routeValid)
+    routeDegrees = routeHeading;
+
+  double resolvedHeading = 0.0;
+  const bool measuredValid = gps.gpsData.headingValid &&
+                             gps.gpsData.heading < 360U;
+  const bool headingValid = headingResolver.resolve(
+      measuredValid, gps.gpsData.heading, routeValid, routeDegrees,
+      resolvedHeading, !bleNavServer.supportsExplicitInvalidGpsHeading());
+
+  uint64_t gpsSignature = 1469598103934665603ULL;
+  gpsSignature = fnvMix64(gpsSignature, doubleBits(gps.gpsData.latitude));
+  gpsSignature = fnvMix64(gpsSignature, doubleBits(gps.gpsData.longitude));
+  gpsSignature = fnvMix64(gpsSignature, gps.gpsData.speed);
+  gpsSignature = fnvMix64(gpsSignature, headingValid ? 1U : 0U);
+  gpsSignature = fnvMix64(gpsSignature, doubleBits(resolvedHeading));
+  // An identical coordinate is still a fresh convergence anchor. Preserve the
+  // BLE packet time so dead reckoning cannot run past newly received fixes.
+  gpsSignature = fnvMix64(gpsSignature,
+                          bleNavServer.getDebugStats().lastGpsPacketMs);
+  if (gpsSignature != lastGpsSignature || !posePresenter.hasFix()) {
+    lastGpsSignature = gpsSignature;
+    map_presentation::Fix fix;
+    fix.position = {lon2x(gps.gpsData.longitude),
+                    lat2y(gps.gpsData.latitude)};
+    fix.headingDegrees = resolvedHeading;
+    fix.headingValid = headingValid;
+    fix.speedMetersPerSecond = gps.gpsData.speed / 3.6;
+    const double latitudeRadians =
+        gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
+    fix.worldUnitsPerMeter =
+        1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
+    fix.timestampMs = nowMs;
+    posePresenter.observe(fix, nowMs);
+  }
+  if (posePresenter.hasFix()) {
+    presentedPose = posePresenter.present(nowMs);
+    hasPresentedPose = true;
+  }
+}
+map_projection::Projection
+Maps::makeRequestProjection(const RenderRequest &request) const {
+  map_projection::Config config;
+  config.viewportWidth = request.renderWidth;
+  config.viewportHeight = request.renderHeight;
+  config.worldOrigin = request.center;
+  config.zoom = request.zoom;
+  config.rotationRad = request.rotationRad;
+  config.anchorX = request.overscanPixels +
+                   gui_layout::mapAnchorX(request.viewportWidth);
+  config.anchorY = request.overscanPixels +
+                   (request.birdsEye
+                        ? map_projection::birdsEyeAnchorY(
+                              request.viewportHeight)
+                        : gui_layout::mapAnchorY(request.viewportHeight));
+  config.mode = request.birdsEye ? map_projection::Mode::BirdsEye
+                                 : map_projection::Mode::Flat;
+  config.topEdgeScale = map_projection::birdsEyeTopEdgeScale(
+      map_projection::birdsEyePerspectiveForValue(
+          request.context.birdsEyePerspective));
+  return map_projection::Projection(config);
+}
+
+bool Maps::buildRenderRequest(uint8_t requestedZoom, uint32_t nowMs,
+                              RenderRequest &request) {
+  invalidateRenderSemantics(nowMs);
+  updatePresentedPose(nowMs);
+
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? mapScrFull : mapScrHeight;
+  if (mapScrWidth == 0 || viewportHeight == 0)
+    return false;
+
+  request = {};
+  request.zoom = requestedZoom;
+  request.viewportWidth = mapScrWidth;
+  request.viewportHeight = viewportHeight;
+  request.overscanPixels = MAP_RENDER_OVERSCAN_PIXELS;
+  request.renderWidth = static_cast<uint16_t>(
+      request.viewportWidth + request.overscanPixels * 2U);
+  request.renderHeight = static_cast<uint16_t>(
+      request.viewportHeight + request.overscanPixels * 2U);
+  request.renderStridePixels =
+      lv_draw_buf_width_to_stride(request.renderWidth,
+                                  LV_COLOR_FORMAT_RGB565) /
+      sizeof(uint16_t);
+  request.birdsEye = navigation_content_mode::usesMapGuidanceBirdsEye(
+      isMapGuidanceScreenActive(),
+      mapRenderSettings.mapNavigationBirdsEyeEnabled);
+  request.context = captureRenderContext(nowMs);
+  request.styleSignature = styleSignature(request.context.style);
+  request.navigationSignature = navigationSignature();
+  request.projectionSignature = projectionSignature(
+      request.zoom, request.viewportWidth, request.viewportHeight,
+      request.birdsEye, request.context.birdsEyePerspective);
+
+  const bool followPosition = request.context.followPosition;
+  request.center = followPosition && hasPresentedPose
+                       ? map_transform::WorldPoint{presentedPose.position.x,
+                                                   presentedPose.position.y}
+                       : map_transform::WorldPoint{static_cast<double>(point.x),
+                                                   static_cast<double>(point.y)};
+  request.context.presentedWorld =
+      hasPresentedPose
+          ? map_transform::WorldPoint{presentedPose.position.x,
+                                      presentedPose.position.y}
+          : request.context.measuredGpsWorld;
+
+  request.rotationRad = 0.0;
+  if (rotationMode == ROT_COURSE_UP) {
+    if (hasPresentedPose && presentedPose.headingValid) {
+      request.rotationRad =
+          -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+    } else if (publishedMapFrame &&
+               visibleRenderResult.version.navigationEpoch ==
+                   navigationEpoch) {
+      request.rotationRad = visibleRenderResult.rotationRad;
+    } else if (!request.context.navigationSessionActive) {
+      // Course-up has no semantic direction before guidance starts. Permit an
+      // initial north-up base so the idle Map + Navigation screen can show its
+      // configured bird's-eye/3D scene. Once a route or maneuver is active,
+      // the branch below still refuses to invent north from a missing course.
+      request.rotationRad = 0.0;
+    } else {
+      ESP_LOGW(TAG,
+               "Course-up frame deferred: neither measured course nor route "
+               "bearing is valid");
+      return false;
+    }
+  }
+
+  // Render toward where the rider is expected when this worker pass finishes,
+  // while capping the lead to the proven overscan budget. Presentation still
+  // anchors the live rider at the normal screen point; only the source-frame
+  // coverage is asymmetric in the direction of travel.
+  if (followPosition && hasPresentedPose && presentedPose.headingValid) {
+    const double speedMetersPerSecond = gps.gpsData.speed / 3.6;
+    const double latitudeRadians =
+        gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
+    const double worldUnitsPerMeter =
+        1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
+    const double pixelsPerMeter =
+        worldUnitsPerMeter * map_transform::worldToScreenScale(request.zoom);
+    const uint32_t expectedLatencyMs =
+        std::max<uint32_t>(250U,
+                           std::min<uint32_t>(5000U,
+                                              lastCompletedRenderDurationMs));
+    const double leadPixels = map_presentation::refreshLeadPixels(
+        speedMetersPerSecond, pixelsPerMeter, expectedLatencyMs, 0.0, 0.0,
+        MAP_RENDER_OVERSCAN_PIXELS - MAP_RENDER_SAFETY_PIXELS);
+    if (pixelsPerMeter > 0.0 && leadPixels > 0.0) {
+      const double leadWorld =
+          leadPixels / pixelsPerMeter * worldUnitsPerMeter;
+      const double headingRadians =
+          map_presentation::normalizeDegrees(presentedPose.headingDegrees) *
+          3.14159265358979323846 / 180.0;
+      request.center.x += std::sin(headingRadians) * leadWorld;
+      request.center.y += std::cos(headingRadians) * leadWorld;
+    }
+  }
+
+  request.version.routeRevision = routeOverlay.revision();
+  request.version.navigationEpoch = navigationEpoch;
+  request.version.styleEpoch = styleEpoch;
+  request.version.mapEpoch = mapEpoch;
+  request.version.projectionEpoch = projectionEpoch;
+  return true;
+}
+
+bool Maps::submitRenderRequest(const RenderRequest &immutableRequest) {
+  if (renderStateMutex == nullptr || renderWorkerTaskHandle == nullptr)
+    return false;
+  RenderRequest request = immutableRequest;
+  if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  request.version = renderJobs.submit(request.version);
+  latestRenderRequest = request;
+  latestRenderRequestValid = true;
+  if (renderJobs.state() == map_render_job::State::Ready &&
+      !map_render_job::Version::sameFrame(renderJobs.ready(),
+                                          request.version)) {
+    renderJobs.rejectReadyAsStale();
+    readyRenderResultValid = false;
+  }
+  gMapRenderLatestSequence.store(request.version.sequence,
+                                 std::memory_order_release);
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  xSemaphoreGive(renderStateMutex);
+  if (worker != nullptr)
+    xTaskNotifyGive(worker);
+  MAPIO_LOG("MAPIO: render-submit seq=%lu route=%lu nav=%lu style=%lu "
+            "map=%lu projection=%lu center=(%.1f,%.1f) rotation=%.3f\n",
+            (unsigned long)request.version.sequence,
+            (unsigned long)request.version.routeRevision,
+            (unsigned long)request.version.navigationEpoch,
+            (unsigned long)request.version.styleEpoch,
+            (unsigned long)request.version.mapEpoch,
+            (unsigned long)request.version.projectionEpoch, request.center.x,
+            request.center.y, request.rotationRad);
+  return true;
+}
+
+bool Maps::takeWorkerRequest(RenderRequest &request) {
+  if (renderStateMutex == nullptr)
+    return false;
+  if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  bool available =
+      !pendingVectorMapActivationValid &&
+      !completedVectorMapActivationValid && latestRenderRequestValid &&
+      latestRenderRequest.version.sequence > lastTakenRenderSequence &&
+      renderJobs.beginLatest();
+  if (available) {
+    request = latestRenderRequest;
+    available = request.version == renderJobs.active();
+    if (available) {
+      request.cancellationGeneration =
+          gMapRenderCancellationGeneration.load(std::memory_order_acquire);
+      lastTakenRenderSequence = request.version.sequence;
+    } else {
+      renderJobs.cancelActive();
+    }
+  }
+  xSemaphoreGive(renderStateMutex);
+  return available;
+}
+
+bool Maps::renderRequestStillCurrent(const RenderRequest &request) const {
+  return request.version.navigationEpoch == navigationEpoch &&
+         request.version.styleEpoch == styleEpoch &&
+         request.version.mapEpoch == mapEpoch &&
+         request.version.projectionEpoch == projectionEpoch &&
+         request.styleSignature == styleSignature(currentMapStyleSettings()) &&
+         request.navigationSignature == navigationSignature() &&
+         request.projectionSignature == projectionSignature(
+             request.zoom, request.viewportWidth, request.viewportHeight,
+             navigation_content_mode::usesMapGuidanceBirdsEye(
+                 isMapGuidanceScreenActive(),
+                 mapRenderSettings.mapNavigationBirdsEyeEnabled),
+             mapRenderSettings.mapNavigationBirdsEyePerspective);
+}
+
+bool Maps::renderResultStillCurrent(const RenderResult &result) const {
+  RenderRequest request;
+  request.version = result.version;
+  request.styleSignature = result.styleSignature;
+  request.navigationSignature = result.navigationSignature;
+  request.projectionSignature = result.projectionSignature;
+  request.zoom = result.viewport.zoom;
+  request.viewportWidth = result.viewportWidth;
+  request.viewportHeight = result.viewportHeight;
+  request.birdsEye = result.projection.isBirdsEye();
+  return renderRequestStillCurrent(request);
+}
+
+bool Maps::startRenderWorker() {
+  if (renderWorkerTaskHandle != nullptr) {
+    return !renderWorkerShutdown.load(std::memory_order_acquire);
+  }
+  if (renderStateMutex == nullptr)
+    renderStateMutex = xSemaphoreCreateMutex();
+  if (renderStateMutex == nullptr)
+    return false;
+
+  renderWorkerShutdown.store(false, std::memory_order_release);
+  renderWorkerExited.store(false, std::memory_order_release);
+  renderWorkerRestartAfterExit.store(false, std::memory_order_release);
+  gMapRenderWorkerShutdown.store(false, std::memory_order_release);
+  gMapRenderControlOperation.store(false, std::memory_order_release);
+  gMapRenderLatestSequence.store(0, std::memory_order_release);
+  gMapRenderActiveSequence.store(0, std::memory_order_release);
+  gMapRenderCancellationGeneration.store(0, std::memory_order_release);
+  gMapRenderActiveCancellationGeneration.store(0,
+                                               std::memory_order_release);
+  renderJobs.reset();
+  latestRenderRequestValid = false;
+  lastTakenRenderSequence = 0;
+  readyRenderResultValid = false;
+  renderFailurePending = false;
+  BaseType_t created = xTaskCreatePinnedToCore(
+      renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
+      1, &renderWorkerTaskHandle, 0);
+  if (created != pdPASS) {
+    renderWorkerTaskHandle = nullptr;
+    renderWorkerExited.store(true, std::memory_order_release);
+    ESP_LOGE(TAG, "Could not create map render worker");
+    return false;
+  }
+  return true;
+}
+
+bool Maps::stopRenderWorker() {
+  TaskHandle_t worker = renderWorkerTaskHandle;
+  if (worker == nullptr) {
+    renderWorkerRestartAfterExit.store(false, std::memory_order_release);
+    renderWorkerExited.store(true, std::memory_order_release);
+    return true;
+  }
+
+  renderWorkerShutdown.store(true, std::memory_order_release);
+  gMapRenderWorkerShutdown.store(true, std::memory_order_release);
+  gMapRenderLatestSequence.fetch_add(1, std::memory_order_acq_rel);
+  xTaskNotifyGive(worker);
+
+  // This is an exceptional control-plane path (screen destruction or map-root
+  // mutation), never a normal LVGL tick. Do not free worker-owned surfaces if
+  // a bounded storage operation has not returned yet.
+  const uint32_t started = millis();
+  while (!renderWorkerExited.load(std::memory_order_acquire) &&
+         static_cast<uint32_t>(millis() - started) < 2500U) {
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  if (!renderWorkerExited.load(std::memory_order_acquire)) {
+    // The caller leaves worker-owned state untouched. Once the delayed IO
+    // checkpoint returns, the UI pipeline restarts the old, still-valid map
+    // root instead of silently leaving navigation on a frozen frame.
+    renderWorkerRestartAfterExit.store(true, std::memory_order_release);
+    ESP_LOGE(TAG, "Map render worker did not stop cleanly; state preserved");
+    return false;
+  }
+  renderWorkerRestartAfterExit.store(false, std::memory_order_release);
+  gMapRenderWorkerShutdown.store(false, std::memory_order_release);
+  renderWorkerShutdown.store(false, std::memory_order_release);
+  return true;
+}
+
+bool Maps::recoverRenderWorkerIfNeeded() {
+  if (!renderWorkerRestartAfterExit.load(std::memory_order_acquire))
+    return renderWorkerTaskHandle != nullptr;
+  if (!renderWorkerExited.load(std::memory_order_acquire))
+    return false;
+  if (startRenderWorker())
+    return true;
+  renderWorkerRestartAfterExit.store(true, std::memory_order_release);
+  return false;
+}
+
+void Maps::renderWorkerTaskThunk(void *argument) {
+  auto *maps = static_cast<Maps *>(argument);
+  if (maps != nullptr)
+    maps->renderWorkerLoop();
+  vTaskDelete(nullptr);
+}
+
+void Maps::renderWorkerLoop() {
+  gMapRenderWorkerTaskHandle = xTaskGetCurrentTaskHandle();
+  MAPIO_LOG("MAPIO: render-worker started core=%d\n", xPortGetCoreID());
+  while (!renderWorkerShutdown.load(std::memory_order_acquire)) {
+    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+    if (renderWorkerShutdown.load(std::memory_order_acquire))
+      break;
+
+    if (processPendingVectorMapActivation())
+      continue;
+
+    RenderRequest request;
+    while (takeWorkerRequest(request)) {
+      gMapRenderActiveSequence.store(request.version.sequence,
+                                     std::memory_order_release);
+      gMapRenderActiveCancellationGeneration.store(
+          request.cancellationGeneration,
+          std::memory_order_release);
+      gMapRenderSliceCount.store(0, std::memory_order_relaxed);
+      gMapRenderLongestSliceUs.store(0, std::memory_order_relaxed);
+      gMapRenderLastCheckpointUs = micros();
+      const uint32_t startMs = millis();
+      RenderResult result;
+      result.version = request.version;
+      result.center = request.center;
+      result.styleSignature = request.styleSignature;
+      result.navigationSignature = request.navigationSignature;
+      result.projectionSignature = request.projectionSignature;
+      result.viewportWidth = request.viewportWidth;
+      result.viewportHeight = request.viewportHeight;
+      result.renderWidth = request.renderWidth;
+      result.renderHeight = request.renderHeight;
+      result.overscanPixels = request.overscanPixels;
+      result.renderStridePixels = request.renderStridePixels;
+      result.rotationRad = request.rotationRad;
+      result.followPosition = request.context.followPosition;
+      result.projection = makeRequestProjection(request);
+      result.viewport.zoom = request.zoom;
+      result.viewport.rasterOriginX = request.center.x;
+      result.viewport.rasterOriginY = request.center.y;
+      result.viewport.rasterCellOffsetX = 0;
+      result.viewport.rasterCellOffsetY = 0;
+      result.viewport.center = Point32(
+          static_cast<int32_t>(std::round(request.center.x)),
+          static_cast<int32_t>(std::round(request.center.y)));
+      const auto worldBounds = result.projection.worldBounds(4.0);
+      result.viewport.bbox.min = Point32(
+          static_cast<int32_t>(std::floor(worldBounds.min.x)),
+          static_cast<int32_t>(std::floor(worldBounds.min.y)));
+      result.viewport.bbox.max = Point32(
+          static_cast<int32_t>(std::ceil(worldBounds.max.x)),
+          static_cast<int32_t>(std::ceil(worldBounds.max.y)));
+
+      bool completed = false;
+      {
+        power_management::ScopedLock powerLock(
+            power_management::LockDomain::Map);
+        const uint32_t blocksStartMs = millis();
+        const bool blocksLoaded =
+            getMapBlocks(result.viewport.bbox, memCache);
+        result.blocksMs = millis() - blocksStartMs;
+        result.mapFound = isMapFound.load(std::memory_order_acquire);
+        if (blocksLoaded && !shouldCancelMapRenderWork()) {
+          const size_t requiredBytes = request.renderStridePixels *
+                                       request.renderHeight * sizeof(uint16_t);
+          if (bufMapTemp != nullptr && requiredBytes <= bufMapTempSize) {
+            map_surface::Rgb565Surface target{
+                static_cast<uint16_t *>(bufMapTemp), request.renderWidth,
+                request.renderHeight, request.renderStridePixels};
+            const uint32_t drawStartMs = millis();
+            completed = readVectorMap(
+                result.viewport, memCache, target, request.zoom,
+                request.rotationRad, result.projection, request.context, true,
+                false, &result.raster);
+            result.drawMs = millis() - drawStartMs;
+            if (completed) {
+              if (result.mapFound) {
+                logMapMemorySnapshot("canvas-draw");
+              } else {
+                logMapMemorySnapshot("canvas-no-map");
+                logMapMemorySnapshot("canvas-draw-empty");
+              }
+            }
+          } else {
+            ESP_LOGE(TAG,
+                     "Map render back buffer invariant failed required=%u "
+                     "capacity=%u",
+                     (unsigned)requiredBytes, (unsigned)bufMapTempSize);
+          }
+        }
+      }
+      result.durationMs = millis() - startMs;
+      result.psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+      result.psramLargest =
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+      if (renderStateMutex != nullptr &&
+          xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+        renderJobs.noteSlices(
+            gMapRenderSliceCount.load(std::memory_order_relaxed),
+            gMapRenderLongestSliceUs.load(std::memory_order_relaxed),
+            MAP_RENDER_DECLARED_SLICE_US);
+        const map_render_job::StopReason stopReason = renderJobs.checkpoint(
+            renderWorkerShutdown.load(std::memory_order_acquire));
+        const bool latest = stopReason == map_render_job::StopReason::None;
+        if (completed && latest && renderJobs.completeActive()) {
+          readyRenderResult = result;
+          readyRenderResultValid = true;
+          MAPIO_LOG(
+              "MAPIO: render-ready seq=%lu durationMs=%lu blocksMs=%lu "
+              "drawMs=%lu mapFound=%u selected=%lu extruded=%lu flat=%lu "
+              "deferred=%lu allocationFallback=%u psramFree=%lu "
+              "psramLargest=%lu\n",
+              (unsigned long)result.version.sequence,
+              (unsigned long)result.durationMs,
+              (unsigned long)result.blocksMs,
+              (unsigned long)result.drawMs, result.mapFound ? 1U : 0U,
+              (unsigned long)result.raster.selectedBuildings,
+              (unsigned long)result.raster.extrudedBuildings,
+              (unsigned long)result.raster.flatBuildings,
+              (unsigned long)result.raster.deferredBuildings,
+              result.raster.allocationFallback ? 1U : 0U,
+              (unsigned long)result.psramFree,
+              (unsigned long)result.psramLargest);
+        } else {
+          renderJobs.cancelActive();
+          // Supersession and shutdown are normal scheduling events. Only an
+          // actual render/invariant failure asks the UI to retry the last good
+          // frame and records recovery diagnostics.
+          if (!completed && latest) {
+            renderFailurePending = true;
+          }
+          MAPIO_LOG(
+              "MAPIO: render-cancel seq=%lu completed=%u reason=%u "
+              "elapsedMs=%lu\n",
+              (unsigned long)request.version.sequence,
+              completed ? 1U : 0U, static_cast<unsigned>(stopReason),
+              (unsigned long)(millis() - startMs));
+        }
+        xSemaphoreGive(renderStateMutex);
+      }
+
+      if (renderWorkerShutdown.load(std::memory_order_acquire))
+        break;
+      taskYIELD();
+      if (processPendingVectorMapActivation())
+        break;
+    }
+  }
+
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+    renderJobs.cancelActive();
+    readyRenderResultValid = false;
+    latestRenderRequestValid = false;
+    renderWorkerTaskHandle = nullptr;
+    xSemaphoreGive(renderStateMutex);
+  } else {
+    renderWorkerTaskHandle = nullptr;
+  }
+  gMapRenderWorkerTaskHandle = nullptr;
+  gMapRenderControlOperation.store(false, std::memory_order_release);
+  renderWorkerExited.store(true, std::memory_order_release);
+  MAPIO_LOG("MAPIO: render-worker stopped\n");
+}
+
+bool Maps::publishReadyFrame(uint32_t nowMs) {
+  if (renderStateMutex == nullptr || canvasMap == nullptr ||
+      canvasMapTemp == nullptr)
+    return false;
+
+  RenderResult result;
+  map_render_job::Version publishedVersion;
+  if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  if (!readyRenderResultValid ||
+      renderJobs.state() != map_render_job::State::Ready) {
+    xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  if (!renderResultStillCurrent(readyRenderResult)) {
+    renderJobs.rejectReadyAsStale();
+    readyRenderResultValid = false;
+    const TaskHandle_t worker = renderWorkerTaskHandle;
+    xSemaphoreGive(renderStateMutex);
+    if (worker != nullptr)
+      xTaskNotifyGive(worker);
+    MAPIO_LOG("MAPIO: render-stale rejected before publication\n");
+    return false;
+  }
+  if (readyRenderResult.followPosition && hasPresentedPose) {
+    const map_transform::WorldPoint current{presentedPose.position.x,
+                                             presentedPose.position.y};
+    const auto projected = readyRenderResult.projection.projectWorld(current);
+    double desiredRotation = readyRenderResult.rotationRad;
+    if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
+      desiredRotation =
+          -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+    } else if (rotationMode == ROT_NORTH_UP) {
+      desiredRotation = 0.0;
+    }
+    const double rotationDelta = map_presentation::signedHeadingDelta(
+        readyRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
+        desiredRotation * 180.0 / 3.14159265358979323846) *
+        3.14159265358979323846 / 180.0;
+    const bool covered = projected.valid &&
+        map_presentation::frameCoversViewport(
+            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
+            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
+            {projected.x, projected.y},
+            {readyRenderResult.projection.anchorX() -
+                 readyRenderResult.overscanPixels,
+             readyRenderResult.projection.anchorY() -
+                 readyRenderResult.overscanPixels},
+            rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+    if (!covered) {
+      renderJobs.rejectReadyAsStale();
+      readyRenderResultValid = false;
+      isPosMoved = true;
+      redrawMap = true;
+      const TaskHandle_t worker = renderWorkerTaskHandle;
+      xSemaphoreGive(renderStateMutex);
+      if (worker != nullptr)
+        xTaskNotifyGive(worker);
+      MAPIO_LOG("MAPIO: render-coverage rejected before publication\n");
+      return false;
+    }
+  }
+  const size_t requiredFrameBytes =
+      static_cast<size_t>(readyRenderResult.renderStridePixels) *
+      readyRenderResult.renderHeight * sizeof(uint16_t);
+  if (readyRenderResult.renderWidth == 0 ||
+      readyRenderResult.renderHeight == 0 ||
+      readyRenderResult.renderStridePixels < readyRenderResult.renderWidth ||
+      bufMapScreen == nullptr || bufMapTemp == nullptr ||
+      requiredFrameBytes > bufMapScreenSize ||
+      requiredFrameBytes > bufMapTempSize) {
+    renderJobs.rejectReadyAsInvariant();
+    readyRenderResultValid = false;
+    renderFailurePending = true;
+    const TaskHandle_t worker = renderWorkerTaskHandle;
+    ESP_LOGE(TAG,
+             "Map render publication invariant failed required=%u front=%u "
+             "back=%u dimensions=%ux%u stride=%u",
+             (unsigned)requiredFrameBytes, (unsigned)bufMapScreenSize,
+             (unsigned)bufMapTempSize,
+             (unsigned)readyRenderResult.renderWidth,
+             (unsigned)readyRenderResult.renderHeight,
+             (unsigned)readyRenderResult.renderStridePixels);
+    xSemaphoreGive(renderStateMutex);
+    if (worker != nullptr)
+      xTaskNotifyGive(worker);
+    return false;
+  }
+  if (!renderJobs.takeReady(publishedVersion) ||
+      publishedVersion != readyRenderResult.version) {
+    readyRenderResultValid = false;
+    xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  result = readyRenderResult;
+  readyRenderResultValid = false;
+  std::swap(bufMapScreen, bufMapTemp);
+  std::swap(bufMapScreenSize, bufMapTempSize);
+  const map_render_job::Diagnostics jobDiagnostics = renderJobs.diagnostics();
+  xSemaphoreGive(renderStateMutex);
+
+  const uint32_t swapStartedUs = micros();
+  lv_canvas_set_buffer(canvasMap, bufMapScreen, result.renderWidth,
+                       result.renderHeight, LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(canvasMapTemp, bufMapTemp, result.renderWidth,
+                       result.renderHeight, LV_COLOR_FORMAT_RGB565);
+  lv_obj_add_flag(canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
+  // Raw worker rendering cannot touch LVGL. Re-apply the user-facing no-map
+  // state on the UI owner after the complete frame is bound, instead of
+  // silently replacing it with a blank background.
+  if (!result.mapFound)
+    showNoMap(canvasMap, storage.getSdLoaded());
+  lv_img_set_angle(canvasMap, 0);
+  lv_image_set_scale(canvasMap, LV_SCALE_NONE);
+  lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
+  visibleRenderResult = result;
+  lastCompletedRenderDurationMs = std::max<uint32_t>(250U, result.durationMs);
+  visibleProjection = result.projection;
+  hasVisibleProjection = true;
+  viewPort = result.viewport;
+  publishedMapFound = result.mapFound;
+  publishedMapFrame = true;
+  framePublicationPending = true;
+
+  totalBounds.lat_min = mercatorY2lat(result.viewport.bbox.min.y);
+  totalBounds.lat_max = mercatorY2lat(result.viewport.bbox.max.y);
+  totalBounds.lon_min = mercatorX2lon(result.viewport.bbox.min.x);
+  totalBounds.lon_max = mercatorX2lon(result.viewport.bbox.max.x);
+  if (isCoordInBounds(destLat, destLon, totalBounds)) {
+    coords2map(destLat, destLon, totalBounds, &wptPosX, &wptPosY);
+  } else {
+    wptPosX = static_cast<uint16_t>(-1);
+    wptPosY = static_cast<uint16_t>(-1);
+  }
+
+  finishDragSettlement();
+  finishPinchSettlement();
+  updatePresentedPose(nowMs);
+  updatePresentedFrameTransform();
+  renderLiveForeground();
+  lv_obj_invalidate(canvasMap);
+  const uint32_t swapDurationUs = micros() - swapStartedUs;
+  MAPIO_LOG(
+      "MAPIO: render-publish seq=%lu durationMs=%lu uiSwapUs=%lu "
+      "mapFound=%u allocationFallback=%u cancelled=%lu stale=%lu "
+      "invariant=%lu units=%lu longestUnitUs=%lu\n",
+      (unsigned long)result.version.sequence,
+      (unsigned long)result.durationMs, (unsigned long)swapDurationUs,
+      result.mapFound ? 1U : 0U,
+      result.raster.allocationFallback ? 1U : 0U,
+      (unsigned long)jobDiagnostics.cancelled,
+      (unsigned long)jobDiagnostics.stalePublications,
+      (unsigned long)jobDiagnostics.invariantFailures,
+      (unsigned long)jobDiagnostics.boundedSlices,
+      (unsigned long)jobDiagnostics.longestSliceUs);
+
+  if (renderWorkerTaskHandle != nullptr)
+    xTaskNotifyGive(renderWorkerTaskHandle);
+  return true;
+}
+
+void Maps::updatePresentedFrameTransform() {
+  if (!publishedMapFrame || canvasMap == nullptr || !hasVisibleProjection)
+    return;
+  const map_transform::WorldPoint current =
+      visibleRenderResult.followPosition && hasPresentedPose
+          ? map_transform::WorldPoint{presentedPose.position.x,
+                                      presentedPose.position.y}
+          : visibleRenderResult.center;
+  const auto projected = visibleProjection.projectWorld(current);
+  if (!projected.valid)
+    return;
+
+  const int16_t pivotX = static_cast<int16_t>(
+      map_transform::quantizePixel(projected.x));
+  const int16_t pivotY = static_cast<int16_t>(
+      map_transform::quantizePixel(projected.y));
+  const uint16_t containerWidth = lv_obj_get_width(mapTile);
+  const uint16_t containerHeight = lv_obj_get_height(mapTile);
+  const int16_t viewportOriginX = gui_layout::centeredViewportOrigin(
+      containerWidth, visibleRenderResult.viewportWidth);
+  const int16_t viewportOriginY = gui_layout::centeredViewportOrigin(
+      containerHeight, visibleRenderResult.viewportHeight);
+  const int16_t screenAnchorX = static_cast<int16_t>(
+      visibleRenderResult.projection.anchorX() -
+      visibleRenderResult.overscanPixels);
+  const int16_t screenAnchorY = static_cast<int16_t>(
+      visibleRenderResult.projection.anchorY() -
+      visibleRenderResult.overscanPixels);
+
+  double desiredRotation = visibleRenderResult.rotationRad;
+  if (rotationMode == ROT_COURSE_UP && hasPresentedPose &&
+      presentedPose.headingValid) {
+    desiredRotation =
+        -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+  } else if (rotationMode == ROT_NORTH_UP) {
+    desiredRotation = 0.0;
+  }
+  const double rotationDelta = map_presentation::signedHeadingDelta(
+      visibleRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
+      desiredRotation * 180.0 / 3.14159265358979323846) *
+      3.14159265358979323846 / 180.0;
+  // canvasMap remains LV_ALIGN_CENTER. Its style x/y are offsets from the
+  // already-centered 658x658 overscan frame, not absolute parent coordinates.
+  // Converting the desired parent-space pivot target into that aligned offset
+  // prevents applying the 96 px overscan origin twice while the viewport-sized
+  // route foreground and arrow use it once.
+  const int32_t targetX = gui_layout::centerAlignedOffsetForPoint(
+      containerWidth, visibleRenderResult.renderWidth, pivotX,
+      viewportOriginX + screenAnchorX);
+  const int32_t targetY = gui_layout::centerAlignedOffsetForPoint(
+      containerHeight, visibleRenderResult.renderHeight, pivotY,
+      viewportOriginY + screenAnchorY);
+  const int16_t targetAngle = mapAngleTenths(rotationDelta);
+  uint64_t presentationSignature = 1469598103934665603ULL;
+  presentationSignature = fnvMix64(
+      presentationSignature, visibleRenderResult.version.sequence);
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(projected.x));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(projected.y));
+  presentationSignature = fnvMix64(
+      presentationSignature, static_cast<uint64_t>(containerWidth));
+  presentationSignature = fnvMix64(
+      presentationSignature, static_cast<uint64_t>(containerHeight));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(rotationDelta));
+
+  lv_point_t currentPivot{};
+  lv_image_get_pivot(canvasMap, &currentPivot);
+  const bool transformAlreadyApplied =
+      currentPivot.x == pivotX && currentPivot.y == pivotY &&
+      lv_obj_get_x_aligned(canvasMap) == targetX &&
+      lv_obj_get_y_aligned(canvasMap) == targetY &&
+      lv_img_get_angle(canvasMap) == targetAngle;
+  if (presentationSignature == lastFramePresentationSignature &&
+      transformAlreadyApplied) {
+    return;
+  }
+
+  lv_image_set_pivot(canvasMap, pivotX, pivotY);
+  lv_obj_set_pos(canvasMap, targetX, targetY);
+  lv_img_set_angle(canvasMap, targetAngle);
+  lv_obj_invalidate(canvasMap);
+
+  const bool visibleCoversPose = map_presentation::frameCoversViewport(
+      visibleRenderResult.renderWidth, visibleRenderResult.renderHeight,
+      visibleRenderResult.viewportWidth, visibleRenderResult.viewportHeight,
+      {projected.x, projected.y},
+      {static_cast<double>(screenAnchorX),
+       static_cast<double>(screenAnchorY)},
+      rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+
+  RenderRequest latestRequestSnapshot;
+  bool latestRequestSnapshotValid = false;
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) == pdTRUE) {
+    latestRequestSnapshotValid = latestRenderRequestValid;
+    if (latestRequestSnapshotValid)
+      latestRequestSnapshot = latestRenderRequest;
+    xSemaphoreGive(renderStateMutex);
+  }
+
+  bool latestCoversPose = false;
+  if (latestRequestSnapshotValid &&
+      renderRequestStillCurrent(latestRequestSnapshot)) {
+    const auto latestProjection = makeRequestProjection(latestRequestSnapshot);
+    const auto latestPoint = latestProjection.projectWorld(current);
+    if (latestPoint.valid) {
+      const double latestRotationDelta =
+          map_presentation::signedHeadingDelta(
+              latestRequestSnapshot.rotationRad * 180.0 /
+                  3.14159265358979323846,
+              desiredRotation * 180.0 / 3.14159265358979323846) *
+          3.14159265358979323846 / 180.0;
+      latestCoversPose = map_presentation::frameCoversViewport(
+          latestRequestSnapshot.renderWidth,
+          latestRequestSnapshot.renderHeight,
+          latestRequestSnapshot.viewportWidth,
+          latestRequestSnapshot.viewportHeight,
+          {latestPoint.x, latestPoint.y},
+          {latestProjection.anchorX() -
+               latestRequestSnapshot.overscanPixels,
+           latestProjection.anchorY() -
+               latestRequestSnapshot.overscanPixels},
+          latestRotationDelta, MAP_RENDER_SAFETY_PIXELS);
+    }
+  }
+  if (!visibleCoversPose && !latestCoversPose) {
+    isPosMoved = true;
+    redrawMap = true;
+  }
+  lastFramePresentationSignature = presentationSignature;
+}
+
+void Maps::renderLiveForeground() {
+  if (canvasForeground == nullptr) {
+    lastForegroundPresentationSignature = 0;
+    return;
+  }
+  const auto hideForeground = [this]() {
+    lastForegroundPresentationSignature = 0;
+    if (!lv_obj_has_flag(canvasForeground, LV_OBJ_FLAG_HIDDEN))
+      lv_obj_add_flag(canvasForeground, LV_OBJ_FLAG_HIDDEN);
+  };
+  if (bufMapForeground == nullptr) {
+    hideForeground();
+    return;
+  }
+  const RouteSnapshot route = routeOverlay.snapshot();
+  if (!publishedMapFrame || !hasVisibleProjection || !route.hasRoute() ||
+      !isRouteOverlayVisible(mapRenderSettings) || !hasPresentedPose) {
+    hideForeground();
+    return;
+  }
+  const uint16_t width = mapScrWidth;
+  const uint16_t height = mapSet.mapFullScreen ? mapScrFull : mapScrHeight;
+  const size_t required = rgb565A8BufferSize(width, height);
+  if (width == 0 || height == 0 || required > bufMapForegroundSize) {
+    hideForeground();
+    return;
+  }
+
+  const map_transform::WorldPoint presented{presentedPose.position.x,
+                                             presentedPose.position.y};
+  const map_transform::WorldPoint presentationPivotWorld =
+      visibleRenderResult.followPosition ? presented : visibleRenderResult.center;
+  const auto projectedPivot =
+      visibleProjection.projectWorld(presentationPivotWorld);
+  if (!projectedPivot.valid) {
+    hideForeground();
+    return;
+  }
+
+  double desiredRotation = visibleRenderResult.rotationRad;
+  if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
+    desiredRotation =
+        -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+  } else if (rotationMode == ROT_NORTH_UP) {
+    desiredRotation = 0.0;
+  }
+  const double rotationDelta = map_presentation::signedHeadingDelta(
+      visibleRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
+      desiredRotation * 180.0 / 3.14159265358979323846) *
+      3.14159265358979323846 / 180.0;
+  const uint8_t routeLineWidth = static_cast<uint8_t>(std::min<int>(
+      48, std::max<int>(1, currentMapStyleSettings().routeLineWidth)));
+  uint64_t presentationSignature = 1469598103934665603ULL;
+  presentationSignature =
+      fnvMix64(presentationSignature, route.revision);
+  presentationSignature = fnvMix64(
+      presentationSignature, visibleRenderResult.version.sequence);
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(presented.x));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(presented.y));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(projectedPivot.x));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(projectedPivot.y));
+  presentationSignature =
+      fnvMix64(presentationSignature, doubleBits(rotationDelta));
+  presentationSignature = fnvMix64(presentationSignature, width);
+  presentationSignature = fnvMix64(presentationSignature, height);
+  presentationSignature =
+      fnvMix64(presentationSignature, routeLineWidth);
+  if (presentationSignature == lastForegroundPresentationSignature &&
+      !lv_obj_has_flag(canvasForeground, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+
+  bindMapForegroundCanvas(canvasForeground, width, height);
+  lv_obj_center(canvasForeground);
+  lv_img_set_angle(canvasForeground, 0);
+  lv_image_set_scale(canvasForeground, LV_SCALE_NONE);
+
+  lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvasForeground);
+  if (drawBuffer == nullptr || drawBuffer->data == nullptr) {
+    hideForeground();
+    return;
+  }
+  const size_t colorStridePixels =
+      static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t));
+  auto *alpha = static_cast<uint8_t *>(drawBuffer->data) +
+                static_cast<size_t>(drawBuffer->header.stride) * height;
+  map_surface::Rgb565A8Surface surface{
+      reinterpret_cast<uint16_t *>(drawBuffer->data), alpha, width, height,
+      colorStridePixels, colorStridePixels};
+  surface.clearAlpha();
+
+  // This is the exact transform used by updatePresentedFrameTransform(): the
+  // immutable base projection supplies source pixels, the presented rider is
+  // the pivot, and the viewport anchor is the target. Route head, route line,
+  // arrow, and translated/rotated map therefore share one PresentedPose.
+  RoutePresentationTransform presentation;
+  presentation.inputPivotX = projectedPivot.x;
+  presentation.inputPivotY = projectedPivot.y;
+  presentation.outputPivotX =
+      visibleProjection.anchorX() - visibleRenderResult.overscanPixels;
+  presentation.outputPivotY =
+      visibleProjection.anchorY() - visibleRenderResult.overscanPixels;
+  presentation.rotationRad = rotationDelta;
+  RouteOverlay::drawSnapshot(route, surface, visibleProjection, routeLineWidth,
+                             &presented, &presentation);
+
+  lv_obj_clear_flag(canvasForeground, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_invalidate(canvasForeground);
+  lastForegroundPresentationSignature = presentationSignature;
+  if (canvasArrow != nullptr)
+    lv_obj_move_foreground(canvasArrow);
+}
+
+bool Maps::presentationGestureOwnsTransforms() const {
+  return dragPreviewController.active() ||
+         dragPreviewController.settlementPending() ||
+         pinchPresentation.active || pinchPresentation.settlementPending;
+}
+
+bool Maps::serviceRenderPipeline(uint32_t nowMs) {
+  (void)recoverRenderWorkerIfNeeded();
+  if (canvasMap == nullptr)
+    return false;
+  invalidateRenderSemantics(nowMs);
+  updatePresentedPose(nowMs);
+  const bool gestureActive = dragPreviewController.active() ||
+                             pinchPresentation.active;
+  const bool settlementPending =
+      dragPreviewController.settlementPending() ||
+      pinchPresentation.settlementPending;
+  // An active gesture owns the image pivot/position/scale and its marker. Keep
+  // a ready worker frame hidden until release. During settlement, publication
+  // is the event that ends ownership; until a replacement is ready, preserve
+  // the exact preview endpoint instead of snapping back to follow mode.
+  const bool published = gestureActive ? false : publishReadyFrame(nowMs);
+  if (gestureActive || (settlementPending && !published))
+    return false;
+  updatePresentedFrameTransform();
+  renderLiveForeground();
+  return published;
+}
+
+bool Maps::takeFramePublication() {
+  const bool pending = framePublicationPending;
+  framePublicationPending = false;
+  return pending;
+}
+
+bool Maps::takeRenderFailure() {
+  if (renderStateMutex == nullptr)
+    return false;
+  if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  const bool pending = renderFailurePending;
+  renderFailurePending = false;
+  xSemaphoreGive(renderStateMutex);
+  return pending;
+}
+
 void Maps::getPosition(double lat, double lon) {
   Coord pos;
   pos.lat = lat;
@@ -3679,15 +4948,40 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
 }
 
 bool Maps::setVectorMapFolder(const std::string &folder) {
-  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
   if (normalized == vectorMapFolder)
     return true;
 
-  struct stat storage = {};
-  if (::stat(normalized.c_str(), &storage) != 0 || !S_ISDIR(storage.st_mode)) {
+  const bool restartWorker = renderWorkerTaskHandle != nullptr;
+  if (restartWorker && !stopRenderWorker()) {
+    ESP_LOGE(TAG, "Vector map root switch deferred: render worker is busy");
+    return false;
+  }
+
+  const bool switched = switchVectorMapFolderOnStorageOwner(folder);
+  if (switched)
+    finalizeVectorMapFolderSwitchOnUi();
+  if (restartWorker && !startRenderWorker()) {
+    ESP_LOGE(TAG, "Vector map root switched but render worker restart failed");
+    return false;
+  }
+  if (switched)
+    ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
+  return switched;
+}
+
+bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
+  String normalized(folder.c_str());
+  if (!normalized.endsWith("/"))
+    normalized += "/";
+  if (normalized == vectorMapFolder)
+    return true;
+
+  struct stat storageMetadata = {};
+  if (::stat(normalized.c_str(), &storageMetadata) != 0 ||
+      !S_ISDIR(storageMetadata.st_mode)) {
     ESP_LOGE(TAG, "Vector map root is unavailable: %s", normalized.c_str());
     return false;
   }
@@ -3696,59 +4990,89 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
   const std::string fontPath =
       std::string(normalized.c_str()) + "assets/street-labels.fma";
   struct stat fontMetadata = {};
-  if (::stat(fontPath.c_str(), &fontMetadata) == 0) {
-    if (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath)) {
-      ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
-      return false;
-    }
+  if (::stat(fontPath.c_str(), &fontMetadata) == 0 &&
+      (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath))) {
+    ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
+    return false;
   }
 
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   for (MapBlock *block : memCache.blocks)
     delete block;
   memCache.blocks.clear();
+  cachedBlockCount.store(0, std::memory_order_release);
   labelFontAsset = std::move(candidateFont);
+  streetLabelFontHealthy.store(labelFontAsset.healthy(),
+                               std::memory_order_release);
   labelLayoutCache.clear();
-  streetLabelRuntimeFailurePending = false;
-  streetLabelRuntimeFailureCode.clear();
+  streetLabelRuntimeFailure.store(map_font_asset::RuntimeError::None,
+                                  std::memory_order_release);
   buildingFailureRetryCooldown.clear();
   vectorMapFolder = normalized;
-  invalidateRollingRasterWindow();
   isMapFound = false;
+  return true;
+}
+
+void Maps::finalizeVectorMapFolderSwitchOnUi() {
+  ++mapEpoch;
+  invalidateRollingRasterWindow();
+  publishedMapFound = false;
+  publishedMapFrame = false;
   isPosMoved = true;
   redrawMap = true;
   oldMapTile = {};
   currentMapTile = {};
-  ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
-  return true;
 }
 
 bool Maps::takeStreetLabelRuntimeFailure(std::string &code) {
-  if (!streetLabelRuntimeFailurePending)
+  const map_font_asset::RuntimeError error = streetLabelRuntimeFailure.exchange(
+      map_font_asset::RuntimeError::None, std::memory_order_acq_rel);
+  if (error == map_font_asset::RuntimeError::None)
     return false;
-  code = streetLabelRuntimeFailureCode;
-  streetLabelRuntimeFailurePending = false;
+  code = map_font_asset::runtimeErrorCode(error);
   return true;
 }
 
 bool Maps::probeVectorMapFolder(const std::string &folder) {
-  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
+  const bool restartWorker = renderWorkerTaskHandle != nullptr;
+  if (restartWorker && !stopRenderWorker()) {
+    ESP_LOGE(TAG, "Vector map probe deferred: render worker is busy");
+    return false;
+  }
+
+  const bool loaded = probeVectorMapFolderOnStorageOwner(folder);
+
+  if (restartWorker && !startRenderWorker()) {
+    ESP_LOGE(TAG, "Vector map probe completed but worker restart failed");
+    return false;
+  }
+  return loaded;
+}
+
+bool Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
   std::string normalized = folder;
   while (normalized.size() > 1 && normalized.back() == '/')
     normalized.pop_back();
-  struct stat storage = {};
-  if (::stat(normalized.c_str(), &storage) != 0 || !S_ISDIR(storage.st_mode))
+  struct stat storageMetadata = {};
+  if (::stat(normalized.c_str(), &storageMetadata) != 0 ||
+      !S_ISDIR(storageMetadata.st_mode))
     return false;
 
+  bool loaded = false;
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   size_t visited = 0;
   std::string blockBase;
   if (!findMapBlock(normalized, blockBase, visited, 0)) {
     ESP_LOGE(TAG, "No map block found under %s", normalized.c_str());
     return false;
   }
-  const bool previousMapFound = isMapFound;
+
+  const bool previousMapFound = isMapFound.load();
   isMapFound = false;
   MapBlock *block = readMapBlock(String(blockBase.c_str()));
-  bool loaded = isMapFound;
+  loaded = block != nullptr && isMapFound.load();
   if (loaded && block->formatVersion >= 3) {
     map_font_asset::Asset candidateFont;
     const std::string fontPath = normalized + "/assets/street-labels.fma";
@@ -3756,7 +5080,7 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
              candidateFont.profileFingerprint() ==
                  block->labelData.profileFingerprint &&
              block->labelData.referencesResolve(candidateFont.glyphCount(),
-                                                 candidateFont.languageCount());
+                                                candidateFont.languageCount());
     if (!loaded)
       ESP_LOGE(TAG, "Street-label block/font contract failed under %s",
                normalized.c_str());
@@ -3768,6 +5092,117 @@ bool Maps::probeVectorMapFolder(const std::string &folder) {
   return loaded;
 }
 
+bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
+  if (folder.empty())
+    return false;
+  if (renderWorkerRestartAfterExit.load(std::memory_order_acquire) &&
+      !recoverRenderWorkerIfNeeded())
+    return false;
+  if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
+    return false;
+  if (renderWorkerShutdown.load(std::memory_order_acquire))
+    return false;
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) != pdTRUE)
+    return false;
+  if (pendingVectorMapActivationValid || completedVectorMapActivationValid) {
+    xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+
+  pendingVectorMapActivation.sequence = ++vectorMapActivationSequence;
+  pendingVectorMapActivation.folder = folder;
+  pendingVectorMapActivationValid = true;
+  gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+  renderJobs.requestCancellation();
+  if (renderJobs.state() == map_render_job::State::Ready) {
+    renderJobs.rejectReadyAsStale();
+    readyRenderResultValid = false;
+  }
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  xSemaphoreGive(renderStateMutex);
+  if (worker != nullptr)
+    xTaskNotifyGive(worker);
+  return true;
+}
+
+bool Maps::takeVectorMapActivationRequest(
+    VectorMapActivationRequest &request) {
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  const bool available = pendingVectorMapActivationValid &&
+                         !completedVectorMapActivationValid;
+  if (available) {
+    request = pendingVectorMapActivation;
+    pendingVectorMapActivation = {};
+    pendingVectorMapActivationValid = false;
+  }
+  xSemaphoreGive(renderStateMutex);
+  return available;
+}
+
+bool Maps::processPendingVectorMapActivation() {
+  VectorMapActivationRequest request;
+  if (!takeVectorMapActivationRequest(request))
+    return false;
+
+  // Control-plane storage work runs on the same sole owner as block rendering,
+  // but starts a fresh cooperative token after the render it superseded has
+  // quiesced. No SD traversal or block parsing runs in the LVGL loop.
+  gMapRenderActiveCancellationGeneration.store(
+      gMapRenderCancellationGeneration.load(std::memory_order_acquire),
+      std::memory_order_release);
+  gMapRenderControlOperation.store(true, std::memory_order_release);
+  const bool loaded = probeVectorMapFolderOnStorageOwner(request.folder) &&
+                      switchVectorMapFolderOnStorageOwner(request.folder);
+  gMapRenderControlOperation.store(false, std::memory_order_release);
+
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+    completedVectorMapActivation =
+        {request.sequence, request.folder, loaded};
+    completedVectorMapActivationValid = true;
+    latestRenderRequestValid = false;
+    xSemaphoreGive(renderStateMutex);
+  }
+  MAPIO_LOG("MAPIO: activation-ready sequence=%lu loaded=%u root=%s\n",
+            (unsigned long)request.sequence, loaded ? 1U : 0U,
+            request.folder.c_str());
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
+  return true;
+}
+
+bool Maps::takeVectorMapFolderActivationResult(
+    VectorMapActivationResult &result) {
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  if (!completedVectorMapActivationValid) {
+    xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  result.folder = completedVectorMapActivation.folder;
+  result.loaded = completedVectorMapActivation.loaded;
+  completedVectorMapActivation = {};
+  completedVectorMapActivationValid = false;
+  xSemaphoreGive(renderStateMutex);
+
+  if (result.loaded)
+    finalizeVectorMapFolderSwitchOnUi();
+  else {
+    // Enqueuing the control job cancels any render that was using the old
+    // storage snapshot.  A failed probe leaves that old root selected, so
+    // explicitly request a replacement frame instead of waiting for a later
+    // movement/heading threshold to happen to revive the renderer.
+    isPosMoved = true;
+    redrawMap = true;
+  }
+  if (renderWorkerTaskHandle != nullptr)
+    xTaskNotifyGive(renderWorkerTaskHandle);
+  return true;
+}
+
 /**
  * @brief Delete map screen and release PSRAM
  *
@@ -3777,9 +5212,35 @@ void Maps::deleteMapScrSprites() {
   cancelPinchPreview();
   pinchZoomOutBackdrop = {};
   invalidateRollingRasterWindow();
+
+  // The worker owns only raw back-buffer/cache state and may outlive this LVGL
+  // screen. Cancel the semantic request without blocking the UI task; stale
+  // completion is rejected before publication when the screen is recreated.
+  ++projectionEpoch;
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    renderJobs.requestCancellation();
+    const map_render_job::Version invalidated = renderJobs.invalidate();
+    gMapRenderLatestSequence.store(invalidated.sequence,
+                                   std::memory_order_release);
+    latestRenderRequestValid = false;
+    readyRenderResultValid = false;
+    xSemaphoreGive(renderStateMutex);
+  } else {
+    // The worker also checks this atomic token between bounded work units. If
+    // the mutex is momentarily busy, publication still rejects the obsolete
+    // projection epoch before the frame can become visible.
+    gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    gMapRenderLatestSequence.fetch_add(1, std::memory_order_acq_rel);
+  }
+
   hasVisibleProjection = false;
-  // Maps::arrowSprite.deleteSprite();
-  // Maps::mapSprite.deleteSprite();
+  publishedMapFrame = false;
+  publishedMapFound = false;
+  framePublicationPending = false;
+  lastFramePresentationSignature = 0;
+  lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
     lv_obj_delete(Maps::canvasArrow);
   if (Maps::canvasMap)
@@ -3802,94 +5263,87 @@ void Maps::deleteMapScrSprites() {
  */
 void Maps::createMapScrSprites() {
   ESP_LOGI(TAG, "createMapScrSprites start");
-  hasVisibleProjection = false;
-  // Map Sprite
-  // Map Sprite (Canvas)
-  uint16_t w = Maps::mapScrWidth;
-  uint16_t h = Maps::mapScrHeight;
-  if (mapSet.mapFullScreen)
-    h = Maps::mapScrFull;
 
-  // Zoom 5 uses a 5x5 grid of 192 px cells. Zooms 1...4 use a 7x7 grid of
-  // 128 px cells. The scratch buffer must hold one complete incoming
-  // row/column for either layout so recycling remains atomic.
-  const auto wideLayout = map_raster_window::layoutForZoom(
-      map_transform::kMaximumRuntimeZoom,
-      map_transform::kMaximumRuntimeZoom);
-  const auto compactLayout = map_raster_window::layoutForZoom(
-      map_transform::kMinimumRuntimeZoom,
-      map_transform::kMaximumRuntimeZoom);
-  const auto maximumGrid = map_raster_window::gridExtent(wideLayout);
-  const auto compactGrid = map_raster_window::gridExtent(compactLayout);
-  const uint32_t gridStride = lv_draw_buf_width_to_stride(
-      maximumGrid.width, LV_COLOR_FORMAT_RGB565);
-  const size_t rollingScreenSize = gridStride * maximumGrid.height;
-  const uint32_t wideTileStride = lv_draw_buf_width_to_stride(
-      wideLayout.cellExtent, LV_COLOR_FORMAT_RGB565);
-  const size_t wideTileSize = wideTileStride * wideLayout.cellExtent;
-  const uint32_t compactTileStride = lv_draw_buf_width_to_stride(
-      compactLayout.cellExtent, LV_COLOR_FORMAT_RGB565);
-  const size_t compactTileSize =
-      compactTileStride * compactLayout.cellExtent;
-  const size_t maximumTileSize = std::max(wideTileSize, compactTileSize);
-  const size_t maximumScratchRowSize =
-      std::max(wideTileSize * wideLayout.span,
-               compactTileSize * compactLayout.span);
-  const uint32_t normalStride = lv_draw_buf_width_to_stride(
-      Maps::mapScrWidth, LV_COLOR_FORMAT_RGB565);
-  const size_t maximumNormalFrameSize = normalStride * Maps::mapScrFull;
-  const size_t requiredTempSize = std::max(
-      maximumNormalFrameSize + maximumTileSize,
-      maximumScratchRowSize);
+  const uint16_t viewportWidth = Maps::mapScrWidth;
+  const uint16_t viewportHeight =
+      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
+  const uint16_t maximumRenderWidth = static_cast<uint16_t>(
+      Maps::mapScrWidth + MAP_RENDER_OVERSCAN_PIXELS * 2U);
+  const uint16_t maximumRenderHeight = static_cast<uint16_t>(
+      Maps::mapScrFull + MAP_RENDER_OVERSCAN_PIXELS * 2U);
+  const uint16_t initialRenderHeight = static_cast<uint16_t>(
+      viewportHeight + MAP_RENDER_OVERSCAN_PIXELS * 2U);
+  const uint32_t frameStride = lv_draw_buf_width_to_stride(
+      maximumRenderWidth, LV_COLOR_FORMAT_RGB565);
+  const size_t frameBytes =
+      static_cast<size_t>(frameStride) * maximumRenderHeight;
+  const size_t foregroundBytes =
+      rgb565A8BufferSize(Maps::mapScrWidth, Maps::mapScrFull);
+  const size_t persistentSurfaceBytes = frameBytes * 2U + foregroundBytes;
 
-  ESP_LOGI(TAG,
-           "MapBuff: rollingWide=%ux%u rollingCompact=%ux%u "
-           "rollingScreen=%u initialScreen=%u scratch=%u initial=%ux%u",
-           (unsigned)maximumGrid.width, (unsigned)maximumGrid.height,
-           (unsigned)compactGrid.width, (unsigned)compactGrid.height,
-           (unsigned)rollingScreenSize, (unsigned)maximumNormalFrameSize,
-           (unsigned)requiredTempSize, (unsigned)w, (unsigned)h);
-  // Keep the front buffer viewport-sized until standalone Map first reaches
-  // a runtime zoom. Map + Navigation therefore does not pay the rolling
-  // grid's PSRAM cost merely by creating the shared map canvases.
-  if (!ensureMapScreenBuffer(maximumNormalFrameSize) ||
-      !ensureMapTempBuffer(requiredTempSize) ||
-      !ensureMapForegroundBuffer(Maps::mapScrWidth, Maps::mapScrFull)) {
+  // Recreating LVGL objects is safe while the worker writes the hidden raw
+  // back surface: the addresses remain stable and the object stays hidden.
+  // Quiesce only when a front/back allocation must actually move. This keeps
+  // an ordinary screen transition out of the render job's SD/geometry latency.
+  const bool frameStorageMustMove =
+      bufMapScreen == nullptr || bufMapScreenSize < frameBytes ||
+      bufMapTemp == nullptr || bufMapTempSize < frameBytes;
+  const bool workerCanOwnFrameStorage =
+      bufMapScreen != nullptr && bufMapTemp != nullptr;
+  if (frameStorageMustMove && workerCanOwnFrameStorage &&
+      renderWorkerTaskHandle != nullptr &&
+      !stopRenderWorker()) {
+    ESP_LOGE(TAG, "Map screen creation deferred: render worker owns storage");
     return;
   }
-  memset(bufMapScreen, 0, maximumNormalFrameSize);
-  memset(bufMapTemp, 0, requiredTempSize);
-  memset(bufMapForeground, 0,
-         rgb565A8BufferSize(Maps::mapScrWidth, Maps::mapScrFull));
+  if (canvasMap != nullptr || canvasMapTemp != nullptr ||
+      canvasForeground != nullptr || canvasArrow != nullptr) {
+    deleteMapScrSprites();
+  }
+
+  if (!ensureMapScreenBuffer(frameBytes) || !ensureMapTempBuffer(frameBytes) ||
+      !ensureMapForegroundBuffer(Maps::mapScrWidth, Maps::mapScrFull)) {
+    ESP_LOGE(TAG,
+             "Map render surfaces unavailable frame=%u foreground=%u total=%u",
+             (unsigned)frameBytes, (unsigned)foregroundBytes,
+             (unsigned)persistentSurfaceBytes);
+    return;
+  }
+  memset(bufMapForeground, 0, foregroundBytes);
   invalidateRollingRasterWindow();
+  invalidatePinchZoomOutBackdrop();
+  publishedMapFrame = false;
+  publishedMapFound = false;
+  framePublicationPending = false;
+  hasVisibleProjection = false;
+  lastFramePresentationSignature = 0;
+  lastForegroundPresentationSignature = 0;
+  ++projectionEpoch;
 
   Maps::canvasMap = lv_canvas_create(mapTile);
   lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, w, h,
-                       LV_COLOR_FORMAT_RGB565);
+  lv_obj_add_flag(Maps::canvasMap, LV_OBJ_FLAG_HIDDEN);
+  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, maximumRenderWidth,
+                       initialRenderHeight, LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMap);
 
-  // Vector rendering is synchronous. Draw into a hidden back buffer so an
-  // input-triggered abort can never expose a half-rendered frame.
+  // This object is always hidden. Its raw storage is exclusively written by
+  // the render worker; only the LVGL owner rebinds it after an atomic swap.
   Maps::canvasMapTemp = lv_canvas_create(mapTile);
   lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, w, h,
-                       LV_COLOR_FORMAT_RGB565);
+  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, maximumRenderWidth,
+                       initialRenderHeight, LV_COLOR_FORMAT_RGB565);
   lv_obj_center(Maps::canvasMapTemp);
 
-  // Standalone Map uses a rolling base raster. Street labels and the route are
-  // composed once in viewport coordinates on this transparent foreground so
-  // labels are neither clipped nor collision-tested independently per cell.
   Maps::canvasForeground = lv_canvas_create(mapTile);
   lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
-  bindMapForegroundCanvas(Maps::canvasForeground, w, h);
+  bindMapForegroundCanvas(Maps::canvasForeground, viewportWidth,
+                          viewportHeight);
   lv_obj_center(Maps::canvasForeground);
 
-  // Draw the current-position marker as native LVGL geometry at its final
-  // on-screen size. This avoids magnifying a fixed 48x48 bitmap.
   Maps::canvasArrow = lv_obj_create(mapTile);
   lv_obj_remove_style_all(Maps::canvasArrow);
   lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
@@ -3897,26 +5351,32 @@ void Maps::createMapScrSprites() {
   lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_event_cb(Maps::canvasArrow, drawCurrentPositionMarker,
                       LV_EVENT_DRAW_MAIN, nullptr);
-  updateCurrentPositionMarker(Maps::canvasArrow, true);
+  updateCurrentPositionMarker(Maps::canvasArrow, 0.0, true);
+
+  if (!startRenderWorker()) {
+    ESP_LOGE(TAG, "Map render worker unavailable");
+    deleteMapScrSprites();
+    return;
+  }
+
+  isPosMoved = true;
+  redrawMap = true;
+  ESP_LOGI(TAG,
+           "Map render surfaces front=%u back=%u foreground=%u total=%u "
+           "psramFree=%u psramLargest=%u",
+           (unsigned)frameBytes, (unsigned)frameBytes,
+           (unsigned)foregroundBytes, (unsigned)persistentSurfaceBytes,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
   ESP_LOGI(TAG, "createMapScrSprites done");
-
-  // Make arrow clickable to toggle rotation mode
-  // lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_CLICKABLE);
-  // lv_obj_add_event_cb(
-  //     Maps::canvasArrow,
-  //     [](lv_event_t *e) {
-  //       Maps *maps = (Maps *)lv_event_get_user_data(e);
-  //       maps->toggleRotationMode();
-  //     },
-  //     LV_EVENT_CLICKED, this);
-
-  // Maps::arrowSprite.pushImage(0, 0, 16, 16, (uint16_t *)navigation);
 }
 
 bool Maps::shouldUseRollingRasterWindow(uint8_t requestedZoom) const {
-  return mapSet.vectorMap && isMapScreenActive() &&
-         requestedZoom >= map_transform::kMinimumRuntimeZoom &&
-         requestedZoom <= map_transform::kMaximumRuntimeZoom;
+  (void)requestedZoom;
+  // The previous rolling raster synchronously loaded/rendered cells from the
+  // LVGL task and shared the worker back buffer. Render-ahead overscan now
+  // provides motion margin without violating ownership.
+  return false;
 }
 
 uint64_t Maps::rollingRasterSignature() const {
@@ -4010,7 +5470,8 @@ bool Maps::renderRollingRasterCell(double rasterOriginX,
     return false;
   }
 
-  const bool previousMapFound = Maps::isMapFound;
+  const bool previousMapFound =
+      Maps::isMapFound.load(std::memory_order_acquire);
   const tileBounds previousBounds = Maps::totalBounds;
   const uint16_t previousWptX = Maps::wptPosX;
   const uint16_t previousWptY = Maps::wptPosY;
@@ -4055,13 +5516,13 @@ bool Maps::renderRollingRasterCell(double rasterOriginX,
     return false;
   }
 
-  if (shouldInterruptMapRenderForScreenCycle()) {
+  if (shouldCancelMapRenderWork()) {
     restoreVisibleState();
     return false;
   }
 
   if (mapFoundOut != nullptr)
-    *mapFoundOut = Maps::isMapFound;
+    *mapFoundOut = Maps::isMapFound.load(std::memory_order_acquire);
   restoreVisibleState();
   return true;
 }
@@ -4256,7 +5717,8 @@ bool Maps::renderRollingForeground() {
   lv_obj_center(Maps::canvasForeground);
 
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
-  if (style.labelDensity != 0 && labelFontAsset.healthy()) {
+  if (style.labelDensity != 0 &&
+      streetLabelFontHealthy.load(std::memory_order_acquire)) {
     if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache) ||
         !drawStreetLabels(Maps::viewPort, Maps::memCache,
                           Maps::canvasForeground, rollingRasterWindow.zoom,
@@ -4359,6 +5821,7 @@ bool Maps::buildRollingRasterWindow(uint8_t requestedZoom,
     for (MapBlock *block : Maps::memCache.blocks)
       delete block;
     Maps::memCache.blocks.clear();
+    cachedBlockCount.store(0, std::memory_order_release);
   }
   if (!ensureMapScreenBuffer(gridSize)) {
     restoreVisibleFrameAfterRollingBuildFailure(viewportWidth,
@@ -4576,17 +6039,8 @@ bool Maps::settleRollingRasterWindow() {
 }
 
 bool Maps::hasPinchZoomOutBackdrop(uint8_t baseZoom) const {
-  const uint16_t canvasHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  return pinchZoomOutBackdrop.prepared &&
-         pinchZoomOutBackdrop.baseZoom ==
-             map_transform::clampRuntimeZoom(baseZoom) &&
-         pinchZoomOutBackdrop.center.x == Maps::point.x &&
-         pinchZoomOutBackdrop.center.y == Maps::point.y &&
-         std::fabs(pinchZoomOutBackdrop.rotation - visibleMapRotation()) <
-             0.0001 &&
-         pinchZoomOutBackdrop.canvasHeight == canvasHeight &&
-         Maps::canvasMapTemp != nullptr;
+  (void)baseZoom;
+  return false;
 }
 
 void Maps::invalidatePinchZoomOutBackdrop() {
@@ -4598,93 +6052,14 @@ void Maps::invalidatePinchZoomOutBackdrop() {
   lv_image_set_scale(Maps::canvasMapTemp, LV_SCALE_NONE);
   lv_image_set_pivot(Maps::canvasMapTemp, 0, 0);
   lv_obj_add_flag(Maps::canvasMapTemp, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_center(Maps::canvasMapTemp);
 }
 
 bool Maps::preparePinchZoomOutBackdrop(uint8_t baseZoom) {
-  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
-  baseZoom = map_transform::clampRuntimeZoom(baseZoom);
-  if (baseZoom >= map_transform::kMaximumRuntimeZoom ||
-      Maps::canvasMapTemp == nullptr || pinchPresentation.active ||
-      pinchPresentation.settlementPending || dragPreviewController.active() ||
-      dragPreviewController.settlementPending()) {
-    return false;
-  }
-  if (hasPinchZoomOutBackdrop(baseZoom))
-    return true;
-
-  invalidatePinchZoomOutBackdrop();
-  const uint16_t canvasHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  const uint32_t backdropStride = lv_draw_buf_width_to_stride(
-      Maps::mapScrWidth, LV_COLOR_FORMAT_RGB565);
-  const size_t backdropSize = backdropStride * canvasHeight;
-  if (backdropSize > bufMapTempSize)
-    return false;
-  // Rolling edge renders leave the hidden canvas bound to a single scratch
-  // cell. Rebind it to a complete viewport before preparing the pinch
-  // backdrop used by zoom levels 1...4.
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, Maps::mapScrWidth,
-                       canvasHeight, LV_COLOR_FORMAT_RGB565);
-  lv_obj_center(Maps::canvasMapTemp);
-  const uint8_t backdropZoom = map_transform::kMaximumRuntimeZoom;
-  const double backdropRotation = visibleMapRotation();
-  ViewPort backdropViewPort;
-  backdropViewPort.zoom = backdropZoom;
-  backdropViewPort.setCenter(Maps::point);
-  const auto backdropProjection = makeMapProjection(
-      backdropViewPort.rasterOriginX, backdropViewPort.rasterOriginY,
-      backdropViewPort.rasterCellOffsetX,
-      backdropViewPort.rasterCellOffsetY, backdropZoom, backdropRotation,
-      Maps::mapScrWidth, canvasHeight, map_projection::Mode::Flat);
-
-  const bool previousMapFound = Maps::isMapFound;
-  const tileBounds previousBounds = Maps::totalBounds;
-  const uint16_t previousWptX = Maps::wptPosX;
-  const uint16_t previousWptY = Maps::wptPosY;
-  auto restoreVisibleMapState = [&]() {
-    Maps::isMapFound = previousMapFound;
-    Maps::totalBounds = previousBounds;
-    Maps::wptPosX = previousWptX;
-    Maps::wptPosY = previousWptY;
-  };
-
-  ESP_LOGI(TAG, "Preparing pinch backdrop: baseZoom=%u renderZoom=%u",
-           (unsigned)baseZoom, (unsigned)backdropZoom);
-  if (!Maps::getMapBlocks(backdropViewPort.bbox, Maps::memCache) ||
-      !Maps::readVectorMap(backdropViewPort, Maps::memCache,
-                           Maps::canvasMapTemp, backdropZoom,
-                           backdropRotation, backdropProjection)) {
-    restoreVisibleMapState();
-    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted");
-    return false;
-  }
-
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    restoreVisibleMapState();
-    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted before completion");
-    return false;
-  }
-
-  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(Maps::canvasMapTemp, backdropProjection);
-  }
-
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    restoreVisibleMapState();
-    ESP_LOGI(TAG, "Pinch backdrop preparation interrupted after route");
-    return false;
-  }
-
-  restoreVisibleMapState();
-  pinchZoomOutBackdrop.prepared = true;
-  pinchZoomOutBackdrop.baseZoom = baseZoom;
-  pinchZoomOutBackdrop.renderZoom = backdropZoom;
-  pinchZoomOutBackdrop.center = Maps::point;
-  pinchZoomOutBackdrop.rotation = backdropRotation;
-  pinchZoomOutBackdrop.canvasHeight = canvasHeight;
-  ESP_LOGI(TAG, "Pinch backdrop ready");
-  return true;
+  (void)baseZoom;
+  // A second synchronous vector render into the worker-owned back buffer is
+  // forbidden. Pinch preview scales the last complete front frame; release
+  // submits a normal latest-wins render at the target zoom.
+  return false;
 }
 
 void Maps::applyDragPreviewOffset(map_drag_preview::Offset offset) {
@@ -4836,6 +6211,8 @@ bool Maps::beginDragPreview(uint8_t baseZoom) {
   if (!dragPreviewController.begin())
     return false;
 
+  if (Maps::canvasForeground != nullptr)
+    lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
   hideRollingForeground();
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
   if (dragPresentation.hasBackdrop && Maps::canvasMapTemp != nullptr) {
@@ -4945,6 +6322,8 @@ void Maps::handoffDragPreviewToPinch() {
 }
 
 void Maps::resetDragPresentationVisuals() {
+  lastFramePresentationSignature = 0;
+  lastForegroundPresentationSignature = 0;
   if (Maps::canvasMap != nullptr) {
     if (dragPresentation.usesRollingRaster && rollingRasterWindow.valid) {
       positionRollingRasterCanvas(Maps::point);
@@ -4994,6 +6373,8 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   }
 
   pinchPresentation.active = true;
+  if (Maps::canvasForeground != nullptr)
+    lv_obj_add_flag(Maps::canvasForeground, LV_OBJ_FLAG_HIDDEN);
   hideRollingForeground();
   pinchPresentation.capturedFollowGps = Maps::followGps;
   pinchPresentation.baseZoom = map_transform::clampRuntimeZoom(baseZoom);
@@ -5164,6 +6545,8 @@ void Maps::updatePinchPreview(double previewRatio, int16_t midpointX,
 }
 
 void Maps::resetPinchPresentationVisuals() {
+  lastFramePresentationSignature = 0;
+  lastForegroundPresentationSignature = 0;
   if (Maps::canvasMap != nullptr) {
     lv_anim_delete(Maps::canvasMap, setPinchCanvasScale);
     lv_image_set_scale(Maps::canvasMap, LV_SCALE_NONE);
@@ -5330,7 +6713,7 @@ void Maps::updateArrowColor() {
   if (!Maps::canvasArrow)
     return;
 
-  updateCurrentPositionMarker(Maps::canvasArrow, true);
+  updateCurrentPositionMarker(Maps::canvasArrow, 0.0, true);
 }
 
 /**
@@ -5450,12 +6833,26 @@ void Maps::displayMap() {
 
 void Maps::updatePositionOverlay() {
   const uint32_t displayStartMs = MAPIO_TIME_MS();
+  // Drag/pinch preview code owns the marker transform together with the base
+  // image. A normal 30 ms presentation tick must not overwrite that preview
+  // or its settlement endpoint while a replacement frame is pending.
+  if (presentationGestureOwnsTransforms())
+    return;
   // Update Arrow Position
   if (Maps::canvasArrow) {
-    if (!Maps::isMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
+    if (!publishedMapFound || !isCurrentPositionVisible(mapRenderSettings)) {
       lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-      MAPIO_LOG("MAPIO: current-position marker hidden mapFound=%d visible=%d\n",
-                Maps::isMapFound, isCurrentPositionVisible(mapRenderSettings));
+      return;
+    }
+    const bool navigationActive =
+        routeOverlay.hasRoute() || hasCurrentNavigationData();
+    if (navigationActive &&
+        (!hasPresentedPose || !presentedPose.headingValid)) {
+      // A navigation glyph has directional meaning. Until the new session has
+      // a measured course, route bearing, or remembered in-session course,
+      // hiding it is the only honest presentation; zero degrees would recreate
+      // the false-north bug that the explicit heading contract removes.
+      lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       return;
     }
 
@@ -5466,19 +6863,33 @@ void Maps::updatePositionOverlay() {
         gui_layout::centeredViewportOrigin(containerWidth, Maps::mapScrWidth);
     const int16_t mapOriginY =
         gui_layout::centeredViewportOrigin(containerHeight, h);
-    const bool useSharedProjection =
-        isMapGuidanceScreenActive() && hasVisibleProjection;
+    const bool useSharedProjection = hasVisibleProjection;
     const int16_t anchorX = useSharedProjection
                                 ? static_cast<int16_t>(
                                       map_transform::quantizePixel(
-                                          visibleProjection.anchorX()))
+                                          visibleProjection.anchorX()) -
+                                      visibleRenderResult.overscanPixels)
                                 : mapAnchorXForWidth(Maps::mapScrWidth);
     const int16_t anchorY = useSharedProjection
                                 ? static_cast<int16_t>(
                                       map_transform::quantizePixel(
-                                          visibleProjection.anchorY()))
+                                          visibleProjection.anchorY()) -
+                                      visibleRenderResult.overscanPixels)
                                 : mapAnchorYForHeight(h);
-    updateCurrentPositionMarker(Maps::canvasArrow);
+    double displayedMapRotation = visibleRenderResult.rotationRad;
+    if (rotationMode == ROT_COURSE_UP && hasPresentedPose &&
+        presentedPose.headingValid) {
+      displayedMapRotation =
+          -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+    } else if (rotationMode == ROT_NORTH_UP) {
+      displayedMapRotation = 0.0;
+    }
+    const double markerRotation =
+        hasPresentedPose && presentedPose.headingValid
+            ? map_presentation::markerRotationDegrees(
+                  presentedPose.headingDegrees, displayedMapRotation)
+            : 0.0;
+    updateCurrentPositionMarker(Maps::canvasArrow, markerRotation);
     const int16_t markerVisualHalf = currentMarkerSize() / 2;
     int16_t x, y;
 
@@ -5490,8 +6901,6 @@ void Maps::updatePositionOverlay() {
       y = mapOriginY + anchorY - markerVisualHalf;
       lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_pos(Maps::canvasArrow, x, y);
-      ESP_LOGI(TAG, "GPS indicator: followGps mode, anchor screen pos(%d,%d)",
-               x, y);
     } else {
       // Calculate position relative to viewport center
       // Convert GPS lat/lon to Mercator coordinates
@@ -5501,13 +6910,41 @@ void Maps::updatePositionOverlay() {
       if (useSharedProjection) {
         const auto markerPoint = visibleProjection.projectWorld(
             {static_cast<double>(gpsX), static_cast<double>(gpsY)});
-        if (!markerPoint.valid) {
+        const map_transform::WorldPoint pivotWorld =
+            visibleRenderResult.followPosition && hasPresentedPose
+                ? map_transform::WorldPoint{presentedPose.position.x,
+                                            presentedPose.position.y}
+                : visibleRenderResult.center;
+        const auto projectedPivot = visibleProjection.projectWorld(pivotWorld);
+        if (!markerPoint.valid || !projectedPivot.valid) {
           lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
           return;
         }
-        x = mapOriginX + map_transform::quantizePixel(markerPoint.x) -
+
+        double desiredRotation = visibleRenderResult.rotationRad;
+        if (rotationMode == ROT_COURSE_UP && hasPresentedPose &&
+            presentedPose.headingValid) {
+          desiredRotation = -presentedPose.headingDegrees *
+                            3.14159265358979323846 / 180.0;
+        } else if (rotationMode == ROT_NORTH_UP) {
+          desiredRotation = 0.0;
+        }
+        const double rotationDelta = map_presentation::signedHeadingDelta(
+            visibleRenderResult.rotationRad * 180.0 /
+                3.14159265358979323846,
+            desiredRotation * 180.0 / 3.14159265358979323846) *
+            3.14159265358979323846 / 180.0;
+        const auto presentedPoint = map_presentation::presentFramePoint(
+            {markerPoint.x, markerPoint.y},
+            {projectedPivot.x, projectedPivot.y},
+            {visibleProjection.anchorX() -
+                 visibleRenderResult.overscanPixels,
+             visibleProjection.anchorY() -
+                 visibleRenderResult.overscanPixels},
+            rotationDelta);
+        x = mapOriginX + map_transform::quantizePixel(presentedPoint.x) -
             markerVisualHalf;
-        y = mapOriginY + map_transform::quantizePixel(markerPoint.y) -
+        y = mapOriginY + map_transform::quantizePixel(presentedPoint.y) -
             markerVisualHalf;
       } else {
         const auto markerDelta = map_transform::worldToScreen(
@@ -5517,9 +6954,6 @@ void Maps::updatePositionOverlay() {
         x = mapOriginX + round(markerDelta.x) + anchorX - markerVisualHalf;
         y = mapOriginY + round(markerDelta.y) + anchorY - markerVisualHalf;
       }
-
-      ESP_LOGI(TAG, "GPS indicator updated outside follow mode zoom=%d",
-               zoom);
 
       lv_obj_set_pos(Maps::canvasArrow, x, y);
 
@@ -5532,7 +6966,6 @@ void Maps::updatePositionOverlay() {
           centerY < mapOriginY - markerVisualHalf ||
           centerY > mapOriginY + (int16_t)h + markerVisualHalf) {
         lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
-        ESP_LOGI(TAG, "GPS indicator hidden: off-screen at (%d,%d)", x, y);
       } else {
         lv_obj_clear_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
       }
@@ -5549,286 +6982,25 @@ void Maps::updatePositionOverlay() {
  *
  * @param zoom -> Zoom Level
  */
-bool Maps::generateVectorMap(uint8_t zoom) {
-  power_management::ScopedLock powerLock(power_management::LockDomain::Map);
-  power_metrics::MapRenderMeasurement powerMeasurement;
-#if POWER_METRICS
-  uint32_t powerBlocksUs = 0;
-  uint32_t powerDrawUs = 0;
-  uint32_t powerRouteUs = 0;
-#endif
-  const uint32_t generateStartMs = MAPIO_TIME_MS();
-  if (Maps::canvasMap == nullptr || Maps::canvasMapTemp == nullptr) {
-    ESP_LOGE(TAG, "Map render skipped: canvas double buffer is unavailable");
+bool Maps::generateVectorMap(uint8_t requestedZoom) {
+  (void)recoverRenderWorkerIfNeeded();
+  if (canvasMap == nullptr || canvasMapTemp == nullptr ||
+      renderWorkerTaskHandle == nullptr) {
     return false;
   }
 
-  // The hidden buffer is about to become the render target. Any prepared
-  // zoom-out backdrop in it is no longer reusable.
-  invalidatePinchZoomOutBackdrop();
-
-  Maps::mapTileSize = Maps::vectorMapTileSize;
-  Maps::zoomLevel = zoom;
-
-  // Compute the current course-up request once per generation. A pinch
-  // settlement deliberately renders with the rotation of the pixels the
-  // focal calculation started from; a changed heading is rendered next.
-  double requestedRotation = 0.0;
-  if (rotationMode == ROT_COURSE_UP) {
-    uint16_t courseUpHeading = gps.gpsData.heading;
-    const char *courseUpSource = "gps";
-    uint16_t routeHeading = 0;
-    if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
-                                 routeHeading)) {
-      courseUpHeading = routeHeading;
-      courseUpSource = "route";
-    }
-
-    // Use negative heading to rotate map so the selected navigation/course
-    // direction points up.
-    requestedRotation = -DEG2RAD(courseUpHeading);
-    ESP_LOGI(TAG, "Course-Up: heading=%u source=%s gpsHeading=%u",
-             (unsigned)courseUpHeading, courseUpSource,
-             (unsigned)gps.gpsData.heading);
-  }
-  const bool frozenPinchSettlement = isPinchSettlementPending();
-  rotationRad = map_transform::renderRotationForSettlement(
-      frozenPinchSettlement, pinchPresentation.baseRotation,
-      requestedRotation);
-  if (frozenPinchSettlement &&
-      map_transform::rotationNeedsRefresh(rotationRad, requestedRotation)) {
-    deferredVectorRedraw = true;
-  }
-
-  const uint16_t viewportHeight =
-      mapSet.mapFullScreen ? Maps::mapScrFull : Maps::mapScrHeight;
-  if (shouldUseRollingRasterWindow(zoom)) {
-    const uint64_t signature = rollingRasterSignature();
-    bool completed = false;
-    if (rollingRasterCompatible(zoom, Maps::mapScrWidth, viewportHeight,
-                                signature)) {
-      completed = settleRollingRasterWindow();
-    } else {
-      completed = buildRollingRasterWindow(zoom, Maps::mapScrWidth,
-                                            viewportHeight, signature);
-    }
-    if (!completed)
-      return false;
-
-#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
-    const bool completedPinchSettlement = isPinchSettlementPending();
-#endif
-    if (isPinchSettlementPending()) {
-      // A rolling-window settlement can reposition the oversized canvas as
-      // its origin advances. Animate from that completed position, not the
-      // position captured from the previous raster/zoom.
-      pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
-      pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
-    }
-    finishDragSettlement();
-    finishPinchSettlement();
-    if (!renderRollingForeground()) {
-      MAPIO_LOG("MAPIO: rolling-foreground ok=0 zoom=%u\n", zoom);
-      return false;
-    }
-    MAPIO_LOG("MAPIO: rolling-generate zoom=%u totalMs=%lu cache=%u "
-              "hasRoute=%d\n",
-              zoom, (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
-              (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
-#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
-    if (completedPinchSettlement) {
-      Serial.printf(
-          "Pinch diagnostic: rolling_settlement_ms=%lu free_psram=%u "
-          "largest_psram=%u\n",
-          static_cast<unsigned long>(MAPIO_TIME_MS() - generateStartMs),
-          heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-    }
-#endif
-    return true;
-  }
-
-  invalidateRollingRasterWindow();
-  const map_drag_preview::CanvasExtent renderExtent = {Maps::mapScrWidth,
-                                                        viewportHeight};
-  const uint32_t renderStride = lv_draw_buf_width_to_stride(
-      renderExtent.width, LV_COLOR_FORMAT_RGB565);
-  const size_t renderSize = renderStride * renderExtent.height;
-  if (renderSize > bufMapTempSize || renderSize > bufMapScreenSize) {
-    ESP_LOGE(TAG,
-             "Map render skipped: %ux%u frame needs %u bytes, screen=%u "
-             "temp=%u",
-             (unsigned)renderExtent.width, (unsigned)renderExtent.height,
-             (unsigned)renderSize, (unsigned)bufMapScreenSize,
-             (unsigned)bufMapTempSize);
+  mapTileSize = vectorMapTileSize;
+  zoomLevel = map_transform::clampRuntimeZoom(requestedZoom);
+  RenderRequest request;
+  if (!buildRenderRequest(zoomLevel, millis(), request)) {
+    // Course-up deliberately holds the last good frame until either a valid
+    // measured course or route-segment bearing exists. This is a deferred
+    // state, not an allocation/render failure and must never become north-up.
+    // Return false so the UI scheduler does not mark a request as submitted or
+    // clear the dirty state when no immutable job was actually queued.
     return false;
   }
-
-  // The hidden scratch buffer receives the complete target geometry before it
-  // is copied into the visible allocation. Interrupted renders never touch the
-  // visible frame.
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
-                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
-  lv_obj_center(Maps::canvasMapTemp);
-
-  // Viewport
-  Maps::viewPort.zoom = zoom;
-  Maps::viewPort.setCenterForCanvas(Maps::point, renderExtent.width,
-                                    renderExtent.height, rotationRad);
-  const bool birdsEyeActive =
-      navigation_content_mode::usesMapGuidanceBirdsEye(
-          isMapGuidanceScreenActive(),
-          mapRenderSettings.mapNavigationBirdsEyeEnabled);
-  const auto frameProjection = makeMapProjection(
-      Maps::viewPort.rasterOriginX, Maps::viewPort.rasterOriginY,
-      Maps::viewPort.rasterCellOffsetX, Maps::viewPort.rasterCellOffsetY, zoom,
-      rotationRad, renderExtent.width, renderExtent.height,
-      birdsEyeActive ? map_projection::Mode::BirdsEye
-                     : map_projection::Mode::Flat,
-      map_projection::birdsEyePerspectiveForValue(
-          mapRenderSettings.mapNavigationBirdsEyePerspective));
-  if (frameProjection.isBirdsEye()) {
-    const auto bounds = frameProjection.worldBounds(4.0);
-    Maps::viewPort.bbox.min =
-        Point32(static_cast<int32_t>(std::floor(bounds.min.x)),
-                static_cast<int32_t>(std::floor(bounds.min.y)));
-    Maps::viewPort.bbox.max =
-        Point32(static_cast<int32_t>(std::ceil(bounds.max.x)),
-                static_cast<int32_t>(std::ceil(bounds.max.y)));
-  }
-
-  // Get Map Blocks
-  const uint32_t blocksStartMs = MAPIO_TIME_MS();
-#if POWER_METRICS
-  const uint32_t powerBlocksStartUs = micros();
-#endif
-  if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache)) {
-#if POWER_METRICS
-    powerBlocksUs = micros() - powerBlocksStartUs;
-    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
-                                       powerRouteUs);
-#endif
-    log_i("Map block loading interrupted to service a screen-cycle input");
-    return false;
-  }
-#if POWER_METRICS
-  powerBlocksUs = micros() - powerBlocksStartUs;
-  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
-                                     powerRouteUs);
-#endif
-  const uint32_t blocksMs = MAPIO_TIME_MS() - blocksStartMs;
-
-  ESP_LOGI(TAG,
-           "generateVectorMap: zoom=%d center(%d, %d) bbox[(%d, %d), (%d, %d)]",
-           zoom, Maps::viewPort.center.x, Maps::viewPort.center.y,
-           Maps::viewPort.bbox.min.x, Maps::viewPort.bbox.min.y,
-           Maps::viewPort.bbox.max.x, Maps::viewPort.bbox.max.y);
-
-  // Read Vector Map to Canvas (Pass calculated rotation)
-  const uint32_t drawStartMs = MAPIO_TIME_MS();
-#if POWER_METRICS
-  const uint32_t powerDrawStartUs = micros();
-#endif
-  if (!Maps::readVectorMap(Maps::viewPort, Maps::memCache, Maps::canvasMapTemp,
-                           zoom, rotationRad, frameProjection)) {
-#if POWER_METRICS
-    powerDrawUs = micros() - powerDrawStartUs;
-    powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
-                                       powerRouteUs);
-#endif
-    log_i("Map render interrupted to service a screen-cycle input");
-    return false;
-  }
-#if POWER_METRICS
-  powerDrawUs = micros() - powerDrawStartUs;
-  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
-                                     powerRouteUs);
-#endif
-  const uint32_t drawMs = MAPIO_TIME_MS() - drawStartMs;
-
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    log_i("Map render interrupted before route overlay");
-    return false;
-  }
-
-  // Draw route overlay from iOS navigation (if available)
-  const uint32_t routeStartMs = MAPIO_TIME_MS();
-#if POWER_METRICS
-  const uint32_t powerRouteStartUs = micros();
-#endif
-  ESP_LOGI(TAG, "Checking for route overlay: hasRoute=%d",
-           routeOverlay.hasRoute());
-  if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    ESP_LOGI(TAG, "Drawing route overlay: zoom=%d points=%d", zoom,
-             routeOverlay.getPointCount());
-
-    routeOverlay.drawRoute(Maps::canvasMapTemp, frameProjection);
-    ESP_LOGI(TAG, "Route overlay draw complete (rotation=%.2f rad, canvasH=%d)",
-             rotationRad, renderExtent.height);
-  } else if (routeOverlay.hasRoute()) {
-    ESP_LOGI(TAG, "Route overlay hidden by visibility mask");
-  } else {
-    ESP_LOGI(TAG, "No route overlay to draw (no route data)");
-  }
-#if POWER_METRICS
-  powerRouteUs = micros() - powerRouteStartUs;
-  powerMeasurement.setStageDurations(powerBlocksUs, powerDrawUs,
-                                     powerRouteUs);
-#endif
-  const uint32_t routeMs = MAPIO_TIME_MS() - routeStartMs;
-
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    log_i("Map render interrupted before presenting completed frame");
-    return false;
-  }
-
-  const size_t rowBytes =
-      static_cast<size_t>(renderExtent.width) * sizeof(uint16_t);
-  auto *front = static_cast<uint8_t *>(bufMapScreen);
-  const auto *completedFrame = static_cast<const uint8_t *>(bufMapTemp);
-  for (uint16_t y = 0; y < renderExtent.height; ++y) {
-    memcpy(front + (static_cast<size_t>(y) * renderStride),
-           completedFrame + (static_cast<size_t>(y) * renderStride), rowBytes);
-  }
-  lv_canvas_set_buffer(Maps::canvasMap, bufMapScreen, renderExtent.width,
-                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
-  lv_canvas_set_buffer(Maps::canvasMapTemp, bufMapTemp, renderExtent.width,
-                       renderExtent.height, LV_COLOR_FORMAT_RGB565);
-  lv_obj_center(Maps::canvasMap);
-  lv_obj_center(Maps::canvasMapTemp);
-  visibleProjection = frameProjection;
-  hasVisibleProjection = true;
-  if (isPinchSettlementPending()) {
-    pinchPresentation.canvasBaseX = lv_obj_get_x_aligned(Maps::canvasMap);
-    pinchPresentation.canvasBaseY = lv_obj_get_y_aligned(Maps::canvasMap);
-  }
-#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
-  const bool completedPinchSettlement = isPinchSettlementPending();
-#endif
-  finishDragSettlement();
-  finishPinchSettlement();
-
-  MAPIO_LOG("MAPIO: generate zoom=%u mode=%s blocksMs=%lu drawMs=%lu "
-            "routeMs=%lu totalMs=%lu cache=%u hasRoute=%d\n",
-            zoom, frameProjection.isBirdsEye() ? "birds-eye" : "flat",
-            (unsigned long)blocksMs, (unsigned long)drawMs,
-            (unsigned long)routeMs,
-            (unsigned long)(MAPIO_TIME_MS() - generateStartMs),
-            (unsigned)Maps::memCache.blocks.size(), routeOverlay.hasRoute());
-#ifdef WAVESHARE_TOUCH_DIAGNOSTICS
-  if (completedPinchSettlement) {
-    Serial.printf(
-        "Pinch diagnostic: settlement_ms=%lu free_psram=%u "
-        "largest_psram=%u\n",
-        static_cast<unsigned long>(MAPIO_TIME_MS() - generateStartMs),
-        heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-  }
-#endif
-  // NOTE: isPosMoved flag is now cleared in updateMap() after display,
-  // not here, to allow queued BLE updates to trigger new regenerations
-  powerMeasurement.finish(true);
-  return true;
+  return submitRenderRequest(request);
 }
 
 /**

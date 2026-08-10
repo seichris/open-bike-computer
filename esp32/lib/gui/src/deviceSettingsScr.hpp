@@ -12,7 +12,7 @@
 #include "upgradeScr.hpp"
 #include "lvglSetup.hpp"
 #include "firmUpgrade.hpp"
-#include "ride_automation_runtime.hpp"
+#include "../../ride_automation/ride_automation_runtime.hpp"
 
 static lv_obj_t *deviceSettingsOptions;
 

@@ -1,4 +1,45 @@
+import Combine
 import Foundation
+
+protocol RideAutomationBLETransport: AnyObject {
+    var onRideAutomationFrame: ((RideAutomationFrame) -> Void)? { get set }
+    var connectedDeviceID: String? { get }
+    var supportsRideAutomation: Bool { get }
+    var rideAutomationSupportPublisher: AnyPublisher<Bool, Never> { get }
+    var rideAutomationDevicePublisher: AnyPublisher<String?, Never> { get }
+    func sendRideAutomationFrame(_ frame: RideAutomationFrame) -> Bool
+}
+
+@MainActor
+protocol RideAutomationWorkoutControlling: AnyObject {
+    var rideAutomationPresentation: WorkoutMirrorPresentationV1 { get }
+    var rideAutomationPresentationPublisher:
+        AnyPublisher<WorkoutMirrorPresentationV1, Never> { get }
+    func startOutdoorCyclingOnWatch() -> Bool
+    func requestAutomaticTransition(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool
+    func requestAutomaticTransitionConfirmation(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool
+    func requestAutomaticStartAnnotation(
+        context: WorkoutControlContextV1
+    ) -> Bool
+}
+
+@MainActor
+protocol RideAutomationWatchAvailabilityControlling: AnyObject {
+    @discardableResult
+    func setPendingAutomaticStartContext(
+        _ context: WorkoutControlContextV1?
+    ) -> Bool
+    func setConfirmedRideDetectionSettings(
+        _ settings: RideDetectionSettings?,
+        generation: UInt32?
+    )
+}
 
 nonisolated struct RideAutomationDecisionIdentity:
     Codable, Hashable, Sendable {
@@ -22,7 +63,7 @@ nonisolated enum RideAutomationAdmissionPolicy {
         settings: RideDetectionSettings,
         workoutState: WorkoutSessionStateV1,
         pauseOrigin: WorkoutTransitionOrigin?,
-        expectedSessionIdentityHash: UInt32?,
+        expectedSessionID: UUID?,
         highestDecisionSequence: UInt32
     ) -> RideAutomationAdmission {
         guard frame.kind == .decision,
@@ -54,8 +95,8 @@ nonisolated enum RideAutomationAdmissionPolicy {
             guard workoutState == .running else {
                 return .reject(.stale)
             }
-            guard let expectedSessionIdentityHash,
-                  frame.sessionIdentityHash == expectedSessionIdentityHash else {
+            guard let expectedSessionID,
+                  frame.sessionID == expectedSessionID else {
                 return .reject(.sessionMismatch)
             }
             return .pause
@@ -67,8 +108,8 @@ nonisolated enum RideAutomationAdmissionPolicy {
                   pauseOrigin == .automatic else {
                 return .reject(.stale)
             }
-            guard let expectedSessionIdentityHash,
-                  frame.sessionIdentityHash == expectedSessionIdentityHash else {
+            guard let expectedSessionID,
+                  frame.sessionID == expectedSessionID else {
                 return .reject(.sessionMismatch)
             }
             return .resume
@@ -77,19 +118,6 @@ nonisolated enum RideAutomationAdmissionPolicy {
         }
     }
 
-    static func sessionIdentityHash(_ sessionID: UUID?) -> UInt32? {
-        guard let sessionID else { return nil }
-        var bytes = sessionID.uuid
-        let hash = withUnsafeBytes(of: &bytes) { rawBuffer in
-            rawBuffer.reduce(UInt32(2_166_136_261)) { hash, byte in
-                (hash ^ UInt32(byte)) &* 16_777_619
-            }
-        }
-        // Zero is the on-wire "identity unavailable" sentinel. Preserve the
-        // compact FNV identity while ensuring a real Watch session can never
-        // be mistaken for an absent one.
-        return hash == 0 ? 1 : hash
-    }
 }
 
 nonisolated enum RideAutomationMonotonicClock {

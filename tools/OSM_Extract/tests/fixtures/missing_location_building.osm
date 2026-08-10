@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="open-bike-computer-tests">
+  <node id="1" lat="0.001" lon="0.001" version="1"/>
+  <node id="2" lat="0.001" lon="0.002" version="1"/>
+  <node id="3" lat="0.002" lon="0.002" version="1"/>
+  <way id="10" version="1">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="999"/><nd ref="1"/>
+    <tag k="building" v="yes"/>
+  </way>
+</osm>

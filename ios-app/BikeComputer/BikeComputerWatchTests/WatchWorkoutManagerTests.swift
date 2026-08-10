@@ -21,6 +21,291 @@ private enum SegmentEventProbeError: Error {
 
 @MainActor
 final class WatchWorkoutManagerTests: XCTestCase {
+    func testWorkoutTransportSendsIdleAsOneUnstampedCoreFrame() throws {
+        let frames = try XCTUnwrap(WorkoutDeviceFrameBuilder.frames(
+            for: WorkoutDeviceTelemetrySample(
+                state: .idle,
+                sessionToken: 0,
+                hasLiveNumerics: false,
+                isCurrentSnapshot: true,
+                elapsedSeconds: nil,
+                distanceMeters: nil,
+                speedMetersPerSecond: nil,
+                currentHeartRateBPM: nil,
+                averageHeartRateBPM: nil,
+                activeEnergyKilocalories: nil,
+                cyclingPowerWatts: nil,
+                cyclingCadenceRPM: nil,
+                currentHeartRateZone: nil,
+                altitudeMeters: nil,
+                heartRateZoneCount: nil,
+                sourceFlags: []
+            )
+        ))
+
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
+            generation: 2
+        )
+
+        XCTAssertEqual(payloads, [frames.core])
+        XCTAssertEqual(payloads[0][1] >> 6, 0)
+    }
+
+    func testWorkoutTransportStampsActiveCoreAndExtendedPair() throws {
+        let frames = try XCTUnwrap(WorkoutDeviceFrameBuilder.frames(
+            for: WorkoutDeviceTelemetrySample(
+                state: .running,
+                sessionToken: 42,
+                hasLiveNumerics: true,
+                isCurrentSnapshot: true,
+                elapsedSeconds: 10,
+                distanceMeters: 20,
+                speedMetersPerSecond: 3,
+                currentHeartRateBPM: 120,
+                averageHeartRateBPM: 110,
+                activeEnergyKilocalories: 5,
+                cyclingPowerWatts: 200,
+                cyclingCadenceRPM: 80,
+                currentHeartRateZone: 2,
+                altitudeMeters: 15,
+                heartRateZoneCount: 5,
+                sourceFlags: [.currentSnapshot]
+            )
+        ))
+
+        let payloads = WorkoutDeviceFrameBuilder.transportFrames(
+            for: frames,
+            generation: 2
+        )
+
+        XCTAssertEqual(payloads.count, 2)
+        XCTAssertEqual(payloads[0][1] >> 6, 2)
+        XCTAssertEqual(payloads[1][1] >> 6, 2)
+        XCTAssertNotEqual(payloads[0][1] >> 6, 0)
+    }
+
+    func testWorkoutGPSUpdateCarriesFreshWatchLocationAndRideProgress()
+        throws
+    {
+        let capturedAt = Date(timeIntervalSince1970: 1_786_249_600)
+        let snapshot = WorkoutSnapshotV1(
+            state: .running,
+            elapsedTime: WorkoutMetricV1(
+                value: 42,
+                unit: .seconds,
+                capturedAt: capturedAt
+            ),
+            cyclingDistance: WorkoutMetricV1(
+                value: 123,
+                unit: .meters,
+                capturedAt: capturedAt
+            ),
+            location: WorkoutLocationV1(
+                latitude: 31.2304,
+                longitude: 121.4737,
+                capturedAt: capturedAt,
+                horizontalAccuracy: 7,
+                altitude: 12,
+                verticalAccuracy: 4,
+                course: nil,
+                speed: 3.5
+            )
+        )
+
+        let update = try XCTUnwrap(
+            WorkoutDeviceFrameBuilder.gpsUpdate(for: snapshot)
+        )
+
+        XCTAssertEqual(update.latitude, 31.2304)
+        XCTAssertEqual(update.longitude, 121.4737)
+        XCTAssertEqual(update.horizontalAccuracyMeters, 7)
+        XCTAssertNil(update.courseDegrees)
+        XCTAssertEqual(update.speedMetersPerSecond, 3.5)
+        XCTAssertEqual(update.altitudeMeters, 12)
+        XCTAssertEqual(update.distanceTraveledMeters, 123)
+        XCTAssertEqual(update.elapsedSeconds, 42)
+    }
+
+    func testWorkoutGPSUpdateRejectsInactiveAndInvalidLocation() {
+        let capturedAt = Date()
+        let location = WorkoutLocationV1(
+            latitude: 91,
+            longitude: 121.4737,
+            capturedAt: capturedAt,
+            horizontalAccuracy: 7,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: nil
+        )
+
+        XCTAssertNil(WorkoutDeviceFrameBuilder.gpsUpdate(for: .init(
+            state: .running,
+            location: location
+        )))
+        XCTAssertNil(WorkoutDeviceFrameBuilder.gpsUpdate(for: .init(
+            state: .idle,
+            location: WorkoutLocationV1(
+                latitude: 31.2304,
+                longitude: 121.4737,
+                capturedAt: capturedAt,
+                horizontalAccuracy: 7,
+                altitude: nil,
+                verticalAccuracy: nil,
+                course: nil,
+                speed: nil
+            )
+        )))
+    }
+
+    func testDirectRideAutomationPersistsBeforePauseAndSurvivesRelaunch()
+        throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let startDate = Date().addingTimeInterval(-60)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var pauseCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            remotePauseOperation: { _ in pauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let frame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 7,
+            decisionSequence: 11,
+            profileVersion: 1,
+            sessionID: identity.sessionID
+        )
+
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(30)
+            ),
+            .accepted
+        )
+        XCTAssertEqual(pauseCount, 1)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.pendingTransitionContext?
+                .decisionSequence,
+            11
+        )
+        XCTAssertEqual(
+            recoveryStore.rideAutomationDecisionWatermark(
+                deviceID: "bicino-175",
+                rideGeneration: 7
+            ),
+            11
+        )
+
+        let relaunched = WatchWorkoutRecoveryStore(persistence: persistence)
+        XCTAssertEqual(
+            relaunched.rideAutomationDecisionWatermark(
+                deviceID: "bicino-175",
+                rideGeneration: 7
+            ),
+            11,
+            "a lost confirmation cannot replay across Watch app relaunch"
+        )
+    }
+
+    func testDirectRideAutomationHonorsManualGraceAndPersistenceFailure()
+        throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let startDate = Date().addingTimeInterval(-60)
+        _ = try recoveryStore.begin(startDate: startDate)
+        let manualAt = startDate.addingTimeInterval(30)
+        try recoveryStore.confirmRideTransition(
+            origin: .manual,
+            paused: false,
+            at: manualAt,
+            detectorProfileVersion: nil
+        )
+        let identity = try XCTUnwrap(recoveryStore.recoveredIdentity)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var pauseCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            remotePauseOperation: { _ in pauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let frame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 8,
+            decisionSequence: 12,
+            profileVersion: 1,
+            sessionID: identity.sessionID
+        )
+
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: manualAt.addingTimeInterval(10)
+            ),
+            .stale
+        )
+        XCTAssertEqual(pauseCount, 0)
+
+        persistence.failsSave = true
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: manualAt.addingTimeInterval(16)
+            ),
+            .rejected
+        )
+        XCTAssertEqual(pauseCount, 0)
+        XCTAssertNil(
+            recoveryStore.recoveredIdentity?.pendingTransitionContext,
+            "HealthKit must not mutate unless automatic provenance is durable"
+        )
+    }
+
     func testLocalSegmentsRecordSequentialHealthKitEventsAndCloseAtFinish()
         async throws {
         let startDate = Date().addingTimeInterval(-60)

@@ -16,6 +16,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
+    @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var watchAvailability:
         WorkoutWatchAvailabilityMonitor
     @ObservedObject private var cyclingSensorStore:
@@ -34,6 +35,7 @@ struct SettingsView: View {
         currentLocation: CLLocation?,
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
+        routeLibrary: PhoneRouteLibrary,
         watchAvailability: WorkoutWatchAvailabilityMonitor,
         cyclingSensorStore: CyclingSensorStore? = nil,
         cyclingSensorDetectionCoordinator:
@@ -47,6 +49,7 @@ struct SettingsView: View {
         self.currentLocation = currentLocation
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
+        self.routeLibrary = routeLibrary
         self.watchAvailability = watchAvailability
         _cyclingSensorStore = ObservedObject(
             wrappedValue: cyclingSensorStore
@@ -98,6 +101,8 @@ struct SettingsView: View {
                 ) {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
+
+                SavedRoutesSettingsSection(routeLibrary: routeLibrary)
 
                 Section {
                     NavigationLink {
@@ -435,11 +440,17 @@ private struct DownloadingMapsSettingsSection: View {
                     HStack {
                         Text("Generation Progress")
                         Spacer()
-                        Text("\(generationProgress.percentage)%")
-                            .foregroundColor(.secondary)
+                        if generationProgress.displayFraction != nil {
+                            Text("\(generationProgress.percentage)%")
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    ProgressView(value: generationProgress.fraction)
-                    Text("\(generationProgress.completedBlocks) of \(generationProgress.totalBlocks) map blocks")
+                    if let fraction = generationProgress.displayFraction {
+                        ProgressView(value: fraction)
+                    } else {
+                        ProgressView()
+                    }
+                    Text(generationProgress.detail)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -1839,6 +1850,9 @@ private struct StatusValueRow: View {
         currentLocation: nil,
         offlineMapManager: OfflineMapManager(),
         firmwareUpdateManager: FirmwareUpdateManager(),
+        routeLibrary: PhoneRouteLibrary(
+            connectivity: PhoneWatchConnectivityCoordinator(session: nil)
+        ),
         watchAvailability: WorkoutWatchAvailabilityMonitor(),
         onStartTestNavigation: { _ in }
     )

@@ -188,6 +188,12 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var pendingTransitionContext: WorkoutControlContextV1? = nil
         var pendingTransitionPaused: Bool? = nil
         var pendingTransitionRequestedAt: Date? = nil
+        /// Durable direct-BLE admission watermark. This prevents a decision
+        /// whose confirmation was lost from crossing a Watch app restart and
+        /// overriding a newer manual workout transition.
+        var rideAutomationDeviceID: String? = nil
+        var rideAutomationRideGeneration: UInt32? = nil
+        var rideAutomationDecisionWatermark: UInt32? = nil
         /// A remotely requested segment boundary is journaled with the replay
         /// checkpoint before its HealthKit event write begins. This closes the
         /// crash window where the checkpoint was durable but the event was not.
@@ -719,6 +725,74 @@ nonisolated final class WatchWorkoutRecoveryStore {
         identity.pendingTransitionContext = nil
         identity.pendingTransitionPaused = nil
         identity.pendingTransitionRequestedAt = nil
+        try persist(identity)
+        self.identity = identity
+    }
+
+    func persistAutomaticTransitionRequest(
+        context: WorkoutControlContextV1,
+        paused: Bool,
+        requestedAt: Date,
+        deviceID: String
+    ) throws {
+        guard context.origin == .automatic,
+              context.automaticReason == .rideDetection,
+              context.rideGeneration.map({ $0 > 0 }) == true,
+              context.decisionSequence.map({ $0 > 0 }) == true,
+              context.detectorProfileVersion.map({ $0 > 0 }) == true,
+              !deviceID.isEmpty,
+              deviceID.utf8.count <= 128,
+              requestedAt.timeIntervalSinceReferenceDate.isFinite,
+              var identity,
+              requestedAt >= identity.startDate else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.pendingTransitionContext = context
+        identity.pendingTransitionPaused = paused
+        identity.pendingTransitionRequestedAt = requestedAt
+        identity.rideAutomationDeviceID = deviceID
+        identity.rideAutomationRideGeneration = context.rideGeneration
+        identity.rideAutomationDecisionWatermark = context.decisionSequence
+        try persist(identity)
+        self.identity = identity
+    }
+
+    func rideAutomationDecisionWatermark(
+        deviceID: String,
+        rideGeneration: UInt32
+    ) -> UInt32 {
+        guard identity?.rideAutomationDeviceID == deviceID,
+              identity?.rideAutomationRideGeneration == rideGeneration else {
+            return 0
+        }
+        return identity?.rideAutomationDecisionWatermark ?? 0
+    }
+
+    func persistRideAutomationDecisionWatermark(
+        deviceID: String,
+        rideGeneration: UInt32,
+        decisionSequence: UInt32
+    ) throws {
+        guard !deviceID.isEmpty,
+              deviceID.utf8.count <= 128,
+              rideGeneration != 0,
+              decisionSequence != 0,
+              var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        if identity.rideAutomationDeviceID == deviceID,
+           identity.rideAutomationRideGeneration == rideGeneration,
+           let current = identity.rideAutomationDecisionWatermark,
+           current == decisionSequence
+                || !RideAutomationSerialNumber.isNewer(
+                    decisionSequence,
+                    than: current
+                ) {
+            return
+        }
+        identity.rideAutomationDeviceID = deviceID
+        identity.rideAutomationRideGeneration = rideGeneration
+        identity.rideAutomationDecisionWatermark = decisionSequence
         try persist(identity)
         self.identity = identity
     }
@@ -1298,6 +1372,22 @@ nonisolated final class WatchWorkoutRecoveryStore {
                   $0.timeIntervalSinceReferenceDate.isFinite
                     && $0 >= identity.startDate
               }) ?? true,
+              [
+                identity.rideAutomationDeviceID != nil,
+                identity.rideAutomationRideGeneration != nil,
+                identity.rideAutomationDecisionWatermark != nil,
+              ].allSatisfy({ $0 })
+                || [
+                    identity.rideAutomationDeviceID == nil,
+                    identity.rideAutomationRideGeneration == nil,
+                    identity.rideAutomationDecisionWatermark == nil,
+                ].allSatisfy({ $0 }),
+              identity.rideAutomationDeviceID.map({
+                  !$0.isEmpty && $0.utf8.count <= 128
+              }) ?? true,
+              identity.rideAutomationRideGeneration.map({ $0 > 0 }) ?? true,
+              identity.rideAutomationDecisionWatermark.map({ $0 > 0 })
+                ?? true,
               heartRateZoneMaximumIsValid,
               identity.finishRequest?.requestedAt.timeIntervalSinceReferenceDate.isFinite
                 ?? true else {

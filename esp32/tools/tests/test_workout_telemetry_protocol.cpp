@@ -6,6 +6,7 @@
 
 int main() {
   static_assert(workout_telemetry_protocol::FRAME_SIZE == 16);
+  static_assert(workout_telemetry_protocol::ORIGIN_FRAME_SIZE == 28);
   static_assert(workout_telemetry_protocol::FALLBACK_PREFIX_SIZE == 4);
   static_assert(workout_telemetry_protocol::FALLBACK_FRAME_SIZE == 20);
   static_assert(workout_telemetry_protocol::CAPABILITY_MASK == 0x80);

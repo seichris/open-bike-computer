@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +15,7 @@ from .jobs import (
 )
 from .models import JobStatus, MapJob
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
-from .pipeline import MapBuildPipeline
+from .pipeline import MapBuildPipeline, safe_build_failure
 from .reuse import SubsetReuseUnavailable
 
 
@@ -115,6 +117,7 @@ class MapWorker:
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
         attempt_started_at = job.updated_at
+        attempt_started_monotonic = time.monotonic()
 
         def update(status: JobStatus) -> None:
             self.store.update_status_unless_cancelled(job.job_id, status, worker_id=self.worker_id)
@@ -125,6 +128,37 @@ class MapWorker:
                 completed,
                 total,
                 worker_id=self.worker_id,
+            )
+
+        def update_phase_progress(progress: dict) -> None:
+            observability = getattr(job, "_building_observability", None)
+            if observability is None:
+                observability = {
+                    "attemptStartedMonotonic": attempt_started_monotonic,
+                }
+                job._building_observability = observability
+            if "firstProgressMilliseconds" not in observability:
+                observability["firstProgressMilliseconds"] = max(
+                    0,
+                    int(round((time.monotonic() - attempt_started_monotonic) * 1_000)),
+                )
+            self.store.update_phase_progress_unless_cancelled(
+                job.job_id,
+                phase=progress["phase"],
+                unit=progress["unit"],
+                completed=progress.get("completed"),
+                total=progress.get("total"),
+                completed_blocks=progress.get("completedBlocks"),
+                total_blocks=progress.get("totalBlocks"),
+                indeterminate=progress["indeterminate"],
+                worker_id=self.worker_id,
+            )
+
+        def cancellation_requested() -> bool:
+            current = self.store.get(job.job_id)
+            return (
+                current.status == JobStatus.CANCELLED
+                or current.worker_id != self.worker_id
             )
 
         try:
@@ -139,6 +173,8 @@ class MapWorker:
                     "on_progress": update_progress,
                 }
                 if isinstance(self.pipeline, MapBuildPipeline):
+                    build_kwargs["on_phase_progress"] = update_phase_progress
+                    build_kwargs["cancellation_check"] = cancellation_requested
                     build_kwargs["artifact_publication_lease"] = lambda object_key: (
                         self.store.artifact_publication_lease(
                             job.job_id,
@@ -146,62 +182,112 @@ class MapWorker:
                             worker_id=self.worker_id,
                         )
                     )
+                if isinstance(self.pipeline, MapBuildPipeline):
+                    selected_preprocessing = (
+                        self.pipeline.uses_selected_preprocessing(job)
+                    )
+                    if job.building_preprocessing_mode is not None:
+                        self.store.freeze_building_preprocessing_mode_unless_cancelled(
+                            job.job_id,
+                            worker_id=self.worker_id,
+                            building_preprocessing_mode=(
+                                job.building_preprocessing_mode
+                            ),
+                        )
+                    if selected_preprocessing:
+                        update(JobStatus.CONVERTING_FEATURES)
                 reuse_keys = (
-                    self.pipeline.reuse_keys(job)
+                    self.pipeline.reuse_keys(
+                        job,
+                        on_phase_progress=update_phase_progress,
+                        cancellation_check=cancellation_requested,
+                    )
                     if isinstance(self.pipeline, MapBuildPipeline)
                     else None
                 )
+                if job.building_preprocessing_inputs is not None:
+                    self.store.freeze_building_preprocessing_inputs_unless_cancelled(
+                        job.job_id,
+                        worker_id=self.worker_id,
+                        building_preprocessing_inputs=(
+                            job.building_preprocessing_inputs
+                        ),
+                        building_preprocessing_runtime=(
+                            job.building_preprocessing_runtime
+                        ),
+                    )
                 reuse_strategy = None
                 reuse_source_job_id = None
                 if reuse_keys is not None:
-                    self.store.set_build_keys_unless_cancelled(
-                        job.job_id,
-                        worker_id=self.worker_id,
-                        build_cache_key=reuse_keys.exact,
-                        build_compatibility_key=reuse_keys.compatibility,
-                    )
-                    exact = self.store.find_exact_reuse_candidate(
-                        job_id=job.job_id,
-                        build_cache_key=reuse_keys.exact,
-                    )
-                    if exact is not None:
-                        finished = self.store.complete_exact_reuse(
+                    with self.pipeline.exact_reuse_identity_lease(
+                        job,
+                        on_phase_progress=update_phase_progress,
+                        cancellation_check=cancellation_requested,
+                    ) as confirmed:
+                        if confirmed is None:
+                            raise RuntimeError(
+                                "map build identity became unavailable under source lease"
+                            )
+                        reuse_keys = confirmed
+                        reserved = self.store.set_build_keys_unless_cancelled(
                             job.job_id,
                             worker_id=self.worker_id,
-                            source_job_id=exact.job_id,
                             build_cache_key=reuse_keys.exact,
                             build_compatibility_key=reuse_keys.compatibility,
+                            building_preprocessing_inputs=(
+                                job.building_preprocessing_inputs
+                            ),
                         )
-                        if finished is not None:
-                            monitoring_event = self._monitoring_event(
-                                finished,
-                                attempt_started_at,
-                                outcome="exact_reuse",
-                            )
-                            return WorkerResult(
+                        job.build_cache_key = reserved.build_cache_key
+                        job.build_compatibility_key = reserved.build_compatibility_key
+                        exact = self.store.find_exact_reuse_candidate(
+                            job_id=job.job_id,
+                            build_cache_key=reuse_keys.exact,
+                        )
+                        if (
+                            exact is not None
+                            and self.pipeline.validate_exact_reuse_candidate(job, exact)
+                        ):
+                            finished = self.store.complete_exact_reuse(
+                                job.job_id,
                                 worker_id=self.worker_id,
-                                job=finished,
-                                processed=True,
-                                monitoring_event=monitoring_event,
+                                source_job_id=exact.job_id,
+                                build_cache_key=reuse_keys.exact,
+                                build_compatibility_key=reuse_keys.compatibility,
+                                building_observability=deepcopy(
+                                    getattr(job, "_building_observability", {})
+                                ),
                             )
-                    build_result = None
-                    for parent in self.store.find_subset_reuse_candidates(
-                        job,
-                        build_compatibility_key=reuse_keys.compatibility,
-                    ):
-                        try:
-                            build_result = self.pipeline.build_subset(
-                                job,
-                                parent,
-                                **build_kwargs,
-                            )
-                        except SubsetReuseUnavailable:
-                            continue
-                        reuse_strategy = "subset"
-                        reuse_source_job_id = parent.job_id
-                        break
-                    if build_result is None:
-                        build_result = self.pipeline.build(job, **build_kwargs)
+                            if finished is not None:
+                                monitoring_event = self._monitoring_event(
+                                    finished,
+                                    attempt_started_at,
+                                    outcome="exact_reuse",
+                                )
+                                return WorkerResult(
+                                    worker_id=self.worker_id,
+                                    job=finished,
+                                    processed=True,
+                                    monitoring_event=monitoring_event,
+                                )
+                        build_result = None
+                        for parent in self.store.find_subset_reuse_candidates(
+                            job,
+                            build_compatibility_key=reuse_keys.compatibility,
+                        ):
+                            try:
+                                build_result = self.pipeline.build_subset(
+                                    job,
+                                    parent,
+                                    **build_kwargs,
+                                )
+                            except SubsetReuseUnavailable:
+                                continue
+                            reuse_strategy = "subset"
+                            reuse_source_job_id = parent.job_id
+                            break
+                        if build_result is None:
+                            build_result = self.pipeline.build(job, **build_kwargs)
                 else:
                     build_result = self.pipeline.build(job, **build_kwargs)
                 map_id, archive_path = build_result
@@ -218,8 +304,20 @@ class MapWorker:
                 published_archive=published_archive,
                 artifacts=getattr(build_result, "artifacts", None),
                 artifact_metrics=getattr(build_result, "artifact_metrics", None),
-                build_cache_key=(reuse_keys.exact if reuse_keys else None),
-                build_compatibility_key=(reuse_keys.compatibility if reuse_keys else None),
+                build_cache_key=(
+                    getattr(build_result, "build_cache_key", None)
+                    or (reuse_keys.exact if reuse_keys else None)
+                ),
+                build_cache_aliases=(
+                    getattr(build_result, "build_cache_aliases", None) or []
+                ),
+                build_identity_derivation=getattr(
+                    build_result, "build_identity_derivation", None
+                ),
+                build_compatibility_key=(
+                    getattr(build_result, "build_compatibility_key", None)
+                    or (reuse_keys.compatibility if reuse_keys else None)
+                ),
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
             )
@@ -239,6 +337,11 @@ class MapWorker:
                 monitoring_event=monitoring_event,
             )
         except Exception as exc:
+            if isinstance(self.pipeline, MapBuildPipeline):
+                try:
+                    self.pipeline.cleanup_failed_attempt(job)
+                except OSError:
+                    pass
             current = self.store.get(job.job_id)
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 if (
@@ -258,13 +361,14 @@ class MapWorker:
                     processed=True,
                     monitoring_event=monitoring_event,
                 )
+            error_message, error_code = safe_build_failure(job, exc)
             failed = self.store.update_status_unless_cancelled(
                 job.job_id,
                 JobStatus.FAILED,
-                error=str(exc),
-                error_code=getattr(exc, "code", "map_build_failed"),
+                error=error_message,
+                error_code=error_code,
                 worker_id=self.worker_id,
-                event=str(exc),
+                event=error_message,
                 finished=True,
             )
             monitoring_event = self._monitoring_event(
@@ -277,8 +381,8 @@ class MapWorker:
                 failed = self.store.update_status_unless_cancelled(
                     job.job_id,
                     JobStatus.QUEUED,
-                    error=str(exc),
-                    error_code=getattr(exc, "code", "map_build_failed"),
+                    error=error_message,
+                    error_code=error_code,
                     worker_id=self.worker_id,
                     event="queued for retry",
                 )

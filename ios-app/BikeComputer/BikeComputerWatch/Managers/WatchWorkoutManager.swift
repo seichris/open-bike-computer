@@ -524,6 +524,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var heartRateZoneRuntimeMaximumHeartRateBPM: Int?
 
     override convenience init() {
+        self.init(locationService: WatchLocationService())
+    }
+
+    convenience init(locationService: WatchLocationService) {
 #if DEBUG
         let isAppStoreScreenshotPreview = ProcessInfo.processInfo.arguments
             .contains("--app-store-screenshot-live-workout")
@@ -532,7 +536,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 #endif
         self.init(
             healthStore: HKHealthStore(),
-            routeRecorder: WatchRouteRecorder(),
+            routeRecorder: WatchRouteRecorder(
+                locationService: locationService
+            ),
             recoveryStore: WatchWorkoutRecoveryStore(),
             recoverActiveWorkoutSession: nil,
             requestAuthorization: nil,
@@ -749,6 +755,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         guard isWorkoutActive else { return nil }
         return recoveryStore.recoveredIdentity?.sessionID ?? identity?.sessionID
     }
+    var activeSessionToken: UInt16? {
+        guard isWorkoutActive else { return nil }
+        return recoveryStore.recoveredIdentity?.sessionToken
+            ?? identity?.sessionToken
+    }
     var isAwaitingDetachedSessionCleanup: Bool {
         if isTerminalPublicationPending
             || isTerminalMirrorDeliveryPending
@@ -851,6 +862,127 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func startOutdoorCycling() {
         Task { [weak self] in
             await self?.startOutdoorCyclingWorkout()
+        }
+    }
+
+    func requestDirectRideAutomationTransition(
+        _ frame: RideAutomationFrame,
+        deviceID: String,
+        requestedAt: Date = Date()
+    ) -> RideAutomationResult {
+        guard frame.kind == .decision,
+              frame.origin == .automatic,
+              let frameSessionID = frame.sessionID,
+              frameSessionID == activeSessionID,
+              let session,
+              let durableIdentity = recoveryStore.recoveredIdentity
+                ?? identity else {
+            return .sessionMismatch
+        }
+        let context = WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: frame.rideGeneration,
+            decisionSequence: frame.decisionSequence,
+            detectorProfileVersion: frame.profileVersion
+        )
+        let paused: Bool
+        switch frame.transition {
+        case .pause:
+            if lifecycle.state == .paused,
+               durableIdentity.pauseOrigin == .automatic,
+               durableIdentity.detectorProfileVersion
+                    == frame.profileVersion {
+                return .accepted
+            }
+            guard lifecycle.state == .running else { return .stale }
+            if durableIdentity.lastTransitionOrigin == .manual,
+               let transitionAt = durableIdentity.lastTransitionAt,
+               requestedAt.timeIntervalSince(transitionAt) < 15 {
+                return .stale
+            }
+            paused = true
+        case .resume:
+            if lifecycle.state == .running,
+               durableIdentity.lastTransitionOrigin == .automatic,
+               durableIdentity.detectorProfileVersion
+                    == frame.profileVersion {
+                return .accepted
+            }
+            guard lifecycle.state == .paused,
+                  durableIdentity.pauseOrigin == .automatic else {
+                return .stale
+            }
+            paused = false
+        case .none, .start:
+            return .watchUnavailable
+        }
+
+        do {
+            if durableIdentity.pendingTransitionContext != context
+                || durableIdentity.rideAutomationDeviceID != deviceID
+                || durableIdentity.rideAutomationRideGeneration
+                    != frame.rideGeneration
+                || durableIdentity.rideAutomationDecisionWatermark
+                    != frame.decisionSequence {
+                try recoveryStore.persistAutomaticTransitionRequest(
+                    context: context,
+                    paused: paused,
+                    requestedAt: requestedAt,
+                    deviceID: deviceID
+                )
+                if let persistedIdentity = recoveryStore.recoveredIdentity {
+                    identity = persistedIdentity
+                }
+            }
+        } catch {
+            return .rejected
+        }
+        if pendingAutomaticTransitionAnnotation != nil {
+            return .accepted
+        }
+        if paused {
+            if let injectedRemotePauseOperation {
+                injectedRemotePauseOperation(session)
+            } else {
+                session.pause()
+            }
+        } else if let injectedRemoteResumeOperation {
+            injectedRemoteResumeOperation(session)
+        } else {
+            session.resume()
+        }
+        return .accepted
+    }
+
+    func directRideAutomationDecisionWatermark(
+        deviceID: String,
+        rideGeneration: UInt32
+    ) -> UInt32 {
+        recoveryStore.rideAutomationDecisionWatermark(
+            deviceID: deviceID,
+            rideGeneration: rideGeneration
+        )
+    }
+
+    @discardableResult
+    func recordDirectRideAutomationDecision(
+        deviceID: String,
+        rideGeneration: UInt32,
+        decisionSequence: UInt32
+    ) -> Bool {
+        do {
+            try recoveryStore.persistRideAutomationDecisionWatermark(
+                deviceID: deviceID,
+                rideGeneration: rideGeneration,
+                decisionSequence: decisionSequence
+            )
+            if let persistedIdentity = recoveryStore.recoveredIdentity {
+                identity = persistedIdentity
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

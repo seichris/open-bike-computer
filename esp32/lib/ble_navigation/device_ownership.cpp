@@ -24,8 +24,20 @@ constexpr char REVOCATION_VERSION_KEY[] = "revVersion";
 constexpr char REVOKED_OWNER_ID_KEY[] = "revOwner";
 constexpr char REVOCATION_NONCE_KEY[] = "revNonce";
 constexpr char REVOCATION_PROOF_KEY[] = "revProof";
+constexpr char WATCH_ACTIVE_SLOT_KEY[] = "wcAct";
+constexpr char WATCH_SLOT_A_VERSION_KEY[] = "wcAV";
+constexpr char WATCH_SLOT_A_ID_KEY[] = "wcAId";
+constexpr char WATCH_SLOT_A_KEY_KEY[] = "wcAKey";
+constexpr char WATCH_SLOT_B_VERSION_KEY[] = "wcBV";
+constexpr char WATCH_SLOT_B_ID_KEY[] = "wcBId";
+constexpr char WATCH_SLOT_B_KEY_KEY[] = "wcBKey";
+constexpr char WATCH_STAGED_VERSION_KEY[] = "wcStV";
+constexpr char WATCH_STAGED_ID_KEY[] = "wcStId";
+constexpr char WATCH_STAGED_KEY_KEY[] = "wcStKey";
+constexpr char WATCH_STAGED_CHALLENGE_KEY[] = "wcStCh";
 constexpr uint8_t OWNER_VERSION = 2;
 constexpr uint8_t REVOCATION_VERSION = 1;
+constexpr uint8_t WATCH_CONTROLLER_VERSION = 1;
 
 std::vector<std::string> split(const std::string &value) {
   std::vector<std::string> parts;
@@ -77,6 +89,39 @@ bool ownerMatches(const OwnerId &expected, const std::string &candidateHex) {
   OwnerId candidate{};
   return hexDecode(candidateHex, candidate.data(), candidate.size()) &&
          constantTimeEquals(expected.data(), candidate.data(), expected.size());
+}
+
+bool controllerMatches(const std::array<uint8_t, 16> &expected,
+                       const std::string &candidateHex) {
+  std::array<uint8_t, 16> candidate{};
+  return hexDecode(candidateHex, candidate.data(), candidate.size()) &&
+         constantTimeEquals(expected.data(), candidate.data(), expected.size());
+}
+
+bool isNonzeroControllerId(const std::array<uint8_t, 16> &controllerId) {
+  uint8_t combined = 0;
+  for (uint8_t byte : controllerId) {
+    combined |= byte;
+  }
+  return combined != 0;
+}
+
+bool isNonzeroKey(const OwnerKey &key) {
+  uint8_t combined = 0;
+  for (uint8_t byte : key) {
+    combined |= byte;
+  }
+  return combined != 0;
+}
+
+ride_controller_lease::ControllerId
+leaseControllerId(const std::array<uint8_t, 16> &controllerId) {
+  ride_controller_lease::ControllerId result{};
+  for (size_t index = 0; index < 8; index++) {
+    result.high = (result.high << 8) | controllerId[index];
+    result.low = (result.low << 8) | controllerId[index + 8];
+  }
+  return result;
 }
 
 void makeFrameNonce(AuthenticatedChannel channel, uint32_t sequence,
@@ -267,6 +312,31 @@ bool DeviceOwnership::begin() {
     ownerRecordValid_ = false;
     legacyAuthenticationAllowed_ = false;
   }
+  if (!loadWatchController()) {
+    // Owner authentication remains available for recovery, but the scoped
+    // controller capability must not be advertised or accepted when its
+    // durable state cannot be read unambiguously.
+    watchControllerStorageValid_ = false;
+    clearActiveWatchControllerMemory();
+    clearStagedWatchControllerMemory();
+  }
+  if (watchControllerActive_ && !claimed_) {
+    // A successfully unclaimed device has no authority that could own a
+    // subordinate controller. Purge an orphan so the next physical pairing is
+    // recoverable instead of inheriting an unusable prior key.
+    Preferences preferences;
+    if (!preferences.begin(NVS_NAMESPACE, false) ||
+        !clearWatchControllerStorage(preferences)) {
+      watchControllerStorageValid_ = false;
+      clearActiveWatchControllerMemory();
+    }
+    preferences.end();
+  } else if (watchControllerActive_ && !ownerRecordValid_) {
+    // With a corrupt owner record, preserve storage for physical recovery but
+    // never accept the subordinate credential.
+    watchControllerStorageValid_ = false;
+    clearActiveWatchControllerMemory();
+  }
   if (deviceName_.empty()) {
     deviceName_ = defaultDeviceName();
   }
@@ -274,13 +344,11 @@ bool DeviceOwnership::begin() {
 }
 
 void DeviceOwnership::resetConnection() {
-  sessionAuthenticated_ = false;
-  sessionWriteKey_.fill(0);
-  sessionNotifyKey_.fill(0);
-  lastInboundSequence_.fill(0);
-  nextOutboundSequence_.fill(0);
+  clearAuthenticatedSession(true);
   pendingAuthNonce_[0] = '\0';
   pendingServerAuthNonce_[0] = '\0';
+  pendingAuthenticationRole_ = SessionRole::None;
+  pendingAuthenticationControllerId_.fill(0);
   clearPairing();
   pairingAttemptedOnConnection_ = false;
 }
@@ -442,9 +510,11 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
 
   if (parts[0] == "OWNER" && parts.size() == 3) {
     result.matched = true;
-    sessionAuthenticated_ = false;
+    clearAuthenticatedSession(true);
     pendingAuthNonce_[0] = '\0';
     pendingServerAuthNonce_[0] = '\0';
+    pendingAuthenticationRole_ = SessionRole::None;
+    pendingAuthenticationControllerId_.fill(0);
     if (!claimed_ || !ownerRecordValid_ ||
         !ownerMatches(ownerId_, parts[1]) ||
         !isHexNonce(parts[2])) {
@@ -461,6 +531,8 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
     strncpy(pendingServerAuthNonce_, serverNonceHex.c_str(),
             sizeof(pendingServerAuthNonce_) - 1);
     pendingServerAuthNonce_[sizeof(pendingServerAuthNonce_) - 1] = '\0';
+    pendingAuthenticationRole_ = SessionRole::Owner;
+    pendingAuthenticationControllerId_ = ownerId_;
     const std::string message = "server2|" + deviceIdHex() + "|" + parts[1] +
                                 "|" + parts[2] + "|" + serverNonceHex;
     std::array<uint8_t, 32> proof{};
@@ -476,6 +548,107 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
     return result;
   }
 
+  if (parts[0] == "WATCH" && parts.size() == 3) {
+    result.matched = true;
+    clearAuthenticatedSession(true);
+    pendingAuthNonce_[0] = '\0';
+    pendingServerAuthNonce_[0] = '\0';
+    pendingAuthenticationRole_ = SessionRole::None;
+    pendingAuthenticationControllerId_.fill(0);
+    if (!claimed_ || !ownerRecordValid_ || !watchControllerStorageValid_ ||
+        !watchControllerActive_ ||
+        !controllerMatches(watchControllerId_, parts[1]) ||
+        !isHexNonce(parts[2])) {
+      result.response = "DENIED|" + deviceIdHex();
+      return result;
+    }
+
+    strncpy(pendingAuthNonce_, parts[2].c_str(),
+            sizeof(pendingAuthNonce_) - 1);
+    pendingAuthNonce_[sizeof(pendingAuthNonce_) - 1] = '\0';
+    std::array<uint8_t, 16> serverNonce{};
+    esp_fill_random(serverNonce.data(), serverNonce.size());
+    const std::string serverNonceHex =
+        hexEncode(serverNonce.data(), serverNonce.size());
+    strncpy(pendingServerAuthNonce_, serverNonceHex.c_str(),
+            sizeof(pendingServerAuthNonce_) - 1);
+    pendingServerAuthNonce_[sizeof(pendingServerAuthNonce_) - 1] = '\0';
+    pendingAuthenticationRole_ = SessionRole::WatchRide;
+    pendingAuthenticationControllerId_ = watchControllerId_;
+    const std::string message =
+        "watch-server1|" + deviceIdHex() + "|" + parts[1] + "|" +
+        parts[2] + "|" + serverNonceHex;
+    std::array<uint8_t, 32> proof{};
+    if (!stringProofFor(watchControllerKey_, message, proof)) {
+      pendingAuthNonce_[0] = '\0';
+      pendingServerAuthNonce_[0] = '\0';
+      pendingAuthenticationRole_ = SessionRole::None;
+      pendingAuthenticationControllerId_.fill(0);
+      result.response = "DENIED|" + deviceIdHex();
+      return result;
+    }
+    // Compact framing stays below the firmware's 182-byte authenticated
+    // characteristic limit. deviceId remains bound inside the HMAC transcript.
+    result.response = "WS2|" + parts[1] + "|" + parts[2] + "|" +
+                      serverNonceHex + "|" +
+                      hexEncode(proof.data(), proof.size());
+    return result;
+  }
+
+  if (parts[0] == "WATCH_PROOF" && parts.size() == 5) {
+    result.matched = true;
+    std::array<uint8_t, 32> suppliedProof{};
+    const std::string message =
+        "watch-client1|" + deviceIdHex() + "|" + parts[1] + "|" +
+        parts[2] + "|" + parts[3];
+    std::array<uint8_t, 32> expectedProof{};
+    if (!claimed_ || !ownerRecordValid_ || !watchControllerStorageValid_ ||
+        !watchControllerActive_ ||
+        pendingAuthenticationRole_ != SessionRole::WatchRide ||
+        !controllerMatches(watchControllerId_, parts[1]) ||
+        !controllerMatches(pendingAuthenticationControllerId_, parts[1]) ||
+        parts[2].size() != 32 || parts[3].size() != 32 ||
+        !constantTimeEquals(
+            reinterpret_cast<const uint8_t *>(pendingAuthNonce_),
+            reinterpret_cast<const uint8_t *>(parts[2].c_str()), 32) ||
+        pendingAuthNonce_[32] != '\0' ||
+        !constantTimeEquals(
+            reinterpret_cast<const uint8_t *>(pendingServerAuthNonce_),
+            reinterpret_cast<const uint8_t *>(parts[3].c_str()), 32) ||
+        pendingServerAuthNonce_[32] != '\0' ||
+        !stringProofFor(watchControllerKey_, message, expectedProof) ||
+        !hexDecode(parts[4], suppliedProof.data(), suppliedProof.size()) ||
+        !constantTimeEquals(expectedProof.data(), suppliedProof.data(),
+                            expectedProof.size())) {
+      result.response = "DENIED|" + deviceIdHex();
+      pendingAuthNonce_[0] = '\0';
+      pendingServerAuthNonce_[0] = '\0';
+      pendingAuthenticationRole_ = SessionRole::None;
+      pendingAuthenticationControllerId_.fill(0);
+      return result;
+    }
+    const std::string sessionContext = deviceIdHex() + "|" + parts[1] + "|" +
+                                       parts[2] + "|" + parts[3];
+    if (!beginAuthenticatedSession(
+            SessionRole::WatchRide, watchControllerId_, watchControllerKey_,
+            "watch-session-write", "watch-session-notify", sessionContext,
+            false, nowMs)) {
+      result.response = "DENIED|" + deviceIdHex();
+      pendingAuthNonce_[0] = '\0';
+      pendingServerAuthNonce_[0] = '\0';
+      pendingAuthenticationRole_ = SessionRole::None;
+      pendingAuthenticationControllerId_.fill(0);
+      return result;
+    }
+    pendingAuthNonce_[0] = '\0';
+    pendingServerAuthNonce_[0] = '\0';
+    pendingAuthenticationRole_ = SessionRole::None;
+    pendingAuthenticationControllerId_.fill(0);
+    result.event = Event::Authenticated;
+    result.response = "WOK2|" + parts[2] + "|" + parts[3];
+    return result;
+  }
+
   if (parts[0] == "PROOF" && parts.size() == 5) {
     result.matched = true;
     std::array<uint8_t, 32> suppliedProof{};
@@ -484,6 +657,7 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
     std::array<uint8_t, 32> expectedProof{};
     if (!claimed_ || !ownerRecordValid_ || parts[2].size() != 32 ||
         parts[3].size() != 32 ||
+        pendingAuthenticationRole_ != SessionRole::Owner ||
         !ownerMatches(ownerId_, parts[1]) ||
         !constantTimeEquals(reinterpret_cast<const uint8_t *>(
                                 pendingAuthNonce_),
@@ -504,36 +678,174 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
       result.response = "DENIED|" + deviceIdHex();
       pendingAuthNonce_[0] = '\0';
       pendingServerAuthNonce_[0] = '\0';
+      pendingAuthenticationRole_ = SessionRole::None;
+      pendingAuthenticationControllerId_.fill(0);
       return result;
     }
     const std::string sessionContext =
         deviceIdHex() + "|" + parts[2] + "|" + parts[3];
-    if (!stringProofFor(ownerKey_, "session2-write|" + sessionContext,
-                        sessionWriteKey_) ||
-        !stringProofFor(ownerKey_, "session2-notify|" + sessionContext,
-                        sessionNotifyKey_)) {
+    if (!beginAuthenticatedSession(SessionRole::Owner, ownerId_, ownerKey_,
+                                   "session2-write", "session2-notify",
+                                   sessionContext, true, nowMs)) {
       result.response = "DENIED|" + deviceIdHex();
       pendingAuthNonce_[0] = '\0';
       pendingServerAuthNonce_[0] = '\0';
-      sessionWriteKey_.fill(0);
-      sessionNotifyKey_.fill(0);
+      pendingAuthenticationRole_ = SessionRole::None;
+      pendingAuthenticationControllerId_.fill(0);
       return result;
     }
     pendingAuthNonce_[0] = '\0';
     pendingServerAuthNonce_[0] = '\0';
-    lastInboundSequence_.fill(0);
-    nextOutboundSequence_.fill(0);
-    sessionAuthenticated_ = true;
+    pendingAuthenticationRole_ = SessionRole::None;
+    pendingAuthenticationControllerId_.fill(0);
     result.event = Event::Authenticated;
     result.response = "OK2|" + deviceIdHex() + "|" + parts[2] + "|" +
                       parts[3];
     return result;
   }
 
+  if (parts[0] == "WCTRL_STAGE" && parts.size() == 3) {
+    result.matched = true;
+    std::array<uint8_t, 16> requestedControllerId{};
+    OwnerKey requestedControllerKey{};
+    if (!isOwnerSession() || !watchControllerStorageValid_ ||
+        !hexDecode(parts[1], requestedControllerId.data(),
+                   requestedControllerId.size()) ||
+        !isNonzeroControllerId(requestedControllerId) ||
+        !hexDecode(parts[2], requestedControllerKey.data(),
+                   requestedControllerKey.size()) ||
+        !isNonzeroKey(requestedControllerKey)) {
+      result.response = "ERROR|watch_controller_stage_rejected";
+      return result;
+    }
+    stagedWatchControllerId_ = requestedControllerId;
+    stagedWatchControllerKey_ = requestedControllerKey;
+    esp_fill_random(stagedWatchChallenge_.data(),
+                    stagedWatchChallenge_.size());
+    stagedWatchControllerValid_ = true;
+    if (!persistStagedWatchController()) {
+      clearStagedWatchControllerMemory();
+      result.response = "ERROR|watch_controller_stage_persistence_failed";
+      return result;
+    }
+    result.event = Event::WatchControllerStaged;
+    result.response = "WCTRL_STAGED|" + parts[1] + "|" +
+                      hexEncode(stagedWatchChallenge_.data(),
+                                stagedWatchChallenge_.size());
+    return result;
+  }
+
+  if (parts[0] == "WCTRL_COMMIT" && parts.size() == 4) {
+    result.matched = true;
+    std::array<uint8_t, 32> suppliedProof{};
+    const std::string stagedIdHex =
+        hexEncode(stagedWatchControllerId_.data(),
+                  stagedWatchControllerId_.size());
+    const std::string challengeHex =
+        hexEncode(stagedWatchChallenge_.data(), stagedWatchChallenge_.size());
+    const std::string message = "watch-enroll1|" + deviceIdHex() + "|" +
+                                stagedIdHex + "|" + challengeHex;
+    std::array<uint8_t, 32> expectedProof{};
+    if (!isOwnerSession() || !watchControllerStorageValid_ ||
+        !stagedWatchControllerValid_ || parts[1] != stagedIdHex ||
+        parts[2] != challengeHex ||
+        !stringProofFor(stagedWatchControllerKey_, message, expectedProof) ||
+        !hexDecode(parts[3], suppliedProof.data(), suppliedProof.size()) ||
+        !constantTimeEquals(expectedProof.data(), suppliedProof.data(),
+                            expectedProof.size())) {
+      result.response = "ERROR|watch_controller_commit_rejected";
+      return result;
+    }
+    if (!commitStagedWatchController()) {
+      result.response = "ERROR|watch_controller_commit_persistence_failed";
+      return result;
+    }
+    result.event = Event::WatchControllerCommitted;
+    result.response = "WCTRL_COMMITTED|" + stagedIdHex;
+    return result;
+  }
+
+  if (parts[0] == "WCTRL_REVOKE" && parts.size() == 2) {
+    result.matched = true;
+    std::array<uint8_t, 16> requestedControllerId{};
+    if (!isOwnerSession() || !watchControllerStorageValid_ ||
+        !hexDecode(parts[1], requestedControllerId.data(),
+                   requestedControllerId.size()) ||
+        !isNonzeroControllerId(requestedControllerId) ||
+        !watchControllerActive_ ||
+        !constantTimeEquals(requestedControllerId.data(),
+                            watchControllerId_.data(),
+                            requestedControllerId.size())) {
+      result.response = "ERROR|watch_controller_revoke_rejected";
+      return result;
+    }
+    if (!revokeWatchController(requestedControllerId)) {
+      result.response = "ERROR|watch_controller_revoke_persistence_failed";
+      return result;
+    }
+    result.event = Event::WatchControllerRevoked;
+    result.response = "WCTRL_REVOKED|" + parts[1];
+    return result;
+  }
+
+  if (parts[0] == "WCTRL_STATUS" && parts.size() == 1) {
+    result.matched = true;
+    if (!isOwnerSession() || !watchControllerStorageValid_) {
+      result.response = "ERROR|watch_controller_status_rejected";
+      return result;
+    }
+    result.response = watchControllerActive_
+                          ? "WCTRL_STATUS|" +
+                                hexEncode(watchControllerId_.data(),
+                                          watchControllerId_.size())
+                          : "WCTRL_STATUS|none";
+    return result;
+  }
+
+  if ((parts[0] == "LEASE_CLAIM" || parts[0] == "LEASE_RENEW") &&
+      parts.size() == 1) {
+    result.matched = true;
+    if (!sessionAuthenticated_) {
+      result.response = "ERROR|lease_rejected";
+      return result;
+    }
+    const auto claimResult =
+        rideLease_.claim(currentControllerIdentity(), nowMs);
+    if (claimResult == ride_controller_lease::ClaimResult::Granted ||
+        claimResult == ride_controller_lease::ClaimResult::Renewed) {
+      result.response = "LEASE_OK";
+    } else if (claimResult == ride_controller_lease::ClaimResult::Busy) {
+      result.response = "ERROR|lease_busy";
+    } else {
+      result.response = "ERROR|lease_rejected";
+    }
+    return result;
+  }
+
+  if (parts[0] == "LEASE_HEARTBEAT" && parts.size() == 1) {
+    result.matched = true;
+    result.response =
+        sessionAuthenticated_ &&
+                rideLease_.recordActivity(currentControllerIdentity(), nowMs)
+            ? "LEASE_OK"
+            : "ERROR|lease_not_held";
+    return result;
+  }
+
+  if (parts[0] == "LEASE_RELEASE" && parts.size() == 1) {
+    result.matched = true;
+    result.response =
+        sessionAuthenticated_ &&
+                rideLease_.release(currentControllerIdentity())
+            ? "LEASE_RELEASED"
+            : "ERROR|lease_not_held";
+    return result;
+  }
+
   if (parts[0] == "NAME" && parts.size() == 2) {
     result.matched = true;
     std::array<uint8_t, MAX_DEVICE_NAME_BYTES> nameBytes{};
-    if (!sessionAuthenticated_ || parts[1].empty() ||
+    if (!isOwnerSession() || parts[1].empty() ||
         parts[1].size() > MAX_DEVICE_NAME_BYTES * 2 ||
         parts[1].size() % 2 != 0 ||
         !hexDecode(parts[1], nameBytes.data(), parts[1].size() / 2)) {
@@ -558,7 +870,7 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
 
   if (parts[0] == "GET_NAME" && parts.size() == 1) {
     result.matched = true;
-    if (!sessionAuthenticated_) {
+    if (!isOwnerSession()) {
       result.response = "ERROR|name_read_rejected";
       return result;
     }
@@ -575,7 +887,7 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
 
   if (parts[0] == "UNPAIR" && parts.size() == 1) {
     result.matched = true;
-    if (!sessionAuthenticated_) {
+    if (!isOwnerSession()) {
       result.response = "ERROR|unpair_rejected";
       return result;
     }
@@ -695,6 +1007,355 @@ bool DeviceOwnership::protectAuthenticatedPayload(
   return true;
 }
 
+ride_controller_lease::ControllerIdentity
+DeviceOwnership::currentControllerIdentity() const {
+  ride_controller_lease::ControllerIdentity identity{};
+  identity.controllerId = leaseControllerId(sessionControllerId_);
+  identity.sessionId = sessionId_;
+  identity.role = sessionRole_ == SessionRole::WatchRide
+                      ? ride_controller_lease::ControllerRole::ScopedWatch
+                      : ride_controller_lease::ControllerRole::Owner;
+  return identity;
+}
+
+void DeviceOwnership::clearAuthenticatedSession(bool releaseLease) {
+  if (releaseLease && sessionAuthenticated_) {
+    rideLease_.disconnect(currentControllerIdentity());
+  }
+  sessionAuthenticated_ = false;
+  sessionRole_ = SessionRole::None;
+  sessionControllerId_.fill(0);
+  sessionId_ = 0;
+  sessionWriteKey_.fill(0);
+  sessionNotifyKey_.fill(0);
+  lastInboundSequence_.fill(0);
+  nextOutboundSequence_.fill(0);
+}
+
+bool DeviceOwnership::beginAuthenticatedSession(
+    SessionRole role, const std::array<uint8_t, 16> &controllerId,
+    const OwnerKey &credentialKey, const char *writeLabel,
+    const char *notifyLabel, const std::string &sessionContext,
+    bool claimOwnerLease, uint32_t nowMs) {
+  clearAuthenticatedSession(true);
+  if (role == SessionRole::None || !isNonzeroControllerId(controllerId) ||
+      writeLabel == nullptr || notifyLabel == nullptr ||
+      !stringProofFor(credentialKey,
+                      std::string(writeLabel) + "|" + sessionContext,
+                      sessionWriteKey_) ||
+      !stringProofFor(credentialKey,
+                      std::string(notifyLabel) + "|" + sessionContext,
+                      sessionNotifyKey_)) {
+    clearAuthenticatedSession(false);
+    return false;
+  }
+  do {
+    esp_fill_random(&sessionId_, sizeof(sessionId_));
+  } while (sessionId_ == 0);
+  sessionRole_ = role;
+  sessionControllerId_ = controllerId;
+  lastInboundSequence_.fill(0);
+  nextOutboundSequence_.fill(0);
+  sessionAuthenticated_ = true;
+  if (claimOwnerLease) {
+    const auto claimResult =
+        rideLease_.claim(currentControllerIdentity(), nowMs);
+    if (claimResult != ride_controller_lease::ClaimResult::Granted &&
+        claimResult != ride_controller_lease::ClaimResult::Renewed) {
+      clearAuthenticatedSession(false);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
+                                         uint32_t nowMs) {
+  if (!sessionAuthenticated_) {
+    return false;
+  }
+  if (sessionRole_ == SessionRole::WatchRide &&
+      channel == AuthenticatedChannel::Settings) {
+    return false;
+  }
+  if (channel != AuthenticatedChannel::Navigation &&
+      channel != AuthenticatedChannel::Route &&
+      channel != AuthenticatedChannel::Gps &&
+      channel != AuthenticatedChannel::Settings &&
+      channel != AuthenticatedChannel::Workout &&
+      channel != AuthenticatedChannel::RideAutomation) {
+    return false;
+  }
+  if (rideLease_.recordActivity(currentControllerIdentity(), nowMs)) {
+    return true;
+  }
+  // Owner sessions predate the lease protocol. They may reclaim an expired
+  // lease on their first protected ride write, preserving compatibility while
+  // scoped Watch sessions still require an explicit claim.
+  if (sessionRole_ == SessionRole::Owner) {
+    const auto claimResult = rideLease_.claim(currentControllerIdentity(), nowMs);
+    return claimResult == ride_controller_lease::ClaimResult::Granted ||
+           claimResult == ride_controller_lease::ClaimResult::Renewed;
+  }
+  return false;
+}
+
+void DeviceOwnership::clearStagedWatchControllerMemory() {
+  stagedWatchControllerId_.fill(0);
+  stagedWatchControllerKey_.fill(0);
+  stagedWatchChallenge_.fill(0);
+  stagedWatchControllerValid_ = false;
+}
+
+void DeviceOwnership::clearActiveWatchControllerMemory() {
+  if (watchControllerActive_) {
+    rideLease_.revoke(leaseControllerId(watchControllerId_));
+  }
+  if (isWatchRideSession()) {
+    clearAuthenticatedSession(true);
+  }
+  watchControllerId_.fill(0);
+  watchControllerKey_.fill(0);
+  watchControllerActive_ = false;
+  activeWatchControllerSlot_ = 0;
+}
+
+bool DeviceOwnership::loadWatchController() {
+  clearActiveWatchControllerMemory();
+  clearStagedWatchControllerMemory();
+  watchControllerStorageValid_ = true;
+  Preferences preferences;
+  if (!preferences.begin(NVS_NAMESPACE, false)) {
+    return false;
+  }
+
+  const bool hasActivePointer = preferences.isKey(WATCH_ACTIVE_SLOT_KEY);
+  const uint8_t activeSlot = preferences.getUChar(WATCH_ACTIVE_SLOT_KEY, 0);
+  if ((hasActivePointer && activeSlot != 1 && activeSlot != 2) ||
+      (!hasActivePointer && activeSlot != 0)) {
+    preferences.end();
+    return false;
+  }
+
+  if (activeSlot != 0) {
+    const char *versionKey = activeSlot == 1 ? WATCH_SLOT_A_VERSION_KEY
+                                             : WATCH_SLOT_B_VERSION_KEY;
+    const char *idKey = activeSlot == 1 ? WATCH_SLOT_A_ID_KEY
+                                        : WATCH_SLOT_B_ID_KEY;
+    const char *keyKey = activeSlot == 1 ? WATCH_SLOT_A_KEY_KEY
+                                         : WATCH_SLOT_B_KEY_KEY;
+    const bool valid =
+        preferences.getUChar(versionKey, 0) == WATCH_CONTROLLER_VERSION &&
+        preferences.getBytesLength(idKey) == watchControllerId_.size() &&
+        preferences.getBytesLength(keyKey) == watchControllerKey_.size() &&
+        preferences.getBytes(idKey, watchControllerId_.data(),
+                             watchControllerId_.size()) ==
+            watchControllerId_.size() &&
+        preferences.getBytes(keyKey, watchControllerKey_.data(),
+                             watchControllerKey_.size()) ==
+            watchControllerKey_.size() &&
+        isNonzeroControllerId(watchControllerId_) &&
+        isNonzeroKey(watchControllerKey_);
+    if (!valid) {
+      preferences.end();
+      clearActiveWatchControllerMemory();
+      return false;
+    }
+    watchControllerActive_ = true;
+    activeWatchControllerSlot_ = activeSlot;
+  }
+
+  const bool hasStagedMarker = preferences.isKey(WATCH_STAGED_VERSION_KEY);
+  if (hasStagedMarker &&
+      preferences.getUChar(WATCH_STAGED_VERSION_KEY, 0) ==
+          WATCH_CONTROLLER_VERSION &&
+      preferences.getBytesLength(WATCH_STAGED_ID_KEY) ==
+          stagedWatchControllerId_.size() &&
+      preferences.getBytesLength(WATCH_STAGED_KEY_KEY) ==
+          stagedWatchControllerKey_.size() &&
+      preferences.getBytesLength(WATCH_STAGED_CHALLENGE_KEY) ==
+          stagedWatchChallenge_.size() &&
+      preferences.getBytes(WATCH_STAGED_ID_KEY,
+                           stagedWatchControllerId_.data(),
+                           stagedWatchControllerId_.size()) ==
+          stagedWatchControllerId_.size() &&
+      preferences.getBytes(WATCH_STAGED_KEY_KEY,
+                           stagedWatchControllerKey_.data(),
+                           stagedWatchControllerKey_.size()) ==
+          stagedWatchControllerKey_.size() &&
+      preferences.getBytes(WATCH_STAGED_CHALLENGE_KEY,
+                           stagedWatchChallenge_.data(),
+                           stagedWatchChallenge_.size()) ==
+          stagedWatchChallenge_.size() &&
+      isNonzeroControllerId(stagedWatchControllerId_) &&
+      isNonzeroKey(stagedWatchControllerKey_)) {
+    stagedWatchControllerValid_ = true;
+  }
+  preferences.end();
+  return true;
+}
+
+bool DeviceOwnership::persistStagedWatchController() {
+  if (!stagedWatchControllerValid_) {
+    return false;
+  }
+  Preferences preferences;
+  if (!preferences.begin(NVS_NAMESPACE, false)) {
+    return false;
+  }
+  if (preferences.isKey(WATCH_STAGED_VERSION_KEY) &&
+      !preferences.remove(WATCH_STAGED_VERSION_KEY)) {
+    preferences.end();
+    return false;
+  }
+  const bool stored =
+      preferences.putBytes(WATCH_STAGED_ID_KEY,
+                           stagedWatchControllerId_.data(),
+                           stagedWatchControllerId_.size()) ==
+          stagedWatchControllerId_.size() &&
+      preferences.putBytes(WATCH_STAGED_KEY_KEY,
+                           stagedWatchControllerKey_.data(),
+                           stagedWatchControllerKey_.size()) ==
+          stagedWatchControllerKey_.size() &&
+      preferences.putBytes(WATCH_STAGED_CHALLENGE_KEY,
+                           stagedWatchChallenge_.data(),
+                           stagedWatchChallenge_.size()) ==
+          stagedWatchChallenge_.size() &&
+      preferences.putUChar(WATCH_STAGED_VERSION_KEY,
+                           WATCH_CONTROLLER_VERSION) == sizeof(uint8_t);
+  preferences.end();
+  return stored;
+}
+
+bool DeviceOwnership::commitStagedWatchController() {
+  if (!stagedWatchControllerValid_) {
+    return false;
+  }
+  const uint8_t targetSlot = activeWatchControllerSlot_ == 1 ? 2 : 1;
+  const char *versionKey = targetSlot == 1 ? WATCH_SLOT_A_VERSION_KEY
+                                           : WATCH_SLOT_B_VERSION_KEY;
+  const char *idKey = targetSlot == 1 ? WATCH_SLOT_A_ID_KEY
+                                      : WATCH_SLOT_B_ID_KEY;
+  const char *keyKey = targetSlot == 1 ? WATCH_SLOT_A_KEY_KEY
+                                       : WATCH_SLOT_B_KEY_KEY;
+  Preferences preferences;
+  if (!preferences.begin(NVS_NAMESPACE, false)) {
+    return false;
+  }
+  if (preferences.isKey(versionKey) && !preferences.remove(versionKey)) {
+    preferences.end();
+    return false;
+  }
+  const bool slotStored =
+      preferences.putBytes(idKey, stagedWatchControllerId_.data(),
+                           stagedWatchControllerId_.size()) ==
+          stagedWatchControllerId_.size() &&
+      preferences.putBytes(keyKey, stagedWatchControllerKey_.data(),
+                           stagedWatchControllerKey_.size()) ==
+          stagedWatchControllerKey_.size() &&
+      preferences.putUChar(versionKey, WATCH_CONTROLLER_VERSION) ==
+          sizeof(uint8_t);
+  const bool pointerStored =
+      slotStored &&
+      preferences.putUChar(WATCH_ACTIVE_SLOT_KEY, targetSlot) ==
+          sizeof(uint8_t);
+  if (!pointerStored) {
+    preferences.end();
+    return false;
+  }
+
+  const auto removeIfPresent = [&preferences](const char *key) {
+    return !preferences.isKey(key) || preferences.remove(key);
+  };
+  // Once the active pointer is durable, staged cleanup is best effort. A stale
+  // staged record can only be used by an authenticated owner and cannot change
+  // which credential is active.
+  removeIfPresent(WATCH_STAGED_ID_KEY);
+  removeIfPresent(WATCH_STAGED_KEY_KEY);
+  removeIfPresent(WATCH_STAGED_CHALLENGE_KEY);
+  removeIfPresent(WATCH_STAGED_VERSION_KEY);
+  preferences.end();
+
+  if (watchControllerActive_) {
+    rideLease_.revoke(leaseControllerId(watchControllerId_));
+  }
+  watchControllerId_ = stagedWatchControllerId_;
+  watchControllerKey_ = stagedWatchControllerKey_;
+  watchControllerActive_ = true;
+  activeWatchControllerSlot_ = targetSlot;
+  clearStagedWatchControllerMemory();
+  return true;
+}
+
+bool DeviceOwnership::revokeWatchController(
+    const std::array<uint8_t, 16> &controllerId) {
+  if (!watchControllerActive_ ||
+      !constantTimeEquals(controllerId.data(), watchControllerId_.data(),
+                          controllerId.size())) {
+    return false;
+  }
+  Preferences preferences;
+  if (!preferences.begin(NVS_NAMESPACE, false)) {
+    return false;
+  }
+  // The pointer is the sole validity authority and is removed first, making
+  // the credential unusable even if power fails during later cleanup.
+  if (!preferences.isKey(WATCH_ACTIVE_SLOT_KEY) ||
+      !preferences.remove(WATCH_ACTIVE_SLOT_KEY)) {
+    preferences.end();
+    return false;
+  }
+  const auto removeIfPresent = [&preferences](const char *key) {
+    return !preferences.isKey(key) || preferences.remove(key);
+  };
+  removeIfPresent(WATCH_SLOT_A_ID_KEY);
+  removeIfPresent(WATCH_SLOT_A_KEY_KEY);
+  removeIfPresent(WATCH_SLOT_A_VERSION_KEY);
+  removeIfPresent(WATCH_SLOT_B_ID_KEY);
+  removeIfPresent(WATCH_SLOT_B_KEY_KEY);
+  removeIfPresent(WATCH_SLOT_B_VERSION_KEY);
+  removeIfPresent(WATCH_STAGED_ID_KEY);
+  removeIfPresent(WATCH_STAGED_KEY_KEY);
+  removeIfPresent(WATCH_STAGED_CHALLENGE_KEY);
+  removeIfPresent(WATCH_STAGED_VERSION_KEY);
+  preferences.end();
+  clearActiveWatchControllerMemory();
+  clearStagedWatchControllerMemory();
+  return true;
+}
+
+bool DeviceOwnership::clearWatchControllerStorage(Preferences &preferences) {
+  const auto removeIfPresent = [&preferences](const char *key) {
+    return !preferences.isKey(key) || preferences.remove(key);
+  };
+  const bool pointerRemoved = removeIfPresent(WATCH_ACTIVE_SLOT_KEY);
+  const bool slotAIdRemoved = removeIfPresent(WATCH_SLOT_A_ID_KEY);
+  const bool slotAKeyRemoved = removeIfPresent(WATCH_SLOT_A_KEY_KEY);
+  const bool slotAMarkerRemoved = removeIfPresent(WATCH_SLOT_A_VERSION_KEY);
+  const bool slotBIdRemoved = removeIfPresent(WATCH_SLOT_B_ID_KEY);
+  const bool slotBKeyRemoved = removeIfPresent(WATCH_SLOT_B_KEY_KEY);
+  const bool slotBMarkerRemoved = removeIfPresent(WATCH_SLOT_B_VERSION_KEY);
+  const bool stagedIdRemoved = removeIfPresent(WATCH_STAGED_ID_KEY);
+  const bool stagedKeyRemoved = removeIfPresent(WATCH_STAGED_KEY_KEY);
+  const bool stagedChallengeRemoved =
+      removeIfPresent(WATCH_STAGED_CHALLENGE_KEY);
+  const bool stagedMarkerRemoved =
+      removeIfPresent(WATCH_STAGED_VERSION_KEY);
+  if (pointerRemoved && slotAIdRemoved && slotAKeyRemoved &&
+      slotAMarkerRemoved && slotBIdRemoved && slotBKeyRemoved &&
+      slotBMarkerRemoved && stagedIdRemoved && stagedKeyRemoved &&
+      stagedChallengeRemoved && stagedMarkerRemoved) {
+    clearActiveWatchControllerMemory();
+    clearStagedWatchControllerMemory();
+    watchControllerStorageValid_ = true;
+    return true;
+  }
+  watchControllerStorageValid_ = false;
+  clearActiveWatchControllerMemory();
+  clearStagedWatchControllerMemory();
+  return false;
+}
+
 bool DeviceOwnership::clearOwner() {
   return clearOwnerStorage(false, false);
 }
@@ -708,6 +1369,7 @@ bool DeviceOwnership::clearOwnerStorage(bool preserveSession,
   const auto removeIfPresent = [&preferences](const char *key) {
     return !preferences.isKey(key) || preferences.remove(key);
   };
+  const bool watchControllerRemoved = clearWatchControllerStorage(preferences);
   // Remove the validity marker last. A power loss during cleanup therefore
   // leaves a locked/corrupt record instead of silently enabling the v1 key.
   const bool ownerIdRemoved = removeIfPresent(OWNER_ID_KEY);
@@ -717,22 +1379,18 @@ bool DeviceOwnership::clearOwnerStorage(bool preserveSession,
   const bool receiptRemoved =
       preserveRevocationReceipt || clearRevocationReceipt(preferences);
   preferences.end();
-  if (!ownerIdRemoved || !ownerKeyRemoved || !nameRemoved || !markerRemoved ||
-      !receiptRemoved) {
+  if (!watchControllerRemoved || !ownerIdRemoved || !ownerKeyRemoved ||
+      !nameRemoved || !markerRemoved || !receiptRemoved) {
     claimed_ = true;
     ownerRecordValid_ = false;
     legacyAuthenticationAllowed_ = false;
-    sessionAuthenticated_ = false;
+    clearAuthenticatedSession(true);
     return false;
   }
   ownerId_.fill(0);
   ownerKey_.fill(0);
   if (!preserveSession) {
-    sessionWriteKey_.fill(0);
-    sessionNotifyKey_.fill(0);
-    lastInboundSequence_.fill(0);
-    nextOutboundSequence_.fill(0);
-    sessionAuthenticated_ = false;
+    clearAuthenticatedSession(true);
   }
   claimed_ = false;
   ownerRecordValid_ = false;

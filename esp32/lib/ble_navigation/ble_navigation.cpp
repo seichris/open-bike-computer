@@ -19,6 +19,7 @@
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "device_capabilities_protocol.hpp"
+#include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -98,6 +99,7 @@ static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
+static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
@@ -520,6 +522,19 @@ static bool destinationCatalogContains(uint32_t generation, uint16_t token) {
   return found;
 }
 
+static bool isScopedWatchRideSession() {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    // Destination requests are owner-only. If role state cannot be read,
+    // suppress the request instead of sending an owner command to an
+    // unverified or scoped session.
+    return true;
+  }
+  const bool scopedWatch = deviceOwnership.isWatchRideSession();
+  xSemaphoreGive(deviceOwnershipMutex);
+  return scopedWatch;
+}
+
 bool requestDestinationRoute(uint32_t generation, uint16_t token) {
   if (!destinationCatalogContains(generation, token)) {
     setDestinationPickerStatus(DestinationPickerStatusCode::Stale, generation,
@@ -530,6 +545,11 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
       mapTransferStatusCharacteristic == nullptr) {
     setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
                                token, "Open app to start navigation");
+    return false;
+  }
+  if (isScopedWatchRideSession()) {
+    setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
+                               token, "Open iPhone to start navigation");
     return false;
   }
   if (!beginDestinationRequest(millis())) {
@@ -845,7 +865,11 @@ static bool requireAuthenticated(const char *payloadName) {
 
 static bool unwrapOwnerAuthenticatedPayload(
     device_ownership::AuthenticatedChannel channel, const std::string &frame,
-    std::string &payload, const char *payloadName) {
+    std::string &payload, const char *payloadName,
+    bool *wasScopedWatchSession = nullptr) {
+  if (wasScopedWatchSession != nullptr) {
+    *wasScopedWatchSession = false;
+  }
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     payload = frame;
@@ -854,16 +878,26 @@ static bool unwrapOwnerAuthenticatedPayload(
   const bool requiresFrame = deviceOwnership.isSessionAuthenticated();
   const bool authenticationStateDiverged =
       bleSessionAuthenticated && !requiresFrame;
-  const bool accepted = !authenticationStateDiverged &&
-                        (!requiresFrame ||
-                         deviceOwnership.unwrapAuthenticatedPayload(
-                             channel, frame, payload));
+  const bool validFrame =
+      !authenticationStateDiverged &&
+      (!requiresFrame ||
+       deviceOwnership.unwrapAuthenticatedPayload(channel, frame, payload));
+  const bool accepted =
+      validFrame &&
+      (!requiresFrame ||
+       channel == device_ownership::AuthenticatedChannel::Auth ||
+       deviceOwnership.authorizeRideWrite(channel, millis()));
+  if (accepted && wasScopedWatchSession != nullptr) {
+    *wasScopedWatchSession = deviceOwnership.isWatchRideSession();
+  }
   if (!requiresFrame) {
     payload = frame;
   }
   xSemaphoreGive(deviceOwnershipMutex);
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     bleDebugStats.authenticated = false;
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
@@ -871,7 +905,7 @@ static bool unwrapOwnerAuthenticatedPayload(
   if (!accepted) {
     bleDebugStats.rejectedUnauthenticatedCount++;
     bleDebugStats.lastRejectedUnauthenticatedMs = millis();
-    Serial.printf("BLE: Rejected %s: invalid authenticated frame\n",
+    Serial.printf("BLE: Rejected %s: invalid frame, role, or controller lease\n",
                   payloadName == nullptr ? "payload" : payloadName);
   }
   return accepted;
@@ -991,6 +1025,7 @@ static bool notifyAuthenticatedPayload(
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
     size_t length, const char *label) {
   if (characteristic == nullptr || data == nullptr ||
+      characteristic->getSubscribedCount() == 0 ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -1135,6 +1170,8 @@ static void handleAuthPayload(const std::string &frame) {
     }
     if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
       bleSessionAuthenticated = false;
+      bleSessionSupportsExplicitInvalidGpsHeading.store(
+          false, std::memory_order_release);
       bleDebugStats.authenticated = false;
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
@@ -1157,7 +1194,16 @@ static void handleAuthPayload(const std::string &frame) {
       case device_ownership::Event::Authenticated:
         completeBleSessionAuthentication();
         queueOwnershipUiUpdate();
-        Serial.println("BLE: Owner session authenticated");
+        Serial.println("BLE: Scoped controller session authenticated");
+        break;
+      case device_ownership::Event::WatchControllerStaged:
+        Serial.println("BLE: Watch controller enrollment staged");
+        break;
+      case device_ownership::Event::WatchControllerCommitted:
+        Serial.println("BLE: Watch controller enrollment committed");
+        break;
+      case device_ownership::Event::WatchControllerRevoked:
+        Serial.println("BLE: Watch controller credential revoked");
         break;
       case device_ownership::Event::Renamed:
         ownershipAdvertisingDirty = true;
@@ -1166,6 +1212,8 @@ static void handleAuthPayload(const std::string &frame) {
         break;
       case device_ownership::Event::Unpaired:
         bleSessionAuthenticated = false;
+        bleSessionSupportsExplicitInvalidGpsHeading.store(
+            false, std::memory_order_release);
         bleDebugStats.authenticated = false;
         ownershipAdvertisingDirty = true;
         queueOwnershipUiUpdate();
@@ -1223,6 +1271,8 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -1771,6 +1821,20 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   const uint8_t extendedCapabilityFlags =
       map_profile_protocol::extendedCapabilityFlagsForClient(clientVersion);
   if (useCap2) {
+    bool scopedWatchControllerReady = false;
+    if (deviceOwnershipReady &&
+        (deviceOwnershipMutex == nullptr ||
+         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) !=
+             pdTRUE)) {
+      Serial.println(
+          "BLE Capabilities: ownership state unavailable; retry required");
+      return;
+    }
+    if (deviceOwnershipReady) {
+      scopedWatchControllerReady =
+          deviceOwnership.watchControllerSubsystemReady();
+      xSemaphoreGive(deviceOwnershipMutex);
+    }
     uint32_t featureFlags =
         static_cast<uint32_t>(response[4]) |
         device_capabilities_protocol::STREET_LABELS_FEATURE |
@@ -1778,9 +1842,23 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
+    if (clientVersion >= device_capabilities_protocol::
+                             EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::
+          EXPLICIT_INVALID_GPS_HEADING_FEATURE;
+    }
+    if (scopedWatchControllerReady &&
+        clientVersion >= device_capabilities_protocol::
+                             SCOPED_WATCH_CONTROLLER_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE;
+    }
 #if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
-    featureFlags |=
-        device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE;
+    if (clientVersion >= device_capabilities_protocol::
+                             RIDE_AUTOMATION_V2_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE;
+    }
 #endif
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
@@ -1850,6 +1928,10 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsStreetLabels =
         clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
     bleSessionSupports3DBuildings = bleSessionSupportsStreetLabels;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(
+        clientVersion >=
+            device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
+        std::memory_order_release);
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
@@ -2154,8 +2236,16 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
         "BLE route geometry: seeded map start; transitioning to map");
   }
 
+  const bool hadRoute = routeOverlay.hasRoute();
   routeOverlay.parseRouteData(data, len);
-  requestMapRender(map_render_policy::Reason::Route);
+  // Route geometry is a live foreground input, not part of the expensive base
+  // frame. Only a transition into or out of usable route geometry forces a
+  // base request; ordinary sliding-window replacement is picked up on the next
+  // UI tick and must not cancel a long 3D render. The reverse transition also
+  // covers a short/malformed replacement without leaving stale course-up
+  // semantics behind.
+  if (hadRoute != routeOverlay.hasRoute())
+    requestMapRender(map_render_policy::Reason::Route);
 }
 
 static void handleGpsPayload(const uint8_t *data, size_t len,
@@ -2745,6 +2835,8 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -2803,6 +2895,8 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                      std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -2852,14 +2946,37 @@ public:
       return;
     }
     std::string value;
+    bool scopedWatchSession = false;
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
-            "navigation characteristic")) {
+            "navigation characteristic", &scopedWatchSession)) {
+      return;
+    }
+
+    if (scopedWatchSession &&
+        !scoped_watch_payload_policy::allowsNavigationPayload(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      bleDebugStats.rejectedUnauthenticatedCount++;
+      bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+      Serial.println(
+          "BLE: Rejected privileged multiplexed command from scoped Watch");
       return;
     }
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+      return;
+    }
+
+    if (value.size() == ride_automation_protocol::FALLBACK_PREFIX_SIZE +
+                            ride_automation_protocol::FRAME_SIZE &&
+        std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
+                    ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
+      if (!ride_automation_runtime::ingestTransportFrame(
+              reinterpret_cast<const uint8_t *>(value.data()) +
+                  ride_automation_protocol::FALLBACK_PREFIX_SIZE,
+              ride_automation_protocol::FRAME_SIZE, millis()))
+        Serial.println("BLE Ride Automation: rejected navigation fallback frame");
       return;
     }
 
@@ -3345,7 +3462,8 @@ void BLENavigationServer::init(const char *deviceName) {
   // Workout frames are accepted only after the same local authentication
   // handshake as navigation traffic and remain in RAM-only telemetry state.
   pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
-      WORKOUT_TELEMETRY_CHAR_UUID, NIMBLE_PROPERTY::WRITE_NR);
+      WORKOUT_TELEMETRY_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   pWorkoutTelemetryCharacteristic->setCallbacks(
       new MyWorkoutTelemetryCharacteristicCallbacks());
 
@@ -3551,6 +3669,11 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
   return stats;
 }
 
+bool BLENavigationServer::supportsExplicitInvalidGpsHeading() const {
+  return bleSessionSupportsExplicitInvalidGpsHeading.load(
+      std::memory_order_acquire);
+}
+
 bool BLENavigationServer::forgetOwner() {
   bool cleared = false;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
@@ -3562,6 +3685,8 @@ bool BLENavigationServer::forgetOwner() {
     return false;
   }
   bleSessionAuthenticated = false;
+  bleSessionSupportsExplicitInvalidGpsHeading.store(false,
+                                                    std::memory_order_release);
   bleDebugStats.authenticated = false;
   ownershipAdvertisingDirty = true;
   queueOwnershipUiUpdate();

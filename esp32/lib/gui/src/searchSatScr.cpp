@@ -7,6 +7,7 @@
  */
 
 #include "searchSatScr.hpp"
+#include "settings.hpp"
 
 static unsigned long millisActual = 0;
 static bool skipSearch = false;

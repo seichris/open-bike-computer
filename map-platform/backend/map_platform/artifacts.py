@@ -251,6 +251,23 @@ class FileSystemArtifactStore:
         path = self._path(object_key)
         return path if path.is_file() else None
 
+    def verify(self, object_key: str, *, sha256: str, expected_bytes: int) -> bool:
+        path = self.local_path(object_key)
+        return (
+            path is not None
+            and path.stat().st_size == expected_bytes
+            and sha256_file(path) == sha256
+        )
+
+    def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
+        if not 0 < maximum_bytes <= MAXIMUM_STREAM_ARTIFACT_BYTES:
+            raise ValueError("artifact prefix limit is invalid")
+        path = self.local_path(object_key)
+        if path is None:
+            return None
+        with path.open("rb") as artifact:
+            return artifact.read(maximum_bytes)
+
     def create_download_url(
         self,
         object_key: str,
@@ -348,6 +365,37 @@ class S3ArtifactStore:
     def local_path(self, object_key: str) -> Path | None:
         _validate_object_key(object_key)
         return None
+
+    def verify(self, object_key: str, *, sha256: str, expected_bytes: int) -> bool:
+        _validate_object_key(object_key)
+        head = self._head(self._key(object_key))
+        if head is None:
+            return False
+        try:
+            self._verify_head(head, sha256, expected_bytes)
+        except ArtifactStoreError:
+            return False
+        return True
+
+    def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
+        _validate_object_key(object_key)
+        if not 0 < maximum_bytes <= MAXIMUM_STREAM_ARTIFACT_BYTES:
+            raise ValueError("artifact prefix limit is invalid")
+        try:
+            response = self.client.get_object(
+                Bucket=self.bucket,
+                Key=self._key(object_key),
+                Range=f"bytes=0-{maximum_bytes - 1}",
+            )
+            body = response["Body"]
+            try:
+                return body.read(maximum_bytes)
+            finally:
+                close = getattr(body, "close", None)
+                if close is not None:
+                    close()
+        except Exception:
+            return None
 
     def create_download_url(
         self,

@@ -8,6 +8,7 @@
 
 #include "gps.hpp"
 #include "lvgl.h"
+#include "settings.hpp"
 #include "widgets.hpp"
 
 extern lv_obj_t *sunriseLabel;
@@ -124,7 +125,7 @@ double Gps::getLon()
 void Gps::getGPSData()
 {
   const uint32_t capturedAtMs = millis();
-  RideObservation ride;
+  GpsRideObservation ride;
   ride.fixAvailable = true;
   // NeoGPS orders statuses by increasing accuracy. Estimated and time-only
   // reports are not spatial fixes and must never satisfy the detector's
@@ -186,9 +187,11 @@ void Gps::getGPSData()
     ride.locationCapturedAtMs = capturedAtMs;
   }
 
-  // Heading
-  if (fix.valid.heading)
-    gpsData.heading = (uint16_t)fix.heading();
+  // Heading validity is explicit. A missing/invalid course must never be
+  // interpreted as zero/north by navigation presentation.
+  gpsData.headingValid = fix.valid.heading;
+  if (gpsData.headingValid)
+    gpsData.heading = static_cast<uint16_t>(fix.heading()) % 360U;
 
   // HDOP , PDOP , VDOP
 #ifdef GPS_FIX_HDOP
@@ -233,12 +236,18 @@ void Gps::getGPSData()
   portEXIT_CRITICAL(&gpsRideObservationMux);
 }
 
-Gps::RideObservation Gps::rideObservation() const
+GpsRideObservation Gps::rideObservation() const
 {
   portENTER_CRITICAL(&gpsRideObservationMux);
-  const RideObservation snapshot = rideObservation_;
+  const GpsRideObservation snapshot = rideObservation_;
   portEXIT_CRITICAL(&gpsRideObservationMux);
   return snapshot;
+}
+
+extern Gps gps;
+
+GpsRideObservation currentGpsRideObservation() {
+  return gps.rideObservation();
 }
 
 /**

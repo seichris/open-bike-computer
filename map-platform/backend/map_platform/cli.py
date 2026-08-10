@@ -10,6 +10,7 @@ from .artifacts import create_artifact_store_from_environment
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
 from .map_buildings import (
+    building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
     building_target3_generation_enabled,
 )
@@ -405,6 +406,7 @@ def main() -> int:
                 pack_root=data_root / "packs",
             ),
             source_cache=source_cache,
+            building_scope_mode=building_preprocessing_scope_mode(),
             artifact_store=create_artifact_store_from_environment(data_root),
             map_signer=map_signer,
             producer_build_sha256=producer_build_sha256,

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "license": "CC0-1.0",
+  "description": "Synthetic projected fixtures for selected-area building topology and calibration",
+  "relationIndex": {
+    "schemaVersion": 1,
+    "partParents": {"w4": "w3"},
+    "relations": 1,
+    "ambiguousParts": 0
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 1, "building": "office", "other_tags": "\"height\"=>\"24\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[4080, 100], [4110, 100], [4110, 180], [4080, 180], [4080, 100]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 2, "building": "house", "other_tags": "\"building:levels\"=>\"2\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[100, 4080], [180, 4080], [180, 4110], [100, 4110], [100, 4080]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 3, "building": "apartments", "other_tags": "\"height\"=>\"30\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[500, 500], [900, 500], [900, 900], [500, 900], [500, 500]], [[600, 600], [600, 700], [700, 700], [700, 600], [600, 600]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 4, "building:part": "apartments", "other_tags": ""},
+      "geometry": {"type": "Polygon", "coordinates": [[[520, 520], [580, 520], [580, 580], [520, 580], [520, 520]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_id": 5, "building": "commercial", "other_tags": "\"height\"=>\"18\""},
+      "geometry": {"type": "MultiPolygon", "coordinates": [[[[1200, 1200], [1400, 1200], [1400, 1400], [1200, 1400], [1200, 1200]], [[1250, 1250], [1250, 1300], [1300, 1300], [1300, 1250], [1250, 1250]]], [[[1500, 1200], [1600, 1200], [1600, 1300], [1500, 1300], [1500, 1200]]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 6, "building": "office", "other_tags": "\"height\"=>\"unknown\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[2000, 2000], [2050, 2000], [2050, 2050], [2000, 2050], [2000, 2000]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 7, "building": "office", "other_tags": "\"height\"=>\"10\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[8000, 200], [8050, 200], [8050, 250], [8000, 250], [8000, 200]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 8, "building": "office", "other_tags": "\"height\"=>\"20\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[8300, 200], [8350, 200], [8350, 250], [8300, 250], [8300, 200]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"osm_way_id": 9, "building": "office", "other_tags": "\"height\"=>\"30\""},
+      "geometry": {"type": "Polygon", "coordinates": [[[8400, 300], [8450, 300], [8450, 350], [8400, 350], [8400, 300]]]}
+    }
+  ],
+  "expected": {
+    "sourceCount": 9,
+    "relationAssociationCount": 1,
+    "minimumHoleCount": 2,
+    "malformedHeightCount": 1,
+    "verticalSeamSource": "w1",
+    "horizontalSeamSource": "w2",
+    "canonicalSourceSha256": "e330bfa096204754bb27c0ad1cbcfd5cdcf4583477ddd3ad12cf51157c7ad91e",
+    "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+    "buildingSections": {
+      "0,0": {"records": 7, "bytes": 344, "sha256": "21feda7df9f02caced12c5eaf7ada66bd0b00abfdd641b136faf6c15ba8f313b"},
+      "4096,0": {"records": 2, "bytes": 86, "sha256": "6cfc610e993e0b94095de810a8a13ce326d305933820153ca6cc3e9a38810e7c"},
+      "0,4096": {"records": 1, "bytes": 47, "sha256": "e2b1a33f9a7dd5db0f2f573dca8715f3e5ee372e536ab3386d4c99ff2be6ee2d"},
+      "4096,4096": {"records": 0, "bytes": 8, "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"}
+    }
+  }
+}

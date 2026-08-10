@@ -8,7 +8,7 @@
 #if defined(RIDE_AUTOMATION_SHADOW) &&                                  \
     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
 
-#include "gps.hpp"
+#include "gps_ride_observation.hpp"
 #include "ble_navigation.hpp"
 #include "qmi8658.hpp"
 #include "ride_automation_trace.hpp"
@@ -23,8 +23,6 @@
 #include <freertos/queue.h>
 #include <algorithm>
 #include <cmath>
-
-extern Gps gps;
 
 namespace {
 
@@ -200,10 +198,16 @@ void loadPersistentRuntimeState() {
     persistedStartSuppression = false;
     return;
   }
-  rideGeneration = preferences.getULong("rideGen", 0) + 1U;
-  if (rideGeneration == 0)
-    rideGeneration = 1;
-  preferences.putULong("rideGen", rideGeneration);
+  const uint32_t nextGeneration = preferences.getULong("rideGen", 0) + 1U;
+  rideGeneration = nextGeneration == 0 ? 1 : nextGeneration;
+  if (preferences.putULong("rideGen", rideGeneration) != sizeof(uint32_t)) {
+    // A failed NVS write must not reuse the same boot generation after the
+    // next reset. Fall back to a non-zero per-boot nonce so stale decisions
+    // cannot be correlated with this runtime instance.
+    rideGeneration = esp_random();
+    if (rideGeneration == 0)
+      rideGeneration = 1;
+  }
   persistedStartSuppression = preferences.getBool("suppressed", false);
   preferences.end();
 }
@@ -290,17 +294,19 @@ void playConfirmedTransitionAlert() {
       waveshare_board::speaker::Sound::BellDing, 55);
 }
 
-double radians(double degrees) { return degrees * 0.017453292519943295; }
+double degreesToRadians(double degrees) {
+  return degrees * 0.017453292519943295;
+}
 
 float distanceMeters(double latitudeA, double longitudeA, double latitudeB,
                      double longitudeB) {
   constexpr double kEarthRadiusMeters = 6'371'000.0;
-  const double latitudeDelta = radians(latitudeB - latitudeA);
-  const double longitudeDelta = radians(longitudeB - longitudeA);
+  const double latitudeDelta = degreesToRadians(latitudeB - latitudeA);
+  const double longitudeDelta = degreesToRadians(longitudeB - longitudeA);
   const double a = std::sin(latitudeDelta / 2.0) *
                        std::sin(latitudeDelta / 2.0) +
-                   std::cos(radians(latitudeA)) *
-                       std::cos(radians(latitudeB)) *
+                   std::cos(degreesToRadians(latitudeA)) *
+                       std::cos(degreesToRadians(latitudeB)) *
                        std::sin(longitudeDelta / 2.0) *
                        std::sin(longitudeDelta / 2.0);
   const double boundedA = std::max(0.0, std::min(1.0, a));
@@ -357,9 +363,8 @@ bool workoutContradictsOutstandingDecision(
   if (!workout.state.originReceived)
     return false;
   if (outstandingDecision.transition != Transition::Start &&
-      outstandingDecision.sessionIdentityHash != 0 &&
-      workout.state.sessionIdentityHash !=
-          outstandingDecision.sessionIdentityHash) {
+      ride_automation_protocol::hasSessionID(outstandingDecision.sessionID) &&
+      workout.state.sessionID != outstandingDecision.sessionID) {
     return true;
   }
   switch (outstandingDecision.transition) {
@@ -410,7 +415,7 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
 
 void appendGpsEvidence(uint32_t nowMs,
                        ride_automation::RideEvidenceObservation &out) {
-  const Gps::RideObservation value = gps.rideObservation();
+  const GpsRideObservation value = currentGpsRideObservation();
   out.gpsFixValid = {value.fixAvailable, value.fixValid,
                      value.fixCapturedAtMs,
                      ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
@@ -472,31 +477,14 @@ void appendImuEvidence(ride_automation::RideEvidenceObservation &out) {
 
 bool matchesOutstandingResponse(
     const ride_automation_protocol::Frame &frame) {
-  if (!hasOutstandingDecision || frame.rideGeneration != rideGeneration ||
-      frame.decisionSequence != outstandingDecision.decisionSequence ||
-      frame.transition != outstandingDecision.transition ||
-      frame.origin != ride_automation_protocol::Origin::Automatic ||
-      frame.profileVersion != outstandingDecision.profileVersion) {
-    return false;
-  }
-  if (outstandingDecision.transition !=
-          ride_automation_protocol::Transition::Start &&
-      outstandingDecision.sessionIdentityHash != 0 &&
-      frame.sessionIdentityHash != outstandingDecision.sessionIdentityHash) {
-    return false;
-  }
-  return true;
+  return ride_automation_protocol::matchesOutstandingResponse(
+      hasOutstandingDecision, outstandingDecision, frame);
 }
 
 bool processInboundTransportFrame(
     const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs) {
-  if (hasInboundFrame && frame.kind == lastInboundFrame.kind &&
-      frame.rideGeneration == lastInboundFrame.rideGeneration &&
-      frame.decisionSequence != 0 &&
-      !ride_automation_protocol::serialNumberNewer(
-          frame.decisionSequence, lastInboundFrame.decisionSequence) &&
-      frame.kind != ride_automation_protocol::Kind::PromptResponse &&
-      frame.acknowledgedKind == lastInboundFrame.acknowledgedKind) {
+  if (ride_automation_protocol::isDuplicateOrOutOfOrderInbound(
+          hasInboundFrame, lastInboundFrame, frame)) {
     return false;
   }
 
@@ -636,9 +624,9 @@ bool processInboundTransportFrame(
     response.rideGeneration = rideGeneration;
     response.profileVersion =
         ride_automation::kRideDetectionProfileV1.version;
-    response.watermarkOrConfigGeneration = hasOutstandingDecision
-        ? outstandingDecision.decisionSequence
-        : 0;
+    response.watermarkOrConfigGeneration =
+        ride_automation_protocol::outstandingDecisionWatermark(
+            hasOutstandingDecision, outstandingDecision);
     response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
     response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
     response.alertMode = configuredAlertMode;
@@ -801,9 +789,8 @@ void processFirmwareShadow(uint32_t nowMs) {
     frame.decisionSequence = decision.sequence;
     frame.evidenceMask = decision.evidenceMask;
     frame.profileVersion = decision.profileVersion;
-    frame.sessionIdentityHash = workout.state.originReceived
-        ? workout.state.sessionIdentityHash
-        : 0;
+    if (workout.state.originReceived)
+      frame.sessionID = workout.state.sessionID;
     frame.watermarkOrConfigGeneration = configGeneration;
     frame.startMode = static_cast<uint8_t>(settings.startMode);
     frame.autoPauseEnabled = settings.autoPauseEnabled;

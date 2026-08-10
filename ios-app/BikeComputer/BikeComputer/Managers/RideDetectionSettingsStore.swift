@@ -14,20 +14,20 @@ nonisolated struct RideAutomationPendingDecision: Codable, Equatable, Sendable {
     let frame: RideAutomationFrame
     let expectedState: WorkoutSessionStateV1?
     let resolvedResult: RideAutomationResult?
-    let resolvedSessionIdentityHash: UInt32?
+    let resolvedSessionID: UUID?
 
     init(
         identity: RideAutomationDecisionIdentity,
         frame: RideAutomationFrame,
         expectedState: WorkoutSessionStateV1?,
         resolvedResult: RideAutomationResult? = nil,
-        resolvedSessionIdentityHash: UInt32? = nil
+        resolvedSessionID: UUID? = nil
     ) {
         self.identity = identity
         self.frame = frame
         self.expectedState = expectedState
         self.resolvedResult = resolvedResult
-        self.resolvedSessionIdentityHash = resolvedSessionIdentityHash
+        self.resolvedSessionID = resolvedSessionID
     }
 
     /// UserDefaults is only a recovery cache, not an authority boundary. A
@@ -54,12 +54,12 @@ nonisolated struct RideAutomationPendingDecision: Codable, Equatable, Sendable {
             }
         case .pause:
             guard expectedState == .paused,
-                  frame.sessionIdentityHash != 0 else {
+                  frame.sessionID != nil else {
                 return false
             }
         case .resume:
             guard expectedState == .running,
-                  frame.sessionIdentityHash != 0 else {
+                  frame.sessionID != nil else {
                 return false
             }
         case .none:
@@ -67,13 +67,13 @@ nonisolated struct RideAutomationPendingDecision: Codable, Equatable, Sendable {
         }
 
         guard let resolvedResult else {
-            return resolvedSessionIdentityHash == nil
+            return resolvedSessionID == nil
         }
         guard resolvedResult != .none else { return false }
         if resolvedResult == .accepted {
-            return resolvedSessionIdentityHash.map { $0 != 0 } == true
+            return resolvedSessionID != nil
         }
-        return resolvedSessionIdentityHash == nil
+        return resolvedSessionID == nil
     }
 
     func isProvenOutstanding(

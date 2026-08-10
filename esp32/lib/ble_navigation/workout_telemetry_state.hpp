@@ -2,6 +2,7 @@
 
 #include "workout_telemetry_protocol.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -39,7 +40,7 @@ struct State {
   OptionalMetric<int16_t> altitudeMeters{};
   OptionalMetric<uint8_t> heartRateZoneCount{};
   OptionalMetric<uint32_t> wallElapsedSeconds{};
-  uint32_t sessionIdentityHash = 0;
+  std::array<uint8_t, workout_telemetry_protocol::SESSION_ID_SIZE> sessionID{};
   uint16_t detectorProfileVersion = 0;
   workout_telemetry_protocol::PauseOrigin pauseOrigin =
       workout_telemetry_protocol::PauseOrigin::None;
@@ -80,7 +81,7 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.altitudeMeters == rhs.altitudeMeters &&
          lhs.heartRateZoneCount == rhs.heartRateZoneCount &&
          lhs.wallElapsedSeconds == rhs.wallElapsedSeconds &&
-         lhs.sessionIdentityHash == rhs.sessionIdentityHash &&
+         lhs.sessionID == rhs.sessionID &&
          lhs.detectorProfileVersion == rhs.detectorProfileVersion &&
          lhs.pauseOrigin == rhs.pauseOrigin &&
          lhs.lastTransitionOrigin == rhs.lastTransitionOrigin &&
@@ -242,16 +243,24 @@ public:
     if (!authenticated) {
       return ApplyResult::RejectedUnauthenticated;
     }
-    if (bytes == nullptr || length != workout_telemetry_protocol::FRAME_SIZE) {
+    if (bytes == nullptr ||
+        (length != workout_telemetry_protocol::FRAME_SIZE &&
+         length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)) {
       return ApplyResult::RejectedLength;
     }
 
     switch (bytes[0]) {
     case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Core):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
       return applyCore(bytes, receivedAtMs);
     case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Extended):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
       return applyExtended(bytes, receivedAtMs);
     case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Origin):
+      if (length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)
+        return ApplyResult::RejectedLength;
       return applyOrigin(bytes, receivedAtMs);
     default:
       return ApplyResult::RejectedKind;
@@ -326,7 +335,7 @@ private:
       // as manual rather than allowing an automatic resume.
       next.originReceived = false;
       next.wallElapsedSeconds = {};
-      next.sessionIdentityHash = 0;
+      next.sessionID = {};
       next.detectorProfileVersion = 0;
       next.pauseOrigin = PauseOrigin::None;
       next.lastTransitionOrigin = PauseOrigin::None;
@@ -515,17 +524,19 @@ private:
     const uint8_t rawPauseOrigin = bytes[1];
     const uint16_t token = readUInt16LE(bytes, 2);
     const uint32_t wallElapsed = readUInt32LE(bytes, 4);
-    const uint32_t sessionHash = readUInt32LE(bytes, 8);
-    const uint16_t profileVersion = readUInt16LE(bytes, 12);
-    const uint8_t rawLastOrigin = bytes[14];
-    const uint8_t flags = bytes[15];
+    std::array<uint8_t, SESSION_ID_SIZE> sessionID{};
+    for (std::size_t index = 0; index < SESSION_ID_SIZE; ++index)
+      sessionID[index] = bytes[8 + index];
+    const uint16_t profileVersion = readUInt16LE(bytes, 24);
+    const uint8_t rawLastOrigin = bytes[26];
+    const uint8_t flags = bytes[27];
     if (token == 0)
       return ApplyResult::RejectedToken;
     if (!state_.coreReceived || state_.sessionToken != token)
       return ApplyResult::IgnoredToken;
     if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
         rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
-        flags > 1 || sessionHash == 0)
+        flags != 0 || !hasSessionID(sessionID))
       return ApplyResult::RejectedMetric;
     const bool paused = state_.sessionState == SessionState::Paused;
     if (!paused && rawPauseOrigin != 0)
@@ -545,7 +556,7 @@ private:
                                     ? OptionalMetric<uint32_t>{}
                                     : OptionalMetric<uint32_t>{true,
                                                                wallElapsed};
-    state_.sessionIdentityHash = sessionHash;
+    state_.sessionID = sessionID;
     state_.detectorProfileVersion = profileVersion;
     state_.pauseOrigin = static_cast<PauseOrigin>(rawPauseOrigin);
     state_.lastTransitionOrigin =

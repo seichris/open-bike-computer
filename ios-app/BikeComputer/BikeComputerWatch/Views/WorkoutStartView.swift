@@ -2,6 +2,10 @@ import SwiftUI
 
 struct WorkoutStartView: View {
     @ObservedObject var manager: WatchWorkoutManager
+    @ObservedObject var routeLibrary: WatchRouteLibrary
+    @ObservedObject var navigationManager: WatchNavigationManager
+    @ObservedObject var navigationSettings: WatchNavigationSettingsStore
+    @ObservedObject var favoriteStore: WatchFavoriteStore
     @State private var showingRecoveryResetConfirmation = false
 
     var body: some View {
@@ -36,7 +40,23 @@ struct WorkoutStartView: View {
                 }
 
                 NavigationLink {
-                    WatchSettingsView(manager: manager)
+                    WatchRouteLibraryView(
+                        routeLibrary: routeLibrary,
+                        navigationManager: navigationManager
+                    )
+                } label: {
+                    Label("Offline Navigation", systemImage: "map")
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                }
+                .buttonStyle(.borderless)
+
+                NavigationLink {
+                    WatchSettingsView(
+                        manager: manager,
+                        navigationSettings: navigationSettings,
+                        favoriteStore: favoriteStore,
+                        navigationManager: navigationManager
+                    )
                 } label: {
                     Image(systemName: "gearshape")
                         .accessibilityLabel("Settings")
@@ -82,7 +102,7 @@ struct WorkoutStartView: View {
                 manager.startOutdoorCycling()
             } label: {
                 Label("Start Ride", systemImage: "play.fill")
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 52)
             }
             .tint(.green)
             .disabled(manager.state == .failed)

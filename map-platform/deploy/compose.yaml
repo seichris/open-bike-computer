@@ -1,5 +1,5 @@
-# control-plane-source-commit: a529b3a9c52d014f1198d6815c86fbc3a49ea4d2
-# worker-source-commit: a529b3a9c52d014f1198d6815c86fbc3a49ea4d2
+# control-plane-source-commit: 3cc0aeb7b546b85e34cdc9c56486c7e9a4e9deb1
+# worker-source-commit: 3cc0aeb7b546b85e34cdc9c56486c7e9a4e9deb1
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -10,8 +10,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:20db77b42f6df5149c669af5162552a913870298ad28924d04e2529e80460801
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:20db77b42f6df5149c669af5162552a913870298ad28924d04e2529e80460801
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:f800a2ffa909c380a638da1f3e8c8c8088949ebba9a9eda32d1a73bb24dd743d
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:f800a2ffa909c380a638da1f3e8c8c8088949ebba9a9eda32d1a73bb24dd743d
 
 services:
   map-platform-api:
@@ -48,6 +48,7 @@ services:
       MAP_PLATFORM_LABEL_TARGET2_ENABLED: ${MAP_PLATFORM_LABEL_TARGET2_ENABLED:-0}
       MAP_PLATFORM_BUILDING_TARGET3_ENABLED: ${MAP_PLATFORM_BUILDING_TARGET3_ENABLED:-0}
       MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST: ${MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST:-}
+      MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE: ${MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE:-shadow}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE:-disabled}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_ALLOWLIST:-}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
@@ -92,6 +93,7 @@ services:
       MAP_PLATFORM_LABEL_TARGET2_ENABLED: ${MAP_PLATFORM_LABEL_TARGET2_ENABLED:-0}
       MAP_PLATFORM_BUILDING_TARGET3_ENABLED: ${MAP_PLATFORM_BUILDING_TARGET3_ENABLED:-0}
       MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST: ${MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST:-}
+      MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE: ${MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE:-shadow}
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
       MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}

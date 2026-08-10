@@ -50,7 +50,7 @@ nonisolated enum RideAutomationSerialNumber {
 
 nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
     static let version: UInt8 = 2
-    static let byteCount = 40
+    static let byteCount = 52
     static let validSourceHealthMask: UInt16 = 0x000F
 
     var kind: RideAutomationKind
@@ -61,7 +61,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
     var decisionSequence: UInt32 = 0
     var evidenceMask: UInt16 = 0
     var profileVersion: UInt16 = 1
-    var sessionIdentityHash: UInt32 = 0
+    var sessionID: UUID?
     var watermarkOrConfigGeneration: UInt32 = 0
     var startMode: RideStartMode = .off
     var autoPauseEnabled = false
@@ -80,7 +80,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
         decisionSequence: UInt32 = 0,
         evidenceMask: UInt16 = 0,
         profileVersion: UInt16 = 1,
-        sessionIdentityHash: UInt32 = 0,
+        sessionID: UUID? = nil,
         watermarkOrConfigGeneration: UInt32 = 0,
         startMode: RideStartMode = .off,
         autoPauseEnabled: Bool = false,
@@ -98,7 +98,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
         self.decisionSequence = decisionSequence
         self.evidenceMask = evidenceMask
         self.profileVersion = profileVersion
-        self.sessionIdentityHash = sessionIdentityHash
+        self.sessionID = sessionID
         self.watermarkOrConfigGeneration = watermarkOrConfigGeneration
         self.startMode = startMode
         self.autoPauseEnabled = autoPauseEnabled
@@ -134,12 +134,12 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
         bytes.writeLE(decisionSequence, at: 12)
         bytes.writeLE(evidenceMask, at: 16)
         bytes.writeLE(profileVersion, at: 18)
-        bytes.writeLE(sessionIdentityHash, at: 20)
-        bytes.writeLE(watermarkOrConfigGeneration, at: 24)
-        bytes.writeLE(candidateBeganSeconds, at: 28)
-        bytes.writeLE(monotonicSeconds, at: 32)
-        bytes.writeLE(sourceHealthMask, at: 36)
-        bytes[38] = acknowledgedKind?.rawValue ?? 0
+        bytes.writeUUID(sessionID, at: 20)
+        bytes.writeLE(watermarkOrConfigGeneration, at: 36)
+        bytes.writeLE(candidateBeganSeconds, at: 40)
+        bytes.writeLE(monotonicSeconds, at: 44)
+        bytes.writeLE(sourceHealthMask, at: 48)
+        bytes[50] = acknowledgedKind?.rawValue ?? 0
         return Data(bytes)
     }
 
@@ -154,7 +154,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
               let startMode = RideStartMode(rawValue: bytes[5]),
               bytes[6] <= 1,
               bytes[7] <= 2,
-              bytes[39] == 0 else { return nil }
+              bytes[51] == 0 else { return nil }
         let rideGeneration: UInt32 = bytes.readLE(at: 8)
         let sequence: UInt32 = bytes.readLE(at: 12)
         let profile: UInt16 = bytes.readLE(at: 18)
@@ -171,18 +171,18 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
         decisionSequence = sequence
         evidenceMask = bytes.readLE(at: 16)
         profileVersion = profile
-        sessionIdentityHash = bytes.readLE(at: 20)
-        watermarkOrConfigGeneration = bytes.readLE(at: 24)
+        sessionID = bytes.readUUID(at: 20)
+        watermarkOrConfigGeneration = bytes.readLE(at: 36)
         self.startMode = startMode
         autoPauseEnabled = bytes[6] == 1
         alertMode = bytes[7]
-        candidateBeganSeconds = bytes.readLE(at: 28)
-        monotonicSeconds = bytes.readLE(at: 32)
-        sourceHealthMask = bytes.readLE(at: 36)
-        if bytes[38] == 0 {
+        candidateBeganSeconds = bytes.readLE(at: 40)
+        monotonicSeconds = bytes.readLE(at: 44)
+        sourceHealthMask = bytes.readLE(at: 48)
+        if bytes[50] == 0 {
             acknowledgedKind = nil
         } else {
-            guard let value = RideAutomationKind(rawValue: bytes[38]) else {
+            guard let value = RideAutomationKind(rawValue: bytes[50]) else {
                 return nil
             }
             acknowledgedKind = value
@@ -234,6 +234,26 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
 }
 
 private extension Array where Element == UInt8 {
+    nonisolated mutating func writeUUID(_ value: UUID?, at offset: Int) {
+        guard var uuid = value?.uuid else { return }
+        Swift.withUnsafeBytes(of: &uuid) { rawBuffer in
+            for index in 0..<16 {
+                self[offset + index] = rawBuffer[index]
+            }
+        }
+    }
+
+    nonisolated func readUUID(at offset: Int) -> UUID? {
+        let values = Array(self[offset..<(offset + 16)])
+        guard values.contains(where: { $0 != 0 }) else { return nil }
+        return UUID(uuid: (
+            values[0], values[1], values[2], values[3],
+            values[4], values[5], values[6], values[7],
+            values[8], values[9], values[10], values[11],
+            values[12], values[13], values[14], values[15]
+        ))
+    }
+
     nonisolated mutating func writeLE<T: FixedWidthInteger>(
         _ value: T,
         at offset: Int

@@ -11,7 +11,7 @@
 #include "rideMetricFontSelection.hpp"
 #include "rideTelemetryLayout.hpp"
 #include "rideTelemetryPresenter.hpp"
-#include "ride_automation_runtime.hpp"
+#include "../../ride_automation/ride_automation_runtime.hpp"
 
 #include <array>
 #include <cstdio>

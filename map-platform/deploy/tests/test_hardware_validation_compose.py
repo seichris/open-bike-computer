@@ -35,6 +35,13 @@ class HardwareValidationComposeTests(unittest.TestCase):
             "${MAP_PLATFORM_LABEL_TARGET2_ENABLED:-0}",
             compose,
         )
+        self.assertEqual(
+            compose.count(
+                "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE: "
+                "${MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE:-shadow}"
+            ),
+            2,
+        )
         self.assertIn(
             "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE: "
             "${MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE:-disabled}",

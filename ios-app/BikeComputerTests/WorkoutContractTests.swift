@@ -67,6 +67,7 @@ private struct WorkoutContractTestSuite {
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
+        testWorkoutDevicePairGenerationStamp()
         testInvalidEnvelopeIdentityIsRejected()
         testInvalidNumbersAndCoordinatesAreRejected()
         testMetricUnitsAndAvailabilityMustMatchPayload()
@@ -134,6 +135,7 @@ private struct WorkoutContractTestSuite {
         testDiscardedWorkoutSummaryDismissalPolicy()
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
+        testWatchOfflineNavigationUIFlow()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
@@ -143,6 +145,9 @@ private struct WorkoutContractTestSuite {
     }
 
     private mutating func testRideAutomationGoldenVectorAndValidation() {
+        let sessionID = UUID(
+            uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"
+        )!
         let frame = RideAutomationFrame(
             kind: .decision,
             transition: .pause,
@@ -151,7 +156,7 @@ private struct WorkoutContractTestSuite {
             decisionSequence: 0x1122_3344,
             evidenceMask: 0x55AA,
             profileVersion: 1,
-            sessionIdentityHash: 0xAABB_CCDD,
+            sessionID: sessionID,
             watermarkOrConfigGeneration: 7,
             startMode: .ask,
             autoPauseEnabled: true,
@@ -163,13 +168,15 @@ private struct WorkoutContractTestSuite {
         let expected = Data([
             2, 1, 2, 2, 0, 1, 1, 2,
             0x04, 0x03, 0x02, 0x01, 0x44, 0x33, 0x22, 0x11,
-            0xAA, 0x55, 0x01, 0x00, 0xDD, 0xCC, 0xBB, 0xAA,
+            0xAA, 0x55, 0x01, 0x00,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
             0x07, 0, 0, 0, 0x58, 0, 0, 0,
             0x63, 0, 0, 0, 0x0F, 0, 0, 0,
         ])
         expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
         expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
-        expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 40 bytes")
+        expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 52 bytes")
         var invalid = expected
         invalid[12] = 0
         invalid[13] = 0
@@ -177,13 +184,13 @@ private struct WorkoutContractTestSuite {
         invalid[15] = 0
         expect(RideAutomationFrame(invalid) == nil, "RAUT decisions require a nonzero sequence")
         invalid = expected
-        invalid[36] = 0x10
+        invalid[48] = 0x10
         expect(
             RideAutomationFrame(invalid) == nil,
             "RAUT source health must reject undefined bits"
         )
         invalid = expected
-        invalid[39] = 1
+        invalid[51] = 1
         expect(
             RideAutomationFrame(invalid) == nil,
             "RAUT reserved bytes must remain zero"
@@ -348,6 +355,9 @@ private struct WorkoutContractTestSuite {
 
 #if WORKOUT_CONTRACT_HOST
     private mutating func testRideDetectionSettingsAdoptOnlyNewerDeviceState() {
+        let sessionID = UUID(
+            uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"
+        )!
         let suiteName = "RideDetectionSettingsTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             expect(false, "ride settings test defaults must be available")
@@ -502,7 +512,7 @@ private struct WorkoutContractTestSuite {
             origin: .automatic,
             rideGeneration: 7,
             decisionSequence: 12,
-            sessionIdentityHash: 99,
+            sessionID: sessionID,
             startMode: .ask,
             autoPauseEnabled: true
         )
@@ -516,7 +526,7 @@ private struct WorkoutContractTestSuite {
             frame: pauseFrame,
             expectedState: .paused,
             resolvedResult: .accepted,
-            resolvedSessionIdentityHash: 99
+            resolvedSessionID: sessionID
         )
         expect(
             acceptedPause.isValidForPersistence,
@@ -527,7 +537,7 @@ private struct WorkoutContractTestSuite {
             frame: pauseFrame,
             expectedState: .paused,
             resolvedResult: .accepted,
-            resolvedSessionIdentityHash: 0
+            resolvedSessionID: nil
         )
         expect(
             !unboundAcceptedPause.isValidForPersistence,
@@ -538,11 +548,6 @@ private struct WorkoutContractTestSuite {
 
     private mutating func testRideAutomationAdmissionAndOriginContract() {
         let sessionID = UUID(uuidString: "6D1ED7F6-8BAA-43E2-94D5-2A0E4FF65A01")!
-        let sessionHash = RideAutomationAdmissionPolicy.sessionIdentityHash(
-            sessionID
-        )!
-        expect(sessionHash != 0,
-               "a real Watch session identity never uses the wire sentinel")
         var settings = RideDetectionSettings()
         let start = RideAutomationFrame(
             kind: .decision,
@@ -557,7 +562,7 @@ private struct WorkoutContractTestSuite {
                 settings: settings,
                 workoutState: .idle,
                 pauseOrigin: nil,
-                expectedSessionIdentityHash: nil,
+                expectedSessionID: nil,
                 highestDecisionSequence: 0
             ) == .prompt,
             "Ask mode must admit a prompt rather than starting optimistically"
@@ -569,7 +574,7 @@ private struct WorkoutContractTestSuite {
                 settings: settings,
                 workoutState: .idle,
                 pauseOrigin: nil,
-                expectedSessionIdentityHash: nil,
+                expectedSessionID: nil,
                 highestDecisionSequence: 0
             ) == .reject(.rejected),
             "Off mode must reject detected starts"
@@ -581,7 +586,7 @@ private struct WorkoutContractTestSuite {
             origin: .automatic,
             rideGeneration: 4,
             decisionSequence: 2,
-            sessionIdentityHash: sessionHash
+            sessionID: sessionID
         )
         expect(
             RideAutomationAdmissionPolicy.resolve(
@@ -589,7 +594,7 @@ private struct WorkoutContractTestSuite {
                 settings: settings,
                 workoutState: .paused,
                 pauseOrigin: .manual,
-                expectedSessionIdentityHash: sessionHash,
+                expectedSessionID: sessionID,
                 highestDecisionSequence: 1
             ) == .reject(.stale),
             "automation must never resume a manually paused ride"
@@ -600,7 +605,7 @@ private struct WorkoutContractTestSuite {
                 settings: settings,
                 workoutState: .paused,
                 pauseOrigin: .automatic,
-                expectedSessionIdentityHash: sessionHash,
+                expectedSessionID: sessionID,
                 highestDecisionSequence: 1
             ) == .resume,
             "matching automatic pauses may auto-resume"
@@ -613,7 +618,7 @@ private struct WorkoutContractTestSuite {
                 settings: settings,
                 workoutState: .idle,
                 pauseOrigin: nil,
-                expectedSessionIdentityHash: nil,
+                expectedSessionID: nil,
                 highestDecisionSequence: UInt32.max
             ) == .prompt,
             "decision deduplication must accept the serial after UInt32 wrap"
@@ -746,6 +751,45 @@ private struct WorkoutContractTestSuite {
         ) {
             try WorkoutContractCodec.validate(invalidContext)
         }
+    }
+    private mutating func testWorkoutDevicePairGenerationStamp() {
+        let sample = WorkoutDeviceTelemetrySample(
+            state: .running,
+            sessionToken: 7,
+            hasLiveNumerics: true,
+            isCurrentSnapshot: true,
+            elapsedSeconds: 10,
+            distanceMeters: 20,
+            speedMetersPerSecond: 3,
+            currentHeartRateBPM: 120,
+            averageHeartRateBPM: 110,
+            activeEnergyKilocalories: 5,
+            cyclingPowerWatts: 200,
+            cyclingCadenceRPM: 80,
+            currentHeartRateZone: 2,
+            altitudeMeters: 30,
+            heartRateZoneCount: 5,
+            sourceFlags: [.watchSpeed, .watchAltitude]
+        )
+        guard let frames = WorkoutDeviceFrameBuilder.frames(for: sample) else {
+            expect(false, "workout device frames encode")
+            return
+        }
+        let stamped = WorkoutDeviceFrameBuilder.stampedPair(
+            core: frames.core,
+            extended: frames.extended,
+            generation: 3
+        )
+        expect(
+            stamped.core[1] & 0xC0 == 0xC0 &&
+                stamped.extended[1] & 0xC0 == 0xC0,
+            "workout core and extended frames share one pair generation"
+        )
+        expect(
+            stamped.core[1] & 0x3F == frames.core[1] &&
+                stamped.extended[1] & 0x3F == frames.extended[1],
+            "pair stamping preserves state and source bits"
+        )
     }
 
     private mutating func expect(
@@ -6670,6 +6714,130 @@ private struct WorkoutContractTestSuite {
             !watchSource.contains("Max HR")
                 && !watchSource.contains("heartRateZoneSettings"),
             "maximum-heart-rate configuration must not remain on the Watch start screen"
+        )
+    }
+
+    private mutating func testWatchOfflineNavigationUIFlow() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let sourceURLs = [
+            "start": watchDirectory.appendingPathComponent(
+                "Views/WorkoutStartView.swift"
+            ),
+            "library": watchDirectory.appendingPathComponent(
+                "Views/WatchRouteLibraryView.swift"
+            ),
+            "status": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationStatusView.swift"
+            ),
+            "navigationOnly": watchDirectory.appendingPathComponent(
+                "Views/WatchNavigationOnlyView.swift"
+            ),
+            "manager": watchDirectory.appendingPathComponent(
+                "Managers/WatchNavigationManager.swift"
+            ),
+            "settings": watchDirectory.appendingPathComponent(
+                "Views/WatchSettingsView.swift"
+            ),
+            "root": watchDirectory.appendingPathComponent(
+                "Views/WatchWorkoutRootView.swift"
+            ),
+            "live": watchDirectory.appendingPathComponent(
+                "Views/LiveWorkoutView.swift"
+            ),
+        ]
+        var sources: [String: String] = [:]
+        for (name, url) in sourceURLs {
+            guard let source = try? String(
+                contentsOf: url,
+                encoding: .utf8
+            ) else {
+                expect(
+                    false,
+                    "Watch offline-navigation source must exist: \(name)"
+                )
+                return
+            }
+            sources[name] = source
+        }
+
+        let start = sources["start"] ?? ""
+        expect(
+            start.contains(
+                "Label(\"Offline Navigation\", systemImage: \"map\")"
+            )
+                && start.components(
+                    separatedBy: ".frame(maxWidth: .infinity, minHeight: 52)"
+                ).count - 1 == 2
+                && !start.contains("Picker(\"Navigation\"")
+                && !start.contains("selectedNavigation"),
+            "Watch home must offer equal-height Ride and backgroundless Offline Navigation actions without a navigation picker"
+        )
+
+        let library = sources["library"] ?? ""
+        let manager = sources["manager"] ?? ""
+        expect(
+            library.contains("pendingRoute = route")
+                && library.contains(".confirmationDialog(")
+                && library.contains("\"Start Navigation?\"")
+                && library.contains(
+                    "navigationManager.startInstalledRoute(routeID: route.id)"
+                )
+                && manager.contains(
+                    "func startInstalledRoute(routeID: UUID)"
+                )
+                && manager.contains("case .awaitingStartConfirmation")
+                && manager.contains("func startAnyway()"),
+            "selecting an offline route must confirm intent and retain the measured far-start warning"
+        )
+
+        let status = sources["status"] ?? ""
+        expect(
+            status.contains("let suffix = \" checkpoint\"")
+                && status.contains(
+                    "\"Off route by \\(compactDistance($0))\""
+                )
+                && status.contains("snapshot.routeRemainingDistanceMeters")
+                && status.contains(".background(.quaternary")
+                && status.contains("navigationManager.routeAttribution")
+                && status.contains("RouteProviderPolicyV1.importedGPX")
+                && status.contains("navigationManager.onlineStatus")
+                && status.contains("Bicino is controlled by iPhone")
+                && !status.contains("Rerouting unavailable offline"),
+            "active Watch guidance keeps the compact offline layout while surfacing online attribution and actionable Bicino failures"
+        )
+
+        let navigationOnly = sources["navigationOnly"] ?? ""
+        expect(
+            navigationOnly.contains(
+                "Label(\"Start Workout\", systemImage: \"bicycle\")"
+            )
+                && navigationOnly.contains("manager.startOutdoorCycling()")
+                && navigationOnly.contains(
+                    "Label(\"End Navigation\", systemImage: \"stop.fill\")"
+                )
+                && navigationOnly.contains(
+                    "navigationManager.stopNavigation()"
+                )
+                && navigationOnly.contains("WatchSettingsView("),
+            "navigation-only mode must independently start a workout, end navigation, or open live navigation settings"
+        )
+
+        let settings = sources["settings"] ?? ""
+        let root = sources["root"] ?? ""
+        let live = sources["live"] ?? ""
+        expect(
+            settings.contains("WatchOnlineDestinationListView(")
+                && settings.contains("favoriteStore.favorites")
+                && settings.contains(
+                    "navigationManager.startOnline(destination: destination)"
+                )
+                && settings.contains("navigationManager.recalculateOnlineRoute()")
+                && root.contains("favoriteStore: favoriteStore")
+                && live.contains("WatchSettingsView("),
+            "synced online destinations and the policy toggle must remain reachable before and during a ride"
         )
     }
 

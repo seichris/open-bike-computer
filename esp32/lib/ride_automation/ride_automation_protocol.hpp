@@ -1,12 +1,14 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace ride_automation_protocol {
 
-constexpr uint8_t VERSION = 2;
-constexpr std::size_t FRAME_SIZE = 40;
+constexpr uint8_t PROTOCOL_VERSION = 2;
+constexpr std::size_t FRAME_SIZE = 52;
+constexpr std::size_t SESSION_ID_SIZE = 16;
 constexpr uint16_t SOURCE_HEALTH_MASK = 0x000F;
 constexpr char FALLBACK_PREFIX[] = "RAUT";
 constexpr std::size_t FALLBACK_PREFIX_SIZE = 4;
@@ -42,7 +44,7 @@ struct Frame {
   uint32_t decisionSequence = 0;
   uint16_t evidenceMask = 0;
   uint16_t profileVersion = 0;
-  uint32_t sessionIdentityHash = 0;
+  std::array<uint8_t, SESSION_ID_SIZE> sessionID{};
   uint32_t watermarkOrConfigGeneration = 0;
   uint8_t startMode = 0;
   bool autoPauseEnabled = false;
@@ -75,6 +77,15 @@ constexpr bool validResult(uint8_t raw) {
 constexpr bool serialNumberNewer(uint32_t candidate, uint32_t current) {
   const uint32_t delta = candidate - current;
   return delta != 0 && delta < 0x80000000U;
+}
+
+constexpr bool hasSessionID(
+    const std::array<uint8_t, SESSION_ID_SIZE> &sessionID) {
+  for (const uint8_t value : sessionID) {
+    if (value != 0)
+      return true;
+  }
+  return false;
 }
 
 struct PromptResponseResolution {
@@ -183,7 +194,7 @@ inline bool encode(const Frame &frame, uint8_t *output, std::size_t capacity) {
     return false;
   for (std::size_t index = 0; index < FRAME_SIZE; ++index)
     output[index] = 0;
-  output[0] = VERSION;
+  output[0] = PROTOCOL_VERSION;
   output[1] = static_cast<uint8_t>(frame.kind);
   output[2] = static_cast<uint8_t>(frame.transition);
   output[3] = static_cast<uint8_t>(frame.origin);
@@ -195,20 +206,22 @@ inline bool encode(const Frame &frame, uint8_t *output, std::size_t capacity) {
   writeUInt32(output, 12, frame.decisionSequence);
   writeUInt16(output, 16, frame.evidenceMask);
   writeUInt16(output, 18, frame.profileVersion);
-  writeUInt32(output, 20, frame.sessionIdentityHash);
-  writeUInt32(output, 24, frame.watermarkOrConfigGeneration);
-  writeUInt32(output, 28, frame.candidateBeganSeconds);
-  writeUInt32(output, 32, frame.monotonicSeconds);
-  writeUInt16(output, 36, frame.sourceHealthMask);
-  output[38] = frame.acknowledgedKind;
+  for (std::size_t index = 0; index < SESSION_ID_SIZE; ++index)
+    output[20 + index] = frame.sessionID[index];
+  writeUInt32(output, 36, frame.watermarkOrConfigGeneration);
+  writeUInt32(output, 40, frame.candidateBeganSeconds);
+  writeUInt32(output, 44, frame.monotonicSeconds);
+  writeUInt16(output, 48, frame.sourceHealthMask);
+  output[50] = frame.acknowledgedKind;
   return true;
 }
 
 inline bool decode(const uint8_t *bytes, std::size_t length, Frame &frame) {
-  if (bytes == nullptr || length != FRAME_SIZE || bytes[0] != VERSION ||
+  if (bytes == nullptr || length != FRAME_SIZE ||
+      bytes[0] != PROTOCOL_VERSION ||
       !validKind(bytes[1]) || !validTransition(bytes[2]) ||
       !validOrigin(bytes[3]) || !validResult(bytes[4]) || bytes[5] > 2 ||
-      bytes[6] > 1 || bytes[7] > 2 || bytes[39] != 0)
+      bytes[6] > 1 || bytes[7] > 2 || bytes[51] != 0)
     return false;
   Frame parsed;
   parsed.kind = static_cast<Kind>(bytes[1]);
@@ -222,12 +235,13 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Frame &frame) {
   parsed.decisionSequence = readUInt32(bytes, 12);
   parsed.evidenceMask = readUInt16(bytes, 16);
   parsed.profileVersion = readUInt16(bytes, 18);
-  parsed.sessionIdentityHash = readUInt32(bytes, 20);
-  parsed.watermarkOrConfigGeneration = readUInt32(bytes, 24);
-  parsed.candidateBeganSeconds = readUInt32(bytes, 28);
-  parsed.monotonicSeconds = readUInt32(bytes, 32);
-  parsed.sourceHealthMask = readUInt16(bytes, 36);
-  parsed.acknowledgedKind = bytes[38];
+  for (std::size_t index = 0; index < SESSION_ID_SIZE; ++index)
+    parsed.sessionID[index] = bytes[20 + index];
+  parsed.watermarkOrConfigGeneration = readUInt32(bytes, 36);
+  parsed.candidateBeganSeconds = readUInt32(bytes, 40);
+  parsed.monotonicSeconds = readUInt32(bytes, 44);
+  parsed.sourceHealthMask = readUInt16(bytes, 48);
+  parsed.acknowledgedKind = bytes[50];
   if (parsed.rideGeneration == 0 || parsed.profileVersion == 0 ||
       (parsed.sourceHealthMask & ~SOURCE_HEALTH_MASK) != 0)
     return false;
@@ -242,6 +256,42 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Frame &frame) {
     return false;
   frame = parsed;
   return true;
+}
+
+inline bool matchesOutstandingResponse(bool hasOutstanding,
+                                       const Frame &outstanding,
+                                       const Frame &response) {
+  if (!hasOutstanding ||
+      response.rideGeneration != outstanding.rideGeneration ||
+      response.decisionSequence != outstanding.decisionSequence ||
+      response.transition != outstanding.transition ||
+      response.origin != Origin::Automatic ||
+      response.profileVersion != outstanding.profileVersion) {
+    return false;
+  }
+  if (outstanding.transition != Transition::Start &&
+      hasSessionID(outstanding.sessionID) &&
+      response.sessionID != outstanding.sessionID) {
+    return false;
+  }
+  return true;
+}
+
+inline bool isDuplicateOrOutOfOrderInbound(bool hasPrevious,
+                                           const Frame &previous,
+                                           const Frame &candidate) {
+  return hasPrevious && candidate.kind == previous.kind &&
+         candidate.rideGeneration == previous.rideGeneration &&
+         candidate.decisionSequence != 0 &&
+         !serialNumberNewer(candidate.decisionSequence,
+                            previous.decisionSequence) &&
+         candidate.kind != Kind::PromptResponse &&
+         candidate.acknowledgedKind == previous.acknowledgedKind;
+}
+
+constexpr uint32_t outstandingDecisionWatermark(bool hasOutstanding,
+                                                const Frame &outstanding) {
+  return hasOutstanding ? outstanding.decisionSequence : 0;
 }
 
 } // namespace ride_automation_protocol

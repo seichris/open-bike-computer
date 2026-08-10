@@ -14,7 +14,8 @@ int main() {
   input.decisionSequence = 0x11223344;
   input.evidenceMask = 0x55AA;
   input.profileVersion = 1;
-  input.sessionIdentityHash = 0xAABBCCDD;
+  input.sessionID = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                     0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
   input.watermarkOrConfigGeneration = 7;
   input.startMode = 1;
   input.autoPauseEnabled = true;
@@ -28,7 +29,9 @@ int main() {
   const uint8_t golden[FRAME_SIZE] = {
       2,    1,    2,    2,    0,    1,    1,    2,
       0x04, 0x03, 0x02, 0x01, 0x44, 0x33, 0x22, 0x11,
-      0xAA, 0x55, 0x01, 0x00, 0xDD, 0xCC, 0xBB, 0xAA,
+      0xAA, 0x55, 0x01, 0x00, 0x00, 0x11, 0x22, 0x33,
+      0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+      0xCC, 0xDD, 0xEE, 0xFF,
       0x07, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00,
       0x63, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00,
   };
@@ -43,7 +46,7 @@ int main() {
   assert(decoded.decisionSequence == input.decisionSequence);
   assert(decoded.evidenceMask == input.evidenceMask);
   assert(decoded.profileVersion == input.profileVersion);
-  assert(decoded.sessionIdentityHash == input.sessionIdentityHash);
+  assert(decoded.sessionID == input.sessionID);
   assert(decoded.watermarkOrConfigGeneration == 7);
   assert(decoded.autoPauseEnabled);
   assert(decoded.candidateBeganSeconds == 88);
@@ -54,7 +57,7 @@ int main() {
   assert(!decode(bytes, FRAME_SIZE - 1, decoded));
   bytes[0] = 1;
   assert(!decode(bytes, FRAME_SIZE, decoded));
-  bytes[0] = VERSION;
+  bytes[0] = PROTOCOL_VERSION;
   bytes[1] = 99;
   assert(!decode(bytes, FRAME_SIZE, decoded));
   bytes[1] = static_cast<uint8_t>(Kind::Decision);
@@ -145,7 +148,7 @@ int main() {
   assert(!encode(cancellation, bytes, sizeof(bytes)));
   cancellation.sourceHealthMask = 0x000F;
   assert(encode(cancellation, bytes, sizeof(bytes)));
-  bytes[39] = 1;
+  bytes[51] = 1;
   assert(!decode(bytes, sizeof(bytes), decoded));
 
   static_assert(FALLBACK_PREFIX_SIZE == 4);
@@ -171,5 +174,32 @@ int main() {
   static_assert(!laterNotNow.accepted);
   static_assert(laterNotNow.acknowledgement == Result::Accepted);
   static_assert(laterNotNow.shouldSnooze);
+
+  Frame response = input;
+  response.kind = Kind::Acknowledgement;
+  response.result = Result::Accepted;
+  response.acknowledgedKind = static_cast<uint8_t>(Kind::Decision);
+  assert(matchesOutstandingResponse(true, input, response));
+  response.sessionID[15] ^= 0x01;
+  assert(!matchesOutstandingResponse(true, input, response));
+  response.sessionID = input.sessionID;
+  assert(!matchesOutstandingResponse(false, input, response));
+
+  assert(!isDuplicateOrOutOfOrderInbound(false, response, response));
+  assert(isDuplicateOrOutOfOrderInbound(true, response, response));
+  Frame olderResponse = response;
+  olderResponse.decisionSequence = response.decisionSequence - 1;
+  assert(isDuplicateOrOutOfOrderInbound(true, response, olderResponse));
+  Frame newerResponse = response;
+  newerResponse.decisionSequence = response.decisionSequence + 1;
+  assert(!isDuplicateOrOutOfOrderInbound(true, response, newerResponse));
+  Frame promptRetry = response;
+  promptRetry.kind = Kind::PromptResponse;
+  promptRetry.transition = Transition::Start;
+  promptRetry.acknowledgedKind = 0;
+  assert(!isDuplicateOrOutOfOrderInbound(true, promptRetry, promptRetry));
+  assert(outstandingDecisionWatermark(false, input) == 0);
+  assert(outstandingDecisionWatermark(true, input) ==
+         input.decisionSequence);
   return 0;
 }

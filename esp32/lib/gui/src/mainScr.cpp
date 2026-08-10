@@ -171,6 +171,7 @@ uint64_t gpsSignature() {
   hashScalar(hash, gps.gpsData.latitude);
   hashScalar(hash, gps.gpsData.longitude);
   hashScalar(hash, gps.gpsData.heading);
+  hashScalar(hash, gps.gpsData.headingValid);
   hashScalar(hash, gps.gpsData.hdop);
   hashScalar(hash, gps.gpsData.pdop);
   hashScalar(hash, gps.gpsData.vdop);
@@ -332,11 +333,13 @@ void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
 
 Maps mapView;
 static map_tap_arbiter::Controller mapTapController;
-static uint16_t currentCourseUpHeading();
+static bool currentCourseUpHeading(uint16_t &headingDegrees);
 
 static map_render_policy::Fix currentMapFix() {
-  return {gps.gpsData.latitude, gps.gpsData.longitude,
-          currentCourseUpHeading()};
+  uint16_t headingDegrees = 0;
+  const bool headingValid = currentCourseUpHeading(headingDegrees);
+  return {gps.gpsData.latitude, gps.gpsData.longitude, headingDegrees,
+          headingValid};
 }
 
 static void noteMapRenderReasons(uint32_t reasons) {
@@ -556,13 +559,30 @@ static int16_t mapInteractionAnchorY() {
   return gui_layout::mapScreenAnchorY(TFT_HEIGHT, mapHeight);
 }
 
-static uint16_t currentCourseUpHeading() {
+static bool currentCourseUpHeading(uint16_t &headingDegrees) {
   uint16_t routeHeading = 0;
-  if (routeOverlay.headingNear(gps.gpsData.latitude, gps.gpsData.longitude,
-                               routeHeading)) {
-    return routeHeading;
+  const bool routeHeadingValid = routeOverlay.headingNear(
+      gps.gpsData.latitude, gps.gpsData.longitude, routeHeading);
+
+  // Client protocol versions before explicit-invalid-heading support encoded
+  // an unavailable Core Location course as 0 degrees. Prefer the route for
+  // those sessions so both normal and test navigation cannot be pinned north
+  // by an ambiguous legacy value. New clients preserve invalidity with the BLE
+  // sentinel, so a real measured course remains authoritative.
+  if (!bleNavServer.supportsExplicitInvalidGpsHeading() &&
+      routeHeadingValid) {
+    headingDegrees = routeHeading;
+    return true;
   }
-  return gps.gpsData.heading;
+  if (gps.gpsData.headingValid) {
+    headingDegrees = gps.gpsData.heading % 360U;
+    return true;
+  }
+  if (routeHeadingValid) {
+    headingDegrees = routeHeading;
+    return true;
+  }
+  return false;
 }
 
 static bool isMapBackedTile(uint8_t tile) {
@@ -664,7 +684,9 @@ static tileName nextEnabledTile(tileName current) {
   return configuredDefaultTile();
 }
 
-static bool isGuidanceNavigating() { return routeOverlay.hasRoute(); }
+static bool isGuidanceNavigating() {
+  return routeOverlay.hasRoute() || hasCurrentNavigationData();
+}
 
 static int16_t navigationArrowAngle(uint8_t iconID) {
   switch (iconID) {
@@ -1051,22 +1073,42 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
 #endif
   applyMapRotationForActiveTile();
 
+  // Publication, pose interpolation, front-frame translation, live route, and
+  // marker work are all bounded LVGL-owner operations and run at display
+  // cadence even while the render worker is busy.
+  const bool framePublished = mapView.serviceRenderPipeline(nowMs);
+  mapView.updatePositionOverlay();
+  if (framePublished) {
+    mapTileTransition.noteFramePublished();
+    (void)mapView.takeFramePublication();
+    mapRenderScheduler.markRendered(nowMs, currentMapFix());
+    revealPendingMapTileIfReady();
+  }
+  if (mapView.takeRenderFailure()) {
+    mapRenderScheduler.markInterrupted();
+    noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
+    mapView.isPosMoved = true;
+    mapView.redrawMap = true;
+  }
+
   bool navigationOverlayChanged = false;
   if (activeTile == MAP_GUIDANCE) {
     mapView.followGps = true;
     navigationOverlayChanged =
         uiChangeTracker.take(ui_update_policy::Source::Navigation);
-    if (navigationOverlayChanged) {
-      // Apply the maneuver model before considering synchronous base-map work.
-      // The caller gives LVGL one cycle to present this overlay first.
+    if (navigationOverlayChanged)
       updateMapGuidanceOverlay();
-    }
   }
 
-  if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
-    // Keep the lightweight marker current for every accepted fix. The vector
-    // background has a separate, bounded regeneration policy.
-    mapView.updatePositionOverlay();
+  // A route window can change the resolved course even when the phone has not
+  // sent a new GPS fix. Feed that observation through the normal 12-degree
+  // policy instead of forcing every sliding route packet to cancel/rebuild the
+  // base frame.
+  const bool gpsChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Gps);
+  const bool routeChanged =
+      uiChangeTracker.take(ui_update_policy::Source::Route);
+  if (gpsChanged || routeChanged) {
     mapRenderScheduler.observe(currentMapFix());
   }
 
@@ -1086,7 +1128,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
         mapView.isPosMoved = true;
       }
       mapView.redrawMap = true;
-      log_i("Map scheduler: render reasons=0x%02lx distance=%.1fm "
+      log_i("Map scheduler: request reasons=0x%02lx distance=%.1fm "
             "heading=%u",
             static_cast<unsigned long>(decision.reasons),
             decision.distanceMeters,
@@ -1105,13 +1147,6 @@ void updateMainScreen(lv_timer_t *t) {
   (void)t;
   processMapPinchZoom();
   processDeferredMapTap();
-
-  // The Map + Navigation renderer can take long enough to mask a complete
-  // button press or touch. Let the input timer run before starting more map
-  // work whenever either physical input is already active.
-  if (shouldInterruptMapRenderForScreenCycle()) {
-    return;
-  }
 
   // The 30 ms timer remains the input path for touch responsiveness, but
   // source acquisition is unnecessary while another screen is active.
@@ -1202,15 +1237,15 @@ void updateMainScreen(lv_timer_t *t) {
     }
   }
 
-  // Route and settings handlers already set the concrete map redraw flags or
-  // apply screen settings. Consuming their signatures prevents stale work from
-  // being mistaken for a later visible-widget change.
-  (void)uiChangeTracker.take(ui_update_policy::Source::Route);
+  // Settings handlers already apply the concrete map redraw flags. Consuming
+  // the signature prevents stale work from being mistaken for a later visible
+  // widget change. Route changes are consumed by prepareVisibleMapUpdate so a
+  // material course change can pass through the normal render policy.
   (void)uiChangeTracker.take(ui_update_policy::Source::Settings);
 
-  // Synchronous vector-map generation can be long. When a new maneuver and a
-  // base-map request arrive together, return to LVGL once so the lightweight
-  // overlay can be presented before the expensive background regeneration.
+  // Keep maneuver/foreground presentation ahead of render-job submission
+  // when both arrive in one cycle. Submission itself is bounded; all storage,
+  // parsing, and raster work belongs to the low-priority worker.
   if (!navigationOverlayChanged && isMapBackedTile(activeTile) &&
       mapView.hasMapCanvas() &&
       (mapView.isPosMoved || mapView.redrawMap)) {
@@ -1263,44 +1298,37 @@ void gestureEvent(lv_event_t *event) {
  * @param event
  */
 void updateMap(lv_event_t *event) {
+  (void)event;
   if (mapPinchBlocksMapRender() || isScrollingMap ||
       mapView.dragPreviewBlocksMapRender(millis())) {
     return;
   }
 
-  // Only regenerate map if position changed to avoid blocking the main loop
   if (mapView.isPosMoved) {
-    bool renderCompleted = true;
     if (mapSet.vectorMap) {
-      renderCompleted = mapView.generateVectorMap(zoom);
+      const uint32_t submittedAtMs = millis();
+      if (!mapView.generateVectorMap(zoom)) {
+        // No UI work was blocked and the last complete frame remains visible.
+        // A missing course-up heading is intentionally deferred until either
+        // measured course or route geometry becomes valid.
+        return;
+      }
+      mapView.isPosMoved = false;
+      mapRenderScheduler.markSubmitted(submittedAtMs, currentMapFix());
     } else {
       power_metrics::MapRenderMeasurement powerMeasurement;
       mapView.generateRenderMap(zoom);
       powerMeasurement.finish(true);
+      mapView.isPosMoved = false;
+      mapRenderScheduler.markRendered(millis(), currentMapFix());
     }
-    if (!renderCompleted) {
-      // Keep both flags set so the map is regenerated cleanly if the user
-      // remains on this screen. Do not display the partially rendered canvas.
-      mapView.redrawMap = true;
-      mapRenderScheduler.markInterrupted();
-      noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
-      return;
-    }
-    // Clear flag AFTER generation complete (not inside generateVectorMap)
-    // This ensures BLE updates during generation will queue another cycle
-    mapView.isPosMoved = false;
-    mapRenderScheduler.markRendered(millis(), currentMapFix());
-    if (mapView.takeDeferredVectorRedraw()) {
-      // Course-up heading changed while a pinch was in flight. First present
-      // the focal-stable settlement frame, then render the latest heading on
-      // the following LVGL cycle.
+    if (mapView.takeDeferredVectorRedraw())
       requestMapRender(map_render_policy::Reason::Heading);
-    }
   }
 
   if (mapView.redrawMap) {
     mapView.displayMap();
-    mapView.redrawMap = false; // Clear after display
+    mapView.redrawMap = false;
   }
 
   revealPendingMapTileIfReady();
@@ -1805,7 +1833,6 @@ static void showMainTile(tileName tile) {
     return;
   }
 
-  const bool mapWasVisible = !lv_obj_has_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
   activeTile = tile;
@@ -1814,14 +1841,12 @@ static void showMainTile(tileName tile) {
     mapView.cancelDragPreview();
   }
   if (isMapBackedTile(activeTile)) {
-    // Keep the currently visible non-map tile in front until the new map
-    // profile has rendered into the back buffer. Revealing mapTile first can
-    // briefly expose its previous full-map frame while Map + Navigation is
-    // still rendering (or while the screen-cycle button remains pressed and
-    // interrupts that first render).
-    if (!mapWasVisible) {
-      lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
-    }
+    // Map and Map + Navigation share one front canvas but have different
+    // style/projection semantics. Conceal that canvas for every map-backed
+    // transition, including MAP <-> MAP_GUIDANCE, until the worker publishes
+    // a frame built for the destination profile. Otherwise the source
+    // profile remains visible briefly while the replacement renders.
+    lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapTileTransition.begin();
     zoom = currentMapStyleSettings().zoomLevel;
     requestMapRender(map_render_policy::Reason::Screen);
@@ -1882,7 +1907,8 @@ static void showMainTile(tileName tile) {
 }
 
 static void revealPendingMapTileIfReady() {
-  if (!mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
+  if (!mapView.hasPublishedMapFrame() ||
+      !mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
     return;
   }
 
@@ -1952,6 +1978,8 @@ void toggleNavigationScreen() {
  */
 void createMainScr() {
   mainScreen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(mainScreen, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(mainScreen, LV_OPA_COVER, 0);
 
 #if defined(WAVESHARE_AMOLED_175)
   // The CST9217's second contact belongs exclusively to the standalone Map.

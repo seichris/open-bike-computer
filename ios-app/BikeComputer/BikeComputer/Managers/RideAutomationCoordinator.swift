@@ -1,6 +1,6 @@
+import AudioToolbox
 import Combine
 import Foundation
-import AudioToolbox
 import UIKit
 
 @MainActor
@@ -18,10 +18,11 @@ final class RideAutomationCoordinator: ObservableObject {
     @Published private(set) var confirmedDeviceSettings:
         RideDetectionSettings?
 
-    private let bleManager: BLEManager
-    private let workoutManager: WorkoutMirrorManager
+    private let bleManager: any RideAutomationBLETransport
+    private let workoutManager: any RideAutomationWorkoutControlling
     private let settingsStore: RideDetectionSettingsStore
-    private let watchAvailability: WorkoutWatchAvailabilityMonitor?
+    private let watchAvailability:
+        (any RideAutomationWatchAvailabilityControlling)?
     private var cancellables: Set<AnyCancellable> = []
     private var highestSequenceByGeneration: [String: UInt32] = [:]
     private var acknowledgementByDecision:
@@ -37,17 +38,33 @@ final class RideAutomationCoordinator: ObservableObject {
     private var configurationRetryCountByDevice: [String: Int] = [:]
     private var startAnnotationRequestedFor:
         RideAutomationDecisionIdentity?
+    private let pendingDecisionTimeout: TimeInterval
+    private let pendingDecisionWait:
+        @MainActor @Sendable (TimeInterval) async throws -> Void
 
     init(
-        bleManager: BLEManager,
-        workoutManager: WorkoutMirrorManager,
+        bleManager: any RideAutomationBLETransport,
+        workoutManager: any RideAutomationWorkoutControlling,
         settingsStore: RideDetectionSettingsStore,
-        watchAvailability: WorkoutWatchAvailabilityMonitor? = nil
+        watchAvailability:
+            (any RideAutomationWatchAvailabilityControlling)? = nil,
+        pendingDecisionTimeout: TimeInterval = 30,
+        pendingDecisionWait: (@MainActor @Sendable (
+            TimeInterval
+        ) async throws -> Void)? = nil
     ) {
         self.bleManager = bleManager
         self.workoutManager = workoutManager
         self.settingsStore = settingsStore
         self.watchAvailability = watchAvailability
+        self.pendingDecisionTimeout = pendingDecisionTimeout.isFinite
+            ? max(0, pendingDecisionTimeout)
+            : 30
+        self.pendingDecisionWait = pendingDecisionWait ?? { timeout in
+            try await Task.sleep(
+                nanoseconds: UInt64(timeout * 1_000_000_000)
+            )
+        }
         highestSequenceByGeneration = settingsStore.loadDecisionWatermarks()
         pendingDecision = settingsStore.loadPendingDecision()
 
@@ -56,8 +73,8 @@ final class RideAutomationCoordinator: ObservableObject {
                 self?.handle(frame)
             }
         }
-        bleManager.$supportsRideAutomation
-            .combineLatest(bleManager.$connectedDeviceID)
+        bleManager.rideAutomationSupportPublisher
+            .combineLatest(bleManager.rideAutomationDevicePublisher)
             .sink { [weak self] supported, deviceID in
                 guard supported, let deviceID else {
                     self?.resynchronizationTask?.cancel()
@@ -99,7 +116,7 @@ final class RideAutomationCoordinator: ObservableObject {
                 }
             }
             .store(in: &cancellables)
-        workoutManager.store.$presentation
+        workoutManager.rideAutomationPresentationPublisher
             .sink { [weak self] presentation in
                 self?.confirmIfAuthoritative(presentation)
             }
@@ -111,6 +128,11 @@ final class RideAutomationCoordinator: ObservableObject {
         guard bleManager.connectedDeviceID == prompt.identity.deviceID else {
             return
         }
+        beginPendingDecision(
+            identity: prompt.identity,
+            frame: prompt.frame,
+            expectedState: .running
+        )
         guard sendPromptResponse(
             to: prompt.frame,
             result: .accepted
@@ -120,11 +142,6 @@ final class RideAutomationCoordinator: ObservableObject {
         }
         startPrompt = nil
         cancelPromptCountdown()
-        beginPendingDecision(
-            identity: prompt.identity,
-            frame: prompt.frame,
-            expectedState: .running
-        )
     }
 
     func dismissStartPrompt() {
@@ -132,10 +149,11 @@ final class RideAutomationCoordinator: ObservableObject {
         guard bleManager.connectedDeviceID == prompt.identity.deviceID else {
             return
         }
+        guard let resolved = persistPendingResolution(result: .rejected) else {
+            return
+        }
         sendPromptResponse(to: prompt.frame, result: .rejected)
-        startPrompt = nil
-        cancelPromptCountdown()
-        resolvePendingDecision(result: .rejected)
+        publishPendingResolution(resolved, result: .rejected)
     }
 
     func dismissError() {
@@ -190,7 +208,7 @@ final class RideAutomationCoordinator: ObservableObject {
             decisionSequence: frame.decisionSequence
         )
         let highest = highestSequenceByGeneration[generationKey] ?? 0
-        lastRideGenerationByDevice[deviceID] = frame.rideGeneration
+        noteRideGeneration(frame.rideGeneration, deviceID: deviceID)
         guard decisionConfigurationMatches(frame, deviceID: deviceID),
               !isExpiredDecision(frame, deviceID: deviceID) else {
             lastError = .stale
@@ -199,16 +217,13 @@ final class RideAutomationCoordinator: ObservableObject {
             return
         }
         noteDeviceMonotonic(frame.monotonicSeconds, deviceID: deviceID)
-        let presentation = workoutManager.store.presentation
+        let presentation = workoutManager.rideAutomationPresentation
         let admission = RideAutomationAdmissionPolicy.resolve(
             frame: frame,
             settings: settingsStore.settings,
             workoutState: presentation.sessionState,
             pauseOrigin: presentation.snapshot.pauseOrigin,
-            expectedSessionIdentityHash:
-                RideAutomationAdmissionPolicy.sessionIdentityHash(
-                    presentation.sessionID
-                ),
+            expectedSessionID: presentation.sessionID,
             highestDecisionSequence: highest
         )
         if admission != .duplicate {
@@ -256,31 +271,33 @@ final class RideAutomationCoordinator: ObservableObject {
                 return
             }
             acknowledgementByDecision[identity] = .accepted
-            sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
             supersedePendingDecision(ifDifferentFrom: identity)
             beginPendingDecision(
                 identity: identity,
                 frame: frame,
                 expectedState: .running
             )
+            sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
             launchPendingAutomaticStart()
         case .pause, .resume:
             let context = automaticControlContext(for: frame)
-            guard workoutManager.requestAutomaticTransition(
-                frame.transition,
-                context: context
-            ) else {
-                sendResponse(to: frame, kind: .acknowledgement, result: .rejected)
-                return
-            }
-            acknowledgementByDecision[identity] = .accepted
-            sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
             supersedePendingDecision(ifDifferentFrom: identity)
             beginPendingDecision(
                 identity: identity,
                 frame: frame,
                 expectedState: admission == .pause ? .paused : .running
             )
+            guard workoutManager.requestAutomaticTransition(
+                frame.transition,
+                context: context
+            ) else {
+                clearPendingDecision()
+                acknowledgementByDecision[identity] = .rejected
+                sendResponse(to: frame, kind: .acknowledgement, result: .rejected)
+                return
+            }
+            acknowledgementByDecision[identity] = .accepted
+            sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
         }
     }
 
@@ -308,6 +325,13 @@ final class RideAutomationCoordinator: ObservableObject {
         }
         switch frame.result {
         case .accepted:
+            if pending.expectedState != .running {
+                beginPendingDecision(
+                    identity: pending.identity,
+                    frame: pending.frame,
+                    expectedState: .running
+                )
+            }
             guard sendResponse(
                 to: frame,
                 kind: .acknowledgement,
@@ -317,15 +341,11 @@ final class RideAutomationCoordinator: ObservableObject {
             }
             startPrompt = nil
             cancelPromptCountdown()
-            if pending.expectedState != .running {
-                beginPendingDecision(
-                    identity: pending.identity,
-                    frame: pending.frame,
-                    expectedState: .running
-                )
-            }
             launchPendingAutomaticStart()
         case .rejected:
+            guard let resolved = persistPendingResolution(
+                result: .rejected
+            ) else { return }
             sendResponse(
                 to: frame,
                 kind: .acknowledgement,
@@ -334,7 +354,7 @@ final class RideAutomationCoordinator: ObservableObject {
             // Not Now is authoritative even if the other surface accepted a
             // moment earlier. Do not attach this detector identity to a later
             // Watch transition.
-            resolvePendingDecision(result: .rejected)
+            publishPendingResolution(resolved, result: .rejected)
         case .none, .watchUnavailable, .stale, .sessionMismatch:
             sendResponse(
                 to: frame,
@@ -378,7 +398,7 @@ final class RideAutomationCoordinator: ObservableObject {
               pending.expectedState == .running else {
             return
         }
-        let presentation = workoutManager.store.presentation
+        let presentation = workoutManager.rideAutomationPresentation
         guard presentation.canStartNewWorkout else {
             confirmIfAuthoritative(presentation)
             return
@@ -494,16 +514,13 @@ final class RideAutomationCoordinator: ObservableObject {
            presentation.snapshot.pauseOrigin != .automatic {
             return
         }
-        guard let sessionIdentityHash =
-                RideAutomationAdmissionPolicy.sessionIdentityHash(
-                    presentation.sessionID
-                ) else {
+        guard let sessionID = presentation.sessionID else {
             resolvePendingDecision(result: .watchUnavailable)
             return
         }
         resolvePendingDecision(
             result: .accepted,
-            sessionIdentityHash: sessionIdentityHash
+            sessionID: sessionID
         )
     }
 
@@ -525,16 +542,13 @@ final class RideAutomationCoordinator: ObservableObject {
             )
         }
         let settings = settingsStore.settings
-        let presentation = workoutManager.store.presentation
+        let presentation = workoutManager.rideAutomationPresentation
         _ = bleManager.sendRideAutomationFrame(
             RideAutomationFrame(
                 kind: .resynchronize,
                 rideGeneration: baseGeneration,
                 profileVersion: 1,
-                sessionIdentityHash:
-                    RideAutomationAdmissionPolicy.sessionIdentityHash(
-                        presentation.sessionID
-                    ) ?? 0,
+                sessionID: presentation.sessionID,
                 watermarkOrConfigGeneration: decisionWatermark,
                 startMode: settings.startMode,
                 autoPauseEnabled: settings.autoPauseEnabled,
@@ -548,7 +562,7 @@ final class RideAutomationCoordinator: ObservableObject {
         to request: RideAutomationFrame,
         kind: RideAutomationKind,
         result: RideAutomationResult,
-        sessionIdentityHash: UInt32? = nil
+        sessionID: UUID? = nil
     ) -> Bool {
         guard let deviceID = bleManager.connectedDeviceID,
               pendingDecision?.identity.deviceID == deviceID
@@ -559,7 +573,7 @@ final class RideAutomationCoordinator: ObservableObject {
             to: request,
             kind: kind,
             result: result,
-            sessionIdentityHash: sessionIdentityHash
+            sessionID: sessionID
         )
     }
 
@@ -568,7 +582,7 @@ final class RideAutomationCoordinator: ObservableObject {
         to request: RideAutomationFrame,
         kind: RideAutomationKind,
         result: RideAutomationResult,
-        sessionIdentityHash: UInt32? = nil
+        sessionID: UUID? = nil
     ) -> Bool {
         bleManager.sendRideAutomationFrame(
             RideAutomationFrame(
@@ -580,8 +594,7 @@ final class RideAutomationCoordinator: ObservableObject {
                 decisionSequence: request.decisionSequence,
                 evidenceMask: request.evidenceMask,
                 profileVersion: request.profileVersion,
-                sessionIdentityHash:
-                    sessionIdentityHash ?? request.sessionIdentityHash,
+                sessionID: sessionID ?? request.sessionID,
                 watermarkOrConfigGeneration:
                     settingsStore.generation,
                 startMode: settingsStore.settings.startMode,
@@ -656,16 +669,13 @@ final class RideAutomationCoordinator: ObservableObject {
         }
         if pending.frame.transition == .pause
             || pending.frame.transition == .resume {
-            let presentation = workoutManager.store.presentation
+            let presentation = workoutManager.rideAutomationPresentation
             guard presentation.connectionState == .connected else {
                 resolvePendingDecision(result: .watchUnavailable)
                 return
             }
-            guard let currentSessionHash =
-                    RideAutomationAdmissionPolicy.sessionIdentityHash(
-                        presentation.sessionID
-                    ),
-                  currentSessionHash == pending.frame.sessionIdentityHash else {
+            guard let currentSessionID = presentation.sessionID,
+                  currentSessionID == pending.frame.sessionID else {
                 resolvePendingDecision(result: .sessionMismatch)
                 return
             }
@@ -711,7 +721,7 @@ final class RideAutomationCoordinator: ObservableObject {
             result: .accepted
         )
         schedulePendingTimeout(for: pending)
-        confirmIfAuthoritative(workoutManager.store.presentation)
+        confirmIfAuthoritative(workoutManager.rideAutomationPresentation)
     }
 
     private func supersedePendingDecision(
@@ -727,10 +737,21 @@ final class RideAutomationCoordinator: ObservableObject {
 
     private func resolvePendingDecision(
         result: RideAutomationResult,
-        sessionIdentityHash: UInt32? = nil
+        sessionID: UUID? = nil
     ) {
+        guard let resolved = persistPendingResolution(
+            result: result,
+            sessionID: sessionID
+        ) else { return }
+        publishPendingResolution(resolved, result: result)
+    }
+
+    private func persistPendingResolution(
+        result: RideAutomationResult,
+        sessionID: UUID? = nil
+    ) -> RideAutomationPendingDecision? {
         guard let pending = pendingDecision,
-              pending.resolvedResult == nil else { return }
+              pending.resolvedResult == nil else { return nil }
         if result == .sessionMismatch || result == .watchUnavailable {
             lastError = result
         }
@@ -739,7 +760,7 @@ final class RideAutomationCoordinator: ObservableObject {
             frame: pending.frame,
             expectedState: pending.expectedState,
             resolvedResult: result,
-            resolvedSessionIdentityHash: sessionIdentityHash
+            resolvedSessionID: sessionID
         )
         pendingDecision = resolved
         settingsStore.savePendingDecision(resolved)
@@ -749,6 +770,13 @@ final class RideAutomationCoordinator: ObservableObject {
         startPrompt = nil
         startAnnotationRequestedFor = nil
         cancelPromptCountdown()
+        return resolved
+    }
+
+    private func publishPendingResolution(
+        _ resolved: RideAutomationPendingDecision,
+        result: RideAutomationResult
+    ) {
         sendResolvedConfirmation(resolved, result: result)
         sendConfigurationAndResynchronize()
         schedulePendingTimeout(for: resolved)
@@ -784,8 +812,12 @@ final class RideAutomationCoordinator: ObservableObject {
     ) {
         pendingTimeoutTask?.cancel()
         pendingTimeoutTask = Task { @MainActor [weak self] in
+            guard let wait = self?.pendingDecisionWait,
+                  let timeout = self?.pendingDecisionTimeout else {
+                return
+            }
             do {
-                try await Task.sleep(nanoseconds: 30_000_000_000)
+                try await wait(timeout)
             } catch {
                 return
             }
@@ -812,13 +844,8 @@ final class RideAutomationCoordinator: ObservableObject {
         _ frame: RideAutomationFrame,
         deviceID: String
     ) {
-        lastRideGenerationByDevice[deviceID] = frame.rideGeneration
+        noteRideGeneration(frame.rideGeneration, deviceID: deviceID)
         noteDeviceMonotonic(frame.monotonicSeconds, deviceID: deviceID)
-        if let pending = pendingDecision,
-           pending.identity.deviceID == deviceID,
-           pending.identity.rideGeneration != frame.rideGeneration {
-            clearPendingDecision()
-        }
         if confirmedConfigurationGenerationByDevice[deviceID]
             != settingsStore.generation {
             sendConfiguration(rideGeneration: frame.rideGeneration)
@@ -883,7 +910,7 @@ final class RideAutomationCoordinator: ObservableObject {
             to: pending.frame,
             kind: .confirmation,
             result: result,
-            sessionIdentityHash: pending.resolvedSessionIdentityHash
+            sessionID: pending.resolvedSessionID
         )
     }
 
@@ -935,6 +962,22 @@ final class RideAutomationCoordinator: ObservableObject {
         }
     }
 
+    private func noteRideGeneration(
+        _ generation: UInt32,
+        deviceID: String
+    ) {
+        if let previous = lastRideGenerationByDevice[deviceID],
+           previous != generation {
+            latestDeviceMonotonicByDevice[deviceID] = nil
+            if let pending = pendingDecision,
+               pending.identity.deviceID == deviceID,
+               pending.identity.rideGeneration != generation {
+                clearPendingDecision()
+            }
+        }
+        lastRideGenerationByDevice[deviceID] = generation
+    }
+
     private func isExpiredDecision(
         _ frame: RideAutomationFrame,
         deviceID: String
@@ -983,7 +1026,7 @@ final class RideAutomationCoordinator: ObservableObject {
         _ frame: RideAutomationFrame,
         deviceID: String
     ) {
-        lastRideGenerationByDevice[deviceID] = frame.rideGeneration
+        noteRideGeneration(frame.rideGeneration, deviceID: deviceID)
         noteDeviceMonotonic(frame.monotonicSeconds, deviceID: deviceID)
         let deviceSettings = RideDetectionSettings(
             startMode: frame.startMode,

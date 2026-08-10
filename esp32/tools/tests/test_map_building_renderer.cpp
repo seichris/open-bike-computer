@@ -420,13 +420,13 @@ void assertInterruptionPropagates() {
   assert(!completed);
   assert(emitted == 1);
 
-  size_t deadlineChecks = 0;
-  const bool deadlineCompleted = map_building_renderer::renderSurfaces(
+  size_t cancellationChecks = 0;
+  const bool cancelled = map_building_renderer::renderSurfaces(
       building, 100000, 200000, 1.0, projection, true,
       [](Surface, const auto &) { return true; }, nullptr,
-      [&]() { return ++deadlineChecks >= 2; });
-  assert(!deadlineCompleted);
-  assert(deadlineChecks >= 2);
+      [&]() { return ++cancellationChecks >= 2; });
+  assert(!cancelled);
+  assert(cancellationChecks >= 2);
 }
 
 void assertAllocationFailureFailsClosed() {
@@ -443,16 +443,6 @@ void assertAllocationFailureFailsClosed() {
   assert(successful);
   assert(!allocationFailureObserved);
 
-  assert(map_building_renderer::shouldRetryWithoutBuildings(false, true, false,
-                                                             false));
-  assert(map_building_renderer::shouldRetryWithoutBuildings(false, false, true,
-                                                             false));
-  assert(!map_building_renderer::shouldRetryWithoutBuildings(true, true, false,
-                                                              false));
-  assert(!map_building_renderer::shouldRetryWithoutBuildings(false, true, false,
-                                                              true));
-  assert(!map_building_renderer::shouldRetryWithoutBuildings(
-      false, false, false, false));
 }
 
 void assertFailureRetryCooldown() {

@@ -484,6 +484,11 @@ private struct BikeComputerDetailView: View {
                     }
                 }
 
+
+                if !device.isLegacy {
+                    watchControllerSection(device: device)
+                }
+
                 if bleManager.deviceFeedbackDeviceID == device.deviceID,
                    let error = bleManager.pairingError {
                     Section {
@@ -562,6 +567,112 @@ private struct BikeComputerDetailView: View {
         .onChange(of: device) { newDevice in
             if newDevice == nil { dismiss() }
         }
+    }
+
+    private func watchDisplayName() -> String {
+        let state = bleManager.watchConnectivityState
+        if let name = state.watchMetadata?.name {
+            return name
+        }
+        if !state.isSupported {
+            return "Unavailable"
+        }
+        if !state.isPaired {
+            return "Not paired"
+        }
+        if !state.isWatchAppInstalled {
+            return "Bicino not installed"
+        }
+        return "Apple Watch"
+    }
+
+    private func directRideStatus(
+        for device: KnownBikeComputerDevice
+    ) -> String {
+        let isCurrentDevice = bleManager.connectedDeviceID == device.deviceID
+        if isCurrentDevice,
+           bleManager.watchControllerOperationStatus != nil {
+            return "Setting up…"
+        }
+        if isCurrentDevice,
+           bleManager.watchControllerOperationError != nil {
+            return "Needs attention"
+        }
+        if bleManager.isWatchControllerConfigured(for: device) {
+            return "Ready"
+        }
+        guard bleManager.isConnected(to: device) else {
+            return "Connect Bicino to set up"
+        }
+        guard bleManager.supportsScopedWatchController else {
+            return "Update firmware"
+        }
+        let state = bleManager.watchConnectivityState
+        if !state.isPaired {
+            return "Pair an Apple Watch"
+        }
+        if !state.isWatchAppInstalled {
+            return "Install Bicino on Watch"
+        }
+        if !state.isReachable {
+            return "Open Watch app"
+        }
+        return "Setting up…"
+    }
+
+    @ViewBuilder
+    private func watchControllerSection(
+        device: KnownBikeComputerDevice
+    ) -> some View {
+        Section {
+            DeviceValueRow(
+                title: "Watch",
+                value: watchDisplayName()
+            )
+            DeviceValueRow(
+                title: "Direct rides",
+                value: directRideStatus(for: device)
+            )
+            if bleManager.connectedDeviceID == device.deviceID,
+               let status = bleManager.watchControllerOperationStatus {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text(verbatim: status)
+                }
+            }
+            if bleManager.connectedDeviceID == device.deviceID,
+               let error = bleManager.watchControllerOperationError {
+                Label(
+                    error,
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Apple Watch")
+        } footer: {
+            Text(watchControllerFooter(for: device))
+        }
+    }
+
+    private func watchControllerFooter(
+        for device: KnownBikeComputerDevice
+    ) -> String {
+        let isCurrentDevice = bleManager.connectedDeviceID == device.deviceID
+        if bleManager.isWatchControllerConfigured(for: device),
+           (!isCurrentDevice || bleManager.watchControllerOperationError == nil) {
+            return "Direct workout data and navigation switch to Apple Watch automatically when the iPhone is unavailable."
+        }
+        if !bleManager.isConnected(to: device) {
+            return "Connect this Bicino to set up direct rides automatically."
+        }
+        if !bleManager.supportsScopedWatchController {
+            return "Install firmware with scoped Apple Watch controller support."
+        }
+        if !bleManager.watchConnectivityState.isReachable {
+            return "Unlock Apple Watch and open its Bicino app to finish automatic setup."
+        }
+        return "The Watch receives ride-only access automatically. It cannot rename, reconfigure, transfer maps to, or deregister this Bike Computer."
     }
 }
 

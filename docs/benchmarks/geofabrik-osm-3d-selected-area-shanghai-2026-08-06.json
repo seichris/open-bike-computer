@@ -1,0 +1,1382 @@
+{
+  "artifactReceipts": {
+    "legacyCold": {
+      "manifestReceipt": "a5b7839eb7c132cdb37ab922b042eabe1b9392c016ee0dd6342813abe0cc0d98",
+      "signedManifestReceipt": "0dbd6576159f858b3dd59dbe23f0a305dd163fca2f9f731836f70e24e2d94d96"
+    },
+    "legacyWarm": {
+      "manifestReceipt": "bf5cc893e64424378b985a3db71d685411f69c21bd6342bb29c65013c39e43ee",
+      "signedManifestReceipt": "ff444803247814267220046d437701ccfcb763939ae6810e5a8f4bf2dea00f54"
+    },
+    "selectedCold": {
+      "manifestReceipt": "72d47d634af927a0346d4bdec41ac7bbf88856fd425936450f1242e6bca4b392",
+      "signedManifestReceipt": "fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649"
+    },
+    "selectedWarm": {
+      "manifestReceipt": "72d47d634af927a0346d4bdec41ac7bbf88856fd425936450f1242e6bca4b392",
+      "signedManifestReceipt": "fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649"
+    }
+  },
+  "cache": {
+    "coldOutcome": "rebuilt",
+    "warmOutcome": "hit"
+  },
+  "measurements": {
+    "legacyColdPeakResidentBytes": 3984375808,
+    "legacyColdWallMilliseconds": 889808,
+    "legacySourceAreaM2": 805306368,
+    "legacyWarmFirstBlockProgressMilliseconds": 823702,
+    "legacyWarmPeakResidentBytes": 3978379264,
+    "legacyWarmSourceQueryBytes": 8313912,
+    "legacyWarmWallMilliseconds": 831795,
+    "outputAreaM2": 100663296,
+    "requestedAreaM2": 23840377,
+    "selectedColdPeakResidentBytes": 4579409920,
+    "selectedColdWallMilliseconds": 100570,
+    "selectedSourceAreaM2": 111411200,
+    "selectedSourceToOutputAreaBasisPoints": 11068,
+    "selectedWarmFirstBlockProgressMilliseconds": 51516,
+    "selectedWarmFirstPreprocessingProgressMilliseconds": 2,
+    "selectedWarmPeakResidentBytes": 4465016832,
+    "selectedWarmSourceQueryBytes": 2381268,
+    "selectedWarmWallMilliseconds": 57257,
+    "sourceQueryByteReductionBasisPoints": 7135,
+    "sourceReductionBasisPoints": 8616
+  },
+  "proposedThresholds": {
+    "maximumFirstPreprocessingProgressMilliseconds": 10000,
+    "maximumSourceAreaM2": 200000000,
+    "maximumSourceToOutputAreaBasisPoints": 13500,
+    "minimumFirstBlockImprovementBasisPoints": 5000,
+    "minimumLegacySourceReductionBasisPoints": 8000
+  },
+  "runs": {
+    "legacyCold": {
+      "artifactMetrics": {
+        "buildingBuild": {
+          "ambiguousRelationPartCount": 0,
+          "blockBytes": 819588,
+          "blocks": 6,
+          "calibrationKey": null,
+          "calibrationLookup": null,
+          "calibrationSource": "requestCandidates",
+          "classDefaultHeightCount": 46,
+          "containmentAssociationCount": 2941,
+          "droppedHoleCount": 0,
+          "emittedWallCount": 113989,
+          "explicitHeightCount": 275,
+          "extrudedSourceCount": 64209,
+          "flatOutlineCount": 313,
+          "holeCount": 202,
+          "inheritedHeightCount": 5,
+          "levelsHeightCount": 1449,
+          "localMedianHeightCount": 13467,
+          "maximumBlockPoints": 29048,
+          "maximumBlockRecords": 4126,
+          "outlineCount": 61383,
+          "partCount": 3139,
+          "pointCount": 115781,
+          "profileVersion": 1,
+          "recordCount": 15242,
+          "rejectedTags": {
+            "heightMalformed": 1,
+            "heightOutsideBounds": 47,
+            "invalidGeometry": 226,
+            "levelsMalformed": 17,
+            "minimumHeightNotBelowHeight": 2,
+            "minimumLevelsMalformed": 1,
+            "roofHeightMalformed": 1,
+            "roofLevelsMalformed": 3
+          },
+          "relationAssociationCount": 109,
+          "relationClosure": null,
+          "relationCount": 9,
+          "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+          "sourceCount": 64522,
+          "suppressedWallCount": 1792,
+          "unassociatedPartCount": 89
+        },
+        "buildingPhaseTimings": {
+          "packaging": 0.30590633300016634
+        },
+        "buildingScriptPhaseTimings": {
+          "blockEncoding": 4.444922,
+          "buildingNormalization": 861.178904
+        },
+        "labelBuild": {
+          "blockBytes": 1810388,
+          "blocks": 6,
+          "candidates": 7432,
+          "diagnostics": {
+            "candidatesByRoadClass": {
+              "highway.footway": 425,
+              "highway.living_street": 50,
+              "highway.motorway": 573,
+              "highway.motorway_link": 9,
+              "highway.path": 2,
+              "highway.pedestrian": 111,
+              "highway.primary": 4545,
+              "highway.residential": 5761,
+              "highway.secondary": 3914,
+              "highway.secondary_link": 15,
+              "highway.service": 539,
+              "highway.steps": 2,
+              "highway.tertiary": 4333,
+              "highway.track": 14,
+              "highway.trunk": 1964,
+              "highway.unclassified": 478,
+              "natural.coastline": 0,
+              "railway.abandoned": 157,
+              "railway.construction": 3097,
+              "railway.disused": 42,
+              "railway.funicular": 16,
+              "railway.light_rail": 0,
+              "railway.monorail": 106,
+              "railway.narrow_gauge": 6,
+              "railway.planned": 288,
+              "railway.platform": 0,
+              "railway.platform_edge": 2,
+              "railway.proposed": 21,
+              "railway.rail": 1182,
+              "railway.razed": 55,
+              "railway.station": 409,
+              "railway.subway": 12717,
+              "railway.subway_entrance": 0,
+              "waterway.canal": 1180,
+              "waterway.drain": 117,
+              "waterway.river": 5193,
+              "waterway.stream": 182
+            },
+            "candidatesByRoadRank": {
+              "0": 2546,
+              "1": 8474,
+              "2": 4333,
+              "3": 6239,
+              "4": 539,
+              "5": 443,
+              "6": 24931
+            },
+            "candidatesByZoomBand": {
+              "0-3": 25374,
+              "0-4": 539,
+              "0-5": 21592
+            },
+            "candidatesRejectedByBlockOwnership": 14041,
+            "clippedCandidates": 7432,
+            "labelTagsRead": 49151,
+            "namedRoadsClipped": 2450,
+            "namedRoadsJoined": 8752,
+            "namedRoadsPreserved": 17811,
+            "namedRoadsRead": 16957,
+            "rejectedCandidates": {
+              "excessiveBend": 118,
+              "insufficientStraightSpan": 575,
+              "noUsableText": 22441,
+              "roadTooShort": 4545,
+              "spanTooShort": 2015
+            },
+            "rejectedText": {
+              "invalidLanguageTag": 23
+            },
+            "variantsByKind": {
+              "international": 811,
+              "local": 9524,
+              "preferred": 10251,
+              "ref": 988
+            },
+            "variantsByLanguage": {
+              "en": 8455,
+              "en-US": 811,
+              "zh-Hans": 1796
+            }
+          },
+          "fontBytes": 2423664,
+          "fontCompressedBitmapBytes": 2307285,
+          "fontCompressionRatio": 0.49311,
+          "fontFallbackSelections": 3435,
+          "fontGlyphs": 1211,
+          "fontProfileFingerprint": 2986106067,
+          "fontRecords": 3633,
+          "fontShapeCacheHits": 19278,
+          "fontShapeCalls": 25525,
+          "fontShapingFailures": 0,
+          "fontUncompressedBitmapBytes": 4679050,
+          "labels": 1729,
+          "maximumBlockBytes": 521361,
+          "maximumBlockCandidates": 1729,
+          "maximumBlockLabels": 557,
+          "maximumBlockRuns": 2118,
+          "maximumBlockStringBytes": 6989,
+          "maximumBlockStrings": 562,
+          "runs": 5751,
+          "stringBytes": 20434,
+          "strings": 1622
+        },
+        "labelPhaseTimings": {
+          "labelCandidateGeneration": 11.957474,
+          "labelFmbWriting": 0.0,
+          "labelFontWriting": 3.102235,
+          "labelNormalization": 2.316466,
+          "labelPackaging": 0.30590633300016634,
+          "labelRoadJoining": 0.154753,
+          "labelShaping": 9.94314,
+          "labelSigning": 0.008980207989225164
+        },
+        "streamArtifactBytes": 4237812,
+        "streamArtifactWriteSeconds": 0.0010904160735663027,
+        "streamCanonicalizationSeconds": 0.0019029589893762022,
+        "streamFileCount": 7,
+        "streamHashingSeconds": 0.0031039989553391933,
+        "streamPayloadBytes": 4234052,
+        "streamSignatureKeyId": "selected-area-benchmark",
+        "streamSigningSeconds": 0.008980207989225164,
+        "streamStorageSeconds": 0.0046794170048087835,
+        "streamTotalSeconds": 0.016446083987830207,
+        "zipHashingSeconds": 0.0018642089853528887,
+        "zipStorageSeconds": 0.0035902079835068434
+      },
+      "artifacts": [
+        {
+          "bytes": 4237812,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.bmap",
+          "format": "bike-map-stream-v1",
+          "manifestReceipt": "a5b7839eb7c132cdb37ab922b042eabe1b9392c016ee0dd6342813abe0cc0d98",
+          "mediaType": "application/vnd.openbikecomputer.map-stream",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/bike-map-stream-v1/selected-area-benchmark/b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4/b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0/5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93/0dbd6576159f858b3dd59dbe23f0a305dd163fca2f9f731836f70e24e2d94d96.bmap",
+          "producerBuildSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0",
+          "producerImageDigest": "sha256:5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+          "sha256": "fedf081b0ada8ac324f2b05c8ed229112eb940a03df5e9c65744b28f053ab330",
+          "signatureKeyId": "selected-area-benchmark",
+          "signatureKeySha256": "b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4",
+          "signedManifestReceipt": "0dbd6576159f858b3dd59dbe23f0a305dd163fca2f9f731836f70e24e2d94d96"
+        },
+        {
+          "bytes": 4240051,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.zip",
+          "format": "zip-stored-v1",
+          "mediaType": "application/zip",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/zip-stored-v1/12c3a17be39eae01c3bb7ba91cbed3c7f3cc0fcaac3eb7a7cb7c8832827a33c7.zip",
+          "sha256": "12c3a17be39eae01c3bb7ba91cbed3c7f3cc0fcaac3eb7a7cb7c8832827a33c7"
+        }
+      ],
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "3dfdbb9634ae38bf4769a7abeb06d8a927c06b4d16712b513d763d3cf65e75b0",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "03db1b8ff8a72e1d131e8a58770a50f4a6f3f4ac7223da59d4d5f8de374e038d",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "3deb54ec32f5cdf8f8f5bf15afe2a2b488811927d01bdc35435e26f35a563dc9",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "edb27f3d021cc03b477b749bcb807b3afd8b19be13d413733e06df7cca626c77",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "ea850ce095e2d48f286d60b6453ce9329bc2a9b93e7e287563749b7ac92cef79",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "0e3182ca10db26374446b5c4993de54e29f7a767a8287bb122e08b00d742e3b0"
+      },
+      "mode": "legacy",
+      "peakResidentBytes": 3984375808,
+      "runLabel": "legacyCold",
+      "sourceIdentity": {
+        "bytes": 25617644,
+        "publishedAt": "2026-08-06T22:46:41Z",
+        "sha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+        "url": "https://download.geofabrik.de/asia/china/shanghai-260806.osm.pbf"
+      },
+      "sourceQueryBytes": 8313912,
+      "sourceQueryObjects": {
+        "nodes": 840202,
+        "relations": 7649,
+        "ways": 131345
+      },
+      "timings": {
+        "firstBlockProgressMilliseconds": 881481,
+        "firstPreprocessingProgressMilliseconds": 5602,
+        "wallMilliseconds": 889808
+      },
+      "workerIdentity": {
+        "gdal": "GDAL 3.12.0 \"Chicoutimi\", released 2025/11/03",
+        "gitHead": "773f16c59535b72e1148eedd8c18e402c421ab6d",
+        "osmium": "osmium version 1.18.0",
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "python": "3.14.5",
+        "workerFingerprintSha256": "5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+        "workspaceContentSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0"
+      }
+    },
+    "legacyWarm": {
+      "artifactMetrics": {
+        "buildingBuild": {
+          "ambiguousRelationPartCount": 0,
+          "blockBytes": 819588,
+          "blocks": 6,
+          "calibrationKey": null,
+          "calibrationLookup": null,
+          "calibrationSource": "requestCandidates",
+          "classDefaultHeightCount": 46,
+          "containmentAssociationCount": 2941,
+          "droppedHoleCount": 0,
+          "emittedWallCount": 113989,
+          "explicitHeightCount": 275,
+          "extrudedSourceCount": 64209,
+          "flatOutlineCount": 313,
+          "holeCount": 202,
+          "inheritedHeightCount": 5,
+          "levelsHeightCount": 1449,
+          "localMedianHeightCount": 13467,
+          "maximumBlockPoints": 29048,
+          "maximumBlockRecords": 4126,
+          "outlineCount": 61383,
+          "partCount": 3139,
+          "pointCount": 115781,
+          "profileVersion": 1,
+          "recordCount": 15242,
+          "rejectedTags": {
+            "heightMalformed": 1,
+            "heightOutsideBounds": 47,
+            "invalidGeometry": 226,
+            "levelsMalformed": 17,
+            "minimumHeightNotBelowHeight": 2,
+            "minimumLevelsMalformed": 1,
+            "roofHeightMalformed": 1,
+            "roofLevelsMalformed": 3
+          },
+          "relationAssociationCount": 109,
+          "relationClosure": null,
+          "relationCount": 9,
+          "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+          "sourceCount": 64522,
+          "suppressedWallCount": 1792,
+          "unassociatedPartCount": 89
+        },
+        "buildingPhaseTimings": {
+          "packaging": 0.28112400000100024
+        },
+        "buildingScriptPhaseTimings": {
+          "blockEncoding": 4.333912,
+          "buildingNormalization": 804.580679
+        },
+        "labelBuild": {
+          "blockBytes": 1810388,
+          "blocks": 6,
+          "candidates": 7432,
+          "diagnostics": {
+            "candidatesByRoadClass": {
+              "highway.footway": 425,
+              "highway.living_street": 50,
+              "highway.motorway": 573,
+              "highway.motorway_link": 9,
+              "highway.path": 2,
+              "highway.pedestrian": 111,
+              "highway.primary": 4545,
+              "highway.residential": 5761,
+              "highway.secondary": 3914,
+              "highway.secondary_link": 15,
+              "highway.service": 539,
+              "highway.steps": 2,
+              "highway.tertiary": 4333,
+              "highway.track": 14,
+              "highway.trunk": 1964,
+              "highway.unclassified": 478,
+              "natural.coastline": 0,
+              "railway.abandoned": 157,
+              "railway.construction": 3097,
+              "railway.disused": 42,
+              "railway.funicular": 16,
+              "railway.light_rail": 0,
+              "railway.monorail": 106,
+              "railway.narrow_gauge": 6,
+              "railway.planned": 288,
+              "railway.platform": 0,
+              "railway.platform_edge": 2,
+              "railway.proposed": 21,
+              "railway.rail": 1182,
+              "railway.razed": 55,
+              "railway.station": 409,
+              "railway.subway": 12717,
+              "railway.subway_entrance": 0,
+              "waterway.canal": 1180,
+              "waterway.drain": 117,
+              "waterway.river": 5193,
+              "waterway.stream": 182
+            },
+            "candidatesByRoadRank": {
+              "0": 2546,
+              "1": 8474,
+              "2": 4333,
+              "3": 6239,
+              "4": 539,
+              "5": 443,
+              "6": 24931
+            },
+            "candidatesByZoomBand": {
+              "0-3": 25374,
+              "0-4": 539,
+              "0-5": 21592
+            },
+            "candidatesRejectedByBlockOwnership": 14041,
+            "clippedCandidates": 7432,
+            "labelTagsRead": 49151,
+            "namedRoadsClipped": 2450,
+            "namedRoadsJoined": 8752,
+            "namedRoadsPreserved": 17811,
+            "namedRoadsRead": 16957,
+            "rejectedCandidates": {
+              "excessiveBend": 118,
+              "insufficientStraightSpan": 575,
+              "noUsableText": 22441,
+              "roadTooShort": 4545,
+              "spanTooShort": 2015
+            },
+            "rejectedText": {
+              "invalidLanguageTag": 23
+            },
+            "variantsByKind": {
+              "international": 811,
+              "local": 9524,
+              "preferred": 10251,
+              "ref": 988
+            },
+            "variantsByLanguage": {
+              "en": 8455,
+              "en-US": 811,
+              "zh-Hans": 1796
+            }
+          },
+          "fontBytes": 2423664,
+          "fontCompressedBitmapBytes": 2307285,
+          "fontCompressionRatio": 0.49311,
+          "fontFallbackSelections": 3435,
+          "fontGlyphs": 1211,
+          "fontProfileFingerprint": 2986106067,
+          "fontRecords": 3633,
+          "fontShapeCacheHits": 19278,
+          "fontShapeCalls": 25525,
+          "fontShapingFailures": 0,
+          "fontUncompressedBitmapBytes": 4679050,
+          "labels": 1729,
+          "maximumBlockBytes": 521361,
+          "maximumBlockCandidates": 1729,
+          "maximumBlockLabels": 557,
+          "maximumBlockRuns": 2118,
+          "maximumBlockStringBytes": 6989,
+          "maximumBlockStrings": 562,
+          "runs": 5751,
+          "stringBytes": 20434,
+          "strings": 1622
+        },
+        "labelPhaseTimings": {
+          "labelCandidateGeneration": 11.512042,
+          "labelFmbWriting": 0.0,
+          "labelFontWriting": 3.067072,
+          "labelNormalization": 2.418313,
+          "labelPackaging": 0.28112400000100024,
+          "labelRoadJoining": 0.156565,
+          "labelShaping": 9.599345,
+          "labelSigning": 0.0042292500147596
+        },
+        "streamArtifactBytes": 4237812,
+        "streamArtifactWriteSeconds": 0.0010284190939273685,
+        "streamCanonicalizationSeconds": 0.0002223340270575136,
+        "streamFileCount": 7,
+        "streamHashingSeconds": 0.0029816659807693213,
+        "streamPayloadBytes": 4234052,
+        "streamSignatureKeyId": "selected-area-benchmark",
+        "streamSigningSeconds": 0.0042292500147596,
+        "streamStorageSeconds": 0.0047579589881934226,
+        "streamTotalSeconds": 0.009570750000420958,
+        "zipHashingSeconds": 0.0017404170066583902,
+        "zipStorageSeconds": 0.005096540990052745
+      },
+      "artifacts": [
+        {
+          "bytes": 4237812,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.bmap",
+          "format": "bike-map-stream-v1",
+          "manifestReceipt": "bf5cc893e64424378b985a3db71d685411f69c21bd6342bb29c65013c39e43ee",
+          "mediaType": "application/vnd.openbikecomputer.map-stream",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/bike-map-stream-v1/selected-area-benchmark/b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4/b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0/5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93/ff444803247814267220046d437701ccfcb763939ae6810e5a8f4bf2dea00f54.bmap",
+          "producerBuildSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0",
+          "producerImageDigest": "sha256:5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+          "sha256": "139a66d09cba0912ba45aa9654e6d7623baf1262136f3a3a1ad4e9d721f00ed5",
+          "signatureKeyId": "selected-area-benchmark",
+          "signatureKeySha256": "b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4",
+          "signedManifestReceipt": "ff444803247814267220046d437701ccfcb763939ae6810e5a8f4bf2dea00f54"
+        },
+        {
+          "bytes": 4240051,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.zip",
+          "format": "zip-stored-v1",
+          "mediaType": "application/zip",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/zip-stored-v1/6e717bc2db68866efb77a5be8e090a0085fe984debc7f3cfd3ad30bec6d2e998.zip",
+          "sha256": "6e717bc2db68866efb77a5be8e090a0085fe984debc7f3cfd3ad30bec6d2e998"
+        }
+      ],
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "3dfdbb9634ae38bf4769a7abeb06d8a927c06b4d16712b513d763d3cf65e75b0",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "03db1b8ff8a72e1d131e8a58770a50f4a6f3f4ac7223da59d4d5f8de374e038d",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "3deb54ec32f5cdf8f8f5bf15afe2a2b488811927d01bdc35435e26f35a563dc9",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "edb27f3d021cc03b477b749bcb807b3afd8b19be13d413733e06df7cca626c77",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "ea850ce095e2d48f286d60b6453ce9329bc2a9b93e7e287563749b7ac92cef79",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "0e3182ca10db26374446b5c4993de54e29f7a767a8287bb122e08b00d742e3b0"
+      },
+      "mode": "legacy",
+      "peakResidentBytes": 3978379264,
+      "runLabel": "legacyWarm",
+      "sourceIdentity": {
+        "bytes": 25617644,
+        "publishedAt": "2026-08-06T22:46:41Z",
+        "sha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+        "url": "https://download.geofabrik.de/asia/china/shanghai-260806.osm.pbf"
+      },
+      "sourceQueryBytes": 8313912,
+      "sourceQueryObjects": {
+        "nodes": 840202,
+        "relations": 7649,
+        "ways": 131345
+      },
+      "timings": {
+        "firstBlockProgressMilliseconds": 823702,
+        "firstPreprocessingProgressMilliseconds": 4783,
+        "wallMilliseconds": 831795
+      },
+      "workerIdentity": {
+        "gdal": "GDAL 3.12.0 \"Chicoutimi\", released 2025/11/03",
+        "gitHead": "773f16c59535b72e1148eedd8c18e402c421ab6d",
+        "osmium": "osmium version 1.18.0",
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "python": "3.14.5",
+        "workerFingerprintSha256": "5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+        "workspaceContentSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0"
+      }
+    },
+    "selectedCold": {
+      "artifactMetrics": {
+        "buildingBuild": {
+          "ambiguousRelationPartCount": 0,
+          "blockBytes": 819588,
+          "blocks": 6,
+          "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+          "calibrationLookup": {
+            "lookups": 56,
+            "underThreshold": 3
+          },
+          "calibrationSource": "sourceSnapshotCache",
+          "classDefaultHeightCount": 46,
+          "containmentAssociationCount": 202,
+          "droppedHoleCount": 0,
+          "emittedWallCount": 113989,
+          "explicitHeightCount": 275,
+          "extrudedSourceCount": 16733,
+          "flatOutlineCount": 39,
+          "holeCount": 70,
+          "inheritedHeightCount": 5,
+          "levelsHeightCount": 1449,
+          "localMedianHeightCount": 13467,
+          "maximumBlockPoints": 29048,
+          "maximumBlockRecords": 4126,
+          "outlineCount": 16493,
+          "partCount": 279,
+          "pointCount": 115781,
+          "profileVersion": 1,
+          "recordCount": 15242,
+          "rejectedTags": {
+            "invalidGeometry": 8,
+            "levelsMalformed": 2,
+            "minimumLevelsMalformed": 1,
+            "roofHeightMalformed": 1
+          },
+          "relationAssociationCount": 70,
+          "relationClosure": {
+            "candidateCount": 15087,
+            "closureNodeCount": 109160,
+            "closureRelationCount": 63,
+            "closureWayCount": 15160,
+            "relationRetryCount": 0,
+            "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+            "sourceIndexKey": "c8bdf29a8bd396f2b7cf965b86bc98f00e7770ce3456f6b054092d834613a97b",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "relationCount": 3,
+          "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+          "sourceCount": 16772,
+          "suppressedWallCount": 1792,
+          "unassociatedPartCount": 7
+        },
+        "buildingObservability": {
+          "cacheWaitMilliseconds": 0,
+          "firstProgressMilliseconds": 2,
+          "retryMilliseconds": 0
+        },
+        "buildingPhaseTimings": {
+          "blockEncoding": 3.866353,
+          "buildingNormalization": 16.092366,
+          "calibrationGeneration": 15.649031,
+          "conversion": 10.045075,
+          "packaging": 0.21185541700106114,
+          "preprocessing": 44.90969,
+          "sourceExtraction": 3.206536
+        },
+        "buildingPreprocessing": {
+          "calibration": {
+            "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+            "cellCount": 279,
+            "cellsHits": 25,
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+            "cellsRequested": 25,
+            "entrySetSha256": "1338fef78ff62222b1a6c0ea3fe5d016357b75bf8c7b0dbbf87688405217ab7e",
+            "manifestSha256": "acb60b04b5b6024d064a33d659f76dac1d70c9125c0e4afb8448b4807a17c800",
+            "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "calibrationExecution": {
+            "areasSeen": 0,
+            "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+            "cellsHits": 279,
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+            "cellsRequested": 279,
+            "directSamples": 0,
+            "invalidGeometry": 0,
+            "outsideRequestedCells": 0,
+            "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "calibrationGenerationExecution": {
+            "areasSeen": 154831,
+            "cacheOutcome": "rebuilt",
+            "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+            "cellsHits": 0,
+            "cellsMisses": 279,
+            "cellsRebuilt": 0,
+            "cellsRequested": 279,
+            "commandSeconds": 15.647635,
+            "directSamples": 11853,
+            "durationSeconds": 15.649031,
+            "invalidGeometry": 2,
+            "outsideRequestedCells": 0,
+            "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "closure": {
+            "calibrationCellCount": 23,
+            "candidateCount": 15087,
+            "closurePlanSha256": "f19067a66d04c03b35dd2007d08e459e5b9c3b18dbea94c3d7c19122b8e2da7f",
+            "nodeCount": 109160,
+            "relationCount": 63,
+            "wayCount": 15160
+          },
+          "identity": {
+            "buildingProfileVersion": 1,
+            "calibration": {
+              "algorithmVersion": 1,
+              "buildingProfileVersion": 1,
+              "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+              "cellSizeMeters": 8192,
+              "creationTool": "open-bike-building-calibration",
+              "entrySetSha256": "1338fef78ff62222b1a6c0ea3fe5d016357b75bf8c7b0dbbf87688405217ab7e",
+              "generationCellCount": 279,
+              "haloCells": 1,
+              "manifestSha256": "acb60b04b5b6024d064a33d659f76dac1d70c9125c0e4afb8448b4807a17c800",
+              "minimumSamples": 3,
+              "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+              "schemaVersion": 1,
+              "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+            },
+            "closureAlgorithmVersion": 1,
+            "extractionAlgorithmVersion": 1,
+            "identitySha256": "6d5bfc3719dc6c926d232750f8f0e559698a70e41d749683f0cc6477cabbc3a2",
+            "schemaVersion": 1,
+            "scope": {
+              "blockGridVersion": 1,
+              "blockSizeMeters": 4096,
+              "geometryBufferMeters": 256,
+              "maxGeometryBufferMeters": 2048,
+              "maxRelationObjectsPerJob": 200000,
+              "maxSourceAreaM2": 200000000,
+              "maxSourceToOutputAreaBasisPoints": 13500,
+              "relationClosureMode": "source_snapshot_index",
+              "relationRetryBufferMeters": 512,
+              "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+              "scopePolicyVersion": 1,
+              "selectionSemantics": "complete_blocks_no_selection_edge_clipping"
+            },
+            "sourceIndex": {
+              "algorithmVersion": 2,
+              "schemaVersion": 1
+            },
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "legacyScope": {
+            "legacySourceAreaM2": 805306368,
+            "legacySourceBoundsE7": [
+              1213498903,
+              311606636,
+              1215706603,
+              314122179
+            ],
+            "legacySourceToOutputAreaBasisPoints": 80000,
+            "outputAreaM2": 100663296,
+            "requestedApproximateAreaM2": 23840377
+          },
+          "mode": "selected",
+          "phaseTimings": {
+            "calibration_cells": 0.25611,
+            "relation_closure": 8.534442,
+            "source_index": 35.547478
+          },
+          "relationRetries": [],
+          "scope": {
+            "calibrationCellCount": 9,
+            "calibrationSampleCellCount": 25,
+            "geometryBufferMeters": 256,
+            "outputAreaM2": 100663296,
+            "outputBlockCount": 6,
+            "requestedApproximateAreaM2": 23840377,
+            "schemaVersion": 1,
+            "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+            "scopePolicyVersion": 1,
+            "sourceAreaM2": 111411200,
+            "sourceBoundsE7": [
+              1214211806,
+              312216485,
+              1214993700,
+              313199283
+            ],
+            "sourceToOutputAreaBasisPoints": 11068
+          },
+          "sourceBytes": 25617644,
+          "sourceIndex": {
+            "algorithmVersion": 2,
+            "creationTool": "open-bike-building-source-index",
+            "databaseSha256": "45c6dc0d15e0cff92cc9cfa1ff355be24d14aa98281555a55afa704848470623",
+            "indexKey": "c8bdf29a8bd396f2b7cf965b86bc98f00e7770ce3456f6b054092d834613a97b",
+            "nodeCount": 902560,
+            "relationCount": 892,
+            "relationMemberCount": 2510,
+            "schemaVersion": 1,
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+            "wayCount": 156055
+          }
+        },
+        "buildingScope": {
+          "calibrationCellCount": 9,
+          "calibrationSampleCellCount": 25,
+          "geometryBufferMeters": 256,
+          "outputAreaM2": 100663296,
+          "outputBlockCount": 6,
+          "requestedApproximateAreaM2": 23840377,
+          "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+          "sourceAreaM2": 111411200,
+          "sourceBoundsE7": [
+            1214211806,
+            312216485,
+            1214993700,
+            313199283
+          ],
+          "sourceToOutputAreaBasisPoints": 11068
+        },
+        "labelBuild": {
+          "blockBytes": 1810478,
+          "blocks": 6,
+          "candidates": 7441,
+          "diagnostics": {
+            "candidatesByRoadClass": {
+              "highway.footway": 98,
+              "highway.living_street": 7,
+              "highway.path": 0,
+              "highway.pedestrian": 55,
+              "highway.primary": 991,
+              "highway.residential": 1555,
+              "highway.secondary": 926,
+              "highway.secondary_link": 4,
+              "highway.service": 112,
+              "highway.steps": 0,
+              "highway.tertiary": 745,
+              "highway.trunk": 548,
+              "highway.unclassified": 61,
+              "railway.abandoned": 8,
+              "railway.construction": 1371,
+              "railway.disused": 5,
+              "railway.funicular": 16,
+              "railway.planned": 25,
+              "railway.platform": 0,
+              "railway.platform_edge": 2,
+              "railway.rail": 429,
+              "railway.razed": 55,
+              "railway.station": 72,
+              "railway.subway": 6649,
+              "railway.subway_entrance": 0,
+              "waterway.canal": 36,
+              "waterway.drain": 72,
+              "waterway.river": 1569,
+              "waterway.stream": 39
+            },
+            "candidatesByRoadRank": {
+              "0": 548,
+              "1": 1921,
+              "2": 745,
+              "3": 1616,
+              "4": 112,
+              "5": 98,
+              "6": 10410
+            },
+            "candidatesByZoomBand": {
+              "0-3": 10508,
+              "0-4": 112,
+              "0-5": 4830
+            },
+            "candidatesRejectedByBlockOwnership": 13582,
+            "clippedCandidates": 7441,
+            "labelTagsRead": 12726,
+            "namedRoadsClipped": 2450,
+            "namedRoadsJoined": 2206,
+            "namedRoadsPreserved": 4374,
+            "namedRoadsRead": 4157,
+            "rejectedCandidates": {
+              "excessiveBend": 52,
+              "insufficientStraightSpan": 145,
+              "noUsableText": 4957,
+              "roadTooShort": 1121,
+              "spanTooShort": 472
+            },
+            "rejectedText": {
+              "invalidLanguageTag": 23
+            },
+            "variantsByKind": {
+              "international": 63,
+              "local": 2389,
+              "preferred": 2915,
+              "ref": 37
+            },
+            "variantsByLanguage": {
+              "en": 2215,
+              "en-US": 63,
+              "zh-Hans": 700
+            }
+          },
+          "fontBytes": 1405678,
+          "fontCompressedBitmapBytes": 1336147,
+          "fontCompressionRatio": 0.489109,
+          "fontFallbackSelections": 1183,
+          "fontGlyphs": 723,
+          "fontProfileFingerprint": 2986106067,
+          "fontRecords": 2169,
+          "fontShapeCacheHits": 7310,
+          "fontShapeCalls": 9355,
+          "fontShapingFailures": 0,
+          "fontUncompressedBitmapBytes": 2731800,
+          "labels": 1729,
+          "maximumBlockBytes": 521371,
+          "maximumBlockCandidates": 1730,
+          "maximumBlockLabels": 557,
+          "maximumBlockRuns": 2118,
+          "maximumBlockStringBytes": 6989,
+          "maximumBlockStrings": 562,
+          "runs": 5751,
+          "stringBytes": 20434,
+          "strings": 1622
+        },
+        "labelPhaseTimings": {
+          "labelCandidateGeneration": 3.79167,
+          "labelFmbWriting": 0.0,
+          "labelFontWriting": 1.793225,
+          "labelNormalization": 0.651293,
+          "labelPackaging": 0.21185541700106114,
+          "labelRoadJoining": 0.041349,
+          "labelShaping": 3.215298,
+          "labelSigning": 0.003259457997046411
+        },
+        "streamArtifactBytes": 3221654,
+        "streamArtifactWriteSeconds": 0.0008372089359909296,
+        "streamCanonicalizationSeconds": 0.0002361249935347587,
+        "streamFileCount": 7,
+        "streamHashingSeconds": 0.00225999896065332,
+        "streamPayloadBytes": 3216156,
+        "streamSignatureKeyId": "selected-area-benchmark",
+        "streamSigningSeconds": 0.003259457997046411,
+        "streamStorageSeconds": 0.0028321669960860163,
+        "streamTotalSeconds": 0.007434625003952533,
+        "zipHashingSeconds": 0.0013559999933931977,
+        "zipStorageSeconds": 0.0025956250028684735
+      },
+      "artifacts": [
+        {
+          "bytes": 3221654,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.bmap",
+          "format": "bike-map-stream-v1",
+          "manifestReceipt": "72d47d634af927a0346d4bdec41ac7bbf88856fd425936450f1242e6bca4b392",
+          "mediaType": "application/vnd.openbikecomputer.map-stream",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/bike-map-stream-v1/selected-area-benchmark/b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4/b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0/5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93/fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649.bmap",
+          "producerBuildSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0",
+          "producerImageDigest": "sha256:5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+          "sha256": "5650f11399de527fb6f4aa5d4655c3cb9e6a6cb07fe1027bcaf6cfc8f5ff4973",
+          "signatureKeyId": "selected-area-benchmark",
+          "signatureKeySha256": "b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4",
+          "signedManifestReceipt": "fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649"
+        },
+        {
+          "bytes": 3224293,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.zip",
+          "format": "zip-stored-v1",
+          "mediaType": "application/zip",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/zip-stored-v1/81254dd49aea84fd729410d318a0d20496cf6523f1199d32b79f001276cd591f.zip",
+          "sha256": "81254dd49aea84fd729410d318a0d20496cf6523f1199d32b79f001276cd591f"
+        }
+      ],
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "06b7f6e101c5c6e1b622a5d89359958e1a1152a095fc957732a244d03fe7ac3c",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "548eab61a676611108b5a947f48c157a97dc25c23e61c4edff6db8783df82698",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "0a94636faeee715195f0aba9088d748e6041e31a7a8fc53c030e45fa3a5e3ec0",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "3cd59187ed038250d01a40e1ad809679b9902aa3b92a8e6f11609b04c2273e1f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "cacc3d399e24365997d14e498ee5ca6b37480fe04ce1a2bfe161e8282916616e",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "f036bd9ead703a8e515448ad4e781cede3f4f64d801eb667498b31e72e7b0f31"
+      },
+      "mode": "selected",
+      "peakResidentBytes": 4579409920,
+      "runLabel": "selectedCold",
+      "sourceIdentity": {
+        "bytes": 25617644,
+        "publishedAt": "2026-08-06T22:46:41Z",
+        "sha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+        "url": "https://download.geofabrik.de/asia/china/shanghai-260806.osm.pbf"
+      },
+      "sourceQueryBytes": 2381268,
+      "sourceQueryObjects": {
+        "nodes": 220217,
+        "relations": 2193,
+        "ways": 32313
+      },
+      "timings": {
+        "firstBlockProgressMilliseconds": 94592,
+        "firstPreprocessingProgressMilliseconds": 2,
+        "wallMilliseconds": 100570
+      },
+      "workerIdentity": {
+        "gdal": "GDAL 3.12.0 \"Chicoutimi\", released 2025/11/03",
+        "gitHead": "773f16c59535b72e1148eedd8c18e402c421ab6d",
+        "osmium": "osmium version 1.18.0",
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "python": "3.14.5",
+        "workerFingerprintSha256": "5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+        "workspaceContentSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0"
+      }
+    },
+    "selectedWarm": {
+      "artifactMetrics": {
+        "buildingBuild": {
+          "ambiguousRelationPartCount": 0,
+          "blockBytes": 819588,
+          "blocks": 6,
+          "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+          "calibrationLookup": {
+            "lookups": 56,
+            "underThreshold": 3
+          },
+          "calibrationSource": "sourceSnapshotCache",
+          "classDefaultHeightCount": 46,
+          "containmentAssociationCount": 202,
+          "droppedHoleCount": 0,
+          "emittedWallCount": 113989,
+          "explicitHeightCount": 275,
+          "extrudedSourceCount": 16733,
+          "flatOutlineCount": 39,
+          "holeCount": 70,
+          "inheritedHeightCount": 5,
+          "levelsHeightCount": 1449,
+          "localMedianHeightCount": 13467,
+          "maximumBlockPoints": 29048,
+          "maximumBlockRecords": 4126,
+          "outlineCount": 16493,
+          "partCount": 279,
+          "pointCount": 115781,
+          "profileVersion": 1,
+          "recordCount": 15242,
+          "rejectedTags": {
+            "invalidGeometry": 8,
+            "levelsMalformed": 2,
+            "minimumLevelsMalformed": 1,
+            "roofHeightMalformed": 1
+          },
+          "relationAssociationCount": 70,
+          "relationClosure": {
+            "candidateCount": 15087,
+            "closureNodeCount": 109160,
+            "closureRelationCount": 63,
+            "closureWayCount": 15160,
+            "relationRetryCount": 0,
+            "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+            "sourceIndexKey": "c8bdf29a8bd396f2b7cf965b86bc98f00e7770ce3456f6b054092d834613a97b",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "relationCount": 3,
+          "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+          "sourceCount": 16772,
+          "suppressedWallCount": 1792,
+          "unassociatedPartCount": 7
+        },
+        "buildingObservability": {
+          "cacheWaitMilliseconds": 0,
+          "firstProgressMilliseconds": 2,
+          "retryMilliseconds": 0
+        },
+        "buildingPhaseTimings": {
+          "blockEncoding": 3.5961,
+          "buildingNormalization": 16.06892,
+          "calibrationGeneration": 0.000848,
+          "conversion": 11.598186,
+          "packaging": 0.21390049997717142,
+          "preprocessing": 16.438326,
+          "sourceExtraction": 2.673056
+        },
+        "buildingPreprocessing": {
+          "calibration": {
+            "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+            "cellCount": 279,
+            "cellsHits": 25,
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+            "cellsRequested": 25,
+            "entrySetSha256": "1338fef78ff62222b1a6c0ea3fe5d016357b75bf8c7b0dbbf87688405217ab7e",
+            "manifestSha256": "acb60b04b5b6024d064a33d659f76dac1d70c9125c0e4afb8448b4807a17c800",
+            "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "calibrationExecution": {
+            "areasSeen": 0,
+            "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+            "cellsHits": 279,
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+            "cellsRequested": 279,
+            "directSamples": 0,
+            "invalidGeometry": 0,
+            "outsideRequestedCells": 0,
+            "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "calibrationGenerationExecution": {
+            "cacheOutcome": "hit",
+            "cellsHits": 279,
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+            "cellsRequested": 279,
+            "durationSeconds": 0.000848
+          },
+          "closure": {
+            "calibrationCellCount": 23,
+            "candidateCount": 15087,
+            "closurePlanSha256": "f19067a66d04c03b35dd2007d08e459e5b9c3b18dbea94c3d7c19122b8e2da7f",
+            "nodeCount": 109160,
+            "relationCount": 63,
+            "wayCount": 15160
+          },
+          "identity": {
+            "buildingProfileVersion": 1,
+            "calibration": {
+              "algorithmVersion": 1,
+              "buildingProfileVersion": 1,
+              "calibrationKey": "3bc304eb06f7965596504ee16fce358bd82e9b6bf119313438dd1f4e9f63bfba",
+              "cellSizeMeters": 8192,
+              "creationTool": "open-bike-building-calibration",
+              "entrySetSha256": "1338fef78ff62222b1a6c0ea3fe5d016357b75bf8c7b0dbbf87688405217ab7e",
+              "generationCellCount": 279,
+              "haloCells": 1,
+              "manifestSha256": "acb60b04b5b6024d064a33d659f76dac1d70c9125c0e4afb8448b4807a17c800",
+              "minimumSamples": 3,
+              "rulesSha256": "8c731d4fc3df93be675cb951fd6909e2a9183e52970fd968f7e18bc86e09e8c6",
+              "schemaVersion": 1,
+              "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+            },
+            "closureAlgorithmVersion": 1,
+            "extractionAlgorithmVersion": 1,
+            "identitySha256": "6d5bfc3719dc6c926d232750f8f0e559698a70e41d749683f0cc6477cabbc3a2",
+            "schemaVersion": 1,
+            "scope": {
+              "blockGridVersion": 1,
+              "blockSizeMeters": 4096,
+              "geometryBufferMeters": 256,
+              "maxGeometryBufferMeters": 2048,
+              "maxRelationObjectsPerJob": 200000,
+              "maxSourceAreaM2": 200000000,
+              "maxSourceToOutputAreaBasisPoints": 13500,
+              "relationClosureMode": "source_snapshot_index",
+              "relationRetryBufferMeters": 512,
+              "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+              "scopePolicyVersion": 1,
+              "selectionSemantics": "complete_blocks_no_selection_edge_clipping"
+            },
+            "sourceIndex": {
+              "algorithmVersion": 2,
+              "schemaVersion": 1
+            },
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a"
+          },
+          "legacyScope": {
+            "legacySourceAreaM2": 805306368,
+            "legacySourceBoundsE7": [
+              1213498903,
+              311606636,
+              1215706603,
+              314122179
+            ],
+            "legacySourceToOutputAreaBasisPoints": 80000,
+            "outputAreaM2": 100663296,
+            "requestedApproximateAreaM2": 23840377
+          },
+          "mode": "selected",
+          "phaseTimings": {
+            "calibration_cells": 0.270699,
+            "relation_closure": 8.953581,
+            "source_index": 6.642455
+          },
+          "relationRetries": [],
+          "scope": {
+            "calibrationCellCount": 9,
+            "calibrationSampleCellCount": 25,
+            "geometryBufferMeters": 256,
+            "outputAreaM2": 100663296,
+            "outputBlockCount": 6,
+            "requestedApproximateAreaM2": 23840377,
+            "schemaVersion": 1,
+            "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+            "scopePolicyVersion": 1,
+            "sourceAreaM2": 111411200,
+            "sourceBoundsE7": [
+              1214211806,
+              312216485,
+              1214993700,
+              313199283
+            ],
+            "sourceToOutputAreaBasisPoints": 11068
+          },
+          "sourceBytes": 25617644,
+          "sourceIndex": {
+            "algorithmVersion": 2,
+            "creationTool": "open-bike-building-source-index",
+            "databaseSha256": "45c6dc0d15e0cff92cc9cfa1ff355be24d14aa98281555a55afa704848470623",
+            "indexKey": "c8bdf29a8bd396f2b7cf965b86bc98f00e7770ce3456f6b054092d834613a97b",
+            "nodeCount": 902560,
+            "relationCount": 892,
+            "relationMemberCount": 2510,
+            "schemaVersion": 1,
+            "sourceSnapshotSha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+            "wayCount": 156055
+          }
+        },
+        "buildingScope": {
+          "calibrationCellCount": 9,
+          "calibrationSampleCellCount": 25,
+          "geometryBufferMeters": 256,
+          "outputAreaM2": 100663296,
+          "outputBlockCount": 6,
+          "requestedApproximateAreaM2": 23840377,
+          "scopePlanSha256": "76a33b029b44f3ff0aefa3368afc8cf14188d70d3e140f4c5cf078af8b475cdd",
+          "sourceAreaM2": 111411200,
+          "sourceBoundsE7": [
+            1214211806,
+            312216485,
+            1214993700,
+            313199283
+          ],
+          "sourceToOutputAreaBasisPoints": 11068
+        },
+        "labelBuild": {
+          "blockBytes": 1810478,
+          "blocks": 6,
+          "candidates": 7441,
+          "diagnostics": {
+            "candidatesByRoadClass": {
+              "highway.footway": 98,
+              "highway.living_street": 7,
+              "highway.path": 0,
+              "highway.pedestrian": 55,
+              "highway.primary": 991,
+              "highway.residential": 1555,
+              "highway.secondary": 926,
+              "highway.secondary_link": 4,
+              "highway.service": 112,
+              "highway.steps": 0,
+              "highway.tertiary": 745,
+              "highway.trunk": 548,
+              "highway.unclassified": 61,
+              "railway.abandoned": 8,
+              "railway.construction": 1371,
+              "railway.disused": 5,
+              "railway.funicular": 16,
+              "railway.planned": 25,
+              "railway.platform": 0,
+              "railway.platform_edge": 2,
+              "railway.rail": 429,
+              "railway.razed": 55,
+              "railway.station": 72,
+              "railway.subway": 6649,
+              "railway.subway_entrance": 0,
+              "waterway.canal": 36,
+              "waterway.drain": 72,
+              "waterway.river": 1569,
+              "waterway.stream": 39
+            },
+            "candidatesByRoadRank": {
+              "0": 548,
+              "1": 1921,
+              "2": 745,
+              "3": 1616,
+              "4": 112,
+              "5": 98,
+              "6": 10410
+            },
+            "candidatesByZoomBand": {
+              "0-3": 10508,
+              "0-4": 112,
+              "0-5": 4830
+            },
+            "candidatesRejectedByBlockOwnership": 13582,
+            "clippedCandidates": 7441,
+            "labelTagsRead": 12726,
+            "namedRoadsClipped": 2450,
+            "namedRoadsJoined": 2206,
+            "namedRoadsPreserved": 4374,
+            "namedRoadsRead": 4157,
+            "rejectedCandidates": {
+              "excessiveBend": 52,
+              "insufficientStraightSpan": 145,
+              "noUsableText": 4957,
+              "roadTooShort": 1121,
+              "spanTooShort": 472
+            },
+            "rejectedText": {
+              "invalidLanguageTag": 23
+            },
+            "variantsByKind": {
+              "international": 63,
+              "local": 2389,
+              "preferred": 2915,
+              "ref": 37
+            },
+            "variantsByLanguage": {
+              "en": 2215,
+              "en-US": 63,
+              "zh-Hans": 700
+            }
+          },
+          "fontBytes": 1405678,
+          "fontCompressedBitmapBytes": 1336147,
+          "fontCompressionRatio": 0.489109,
+          "fontFallbackSelections": 1183,
+          "fontGlyphs": 723,
+          "fontProfileFingerprint": 2986106067,
+          "fontRecords": 2169,
+          "fontShapeCacheHits": 7310,
+          "fontShapeCalls": 9355,
+          "fontShapingFailures": 0,
+          "fontUncompressedBitmapBytes": 2731800,
+          "labels": 1729,
+          "maximumBlockBytes": 521371,
+          "maximumBlockCandidates": 1730,
+          "maximumBlockLabels": 557,
+          "maximumBlockRuns": 2118,
+          "maximumBlockStringBytes": 6989,
+          "maximumBlockStrings": 562,
+          "runs": 5751,
+          "stringBytes": 20434,
+          "strings": 1622
+        },
+        "labelPhaseTimings": {
+          "labelCandidateGeneration": 3.911554,
+          "labelFmbWriting": 0.0,
+          "labelFontWriting": 1.809855,
+          "labelNormalization": 0.554734,
+          "labelPackaging": 0.21390049997717142,
+          "labelRoadJoining": 0.038599,
+          "labelShaping": 3.286794,
+          "labelSigning": 0.0025233750056941062
+        },
+        "streamArtifactBytes": 3221654,
+        "streamArtifactWriteSeconds": 0.0034523749782238156,
+        "streamCanonicalizationSeconds": 0.0002445419959258288,
+        "streamFileCount": 7,
+        "streamHashingSeconds": 0.0022655430366285145,
+        "streamPayloadBytes": 3216156,
+        "streamSignatureKeyId": "selected-area-benchmark",
+        "streamSigningSeconds": 0.0025233750056941062,
+        "streamStorageSeconds": 0.0031270420004148036,
+        "streamTotalSeconds": 0.009453749982640147,
+        "zipHashingSeconds": 0.001347208017250523,
+        "zipStorageSeconds": 0.003283666999777779
+      },
+      "artifacts": [
+        {
+          "bytes": 3221654,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.bmap",
+          "format": "bike-map-stream-v1",
+          "manifestReceipt": "72d47d634af927a0346d4bdec41ac7bbf88856fd425936450f1242e6bca4b392",
+          "mediaType": "application/vnd.openbikecomputer.map-stream",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/bike-map-stream-v1/selected-area-benchmark/b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4/b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0/5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93/fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649.bmap",
+          "producerBuildSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0",
+          "producerImageDigest": "sha256:5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+          "sha256": "5650f11399de527fb6f4aa5d4655c3cb9e6a6cb07fe1027bcaf6cfc8f5ff4973",
+          "signatureKeyId": "selected-area-benchmark",
+          "signatureKeySha256": "b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4",
+          "signedManifestReceipt": "fc48890a827fb0cb647899239d5bd7d338e5a27fa5cbbf732b2b50ed28431649"
+        },
+        {
+          "bytes": 3224293,
+          "filename": "shanghai-selected-area-3d-benchmark-0888580842.zip",
+          "format": "zip-stored-v1",
+          "mediaType": "application/zip",
+          "objectKey": "maps/shanghai-selected-area-3d-benchmark-0888580842/zip-stored-v1/81254dd49aea84fd729410d318a0d20496cf6523f1199d32b79f001276cd591f.zip",
+          "sha256": "81254dd49aea84fd729410d318a0d20496cf6523f1199d32b79f001276cd591f"
+        }
+      ],
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "06b7f6e101c5c6e1b622a5d89359958e1a1152a095fc957732a244d03fe7ac3c",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "548eab61a676611108b5a947f48c157a97dc25c23e61c4edff6db8783df82698",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "0a94636faeee715195f0aba9088d748e6041e31a7a8fc53c030e45fa3a5e3ec0",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "3cd59187ed038250d01a40e1ad809679b9902aa3b92a8e6f11609b04c2273e1f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "cacc3d399e24365997d14e498ee5ca6b37480fe04ce1a2bfe161e8282916616e",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "f036bd9ead703a8e515448ad4e781cede3f4f64d801eb667498b31e72e7b0f31"
+      },
+      "mode": "selected",
+      "peakResidentBytes": 4465016832,
+      "runLabel": "selectedWarm",
+      "sourceIdentity": {
+        "bytes": 25617644,
+        "publishedAt": "2026-08-06T22:46:41Z",
+        "sha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+        "url": "https://download.geofabrik.de/asia/china/shanghai-260806.osm.pbf"
+      },
+      "sourceQueryBytes": 2381268,
+      "sourceQueryObjects": {
+        "nodes": 220217,
+        "relations": 2193,
+        "ways": 32313
+      },
+      "timings": {
+        "firstBlockProgressMilliseconds": 51516,
+        "firstPreprocessingProgressMilliseconds": 2,
+        "wallMilliseconds": 57257
+      },
+      "workerIdentity": {
+        "gdal": "GDAL 3.12.0 \"Chicoutimi\", released 2025/11/03",
+        "gitHead": "773f16c59535b72e1148eedd8c18e402c421ab6d",
+        "osmium": "osmium version 1.18.0",
+        "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+        "python": "3.14.5",
+        "workerFingerprintSha256": "5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+        "workspaceContentSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0"
+      }
+    }
+  },
+  "schemaVersion": 1,
+  "sourceIdentity": {
+    "bytes": 25617644,
+    "publishedAt": "2026-08-06T22:46:41Z",
+    "sha256": "aff1ff719373689c368d3db27f13e4efd16a12e9a272a8e17ea4d3b9bcded83a",
+    "url": "https://download.geofabrik.de/asia/china/shanghai-260806.osm.pbf"
+  },
+  "status": "pass",
+  "workerIdentity": {
+    "gdal": "GDAL 3.12.0 \"Chicoutimi\", released 2025/11/03",
+    "gitHead": "773f16c59535b72e1148eedd8c18e402c421ab6d",
+    "osmium": "osmium version 1.18.0",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.5",
+    "workerFingerprintSha256": "5fc0838c5953217a266a7428a2c10159e73cf190ca994dc029ca050966994c93",
+    "workspaceContentSha256": "b00b7df18cb3c9fdc55f8734edf02f9e7ce30883a886d30c9ce6c37d2e2365c0"
+  }
+}

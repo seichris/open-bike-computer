@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "settings.hpp"
+#include "gps_ride_observation.hpp"
 #include <NMEAGPS.h>
 #include <Streamers.h>
 #include <hal.hpp>
@@ -56,22 +56,6 @@ static const uint8_t canvasRadius = canvasCenter_X - canvasOffset;
 
 class Gps {
 public:
-  struct RideObservation {
-    bool fixAvailable = false;
-    bool fixValid = false;
-    uint32_t fixCapturedAtMs = 0;
-    bool speedAvailable = false;
-    float speedMetersPerSecond = 0.0F;
-    uint32_t speedCapturedAtMs = 0;
-    bool locationAvailable = false;
-    double latitude = 0.0;
-    double longitude = 0.0;
-    uint32_t locationCapturedAtMs = 0;
-    bool hdopAvailable = false;
-    float hdop = 0.0F;
-    uint32_t hdopCapturedAtMs = 0;
-  };
-
   Gps();
   void init();
   double getLat();
@@ -84,7 +68,7 @@ public:
   bool hasLocationChange();
   bool isDOPChanged();
   void setLocalTime(NeoGPS::time_t gpsTime, const char *tz);
-  RideObservation rideObservation() const;
+  GpsRideObservation rideObservation() const;
 
   struct GPSDATA {
     uint8_t satellites;
@@ -98,6 +82,7 @@ public:
     double latitude;
     double longitude;
     uint16_t heading;
+    bool headingValid;
     float hdop;
     float pdop;
     float vdop;
@@ -105,7 +90,7 @@ public:
     char sunriseHour[6];
     char sunsetHour[6];
     int UTC;
-  } gpsData;
+  } gpsData{};
 
   struct SV {
     bool active;
@@ -119,7 +104,7 @@ public:
   } satTracker[MAX_SATELLITES];
 
 private:
-  RideObservation rideObservation_{};
+  GpsRideObservation rideObservation_{};
   uint16_t previousSpeed;
   int16_t previousAltitude;
   double previousLatitude;

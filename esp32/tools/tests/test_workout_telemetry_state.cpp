@@ -27,6 +27,7 @@ struct TestRideData {
   double latitude = 0;
   double longitude = 0;
   uint16_t heading = 0;
+  bool headingValid = false;
 };
 
 void writeUInt16LE(uint8_t *bytes, std::size_t offset, uint16_t value) {
@@ -118,9 +119,11 @@ int main() {
       0x02, 0x3F, 0x34, 0x12, 0x94, 0x00, 0xD7, 0x11,
       0x41, 0x01, 0x6C, 0x03, 0x04, 0xF4, 0xFF, 0x05,
   };
-  const uint8_t origin[workout_telemetry_protocol::FRAME_SIZE] = {
+  const uint8_t origin[workout_telemetry_protocol::ORIGIN_FRAME_SIZE] = {
       0x03, 0x00, 0x34, 0x12, 0xA0, 0x0F, 0x00, 0x00,
-      0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x02, 0x01,
+      0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+      0x01, 0x00, 0x02, 0x00,
   };
 
   Reducer reducer;
@@ -160,7 +163,10 @@ int main() {
          ApplyResult::Applied);
   assert(reducer.state().originReceived);
   assert(reducer.state().wallElapsedSeconds.value == 4000);
-  assert(reducer.state().sessionIdentityHash == 0x12345678);
+  assert(reducer.state().sessionID ==
+         (std::array<uint8_t, workout_telemetry_protocol::SESSION_ID_SIZE>{
+             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+             0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}));
   assert(reducer.state().lastTransitionOrigin ==
          workout_telemetry_protocol::PauseOrigin::Automatic);
 
@@ -274,8 +280,8 @@ int main() {
   std::memcpy(pendingPausedOrigin, origin, sizeof(origin));
   pendingPausedOrigin[1] = static_cast<uint8_t>(
       workout_telemetry_protocol::PauseOrigin::None);
-  writeUInt16LE(pendingPausedOrigin, 12, 0);
-  pendingPausedOrigin[14] = static_cast<uint8_t>(
+  writeUInt16LE(pendingPausedOrigin, 24, 0);
+  pendingPausedOrigin[26] = static_cast<uint8_t>(
       workout_telemetry_protocol::PauseOrigin::None);
   assert(reducer.applyFrame(pendingPausedOrigin,
                             sizeof(pendingPausedOrigin), 9001, true) ==
@@ -293,7 +299,7 @@ int main() {
          workout_telemetry_protocol::PauseOrigin::Automatic);
   uint8_t automaticWithoutProfile[sizeof(pausedOrigin)];
   std::memcpy(automaticWithoutProfile, pausedOrigin, sizeof(pausedOrigin));
-  writeUInt16LE(automaticWithoutProfile, 12, 0);
+  writeUInt16LE(automaticWithoutProfile, 24, 0);
   assertResultPreservesState(
       reducer, automaticWithoutProfile, sizeof(automaticWithoutProfile),
       9003, true, ApplyResult::RejectedMetric);
@@ -1154,10 +1160,12 @@ int main() {
     assert(rideData.satellites == 10);
     if (length == 8) {
       assert(rideData.heading == 99);
+      assert(!rideData.headingValid);
       assert(rideData.speed == 0);
     }
     if (length >= 10) {
       assert(rideData.heading == 270);
+      assert(rideData.headingValid);
     }
     if (length == 30) {
       assert(rideData.speed == 44);
@@ -1168,6 +1176,21 @@ int main() {
       assert(rideData.routeRemaining == 4321);
     }
   }
+
+  writeUInt16LE(gpsPacket, 8, UINT16_MAX);
+  assert(gps_position_protocol::decode(gpsPacket, 10, decoded));
+  assert(!decoded.hasHeading);
+  TestRideData invalidHeadingRide{};
+  invalidHeadingRide.heading = 123;
+  invalidHeadingRide.headingValid = true;
+  assert(gps_position_protocol::decodeAndApply(
+      gpsPacket, 10, invalidHeadingRide, &decoded));
+  assert(!invalidHeadingRide.headingValid);
+  assert(invalidHeadingRide.heading == 123);
+
+  writeUInt16LE(gpsPacket, 8, 360);
+  assert(gps_position_protocol::decode(gpsPacket, 10, decoded));
+  assert(!decoded.hasHeading);
 
   return 0;
 }

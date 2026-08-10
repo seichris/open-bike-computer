@@ -1,235 +1,5 @@
 import Combine
 import Foundation
-
-enum WorkoutDeviceSessionState: UInt8, Equatable, Sendable {
-    case idle = 0
-    case starting = 1
-    case running = 2
-    case paused = 3
-    case ending = 4
-    case ended = 5
-    case failed = 6
-
-    init(_ state: WorkoutSessionStateV1) {
-        switch state {
-        case .idle: self = .idle
-        case .starting: self = .starting
-        case .running: self = .running
-        case .paused: self = .paused
-        case .ending: self = .ending
-        case .ended: self = .ended
-        case .failed: self = .failed
-        }
-    }
-}
-
-struct WorkoutDeviceSourceFlags: OptionSet, Equatable, Sendable {
-    let rawValue: UInt8
-
-    static let pairedSpeedSensor = Self(rawValue: 1 << 0)
-    static let watchSpeed = Self(rawValue: 1 << 1)
-    static let healthKitDistance = Self(rawValue: 1 << 2)
-    static let watchAltitude = Self(rawValue: 1 << 3)
-    static let liveHeartRateZone = Self(rawValue: 1 << 4)
-    static let currentSnapshot = Self(rawValue: 1 << 5)
-}
-
-struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
-    let state: WorkoutDeviceSessionState
-    let sessionToken: UInt16
-    let hasLiveNumerics: Bool
-    let isCurrentSnapshot: Bool
-    let elapsedSeconds: Double?
-    let distanceMeters: Double?
-    let speedMetersPerSecond: Double?
-    let currentHeartRateBPM: Double?
-    let averageHeartRateBPM: Double?
-    let activeEnergyKilocalories: Double?
-    let cyclingPowerWatts: Double?
-    let cyclingCadenceRPM: Double?
-    let currentHeartRateZone: UInt8?
-    let altitudeMeters: Double?
-    let heartRateZoneCount: UInt8?
-    let sourceFlags: WorkoutDeviceSourceFlags
-    let pauseOrigin: WorkoutTransitionOrigin?
-    let wallElapsedSeconds: Double?
-    let sessionIdentityHash: UInt32?
-    let detectorProfileVersion: UInt16?
-    let lastTransitionOrigin: WorkoutTransitionOrigin?
-}
-
-struct WorkoutDeviceFrames: Equatable, Sendable {
-    struct Identity: Equatable, Sendable {
-        let state: WorkoutDeviceSessionState
-        let sessionToken: UInt16
-        let hasLiveNumerics: Bool
-        let isCurrentSnapshot: Bool
-    }
-
-    let core: Data
-    let extended: Data
-    let origin: Data
-    let originAvailable: Bool
-    let identity: Identity
-}
-
-enum WorkoutDeviceFrameBuilder {
-    static let frameLength = DeviceBLEProtocol.workoutTelemetryFrameLength
-    static let unavailableUInt16 = UInt16.max
-    static let unavailableUInt32 = UInt32.max
-    static let unavailableAltitude = Int16.min
-    private static let metricSourceFlagsMask: UInt8 = 0x1F
-
-    static func frames(for sample: WorkoutDeviceTelemetrySample) -> WorkoutDeviceFrames? {
-        guard (sample.state == .idle && sample.sessionToken == 0)
-                || (sample.state != .idle && sample.sessionToken != 0) else {
-            return nil
-        }
-
-        let numerics = sample.hasLiveNumerics
-        var core = Data(capacity: frameLength)
-        core.append(1)
-        core.append(sample.state.rawValue)
-        core.appendUInt16LE(sample.sessionToken)
-        core.appendUInt32LE(numerics
-            ? encodeUInt32(sample.elapsedSeconds)
-            : unavailableUInt32)
-        core.appendUInt32LE(numerics
-            ? encodeUInt32(sample.distanceMeters)
-            : unavailableUInt32)
-        core.appendUInt16LE(numerics
-            ? encodeUInt16(sample.speedMetersPerSecond, scale: 100)
-            : unavailableUInt16)
-        core.appendUInt16LE(numerics
-            ? encodeUInt16(sample.currentHeartRateBPM, requiresPositive: true)
-            : unavailableUInt16)
-
-        let zone = validZone(
-            current: numerics ? sample.currentHeartRateZone : nil,
-            count: numerics ? sample.heartRateZoneCount : nil
-        )
-        let altitude = numerics
-            ? encodeAltitude(sample.altitudeMeters)
-            : unavailableAltitude
-        var flags = WorkoutDeviceSourceFlags(
-            rawValue: numerics
-                ? sample.sourceFlags.rawValue & metricSourceFlagsMask
-                : 0
-        )
-        if encodeUInt16(sample.speedMetersPerSecond, scale: 100) == unavailableUInt16 {
-            flags.subtract([.pairedSpeedSensor, .watchSpeed])
-        }
-        if encodeUInt32(sample.distanceMeters) == unavailableUInt32 {
-            flags.remove(.healthKitDistance)
-        }
-        if altitude == unavailableAltitude {
-            flags.remove(.watchAltitude)
-        }
-        if zone == nil {
-            flags.remove(.liveHeartRateZone)
-        }
-        if sample.isCurrentSnapshot {
-            flags.insert(.currentSnapshot)
-        }
-
-        var extended = Data(capacity: frameLength)
-        extended.append(2)
-        extended.append(flags.rawValue)
-        extended.appendUInt16LE(sample.sessionToken)
-        extended.appendUInt16LE(numerics
-            ? encodeUInt16(sample.averageHeartRateBPM, requiresPositive: true)
-            : unavailableUInt16)
-        extended.appendUInt16LE(numerics
-            ? encodeUInt16(sample.activeEnergyKilocalories, scale: 10)
-            : unavailableUInt16)
-        extended.appendUInt16LE(numerics
-            ? encodeUInt16(sample.cyclingPowerWatts)
-            : unavailableUInt16)
-        extended.appendUInt16LE(numerics
-            ? encodeUInt16(sample.cyclingCadenceRPM, scale: 10)
-            : unavailableUInt16)
-        extended.append(zone?.current ?? 0)
-        extended.appendInt16LE(altitude)
-        extended.append(zone?.count ?? 0)
-
-        var origin = Data(capacity: frameLength)
-        origin.append(3)
-        origin.append(sample.pauseOrigin?.rawValue ?? 0)
-        origin.appendUInt16LE(sample.sessionToken)
-        origin.appendUInt32LE(
-            encodeUInt32(sample.wallElapsedSeconds)
-        )
-        origin.appendUInt32LE(sample.sessionIdentityHash ?? 0)
-        origin.appendUInt16LE(sample.detectorProfileVersion ?? 0)
-        origin.append(sample.lastTransitionOrigin?.rawValue ?? 0)
-        origin.append(sample.isCurrentSnapshot ? 1 : 0)
-
-        guard core.count == frameLength, extended.count == frameLength,
-              origin.count == frameLength else {
-            return nil
-        }
-        return WorkoutDeviceFrames(
-            core: core,
-            extended: extended,
-            origin: origin,
-            originAvailable: sample.state != .idle
-                && sample.sessionToken != 0
-                && sample.sessionIdentityHash != nil
-                && sample.sessionIdentityHash != 0,
-            identity: .init(
-                state: sample.state,
-                sessionToken: sample.sessionToken,
-                hasLiveNumerics: sample.hasLiveNumerics,
-                isCurrentSnapshot: sample.isCurrentSnapshot
-            )
-        )
-    }
-
-    private static func encodeUInt16(
-        _ value: Double?,
-        scale: Double = 1,
-        requiresPositive: Bool = false
-    ) -> UInt16 {
-        guard let value,
-              value.isFinite,
-              value >= 0,
-              !requiresPositive || value > 0 else {
-            return unavailableUInt16
-        }
-        let scaled = value * scale
-        guard scaled.isFinite else { return UInt16.max - 1 }
-        return UInt16(min(scaled.rounded(), Double(UInt16.max - 1)))
-    }
-
-    private static func encodeUInt32(_ value: Double?) -> UInt32 {
-        guard let value, value.isFinite, value >= 0 else {
-            return unavailableUInt32
-        }
-        return UInt32(min(value.rounded(), Double(UInt32.max - 1)))
-    }
-
-    private static func encodeAltitude(_ value: Double?) -> Int16 {
-        guard let value, value.isFinite else { return unavailableAltitude }
-        let lowerBound = Double(Int16.min + 1)
-        let upperBound = Double(Int16.max)
-        return Int16(min(max(value.rounded(), lowerBound), upperBound))
-    }
-
-    private static func validZone(
-        current: UInt8?,
-        count: UInt8?
-    ) -> (current: UInt8, count: UInt8)? {
-        guard let current,
-              let count,
-              current > 0,
-              count > 0,
-              current <= count else {
-            return nil
-        }
-        return (current, count)
-    }
-}
-
 enum WorkoutDeviceTelemetryMapper {
     static func sample(
         presentation: WorkoutMirrorPresentationV1,
@@ -353,10 +123,7 @@ enum WorkoutDeviceTelemetryMapper {
                 snapshot.wallElapsedTime,
                 unit: .seconds
             ),
-            sessionIdentityHash:
-                RideAutomationAdmissionPolicy.sessionIdentityHash(
-                    presentation.sessionID
-                ),
+            sessionID: presentation.sessionID,
             detectorProfileVersion: snapshot.detectorProfileVersion,
             lastTransitionOrigin: snapshot.lastTransitionOrigin
         )
@@ -386,7 +153,7 @@ enum WorkoutDeviceTelemetryMapper {
             sourceFlags: [],
             pauseOrigin: nil,
             wallElapsedSeconds: nil,
-            sessionIdentityHash: nil,
+            sessionID: nil,
             detectorProfileVersion: nil,
             lastTransitionOrigin: nil
         )
@@ -533,8 +300,12 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             lastSentAt: lastOriginSentAt,
             at: date
         )
+        let originIdentityBoundary = lastCoreIdentity.map {
+            $0.sessionToken != frames.identity.sessionToken
+                || $0.hasLiveNumerics != frames.identity.hasLiveNumerics
+        } ?? true
         let originDue = originReady
-            && (becameReady || originChangedDue)
+            && (becameReady || originChangedDue || originIdentityBoundary)
         let pairDue = urgent || coreChangedDue || coreHeartbeatDue
             || extendedChangedDue || extendedHeartbeatDue
         guard pairDue || originDue else {

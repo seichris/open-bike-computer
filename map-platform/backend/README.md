@@ -183,15 +183,41 @@ remove or invalidate existing artifacts; it prevents new target-2 jobs.
 OSM 3D-building target-3 generation has a separate fail-closed gate:
 `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0` is the default. Target 3 retains the
 target-2 label/FMA1 contract, emits FMB v4 building sections and a signed
-artifact-derived height-provenance summary, and uses an expanded source cut-out
-while keeping final blocks limited to the requested aligned extent. Enable this
-gate only for target-3 hardware validation and approved production identities.
+artifact-derived height-provenance summary. The independent
+`MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE` rollout control defaults to
+`shadow`: it records the bounded selected-area plan while preserving the legacy
+expanded source cut-out. Set it to `selected` to use the immutable source index,
+sealed calibration generation, relation closure, and selected/aligned blocks
+plus the bounded correctness buffer. Set it to `legacy` for emergency rollback
+without shadow planning. Invalid values fail startup. Enable target 3 only for
+hardware validation and approved production identities.
 Set `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` to a comma-separated list of exact
-registered installation IDs during the limited rollout; an empty allowlist makes
-the enabled gate global. Rejected clients receive a typed list of compatible
+registered installation IDs during the limited rollout. A nonempty allowlist
+authorizes only those canary installations even while the global gate remains
+off; with an empty allowlist, `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=1` enables
+the target globally. Rejected clients receive a typed list of compatible
 renderer targets so they can retry without mislabeling the resulting artifact.
 Changing either setting does not affect renderer-format-1/2 requests or existing
 artifacts.
+
+During selected-area preprocessing the public job status remains
+`converting_features` for client compatibility. Its optional `progress` object
+adds `phase`, `unit`, generic `completed`/`total`, and `indeterminate` fields
+while retaining `completedBlocks`/`totalBlocks`. Calibration or source-index
+units never count as completed blocks; `phase=block_encoding` resumes the
+ordinary block fraction. Artifact metrics record both the bounded selected
+scope and the legacy expanded-scope comparison, source/index/calibration
+counts, phase timings, retry duration, and the final renderer diagnostics.
+
+The retained Shanghai performance gate is a full legacy-cold/legacy-warm and
+selected-cold/selected-warm target-3 run, not the synthetic scope calculator.
+Run `tools/benchmark_building_pipeline.py suite --help` with a dated Geofabrik
+Shanghai PBF and its verified SHA-256. The harness uses the same source and host
+fingerprint for all four runs, measures peak RSS and first-progress timings,
+records query bytes/object counts, requires byte-identical FMB blocks, proves a
+cold-to-warm calibration-cache transition, and retains signed artifact
+receipts. `tools/benchmark_building_scope.py` remains the quick geometry-only
+check and cannot satisfy the performance gate by itself.
 
 Signed artifact generation and client delivery are separate controls. The API
 defaults `MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE` to `disabled`. Use `allowlist`

@@ -19,6 +19,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
