@@ -1513,12 +1513,12 @@ class MapJobService:
                     job.preparation_estimate = None
                     job.preparation_estimator_context = None
             self.store.save(job)
-            if self.estimate_coordinator is not None:
-                try:
-                    self.estimate_coordinator.record_prepared(job)
-                except Exception:
-                    pass
-            return job
+        if self.estimate_coordinator is not None:
+            try:
+                self.estimate_coordinator.record_prepared(job)
+            except Exception:
+                pass
+        return job
 
     @contextmanager
     def lock_client_request(

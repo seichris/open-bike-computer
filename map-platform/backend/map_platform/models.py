@@ -556,7 +556,12 @@ def _preparation_estimate(value: Any) -> dict[str, Any] | None:
         return None
     from .preparation_estimates import validate_preparation_estimate
 
-    return validate_preparation_estimate(value)
+    try:
+        return validate_preparation_estimate(value)
+    except (TypeError, ValueError):
+        # Preparation estimates are advisory. A future schema or damaged
+        # optional field must not make the durable map job unreadable.
+        return None
 
 
 def _preparation_estimator_context(value: Any) -> dict[str, Any] | None:
@@ -564,7 +569,10 @@ def _preparation_estimator_context(value: Any) -> dict[str, Any] | None:
         return None
     from .preparation_estimates import validate_estimator_context
 
-    return validate_estimator_context(value)
+    try:
+        return validate_estimator_context(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _building_preprocessing_mode(value: Any) -> str | None:

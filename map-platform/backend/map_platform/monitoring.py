@@ -12,7 +12,12 @@ from .map_labels import renderer_format_version
 from .models import JobStatus, MapJob, utc_now_iso
 
 
+# The admin summary payload has its own forward-compatible schema. Keep the
+# SQLite user_version at 1 because the v2 storage changes are additive: during
+# a digest-pinned rollout, the previous API or worker must continue opening the
+# shared database after a newer process adds the estimator columns/table.
 MONITORING_SCHEMA_VERSION = 2
+MONITORING_STORAGE_SCHEMA_VERSION = 1
 DEFAULT_MONITORING_RETENTION_DAYS = 90
 MAX_MONITORING_RETENTION_DAYS = 3_650
 MAX_MONITORING_WINDOW_HOURS = 24 * 365
@@ -270,7 +275,10 @@ class MapMonitoringStore:
             estimate.get("sampleCount"),
             estimate["basedOnPhase"],
         )
-        connection = self._connect()
+        # Revisions are advisory telemetry. Fail fast on writer contention so
+        # an estimate cannot stall job acceptance or map progress behind the
+        # monitoring database's normal five-second busy timeout.
+        connection = self._connect(busy_timeout_ms=100)
         try:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -328,7 +336,10 @@ class MapMonitoringStore:
         minimum_samples: int = 20,
         limit: int = 500,
     ) -> list[float]:
-        column = "processing_seconds" if claimed else "total_seconds"
+        # Build-history cohorts model work only. Queue delay is estimated as a
+        # separate current-topology component and must not be counted twice.
+        del claimed
+        column = "processing_seconds"
         connection = self._connect()
         try:
             rows = connection.execute(
@@ -586,7 +597,9 @@ class MapMonitoringStore:
                 LEFT JOIN map_build_runs run ON run.job_id = revision.job_id
                 WHERE revision.generated_epoch >= ?
                   AND revision.generated_epoch <= ?
-                ORDER BY revision.generated_epoch, revision.job_id, revision.revision
+                ORDER BY revision.generated_epoch DESC,
+                         revision.job_id DESC,
+                         revision.revision DESC
                 LIMIT ?
                 """,
                 (cutoff, now, self.summary_run_limit * 16),
@@ -598,6 +611,7 @@ class MapMonitoringStore:
         # composite completion index. Restore chronological order for the
         # existing aggregate helpers and lastCompletedAt field.
         rows.reverse()
+        revision_rows.reverse()
         sampled_count = len(rows)
 
         return {
@@ -641,7 +655,7 @@ class MapMonitoringStore:
                 (MONITORING_TABLE,),
             ).fetchone() is not None
 
-            if version > MONITORING_SCHEMA_VERSION:
+            if version > MONITORING_STORAGE_SCHEMA_VERSION:
                 raise MonitoringSchemaError(
                     f"unsupported monitoring schema version {version}"
                 )
@@ -651,7 +665,7 @@ class MapMonitoringStore:
                         "monitoring schema version is set but its table is missing"
                     )
                 self._create_v2_tables(connection)
-                version = MONITORING_SCHEMA_VERSION
+                version = MONITORING_STORAGE_SCHEMA_VERSION
             else:
                 columns = {
                     str(row[1])
@@ -668,18 +682,20 @@ class MapMonitoringStore:
                 if version == 0:
                     # PR #198 shipped this exact v1 table before user_version.
                     if columns == MONITORING_V1_COLUMNS:
-                        version = 1
-                        connection.execute("PRAGMA user_version = 1")
-                    elif MONITORING_COLUMNS.issubset(columns):
-                        version = MONITORING_SCHEMA_VERSION
+                        version = MONITORING_STORAGE_SCHEMA_VERSION
                         connection.execute(
-                            f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+                            f"PRAGMA user_version = {MONITORING_STORAGE_SCHEMA_VERSION}"
+                        )
+                    elif MONITORING_COLUMNS.issubset(columns):
+                        version = MONITORING_STORAGE_SCHEMA_VERSION
+                        connection.execute(
+                            f"PRAGMA user_version = {MONITORING_STORAGE_SCHEMA_VERSION}"
                         )
                     else:
                         raise MonitoringSchemaError(
                             "unversioned monitoring schema cannot be safely adopted"
                         )
-                if version == 1:
+                if version == MONITORING_STORAGE_SCHEMA_VERSION:
                     for name, column_type in MONITORING_V2_COLUMN_TYPES.items():
                         if name not in columns:
                             connection.execute(
@@ -687,11 +703,7 @@ class MapMonitoringStore:
                                 f"ADD COLUMN {name} {column_type}"
                             )
                     self._create_revision_table(connection)
-                    connection.execute(
-                        f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
-                    )
-                    version = MONITORING_SCHEMA_VERSION
-                elif version != MONITORING_SCHEMA_VERSION:
+                else:
                     raise MonitoringSchemaError(
                         f"unsupported monitoring schema version {version}"
                     )
@@ -817,7 +829,7 @@ class MapMonitoringStore:
         )
         MapMonitoringStore._create_revision_table(connection)
         connection.execute(
-            f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+            f"PRAGMA user_version = {MONITORING_STORAGE_SCHEMA_VERSION}"
         )
 
     @staticmethod
@@ -846,9 +858,12 @@ class MapMonitoringStore:
             """
         )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5)
-        connection.execute("PRAGMA busy_timeout=5000")
+    def _connect(self, *, busy_timeout_ms: int = 5_000) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.path,
+            timeout=max(0, busy_timeout_ms) / 1_000,
+        )
+        connection.execute(f"PRAGMA busy_timeout={max(0, busy_timeout_ms)}")
         connection.row_factory = sqlite3.Row
         return connection
 

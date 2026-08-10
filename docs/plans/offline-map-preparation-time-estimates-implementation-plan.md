@@ -68,14 +68,15 @@ The following v1 decisions are now resolved for implementation:
 
 The branch implements the optional job schema, deterministic checked-in
 profile, exact API/worker compatibility handoff, atomic revisions, queue and
-tiered history cohorts, monitoring schema v2 migration, early
+tiered history cohorts, an additive monitoring extension with admin response
+schema v2, early
 `BUILDING_COMPLEXITY` evidence, phase/block refinements, public/shadow/off
 rollout behavior, privacy-safe events, and defensive iOS presentation. The
 rollout default remains `off`. A production shadow window, a fresh pinned
 approximately 24 km2 benchmark matrix, and public canary/promotion are
 deliberately not performed by this code-only change.
 
-Pre-commit verification on 2026-08-10 passed 346 backend tests, 110
+Pre-commit verification on 2026-08-10 passed 357 backend tests, 110
 OSM/extractor tests, 37 deployment tests, the portable iOS/Catalyst suite, and
 a whole-main-app iOS Simulator Swift typecheck. The ordinary generic-device
 `xcodebuild` was also attempted with isolated derived data, but the shared
@@ -703,11 +704,15 @@ A worker restart reconstructs context from the frozen scope/dependency inputs,
 current progress, and latest estimate. It publishes a new revision if the
 active performance/model key changed.
 
-### Monitoring schema version 2
+### Monitoring response schema version 2 and additive storage
 
-Migrate `map-monitoring.sqlite3` transactionally from schema version 1. Preserve
-all existing rows and add nullable columns so older observations remain usable
-only for compatible coarse cohorts.
+Extend `map-monitoring.sqlite3` transactionally while preserving SQLite
+`user_version = 1`. The storage changes are additive so a previous
+digest-pinned API or worker can keep opening and writing the shared database
+during staggered rollout or rollback. Preserve all existing rows and add
+nullable columns so older observations remain usable only for compatible
+coarse cohorts. The admin summary payload independently advances to schema
+version 2.
 
 Proposed terminal-run columns include:
 
@@ -731,12 +736,14 @@ model/performance keys, basis JSON, and sample count. Prune it under the same
 retention transaction as terminal runs. A normal job is capped at the proposed
 16 persisted revisions; rejected writes are counted and logged.
 
-Migration requirements:
+Storage-extension requirements:
 
-- migrate v1 to v2 in one `BEGIN IMMEDIATE` transaction;
+- add the estimator columns and revision table in one `BEGIN IMMEDIATE`
+  transaction without advancing the storage `user_version`;
 - preserve the existing adoption path for the pre-`user_version` v1 table;
 - validate every required table/column/index before committing;
-- reject unknown future versions;
+- reject unknown future storage versions;
+- prove the previous v1 reader still accepts the additive table shape;
 - keep WAL/busy timeout behavior; and
 - make API startup failure explicit if the durable schema is inconsistent.
 
@@ -1215,8 +1222,9 @@ revisions for the same running job must not create a new map or prevent reuse.
 
 1. **Offline baseline:** profile the dense normalization path and produce the
    benchmark/model profile without changing public responses.
-2. **Telemetry schema:** deploy monitoring v2 and estimator code with mode
-   `off`; validate migration/reconciliation and no map-build regression.
+2. **Telemetry schema:** deploy the additive monitoring extension and admin
+   response schema v2 with mode `off`; validate mixed-version readers,
+   migration/reconciliation, and no map-build regression.
 3. **Shadow estimates:** switch to `shadow`; inspect coverage and overhead for
    at least the proposed 30 selected full builds and required matrix.
 4. **Backend public canary:** enable `public` only for reviewed test
@@ -1238,10 +1246,10 @@ Rollback order:
 2. the iOS app shows generic fallback copy while map jobs continue normally;
 3. if schema/runtime rollback is required, restore the complete previous
    digest-pinned Compose lock through a PR; and
-4. retain v2 monitoring data for forensic export. Do not downgrade or delete
-   the SQLite schema in place; an older image that cannot read v2 must fail
-   startup rather than corrupt it. Provide an explicit forward-compatible
-   rollback reader or deploy a reviewed v2-capable rollback image.
+4. retain the additive estimator columns/revisions for forensic export. Do not
+   delete or destructively downgrade the SQLite schema in place; the previous
+   v1 image can ignore the extra columns/table while preserving its explicit
+   writes to the original columns.
 
 No map artifacts need deletion or regeneration when disabling estimates.
 
@@ -1273,8 +1281,8 @@ No map artifacts need deletion or regeneration when disabling estimates.
       performance compatibility contract.
 - [ ] Profile/reproduce the dense Shanghai normalization observation and rerun
       the pinned approximately 24 km2 benchmark matrix.
-- [x] Implement and test monitoring schema v2 migration and bounded estimate
-      revisions.
+- [x] Implement and test the rollback-compatible additive monitoring extension,
+      admin response schema v2, and bounded estimate revisions.
 - [x] Add the versioned deterministic estimator and checked-in baseline/model
       profile.
 - [x] Add optional `MapJob` estimate state, atomic updates, and API

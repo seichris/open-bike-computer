@@ -83,12 +83,15 @@ python -m map_platform.cli monitoring-summary --window-hours 168
 The production equivalent is the admin-only
 `GET /v1/admin/map-monitoring?windowHours=168` route. It is read-only and
 calculates queue, processing, and total-duration summaries from the bounded
-SQLite sample, including p50/p95 values overall and by renderer format. Schema
-version 2 also retains a default maximum of 16 estimate revisions per job and
+SQLite sample, including p50/p95 values overall and by renderer format. Admin
+response schema version 2 also retains a default maximum of 16 estimate
+revisions per job and
 reports redacted compatibility cohorts, interval/upper-bound coverage, range
 width, revision-to-ready latency, and exclusion reasons. Existing schema-v1 timing
-rows migrate transactionally and remain usable only for coarse summaries when
-their new compatibility fields are absent.
+rows receive additive nullable columns transactionally and remain usable only
+for coarse summaries when their new compatibility fields are absent. SQLite
+`user_version` deliberately remains 1 so the previous digest-pinned API or
+worker can continue opening the shared database during rollout and rollback.
 Maintenance performs the explicit restart reconciliation and retention prune;
 the CLI command above does the same before producing a local summary. The
 worker emits a `map_job_run_completed` JSON log event for each processed

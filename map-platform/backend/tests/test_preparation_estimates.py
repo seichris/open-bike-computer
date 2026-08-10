@@ -104,6 +104,11 @@ class RetryPipeline:
         return "stable-map-id", archive
 
 
+class FailingCapabilityStore:
+    def publish(self, **_kwargs):
+        raise OSError("capability sidecar unavailable")
+
+
 class PreparationEstimateTests(unittest.TestCase):
     def setUp(self):
         self.profile = BaselineProfile.load(PROFILE_PATH)
@@ -133,7 +138,12 @@ class PreparationEstimateTests(unittest.TestCase):
     def test_off_mode_does_not_require_profile_or_rules_files(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(
             "os.environ",
-            {"MAP_PLATFORM_PREPARATION_ESTIMATES_MODE": "off"},
+            {
+                "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE": "off",
+                "MAP_PLATFORM_ESTIMATOR_WORKER_CLASS": "invalid worker class",
+                "MAP_PLATFORM_ESTIMATE_MIN_HISTORY_SAMPLES": "50",
+                "MAP_PLATFORM_ESTIMATE_HIGH_CONFIDENCE_SAMPLES": "1",
+            },
             clear=False,
         ):
             coordinator = load_estimate_coordinator(
@@ -247,6 +257,190 @@ class PreparationEstimateTests(unittest.TestCase):
             "upperSeconds": 100,
         })
 
+    def test_confidence_thresholds_cannot_be_inverted(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "high-confidence samples must be at least the history minimum",
+        ):
+            PreparationEstimateConfig(
+                mode=PreparationEstimateMode.PUBLIC,
+                worker_class="test-worker",
+                worker_concurrency_class="single",
+                minimum_history_samples=20,
+                high_confidence_samples=1,
+            )
+
+    def test_reuse_range_above_configured_ceiling_becomes_unavailable(self):
+        config = PreparationEstimateConfig(
+            mode=PreparationEstimateMode.PUBLIC,
+            worker_class="test-worker",
+            worker_concurrency_class="single",
+            max_seconds=60,
+        )
+        estimator = PreparationEstimator(
+            self.profile,
+            config,
+            clock=lambda: 1_786_330_000.0,
+        )
+        job = build_job("bounded-reuse")
+        context = self.context(estimator, job)
+        context["outcomeClass"] = "subset_reuse"
+        estimate = estimator.estimate(job, context, revision=1)
+        self.assertEqual(estimate["state"], "unavailable")
+        self.assertEqual(estimate["reason"], "temporarily_unavailable")
+
+    def test_queue_topology_counts_each_active_job_once(self):
+        estimator = self.estimator()
+        estimates = []
+        first_range = None
+        for index in range(4):
+            job = build_job(f"queue-{index}")
+            context = estimator.initial_context(
+                job,
+                preprocessing_mode="selected",
+                rules_sha256="a" * 64,
+                queue_depth=index,
+                queued_estimates=estimates,
+                compatible_worker_count=1,
+            )
+            estimate = estimator.estimate(job, context, revision=1)
+            estimates.append(estimate)
+            if first_range is None:
+                first_range = estimate["remaining"]
+                self.assertNotIn("queue", estimate)
+                continue
+            self.assertEqual(
+                estimate["queue"],
+                {
+                    "lowerSeconds": first_range["lowerSeconds"] * index,
+                    "upperSeconds": first_range["upperSeconds"] * index,
+                },
+            )
+            self.assertEqual(
+                estimate["remaining"],
+                {
+                    "lowerSeconds": first_range["lowerSeconds"] * (index + 1),
+                    "upperSeconds": first_range["upperSeconds"] * (index + 1),
+                },
+            )
+
+    def test_queue_topology_keeps_a_fallback_for_jobs_without_estimates(self):
+        estimator = self.estimator()
+        existing = build_job("known-queue-job")
+        existing_context = self.context(estimator, existing)
+        known = estimator.estimate(existing, existing_context, revision=1)
+        context = estimator.initial_context(
+            build_job("mixed-queue"),
+            preprocessing_mode="selected",
+            rules_sha256="a" * 64,
+            queue_depth=2,
+            queued_estimates=[known],
+            compatible_worker_count=1,
+        )
+        self.assertEqual(
+            context["queueRange"],
+            {
+                "lowerSeconds": known["remaining"]["lowerSeconds"],
+                "upperSeconds": known["remaining"]["upperSeconds"] + 900,
+            },
+        )
+
+    def test_empty_queue_does_not_inherit_historical_congestion(self):
+        estimator = self.estimator(FakeHistory(queue=[600.0, 1_200.0]))
+        job = build_job("empty-queue")
+        context = estimator.initial_context(
+            job,
+            preprocessing_mode="selected",
+            rules_sha256="a" * 64,
+            queue_depth=0,
+            compatible_worker_count=1,
+        )
+        self.assertEqual(
+            context["queueRange"],
+            {"lowerSeconds": 0, "upperSeconds": 0},
+        )
+        self.assertNotIn(
+            "queue", estimator.estimate(job, context, revision=1)
+        )
+
+    def test_building_progress_removes_only_completed_components(self):
+        estimator = self.estimator()
+        job = build_job("component-progress")
+        context = self.context(estimator, job)
+        queued = estimator.estimate(job, context, revision=1)
+        context["evidence"] = {
+            "progress": {
+                "phase": "building_preprocessing",
+                "unit": "scope_plan",
+                "completed": 1,
+                "total": 1,
+            }
+        }
+        scope_planned = estimator.estimate(
+            job,
+            context,
+            revision=2,
+            based_on_phase="building_preprocessing",
+        )
+        context["evidence"]["progress"]["unit"] = "dependency_snapshot"
+        dependencies_done = estimator.estimate(
+            job,
+            context,
+            revision=3,
+            based_on_phase="building_preprocessing",
+        )
+        context["evidence"]["progress"]["unit"] = "building_complexity"
+        normalization_pending = estimator.estimate(
+            job,
+            context,
+            revision=4,
+            based_on_phase="building_preprocessing",
+        )
+        context["evidence"]["progress"]["unit"] = "building_normalization"
+        normalization_done = estimator.estimate(
+            job,
+            context,
+            revision=5,
+            based_on_phase="building_preprocessing",
+        )
+        self.assertEqual(scope_planned["remaining"], queued["remaining"])
+        self.assertLess(
+            dependencies_done["remaining"]["upperSeconds"],
+            queued["remaining"]["upperSeconds"],
+        )
+        self.assertEqual(
+            normalization_pending["remaining"],
+            dependencies_done["remaining"],
+        )
+        self.assertLess(
+            normalization_done["remaining"]["upperSeconds"],
+            dependencies_done["remaining"]["upperSeconds"],
+        )
+
+    def test_full_build_history_scales_only_remaining_components(self):
+        estimator = self.estimator(FakeHistory([10_000.0] * 50))
+        job = build_job("historical-progress")
+        context = self.context(estimator, job)
+        queued = estimator.estimate(job, context, revision=1)
+        packaging = estimator.estimate(
+            job,
+            context,
+            revision=2,
+            based_on_phase="packaging",
+        )
+        self.assertEqual(
+            queued["remaining"],
+            {"lowerSeconds": 10_000, "upperSeconds": 10_000},
+        )
+        self.assertLess(
+            packaging["remaining"]["upperSeconds"],
+            queued["remaining"]["upperSeconds"],
+        )
+        self.assertGreaterEqual(
+            packaging["remaining"]["lowerSeconds"],
+            0,
+        )
+
     def test_unvalidated_confidence_cap_prevents_history_from_narrowing(self):
         config = PreparationEstimateConfig(
             mode=PreparationEstimateMode.SHADOW,
@@ -295,6 +489,42 @@ class PreparationEstimateTests(unittest.TestCase):
         malformed_context["evidence"] = {"complexity": {"value": math.inf}}
         with self.assertRaises(ValueError):
             validate_estimator_context(malformed_context)
+
+    def test_context_accepts_signed_bounds_but_rejects_invalid_counters(self):
+        estimator = self.estimator()
+        job = build_job()
+        context = self.context(estimator, job)
+        context["evidence"] = {
+            "scope": {
+                "outputBlockCount": 6,
+                "sourceAreaM2": 111_411_200,
+                "sourceBoundsE7": [
+                    -1_224_500_000,
+                    377_000_000,
+                    -1_223_000_000,
+                    378_000_000,
+                ],
+            }
+        }
+        self.assertEqual(
+            validate_estimator_context(context)["evidence"]["scope"][
+                "sourceBoundsE7"
+            ][0],
+            -1_224_500_000,
+        )
+        for invalid in (True, -1, 1.5):
+            with self.subTest(invalid=invalid):
+                context["evidence"]["scope"]["sourceAreaM2"] = invalid
+                with self.assertRaises(ValueError):
+                    validate_estimator_context(context)
+
+    def test_future_advisory_schema_does_not_break_persisted_job_decode(self):
+        serialized = build_job("future-estimate").to_dict(include_internal=True)
+        serialized["preparationEstimate"] = {"schemaVersion": 2}
+        serialized["preparationEstimatorContext"] = {"schemaVersion": 2}
+        restored = MapJob.from_dict(serialized)
+        self.assertIsNone(restored.preparation_estimate)
+        self.assertIsNone(restored.preparation_estimator_context)
 
     def test_performance_key_changes_with_rules_renderer_and_worker_class(self):
         base = performance_compatibility_key(
@@ -473,6 +703,16 @@ class PreparationEstimateTests(unittest.TestCase):
             self.assertEqual(
                 store.compatible(model_version="map-preparation-v1"), []
             )
+
+    def test_capability_sidecar_failure_does_not_break_worker_heartbeat(self):
+        coordinator = PreparationEstimateCoordinator(
+            None,
+            self.estimator(),
+            preprocessing_mode="selected",
+            rules_sha256="a" * 64,
+            capability_store=FailingCapabilityStore(),
+        )
+        self.assertIsNone(coordinator.publish_worker_capability("worker-one"))
 
     def test_forced_phase_updates_cannot_bypass_revision_cap(self):
         with tempfile.TemporaryDirectory() as temporary:

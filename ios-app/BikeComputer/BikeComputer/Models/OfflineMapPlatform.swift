@@ -838,6 +838,19 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
         if seconds < 3_600 {
             return "\(max(1, seconds / 60)) min"
         }
+        if seconds >= 86_400 {
+            let days = seconds / 86_400
+            let hours = (seconds % 86_400) / 3_600
+            let minutes = (seconds % 3_600) / 60
+            var parts = [days == 1 ? "1 day" : "\(days) days"]
+            if hours > 0 {
+                parts.append(hours == 1 ? "1 hr" : "\(hours) hr")
+            }
+            if minutes > 0 {
+                parts.append("\(minutes) min")
+            }
+            return parts.joined(separator: " ")
+        }
         if seconds % 3_600 == 0 {
             let hours = seconds / 3_600
             return hours == 1 ? "1 hr" : "\(hours) hr"

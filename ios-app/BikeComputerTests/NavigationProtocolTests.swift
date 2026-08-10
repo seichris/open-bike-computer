@@ -5347,6 +5347,16 @@ struct NavigationProtocolTests {
             "About 1 hr–1 hr 45 min remaining",
             "hour ranges round outward in fifteen-minute increments"
         )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.description(
+                for: OfflineMapPreparationEstimateRange(
+                    lowerSeconds: 604_800,
+                    upperSeconds: 604_800
+                )
+            ),
+            "About 7 days remaining",
+            "seven-day public ceiling remains readable"
+        )
     }
 
     static func testOfflineMapJobProgressDecoding() {

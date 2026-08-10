@@ -61,7 +61,10 @@ COMPLETED_BY_PHASE = {
     "resolving_source": frozenset(),
     "extracting_pbf": frozenset(),
     "converting_features": frozenset({"source"}),
-    "building_preprocessing": frozenset({"source"}),
+    # This phase is emitted for several selected-area substeps, including the
+    # scope plan before source extraction starts. Its completed work therefore
+    # comes from the typed progress unit below rather than the phase name.
+    "building_preprocessing": frozenset(),
     "block_encoding": frozenset({"source", "dependencies", "normalization", "conversion"}),
     "packaging": frozenset({"source", "dependencies", "normalization", "conversion", "encoding"}),
 }
@@ -97,6 +100,17 @@ class PreparationEstimateConfig:
     minimum_update_seconds: float = 5.0
     material_change_basis_points: int = 1_000
     max_seconds: int = MAX_PUBLIC_SECONDS
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.minimum_history_samples, bool)
+            or isinstance(self.high_confidence_samples, bool)
+            or self.minimum_history_samples < 1
+            or self.high_confidence_samples < self.minimum_history_samples
+        ):
+            raise ValueError(
+                "high-confidence samples must be at least the history minimum"
+            )
 
     @classmethod
     def from_environment(cls) -> "PreparationEstimateConfig":
@@ -376,26 +390,65 @@ class PreparationEstimator:
             lower, upper = self._apply_history(lower, upper, samples)
             if samples:
                 basis.append("historical_cohort")
+            if upper > self.config.max_seconds:
+                raise ValueError("estimate exceeds public range")
             return lower, upper, None, basis, len(samples)
 
         baseline = self.profile.baseline(renderer, preprocessing_mode)
         completed = set(COMPLETED_BY_PHASE.get(phase, ()))
         completed.update(_string_list(context.get("completedComponents"), 16))
-        components: dict[str, tuple[float, float]] = {
+        progress = evidence.get("progress") if isinstance(evidence, dict) else None
+        if phase == "building_preprocessing" and isinstance(progress, dict):
+            unit = progress.get("unit")
+            if unit in {
+                "source_index",
+                "relation_closure",
+                "dependency_snapshot",
+                "building_normalization",
+                "building_complexity",
+            }:
+                completed.add("source")
+            if unit in {
+                "dependency_snapshot",
+                "building_normalization",
+                "building_complexity",
+            }:
+                completed.update({"source", "dependencies"})
+            if (
+                unit == "building_normalization"
+                and progress.get("completed") == progress.get("total")
+                and _finite_nonnegative(progress.get("total"))
+                and float(progress["total"]) > 0
+            ):
+                completed.add("normalization")
+        all_components: dict[str, tuple[float, float]] = {
             name: (float(value[0]), float(value[1]))
             for name, value in baseline["components"].items()
-            if name not in completed
         }
         scope = evidence.get("scope") if isinstance(evidence, dict) else None
         complexity = evidence.get("complexity") if isinstance(evidence, dict) else None
         scale_area = self._area_scale(job, baseline, scope)
         scale_blocks = self._block_scale(baseline, scope)
         for name in ("source", "dependencies", "conversion"):
-            if name in components:
-                components[name] = _scale_range(components[name], scale_area)
+            if name in all_components:
+                all_components[name] = _scale_range(
+                    all_components[name], scale_area
+                )
+        if "encoding" in all_components:
+            all_components["encoding"] = _scale_range(
+                all_components["encoding"], scale_blocks
+            )
+        if "normalization" in all_components:
+            all_components["normalization"] = _scale_range(
+                all_components["normalization"],
+                self._normalization_scale(baseline, complexity, scale_area),
+            )
+        components = {
+            name: value
+            for name, value in all_components.items()
+            if name not in completed
+        }
         if "encoding" in components:
-            components["encoding"] = _scale_range(components["encoding"], scale_blocks)
-            progress = evidence.get("progress") if isinstance(evidence, dict) else None
             if isinstance(progress, dict) and progress.get("phase") == "block_encoding":
                 completed_blocks = progress.get("completed")
                 total_blocks = progress.get("total")
@@ -415,11 +468,12 @@ class PreparationEstimator:
                     components["encoding"] = _scale_range(
                         components["encoding"], remaining_fraction
                     )
-        if "normalization" in components:
-            components["normalization"] = _scale_range(
-                components["normalization"],
-                self._normalization_scale(baseline, complexity, scale_area),
-            )
+        full_lower = math.floor(
+            sum(value[0] for value in all_components.values())
+        )
+        full_upper = math.ceil(
+            sum(value[1] for value in all_components.values()) * 1.05
+        )
         lower = math.floor(sum(value[0] for value in components.values()))
         upper = math.ceil(sum(value[1] for value in components.values()) * 1.05)
         basis = ["baseline_profile"]
@@ -447,8 +501,16 @@ class PreparationEstimator:
         samples = self._history_samples(
             job, context, renderer, preprocessing_mode, "full_build", claimed
         )
-        lower, upper = self._apply_history(lower, upper, samples)
         if samples:
+            calibrated_lower, calibrated_upper = self._apply_history(
+                full_lower, full_upper, samples
+            )
+            lower = math.floor(
+                calibrated_lower * lower / max(full_lower, 1)
+            )
+            upper = math.ceil(
+                calibrated_upper * upper / max(full_upper, 1)
+            )
             basis.append("historical_cohort")
         queue: tuple[int, int] | None = None
         if not claimed:
@@ -542,16 +604,24 @@ class PreparationEstimator:
         queued_estimates: Iterable[Mapping[str, Any]],
         compatible_worker_count: int,
     ) -> tuple[dict[str, int], str]:
+        if queue_depth <= 0:
+            return (
+                {"lowerSeconds": 0, "upperSeconds": 0},
+                "queue_topology" if compatible_worker_count > 0 else "queue_baseline",
+            )
         workers = max(compatible_worker_count, 1)
         ranges = [
-            _available_range(value)
+            _available_work_range(value)
             for value in queued_estimates
             if isinstance(value, Mapping)
         ]
         ranges = [value for value in ranges if value is not None]
         if ranges:
             lower = math.floor(sum(value[0] for value in ranges) / workers)
-            upper = math.ceil(sum(value[1] for value in ranges) / workers)
+            missing = max(0, int(queue_depth) - len(ranges))
+            upper = math.ceil(
+                (sum(value[1] for value in ranges) + missing * 900) / workers
+            )
             return (
                 {
                     "lowerSeconds": max(0, lower),
@@ -712,27 +782,33 @@ class PreparationEstimateCoordinator:
     def publish_worker_capability(self, worker_id: str) -> None:
         if self.mode == PreparationEstimateMode.OFF or self.capability_store is None:
             return
-        keys = {
-            performance_compatibility_key(
-                profile=self.estimator.profile,
-                config=self.config,
-                renderer=renderer,
-                preprocessing_mode=(
-                    self.preprocessing_mode if renderer == 3 else "legacy"
-                ),
-                rules_sha256=self.rules_sha256,
+        try:
+            keys = {
+                performance_compatibility_key(
+                    profile=self.estimator.profile,
+                    config=self.config,
+                    renderer=renderer,
+                    preprocessing_mode=(
+                        self.preprocessing_mode if renderer == 3 else "legacy"
+                    ),
+                    rules_sha256=self.rules_sha256,
+                )
+                for renderer in (1, 2, 3)
+            }
+            self.capability_store.publish(
+                worker_id=worker_id,
+                performance_compatibility_keys=keys,
+                worker_class=self.config.worker_class,
+                preprocessing_modes={self.preprocessing_mode},
+                renderer_formats={1, 2, 3},
+                model_version=self.estimator.profile.model_version,
+                profile_sha256=self.estimator.profile.sha256,
             )
-            for renderer in (1, 2, 3)
-        }
-        self.capability_store.publish(
-            worker_id=worker_id,
-            performance_compatibility_keys=keys,
-            worker_class=self.config.worker_class,
-            preprocessing_modes={self.preprocessing_mode},
-            renderer_formats={1, 2, 3},
-            model_version=self.estimator.profile.model_version,
-            profile_sha256=self.estimator.profile.sha256,
-        )
+        except (OSError, TypeError, ValueError):
+            # Capability publication refines API queue estimates only. A
+            # transient sidecar failure must not break the worker heartbeat or
+            # interrupt a map build.
+            return
 
     def publish(
         self,
@@ -1040,9 +1116,9 @@ def load_estimate_coordinator(
     producer_build_sha256: str | None = None,
     producer_image_digest: str | None = None,
 ) -> PreparationEstimateCoordinator | DisabledPreparationEstimateCoordinator:
-    config = PreparationEstimateConfig.from_environment()
-    if config.mode == PreparationEstimateMode.OFF:
+    if PreparationEstimateMode.from_environment() == PreparationEstimateMode.OFF:
         return DisabledPreparationEstimateCoordinator()
+    config = PreparationEstimateConfig.from_environment()
     profile_path = Path(
         os.environ.get(
             "MAP_PLATFORM_PREPARATION_ESTIMATE_MODEL_PATH",
@@ -1063,7 +1139,12 @@ def load_estimate_coordinator(
     )
     rules_sha256 = hashlib.sha256(rules_path.read_bytes()).hexdigest()
     estimator = PreparationEstimator(profile, config, monitoring_store)
-    capability_store = WorkerCapabilityStore(data_root / "health" / "worker-capabilities")
+    try:
+        capability_store = WorkerCapabilityStore(
+            data_root / "health" / "worker-capabilities"
+        )
+    except OSError:
+        capability_store = None
     return PreparationEstimateCoordinator(
         store,
         estimator,
@@ -1240,6 +1321,7 @@ def validate_estimator_context(value: Any) -> dict[str, Any]:
     evidence = _bounded_json_value(value["evidence"])
     if not isinstance(evidence, dict):
         raise ValueError("estimator evidence is invalid")
+    _validate_estimator_evidence(evidence)
     result = {
         "schemaVersion": ESTIMATOR_CONTEXT_SCHEMA_VERSION,
         "rendererFormatVersion": renderer,
@@ -1409,9 +1491,9 @@ def _bounded_json_value(value: Any, *, depth: int = 0) -> Any:
             raise ValueError("estimator context string is too long")
         return value
     if isinstance(value, int) and not isinstance(value, bool):
-        return _bounded_int(value, 0, MAX_COUNTER)
+        return _bounded_int(value, -MAX_COUNTER, MAX_COUNTER)
     if isinstance(value, float):
-        if not math.isfinite(value) or value < 0 or value > MAX_COUNTER:
+        if not math.isfinite(value) or abs(value) > MAX_COUNTER:
             raise ValueError("estimator context number is invalid")
         return value
     if isinstance(value, list):
@@ -1428,6 +1510,77 @@ def _bounded_json_value(value: Any, *, depth: int = 0) -> Any:
             result[key] = _bounded_json_value(item, depth=depth + 1)
         return result
     raise ValueError("estimator context value is invalid")
+
+
+def _validate_estimator_evidence(evidence: Mapping[str, Any]) -> None:
+    counter_sections = {
+        "scope": {
+            "outputBlockCount",
+            "requestedApproximateAreaM2",
+            "outputAreaM2",
+            "sourceAreaM2",
+            "sourceToOutputAreaBasisPoints",
+            "calibrationCellCount",
+            "calibrationSampleCellCount",
+            "geometryBufferMeters",
+        },
+        "complexity": {
+            "schemaVersion",
+            "sourceCount",
+            "outlineCount",
+            "partCount",
+            "explicitParentCount",
+            "unresolvedPartCount",
+            "containmentCandidateProduct",
+            "polygonCount",
+            "ringCount",
+            "holeCount",
+            "sourceVertexCount",
+            "maximumVerticesPerObject",
+            "preparationRejectedCount",
+        },
+        "progress": {"completed", "total"},
+    }
+    for section_name, fields in counter_sections.items():
+        section = evidence.get(section_name)
+        if not isinstance(section, Mapping):
+            continue
+        for field in fields & set(section):
+            field_value = section[field]
+            if section_name == "progress" and field_value is None:
+                continue
+            _bounded_int(field_value, 0, MAX_COUNTER)
+
+    scope = evidence.get("scope")
+    if isinstance(scope, Mapping) and "sourceBoundsE7" in scope:
+        bounds = scope["sourceBoundsE7"]
+        if (
+            not isinstance(bounds, list)
+            or len(bounds) != 4
+            or any(
+                isinstance(item, bool) or not isinstance(item, int)
+                for item in bounds
+            )
+            or not -1_800_000_000 <= bounds[0] <= bounds[2] <= 1_800_000_000
+            or not -900_000_000 <= bounds[1] <= bounds[3] <= 900_000_000
+        ):
+            raise ValueError("estimator source bounds are invalid")
+
+    dependencies = evidence.get("dependencies")
+    if not isinstance(dependencies, Mapping):
+        return
+    if "sourceBytes" in dependencies:
+        _bounded_int(dependencies["sourceBytes"], 0, MAX_COUNTER)
+    for section_name in ("sourceIndex", "closure"):
+        section = dependencies.get(section_name)
+        if not isinstance(section, Mapping):
+            continue
+        for field, field_value in section.items():
+            if field.endswith("Count") or field in {
+                "schemaVersion",
+                "algorithmVersion",
+            }:
+                _bounded_int(field_value, 0, MAX_COUNTER)
 
 
 def _string_list(value: Any, maximum: int) -> list[str]:
@@ -1459,6 +1612,29 @@ def _available_range(value: Mapping[str, Any]) -> tuple[int, int] | None:
     except (KeyError, TypeError, ValueError):
         return None
     return (lower, upper) if 0 <= lower <= upper <= MAX_PUBLIC_SECONDS else None
+
+
+def _available_work_range(value: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Return remaining work without recursively counting queued time."""
+    remaining = _available_range(value)
+    if remaining is None:
+        return None
+    queue = value.get("queue")
+    if not isinstance(queue, Mapping):
+        return remaining
+    try:
+        queue_lower = int(queue["lowerSeconds"])
+        queue_upper = int(queue["upperSeconds"])
+    except (KeyError, TypeError, ValueError):
+        return remaining
+    if not (
+        0 <= queue_lower <= queue_upper <= MAX_PUBLIC_SECONDS
+        and queue_upper <= remaining[1]
+    ):
+        return remaining
+    lower = max(0, remaining[0] - queue_lower)
+    upper = max(lower, remaining[1] - queue_upper)
+    return lower, upper
 
 
 def _scale_range(value: tuple[float, float], scale: float) -> tuple[float, float]:

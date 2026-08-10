@@ -130,8 +130,26 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 cache_outcome="hit",
                 minimum_samples=1,
             )
+            queued_samples = store.estimate_samples(
+                performance_key="a" * 64,
+                renderer=3,
+                preprocessing_mode="selected",
+                outcome_class="full_build",
+                claimed=False,
+                source_region_id="sg",
+                output_block_count=6,
+                source_area_m2=100_000_000,
+                building_source_count=50_000,
+                cache_outcome="hit",
+                minimum_samples=1,
+            )
 
         self.assertEqual(samples, [90.0])
+        self.assertEqual(
+            queued_samples,
+            [90.0],
+            "queued estimates keep historical work separate from queue delay",
+        )
 
     def test_estimate_revisions_and_accuracy_are_bounded_and_aggregated(self):
         now = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
@@ -204,6 +222,59 @@ class MapMonitoringStoreTests(unittest.TestCase):
         )
         self.assertEqual((initial_lower, initial_upper), (10, 30))
         self.assertEqual((final_lower, final_upper), (5, 10))
+
+    def test_revision_summary_samples_the_most_recent_bounded_window(self):
+        now = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                summary_run_limit=1,
+                max_estimate_revisions=16,
+                clock=lambda: now.timestamp(),
+            )
+            for sequence, model in enumerate(("older-model", "newer-model")):
+                job = build_job(
+                    f"revision-window-{sequence}",
+                    now=now,
+                    processing_seconds=30,
+                )
+                job.preparation_estimator_context = {
+                    "performanceCompatibilityKey": "a" * 64,
+                    "preprocessingMode": "selected",
+                    "modelVersion": model,
+                    "workerClass": "test",
+                    "evidence": {},
+                }
+                for revision in range(1, 17):
+                    generated = now - timedelta(
+                        hours=2 - sequence,
+                        seconds=17 - revision,
+                    )
+                    job.preparation_estimate = {
+                        "schemaVersion": 1,
+                        "modelVersion": model,
+                        "revision": revision,
+                        "state": "available",
+                        "generatedAt": iso(generated),
+                        "attempt": 1,
+                        "basedOnPhase": "block_encoding",
+                        "confidence": "low",
+                        "remaining": {
+                            "lowerSeconds": 10,
+                            "upperSeconds": 20,
+                        },
+                        "basis": ["baseline_profile"],
+                        "sampleCount": 0,
+                    }
+                    self.assertTrue(store.record_estimate_revision(job))
+
+            summary = store.summary(window_hours=24)
+
+        self.assertEqual(summary["estimateRevisions"]["count"], 16)
+        self.assertEqual(
+            summary["estimateRevisions"]["byModelVersion"],
+            {"newer-model": 16},
+        )
 
     def test_job_timing_and_summary_survive_store_reopen(self):
         now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
@@ -320,7 +391,7 @@ class MapMonitoringStoreTests(unittest.TestCase):
 
             MapMonitoringStore(path)
             with sqlite3.connect(path) as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
                 indexes = {
                     row[1] for row in connection.execute(
                         "PRAGMA index_list(map_build_runs)"
@@ -373,7 +444,7 @@ class MapMonitoringStoreTests(unittest.TestCase):
             MapMonitoringStore(path, clock=lambda: 1_786_320_100)
             with sqlite3.connect(path) as connection:
                 self.assertEqual(
-                    connection.execute("PRAGMA user_version").fetchone()[0], 2
+                    connection.execute("PRAGMA user_version").fetchone()[0], 1
                 )
                 self.assertEqual(
                     connection.execute(
