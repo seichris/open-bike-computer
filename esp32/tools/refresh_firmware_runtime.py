@@ -300,6 +300,19 @@ def _remove_generated_python_state(root: Path, baseline_bin: set[str]) -> None:
             writer = csv.writer(stream, lineterminator="\n")
             writer.writerows(sorted(rows, key=lambda row: row[0]))
 
+    # python-build-standalone includes a platform terminfo database even though
+    # none of the locked firmware tools use it. Some Linux entries differ only
+    # by case, so they cannot be represented safely by the canonical runtime
+    # inventory on case-insensitive filesystems. Remove the entire unused data
+    # set instead of weakening the cross-host collision check.
+    terminfo = root / "python/share/terminfo"
+    if terminfo.exists() or terminfo.is_symlink():
+        if terminfo.is_symlink() or not terminfo.is_dir():
+            raise FirmwareRuntimeError(
+                "candidate runtime terminfo path is not a real directory"
+            )
+        shutil.rmtree(terminfo)
+
 
 def _reject_path_leaks(root: Path, forbidden_paths: Sequence[Path]) -> None:
     needles = {

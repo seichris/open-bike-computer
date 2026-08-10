@@ -90,6 +90,10 @@ class RuntimeRefreshTests(unittest.TestCase):
         (python_bin / "uv").write_text("native uv")
         (python_bin / "generated-console-script").write_text(str(self.root))
         (cache / "module.pyc").write_bytes(b"bytecode")
+        terminfo = runtime / "python/share/terminfo/2"
+        terminfo.mkdir(parents=True)
+        (terminfo / "2621A").write_text("upper")
+        (terminfo / "2621a").write_text("lower")
         record = runtime / "python/lib/example-1.dist-info/RECORD"
         record.parent.mkdir()
         record.write_text(
@@ -101,6 +105,7 @@ class RuntimeRefreshTests(unittest.TestCase):
         _remove_generated_python_state(runtime, {"python3"})
         self.assertEqual({path.name for path in python_bin.iterdir()}, {"python3", "uv"})
         self.assertFalse(cache.exists())
+        self.assertFalse((runtime / "python/share/terminfo").exists())
         self.assertEqual(
             record.read_text(),
             "../../../bin/uv,sha256=stable-uv,3\n"
