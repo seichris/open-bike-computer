@@ -81,6 +81,7 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(bus,
 extern lv_display_t *display;
 static lv_color_t *disp_draw_buf = NULL;
 static lv_color_t *disp_rotation_buf = NULL;
+static bool full_screen_rgb565_buffer_ready = false;
 static uint8_t displayRotation = waveshare_board::display::DEFAULT_ROTATION;
 volatile uint32_t displayFlushCount = 0;
 volatile uint32_t lastDisplayFlushMs = 0;
@@ -1078,7 +1079,7 @@ bool hasFullScreenRgb565Buffer() {
          (displayRotation != waveshare_board::display::ROTATION_90 ||
           disp_rotation_buf != nullptr) &&
          lv_display_get_color_format(display) == LV_COLOR_FORMAT_RGB565 &&
-         lv_display_get_render_mode(display) == LV_DISPLAY_RENDER_MODE_FULL;
+         full_screen_rgb565_buffer_ready;
 }
 
 // ============================================================================
@@ -1128,6 +1129,8 @@ void setupDisplay() {
 
 void setupLVGLforArduinoGFX() {
   Serial.println("Initializing LVGL 9 with Arduino_GFX...");
+
+  full_screen_rgb565_buffer_ready = false;
 
   lv_init();
 
@@ -1204,6 +1207,8 @@ void setupLVGLforArduinoGFX() {
   lv_display_set_buffers(display, disp_draw_buf, NULL,
                          bufSize * sizeof(uint16_t), // RGB565 = 2 bytes
                          LV_DISPLAY_RENDER_MODE_FULL);
+  full_screen_rgb565_buffer_ready =
+      bufSize == static_cast<uint32_t>(SCREEN_WIDTH * SCREEN_HEIGHT);
 
   Serial.println("✓ LVGL 9 Display registered");
 
