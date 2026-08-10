@@ -652,6 +652,23 @@ def _mark_tree_read_only(root: Path) -> None:
     root.chmod(0o555)
 
 
+def _remove_owned_runtime_tree(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise FirmwareRuntimeError(f"refusing to remove unsafe runtime tree: {root}")
+    entries = sorted(root.rglob("*"), key=lambda item: len(item.parts))
+    if any(
+        path.is_symlink() or (not path.is_file() and not path.is_dir())
+        for path in entries
+    ):
+        raise FirmwareRuntimeError(
+            f"refusing to remove runtime tree containing an unsafe entry: {root}"
+        )
+    root.chmod(0o700)
+    for path in entries:
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    shutil.rmtree(root)
+
+
 def ensure_shared_runtime(lock: RuntimeLock, target: RuntimeTarget, *, cache_root: Path | None = None) -> Path:
     if target.bundle is None:
         raise FirmwareRuntimeError("runtime target has no bundle")
@@ -670,15 +687,19 @@ def ensure_shared_runtime(lock: RuntimeLock, target: RuntimeTarget, *, cache_roo
             raise AssertionError("verified runtime tree has no digest")
         return accepted
     staging = Path(tempfile.mkdtemp(prefix=f".{target.bundle.sha256}.", dir=base))
+    published = False
     try:
         staging.rmdir()
         extract_verified_bundle(archive, staging)
         _verify_runtime_tree(staging, target)
-        _mark_tree_read_only(staging)
         os.replace(staging, accepted)
+        published = True
+        _mark_tree_read_only(accepted)
+        _verify_runtime_tree(accepted, target)
     except Exception:
-        if staging.exists() and not staging.is_symlink():
-            shutil.rmtree(staging)
+        cleanup = accepted if published else staging
+        if cleanup.exists() and not cleanup.is_symlink():
+            _remove_owned_runtime_tree(cleanup)
         raise
     return accepted
 
@@ -693,12 +714,7 @@ def repair_runtime(lock: RuntimeLock, target: RuntimeTarget, project_dir: Path, 
             if candidate.is_symlink() or candidate.parent != base:
                 raise FirmwareRuntimeError(f"refusing unsafe runtime repair target: {candidate}")
             if candidate.is_dir():
-                candidate.chmod(0o700)
-                for child in candidate.rglob("*"):
-                    if child.is_symlink():
-                        raise FirmwareRuntimeError("refusing to repair a runtime tree containing symlinks")
-                    child.chmod(0o700 if child.is_dir() else 0o600)
-                shutil.rmtree(candidate)
+                _remove_owned_runtime_tree(candidate)
             elif candidate.is_file():
                 candidate.unlink()
             else:
@@ -708,7 +724,7 @@ def repair_runtime(lock: RuntimeLock, target: RuntimeTarget, project_dir: Path, 
         root_private = project_dir / ".pio/open-bike-build/host-runtime"
         if private.is_symlink() or not private.is_dir() or root_private.resolve() not in private.resolve().parents:
             raise FirmwareRuntimeError("refusing unsafe private runtime repair target")
-        shutil.rmtree(private)
+        _remove_owned_runtime_tree(private)
 
 
 def _hydrate_private(shared: Path, project_dir: Path, lock: RuntimeLock, target: RuntimeTarget) -> Path:
@@ -723,15 +739,19 @@ def _hydrate_private(shared: Path, project_dir: Path, lock: RuntimeLock, target:
         _verify_runtime_tree(destination, target)
         return destination
     staging = Path(tempfile.mkdtemp(prefix=f".{target.target_id}.", dir=parent))
+    published = False
     try:
         staging.rmdir()
         shutil.copytree(shared, staging, symlinks=False)
         _verify_runtime_tree(staging, target)
-        _mark_tree_read_only(staging)
         os.replace(staging, destination)
+        published = True
+        _mark_tree_read_only(destination)
+        _verify_runtime_tree(destination, target)
     except Exception:
-        if staging.exists() and not staging.is_symlink():
-            shutil.rmtree(staging)
+        cleanup = destination if published else staging
+        if cleanup.exists() and not cleanup.is_symlink():
+            _remove_owned_runtime_tree(cleanup)
         raise
     return destination
 
