@@ -13440,6 +13440,49 @@ struct NavigationProtocolTests {
         assert(!driver.isScanning,
                "backgrounding leaves no unknown-device radio scan active")
 
+        let handoffManager = BLEManager()
+        let handoffDriver = BLEScanDriverForTesting()
+        handoffManager.installScanDriverForTesting(handoffDriver)
+        handoffManager.setApplicationActive(true)
+        handoffManager.setUnknownDeviceDiscoverySuspended(true)
+        handoffManager.installExplicitDisconnectHandoffForTesting()
+        handoffManager.completeExplicitDisconnectHandoffForTesting()
+        assertEqual(
+            handoffManager.currentScanPurpose,
+            .none,
+            "disconnect handoff stays yielded during sensor enrollment"
+        )
+        assertEqual(
+            handoffManager.pairingStatusMessage,
+            nil,
+            "disconnect handoff cannot show a false search status while yielded"
+        )
+        handoffManager.setUnknownDeviceDiscoverySuspended(false)
+        assert(waitForMainLoop(timeout: 1) {
+            handoffManager.currentScanPurpose == .explicitDiscovery &&
+                handoffManager.pairingStatusMessage ==
+                    "Looking for nearby Bike Computers…"
+        }, "ending sensor enrollment resumes the completed disconnect handoff")
+
+        let silentManager = BLEManager()
+        let silentDriver = BLEScanDriverForTesting()
+        silentDriver.isPoweredOn = false
+        silentManager.installScanDriverForTesting(silentDriver)
+        silentManager.setApplicationActive(true)
+        silentManager.setUnknownDeviceDiscoverySuspended(true)
+        silentManager.startDeviceDiscovery()
+        assertEqual(
+            silentManager.pairingError,
+            nil,
+            "sensor enrollment hides unrelated Bluetooth guidance"
+        )
+        silentManager.setUnknownDeviceDiscoverySuspended(false)
+        assertEqual(
+            silentManager.pairingError,
+            "Turn on Bluetooth to add a Bike Computer.",
+            "ending sensor enrollment reveals Bluetooth guidance for the queued request"
+        )
+
         let trustedIdentifier = UUID(
             uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
         )!

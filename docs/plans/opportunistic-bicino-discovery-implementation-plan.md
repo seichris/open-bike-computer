@@ -466,7 +466,9 @@ Extend `NavigationProtocolTests.swift` with deterministic policy coverage:
 29. cancelling a Bluetooth-off Settings request clears its discovery-scoped
     error before trusted reconnect resumes; and
 30. a manual reconnect with no registered device re-enables opportunistic sheet
-    discovery instead of starting an invisible, unowned explicit scan.
+    discovery instead of starting an invisible, unowned explicit scan; and
+31. explicit discovery derives status and Bluetooth guidance from one resolver,
+    including disconnect handoff completion while sensor enrollment is active.
 
 Add UI-policy tests for sheet eligibility, modal-route identity, session
 dismissal, in-sheet pairing progression, and the connected-device disconnect

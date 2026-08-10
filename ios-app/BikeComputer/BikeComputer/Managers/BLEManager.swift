@@ -1689,6 +1689,20 @@ class BLEManager: NSObject, ObservableObject {
         pairingError = error
         pairingStatusMessage = status
     }
+
+    func installExplicitDisconnectHandoffForTesting() {
+        explicitDiscoveryRequested = true
+        isExplicitDiscoveryPausedForCandidate = false
+        autoReconnect = false
+        ownershipLifecycle.beginDiscovery()
+        pairingStatusMessage = "Disconnecting before searching nearby…"
+    }
+
+    func completeExplicitDisconnectHandoffForTesting() {
+        _ = resumeExplicitDiscoveryAfterTransportEnded(
+            reason: "test explicit disconnect handoff completed"
+        )
+    }
 #endif
     
     /// Compatibility entry point for callers that want the manager to resolve
@@ -1727,14 +1741,7 @@ class BLEManager: NSObject, ObservableObject {
             }
             if isPureExplicitDiscoveryPhase {
                 autoReconnect = false
-                pairingError = isScanDriverPoweredOn
-                    ? nil
-                    : "Turn on Bluetooth to add a Bike Computer."
-                if !isUnknownDeviceDiscoverySuspended {
-                    pairingStatusMessage = isScanDriverPoweredOn
-                        ? "Looking for nearby Bike Computers…"
-                        : nil
-                }
+                refreshPureExplicitDiscoveryPresentation()
             }
         } else {
             let isSuspendingExplicitDiscovery =
@@ -1779,18 +1786,11 @@ class BLEManager: NSObject, ObservableObject {
         guard isUnknownDeviceDiscoverySuspended != isSuspended else { return }
         isUnknownDeviceDiscoverySuspended = isSuspended
         if isSuspended {
-            if isPureExplicitDiscoveryPhase {
-                pairingStatusMessage = nil
-            }
             clearUnknownDiscoveryState(
                 releasingUnpresentedCandidateSuppression: true
             )
-        } else if isPureExplicitDiscoveryPhase,
-                  isApplicationActive,
-                  isScanDriverPoweredOn {
-            pairingError = nil
-            pairingStatusMessage = "Looking for nearby Bike Computers…"
         }
+        refreshPureExplicitDiscoveryPresentation()
         reconcileScanning(
             reason: isSuspended
                 ? "unknown-device discovery yielded to another enrollment"
@@ -1886,6 +1886,31 @@ class BLEManager: NSObject, ObservableObject {
             pairingPrompt == nil &&
             pendingScannedConnectionIdentifier == nil &&
             !hasActiveBLESession
+    }
+
+    private func refreshPureExplicitDiscoveryPresentation() {
+        guard isPureExplicitDiscoveryPhase else { return }
+        pairingStatusMessage = nil
+        if !isApplicationActive || isUnknownDeviceDiscoverySuspended {
+            pairingError = nil
+        } else if !isScanDriverPoweredOn {
+            pairingError = "Turn on Bluetooth to add a Bike Computer."
+        } else {
+            pairingError = nil
+            pairingStatusMessage = "Looking for nearby Bike Computers…"
+        }
+    }
+
+    @discardableResult
+    private func resumeExplicitDiscoveryAfterTransportEnded(
+        reason: String
+    ) -> Bool {
+        guard explicitDiscoveryRequested,
+              pendingPairingSession == nil,
+              isApplicationActive else { return false }
+        refreshPureExplicitDiscoveryPresentation()
+        reconcileScanning(reason: reason)
+        return true
     }
 
     private func reconcileScanning(reason: String) {
@@ -2383,8 +2408,8 @@ class BLEManager: NSObject, ObservableObject {
         ownershipLifecycle.beginDiscovery()
         clearUnknownDiscoveryState()
         isPairingMode = true
+        refreshPureExplicitDiscoveryPresentation()
         guard !isUnknownDeviceDiscoverySuspended else {
-            pairingStatusMessage = nil
             reconcileScanning(
                 reason: "explicit discovery remains yielded to another enrollment"
             )
@@ -2393,12 +2418,9 @@ class BLEManager: NSObject, ObservableObject {
         guard isScanDriverPoweredOn else {
             // Retain explicit intent so Bluetooth-on resumes this user request
             // before any trusted reconnect can claim the radio.
-            pairingStatusMessage = nil
-            pairingError = "Turn on Bluetooth to add a Bike Computer."
             reconcileScanning(reason: "explicit discovery waiting for Bluetooth")
             return
         }
-        pairingStatusMessage = "Looking for nearby Bike Computers…"
         reconcileScanning(reason: "explicit discovery requested")
     }
 
@@ -2601,7 +2623,7 @@ class BLEManager: NSObject, ObservableObject {
             !shouldResumeExplicitDiscovery
         if shouldResumeExplicitDiscovery {
             ownershipLifecycle.beginDiscovery()
-            pairingStatusMessage = "Looking for nearby Bike Computers…"
+            refreshPureExplicitDiscoveryPresentation()
         } else {
             explicitDiscoveryRequested = false
             isExplicitDiscoveryPausedForCandidate = false
@@ -6438,9 +6460,7 @@ extension BLEManager: CBCentralManagerDelegate {
         if state != .poweredOn {
             if isPureExplicitDiscoveryPhase {
                 autoReconnect = false
-                pairingStatusMessage = nil
-                pairingError =
-                    "Turn on Bluetooth to add a Bike Computer."
+                refreshPureExplicitDiscoveryPresentation()
             } else {
                 interruptPendingPairing("Pairing was interrupted because Bluetooth became unavailable. Start again when Bluetooth is on.")
                 explicitDiscoveryRequested = false
@@ -6470,14 +6490,7 @@ extension BLEManager: CBCentralManagerDelegate {
                 log("Using restored Bike Computer connection")
             } else if explicitDiscoveryRequested {
                 autoReconnect = false
-                if isPureExplicitDiscoveryPhase {
-                    pairingError = nil
-                }
-                if isPureExplicitDiscoveryPhase &&
-                    !isUnknownDeviceDiscoverySuspended {
-                    pairingStatusMessage =
-                        "Looking for nearby Bike Computers…"
-                }
+                refreshPureExplicitDiscoveryPresentation()
                 reconcileScanning(
                     reason: "Bluetooth powered on for explicit discovery"
                 )
@@ -6749,13 +6762,9 @@ extension BLEManager: CBCentralManagerDelegate {
             return
         }
 
-        if explicitDiscoveryRequested,
-           pendingPairingSession == nil,
-           isApplicationActive {
-            pairingStatusMessage = "Looking for nearby Bike Computers…"
-            reconcileScanning(
-                reason: "confirmed disconnect completed before explicit discovery"
-            )
+        if resumeExplicitDiscoveryAfterTransportEnded(
+            reason: "confirmed disconnect completed before explicit discovery"
+        ) {
             return
         }
 
@@ -6834,12 +6843,9 @@ extension BLEManager: CBCentralManagerDelegate {
             return
         }
 
-        if explicitDiscoveryRequested,
-           pendingPairingSession == nil,
-           isApplicationActive {
-            reconcileScanning(
-                reason: "connection failure returned to explicit discovery"
-            )
+        if resumeExplicitDiscoveryAfterTransportEnded(
+            reason: "connection failure returned to explicit discovery"
+        ) {
             return
         }
         
