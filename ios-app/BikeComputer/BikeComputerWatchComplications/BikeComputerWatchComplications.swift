@@ -39,13 +39,13 @@ private struct StartRideComplicationView: View {
             case .accessoryCircular:
                 ZStack {
                     AccessoryWidgetBackground()
-                    Image(systemName: "bicycle")
+                    Image(systemName: "figure.outdoor.cycle")
                         .font(.title2)
                         .widgetAccentable()
                 }
             case .accessoryRectangular:
                 HStack(spacing: 8) {
-                    Image(systemName: "bicycle")
+                    Image(systemName: "figure.outdoor.cycle")
                         .font(.title2)
                         .widgetAccentable()
                     VStack(alignment: .leading, spacing: 1) {
@@ -57,15 +57,15 @@ private struct StartRideComplicationView: View {
                     }
                 }
             case .accessoryInline:
-                Label("Start Ride", systemImage: "bicycle")
+                Label("Start Ride", systemImage: "figure.outdoor.cycle")
             case .accessoryCorner:
-                Image(systemName: "bicycle")
+                Image(systemName: "figure.outdoor.cycle")
                     .widgetAccentable()
                     .widgetLabel {
                         Text("Start Ride")
                     }
             default:
-                Image(systemName: "bicycle")
+                Image(systemName: "figure.outdoor.cycle")
             }
         }
         .containerBackground(for: .widget) {
