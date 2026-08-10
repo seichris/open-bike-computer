@@ -268,75 +268,98 @@ void configureWireControl() {
 }
 
 bool releaseCodecResources() {
-  bool cleanupOk = true;
   initialized = false;
   codecHardwareGainDb = 0.0f;
   currentDacGainDb = 0.0f;
   playbackLimiter = {};
-  if (gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
+  if (resourceState.any() && gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
     Serial.println("Speaker: PA shutdown failed; cleanup will retry");
     return false;
   }
   resourceState.powerAmplifierEnabled = false;
 
-  if (resourceState.codecDeviceOpened) {
-    if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
-      Serial.println("Speaker: codec shutdown failed; cleanup will retry");
-      return false;
+  while (true) {
+    switch (nextCleanupAction(resourceState)) {
+    case CleanupAction::LowerPowerAmplifier:
+      // The PA is lowered before the loop, including after partial opens.
+      resourceState.powerAmplifierEnabled = false;
+      break;
+    case CleanupAction::CloseCodecDevice:
+      if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
+        Serial.println("Speaker: codec shutdown failed; cleanup will retry");
+        return false;
+      }
+      resourceState.codecDeviceOpened = false;
+      break;
+    case CleanupAction::DeleteCodecDevice:
+      esp_codec_dev_delete(speakerDevice);
+      speakerDevice = nullptr;
+      resourceState.codecDeviceCreated = false;
+      break;
+    case CleanupAction::DeleteCodecInterface:
+      if (codecInterface->close != nullptr &&
+          codecInterface->close(codecInterface) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: codec interface close failed; cleanup will retry");
+        return false;
+      }
+      if (audio_codec_delete_codec_if(codecInterface) != ESP_CODEC_DEV_OK) {
+        codecInterface = nullptr;
+        resourceState.codecInterfaceCreated = false;
+        Serial.println("Speaker: codec interface deletion reported an error");
+        return false;
+      }
+      codecInterface = nullptr;
+      resourceState.codecInterfaceCreated = false;
+      break;
+    case CleanupAction::DeleteDataInterface:
+      if (dataInterface->close != nullptr &&
+          dataInterface->close(dataInterface) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: data interface close failed; cleanup will retry");
+        return false;
+      }
+      if (audio_codec_delete_data_if(dataInterface) != ESP_CODEC_DEV_OK) {
+        dataInterface = nullptr;
+        resourceState.dataInterfaceCreated = false;
+        Serial.println("Speaker: data interface deletion reported an error");
+        return false;
+      }
+      dataInterface = nullptr;
+      resourceState.dataInterfaceCreated = false;
+      break;
+    case CleanupAction::DeleteGpioInterface:
+      if (audio_codec_delete_gpio_if(gpioInterface) != ESP_CODEC_DEV_OK) {
+        gpioInterface = nullptr;
+        resourceState.gpioInterfaceCreated = false;
+        Serial.println("Speaker: GPIO interface deletion reported an error");
+        return false;
+      }
+      gpioInterface = nullptr;
+      resourceState.gpioInterfaceCreated = false;
+      break;
+    case CleanupAction::DisableI2sChannel:
+      if (i2s_channel_disable(txChannel) != ESP_OK) {
+        Serial.println(
+            "Speaker: I2S channel disable failed; cleanup will retry");
+        return false;
+      }
+      resourceState.channelEnabled = false;
+      break;
+    case CleanupAction::DeleteI2sChannel:
+      if (i2s_del_channel(txChannel) != ESP_OK) {
+        Serial.println(
+            "Speaker: I2S channel cleanup failed; cleanup will retry");
+        return false;
+      }
+      txChannel = nullptr;
+      resourceState.channelAllocated = false;
+      resourceState.standardModeInitialized = false;
+      break;
+    case CleanupAction::None:
+      return true;
     }
-    resourceState.codecDeviceOpened = false;
   }
-  if (resourceState.codecDeviceCreated) {
-    esp_codec_dev_delete(speakerDevice);
-    speakerDevice = nullptr;
-    resourceState.codecDeviceCreated = false;
-  }
-  if (resourceState.codecInterfaceCreated) {
-    const int result = audio_codec_delete_codec_if(codecInterface);
-    codecInterface = nullptr;
-    resourceState.codecInterfaceCreated = false;
-    if (result != ESP_CODEC_DEV_OK) {
-      Serial.println("Speaker: codec interface deletion reported an error");
-      cleanupOk = false;
-    }
-  }
-  if (resourceState.dataInterfaceCreated) {
-    const int result = audio_codec_delete_data_if(dataInterface);
-    dataInterface = nullptr;
-    resourceState.dataInterfaceCreated = false;
-    if (result != ESP_CODEC_DEV_OK) {
-      Serial.println("Speaker: data interface deletion reported an error");
-      cleanupOk = false;
-    }
-  }
-  if (resourceState.gpioInterfaceCreated) {
-    const int result = audio_codec_delete_gpio_if(gpioInterface);
-    gpioInterface = nullptr;
-    resourceState.gpioInterfaceCreated = false;
-    if (result != ESP_CODEC_DEV_OK) {
-      Serial.println("Speaker: GPIO interface deletion reported an error");
-      cleanupOk = false;
-    }
-  }
-
-  if (resourceState.channelEnabled) {
-    if (i2s_channel_disable(txChannel) != ESP_OK) {
-      Serial.println("Speaker: I2S channel disable failed; cleanup will retry");
-      return false;
-    }
-    resourceState.channelEnabled = false;
-  }
-  if (resourceState.channelAllocated) {
-    if (i2s_del_channel(txChannel) != ESP_OK) {
-      Serial.println("Speaker: I2S channel cleanup failed; cleanup will retry");
-      return false;
-    }
-    txChannel = nullptr;
-    resourceState.channelAllocated = false;
-    resourceState.standardModeInitialized = false;
-  }
-
-  return cleanupOk;
 }
 
 bool failInitialization(const char *message) {
