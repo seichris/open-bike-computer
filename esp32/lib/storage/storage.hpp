@@ -125,6 +125,12 @@ private:
   std::atomic<bool> isSdLoaded;
   sdmmc_card_t *card;
   SemaphoreHandle_t mountMutex = nullptr;
+  uint32_t sdRetryAfterMs = 0;
+  bool sdCooldownArmed = false;
+
+  esp_err_t mountSdLocked(bool ignoreCooldown);
+  void teardownSdLocked();
+  bool sdMountHealthyLocked();
 
 public:
   Storage();

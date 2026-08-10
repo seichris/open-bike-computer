@@ -7,6 +7,7 @@
  */
 
 #include "storage.hpp"
+#include "sd_mount_policy.hpp"
 #include "../power_management/power_management.hpp"
 #include "driver/gpio.h"
 #include "driver/sdspi_host.h"
@@ -36,6 +37,12 @@ namespace {
 #define WAVESHARE_SD_SPI_FREQ_HZ 4000000
 #endif
 
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+SPIClass waveshareHspi(HSPI);
+bool waveshareHspiBegun = false;
+bool waveshareSdLifecycleTouched = false;
+#endif
+
 std::string formatSize(uint64_t size) {
   static const char *suffixes[] = {"B", "KB", "MB", "GB", "TB"};
   int order = 0;
@@ -57,42 +64,165 @@ std::string formatSize(uint64_t size) {
  */
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
+bool Storage::sdMountHealthyLocked() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (!isSdLoaded.load() || SD.cardType() == CARD_NONE) {
+    return false;
+  }
+  struct stat mounted = {};
+  if (::stat("/sdcard", &mounted) != 0 || !S_ISDIR(mounted.st_mode)) {
+    return false;
+  }
+  File root = SD.open("/");
+  const bool healthy = static_cast<bool>(root);
+  root.close();
+  return healthy;
+#else
+  struct stat mounted = {};
+  return isSdLoaded.load() && ::stat("/sdcard", &mounted) == 0 &&
+         S_ISDIR(mounted.st_mode);
+#endif
+}
+
+void Storage::teardownSdLocked() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  isSdLoaded = false;
+  if (waveshareSdLifecycleTouched) {
+    SD.end();
+    waveshareSdLifecycleTouched = false;
+  }
+  if (waveshareHspiBegun) {
+    waveshareHspi.end();
+    waveshareHspiBegun = false;
+  }
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+#endif
+}
+
+esp_err_t Storage::mountSdLocked(bool ignoreCooldown) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const uint32_t sequenceStartMs = millis();
+  if (!ignoreCooldown && sdCooldownArmed &&
+      storage_policy::cooldownActive(sequenceStartMs, sdRetryAfterMs)) {
+    Serial.printf("SDIO: cooldown active=1 retryAfterMs=%lu\n",
+                  (unsigned long)(sdRetryAfterMs - sequenceStartMs));
+    return ESP_FAIL;
+  }
+  if (!ignoreCooldown)
+    sdCooldownArmed = false;
+
+  const auto result = storage_policy::runMountSequence(
+      [&]() { teardownSdLocked(); },
+      [&](uint32_t delayMs) {
+        Serial.printf("SDIO: recovery action=full-bus-teardown delayMs=%lu\n",
+                      (unsigned long)delayMs);
+        delay(delayMs);
+      },
+      [&](std::size_t attempt) {
+        const uint32_t attemptStartMs = millis();
+        Serial.printf("SDIO: attempt=%u/%u phase=begin bus=HSPI freq=%lu\n",
+                      static_cast<unsigned>(attempt),
+                      static_cast<unsigned>(storage_policy::kMountAttemptCount),
+                      (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
+        pinMode(SD_CS, OUTPUT);
+        digitalWrite(SD_CS, HIGH);
+        waveshareHspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
+        waveshareHspiBegun = true;
+        waveshareSdLifecycleTouched = true;
+        const bool mounted = SD.begin(SD_CS, waveshareHspi,
+                                      WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard");
+        bool rootHealthy = false;
+        uint8_t cardType = CARD_NONE;
+        if (mounted) {
+          cardType = SD.cardType();
+          if (cardType != CARD_NONE) {
+            File root = SD.open("/");
+            rootHealthy = static_cast<bool>(root);
+            root.close();
+          }
+        }
+        Serial.printf(
+            "SDIO: attempt=%u/%u phase=mount ok=%u root=%u elapsedMs=%lu\n",
+            static_cast<unsigned>(attempt),
+            static_cast<unsigned>(storage_policy::kMountAttemptCount),
+            mounted && cardType != CARD_NONE ? 1U : 0U,
+            rootHealthy ? 1U : 0U,
+            (unsigned long)(millis() - attemptStartMs));
+        if (mounted && cardType != CARD_NONE && rootHealthy) {
+          const char *typeStr = cardType == CARD_MMC ? "MMC"
+                                : cardType == CARD_SD ? "SD"
+                                : cardType == CARD_SDHC ? "SDHC"
+                                                      : "UNKNOWN";
+          isSdLoaded = true;
+          Serial.printf("SDIO: attempt=%u/%u phase=ready type=%s sizeMB=%llu\n",
+                        static_cast<unsigned>(attempt),
+                        static_cast<unsigned>(storage_policy::kMountAttemptCount),
+                        typeStr, SD.cardSize() / (1024 * 1024));
+        }
+        return storage_policy::MountAttemptResult{
+            mounted && cardType != CARD_NONE, rootHealthy};
+      });
+
+  if (result.ok) {
+    sdRetryAfterMs = 0;
+    sdCooldownArmed = false;
+    Serial.printf("SDIO: summary ok=1 attempts=%u totalElapsedMs=%lu "
+                  "fallback=none\n",
+                  static_cast<unsigned>(result.attempts),
+                  (unsigned long)(millis() - sequenceStartMs));
+    return ESP_OK;
+  }
+  teardownSdLocked();
+  sdRetryAfterMs = millis() + storage_policy::kFailedSequenceCooldownMs;
+  sdCooldownArmed = true;
+  ESP_LOGE(TAG, "SD mount failed after bounded full-bus recovery");
+  Serial.printf("SDIO: summary ok=0 attempts=%u totalElapsedMs=%lu "
+                "fallback=ffat\n",
+                static_cast<unsigned>(result.attempts),
+                (unsigned long)(millis() - sequenceStartMs));
+  return ESP_FAIL;
+#else
+  (void)ignoreCooldown;
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 bool Storage::ensureSdMounted() {
-  power_management::ScopedLock powerLock(
-      power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
     mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
     return false;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
 
-  struct stat mounted = {};
-  bool ready = isSdLoaded.load() && ::stat("/sdcard", &mounted) == 0 &&
-               S_ISDIR(mounted.st_mode);
+  bool ready = false;
+  bool needsFallback = false;
+  {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-  ready = ready && SD.cardType() != CARD_NONE;
-  if (ready) {
-    File root = SD.open("/");
-    ready = static_cast<bool>(root);
-    root.close();
-  }
+    ready = sdMountHealthyLocked();
 #endif
-  if (!ready) {
-    isSdLoaded = false;
+    if (!ready) {
+      isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-    FFat.end();
-    SD.end();
-    delay(25);
+      FFat.end();
 #endif
-    ready = initSD() == ESP_OK;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-    if (!ready)
-      initSPIFFS();
+      const bool cooldownWasActive = sdCooldownArmed &&
+          storage_policy::cooldownActive(millis(), sdRetryAfterMs);
+      ready = mountSdLocked(false) == ESP_OK;
+      needsFallback = !ready && !cooldownWasActive;
+#else
+      ready = initSD() == ESP_OK;
 #endif
+    }
   }
   xSemaphoreGive(mountMutex);
+  if (needsFallback)
+    initSPIFFS();
   return ready;
 }
 
@@ -102,83 +232,24 @@ void Storage::markSdUnavailable() { isSdLoaded = false; }
  * @brief SD Card init with DMA using ESP-IDF
  */
 esp_err_t Storage::initSD() {
-  power_management::ScopedLock powerLock(
-      power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  const uint32_t mountStartMs = millis();
-  // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
-  // QSPI display. The default SPI (FSPI) shares resources with the display.
-  // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See hardware/README.md for variant-specific CS pins.
-
-  Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
-                "sck=%d]\n",
-                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, SD_CS, SD_MOSI,
-                SD_MISO, SD_CLK);
-
-  // Explicitly set CS as output and deselect before SPI init
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-
-  // Create dedicated HSPI instance to isolate from QSPI display
-  static SPIClass hspi(HSPI);
-  hspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
-
-  if (!SD.begin(SD_CS, hspi, WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard")) {
-    ESP_LOGE(TAG, "SD Card Mount Failed - check card insertion and format");
-    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu\n",
-                  (unsigned long)(millis() - mountStartMs),
-                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
-    isSdLoaded = false;
-    return ESP_FAIL;
+  if (mountMutex == nullptr)
+    mountMutex = xSemaphoreCreateMutex();
+  if (mountMutex == nullptr)
+    return ESP_ERR_NO_MEM;
+  xSemaphoreTake(mountMutex, portMAX_DELAY);
+  esp_err_t result = ESP_FAIL;
+  {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
+    result = mountSdLocked(true);
   }
-
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_NONE) {
-    ESP_LOGE(TAG, "No SD card detected");
-    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu card=none\n",
-                  (unsigned long)(millis() - mountStartMs),
-                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
-    isSdLoaded = false;
-    return ESP_FAIL;
-  }
-
-  const char *typeStr = "UNKNOWN";
-  if (cardType == CARD_MMC)
-    typeStr = "MMC";
-  else if (cardType == CARD_SD)
-    typeStr = "SD";
-  else if (cardType == CARD_SDHC)
-    typeStr = "SDHC";
-
-  ESP_LOGI(TAG, "SD Card Type: %s, Size: %lluMB", typeStr,
-           SD.cardSize() / (1024 * 1024));
-  Serial.printf("SDIO: mount ok=1 elapsedMs=%lu freq=%lu type=%s sizeMB=%llu\n",
-                (unsigned long)(millis() - mountStartMs),
-                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, typeStr,
-                SD.cardSize() / (1024 * 1024));
-
-#ifdef WAVESHARE_SD_LIST_ROOT
-  Serial.println("SDIO: root listing enabled");
-  File root = SD.open("/");
-  if (root) {
-    File file = root.openNextFile();
-    while (file) {
-      if (file.isDirectory()) {
-        Serial.printf("  DIR : %s\n", file.name());
-      } else {
-        Serial.printf("  FILE: %s (%d bytes)\n", file.name(), file.size());
-      }
-      file = root.openNextFile();
-    }
-    root.close();
-  }
-#endif
-
-  isSdLoaded = true;
-  return ESP_OK;
+  xSemaphoreGive(mountMutex);
+  return result;
 
 #elif defined(SPI_SHARED)
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH); // De-select SD card initially
 
@@ -195,6 +266,8 @@ esp_err_t Storage::initSD() {
   }
 
 #else
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
   // ESP-IDF SPI mode for other boards
   esp_err_t ret;
 
