@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,10 +38,14 @@ def workflow_source(filename: str) -> str:
     return (WORKFLOW_ROOT / filename).read_text(encoding="utf-8")
 
 
-def workflow_sources() -> tuple[tuple[str, str], ...]:
+def workflow_paths(root: Path = WORKFLOW_ROOT) -> tuple[Path, ...]:
+    return tuple(sorted((*root.glob("*.yml"), *root.glob("*.yaml"))))
+
+
+def workflow_sources(root: Path = WORKFLOW_ROOT) -> tuple[tuple[str, str], ...]:
     return tuple(
         (path.name, path.read_text(encoding="utf-8"))
-        for path in sorted(WORKFLOW_ROOT.glob("*.yml"))
+        for path in workflow_paths(root)
     )
 
 
@@ -70,6 +75,37 @@ def mapping_block(source: str, key: str, *, indent: int) -> str:
             end = index
             break
     return "\n".join(lines[start:end])
+
+
+def child_mapping_blocks(
+    source: str, parent_key: str, *, indent: int
+) -> tuple[tuple[str, str], ...]:
+    parent_lines = mapping_block(source, parent_key, indent=indent).splitlines()
+    child_indent = indent + 2
+    children: list[tuple[str, int]] = []
+    for index, line in enumerate(parent_lines[1:], start=1):
+        line_indent = len(line) - len(line.lstrip())
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*):", line.strip())
+        if line_indent == child_indent and match:
+            children.append((match.group(1), index))
+
+    blocks = []
+    for child_index, (key, start) in enumerate(children):
+        end = (
+            children[child_index + 1][1]
+            if child_index + 1 < len(children)
+            else len(parent_lines)
+        )
+        blocks.append((key, "\n".join(parent_lines[start:end])))
+    return tuple(blocks)
+
+
+def firmware_builder_jobs(source: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (job, block)
+        for job, block in child_mapping_blocks(source, "jobs", indent=0)
+        if firmware_builder_lines(block)
+    )
 
 
 def matrix_targets(source: str) -> set[str]:
@@ -179,29 +215,60 @@ class WorkflowPolicyTests(unittest.TestCase):
             firmware_builder_lines(source),
         )
 
+    def test_workflow_discovery_includes_yml_and_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for filename in ("builder.yml", "release.yaml", "ignored.txt"):
+                (root / filename).write_text("name: test\n", encoding="utf-8")
+
+            self.assertEqual(
+                ("builder.yml", "release.yaml"),
+                tuple(path.name for path in workflow_paths(root)),
+            )
+
+    def test_builder_cache_association_stays_job_scoped(self) -> None:
+        source = (
+            "jobs:\n"
+            "  cached-non-builder:\n"
+            "    steps:\n"
+            "      - uses: actions/cache@v6\n"
+            "  uncached-builder:\n"
+            "    steps:\n"
+            "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+        )
+
+        self.assertEqual(
+            (("uncached-builder", mapping_block(source, "uncached-builder", indent=2)),),
+            firmware_builder_jobs(source),
+        )
+        self.assertNotIn("actions/cache", firmware_builder_jobs(source)[0][1])
+
     def test_every_firmware_builder_clears_library_overrides(self) -> None:
         builder_count = 0
         for workflow, source in workflow_sources():
-            for command in firmware_builder_lines(source):
-                builder_count += 1
-                with self.subTest(workflow=workflow, command=command):
-                    self.assertIn(
-                        "env -u LD_LIBRARY_PATH python tools/build_firmware.py",
-                        command,
-                    )
+            for job, block in firmware_builder_jobs(source):
+                for command in firmware_builder_lines(block):
+                    builder_count += 1
+                    with self.subTest(
+                        workflow=workflow, job=job, command=command
+                    ):
+                        self.assertIn(
+                            "env -u LD_LIBRARY_PATH python tools/build_firmware.py",
+                            command,
+                        )
         self.assertGreater(builder_count, 0)
 
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
-        builder_workflows = tuple(
-            (workflow, source)
+        builder_jobs = tuple(
+            (workflow, job, block)
             for workflow, source in workflow_sources()
-            if firmware_builder_lines(source)
+            for job, block in firmware_builder_jobs(source)
         )
-        self.assertTrue(builder_workflows)
-        for workflow, source in builder_workflows:
-            with self.subTest(workflow=workflow):
-                self.assertIn("uses: actions/cache@v6", source)
-                self.assertIn(".pio/open-bike-build/downloads", source)
+        self.assertTrue(builder_jobs)
+        for workflow, job, block in builder_jobs:
+            with self.subTest(workflow=workflow, job=job):
+                self.assertIn("uses: actions/cache@v6", block)
+                self.assertIn(".pio/open-bike-build/downloads", block)
 
 
 if __name__ == "__main__":
