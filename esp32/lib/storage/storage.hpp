@@ -127,6 +127,7 @@ private:
   SemaphoreHandle_t mountMutex = nullptr;
   uint32_t sdRetryAfterMs = 0;
   bool sdCooldownArmed = false;
+  bool fallbackMounted = false;
 
   esp_err_t mountSdLocked(bool ignoreCooldown);
   void teardownSdLocked();

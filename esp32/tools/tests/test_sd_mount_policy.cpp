@@ -51,5 +51,35 @@ int main() {
   assert(storage_policy::cooldownActive(0xfffffff0U, 0x20U));
   assert(storage_policy::cooldownActive(0xfffff830U, 0U));
 
+  // Callers serialized by Storage's mount mutex must not start another mount
+  // sequence or remount FFat while the failed-sequence cooldown is active.
+  std::size_t sequences = 0;
+  std::size_t fallbacks = 0;
+  bool cooldownArmed = false;
+  uint32_t retryAfterMs = 0;
+  auto serializedEnsure = [&](uint32_t nowMs) {
+    if (cooldownArmed &&
+        storage_policy::cooldownActive(nowMs, retryAfterMs)) {
+      return false;
+    }
+    ++sequences;
+    const auto sequence = storage_policy::runMountSequence(
+        []() {}, [](uint32_t) {},
+        [](std::size_t) { return MountAttemptResult{false, false}; });
+    if (!sequence.ok) {
+      ++fallbacks;
+      cooldownArmed = true;
+      retryAfterMs = nowMs + storage_policy::kFailedSequenceCooldownMs;
+    }
+    return sequence.ok;
+  };
+  assert(!serializedEnsure(1000U));
+  assert(!serializedEnsure(1001U));
+  assert(sequences == 1U);
+  assert(fallbacks == 1U);
+  assert(!serializedEnsure(3000U));
+  assert(sequences == 2U);
+  assert(fallbacks == 2U);
+
   return 0;
 }

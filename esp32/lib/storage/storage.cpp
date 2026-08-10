@@ -111,6 +111,10 @@ esp_err_t Storage::mountSdLocked(bool ignoreCooldown) {
   }
   if (!ignoreCooldown)
     sdCooldownArmed = false;
+  if (fallbackMounted) {
+    FFat.end();
+    fallbackMounted = false;
+  }
 
   const auto result = storage_policy::runMountSequence(
       [&]() { teardownSdLocked(); },
@@ -208,7 +212,10 @@ bool Storage::ensureSdMounted() {
       isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
       FFat.end();
+      fallbackMounted = false;
+#endif
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       const bool cooldownWasActive = sdCooldownArmed &&
@@ -220,9 +227,9 @@ bool Storage::ensureSdMounted() {
 #endif
     }
   }
-  xSemaphoreGive(mountMutex);
   if (needsFallback)
     initSPIFFS();
+  xSemaphoreGive(mountMutex);
   return ready;
 }
 
@@ -361,9 +368,11 @@ esp_err_t Storage::initSPIFFS() {
   // reading from SD Partition label "ffat" is standard for the data partition
   // even when using FFat
   if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
+    fallbackMounted = false;
     ESP_LOGE(TAG, "FFat Mount Failed");
     return ESP_FAIL;
   }
+  fallbackMounted = true;
 
   size_t total = FFat.totalBytes();
   size_t used = FFat.usedBytes();
