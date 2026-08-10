@@ -158,6 +158,10 @@ enum BLEDiscoverySignalPolicy {
         // Core Bluetooth reserves 127 for an unavailable RSSI measurement.
         rssi == 127 ? Int.min : rssi
     }
+
+    static func description(for rssi: Int) -> String {
+        rssi == 127 ? "Unavailable" : "\(rssi) dBm"
+    }
 }
 
 enum BLEScanPurpose: Equatable {
@@ -195,6 +199,29 @@ enum BLEScanCallbackDrainPolicy {
     ) -> TimeInterval {
         guard let lastPhysicalStop else { return 0 }
         return max(0, interval - now.timeIntervalSince(lastPhysicalStop))
+    }
+}
+
+struct BLEUnknownScanObservationGate {
+    private(set) var activeGeneration: UInt64?
+    private var identifiersSeenOnce: Set<UUID> = []
+
+    mutating func begin(generation: UInt64) {
+        activeGeneration = generation
+        identifiersSeenOnce.removeAll()
+    }
+
+    mutating func end() {
+        activeGeneration = nil
+        identifiersSeenOnce.removeAll()
+    }
+
+    mutating func acceptsRepeatedObservation(
+        peripheralIdentifier: UUID,
+        generation: UInt64
+    ) -> Bool {
+        guard activeGeneration == generation else { return false }
+        return !identifiersSeenOnce.insert(peripheralIdentifier).inserted
     }
 }
 
@@ -478,6 +505,19 @@ enum BikeComputerSettingsPresentationPolicy {
             || BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
                 knownDeviceCount: knownDeviceCount
             )
+    }
+
+    static func shouldShowExplicitDiscoveryState(
+        scanPurpose: BLEScanPurpose
+    ) -> Bool {
+        scanPurpose == .explicitDiscovery
+    }
+
+    static func shouldShowConnectAction(
+        baseEligibility: Bool,
+        scanPurpose: BLEScanPurpose
+    ) -> Bool {
+        baseEligibility && scanPurpose != .explicitDiscovery
     }
 }
 

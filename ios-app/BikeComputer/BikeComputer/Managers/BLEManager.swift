@@ -609,6 +609,33 @@ private final class WeakBLEManagerSendableBox: @unchecked Sendable {
     }
 }
 
+#if HOST_TESTING
+final class BLEScanDriverForTesting {
+    struct Start: Equatable {
+        let serviceUUIDs: [String]
+        let allowsDuplicates: Bool
+    }
+
+    var isPoweredOn = true
+    private(set) var isScanning = false
+    private(set) var starts: [Start] = []
+    private(set) var stopCount = 0
+
+    func start(serviceUUIDs: [CBUUID], allowsDuplicates: Bool) {
+        isScanning = true
+        starts.append(Start(
+            serviceUUIDs: serviceUUIDs.map(\.uuidString),
+            allowsDuplicates: allowsDuplicates
+        ))
+    }
+
+    func stop() {
+        stopCount += 1
+        isScanning = false
+    }
+}
+#endif
+
 class BLEManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var isScanning: Bool = false
@@ -868,6 +895,11 @@ class BLEManager: NSObject, ObservableObject {
     private var discoveryFreshnessTimer: Timer?
     private var pendingScanStartWorkItem: DispatchWorkItem?
     private var lastPhysicalScanStoppedAt: Date?
+    private var unknownScanObservationGate =
+        BLEUnknownScanObservationGate()
+#if HOST_TESTING
+    private var scanDriverForTesting: BLEScanDriverForTesting?
+#endif
     private var opportunisticSelectionTimer: Timer?
     private var opportunisticCandidateExpiryTimer: Timer?
     private var discoveryGeneration: UInt64 = 0
@@ -1543,6 +1575,91 @@ class BLEManager: NSObject, ObservableObject {
     }
     
     // MARK: - Public Methods
+
+    private var hasScanDriver: Bool {
+#if HOST_TESTING
+        scanDriverForTesting != nil
+#else
+        centralManager != nil
+#endif
+    }
+
+    private var isScanDriverPoweredOn: Bool {
+#if HOST_TESTING
+        scanDriverForTesting?.isPoweredOn == true
+#else
+        centralManager != nil && centralManager.state == .poweredOn
+#endif
+    }
+
+    private var isScanDriverScanning: Bool {
+#if HOST_TESTING
+        scanDriverForTesting?.isScanning == true
+#else
+        centralManager != nil && centralManager.isScanning
+#endif
+    }
+
+    private func startScanDriver(
+        serviceUUIDs: [CBUUID],
+        allowsDuplicates: Bool
+    ) {
+#if HOST_TESTING
+        scanDriverForTesting?.start(
+            serviceUUIDs: serviceUUIDs,
+            allowsDuplicates: allowsDuplicates
+        )
+#else
+        centralManager.scanForPeripherals(
+            withServices: serviceUUIDs,
+            options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey:
+                    allowsDuplicates
+            ]
+        )
+#endif
+    }
+
+    private func stopScanDriver() {
+#if HOST_TESTING
+        scanDriverForTesting?.stop()
+#else
+        centralManager?.stopScan()
+#endif
+    }
+
+#if HOST_TESTING
+    func installScanDriverForTesting(
+        _ driver: BLEScanDriverForTesting,
+        knownDevices: [KnownBikeComputerDevice] = [],
+        trustedPeripheralIdentifier: UUID? = nil,
+        shouldAutoReconnect: Bool = false,
+        isExclusiveOperationActive: Bool = false
+    ) {
+        pendingScanStartWorkItem?.cancel()
+        pendingScanStartWorkItem = nil
+        scanDriverForTesting = driver
+        self.knownDevices = knownDevices
+        lastConnectedPeripheralIdentifier = trustedPeripheralIdentifier
+        autoReconnect = shouldAutoReconnect
+        watchDirectRidePreparedDeviceID = isExclusiveOperationActive
+            ? knownDevices.first?.deviceID ?? "host-test-device"
+            : nil
+        isApplicationActive = false
+        isOpportunisticDiscoverySuppressed = false
+        explicitDiscoveryRequested = false
+        isExplicitDiscoveryPausedForCandidate = false
+        pendingScannedConnectionIdentifier = nil
+        isScanning = false
+        isDiscoveringDevices = false
+        currentScanPurpose = .none
+        activeDiscoveryGeneration = nil
+        unknownScanObservationGate.end()
+        centralStateDescription = driver.isPoweredOn
+            ? "powered on"
+            : "powered off"
+    }
+#endif
     
     /// Compatibility entry point for callers that want the manager to resolve
     /// the one currently eligible scan. Scan ownership lives in
@@ -1673,7 +1790,7 @@ class BLEManager: NSObject, ObservableObject {
         BLEScanLifecyclePolicy.purpose(
             for: BLEScanContext(
                 isApplicationActive: isApplicationActive,
-                isBluetoothPoweredOn: centralManager.state == .poweredOn,
+                isBluetoothPoweredOn: isScanDriverPoweredOn,
                 hasActiveBLESession: hasActiveBLESession,
                 knownDeviceCount: knownDevices.count,
                 trustedPeripheralIdentifier:
@@ -1694,19 +1811,19 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func reconcileScanning(reason: String) {
-        guard centralManager != nil else { return }
+        guard hasScanDriver else { return }
         let desiredPurpose = resolvedScanPurpose()
 
         if pendingScanStartWorkItem != nil,
            currentScanPurpose == desiredPurpose {
             return
         }
-        if isScanning, centralManager.isScanning,
+        if isScanning, isScanDriverScanning,
            currentScanPurpose == desiredPurpose {
             return
         }
         if isScanning || pendingScanStartWorkItem != nil ||
-            centralManager.isScanning {
+            isScanDriverScanning {
             let previousPurpose = currentScanPurpose.logDescription
             stopPhysicalScan(
                 reason: "purpose transition \(previousPurpose) -> " +
@@ -1758,7 +1875,7 @@ class BLEManager: NSObject, ObservableObject {
         purpose: BLEScanPurpose,
         reason: String
     ) {
-        guard centralManager.state == .poweredOn,
+        guard isScanDriverPoweredOn,
               !hasActiveBLESession,
               currentScanPurpose == purpose,
               resolvedScanPurpose() == purpose else {
@@ -1769,23 +1886,24 @@ class BLEManager: NSObject, ObservableObject {
         if purpose.discoversUnknownDevices {
             discoveryGeneration &+= 1
             activeDiscoveryGeneration = discoveryGeneration
+            unknownScanObservationGate.begin(
+                generation: discoveryGeneration
+            )
             if purpose == .opportunisticDiscovery {
                 opportunisticObservations.removeAll()
             }
             startDiscoveryFreshnessTimer()
         } else {
             activeDiscoveryGeneration = nil
+            unknownScanObservationGate.end()
             discoveryFreshnessTimer?.invalidate()
             discoveryFreshnessTimer = nil
         }
 
         isScanning = true
-        centralManager.scanForPeripherals(
-            withServices: [serviceUUID],
-            options: [
-                CBCentralManagerScanOptionAllowDuplicatesKey:
-                    purpose.allowsDuplicateAdvertisements
-            ]
+        startScanDriver(
+            serviceUUIDs: [serviceUUID],
+            allowsDuplicates: purpose.allowsDuplicateAdvertisements
         )
         log("BLE scan started for \(purpose.logDescription): \(reason)")
     }
@@ -1794,10 +1912,8 @@ class BLEManager: NSObject, ObservableObject {
         pendingScanStartWorkItem?.cancel()
         pendingScanStartWorkItem = nil
         let hadPhysicalScan = isScanning ||
-            (centralManager != nil && centralManager.isScanning)
-        if centralManager != nil {
-            centralManager.stopScan()
-        }
+            isScanDriverScanning
+        stopScanDriver()
         if hadPhysicalScan {
             lastPhysicalScanStoppedAt = Date()
         }
@@ -1805,6 +1921,7 @@ class BLEManager: NSObject, ObservableObject {
         currentScanPurpose = .none
         isDiscoveringDevices = false
         activeDiscoveryGeneration = nil
+        unknownScanObservationGate.end()
         discoveryFreshnessTimer?.invalidate()
         discoveryFreshnessTimer = nil
         opportunisticSelectionTimer?.invalidate()
@@ -2150,7 +2267,7 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = "Wait for the current Bike Computer change to finish."
             return
         }
-        guard centralManager.state == .poweredOn else {
+        guard isScanDriverPoweredOn else {
             pairingError = "Turn on Bluetooth to add a Bike Computer."
             return
         }
@@ -6285,6 +6402,20 @@ extension BLEManager: CBCentralManagerDelegate {
             manufacturerData: advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
             rssi: RSSI.intValue
         )
+        if purpose.discoversUnknownDevices {
+            guard let activeDiscoveryGeneration,
+                  unknownScanObservationGate
+                    .acceptsRepeatedObservation(
+                        peripheralIdentifier: peripheral.identifier,
+                        generation: activeDiscoveryGeneration
+                    ) else {
+                log(
+                    "Waiting for a repeated Device " +
+                    "\(candidate.shortIdentifier) observation in this scan"
+                )
+                return
+            }
+        }
         log(
             "Observed Device \(candidate.shortIdentifier) for " +
             "\(purpose.logDescription) " +
@@ -6372,6 +6503,11 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         guard connectedPeripheral?.identifier == peripheral.identifier else {
             log("Ignoring connection callback for a non-current Bike Computer")
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+        guard watchDirectRidePreparedDeviceID == nil else {
+            log("Cancelling a late iPhone connection during Watch-direct handoff")
             central.cancelPeripheralConnection(peripheral)
             return
         }

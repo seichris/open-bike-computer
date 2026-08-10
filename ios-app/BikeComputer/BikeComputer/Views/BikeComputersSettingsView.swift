@@ -40,8 +40,7 @@ struct BikeComputersSettingsView: View {
             bikeComputerSection
             sensorProfilesSection
 
-            if bleManager.isDiscoveringDevices ||
-                !bleManager.discoveredDevices.isEmpty {
+            if shouldShowExplicitDiscoveryState {
                 Section {
                     if bleManager.discoveredDevices.isEmpty {
                         HStack(spacing: 12) {
@@ -72,8 +71,7 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            if shouldShowConnectBikeComputerAction,
-               !bleManager.isDiscoveringDevices {
+            if shouldShowConnectBikeComputerAction {
                 Section {
                     Button {
                         handleConnectNewBikeComputer()
@@ -134,8 +132,6 @@ struct BikeComputersSettingsView: View {
         .onAppear {
             if shouldStartBikeComputerDiscovery {
                 beginDiscovery()
-            } else if bleManager.isDiscoveringDevices {
-                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
         }
         .onChange(of: bleManager.centralStateDescription) { state in
@@ -178,7 +174,7 @@ struct BikeComputersSettingsView: View {
             }
         }
         .onDisappear {
-            if ownsDiscoveryLifecycle || bleManager.isDiscoveringDevices {
+            if ownsDiscoveryLifecycle {
                 ownsDiscoveryLifecycle = false
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
@@ -233,10 +229,21 @@ struct BikeComputersSettingsView: View {
 
     private var shouldShowConnectBikeComputerAction: Bool {
         BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
-            knownDeviceCount: bleManager.knownDevices.count,
-            isExplicitBikeComputerSetup:
-                startsBikeComputerDiscoveryOnAppear
+            baseEligibility:
+                BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
+                    knownDeviceCount: bleManager.knownDevices.count,
+                    isExplicitBikeComputerSetup:
+                        startsBikeComputerDiscoveryOnAppear
+                ),
+            scanPurpose: bleManager.currentScanPurpose
         )
+    }
+
+    private var shouldShowExplicitDiscoveryState: Bool {
+        BikeComputerSettingsPresentationPolicy
+            .shouldShowExplicitDiscoveryState(
+                scanPurpose: bleManager.currentScanPurpose
+            )
     }
 
     private var shouldStartBikeComputerDiscovery: Bool {
@@ -348,14 +355,17 @@ private struct DiscoveredBikeComputerRow: View {
             }
             Image(systemName: signalImage)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("Signal \(device.rssi) dBm")
+                .accessibilityLabel(
+                    "Signal \(BLEDiscoverySignalPolicy.description(for: device.rssi))"
+                )
         }
         .contentShape(Rectangle())
     }
 
     private var signalImage: String {
-        if device.rssi >= -60 { return "wifi" }
-        if device.rssi >= -75 { return "wifi.exclamationmark" }
+        let rank = BLEDiscoverySignalPolicy.rank(for: device.rssi)
+        if rank >= -60 { return "wifi" }
+        if rank >= -75 { return "wifi.exclamationmark" }
         return "antenna.radiowaves.left.and.right.slash"
     }
 }
@@ -373,7 +383,12 @@ struct BikeComputerPairingFlow: View {
             Form {
                 Section {
                     DeviceValueRow(title: "Device", value: candidate.shortIdentifier)
-                    DeviceValueRow(title: "Signal", value: "\(candidate.rssi) dBm")
+                    DeviceValueRow(
+                        title: "Signal",
+                        value: BLEDiscoverySignalPolicy.description(
+                            for: candidate.rssi
+                        )
+                    )
                 }
 
                 if let prompt = matchingPrompt {

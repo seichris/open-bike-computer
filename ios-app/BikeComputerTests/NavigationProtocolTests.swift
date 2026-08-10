@@ -624,6 +624,7 @@ struct NavigationProtocolTests {
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEScanLifecyclePolicy()
+        testBLEManagerDiscoveryLifecycleTransitions()
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
@@ -13004,6 +13005,38 @@ struct NavigationProtocolTests {
             0,
             "the first scan does not wait for a nonexistent predecessor"
         )
+        var observationGate = BLEUnknownScanObservationGate()
+        observationGate.begin(generation: 7)
+        assert(
+            !observationGate.acceptsRepeatedObservation(
+                peripheralIdentifier: selected,
+                generation: 7
+            ),
+            "one callback cannot prove that a device belongs to the new scan"
+        )
+        assert(
+            observationGate.acceptsRepeatedObservation(
+                peripheralIdentifier: selected,
+                generation: 7
+            ),
+            "a repeated callback admits a device observed during the active scan"
+        )
+        observationGate.end()
+        assert(
+            !observationGate.acceptsRepeatedObservation(
+                peripheralIdentifier: selected,
+                generation: 7
+            ),
+            "a stopped scan rejects observations from its former generation"
+        )
+        observationGate.begin(generation: 8)
+        assert(
+            !observationGate.acceptsRepeatedObservation(
+                peripheralIdentifier: selected,
+                generation: 8
+            ),
+            "a callback delayed into a replacement scan is quarantined as its first observation"
+        )
         assert(
             BLEBackgroundDiscoveryPolicy.shouldRestoreTrustedReconnect(
                 isAbandoningExplicitDiscovery: true,
@@ -13121,6 +13154,11 @@ struct NavigationProtocolTests {
         var unavailableSignal = candidate
         unavailableSignal.rssi = 127
         assertEqual(
+            BLEDiscoverySignalPolicy.description(for: 127),
+            "Unavailable",
+            "Core Bluetooth's RSSI sentinel is not displayed as a real dBm value"
+        )
+        assertEqual(
             BLEOpportunisticCandidatePolicy.strongest(
                 from: [
                     BLEDiscoveryObservation(
@@ -13219,6 +13257,29 @@ struct NavigationProtocolTests {
             ),
             "an explicit setup does not scan behind its selected candidate"
         )
+        assert(
+            !BikeComputerSettingsPresentationPolicy
+                .shouldShowExplicitDiscoveryState(
+                    scanPurpose: .opportunisticDiscovery
+                ),
+            "general Settings never renders an opportunistic scan as its owned list"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy
+                .shouldShowConnectAction(
+                    baseEligibility: true,
+                    scanPurpose: .opportunisticDiscovery
+                ),
+            "general Settings keeps the explicit Connect action during opportunistic scanning"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy
+                .shouldShowConnectAction(
+                    baseEligibility: true,
+                    scanPurpose: .explicitDiscovery
+                ),
+            "an active explicit scan replaces the Connect action with its owned results"
+        )
         var stage = NearbyBicinoSetupStage.offer
         stage.advanceToPairing()
         assertEqual(stage, .pairing,
@@ -13247,6 +13308,90 @@ struct NavigationProtocolTests {
             ),
             "the nearby modal route has stable item identity"
         )
+    }
+
+    @MainActor
+    static func testBLEManagerDiscoveryLifecycleTransitions() {
+        let manager = BLEManager()
+        let driver = BLEScanDriverForTesting()
+        manager.installScanDriverForTesting(driver)
+
+        manager.setApplicationActive(true)
+        assertEqual(
+            manager.currentScanPurpose,
+            .opportunisticDiscovery,
+            "the real manager starts first-device discovery on foreground entry"
+        )
+        assertEqual(driver.starts.count, 1,
+                    "foreground entry starts exactly one physical scan")
+        assert(driver.starts[0].allowsDuplicates,
+               "unknown-device discovery requests duplicate observations")
+
+        manager.startDeviceDiscovery()
+        assertEqual(
+            manager.currentScanPurpose,
+            .explicitDiscovery,
+            "the real manager transfers ownership from opportunistic to explicit discovery"
+        )
+        assert(manager.isDiscoveringDevices,
+               "the explicit transition remains visible while callbacks drain")
+        assertEqual(driver.stopCount, 1,
+                    "the old physical scan stops before explicit discovery")
+        assert(waitForMainLoop(timeout: 1) { driver.starts.count == 2 },
+               "explicit discovery starts after the callback-drain boundary")
+
+        manager.setApplicationActive(false)
+        assertEqual(manager.currentScanPurpose, .none,
+                    "backgrounding the real manager stops explicit discovery")
+        assert(!driver.isScanning,
+               "backgrounding leaves no unknown-device radio scan active")
+
+        let trustedIdentifier = UUID(
+            uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )!
+        let known = KnownBikeComputerDevice(
+            deviceID: "00112233445566778899aabbccddeeff",
+            peripheralIdentifier: trustedIdentifier,
+            name: "Known Bicino",
+            lastConnectedAt: Date(),
+            isLegacy: false
+        )
+        let trustedManager = BLEManager()
+        let trustedDriver = BLEScanDriverForTesting()
+        trustedManager.installScanDriverForTesting(
+            trustedDriver,
+            knownDevices: [known],
+            trustedPeripheralIdentifier: trustedIdentifier,
+            shouldAutoReconnect: true
+        )
+        trustedManager.setApplicationActive(false)
+        assertEqual(
+            trustedManager.currentScanPurpose,
+            .trustedReconnect(trustedIdentifier),
+            "the real manager preserves trusted reconnect in the background"
+        )
+        assertEqual(trustedDriver.starts.count, 1,
+                    "trusted background reconnect owns one physical scan")
+        assert(!trustedDriver.starts[0].allowsDuplicates,
+               "trusted reconnect does not run an unknown-device scan")
+
+        let exclusiveManager = BLEManager()
+        let exclusiveDriver = BLEScanDriverForTesting()
+        exclusiveManager.installScanDriverForTesting(
+            exclusiveDriver,
+            knownDevices: [known],
+            trustedPeripheralIdentifier: trustedIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        exclusiveManager.setApplicationActive(true)
+        assertEqual(
+            exclusiveManager.currentScanPurpose,
+            .none,
+            "the real manager gives Watch-direct ownership priority over reconnect"
+        )
+        assert(exclusiveDriver.starts.isEmpty,
+               "Watch-direct exclusion starts no physical iPhone scan")
     }
 
     static func testBLEManagerRequiresNavigationReadinessForWrites() {

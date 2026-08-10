@@ -297,15 +297,19 @@ In `BLEManager.swift`:
 10. When the app becomes active, start opportunistic discovery only if the
     registry is empty. If a trusted device exists, use only the trusted
     reconnect path and ignore advertisements from all other identifiers.
-11. Route `didDiscover` by the captured scan purpose/generation so a delayed
-    callback from a stopped discovery cannot populate UI or trigger a different
-    connection path.
+11. Route `didDiscover` by the active scan purpose/generation and require a
+    repeated observation in each new unknown-device scan. A lone callback
+    delayed from a stopped scan is quarantined and cannot populate UI or
+    trigger a different connection path.
 12. On connection failure or disconnect, compute the next purpose rather than
     calling `startScanning()` directly. Preserve current reconnect backoff and
     pending-handoff semantics.
 13. After the bounded candidate-selection window, seal the strongest eligible
-    candidate, stop the scan, publish the sheet item, and suppress additional
-    opportunistic scans until the next foreground activation.
+    candidate and stop the scan before publishing the sheet item. Once the
+    sheet is presented, suppress additional opportunistic scans until the next
+    foreground activation. If another app-owned presentation blocks the sheet
+    until the candidate expires, discard it and resume the foreground scan so
+    first-run onboarding cannot consume the only setup opportunity.
 14. Clear discovery candidates on successful pairing, restored connection,
     Bluetooth loss, Watch-direct handoff, and device deregistration/forget
     transitions that invalidate the generation.
@@ -430,7 +434,8 @@ Extend `NavigationProtocolTests.swift` with deterministic policy coverage:
     qualify;
 13. the strongest eligible candidate is selected deterministically;
 14. sealing the automatic candidate stops scanning before sheet presentation;
-15. a stopped discovery generation rejects delayed callbacks;
+15. a stopped discovery generation rejects delayed callbacks and a lone
+    callback in a replacement unknown-device scan remains quarantined;
 16. dismissing the sheet suppresses scanning for the current foreground
     activation;
 17. **Connect** advances the same item-driven sheet into the pairing flow
