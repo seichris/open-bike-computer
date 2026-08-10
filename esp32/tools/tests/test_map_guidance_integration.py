@@ -21,6 +21,12 @@ ROUTE_SOURCE = (
 LVGL_SETUP_SOURCE = (
     ESP32_ROOT / "lib" / "lvgl" / "src" / "lvglSetup.cpp"
 ).read_text(encoding="utf-8")
+LVGL_CONFIG_SOURCE = (
+    ESP32_ROOT / "lib" / "lvgl" / "lv_conf.h"
+).read_text(encoding="utf-8")
+LVGL_CONFIG_TEMPLATE_SOURCE = (
+    ESP32_ROOT / "tools" / "lv_conf_template.h"
+).read_text(encoding="utf-8")
 MAIN_SOURCE = (ESP32_ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
 
 
@@ -90,6 +96,26 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("xTaskCreatePinnedToCore(", start)
         self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
         self.assertNotIn("vTaskDelete(nullptr)", thunk)
+
+    def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
+        gate = (
+            "#if defined(BOARD_HAS_PSRAM) && "
+            "(defined(WAVESHARE_AMOLED_175) || "
+            "defined(WAVESHARE_AMOLED_206))"
+        )
+        allocator = (
+            "heap_caps_aligned_alloc(16, (size), "
+            "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
+        )
+        for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
+            self.assertIn(gate, config)
+            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
+            self.assertIn(
+                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
+            )
+            self.assertIn(allocator, config)
+            fallback = config.index("#else", config.index(gate))
+            self.assertIn("#undef LV_MEM_POOL_ALLOC", config[fallback:])
 
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
         publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
