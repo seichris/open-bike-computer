@@ -691,6 +691,30 @@ static void testPrunesAbandonedStagingSessions() {
   assert(!exists(staging + "/abandoned"));
 }
 
+static void testPruningPreservesForeignFilesystemEntries() {
+  std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string staging = root + "/VECTMAP/.staging";
+  const std::string maps = root + "/VECTMAP/.maps";
+  assert(::system((std::string("mkdir -p ") + staging + "/keep").c_str()) ==
+         0);
+  assert(::system((std::string("mkdir -p ") + staging + "/abandoned").c_str()) ==
+         0);
+  assert(::system((std::string("mkdir -p ") + maps + "/obsolete").c_str()) ==
+         0);
+  writeFile(staging + "/.DS_Store", "foreign metadata");
+  writeFile(maps + "/.DS_Store", "foreign metadata");
+  writeFile(staging + "/abandoned/file", "old transfer");
+  writeFile(maps + "/obsolete/file", "old map");
+
+  assert(installer.pruneStagingSessions("keep"));
+  assert(installer.pruneObsoleteInstalledMaps());
+  assert(exists(staging + "/.DS_Store"));
+  assert(exists(maps + "/.DS_Store"));
+  assert(!exists(staging + "/abandoned"));
+  assert(!exists(maps + "/obsolete"));
+}
+
 static void testPreservesPreviousAndPrunesObsoleteVersions() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -1269,6 +1293,7 @@ int main() {
   testSameSessionRetryRepairsDamagedInstalledVersion();
   testActivationRestoresOldMapWhenMetadataWriteFails();
   testPrunesAbandonedStagingSessions();
+  testPruningPreservesForeignFilesystemEntries();
   testPreservesPreviousAndPrunesObsoleteVersions();
   testPruningPreservesLiveDurableStreamReferences();
   testPrunesLegacyRollbackAfterVersionedMapIsActive();

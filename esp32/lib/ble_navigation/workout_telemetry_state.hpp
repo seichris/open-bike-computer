@@ -2,6 +2,7 @@
 
 #include "workout_telemetry_protocol.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -23,6 +24,7 @@ struct State {
   bool extendedReceived = false;
   bool transportUnavailable = false;
   bool pendingUnavailableCore = false;
+  bool originReceived = false;
 
   OptionalMetric<uint32_t> elapsedSeconds{};
   OptionalMetric<uint32_t> distanceMeters{};
@@ -37,6 +39,14 @@ struct State {
   OptionalMetric<uint8_t> currentHeartRateZone{};
   OptionalMetric<int16_t> altitudeMeters{};
   OptionalMetric<uint8_t> heartRateZoneCount{};
+  OptionalMetric<uint32_t> wallElapsedSeconds{};
+  std::array<uint8_t, workout_telemetry_protocol::SESSION_ID_SIZE> sessionID{};
+  uint16_t detectorProfileVersion = 0;
+  workout_telemetry_protocol::PauseOrigin pauseOrigin =
+      workout_telemetry_protocol::PauseOrigin::None;
+  workout_telemetry_protocol::PauseOrigin lastTransitionOrigin =
+      workout_telemetry_protocol::PauseOrigin::None;
+  uint32_t lastOriginReceivedAtMs = 0;
 };
 
 template <typename T>
@@ -56,6 +66,7 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.extendedReceived == rhs.extendedReceived &&
          lhs.transportUnavailable == rhs.transportUnavailable &&
          lhs.pendingUnavailableCore == rhs.pendingUnavailableCore &&
+         lhs.originReceived == rhs.originReceived &&
          lhs.elapsedSeconds == rhs.elapsedSeconds &&
          lhs.distanceMeters == rhs.distanceMeters &&
          lhs.speedCentimetersPerSecond == rhs.speedCentimetersPerSecond &&
@@ -68,7 +79,13 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.cyclingCadenceTenthsRpm == rhs.cyclingCadenceTenthsRpm &&
          lhs.currentHeartRateZone == rhs.currentHeartRateZone &&
          lhs.altitudeMeters == rhs.altitudeMeters &&
-         lhs.heartRateZoneCount == rhs.heartRateZoneCount;
+         lhs.heartRateZoneCount == rhs.heartRateZoneCount &&
+         lhs.wallElapsedSeconds == rhs.wallElapsedSeconds &&
+         lhs.sessionID == rhs.sessionID &&
+         lhs.detectorProfileVersion == rhs.detectorProfileVersion &&
+         lhs.pauseOrigin == rhs.pauseOrigin &&
+         lhs.lastTransitionOrigin == rhs.lastTransitionOrigin &&
+         lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs;
 }
 
 inline bool operator!=(const State &lhs, const State &rhs) {
@@ -226,15 +243,25 @@ public:
     if (!authenticated) {
       return ApplyResult::RejectedUnauthenticated;
     }
-    if (bytes == nullptr || length != workout_telemetry_protocol::FRAME_SIZE) {
+    if (bytes == nullptr ||
+        (length != workout_telemetry_protocol::FRAME_SIZE &&
+         length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)) {
       return ApplyResult::RejectedLength;
     }
 
     switch (bytes[0]) {
     case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Core):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
       return applyCore(bytes, receivedAtMs);
     case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Extended):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
       return applyExtended(bytes, receivedAtMs);
+    case static_cast<uint8_t>(workout_telemetry_protocol::FrameKind::Origin):
+      if (length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)
+        return ApplyResult::RejectedLength;
+      return applyOrigin(bytes, receivedAtMs);
     default:
       return ApplyResult::RejectedKind;
     }
@@ -300,6 +327,20 @@ private:
         !hasExistingCore || establishesNewToken || startsCollidingSession
             ? State{}
             : state_;
+    if (hasExistingCore && !establishesNewToken && !startsCollidingSession &&
+        incomingState != state_.sessionState) {
+      // Origin/timing is a separate, capability-gated frame. Never carry the
+      // preceding boundary's pause provenance across a state transition: if
+      // the matching origin frame is lost, unknown must fail conservatively
+      // as manual rather than allowing an automatic resume.
+      next.originReceived = false;
+      next.wallElapsedSeconds = {};
+      next.sessionID = {};
+      next.detectorProfileVersion = 0;
+      next.pauseOrigin = PauseOrigin::None;
+      next.lastTransitionOrigin = PauseOrigin::None;
+      next.lastOriginReceivedAtMs = 0;
+    }
     next.sessionState = incomingState;
     next.sessionToken = token;
     next.coreReceived = true;
@@ -475,6 +516,51 @@ private:
     next.lastExtendedReceivedAtMs = receivedAtMs;
     next.extendedReceived = true;
     commitExtendedState(next, generation);
+    return ApplyResult::Applied;
+  }
+
+  ApplyResult applyOrigin(const uint8_t *bytes, uint32_t receivedAtMs) {
+    using namespace workout_telemetry_protocol;
+    const uint8_t rawPauseOrigin = bytes[1];
+    const uint16_t token = readUInt16LE(bytes, 2);
+    const uint32_t wallElapsed = readUInt32LE(bytes, 4);
+    std::array<uint8_t, SESSION_ID_SIZE> sessionID{};
+    for (std::size_t index = 0; index < SESSION_ID_SIZE; ++index)
+      sessionID[index] = bytes[8 + index];
+    const uint16_t profileVersion = readUInt16LE(bytes, 24);
+    const uint8_t rawLastOrigin = bytes[26];
+    const uint8_t flags = bytes[27];
+    if (token == 0)
+      return ApplyResult::RejectedToken;
+    if (!state_.coreReceived || state_.sessionToken != token)
+      return ApplyResult::IgnoredToken;
+    if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
+        rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
+        flags != 0 || !hasSessionID(sessionID))
+      return ApplyResult::RejectedMetric;
+    const bool paused = state_.sessionState == SessionState::Paused;
+    if (!paused && rawPauseOrigin != 0)
+      return ApplyResult::RejectedState;
+    const bool claimsAutomaticOrigin =
+        rawPauseOrigin == static_cast<uint8_t>(PauseOrigin::Automatic) ||
+        rawLastOrigin == static_cast<uint8_t>(PauseOrigin::Automatic);
+    if (claimsAutomaticOrigin && profileVersion == 0)
+      return ApplyResult::RejectedMetric;
+    if (wallElapsed != UNAVAILABLE_UINT32 && state_.elapsedSeconds.available &&
+        wallElapsed < state_.elapsedSeconds.value)
+      return ApplyResult::RejectedMetric;
+
+    state_.originReceived = true;
+    state_.lastOriginReceivedAtMs = receivedAtMs;
+    state_.wallElapsedSeconds = wallElapsed == UNAVAILABLE_UINT32
+                                    ? OptionalMetric<uint32_t>{}
+                                    : OptionalMetric<uint32_t>{true,
+                                                               wallElapsed};
+    state_.sessionID = sessionID;
+    state_.detectorProfileVersion = profileVersion;
+    state_.pauseOrigin = static_cast<PauseOrigin>(rawPauseOrigin);
+    state_.lastTransitionOrigin =
+        static_cast<PauseOrigin>(rawLastOrigin);
     return ApplyResult::Applied;
   }
 

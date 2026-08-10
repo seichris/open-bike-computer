@@ -159,6 +159,190 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )))
     }
 
+    func testDirectRideAutomationPersistsBeforePauseAndSurvivesRelaunch()
+        throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let startDate = Date().addingTimeInterval(-60)
+        let identity = try recoveryStore.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var pauseCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            remotePauseOperation: { _ in pauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let frame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 7,
+            decisionSequence: 11,
+            profileVersion: 1,
+            sessionID: identity.sessionID
+        )
+
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(30)
+            ),
+            .accepted
+        )
+        XCTAssertEqual(pauseCount, 1)
+        XCTAssertEqual(
+            recoveryStore.recoveredIdentity?.pendingTransitionContext?
+                .decisionSequence,
+            11
+        )
+        XCTAssertEqual(
+            recoveryStore.rideAutomationDecisionWatermark(
+                deviceID: "bicino-175",
+                rideGeneration: 7
+            ),
+            11
+        )
+
+        let relaunched = WatchWorkoutRecoveryStore(persistence: persistence)
+        XCTAssertEqual(
+            relaunched.rideAutomationDecisionWatermark(
+                deviceID: "bicino-175",
+                rideGeneration: 7
+            ),
+            11,
+            "only the exact durable pending transition may replay after relaunch"
+        )
+
+        var relaunchedPauseCount = 0
+        let relaunchedManager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: relaunched,
+            remotePauseOperation: { _ in relaunchedPauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        let relaunchedIdentity = try XCTUnwrap(
+            relaunched.recoveredIdentity
+        )
+        relaunchedManager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: relaunchedIdentity,
+            state: .running
+        )
+        XCTAssertEqual(
+            relaunchedManager.retryPendingDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(31)
+            ),
+            .accepted
+        )
+        XCTAssertEqual(relaunchedPauseCount, 1)
+
+        var unrelatedFrame = frame
+        unrelatedFrame.decisionSequence = 12
+        XCTAssertNil(
+            relaunchedManager.retryPendingDirectRideAutomationTransition(
+                unrelatedFrame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(32)
+            )
+        )
+        XCTAssertEqual(relaunchedPauseCount, 1)
+    }
+
+    func testDirectRideAutomationHonorsManualGraceAndPersistenceFailure()
+        throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let startDate = Date().addingTimeInterval(-60)
+        _ = try recoveryStore.begin(startDate: startDate)
+        let manualAt = startDate.addingTimeInterval(30)
+        try recoveryStore.confirmRideTransition(
+            origin: .manual,
+            paused: false,
+            at: manualAt,
+            detectorProfileVersion: nil
+        )
+        let identity = try XCTUnwrap(recoveryStore.recoveredIdentity)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var pauseCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            remotePauseOperation: { _ in pauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+        let frame = RideAutomationFrame(
+            kind: .decision,
+            transition: .pause,
+            origin: .automatic,
+            rideGeneration: 8,
+            decisionSequence: 12,
+            profileVersion: 1,
+            sessionID: identity.sessionID
+        )
+
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: manualAt.addingTimeInterval(10)
+            ),
+            .stale
+        )
+        XCTAssertEqual(pauseCount, 0)
+
+        persistence.failsSave = true
+        XCTAssertEqual(
+            manager.requestDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: manualAt.addingTimeInterval(16)
+            ),
+            .rejected
+        )
+        XCTAssertEqual(pauseCount, 0)
+        XCTAssertNil(
+            recoveryStore.recoveredIdentity?.pendingTransitionContext,
+            "HealthKit must not mutate unless automatic provenance is durable"
+        )
+    }
+
     func testLocalSegmentsRecordSequentialHealthKitEventsAndCloseAtFinish()
         async throws {
         let startDate = Date().addingTimeInterval(-60)
@@ -994,6 +1178,41 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertNil(
             manager.snapshot.heartRateZoneDurations?.maximumHeartRateBPM
         )
+    }
+
+    func testRideDetectionApplicationContextClearsStaleWatchPolicy() {
+        let session = FakeWatchHeartRateZoneConnectivitySession()
+        var receivedSettings: RideDetectionSettings?
+        var receivedGeneration: UInt32?
+        let receiver = WatchHeartRateZoneSettingsReceiver(
+            session: session,
+            applyMaximumHeartRateBPM: { _ in },
+            applyRideDetectionSettings: { settings, generation in
+                receivedSettings = settings
+                receivedGeneration = generation
+            }
+        )
+        let expected = RideDetectionSettings(
+            startMode: .ask,
+            autoPauseEnabled: false,
+            alertMode: 1
+        )
+        receiver.receiveApplicationContext(
+            RideDetectionSyncContext.adding(
+                settings: expected,
+                generation: 12
+            )
+        )
+        XCTAssertEqual(receivedSettings, expected)
+        XCTAssertEqual(receivedGeneration, 12)
+
+        receiver.receiveApplicationContext(
+            WorkoutHeartRateZoneSyncContext.applicationContext(
+                maximumHeartRateBPM: 190
+            )
+        )
+        XCTAssertNil(receivedSettings)
+        XCTAssertNil(receivedGeneration)
     }
 
     func testActiveSessionIDSurvivesInitialMirrorPublicationFailure() throws {
@@ -4853,6 +5072,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
                     from: try XCTUnwrap(recoveryStore.recoveredIdentity)
                 )
             )
+            try await waitUntil { manager.latestEnvelope != nil }
 
             manager.handleSessionReadyForFinalization(
                 at: startDate.addingTimeInterval(31)
@@ -6889,6 +7109,11 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertTrue(manager.isTerminalPublicationPending)
         XCTAssertEqual(confirmedSnapshot.elapsedTime?.value, 123)
         XCTAssertTrue(confirmedSnapshot.availability.contains(.elapsedTime))
+        XCTAssertEqual(confirmedSnapshot.wallElapsedTime?.value, 123)
+        XCTAssertEqual(
+            confirmedSnapshot.wallElapsedTime?.capturedAt,
+            endedAt
+        )
 
         persistence.failOnSaveCall = nil
         manager.retryDetachedSessionCleanup()

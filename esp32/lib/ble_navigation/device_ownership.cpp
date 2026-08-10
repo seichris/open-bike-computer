@@ -1082,7 +1082,8 @@ bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
       channel != AuthenticatedChannel::Route &&
       channel != AuthenticatedChannel::Gps &&
       channel != AuthenticatedChannel::Settings &&
-      channel != AuthenticatedChannel::Workout) {
+      channel != AuthenticatedChannel::Workout &&
+      channel != AuthenticatedChannel::RideAutomation) {
     return false;
   }
   if (rideLease_.recordActivity(currentControllerIdentity(), nowMs)) {

@@ -720,6 +720,8 @@ final class WorkoutLiveActivityController {
             phase: .final,
             capturedAt: content.capturedAt,
             elapsedActiveSeconds: content.elapsedActiveSeconds,
+            elapsedWallSeconds: content.elapsedWallSeconds,
+            pauseOrigin: content.pauseOrigin,
             currentSpeedKilometersPerHour: nil,
             cyclingDistanceMeters: content.cyclingDistanceMeters,
             currentHeartRateBPM: nil,

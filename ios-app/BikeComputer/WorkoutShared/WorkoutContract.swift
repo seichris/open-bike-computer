@@ -1,10 +1,48 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 4)
+    static let current = Self(major: 1, minor: 5)
+    static let rideAutomationControlContextMinor: UInt16 = 5
 
     let major: UInt16
     let minor: UInt16
+
+    var supportsRideAutomationControlContext: Bool {
+        major == Self.current.major
+            && minor >= Self.rideAutomationControlContextMinor
+    }
+}
+
+nonisolated enum WorkoutTransitionOrigin: UInt8, Codable, Sendable {
+    case unknown = 0
+    case manual
+    case automatic
+}
+
+nonisolated enum WorkoutAutomaticReasonV1: String, Codable, Sendable {
+    case rideDetection
+}
+
+nonisolated struct WorkoutControlContextV1: Codable, Equatable, Sendable {
+    let origin: WorkoutTransitionOrigin
+    let automaticReason: WorkoutAutomaticReasonV1?
+    let rideGeneration: UInt32?
+    let decisionSequence: UInt32?
+    let detectorProfileVersion: UInt16?
+
+    init(
+        origin: WorkoutTransitionOrigin,
+        automaticReason: WorkoutAutomaticReasonV1? = nil,
+        rideGeneration: UInt32? = nil,
+        decisionSequence: UInt32? = nil,
+        detectorProfileVersion: UInt16? = nil
+    ) {
+        self.origin = origin
+        self.automaticReason = automaticReason
+        self.rideGeneration = rideGeneration
+        self.decisionSequence = decisionSequence
+        self.detectorProfileVersion = detectorProfileVersion
+    }
 }
 
 nonisolated enum WorkoutTerminalOutcomeV1: String, Codable, Sendable {
@@ -191,6 +229,14 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
     let availability: WorkoutAvailabilityMaskV1
     let errorCode: WorkoutSafeErrorCodeV1?
     let terminalOutcome: WorkoutTerminalOutcomeV1?
+    /// Meaningful only while `state == .paused`.
+    let pauseOrigin: WorkoutTransitionOrigin?
+    let lastTransitionOrigin: WorkoutTransitionOrigin?
+    let lastTransitionAt: Date?
+    /// Wall-clock duration from confirmed start, including pauses. The legacy
+    /// `elapsedTime` remains HealthKit-active/moving time.
+    let wallElapsedTime: WorkoutMetricV1?
+    let detectorProfileVersion: UInt16?
 
     init(
         state: WorkoutSessionStateV1,
@@ -210,7 +256,12 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         lastCompletedSegment: WorkoutCompletedSegmentV1? = nil,
         availability: WorkoutAvailabilityMaskV1 = [],
         errorCode: WorkoutSafeErrorCodeV1? = nil,
-        terminalOutcome: WorkoutTerminalOutcomeV1? = nil
+        terminalOutcome: WorkoutTerminalOutcomeV1? = nil,
+        pauseOrigin: WorkoutTransitionOrigin? = nil,
+        lastTransitionOrigin: WorkoutTransitionOrigin? = nil,
+        lastTransitionAt: Date? = nil,
+        wallElapsedTime: WorkoutMetricV1? = nil,
+        detectorProfileVersion: UInt16? = nil
     ) {
         self.state = state
         self.startDate = startDate
@@ -230,6 +281,11 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         self.availability = availability
         self.errorCode = errorCode
         self.terminalOutcome = terminalOutcome
+        self.pauseOrigin = pauseOrigin
+        self.lastTransitionOrigin = lastTransitionOrigin
+        self.lastTransitionAt = lastTransitionAt
+        self.wallElapsedTime = wallElapsedTime
+        self.detectorProfileVersion = detectorProfileVersion
     }
 
     var currentSegmentIndex: UInt32 {
@@ -284,6 +340,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
     /// gets a fresh identifier so Watch can retire the old replay watermark
     /// without weakening replay protection for delayed controls.
     let controlSenderID: UUID?
+    let controlContext: WorkoutControlContextV1?
     let snapshot: WorkoutSnapshotV1?
     let control: WorkoutControlV1?
     let acknowledgement: WorkoutAcknowledgementV1?
@@ -298,6 +355,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         sequence: UInt64,
         capturedAt: Date,
         controlSenderID: UUID? = nil,
+        controlContext: WorkoutControlContextV1? = nil,
         snapshot: WorkoutSnapshotV1? = nil,
         control: WorkoutControlV1? = nil,
         acknowledgement: WorkoutAcknowledgementV1? = nil,
@@ -311,6 +369,7 @@ nonisolated struct WorkoutEnvelopeV1: Codable, Equatable, Sendable {
         self.sequence = sequence
         self.capturedAt = capturedAt
         self.controlSenderID = controlSenderID
+        self.controlContext = controlContext
         self.snapshot = snapshot
         self.control = control
         self.acknowledgement = acknowledgement
@@ -398,6 +457,7 @@ nonisolated enum WorkoutContractCodec {
         case .snapshot:
             guard let snapshot = envelope.snapshot,
                   envelope.controlSenderID == nil,
+                  envelope.controlContext == nil,
                   envelope.control == nil,
                   envelope.acknowledgement == nil,
                   envelope.error == nil else {
@@ -411,9 +471,14 @@ nonisolated enum WorkoutContractCodec {
                   envelope.error == nil else {
                 throw WorkoutContractError.invalidEnvelopePayload
             }
+            try validateControlContext(
+                envelope.controlContext,
+                control: envelope.control
+            )
         case .acknowledgement:
             guard envelope.snapshot == nil,
                   envelope.controlSenderID == nil,
+                  envelope.controlContext == nil,
                   envelope.control == nil,
                   let acknowledgement = envelope.acknowledgement,
                   envelope.error == nil else {
@@ -429,6 +494,7 @@ nonisolated enum WorkoutContractCodec {
         case .error:
             guard envelope.snapshot == nil,
                   envelope.controlSenderID == nil,
+                  envelope.controlContext == nil,
                   envelope.control == nil,
                   envelope.acknowledgement == nil,
                   envelope.error != nil else {
@@ -447,6 +513,21 @@ nonisolated enum WorkoutContractCodec {
         if snapshot.terminalOutcome != nil, snapshot.state != .ended {
             throw WorkoutContractError.invalidEnvelopePayload
         }
+        if snapshot.pauseOrigin != nil, snapshot.state != .paused {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        if (snapshot.lastTransitionOrigin == nil)
+            != (snapshot.lastTransitionAt == nil) {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        if snapshot.detectorProfileVersion == 0 {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        if snapshot.pauseOrigin == .automatic
+                || snapshot.lastTransitionOrigin == .automatic,
+           snapshot.detectorProfileVersion == nil {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
         if let startDate = snapshot.startDate {
             guard startDate.timeIntervalSinceReferenceDate.isFinite,
                   startDate <= envelopeCapturedAt else {
@@ -461,6 +542,25 @@ nonisolated enum WorkoutContractCodec {
             earliestCapturedAt: earliestComponentDate,
             latestCapturedAt: envelopeCapturedAt
         )
+        try validate(
+            snapshot.wallElapsedTime,
+            expectedUnit: .seconds,
+            earliestCapturedAt: earliestComponentDate,
+            latestCapturedAt: envelopeCapturedAt
+        )
+        if let wallElapsedTime = snapshot.wallElapsedTime?.value,
+           let movingTime = snapshot.elapsedTime?.value,
+           wallElapsedTime + 0.001 < movingTime {
+            throw WorkoutContractError.invalidMetric
+        }
+        if let transitionAt = snapshot.lastTransitionAt,
+           !isWithinComponentWindow(
+             transitionAt,
+             earliest: earliestComponentDate,
+             latest: envelopeCapturedAt
+           ) {
+            throw WorkoutContractError.invalidDate
+        }
         try validate(
             snapshot.currentHeartRate,
             expectedUnit: .beatsPerMinute,
@@ -587,6 +687,35 @@ nonisolated enum WorkoutContractCodec {
         guard snapshot.availability.intersection(knownAvailabilityBits)
                 == expectedAvailability(for: snapshot) else {
             throw WorkoutContractError.invalidMetric
+        }
+    }
+
+    private static func validateControlContext(
+        _ context: WorkoutControlContextV1?,
+        control: WorkoutControlV1?
+    ) throws {
+        guard let context else { return }
+        guard control == .pause || control == .resume
+                || control == .requestCurrentSnapshot,
+              context.origin != .unknown else {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        if control == .requestCurrentSnapshot,
+           context.origin != .automatic {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        if context.origin == .automatic {
+            guard context.automaticReason == .rideDetection,
+                  context.rideGeneration.map({ $0 > 0 }) == true,
+                  context.decisionSequence.map({ $0 > 0 }) == true,
+                  context.detectorProfileVersion.map({ $0 > 0 }) == true else {
+                throw WorkoutContractError.invalidEnvelopePayload
+            }
+        } else if context.automaticReason != nil
+                    || context.rideGeneration != nil
+                    || context.decisionSequence != nil
+                    || context.detectorProfileVersion != nil {
+            throw WorkoutContractError.invalidEnvelopePayload
         }
     }
 

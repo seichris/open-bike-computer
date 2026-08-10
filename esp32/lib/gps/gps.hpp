@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "settings.hpp"
+#include "gps_ride_observation.hpp"
 #include <NMEAGPS.h>
 #include <Streamers.h>
 #include <hal.hpp>
@@ -68,6 +68,7 @@ public:
   bool hasLocationChange();
   bool isDOPChanged();
   void setLocalTime(NeoGPS::time_t gpsTime, const char *tz);
+  GpsRideObservation rideObservation() const;
 
   struct GPSDATA {
     uint8_t satellites;
@@ -103,6 +104,7 @@ public:
   } satTracker[MAX_SATELLITES];
 
 private:
+  GpsRideObservation rideObservation_{};
   uint16_t previousSpeed;
   int16_t previousAltitude;
   double previousLatitude;

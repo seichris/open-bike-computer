@@ -86,6 +86,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "mainScr.hpp"
 #include "power_management.hpp"
 #include "route_overlay.hpp"
+#include "ride_automation_runtime.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -512,6 +513,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     bool activationRunning = false;
     uint32_t lastTransferPollMs = 0;
     bool audioActive = false;
+    bool rideAutomationAttention = false;
     bool touchPending = false;
     uint32_t touchActivityGeneration = 0;
   };
@@ -519,6 +521,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
 
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const bool audioActive = waveshare_board::speaker::isPlaying();
+  const bool rideAutomationAttention =
+      ride_automation_runtime::needsAttention(nowMs);
   const bool touchPending = hasUnattemptedTouchInterrupt();
   const uint32_t touchActivityGeneration = getTouchActivityGeneration();
   lv_obj_t *const activeScreen = lv_screen_active();
@@ -552,6 +556,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.activationRunning = activation.running;
     signals.lastTransferPollMs = nowMs;
     signals.audioActive = audioActive;
+    signals.rideAutomationAttention = rideAutomationAttention;
     signals.touchPending = touchPending;
     signals.touchActivityGeneration = touchActivityGeneration;
   } else {
@@ -567,6 +572,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
         bleStats.authSuccessCount != signals.authSuccessCount ||
         routeRevision != signals.routeRevision ||
         audioActive != signals.audioActive ||
+        rideAutomationAttention != signals.rideAutomationAttention ||
         (touchPending && !signals.touchPending) || decodedTouchActivity;
     signals.screen = activeScreen;
     signals.tile = activeTile;
@@ -574,6 +580,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.authSuccessCount = bleStats.authSuccessCount;
     signals.routeRevision = routeRevision;
     signals.audioActive = audioActive;
+    signals.rideAutomationAttention = rideAutomationAttention;
     signals.touchPending = touchPending;
     signals.touchActivityGeneration = touchActivityGeneration;
 
@@ -642,7 +649,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       workout_telemetry_runtime::isWorkoutActive();
   context.transferActive =
       signals.transferEnabled || signals.activationRunning;
-  context.attentionActive = signals.pairing || audioActive;
+  context.attentionActive =
+      signals.pairing || audioActive || rideAutomationAttention;
   const display_inactivity::Update update =
       displayInactivityPolicy.update(nowMs, context);
   currentDisplayMode = update.current;
@@ -1217,11 +1225,12 @@ void setup() {
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
   waveshare_board::rtc::restoreSystemTimeFromRtc();
-#ifdef WAVESHARE_IMU_DIAGNOSTICS
+#if defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW)
   waveshare_board::imu::begin();
 #else
   waveshare_board::imu::disable();
 #endif
+  ride_automation_runtime::beginFirmwareShadow();
 #endif
 #endif
 
@@ -1696,9 +1705,10 @@ void loop() {
   }
 
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
-    defined(WAVESHARE_IMU_DIAGNOSTICS)
+    (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
 #endif
+  ride_automation_runtime::processFirmwareShadow(now);
 
   logSystemDebugHeartbeat();
   logPowerMetricsReport();

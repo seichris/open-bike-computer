@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import HealthKit
 import UIKit
 
@@ -282,12 +283,13 @@ final class WorkoutMirrorManager: NSObject {
         startFreshnessTimerIfNeeded()
     }
 
-    func startOutdoorCyclingOnWatch() {
+    @discardableResult
+    func startOutdoorCyclingOnWatch() -> Bool {
         guard #available(iOS 17.0, *) else {
             store.markUnsupported()
-            return
+            return false
         }
-        guard pendingTerminalFailureCode == nil else { return }
+        guard pendingTerminalFailureCode == nil else { return false }
         let launchID = UUID()
         let requestDate = now()
         guard store.beginWatchLaunch(
@@ -295,7 +297,7 @@ final class WorkoutMirrorManager: NSObject {
             at: requestDate,
             timeout: watchLaunchTimeout
         ) else {
-            return
+            return false
         }
         mirroredTransport?.installDelegate(nil)
         mirroredTransport = nil
@@ -321,38 +323,138 @@ final class WorkoutMirrorManager: NSObject {
                 }
             }
         }
+        return true
     }
 
     func pause() {
         guard #available(iOS 17.0, *),
-              let session = mirroredTransport,
               store.presentation.sessionState == .running else {
             return
         }
         releasePendingSegmentForLifecycleControl(
             prioritizeRemoteQueue: false
         )
-        guard store.markPendingControl(.pause) else {
-            return
-        }
-        session.pause()
-        scheduleControlConfirmationTimeout(for: .pause)
+        preemptAutomaticControlForManualAction()
+        _ = enqueueStateChangingControl(
+            .pause,
+            controlContext: WorkoutControlContextV1(origin: .manual)
+        )
     }
 
     func resume() {
         guard #available(iOS 17.0, *),
-              let session = mirroredTransport,
               store.presentation.sessionState == .paused else {
             return
         }
         releasePendingSegmentForLifecycleControl(
             prioritizeRemoteQueue: false
         )
-        guard store.markPendingControl(.resume) else {
-            return
+        preemptAutomaticControlForManualAction()
+        _ = enqueueStateChangingControl(
+            .resume,
+            controlContext: WorkoutControlContextV1(origin: .manual)
+        )
+    }
+
+    /// Sends an automatic detector transition through the durable mirrored
+    /// control path so Watch can persist its origin before changing HealthKit.
+    @discardableResult
+    func requestAutomaticTransition(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool {
+        guard context.origin == .automatic,
+              supportsRideAutomationControlContext else { return false }
+        switch transition {
+        case .pause:
+            guard store.presentation.sessionState == .running else {
+                return false
+            }
+            return enqueueStateChangingControl(
+                .pause,
+                controlContext: context
+            )
+        case .resume:
+            guard store.presentation.sessionState == .paused,
+                  store.presentation.snapshot.pauseOrigin == .automatic else {
+                return false
+            }
+            return enqueueStateChangingControl(
+                .resume,
+                controlContext: context
+            )
+        case .none, .start:
+            return false
         }
-        session.resume()
-        scheduleControlConfirmationTimeout(for: .resume)
+    }
+
+    /// Replays an accepted detector transition after process recovery. If the
+    /// Watch is already in the target state, only known automatic provenance
+    /// may be re-annotated; manual or not-yet-attributed state is left alone.
+    @discardableResult
+    func requestAutomaticTransitionConfirmation(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool {
+        guard context.origin == .automatic,
+              supportsRideAutomationControlContext else { return false }
+        let presentation = store.presentation
+        guard RideAutomationRecoveryControlPolicy.mayReplay(
+            transition,
+            sessionState: presentation.sessionState,
+            pauseOrigin: presentation.snapshot.pauseOrigin,
+            lastTransitionOrigin:
+                presentation.snapshot.lastTransitionOrigin
+        ) else {
+            return false
+        }
+        switch transition {
+        case .pause:
+            if presentation.sessionState == .running {
+                return requestAutomaticTransition(
+                    transition,
+                    context: context
+                )
+            }
+        case .resume:
+            if presentation.sessionState == .paused {
+                return requestAutomaticTransition(
+                    transition,
+                    context: context
+                )
+            }
+        case .none, .start:
+            return false
+        }
+        return enqueueStateChangingControl(
+            transition == .pause ? .pause : .resume,
+            controlContext: context
+        )
+    }
+
+    /// Annotates an already-confirmed detector start on the Watch-owned
+    /// workout. The snapshot request is reused as a state-neutral durable
+    /// control so no second workout lifecycle command is introduced.
+    @discardableResult
+    func requestAutomaticStartAnnotation(
+        context: WorkoutControlContextV1
+    ) -> Bool {
+        guard context.origin == .automatic,
+              supportsRideAutomationControlContext,
+              store.presentation.sessionState == .running else {
+            return false
+        }
+        return enqueueStateChangingControl(
+            .requestCurrentSnapshot,
+            controlContext: context
+        )
+    }
+
+    private var supportsRideAutomationControlContext: Bool {
+        guard let version = store.currentEnvelope?.schemaVersion else {
+            return false
+        }
+        return version.supportsRideAutomationControlContext
     }
 
     func markSegment() {
@@ -368,6 +470,7 @@ final class WorkoutMirrorManager: NSObject {
         releasePendingSegmentForLifecycleControl(
             prioritizeRemoteQueue: true
         )
+        preemptAutomaticControlForManualAction()
         enqueueStateChangingControl(.endAndSave)
     }
 
@@ -375,6 +478,7 @@ final class WorkoutMirrorManager: NSObject {
         releasePendingSegmentForLifecycleControl(
             prioritizeRemoteQueue: true
         )
+        preemptAutomaticControlForManualAction()
         enqueueStateChangingControl(.discard)
     }
 
@@ -746,18 +850,25 @@ final class WorkoutMirrorManager: NSObject {
         drainRemoteQueue()
     }
 
-    private func enqueueStateChangingControl(_ control: WorkoutControlV1) {
+    @discardableResult
+    private func enqueueStateChangingControl(
+        _ control: WorkoutControlV1,
+        controlContext: WorkoutControlContextV1? = nil
+    ) -> Bool {
         guard #available(iOS 17.0, *),
               mirroredTransport != nil,
               store.presentation.isWorkoutActive,
               store.presentation.pendingControl == nil,
-              let envelope = makeControlEnvelope(control) else {
-            return
+              let envelope = makeControlEnvelope(
+                control,
+                controlContext: controlContext
+              ) else {
+            return false
         }
         guard store.markPendingControl(
             control,
             sequence: envelope.sequence
-        ) else { return }
+        ) else { return false }
         // A best-effort snapshot request must never hold a rider control
         // behind a callback that HealthKit may delay indefinitely.
         remoteQueue.removeAll {
@@ -774,6 +885,20 @@ final class WorkoutMirrorManager: NSObject {
             )
         )
         drainRemoteQueue()
+        return true
+    }
+
+    private func preemptAutomaticControlForManualAction() {
+        let isAutomatic: (RemoteMessage) -> Bool = {
+            $0.envelope.controlContext?.origin == .automatic
+        }
+        remoteQueue.removeAll(where: isAutomatic)
+        // A mirrored send already submitted to HealthKit cannot be cancelled.
+        // Keep it as the queue barrier so the rider's manual command is sent
+        // immediately after it, preserving transport order. Watch gives that
+        // later manual boundary authoritative provenance.
+        cancelControlConfirmationTimeout()
+        store.preemptPendingControlForManualAction()
     }
 
     private func enqueueSnapshotRequestIfPossible() {
@@ -833,7 +958,8 @@ final class WorkoutMirrorManager: NSObject {
     }
 
     private func makeControlEnvelope(
-        _ control: WorkoutControlV1
+        _ control: WorkoutControlV1,
+        controlContext: WorkoutControlContextV1? = nil
     ) -> WorkoutEnvelopeV1? {
         guard let latestEnvelope = store.currentEnvelope else {
             return nil
@@ -841,7 +967,8 @@ final class WorkoutMirrorManager: NSObject {
         guard let envelope = controlSequencer.makeEnvelope(
             control: control,
             currentEnvelope: latestEnvelope,
-            capturedAt: now()
+            capturedAt: now(),
+            controlContext: controlContext
         ) else {
             store.failSession(error: .sessionFailed)
             return nil
@@ -1330,5 +1457,17 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         @unknown default:
             return .failed
         }
+    }
+}
+
+@MainActor
+extension WorkoutMirrorManager: RideAutomationWorkoutControlling {
+    var rideAutomationPresentation: WorkoutMirrorPresentationV1 {
+        store.presentation
+    }
+
+    var rideAutomationPresentationPublisher:
+        AnyPublisher<WorkoutMirrorPresentationV1, Never> {
+        store.$presentation.eraseToAnyPublisher()
     }
 }

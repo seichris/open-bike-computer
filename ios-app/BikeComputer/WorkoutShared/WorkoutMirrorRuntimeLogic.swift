@@ -26,7 +26,8 @@ nonisolated struct WorkoutControlEnvelopeSequencer: Sendable {
     mutating func makeEnvelope(
         control: WorkoutControlV1,
         currentEnvelope: WorkoutEnvelopeV1,
-        capturedAt: Date
+        capturedAt: Date,
+        controlContext: WorkoutControlContextV1? = nil
     ) -> WorkoutEnvelopeV1? {
         guard currentEnvelope.snapshot != nil else { return nil }
         if sessionID != currentEnvelope.sessionID {
@@ -46,6 +47,7 @@ nonisolated struct WorkoutControlEnvelopeSequencer: Sendable {
             sequence: highestSequence,
             capturedAt: capturedAt,
             controlSenderID: controlSenderID,
+            controlContext: controlContext,
             control: control
         )
         guard (try? WorkoutContractCodec.validate(envelope)) != nil else {
@@ -481,7 +483,12 @@ nonisolated enum WorkoutIPhoneTelemetryMerge {
             lastCompletedSegment: watch.lastCompletedSegment,
             availability: availability,
             errorCode: watch.errorCode,
-            terminalOutcome: watch.terminalOutcome
+            terminalOutcome: watch.terminalOutcome,
+            pauseOrigin: watch.pauseOrigin,
+            lastTransitionOrigin: watch.lastTransitionOrigin,
+            lastTransitionAt: watch.lastTransitionAt,
+            wallElapsedTime: watch.wallElapsedTime,
+            detectorProfileVersion: watch.detectorProfileVersion
         )
     }
 
@@ -1045,6 +1052,14 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         }
         errorCode = nil
         return true
+    }
+
+    mutating func preemptPendingControlForManualAction() {
+        pendingControl = nil
+        pendingControlSequence = nil
+        if timedOutTerminalControl == nil {
+            commandErrorCode = nil
+        }
     }
 
     mutating func failPendingControl(

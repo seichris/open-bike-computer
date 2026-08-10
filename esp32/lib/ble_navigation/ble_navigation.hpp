@@ -263,6 +263,7 @@ public:
   /** Notify the authenticated iPhone app that the device requested a workout. */
   bool requestWorkoutStart();
   bool canRequestWorkoutStart() const;
+  bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
 
   BLEDebugStats getDebugStats() const;
 
@@ -289,17 +290,21 @@ private:
       "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002";
   static constexpr const char *WORKOUT_TELEMETRY_CHAR_UUID =
       "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003";
+  static constexpr const char *RIDE_AUTOMATION_CHAR_UUID =
+      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004";
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
   NimBLECharacteristic *pRouteCharacteristic = nullptr;
   NimBLECharacteristic *pAuthCharacteristic = nullptr;
   NimBLECharacteristic *pWorkoutTelemetryCharacteristic = nullptr;
+  NimBLECharacteristic *pRideAutomationCharacteristic = nullptr;
 
   friend class MyBLEServerCallbacks;
   friend class MyNavCharacteristicCallbacks;
   friend class MyRouteCharacteristicCallbacks;
   friend class MyWorkoutTelemetryCharacteristicCallbacks;
+  friend class MyRideAutomationCharacteristicCallbacks;
   friend class MyAuthCharacteristicCallbacks;
 };
 

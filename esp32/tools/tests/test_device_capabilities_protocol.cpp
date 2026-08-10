@@ -30,6 +30,10 @@ int main() {
   static_assert(
       device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE ==
       (1UL << 14));
+  static_assert(
+      device_capabilities_protocol::RIDE_AUTOMATION_V2_CLIENT_VERSION == 13);
+  static_assert(device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE ==
+                (1UL << 15));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(

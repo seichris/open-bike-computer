@@ -302,6 +302,10 @@ struct WorkoutCompactCard: View {
         case .awaitingFirstSnapshot:
             return "Connecting to Apple Watch"
         case .connected:
+            if presentation.sessionState == .paused,
+               presentation.snapshot.pauseOrigin == .automatic {
+                return "Auto-Paused"
+            }
             return stateLabel(presentation.sessionState)
         case .stale:
             return "Workout data delayed"
@@ -394,11 +398,20 @@ struct WorkoutCompactCard: View {
     }
 
     private func liveDetail(_ snapshot: WorkoutSnapshotV1) -> some View {
-        let elapsed = WorkoutValueFormatter.duration(snapshot.elapsedTime?.value)
+        let elapsed = WorkoutValueFormatter.duration(
+            snapshot.wallElapsedTime?.value ?? snapshot.elapsedTime?.value
+        )
+        let moving = WorkoutValueFormatter.duration(snapshot.elapsedTime?.value)
         let heart = WorkoutValueFormatter.heartRate(snapshot.currentHeartRate?.value)
         let speed = WorkoutValueFormatter.speed(snapshot.currentSpeed?.value)
         return HStack(spacing: 3) {
             Text(elapsed)
+            if snapshot.wallElapsedTime != nil {
+                Text("elapsed")
+                Text("•")
+                Text(moving)
+                Text("moving")
+            }
             Text("•")
             Text(heart)
             if heart != "--" {
@@ -412,7 +425,7 @@ struct WorkoutCompactCard: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "Workout time \(elapsed), heart rate \(heart) beats per minute, speed \(speed) kilometers per hour"
+            "Elapsed \(elapsed), moving \(moving), heart rate \(heart) beats per minute, speed \(speed) kilometers per hour"
         )
     }
 
@@ -588,10 +601,16 @@ struct WorkoutDashboardView: View {
                     errorBanner(errorCode)
                 }
 
-                Text(WorkoutValueFormatter.duration(snapshot.elapsedTime?.value))
-                    .font(.system(size: 42, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .accessibilityLabel("Workout time")
+                HStack(spacing: 24) {
+                    workoutTime(
+                        "Elapsed",
+                        snapshot.wallElapsedTime?.value
+                            ?? snapshot.elapsedTime?.value
+                    )
+                    if snapshot.wallElapsedTime != nil {
+                        workoutTime("Moving", snapshot.elapsedTime?.value)
+                    }
+                }
 
                 if snapshot.lastCompletedSegment != nil,
                    store.presentation.isWorkoutActive {
@@ -710,6 +729,30 @@ struct WorkoutDashboardView: View {
                     .multilineTextAlignment(.center)
             }
         }
+    }
+
+    private func workoutTime(
+        _ label: String,
+        _ seconds: TimeInterval?
+    ) -> some View {
+        VStack(spacing: 2) {
+            Text(WorkoutValueFormatter.duration(seconds))
+                .font(
+                    .system(
+                        size: 36,
+                        weight: .semibold,
+                        design: .rounded
+                    )
+                )
+                .monospacedDigit()
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(label) \(WorkoutValueFormatter.duration(seconds))"
+        )
     }
 
     @ViewBuilder

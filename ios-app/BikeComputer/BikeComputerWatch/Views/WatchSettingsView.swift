@@ -1,12 +1,38 @@
 import SwiftUI
 
 struct WatchSettingsView: View {
+    @ObservedObject var manager: WatchWorkoutManager
     @ObservedObject var navigationSettings: WatchNavigationSettingsStore
     @ObservedObject var favoriteStore: WatchFavoriteStore
     @ObservedObject var navigationManager: WatchNavigationManager
 
     var body: some View {
         Form {
+            Section("Ride Detection") {
+                if manager.rideDetectionSettingsConfirmed {
+                    LabeledContent(
+                        "Start",
+                        value: startModeLabel
+                    )
+                    LabeledContent(
+                        "Auto-Pause",
+                        value: manager.rideDetectionSettings.autoPauseEnabled
+                            ? "On"
+                            : "Off"
+                    )
+                    LabeledContent(
+                        "Start Alerts",
+                        value: alertModeLabel
+                    )
+                } else {
+                    Text("Connect to the bike computer to sync this policy.")
+                        .foregroundStyle(.secondary)
+                }
+                Text("Change ride detection on iPhone or the bike computer.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Toggle(
                     "Use Watch cellular connection",
@@ -57,6 +83,14 @@ struct WatchSettingsView: View {
         .navigationTitle("Settings")
     }
 
+    private var startModeLabel: String {
+        switch manager.rideDetectionSettings.startMode {
+        case .off: "Off"
+        case .ask: "Ask"
+        case .automatic: "Automatic"
+        }
+    }
+
     private var versionDescription: String {
         let version = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
@@ -74,6 +108,14 @@ struct WatchSettingsView: View {
             build
         case (.none, .none):
             "Unknown"
+        }
+    }
+
+    private var alertModeLabel: String {
+        switch manager.rideDetectionSettings.alertMode {
+        case 0: "Sound + Haptic"
+        case 1: "Haptic Only"
+        default: "Visual Only"
         }
     }
 }

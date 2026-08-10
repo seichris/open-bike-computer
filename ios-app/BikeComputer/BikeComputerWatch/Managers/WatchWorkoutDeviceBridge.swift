@@ -22,7 +22,11 @@ final class WatchWorkoutDeviceBridge {
         if snapshot.state.isActive,
            let token = manager.activeSessionToken,
            let frames = WorkoutDeviceFrameBuilder.frames(
-               for: Self.sample(snapshot: snapshot, token: token)
+               for: Self.sample(
+                snapshot: snapshot,
+                token: token,
+                sessionID: manager.activeSessionID
+               )
            ) {
             hasForwardedActiveWorkout = true
             deviceLink.setWorkoutDemand(true)
@@ -43,7 +47,8 @@ final class WatchWorkoutDeviceBridge {
 
     private static func sample(
         snapshot: WorkoutSnapshotV1,
-        token: UInt16
+        token: UInt16,
+        sessionID: UUID?
     ) -> WorkoutDeviceTelemetrySample {
         var flags: WorkoutDeviceSourceFlags = [.currentSnapshot]
         switch snapshot.currentSpeed?.source {
@@ -79,7 +84,12 @@ final class WatchWorkoutDeviceBridge {
             currentHeartRateZone: snapshot.currentHeartRateZone,
             altitudeMeters: snapshot.location?.altitude,
             heartRateZoneCount: snapshot.heartRateZoneCount,
-            sourceFlags: flags
+            sourceFlags: flags,
+            pauseOrigin: snapshot.pauseOrigin,
+            wallElapsedSeconds: snapshot.wallElapsedTime?.value,
+            sessionID: sessionID,
+            detectorProfileVersion: snapshot.detectorProfileVersion,
+            lastTransitionOrigin: snapshot.lastTransitionOrigin
         )
     }
 
@@ -99,6 +109,11 @@ final class WatchWorkoutDeviceBridge {
         currentHeartRateZone: nil,
         altitudeMeters: nil,
         heartRateZoneCount: nil,
-        sourceFlags: []
+        sourceFlags: [],
+        pauseOrigin: nil,
+        wallElapsedSeconds: nil,
+        sessionID: nil,
+        detectorProfileVersion: nil,
+        lastTransitionOrigin: nil
     )
 }

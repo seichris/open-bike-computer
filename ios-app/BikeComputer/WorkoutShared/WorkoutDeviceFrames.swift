@@ -51,6 +51,57 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let altitudeMeters: Double?
     let heartRateZoneCount: UInt8?
     let sourceFlags: WorkoutDeviceSourceFlags
+    let pauseOrigin: WorkoutTransitionOrigin?
+    let wallElapsedSeconds: Double?
+    let sessionID: UUID?
+    let detectorProfileVersion: UInt16?
+    let lastTransitionOrigin: WorkoutTransitionOrigin?
+
+    init(
+        state: WorkoutDeviceSessionState,
+        sessionToken: UInt16,
+        hasLiveNumerics: Bool,
+        isCurrentSnapshot: Bool,
+        elapsedSeconds: Double?,
+        distanceMeters: Double?,
+        speedMetersPerSecond: Double?,
+        currentHeartRateBPM: Double?,
+        averageHeartRateBPM: Double?,
+        activeEnergyKilocalories: Double?,
+        cyclingPowerWatts: Double?,
+        cyclingCadenceRPM: Double?,
+        currentHeartRateZone: UInt8?,
+        altitudeMeters: Double?,
+        heartRateZoneCount: UInt8?,
+        sourceFlags: WorkoutDeviceSourceFlags,
+        pauseOrigin: WorkoutTransitionOrigin? = nil,
+        wallElapsedSeconds: Double? = nil,
+        sessionID: UUID? = nil,
+        detectorProfileVersion: UInt16? = nil,
+        lastTransitionOrigin: WorkoutTransitionOrigin? = nil
+    ) {
+        self.state = state
+        self.sessionToken = sessionToken
+        self.hasLiveNumerics = hasLiveNumerics
+        self.isCurrentSnapshot = isCurrentSnapshot
+        self.elapsedSeconds = elapsedSeconds
+        self.distanceMeters = distanceMeters
+        self.speedMetersPerSecond = speedMetersPerSecond
+        self.currentHeartRateBPM = currentHeartRateBPM
+        self.averageHeartRateBPM = averageHeartRateBPM
+        self.activeEnergyKilocalories = activeEnergyKilocalories
+        self.cyclingPowerWatts = cyclingPowerWatts
+        self.cyclingCadenceRPM = cyclingCadenceRPM
+        self.currentHeartRateZone = currentHeartRateZone
+        self.altitudeMeters = altitudeMeters
+        self.heartRateZoneCount = heartRateZoneCount
+        self.sourceFlags = sourceFlags
+        self.pauseOrigin = pauseOrigin
+        self.wallElapsedSeconds = wallElapsedSeconds
+        self.sessionID = sessionID
+        self.detectorProfileVersion = detectorProfileVersion
+        self.lastTransitionOrigin = lastTransitionOrigin
+    }
 }
 
 nonisolated struct WorkoutDeviceGPSUpdate: Equatable, Sendable {
@@ -75,11 +126,14 @@ nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
 
     let core: Data
     let extended: Data
+    let origin: Data
+    let originAvailable: Bool
     let identity: Identity
 }
 
 nonisolated enum WorkoutDeviceFrameBuilder {
     static let frameLength = 16
+    static let originFrameLength = 28
     static let unavailableUInt16 = UInt16.max
     static let unavailableUInt32 = UInt32.max
     static let unavailableAltitude = Int16.min
@@ -168,12 +222,15 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         extended.appendInt16LE(altitude)
         extended.append(zone?.count ?? 0)
 
+        let origin = originFrame(for: sample)
         guard core.count == frameLength, extended.count == frameLength else {
             return nil
         }
         return WorkoutDeviceFrames(
             core: core,
             extended: extended,
+            origin: origin ?? Data(),
+            originAvailable: origin != nil,
             identity: .init(
                 state: sample.state,
                 sessionToken: sample.sessionToken,
@@ -243,7 +300,8 @@ nonisolated enum WorkoutDeviceFrameBuilder {
     /// frame. Active samples remain an atomically stamped core/extended pair.
     static func transportFrames(
         for frames: WorkoutDeviceFrames,
-        generation: UInt8
+        generation: UInt8,
+        includeOrigin: Bool = false
     ) -> [Data] {
         if frames.identity.state == .idle {
             return [frames.core]
@@ -253,7 +311,46 @@ nonisolated enum WorkoutDeviceFrameBuilder {
             extended: frames.extended,
             generation: generation
         )
-        return [stamped.core, stamped.extended]
+        var result = [stamped.core, stamped.extended]
+        if includeOrigin, frames.originAvailable {
+            result.append(frames.origin)
+        }
+        return result
+    }
+
+    private static func originFrame(
+        for sample: WorkoutDeviceTelemetrySample
+    ) -> Data? {
+        guard sample.state != .idle,
+              sample.sessionToken != 0,
+              let sessionID = sample.sessionID else {
+            return nil
+        }
+        let pauseOrigin: UInt8
+        if sample.state == .paused {
+            pauseOrigin = sample.pauseOrigin?.rawValue ?? 0
+        } else {
+            pauseOrigin = 0
+        }
+        let profileVersion = sample.detectorProfileVersion ?? 0
+        let lastOrigin = sample.lastTransitionOrigin?.rawValue ?? 0
+        if (pauseOrigin == WorkoutTransitionOrigin.automatic.rawValue
+                || lastOrigin == WorkoutTransitionOrigin.automatic.rawValue),
+           profileVersion == 0 {
+            return nil
+        }
+
+        var origin = Data(capacity: originFrameLength)
+        origin.append(3)
+        origin.append(pauseOrigin)
+        origin.appendUInt16LE(sample.sessionToken)
+        origin.appendUInt32LE(encodeUInt32(sample.wallElapsedSeconds))
+        origin.appendUUID(sessionID)
+        origin.appendUInt16LE(profileVersion)
+        origin.append(lastOrigin)
+        origin.append(0)
+        guard origin.count == originFrameLength else { return nil }
+        return origin
     }
 
     private static func encodeUInt16(
@@ -324,6 +421,13 @@ private extension Data {
 
     nonisolated mutating func appendInt16LE(_ value: Int16) {
         Swift.withUnsafeBytes(of: value.littleEndian) {
+            append(contentsOf: $0)
+        }
+    }
+
+    nonisolated mutating func appendUUID(_ value: UUID) {
+        var bytes = value.uuid
+        Swift.withUnsafeBytes(of: &bytes) {
             append(contentsOf: $0)
         }
     }

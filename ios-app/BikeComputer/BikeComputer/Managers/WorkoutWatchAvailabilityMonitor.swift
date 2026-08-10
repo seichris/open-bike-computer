@@ -33,7 +33,10 @@ protocol WorkoutWatchConnectivityCoordinating: AnyObject {
         AnyPublisher<WorkoutWatchConnectivityStateV1, Never> { get }
 
     func activate()
-    func updateApplicationContextMerging(_ fields: [String: Any]) throws
+    func updateApplicationContextMerging(
+        _ fields: [String: Any],
+        removingKeys: Set<String>
+    ) throws
 }
 
 /// Publishes Apple Watch pairing and companion-app installation state for the
@@ -48,22 +51,34 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     private let session: WorkoutWatchConnectivitySession?
     private let connectivityCoordinator: WorkoutWatchConnectivityCoordinating?
     private let heartRateZoneDefaults: UserDefaults
+    private let rideDetectionSettingsStore: RideDetectionSettingsStore?
     private let syncRetryScheduler: (
         TimeInterval,
         @escaping @MainActor () -> Void
     ) -> Void
     private var activationFailed = false
     private var maximumHeartRateSyncPending = true
+    private var rideDetectionSyncPending = true
+    private var automaticStartSyncPending = false
+    private var pendingAutomaticStartContext: WorkoutControlContextV1?
+    private var confirmedRideDetectionSettings: RideDetectionSettings?
+    private var confirmedRideDetectionGeneration: UInt32?
     private var syncRetryAttempt = 0
     private var nextSyncRetryID: UInt64 = 0
     private var scheduledSyncRetryID: UInt64?
-    private var connectivityCancellables = Set<AnyCancellable>()
+    private var cancellables: Set<AnyCancellable> = []
 
     override convenience init() {
-        self.init(heartRateZoneDefaults: .standard)
+        self.init(
+            heartRateZoneDefaults: .standard,
+            rideDetectionSettingsStore: nil
+        )
     }
 
-    convenience init(heartRateZoneDefaults: UserDefaults) {
+    convenience init(
+        heartRateZoneDefaults: UserDefaults,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil
+    ) {
         let session: WorkoutWatchConnectivitySession?
         if #available(iOS 17.0, *) {
             session = WCSession.isSupported() ? WCSession.default : nil
@@ -73,6 +88,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
 
         self.init(
             heartRateZoneDefaults: heartRateZoneDefaults,
+            rideDetectionSettingsStore: rideDetectionSettingsStore,
             session: session,
             syncRetryScheduler: { delay, action in
                 Task { @MainActor in
@@ -87,10 +103,12 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
 
     convenience init(
         heartRateZoneDefaults: UserDefaults = .standard,
-        connectivityCoordinator: WorkoutWatchConnectivityCoordinating
+        connectivityCoordinator: WorkoutWatchConnectivityCoordinating,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil
     ) {
         self.init(
             heartRateZoneDefaults: heartRateZoneDefaults,
+            rideDetectionSettingsStore: rideDetectionSettingsStore,
             session: nil,
             connectivityCoordinator: connectivityCoordinator,
             syncRetryScheduler: { delay, action in
@@ -106,6 +124,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
 
     init(
         heartRateZoneDefaults: UserDefaults,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
         session: WorkoutWatchConnectivitySession?,
         connectivityCoordinator: WorkoutWatchConnectivityCoordinating? = nil,
         syncRetryScheduler: @escaping (
@@ -116,6 +135,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         self.session = session
         self.connectivityCoordinator = connectivityCoordinator
         self.heartRateZoneDefaults = heartRateZoneDefaults
+        self.rideDetectionSettingsStore = rideDetectionSettingsStore
         self.syncRetryScheduler = syncRetryScheduler
         maximumHeartRateBPM = WorkoutHeartRateZoneSettings
             .maximumHeartRateBPM(from: heartRateZoneDefaults)
@@ -127,12 +147,21 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             isReachable: false
         )
         super.init()
+        rideDetectionSettingsStore?.$generation
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.confirmedRideDetectionSettings = nil
+                self?.confirmedRideDetectionGeneration = nil
+                self?.rideDetectionSyncPending = true
+                self?.syncApplicationContextToWatch()
+            }
+            .store(in: &cancellables)
         connectivityCoordinator?.workoutStatePublisher
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.refreshSessionState()
             }
-            .store(in: &connectivityCancellables)
+            .store(in: &cancellables)
     }
 
     func setMaximumHeartRateBPM(_ value: Int) {
@@ -146,8 +175,9 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             )
         }
         maximumHeartRateSyncPending = true
+        rideDetectionSyncPending = true
         syncRetryAttempt = 0
-        syncMaximumHeartRateToWatch()
+        syncApplicationContextToWatch()
     }
 
     func activate() {
@@ -155,7 +185,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             maximumHeartRateSyncPending = true
             connectivityCoordinator.activate()
             publishAvailability()
-            syncMaximumHeartRateToWatch()
+            syncApplicationContextToWatch()
             return
         }
         guard let session else {
@@ -166,8 +196,28 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         session.delegate = self
         session.activate()
         maximumHeartRateSyncPending = true
+        rideDetectionSyncPending = true
         publishAvailability()
-        syncMaximumHeartRateToWatch()
+        syncApplicationContextToWatch()
+    }
+
+    @discardableResult
+    func setPendingAutomaticStartContext(
+        _ context: WorkoutControlContextV1?
+    ) -> Bool {
+        pendingAutomaticStartContext = context
+        automaticStartSyncPending = true
+        return syncApplicationContextToWatch()
+    }
+
+    func setConfirmedRideDetectionSettings(
+        _ settings: RideDetectionSettings?,
+        generation: UInt32?
+    ) {
+        confirmedRideDetectionSettings = settings
+        confirmedRideDetectionGeneration = generation
+        rideDetectionSyncPending = true
+        syncApplicationContextToWatch()
     }
 
     private func publishAvailability() {
@@ -201,49 +251,98 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         self.availability = availability
     }
 
-    private func syncMaximumHeartRateToWatch() {
+    @discardableResult
+    private func syncApplicationContextToWatch() -> Bool {
+        guard maximumHeartRateSyncPending || rideDetectionSyncPending
+                || automaticStartSyncPending,
+              let context = pendingApplicationContext() else {
+            return false
+        }
         if let connectivityCoordinator {
             let state = connectivityCoordinator.workoutState
-            guard maximumHeartRateSyncPending,
-                  state.isActivated,
+            guard state.isActivated,
                   state.isPaired,
                   state.isWatchAppInstalled else {
-                return
+                return false
             }
             do {
                 try connectivityCoordinator.updateApplicationContextMerging(
-                    WorkoutHeartRateZoneSyncContext.applicationContext(
-                        maximumHeartRateBPM: maximumHeartRateBPM
-                    )
+                    context,
+                    removingKeys: pendingApplicationContextRemovalKeys()
                 )
                 maximumHeartRateSyncPending = false
+                rideDetectionSyncPending = false
+                automaticStartSyncPending = false
                 syncRetryAttempt = 0
                 scheduledSyncRetryID = nil
+                return true
             } catch {
                 scheduleMaximumHeartRateSyncRetry()
+                return false
             }
-            return
         }
-        guard maximumHeartRateSyncPending,
-              let session,
+        guard let session,
               session.activationState == .activated,
               session.isPaired,
               session.isWatchAppInstalled else {
-            return
+            return false
         }
-
         do {
-            try session.updateApplicationContext(
-                WorkoutHeartRateZoneSyncContext.applicationContext(
-                    maximumHeartRateBPM: maximumHeartRateBPM
-                )
-            )
+            try session.updateApplicationContext(context)
             maximumHeartRateSyncPending = false
+            rideDetectionSyncPending = false
+            automaticStartSyncPending = false
             syncRetryAttempt = 0
             scheduledSyncRetryID = nil
+            return true
         } catch {
             scheduleMaximumHeartRateSyncRetry()
+            return false
         }
+    }
+
+    private func pendingApplicationContext() -> [String: Any]? {
+        guard maximumHeartRateSyncPending || rideDetectionSyncPending
+                || automaticStartSyncPending else {
+            return nil
+        }
+        var context = WorkoutHeartRateZoneSyncContext.applicationContext(
+            maximumHeartRateBPM: maximumHeartRateBPM
+        )
+        if let confirmedRideDetectionSettings,
+           let confirmedRideDetectionGeneration {
+            context = RideDetectionSyncContext.adding(
+                settings: confirmedRideDetectionSettings,
+                generation: confirmedRideDetectionGeneration,
+                to: context
+            )
+        }
+        return RideDetectionSyncContext.addingPendingAutomaticStart(
+            pendingAutomaticStartContext,
+            to: context
+        )
+    }
+
+    private func pendingApplicationContextRemovalKeys() -> Set<String> {
+        var keys = Set<String>()
+        if confirmedRideDetectionSettings == nil
+            || confirmedRideDetectionGeneration == nil {
+            keys.formUnion([
+                RideDetectionSyncContext.schemaVersionKey,
+                RideDetectionSyncContext.generationKey,
+                RideDetectionSyncContext.startModeKey,
+                RideDetectionSyncContext.autoPauseEnabledKey,
+                RideDetectionSyncContext.alertModeKey,
+            ])
+        }
+        if pendingAutomaticStartContext == nil {
+            keys.formUnion([
+                RideDetectionSyncContext.automaticStartRideGenerationKey,
+                RideDetectionSyncContext.automaticStartDecisionSequenceKey,
+                RideDetectionSyncContext.automaticStartProfileVersionKey,
+            ])
+        }
+        return keys
     }
 
     private func scheduleMaximumHeartRateSyncRetry() {
@@ -259,7 +358,7 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
                 return
             }
             self.scheduledSyncRetryID = nil
-            self.syncMaximumHeartRateToWatch()
+            self.syncApplicationContextToWatch()
         }
     }
 
@@ -270,8 +369,9 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             self.activationFailed = activationFailed
         }
         maximumHeartRateSyncPending = true
+        rideDetectionSyncPending = true
         publishAvailability()
-        syncMaximumHeartRateToWatch()
+        syncApplicationContextToWatch()
     }
 }
 
@@ -314,3 +414,7 @@ extension WorkoutWatchAvailabilityMonitor: WCSessionDelegate {
         }
     }
 }
+
+@MainActor
+extension WorkoutWatchAvailabilityMonitor:
+    RideAutomationWatchAvailabilityControlling {}

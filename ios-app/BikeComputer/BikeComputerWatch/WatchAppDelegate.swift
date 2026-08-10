@@ -15,6 +15,7 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     private let heartRateZoneSettingsReceiver:
         WatchHeartRateZoneSettingsReceiver
     private let workoutDeviceBridge: WatchWorkoutDeviceBridge
+    private let rideAutomationCoordinator: WatchRideAutomationCoordinator
 
     override init() {
         let locationService = WatchLocationService()
@@ -55,10 +56,27 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             manager: workoutManager,
             deviceLink: deviceLink
         )
+        rideAutomationCoordinator = WatchRideAutomationCoordinator(
+            manager: workoutManager,
+            deviceLink: deviceLink
+        )
         heartRateZoneSettingsReceiver = WatchHeartRateZoneSettingsReceiver(
             session: nil,
             applyMaximumHeartRateBPM: { value in
                 workoutManager.setMaximumHeartRateBPM(value)
+            },
+            applyRideDetectionSettings: { settings, generation in
+                if let settings, let generation {
+                    workoutManager.setRideDetectionSettings(
+                        settings,
+                        generation: generation
+                    )
+                } else {
+                    workoutManager.clearRideDetectionSettings()
+                }
+            },
+            applyPendingAutomaticStart: { context in
+                workoutManager.setPendingAutomaticStartContext(context)
             }
         )
         super.init()

@@ -185,6 +185,11 @@ final class WorkoutMetricsStore: ObservableObject {
         return accepted
     }
 
+    func preemptPendingControlForManualAction() {
+        reducer.preemptPendingControlForManualAction()
+        publish()
+    }
+
     func failPendingControl(
         _ control: WorkoutControlV1,
         sequence: UInt64? = nil,

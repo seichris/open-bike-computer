@@ -112,9 +112,15 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         refreshState(activationFailed: false)
     }
 
-    func updateApplicationContextMerging(_ fields: [String: Any]) throws {
+    func updateApplicationContextMerging(
+        _ fields: [String: Any],
+        removingKeys: Set<String> = []
+    ) throws {
         guard let session else { return }
         var merged = session.applicationContext
+        for key in removingKeys {
+            merged.removeValue(forKey: key)
+        }
         for (key, value) in fields {
             merged[key] = value
         }

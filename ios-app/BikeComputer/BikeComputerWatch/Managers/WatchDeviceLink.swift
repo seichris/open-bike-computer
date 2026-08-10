@@ -31,6 +31,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     @Published private(set) var lastError: String?
     var onDirectRidePreparationChange:
         ((WatchDirectRidePreparationOperationV1, String, UUID) -> Void)?
+    var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
 
     private let credentialStore: WatchControllerCredentialStore
     private let defaults: UserDefaults
@@ -52,6 +53,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private let workoutUUID = CBUUID(
         string: WatchDirectBLEProtocolV1.workoutUUID
     )
+    private let rideAutomationUUID = CBUUID(
+        string: WatchDirectBLEProtocolV1.rideAutomationUUID
+    )
     private lazy var central = CBCentralManager(
         delegate: self,
         queue: .main,
@@ -72,6 +76,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var routeCharacteristic: CBCharacteristic?
     private var gpsCharacteristic: CBCharacteristic?
     private var workoutCharacteristic: CBCharacteristic?
+    private var rideAutomationCharacteristic: CBCharacteristic?
     private var authentication: WatchScopedAuthenticationV1?
     private var challenge: WatchScopedAuthenticationChallengeV1?
     private var protectedSession: WatchAuthenticatedBLESessionV1?
@@ -362,6 +367,31 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         drainQueue()
     }
 
+    @discardableResult
+    func sendRideAutomationFrame(_ frame: RideAutomationFrame) -> Bool {
+        guard state.isReady,
+              capabilities?.supportsRideAutomation == true,
+              let payload = frame.encoded(),
+              let transport = WatchRideAutomationTransportV1.outbound(
+                frame: payload,
+                nativeCharacteristicAvailable:
+                    rideAutomationCharacteristic != nil
+              ) else {
+            return false
+        }
+        enqueueProtected(
+            target: transport.target,
+            payload: transport.payload,
+            priority: 0,
+            coalescingKey: frame.kind == .resynchronize
+                || frame.kind == .configuration
+                ? "ride-automation-\(frame.kind.rawValue)"
+                : nil
+        )
+        drainQueue()
+        return true
+    }
+
     func endWorkoutDemandAfterClearing(_ frames: WorkoutDeviceFrames) {
         demand.beginWorkoutRelease()
         clearWorkout(frames)
@@ -550,6 +580,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         routeCharacteristic = nil
         gpsCharacteristic = nil
         workoutCharacteristic = nil
+        rideAutomationCharacteristic = nil
         writeWithResponseInFlight = false
         queue.removeAll()
         if !keepingPeripheral {
@@ -667,6 +698,18 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             fail("Bike Computer sent invalid protected navigation data")
             return
         }
+        if payload.starts(with: WatchRideAutomationTransportV1.fallbackPrefix) {
+            guard state.isReady,
+                  capabilities?.supportsRideAutomation == true,
+                  let framePayload = WatchRideAutomationTransportV1
+                    .decodeNavigationFallback(payload),
+                  let frame = RideAutomationFrame(framePayload) else {
+                fail("Bike Computer sent invalid ride automation fallback")
+                return
+            }
+            onRideAutomationFrame?(frame)
+            return
+        }
         let capabilities: WatchDeviceCapabilitiesV1
         switch WatchNavigationNotificationV1.decode(payload) {
         case .ignoredDeviceRequest:
@@ -698,6 +741,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         startHeartbeat()
         enqueueFullResynchronization()
         drainQueue()
+    }
+
+    private func handleRideAutomationNotification(_ raw: Data) {
+        guard state.isReady,
+              capabilities?.supportsRideAutomation == true,
+              let protectedSession,
+              let payload = protectedSession.notificationPayload(
+                from: raw,
+                channel: .rideAutomation
+              ),
+              let frame = RideAutomationFrame(payload) else {
+            fail("Bike Computer sent invalid ride automation data")
+            return
+        }
+        onRideAutomationFrame?(frame)
     }
 
     private func enqueueFullResynchronization() {
@@ -791,7 +849,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             : workoutPairGeneration + 1
         let payloads = WorkoutDeviceFrameBuilder.transportFrames(
             for: frames,
-            generation: workoutPairGeneration
+            generation: workoutPairGeneration,
+            includeOrigin: capabilities?.supportsRideAutomation == true
         )
         for payload in payloads {
             _ = queue.enqueue(.init(
@@ -919,6 +978,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .route: routeCharacteristic
         case .gps: gpsCharacteristic
         case .workout: workoutCharacteristic
+        case .rideAutomation: rideAutomationCharacteristic
         }
     }
 
@@ -1180,6 +1240,7 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
                 routeUUID,
                 gpsUUID,
                 workoutUUID,
+                rideAutomationUUID,
             ],
             for: service
         )
@@ -1202,6 +1263,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
             case routeUUID: routeCharacteristic = characteristic
             case gpsUUID: gpsCharacteristic = characteristic
             case workoutUUID: workoutCharacteristic = characteristic
+            case rideAutomationUUID:
+                rideAutomationCharacteristic = characteristic
             default: break
             }
         }
@@ -1214,6 +1277,9 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
         }
         peripheral.setNotifyValue(true, for: authCharacteristic)
         peripheral.setNotifyValue(true, for: navigationCharacteristic)
+        if let rideAutomationCharacteristic {
+            peripheral.setNotifyValue(true, for: rideAutomationCharacteristic)
+        }
     }
 
     func peripheral(
@@ -1229,7 +1295,9 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
             return
         }
         if authCharacteristic?.isNotifying == true,
-           navigationCharacteristic?.isNotifying == true {
+           navigationCharacteristic?.isNotifying == true,
+           (rideAutomationCharacteristic == nil
+                || rideAutomationCharacteristic?.isNotifying == true) {
             beginAuthentication()
         }
     }
@@ -1246,6 +1314,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
             handleAuthNotification(value)
         } else if characteristic.uuid == navigationUUID {
             handleNavigationNotification(value)
+        } else if characteristic.uuid == rideAutomationUUID {
+            handleRideAutomationNotification(value)
         }
     }
 

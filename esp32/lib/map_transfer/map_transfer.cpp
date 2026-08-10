@@ -2348,7 +2348,12 @@ bool MapTransferInstaller::pruneStagingSessions(
     const std::string name = entry->d_name;
     if (name == "." || name == ".." || name == keepSessionId)
       continue;
-    if (!safeId(name) || !removeTree(joinPath(root, name)))
+    // The SD card can contain metadata created by another OS or an older
+    // firmware. Preserve entries outside our session-id namespace instead of
+    // allowing an unrelated file to block a new map upload.
+    if (!safeId(name))
+      continue;
+    if (!removeTree(joinPath(root, name)))
       ok = false;
   }
   ::closedir(dir);
@@ -2418,7 +2423,11 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
                      ".bak")))) {
       continue;
     }
-    if (!safeId(name) || !removeTree(candidatePath))
+    // Only delete directories that belong to our map-session namespace.
+    // Foreign filesystem metadata must not make map installation fail.
+    if (!safeId(name))
+      continue;
+    if (!removeTree(candidatePath))
       ok = false;
   }
   ::closedir(dir);
