@@ -79,6 +79,203 @@ def build_job(
 
 
 class MapMonitoringStoreTests(unittest.TestCase):
+    def test_history_prefers_exact_region_scope_density_and_cache_cohort(self):
+        now = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                clock=lambda: now.timestamp(),
+            )
+            singapore = build_job(
+                "cohort-singapore", now=now, processing_seconds=90
+            )
+            shanghai = build_job(
+                "cohort-shanghai", now=now, processing_seconds=30
+            )
+            shanghai.source_region = SourceRegion(
+                id="china/shanghai",
+                provider="geofabrik",
+                name="Shanghai",
+                url="https://example.invalid/shanghai.osm.pbf",
+                bounds=Bounds(120.8, 30.6, 122.2, 31.9),
+            )
+            for job in (singapore, shanghai):
+                job.building_preprocessing_mode = "selected"
+                job.preparation_estimator_context = {
+                    "performanceCompatibilityKey": "a" * 64,
+                    "preprocessingMode": "selected",
+                    "modelVersion": "map-preparation-v1",
+                    "workerClass": "test",
+                    "evidence": {
+                        "scope": {
+                            "outputBlockCount": 6,
+                            "sourceAreaM2": 100_000_000,
+                        },
+                        "dependencies": {"cacheOutcome": "hit"},
+                        "complexity": {"sourceCount": 50_000},
+                    },
+                }
+                self.assertTrue(store.record_job(job))
+
+            samples = store.estimate_samples(
+                performance_key="a" * 64,
+                renderer=3,
+                preprocessing_mode="selected",
+                outcome_class="full_build",
+                claimed=True,
+                source_region_id="sg",
+                output_block_count=6,
+                source_area_m2=100_000_000,
+                building_source_count=50_000,
+                cache_outcome="hit",
+                minimum_samples=1,
+            )
+            queued_samples = store.estimate_samples(
+                performance_key="a" * 64,
+                renderer=3,
+                preprocessing_mode="selected",
+                outcome_class="full_build",
+                claimed=False,
+                source_region_id="sg",
+                output_block_count=6,
+                source_area_m2=100_000_000,
+                building_source_count=50_000,
+                cache_outcome="hit",
+                minimum_samples=1,
+            )
+
+        self.assertEqual(samples, [90.0])
+        self.assertEqual(
+            queued_samples,
+            [90.0],
+            "queued estimates keep historical work separate from queue delay",
+        )
+
+    def test_estimate_revisions_and_accuracy_are_bounded_and_aggregated(self):
+        now = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                clock=lambda: now.timestamp(),
+            )
+            job = build_job(
+                "estimate-accuracy",
+                now=now,
+                processing_seconds=30,
+            )
+            generated = now - timedelta(seconds=50)
+            job.preparation_estimate = {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 1,
+                "state": "available",
+                "generatedAt": iso(generated),
+                "attempt": 1,
+                "basedOnPhase": "building_complexity",
+                "confidence": "medium",
+                "remaining": {"lowerSeconds": 10, "upperSeconds": 30},
+                "basis": ["baseline_profile", "feature_complexity"],
+                "sampleCount": 24,
+            }
+            job.preparation_estimator_context = {
+                "performanceCompatibilityKey": "a" * 64,
+                "preprocessingMode": "selected",
+                "modelVersion": "map-preparation-v1",
+                "workerClass": "test",
+                "evidence": {},
+            }
+            self.assertTrue(store.record_estimate_revision(job))
+            self.assertFalse(store.record_estimate_revision(job))
+            job.preparation_estimate = {
+                **job.preparation_estimate,
+                "revision": 2,
+                "generatedAt": iso(now - timedelta(seconds=35)),
+                "remaining": {"lowerSeconds": 5, "upperSeconds": 10},
+            }
+            self.assertTrue(store.record_estimate_revision(job))
+            self.assertTrue(store.record_job(job))
+            summary = store.summary(window_hours=24)
+            with sqlite3.connect(store.path) as connection:
+                initial_lower, initial_upper, final_lower, final_upper = (
+                    connection.execute(
+                        """
+                        SELECT initial_estimate_lower_seconds,
+                               initial_estimate_upper_seconds,
+                               final_estimate_lower_seconds,
+                               final_estimate_upper_seconds
+                        FROM map_build_runs WHERE job_id = ?
+                        """,
+                        (job.job_id,),
+                    ).fetchone()
+                )
+
+        self.assertEqual(summary["schemaVersion"], 2)
+        self.assertEqual(summary["estimateRevisions"]["count"], 2)
+        self.assertEqual(summary["estimateAccuracy"]["count"], 2)
+        self.assertEqual(summary["estimateAccuracy"]["intervalCoverage"], 1.0)
+        self.assertEqual(summary["estimateAccuracy"]["upperBoundCoverage"], 1.0)
+        self.assertEqual(
+            summary["estimateModelComparison"]["baselineOnly"]["count"], 2
+        )
+        self.assertEqual(
+            summary["estimateModelComparison"]["historicalCohort"]["count"], 0
+        )
+        self.assertEqual((initial_lower, initial_upper), (10, 30))
+        self.assertEqual((final_lower, final_upper), (5, 10))
+
+    def test_revision_summary_samples_the_most_recent_bounded_window(self):
+        now = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                summary_run_limit=1,
+                max_estimate_revisions=16,
+                clock=lambda: now.timestamp(),
+            )
+            for sequence, model in enumerate(("older-model", "newer-model")):
+                job = build_job(
+                    f"revision-window-{sequence}",
+                    now=now,
+                    processing_seconds=30,
+                )
+                job.preparation_estimator_context = {
+                    "performanceCompatibilityKey": "a" * 64,
+                    "preprocessingMode": "selected",
+                    "modelVersion": model,
+                    "workerClass": "test",
+                    "evidence": {},
+                }
+                for revision in range(1, 17):
+                    generated = now - timedelta(
+                        hours=2 - sequence,
+                        seconds=17 - revision,
+                    )
+                    job.preparation_estimate = {
+                        "schemaVersion": 1,
+                        "modelVersion": model,
+                        "revision": revision,
+                        "state": "available",
+                        "generatedAt": iso(generated),
+                        "attempt": 1,
+                        "basedOnPhase": "block_encoding",
+                        "confidence": "low",
+                        "remaining": {
+                            "lowerSeconds": 10,
+                            "upperSeconds": 20,
+                        },
+                        "basis": ["baseline_profile"],
+                        "sampleCount": 0,
+                    }
+                    self.assertTrue(store.record_estimate_revision(job))
+
+            summary = store.summary(window_hours=24)
+
+        self.assertEqual(summary["estimateRevisions"]["count"], 16)
+        self.assertEqual(
+            summary["estimateRevisions"]["byModelVersion"],
+            {"newer-model": 16},
+        )
+
     def test_job_timing_and_summary_survive_store_reopen(self):
         now = datetime(2026, 8, 6, 4, 0, tzinfo=timezone.utc)
         now_epoch = now.timestamp()
@@ -185,7 +382,7 @@ class MapMonitoringStoreTests(unittest.TestCase):
         self.assertEqual(summary["samplingStrategy"], "most_recent_completion_desc")
         self.assertEqual(summary["runs"]["count"], 2)
 
-    def test_schema_version_adopts_legacy_database_and_rejects_future_schema(self):
+    def test_schema_version_adopts_unversioned_v2_and_rejects_future_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "map-monitoring.sqlite3"
             MapMonitoringStore(path)
@@ -201,10 +398,67 @@ class MapMonitoringStoreTests(unittest.TestCase):
                     )
                 }
                 self.assertIn("map_build_runs_completed_desc", indexes)
-                connection.execute("PRAGMA user_version = 2")
+                connection.execute("PRAGMA user_version = 3")
 
             with self.assertRaises(MonitoringSchemaError):
                 MapMonitoringStore(path)
+
+    def test_v1_schema_migrates_transactionally_and_preserves_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "map-monitoring.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE map_build_runs(
+                        job_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        completed_epoch REAL NOT NULL,
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        queue_wait_seconds REAL,
+                        processing_seconds REAL,
+                        total_seconds REAL,
+                        attempts INTEGER NOT NULL,
+                        renderer_format_version INTEGER,
+                        geometry_mode TEXT NOT NULL,
+                        area_km2 REAL NOT NULL,
+                        reuse_strategy TEXT,
+                        phase_timings_json TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO map_build_runs VALUES(
+                        'legacy-job', 'ready', '2026-08-10T00:00:00Z',
+                        1786320000, '2026-08-09T23:59:00Z',
+                        '2026-08-09T23:59:10Z', '2026-08-10T00:00:00Z',
+                        10, 50, 60, 1, 3, 'custom_bbox', 23.84, NULL, '[]'
+                    )
+                    """
+                )
+                connection.execute("PRAGMA user_version = 1")
+
+            MapMonitoringStore(path, clock=lambda: 1_786_320_100)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0], 1
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT status FROM map_build_runs WHERE job_id = 'legacy-job'"
+                    ).fetchone()[0],
+                    "ready",
+                )
+                revision_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(map_estimate_revisions)"
+                    )
+                }
+                self.assertIn("performance_compatibility_key", revision_columns)
 
     def test_schema_validation_rejects_incompatible_legacy_database(self):
         with tempfile.TemporaryDirectory() as tmp:
