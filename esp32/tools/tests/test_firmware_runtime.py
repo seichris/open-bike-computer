@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from firmware_runtime import (
     FirmwareRuntimeError,
@@ -221,11 +222,14 @@ class FirmwareRuntimeTests(unittest.TestCase):
             calls.append((executable, tuple(command), dict(environment)))
             raise RuntimeError("captured")
 
-        with self.assertRaisesRegex(RuntimeError, "captured"):
-            ensure_runtime_handoff(
-                ("WAVESHARE_AMOLED_175",), project,
-                lock_path=lock_path, cache_root=cache, execve=capture,
-            )
+        with mock.patch(
+            "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                ensure_runtime_handoff(
+                    ("WAVESHARE_AMOLED_175",), project,
+                    lock_path=lock_path, cache_root=cache, execve=capture,
+                )
         self.assertIn("host-runtime", calls[0][0])
         self.assertTrue(Path(calls[0][0]).is_relative_to(project))
         self.assertEqual(calls[0][2]["PYTHONNOUSERSITE"], "1")
