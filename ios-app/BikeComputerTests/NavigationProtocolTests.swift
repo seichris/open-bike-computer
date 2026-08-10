@@ -623,6 +623,7 @@ struct NavigationProtocolTests {
         testDeviceScreenValidation()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
+        testBLEScanLifecyclePolicy()
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testBLEManagerSendsFallbackMapSettings()
@@ -12839,6 +12840,294 @@ struct NavigationProtocolTests {
                     "credential deletion failure keeps the device visible")
         assertEqual(failureRegistry.ownerKey(deviceID: first.deviceID), material.ownerKey,
                     "credential deletion failure preserves the owner key")
+    }
+
+    static func testBLEScanLifecyclePolicy() {
+        let trusted = UUID(
+            uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )!
+        let selected = UUID(
+            uuidString: "11111111-2222-3333-4444-555555555555"
+        )!
+        func context(
+            active: Bool = true,
+            poweredOn: Bool = true,
+            hasSession: Bool = false,
+            knownCount: Int = 0,
+            trustedIdentifier: UUID? = nil,
+            reconnect: Bool = false,
+            explicit: Bool = false,
+            selectedIdentifier: UUID? = nil,
+            suppressed: Bool = false,
+            exclusive: Bool = false
+        ) -> BLEScanContext {
+            BLEScanContext(
+                isApplicationActive: active,
+                isBluetoothPoweredOn: poweredOn,
+                hasActiveBLESession: hasSession,
+                knownDeviceCount: knownCount,
+                trustedPeripheralIdentifier: trustedIdentifier,
+                shouldReconnectTrustedPeripheral: reconnect,
+                explicitDiscoveryRequested: explicit,
+                selectedPeripheralIdentifier: selectedIdentifier,
+                isUnknownDiscoverySuppressed: suppressed,
+                isExclusiveOperationActive: exclusive
+            )
+        }
+
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context()),
+            .opportunisticDiscovery,
+            "an active empty registry starts opportunistic discovery"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(active: false)),
+            .none,
+            "an empty registry never discovers unknown devices in background"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                active: false,
+                knownCount: 1,
+                trustedIdentifier: trusted,
+                reconnect: true
+            )),
+            .trustedReconnect(trusted),
+            "trusted reconnect remains eligible in background"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                knownCount: 1,
+                trustedIdentifier: trusted,
+                reconnect: false
+            )),
+            .none,
+            "a non-empty registry does not fall back to unknown discovery"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(explicit: true)),
+            .explicitDiscovery,
+            "a foreground user-owned setup session starts explicit discovery"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                knownCount: 1,
+                trustedIdentifier: trusted,
+                reconnect: true,
+                explicit: true
+            )),
+            .explicitDiscovery,
+            "explicit foreground discovery outranks trusted reconnect"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                knownCount: 1,
+                trustedIdentifier: trusted,
+                reconnect: true,
+                explicit: true,
+                selectedIdentifier: selected
+            )),
+            .selectedPeripheral(selected),
+            "a selected-device handoff outranks every idle scan purpose"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                hasSession: true,
+                explicit: true,
+                selectedIdentifier: selected
+            )),
+            .none,
+            "connecting, authenticating, restored, and connected sessions prohibit scanning"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(
+                knownCount: 1,
+                trustedIdentifier: trusted,
+                reconnect: true,
+                exclusive: true
+            )),
+            .none,
+            "Watch-direct and administration handoffs prohibit scanning"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(suppressed: true)),
+            .none,
+            "dismissing automatic setup suppresses discovery for the activation"
+        )
+        assertEqual(
+            BLEScanLifecyclePolicy.purpose(for: context(poweredOn: false)),
+            .none,
+            "Bluetooth-off state prohibits every scan"
+        )
+
+        let now = Date(timeIntervalSince1970: 100)
+        let candidate = DiscoveredBikeComputerDevice(
+            peripheralIdentifier: selected,
+            advertisedName: "Bicino",
+            shortIdentifier: "158D",
+            identitySuffix: "FA85158D",
+            isClaimed: false,
+            rssi: -45,
+            lastSeenAt: now
+        )
+        let observation = BLEDiscoveryObservation(
+            device: candidate,
+            generation: 7
+        )
+        assert(BLEOpportunisticCandidatePolicy.isEligible(
+            observation,
+            activeGeneration: 7,
+            knownDevices: [],
+            serviceMatched: true,
+            now: now
+        ), "a fresh unclaimed v2 observation is eligible")
+        var rejected = candidate
+        rejected.isClaimed = true
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            BLEDiscoveryObservation(device: rejected, generation: 7),
+            activeGeneration: 7,
+            knownDevices: [],
+            serviceMatched: true,
+            now: now
+        ), "claimed devices never trigger automatic setup")
+        rejected = candidate
+        rejected.isClaimed = nil
+        rejected.identitySuffix = nil
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            BLEDiscoveryObservation(device: rejected, generation: 7),
+            activeGeneration: 7,
+            knownDevices: [],
+            serviceMatched: true,
+            now: now
+        ), "legacy or unknown ownership advertisements are ineligible")
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            observation,
+            activeGeneration: 8,
+            knownDevices: [],
+            serviceMatched: true,
+            now: now
+        ), "a stopped discovery generation rejects delayed callbacks")
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            observation,
+            activeGeneration: 7,
+            knownDevices: [],
+            serviceMatched: false,
+            now: now
+        ), "automatic setup requires the Bicino service-filtered scan")
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            observation,
+            activeGeneration: 7,
+            knownDevices: [],
+            serviceMatched: true,
+            now: now.addingTimeInterval(7)
+        ), "stale observations are ineligible")
+        let known = KnownBikeComputerDevice(
+            deviceID: "00112233445566778899aabbfa85158d",
+            peripheralIdentifier: trusted,
+            name: "Known Bicino",
+            lastConnectedAt: now,
+            isLegacy: false
+        )
+        assert(!BLEOpportunisticCandidatePolicy.isEligible(
+            observation,
+            activeGeneration: 7,
+            knownDevices: [known],
+            serviceMatched: true,
+            now: now
+        ), "any registered Bicino disables automatic unknown discovery")
+        let weaker = DiscoveredBikeComputerDevice(
+            peripheralIdentifier: UUID(
+                uuidString: "99999999-2222-3333-4444-555555555555"
+            )!,
+            advertisedName: "Bicino",
+            shortIdentifier: "2222",
+            identitySuffix: "FA852222",
+            isClaimed: false,
+            rssi: -70,
+            lastSeenAt: now
+        )
+        assertEqual(
+            BLEOpportunisticCandidatePolicy.strongest(
+                from: [
+                    BLEDiscoveryObservation(device: weaker, generation: 7),
+                    observation
+                ],
+                activeGeneration: 7,
+                knownDevices: [],
+                now: now
+            )?.device.peripheralIdentifier,
+            selected,
+            "the bounded window selects the strongest eligible candidate"
+        )
+
+        assertEqual(
+            BLEExplicitDiscoveryStartPolicy.action(
+                hasActiveBLESession: false,
+                isConnecting: false
+            ),
+            .start,
+            "an idle explicit setup starts immediately"
+        )
+        assertEqual(
+            BLEExplicitDiscoveryStartPolicy.action(
+                hasActiveBLESession: true,
+                isConnecting: false
+            ),
+            .confirmDisconnect,
+            "a connected device requires confirmation before discovery"
+        )
+        assertEqual(
+            BLEExplicitDiscoveryStartPolicy.action(
+                hasActiveBLESession: true,
+                isConnecting: true
+            ),
+            .disabledWhileConnecting,
+            "a connection attempt disables add-another discovery"
+        )
+        assert(NearbyBicinoPresentationPolicy.shouldPresent(
+            isApplicationActive: true,
+            knownDeviceCount: 0,
+            hasActiveBLESession: false,
+            hasBlockingPresentation: false,
+            isMapAreaSelectionActive: false,
+            isSuppressed: false
+        ), "an eligible candidate can use the centralized item-driven sheet")
+        assert(!NearbyBicinoPresentationPolicy.shouldPresent(
+            isApplicationActive: true,
+            knownDeviceCount: 0,
+            hasActiveBLESession: false,
+            hasBlockingPresentation: true,
+            isMapAreaSelectionActive: false,
+            isSuppressed: false
+        ), "automatic setup never stacks over another modal")
+        var stage = NearbyBicinoSetupStage.offer
+        stage.advanceToPairing()
+        assertEqual(stage, .pairing,
+                    "Connect advances within the same sheet")
+        assert(NearbyBicinoPresentationPolicy
+            .shouldRetainCandidateDuringConnection(
+                discoveryOrigin: .opportunistic,
+                hasPendingPairingSession: true
+            ), "the sealed Nearby item remains available through secure pairing")
+        assert(!NearbyBicinoPresentationPolicy
+            .shouldRetainCandidateDuringConnection(
+                discoveryOrigin: .explicit,
+                hasPendingPairingSession: true
+            ), "explicit pairing does not retain an automatic-sheet candidate")
+        assert(!NearbyBicinoPresentationPolicy
+            .shouldRetainCandidateDuringConnection(
+                discoveryOrigin: .opportunistic,
+                hasPendingPairingSession: false
+            ), "a finished automatic setup releases its sealed candidate")
+        assertEqual(
+            NearbyBicinoPresentationPolicy.routeID(
+                peripheralIdentifier: selected
+            ),
+            NearbyBicinoPresentationPolicy.routeID(
+                peripheralIdentifier: selected
+            ),
+            "the nearby modal route has stable item identity"
+        )
     }
 
     static func testBLEManagerRequiresNavigationReadinessForWrites() {

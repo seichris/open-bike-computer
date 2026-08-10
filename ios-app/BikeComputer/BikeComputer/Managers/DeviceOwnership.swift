@@ -153,6 +153,184 @@ enum BLEDiscoveryFreshnessPolicy {
     }
 }
 
+enum BLEScanPurpose: Equatable {
+    case none
+    case trustedReconnect(UUID)
+    case opportunisticDiscovery
+    case explicitDiscovery
+    case selectedPeripheral(UUID)
+
+    var discoversUnknownDevices: Bool {
+        self == .opportunisticDiscovery || self == .explicitDiscovery
+    }
+
+    var allowsDuplicateAdvertisements: Bool {
+        discoversUnknownDevices
+    }
+}
+
+enum BLEDiscoveryOrigin: Equatable {
+    case opportunistic
+    case explicit
+}
+
+struct BLEScanContext: Equatable {
+    let isApplicationActive: Bool
+    let isBluetoothPoweredOn: Bool
+    let hasActiveBLESession: Bool
+    let knownDeviceCount: Int
+    let trustedPeripheralIdentifier: UUID?
+    let shouldReconnectTrustedPeripheral: Bool
+    let explicitDiscoveryRequested: Bool
+    let selectedPeripheralIdentifier: UUID?
+    let isUnknownDiscoverySuppressed: Bool
+    let isExclusiveOperationActive: Bool
+}
+
+enum BLEScanLifecyclePolicy {
+    static func purpose(for context: BLEScanContext) -> BLEScanPurpose {
+        guard context.isBluetoothPoweredOn,
+              !context.hasActiveBLESession,
+              !context.isExclusiveOperationActive else {
+            return .none
+        }
+
+        if context.isApplicationActive,
+           let selected = context.selectedPeripheralIdentifier {
+            return .selectedPeripheral(selected)
+        }
+        if context.isApplicationActive,
+           context.explicitDiscoveryRequested {
+            return .explicitDiscovery
+        }
+        if context.shouldReconnectTrustedPeripheral,
+           let trusted = context.trustedPeripheralIdentifier {
+            return .trustedReconnect(trusted)
+        }
+        if context.isApplicationActive,
+           context.knownDeviceCount == 0,
+           !context.isUnknownDiscoverySuppressed {
+            return .opportunisticDiscovery
+        }
+        return .none
+    }
+}
+
+struct BLEDiscoveryObservation: Equatable {
+    let device: DiscoveredBikeComputerDevice
+    let generation: UInt64
+}
+
+enum BLEOpportunisticCandidatePolicy {
+    static func isEligible(
+        _ observation: BLEDiscoveryObservation,
+        activeGeneration: UInt64?,
+        knownDevices: [KnownBikeComputerDevice],
+        serviceMatched: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard serviceMatched,
+              observation.generation == activeGeneration,
+              knownDevices.isEmpty,
+              observation.device.isClaimed == false,
+              observation.device.identitySuffix != nil,
+              now.timeIntervalSince(observation.device.lastSeenAt) <=
+                BLEDiscoveryFreshnessPolicy.maximumAge else {
+            return false
+        }
+
+        let observedSuffix = observation.device.identitySuffix?.uppercased()
+        return !knownDevices.contains { known in
+            if known.peripheralIdentifier == observation.device.peripheralIdentifier {
+                return true
+            }
+            guard !known.isLegacy,
+                  let observedSuffix else { return false }
+            return known.deviceID.uppercased().hasSuffix(observedSuffix)
+        }
+    }
+
+    static func strongest(
+        from observations: [BLEDiscoveryObservation],
+        activeGeneration: UInt64?,
+        knownDevices: [KnownBikeComputerDevice],
+        now: Date = Date()
+    ) -> BLEDiscoveryObservation? {
+        observations
+            .filter {
+                isEligible(
+                    $0,
+                    activeGeneration: activeGeneration,
+                    knownDevices: knownDevices,
+                    serviceMatched: true,
+                    now: now
+                )
+            }
+            .sorted {
+                if $0.device.rssi != $1.device.rssi {
+                    return $0.device.rssi > $1.device.rssi
+                }
+                return $0.device.peripheralIdentifier.uuidString <
+                    $1.device.peripheralIdentifier.uuidString
+            }
+            .first
+    }
+}
+
+enum BLEExplicitDiscoveryStartAction: Equatable {
+    case start
+    case confirmDisconnect
+    case disabledWhileConnecting
+}
+
+enum BLEExplicitDiscoveryStartPolicy {
+    static func action(
+        hasActiveBLESession: Bool,
+        isConnecting: Bool
+    ) -> BLEExplicitDiscoveryStartAction {
+        if isConnecting { return .disabledWhileConnecting }
+        return hasActiveBLESession ? .confirmDisconnect : .start
+    }
+}
+
+enum NearbyBicinoSetupStage: Equatable {
+    case offer
+    case pairing
+
+    mutating func advanceToPairing() {
+        self = .pairing
+    }
+}
+
+enum NearbyBicinoPresentationPolicy {
+    static func shouldPresent(
+        isApplicationActive: Bool,
+        knownDeviceCount: Int,
+        hasActiveBLESession: Bool,
+        hasBlockingPresentation: Bool,
+        isMapAreaSelectionActive: Bool,
+        isSuppressed: Bool
+    ) -> Bool {
+        isApplicationActive &&
+            knownDeviceCount == 0 &&
+            !hasActiveBLESession &&
+            !hasBlockingPresentation &&
+            !isMapAreaSelectionActive &&
+            !isSuppressed
+    }
+
+    static func routeID(peripheralIdentifier: UUID) -> String {
+        "nearby-bicino:\(peripheralIdentifier.uuidString.lowercased())"
+    }
+
+    static func shouldRetainCandidateDuringConnection(
+        discoveryOrigin: BLEDiscoveryOrigin?,
+        hasPendingPairingSession: Bool
+    ) -> Bool {
+        discoveryOrigin == .opportunistic && hasPendingPairingSession
+    }
+}
+
 enum BikeComputersMenuPolicy {
     static func title(knownDeviceCount: Int) -> String {
         switch knownDeviceCount {

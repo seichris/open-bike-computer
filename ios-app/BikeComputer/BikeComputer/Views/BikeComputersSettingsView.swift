@@ -8,6 +8,7 @@ struct BikeComputersSettingsView: View {
     @State private var selectedCandidate: DiscoveredBikeComputerDevice?
     @State private var presentedPairingCompletionGeneration: UInt64?
     @State private var ownsDiscoveryLifecycle = false
+    @State private var showingDisconnectForDiscoveryConfirmation = false
     private let focusSensorsOnAppear: Bool
     private let startsBikeComputerDiscoveryOnAppear: Bool
 
@@ -53,6 +54,9 @@ struct BikeComputersSettingsView: View {
                             Button {
                                 presentedPairingCompletionGeneration =
                                     bleManager.completedPairingGeneration
+                                bleManager.selectDiscoveredDeviceForPairing(
+                                    device
+                                )
                                 selectedCandidate = device
                             } label: {
                                 DiscoveredBikeComputerRow(device: device)
@@ -72,14 +76,17 @@ struct BikeComputersSettingsView: View {
                !bleManager.isDiscoveringDevices {
                 Section {
                     Button {
-                        beginDiscovery()
+                        handleConnectNewBikeComputer()
                     } label: {
                         Label(
                             "Connect a new Bike Computer",
                             systemImage: "plus.circle"
                         )
                     }
-                    .disabled(bleManager.deviceOperationDeviceID != nil)
+                    .disabled(
+                        bleManager.deviceOperationDeviceID != nil ||
+                        bleManager.isConnecting
+                    )
                 }
             }
 
@@ -108,8 +115,21 @@ struct BikeComputersSettingsView: View {
         .sheet(item: $selectedCandidate, onDismiss: {
             resumeOwnedDiscoveryIfNeeded()
         }) { candidate in
-            PairBikeComputerSheet(candidate: candidate)
+            BikeComputerPairingFlow(candidate: candidate)
                 .environmentObject(bleManager)
+        }
+        .confirmationDialog(
+            "Disconnect the current Bike Computer?",
+            isPresented: $showingDisconnectForDiscoveryConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect and Search", role: .destructive) {
+                ownsDiscoveryLifecycle = true
+                bleManager.disconnectCurrentDeviceAndStartDiscovery()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Bicino can connect to one Bike Computer at a time. The current device must disconnect before searching for another.")
         }
         .onAppear {
             if shouldStartBikeComputerDiscovery {
@@ -226,6 +246,20 @@ struct BikeComputersSettingsView: View {
         bleManager.startDeviceDiscovery()
     }
 
+    private func handleConnectNewBikeComputer() {
+        switch BLEExplicitDiscoveryStartPolicy.action(
+            hasActiveBLESession: bleManager.hasActiveTransportSession,
+            isConnecting: bleManager.isConnecting
+        ) {
+        case .start:
+            beginDiscovery()
+        case .confirmDisconnect:
+            showingDisconnectForDiscoveryConfirmation = true
+        case .disabledWhileConnecting:
+            break
+        }
+    }
+
     private func resumeOwnedDiscoveryIfNeeded() {
         let pairingCompletedDuringPresentation =
             presentedPairingCompletionGeneration.map {
@@ -317,7 +351,7 @@ private struct DiscoveredBikeComputerRow: View {
     }
 }
 
-private struct PairBikeComputerSheet: View {
+struct BikeComputerPairingFlow: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
     let candidate: DiscoveredBikeComputerDevice
