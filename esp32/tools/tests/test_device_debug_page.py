@@ -40,10 +40,15 @@ class DeviceDebugPageTests(unittest.TestCase):
             "lastRequestLatencyMs",
             "firmware.gitSha",
             "data.buildProfile",
+            "data.viewRotation",
             "shortGitSha",
             "Stale · retry",
             "/device-debug/v1/info",
             "/device-debug/v1/frame?after=",
+            "/device-debug/v1/button/boot",
+            "BOOT (short press)",
+            "frameWidth-1-dy",
+            "frame.height-1-y",
         ):
             self.assertIn(text, PAGE)
 

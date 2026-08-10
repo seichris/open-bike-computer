@@ -116,6 +116,7 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
     return result;
   }
   wakeRequested_.store(false, std::memory_order_release);
+  bootPressRequested_.store(false, std::memory_order_release);
   exitRequested_.store(false, std::memory_order_release);
   exitResponsePending_.store(false, std::memory_order_release);
   lastFrameResponseMs_ = 0;
@@ -127,6 +128,7 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
 
 void DeviceDebugHttp::cancelSession() {
   pointerInput().cancelSession();
+  bootPressRequested_.store(false, std::memory_order_release);
   exitResponsePending_.store(false, std::memory_order_release);
 }
 
@@ -195,6 +197,9 @@ bool DeviceDebugHttp::handleRequest(
       request.path == "/device-debug/v1/display/wake")
     return handleWake(client);
   if (request.method == "POST" &&
+      request.path == "/device-debug/v1/button/boot")
+    return handleBootPress(request, client);
+  if (request.method == "POST" &&
       request.path == "/device-debug/v1/session/exit")
     return handleExit(client);
   return false;
@@ -233,6 +238,8 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
        << ",\"uptimeMs\":" << nowMs << ",\"deviceId\":\"" << deviceId
        << "\",\"width\":"
        << geometry.width << ",\"height\":" << geometry.height
+       << ",\"viewRotation\":"
+       << static_cast<unsigned>(geometry.panelToLvglRotation)
        << ",\"pixelFormat\":\"rgb565le\",\"displayState\":\""
        << displayStateName(displayPowerManager.state())
        << "\",\"frameSequence\":" << frameStore().currentSequence()
@@ -396,6 +403,23 @@ bool DeviceDebugHttp::handleWake(WiFiClient &client) {
   return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
 }
 
+bool DeviceDebugHttp::handleBootPress(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  if (!server_->isRequestAuthorized(request))
+    return device_transfer::sendHttpError(client, 401, "session_revoked",
+                                          "debug session was revoked");
+  bool expected = false;
+  if (!bootPressRequested_.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel,
+          std::memory_order_acquire))
+    return device_transfer::sendHttpError(
+        client, 409, "boot_press_pending",
+        "a BOOT short press is already queued");
+  frameStore().requestNextFrame();
+  ui_scheduler::notify(ui_scheduler::WakeReason::RemoteDebug);
+  return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
+}
+
 bool DeviceDebugHttp::handleExit(WiFiClient &client) {
   exitResponsePending_.store(true, std::memory_order_release);
   return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
@@ -419,6 +443,14 @@ void DeviceDebugHttp::responseDidComplete(
 
 bool DeviceDebugHttp::takeWakeRequest() {
   return wakeRequested_.exchange(false, std::memory_order_acq_rel);
+}
+
+bool DeviceDebugHttp::bootPressRequested() const {
+  return bootPressRequested_.load(std::memory_order_acquire);
+}
+
+bool DeviceDebugHttp::takeBootPressRequest() {
+  return bootPressRequested_.exchange(false, std::memory_order_acq_rel);
 }
 
 bool DeviceDebugHttp::takeAutomaticExitRequest() {

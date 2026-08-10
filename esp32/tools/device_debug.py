@@ -212,6 +212,9 @@ class DebugClient:
     def wake(self) -> None:
         self._request("/device-debug/v1/display/wake", method="POST")
 
+    def boot(self) -> None:
+        self._request("/device-debug/v1/button/boot", method="POST")
+
     def exit(self) -> None:
         self._request("/device-debug/v1/session/exit", method="POST")
 
@@ -283,6 +286,10 @@ def _run(args: argparse.Namespace, client: DebugClient) -> None:
         client.wake()
         print("wake requested")
         return
+    if args.command == "boot":
+        client.boot()
+        print("BOOT short press requested")
+        return
     if args.command == "exit":
         client.exit()
         print("session exit acknowledged")
@@ -348,6 +355,7 @@ def _parser() -> argparse.ArgumentParser:
         swipe.add_argument(coordinate, type=int)
     swipe.add_argument("--duration-ms", type=int, default=400)
     commands.add_parser("wake")
+    commands.add_parser("boot")
     commands.add_parser("exit")
     return parser
 

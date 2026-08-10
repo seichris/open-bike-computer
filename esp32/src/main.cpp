@@ -209,12 +209,20 @@ static bool processWaveshareBootButton() {
 
   const uint32_t now = millis();
   const bool pressed = digitalRead(BOARD_BOOT_PIN) == LOW;
-  const bool latchedPress = takeWaveshareBootScreenCycle();
-  const bool hadInput = latchedPress || pressed;
+  const bool physicalLatchedPress = takeWaveshareBootScreenCycle();
+  const bool hadInput = physicalLatchedPress || pressed ||
+                        deviceDebugHttp.bootPressRequested();
 
   if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {
     return hadInput;
   }
+
+  // Keep a remote press queued until the prior physical or remote press has
+  // completed its debounced release. Once consumed, it follows the exact same
+  // pairing, screen-cycle, and release-debounce path as a GPIO0 short press.
+  const bool remotePress = !waveshareBootWaitingForRelease &&
+                           deviceDebugHttp.takeBootPressRequest();
+  const bool latchedPress = physicalLatchedPress || remotePress;
 
   if (!waveshareBootWaitingForRelease) {
     if (!latchedPress && !pressed) {

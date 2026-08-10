@@ -405,6 +405,7 @@ All routes exist only while transfer mode is `debug`.
 | `GET` | `/device-debug/v1/frame?after=N` | Token | Read a new complete frame or receive `204`. |
 | `POST` | `/device-debug/v1/pointer` | Token | Queue one bounded pointer event. |
 | `POST` | `/device-debug/v1/display/wake` | Token | Queue an explicit display wake/full refresh on the UI task. |
+| `POST` | `/device-debug/v1/button/boot` | Token | Queue one debounced BOOT/GPIO0 short press through the existing firmware button path. |
 | `POST` | `/device-debug/v1/session/exit` | Token | Acknowledge, cancel input, then revoke the session after response completion. |
 
 Pointer JSON schema:

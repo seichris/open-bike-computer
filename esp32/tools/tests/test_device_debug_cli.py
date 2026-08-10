@@ -126,6 +126,16 @@ class DeviceDebugCliTests(unittest.TestCase):
             device_debug._hold(InterruptingClient(), 3, 4, 0)
         self.assertEqual(phases, ["down", "up", "cancel"])
 
+    def test_boot_uses_dedicated_short_press_route(self):
+        calls = []
+        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+        client._request = lambda path, **kwargs: calls.append((path, kwargs))
+        client.boot()
+        self.assertEqual(
+            calls,
+            [("/device-debug/v1/button/boot", {"method": "POST"})],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,12 +32,21 @@ CAP2 bit `15`, and reject debug-mode entry.
    does not affect it.
 
 The browser displays target identity, dimensions, display state, frame/copy and
-HTTP-duration counters, PSRAM allocation evidence, the live panel-oriented
-RGB565 framebuffer, pointer control, an explicit wake action, PNG export, and
-session exit. Frame polling does not wake an off or dimmed panel. Pointer events
-are rejected while the display is off;
+HTTP-duration counters, PSRAM allocation evidence, the live user-oriented
+RGB565 framebuffer, pointer control, an authenticated **BOOT (short press)**
+action, an explicit wake action, PNG export, and session exit. The 1.75-inch
+panel's final raw framebuffer is rotated 90 degrees left for display, and
+browser coordinates are transformed back before the firmware applies its
+normal panel-to-LVGL mapping. The 2.06-inch view remains unrotated. Frame
+polling does not wake an off or dimmed panel. Pointer events are rejected while
+the display is off;
 **Wake display** requests the same policy-level activity and full refresh used
 by local wake handling.
+
+**BOOT (short press)** queues one debounced short press through the same
+firmware path as the physical GPIO0 button. It advances screens normally and,
+if an ownership comparison is active, obeys the same fresh-input gate before
+confirming it. Long-press owner recovery remains physical-only.
 
 Physical touch always wins. Any hardware contact cancels the synthetic pointer
 and suppresses remote input until physical release. Remote presses also have a
@@ -60,6 +69,7 @@ same-origin page. All versioned API routes require the existing
 | `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. |
 | `POST` | `/device-debug/v1/pointer` | Queue one schema-1 down/move/up/cancel event. |
 | `POST` | `/device-debug/v1/display/wake` | Queue a UI-task display wake and full refresh. |
+| `POST` | `/device-debug/v1/button/boot` | Queue one debounced BOOT/GPIO0 short press through the normal firmware path. |
 | `POST` | `/device-debug/v1/session/exit` | Revoke the session after the response is consumed. |
 
 The 32-byte little-endian `BCF1` header contains header size, flags, frame
@@ -90,7 +100,7 @@ BICINO_DEVICE_DEBUG_TOKEN='session-token' \
 ```
 
 Other commands are `tap X Y`, `long-press X Y --duration-ms N`,
-`swipe X1 Y1 X2 Y2 --duration-ms N`, `wake`, and `exit`. The CLI validates the
+`swipe X1 Y1 X2 Y2 --duration-ms N`, `boot`, `wake`, and `exit`. The CLI validates the
 device identity/dimensions before input and validates frame metadata, length,
 CRC, and PNG output. It never discovers, selects, flashes, or pairs hardware.
 

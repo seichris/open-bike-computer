@@ -23,6 +23,8 @@ public:
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
   bool takeWakeRequest();
+  bool bootPressRequested() const;
+  bool takeBootPressRequest();
   bool takeAutomaticExitRequest();
   bool initialized() const { return configured_ && runtimeReady_; }
 
@@ -36,12 +38,15 @@ private:
   bool handlePointer(const device_transfer::HttpRequest &request,
                      WiFiClient &client);
   bool handleWake(WiFiClient &client);
+  bool handleBootPress(const device_transfer::HttpRequest &request,
+                       WiFiClient &client);
   bool handleExit(WiFiClient &client);
 
   device_transfer::HttpTransferServer *server_ = nullptr;
   bool configured_ = false;
   bool runtimeReady_ = false;
   std::atomic<bool> wakeRequested_{false};
+  std::atomic<bool> bootPressRequested_{false};
   std::atomic<bool> exitRequested_{false};
   std::atomic<bool> exitResponsePending_{false};
   uint32_t lastFrameResponseMs_ = 0;

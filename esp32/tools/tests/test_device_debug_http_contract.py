@@ -15,6 +15,7 @@ BLE = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text(
 INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
+MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 LV_CONFIG = (ROOT / "lib/lvgl/lv_conf.h").read_text(encoding="utf-8")
 LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
     encoding="utf-8"
@@ -52,6 +53,29 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             pointer.index("server_->isRequestAuthorized(request)"),
             pointer.index("deserializeJson"),
         )
+
+    def test_boot_short_press_is_authenticated_bounded_and_session_scoped(self):
+        boot = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleBootPress") :
+            HTTP.index("bool DeviceDebugHttp::handleExit")
+        ]
+        self.assertLess(
+            boot.index("server_->isRequestAuthorized(request)"),
+            boot.index("compare_exchange_strong"),
+        )
+        self.assertIn("boot_press_pending", boot)
+        self.assertIn("bootPressRequested_.store(false", HTTP)
+
+    def test_remote_boot_uses_existing_waveshare_button_path(self):
+        button = MAIN[
+            MAIN.index("static bool processWaveshareBootButton") :
+            MAIN.index("static bool processWavesharePowerButton")
+        ]
+        self.assertIn("takeWaveshareBootScreenCycle()", button)
+        self.assertIn("deviceDebugHttp.takeBootPressRequest()", button)
+        self.assertIn("const bool latchedPress =", button)
+        self.assertIn("toggleNavigationScreen();", button)
+        self.assertIn("confirmOwnershipPairing();", button)
 
     def test_shell_security_headers_are_present(self):
         for header in (
