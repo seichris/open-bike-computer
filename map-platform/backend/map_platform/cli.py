@@ -26,6 +26,7 @@ from .map_stream_build_identity import (
     verify_map_stream_build_identity,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
@@ -371,11 +372,22 @@ def main() -> int:
         data_root / "map-monitoring.sqlite3",
         retention_days=monitoring_retention_days,
         summary_run_limit=monitoring_summary_run_limit,
+        max_estimate_revisions=int(
+            os.environ.get("MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB", "16")
+        ),
     )
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     source_index = SourceIndex.from_json(
         source_index_path,
         fallback_provider=source_provider,
+    )
+    preprocessing_scope_mode = building_preprocessing_scope_mode()
+    estimate_coordinator = load_estimate_coordinator(
+        repo_root=repo_root,
+        data_root=data_root,
+        store=store,
+        monitoring_store=monitoring_store,
+        preprocessing_mode=preprocessing_scope_mode,
     )
     service = MapJobService(
         source_index,
@@ -383,6 +395,7 @@ def main() -> int:
         label_target2_enabled=label_target2_generation_enabled(),
         building_target3_enabled=building_target3_generation_enabled(),
         building_target3_allowlist=building_target3_generation_allowlist(),
+        estimate_coordinator=estimate_coordinator,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
@@ -399,14 +412,14 @@ def main() -> int:
                 required=map_signer is not None,
             )
         )
-        return MapBuildPipeline(
+        pipeline = MapBuildPipeline(
             PipelinePaths(
                 repo_root=repo_root,
                 work_root=data_root / "work",
                 pack_root=data_root / "packs",
             ),
             source_cache=source_cache,
-            building_scope_mode=building_preprocessing_scope_mode(),
+            building_scope_mode=preprocessing_scope_mode,
             artifact_store=create_artifact_store_from_environment(data_root),
             map_signer=map_signer,
             producer_build_sha256=producer_build_sha256,
@@ -417,6 +430,9 @@ def main() -> int:
                 else None
             ),
         )
+        estimate_coordinator.producer_build_sha256 = producer_build_sha256
+        estimate_coordinator.producer_image_digest = producer_image_digest
+        return pipeline
 
     if args.command == "create-job":
         request = json.loads(args.request_json)
@@ -434,6 +450,7 @@ def main() -> int:
                     pipeline,
                     args.job_id,
                     monitoring_store=monitoring_store,
+                    estimate_coordinator=estimate_coordinator,
                 ).to_dict(),
                 indent=2,
                 sort_keys=True,
@@ -456,6 +473,7 @@ def main() -> int:
             store,
             pipeline,
             monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
         ).run_next()
         print(
             json.dumps(
@@ -476,6 +494,7 @@ def main() -> int:
             store,
             pipeline,
             monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
         ).run_until_empty(max_jobs=args.max_jobs)
         print(
             json.dumps(
@@ -500,12 +519,14 @@ def main() -> int:
 
         def write_worker_heartbeat() -> None:
             heartbeat_path.write_text(str(time.time()))
+            estimate_coordinator.publish_worker_capability(worker.worker_id)
 
         worker = MapWorker(
             store,
             pipeline,
             on_heartbeat=write_worker_heartbeat,
             monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
         )
         processed = 0
         while args.max_jobs is None or processed < args.max_jobs:

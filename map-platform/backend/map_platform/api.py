@@ -54,6 +54,10 @@ from .monitoring import (
 )
 from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .preparation_estimates import (
+    PreparationEstimateMode,
+    load_estimate_coordinator,
+)
 from .rate_limits import (
     ClientAddressResolver,
     PersistentRateLimiter,
@@ -129,6 +133,9 @@ def create_app():
         data_root / "map-monitoring.sqlite3",
         retention_days=monitoring_retention_days,
         summary_run_limit=monitoring_summary_run_limit,
+        max_estimate_revisions=int(
+            os.environ.get("MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB", "16")
+        ),
     )
     rate_limiter = PersistentRateLimiter(
         data_root / "rate-limits.sqlite3",
@@ -210,19 +217,29 @@ def create_app():
     ).strip().lower() in {"1", "true", "yes"}
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
+    job_store = JobStore(data_root / "jobs")
+    preprocessing_scope_mode = building_preprocessing_scope_mode()
+    estimate_coordinator = load_estimate_coordinator(
+        repo_root=repo_root,
+        data_root=data_root,
+        store=job_store,
+        monitoring_store=monitoring_store,
+        preprocessing_mode=preprocessing_scope_mode,
+    )
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
-        JobStore(data_root / "jobs"),
+        job_store,
         limits=limits,
         label_target2_enabled=label_target2_generation_enabled(),
         building_target3_enabled=building_target3_generation_enabled(),
         building_target3_allowlist=building_target3_generation_allowlist(),
+        estimate_coordinator=estimate_coordinator,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
         source_cache=source_cache,
-        building_scope_mode=building_preprocessing_scope_mode(),
+        building_scope_mode=preprocessing_scope_mode,
         source_preview_geometry_resolver=(
             source_provider.preview_geometry_for_source
             if source_provider is not None
@@ -239,6 +256,7 @@ def create_app():
     app.state.installation_store = installation_store
     app.state.job_store = service.store
     app.state.monitoring_store = monitoring_store
+    app.state.preparation_estimate_mode = estimate_coordinator.mode.value
     app.state.map_stream_rollout = map_stream_rollout
     app.state.rate_limiter = rate_limiter
 
@@ -339,6 +357,8 @@ def create_app():
                 for key, value in result["artifactMetrics"].items()
                 if not key.startswith("stream")
             } or None
+        if estimate_coordinator.mode != PreparationEstimateMode.PUBLIC:
+            result.pop("preparationEstimate", None)
         return result
 
     def client_map_stream_trust_capabilities(
@@ -408,6 +428,7 @@ def create_app():
         return {
             "status": "ok",
             "mapStreamRollout": map_stream_rollout.public_summary(),
+            "preparationEstimates": estimate_coordinator.mode.value,
         }
 
     @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])
@@ -733,6 +754,7 @@ def create_app():
                 pipeline,
                 job_id,
                 monitoring_store=monitoring_store,
+                estimate_coordinator=estimate_coordinator,
             ).to_dict()
         except JobClaimError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -792,6 +814,7 @@ def create_app():
             service.store,
             pipeline,
             monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
         ).run_next()
         return {
             "workerId": result.worker_id,
