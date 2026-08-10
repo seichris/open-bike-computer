@@ -209,16 +209,12 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - name: Install host crypto dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmbedtls-dev
-          python -m pip install --upgrade cryptography
+          sudo apt-get install -y libmbedtls-dev python3-cryptography
       - name: Firmware manifest tests
-        run: python -m unittest discover -s tools/tests
+        run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
       - name: GUI layout host tests
         run: |

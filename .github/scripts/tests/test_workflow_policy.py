@@ -109,6 +109,16 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Merge only after **CI Gate**", agent_instructions)
         self.assertNotIn("Merge only after **Map Backend**", agent_instructions)
 
+    def test_host_tests_keep_a_clean_firmware_build_environment(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        host_job = general_ci.split("\n  esp32-host:\n", 1)[1].split(
+            "\n  map-platform:\n", 1
+        )[0]
+
+        self.assertNotIn("actions/setup-python", host_job)
+        self.assertIn("python3-cryptography", host_job)
+        self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
+
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
         for workflow in (
             "ci.yml",
