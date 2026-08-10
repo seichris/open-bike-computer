@@ -20,9 +20,16 @@ import urllib.request
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from firmware_runtime import Artifact, FirmwareRuntimeError, load_lock
+from firmware_runtime import (
+    Artifact,
+    FirmwareRuntimeError,
+    _verify_runtime_tree,
+    extract_verified_bundle,
+    load_lock,
+    select_target,
+)
 from generated_sdkconfig import (
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES_SHA256,
@@ -156,17 +163,24 @@ def _extract_python(archive_path: Path, destination: Path) -> Path:
     return python
 
 
-def _run(command: Sequence[str], *, cwd: Path | None = None) -> str:
-    environment = os.environ.copy()
-    environment.update({
+def _run(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    subprocess_environment = os.environ.copy()
+    subprocess_environment.update({
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
         "SOURCE_DATE_EPOCH": "0",
     })
+    if environment:
+        subprocess_environment.update(environment)
     result = subprocess.run(
         command,
         cwd=cwd,
-        env=environment,
+        env=subprocess_environment,
         text=True,
         capture_output=True,
         check=False,
@@ -531,6 +545,147 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         return contract
 
 
+def _installed_distributions(python: Path, environment: Mapping[str, str]) -> dict[str, str]:
+    raw = _run(
+        (
+            str(python),
+            "-c",
+            "import importlib.metadata,json;"
+            "print(json.dumps(sorted((d.metadata['Name'],d.version) "
+            "for d in importlib.metadata.distributions())))",
+        ),
+        environment=environment,
+    )
+    rows = json.loads(raw)
+    if not isinstance(rows, list):
+        raise FirmwareRuntimeError("offline replay distribution output is invalid")
+    result: dict[str, str] = {}
+    for row in rows:
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not all(isinstance(value, str) and value for value in row)
+        ):
+            raise FirmwareRuntimeError("offline replay distribution output is invalid")
+        name = _normalize_name(row[0])
+        if name in result:
+            raise FirmwareRuntimeError(f"offline replay has duplicate distribution: {name}")
+        result[name] = row[1]
+    return result
+
+
+def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> dict[str, object]:
+    inputs, refresh_path, _ = _load_inputs(project_dir)
+    contract_path = candidate_dir / f"contract-{target_id}.json"
+    bundle_path = candidate_dir / f"open-bike-firmware-runtime-{target_id}.tar.gz"
+    if (
+        contract_path.is_symlink()
+        or not contract_path.is_file()
+        or bundle_path.is_symlink()
+        or not bundle_path.is_file()
+    ):
+        raise FirmwareRuntimeError("candidate contract or bundle is missing or unsafe")
+    contract = json.loads(contract_path.read_bytes())
+    with tempfile.TemporaryDirectory(prefix="open-bike-runtime-replay-") as temporary_name:
+        temporary = Path(temporary_name)
+        candidate_lock = {
+            "schema": 1,
+            "lockSetId": "candidate-offline-replay",
+            "generator": {
+                "version": "2",
+                "commit": "0" * 40,
+                "refreshInputsSha256": _sha256(refresh_path),
+                "licensesSha256": "0" * 64,
+            },
+            "targets": [contract],
+        }
+        lock_path = temporary / "lock.json"
+        lock_path.write_bytes(_canonical(candidate_lock))
+        target = select_target(load_lock(lock_path), target_id)
+        if target.bundle is None or target.contents is None:
+            raise FirmwareRuntimeError("candidate contract is not accepted")
+        if (
+            bundle_path.stat().st_size != target.bundle.size
+            or _sha256(bundle_path) != target.bundle.sha256
+        ):
+            raise FirmwareRuntimeError("candidate bundle disagrees with its contract")
+        runtime = temporary / "runtime"
+        extract_verified_bundle(bundle_path, runtime)
+        provenance = _verify_runtime_tree(runtime, target)
+        replay_environment = {"UV_CACHE_DIR": str(temporary / "empty-uv-cache")}
+        pio_output = _run((str(runtime / "bin/pio"), "--version"), environment=replay_environment)
+        uv_output = _run((str(runtime / "bin/uv"), "--version"), environment=replay_environment)
+        observed: dict[str, dict[str, str]] = {}
+        for set_name, requirements_name in (
+            ("pioarduinoRoot", "pioarduino-root.txt"),
+            ("espIdf", "esp-idf.txt"),
+        ):
+            environment_root = temporary / set_name
+            environment_python = environment_root / "bin/python"
+            _run(
+                (
+                    str(runtime / "bin/uv"),
+                    "venv",
+                    "--clear",
+                    "--python",
+                    str(runtime / "python/bin/python3"),
+                    str(environment_root),
+                ),
+                environment=replay_environment,
+            )
+            _run(
+                (
+                    str(runtime / "bin/uv"),
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--no-cache",
+                    "--find-links",
+                    str(runtime / "wheelhouse"),
+                    "--python",
+                    str(environment_python),
+                    "--requirements",
+                    str(runtime / "requirements" / requirements_name),
+                ),
+                environment=replay_environment,
+            )
+            _run(
+                (
+                    str(runtime / "bin/uv"),
+                    "pip",
+                    "check",
+                    "--python",
+                    str(environment_python),
+                ),
+                environment=replay_environment,
+            )
+            distributions = _installed_distributions(
+                environment_python, replay_environment
+            )
+            expected = {
+                _normalize_name(requirement.split("==", 1)[0]): requirement.split("==", 1)[1]
+                for requirement in inputs["distributionSets"][set_name]
+            }
+            if distributions != expected:
+                raise FirmwareRuntimeError(
+                    f"offline replay distribution set changed for {set_name}"
+                )
+            observed[set_name] = distributions
+        return {
+            "schema": 1,
+            "target": target_id,
+            "bundleSha256": target.bundle.sha256,
+            "runtimeTreeSha256": provenance.tree_sha256,
+            "platformioOutput": pio_output,
+            "uvOutput": uv_output,
+            "distributionCounts": {
+                name: len(distributions) for name, distributions in observed.items()
+            },
+            "uvCacheStartedEmpty": True,
+            "networkDisabled": True,
+        }
+
+
 def assemble_lock(project_dir: Path, contracts: Sequence[Path], output: Path, lock_set_id: str) -> dict[str, object]:
     _, refresh, licenses = _load_inputs(project_dir)
     targets = [json.loads(path.read_bytes()) for path in contracts]
@@ -555,7 +710,16 @@ def assemble_lock(project_dir: Path, contracts: Sequence[Path], output: Path, lo
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("inspect-inputs", "verify-python", "build-candidate", "assemble-lock"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "inspect-inputs",
+            "verify-python",
+            "build-candidate",
+            "verify-candidate",
+            "assemble-lock",
+        ),
+    )
     parser.add_argument("--project-dir", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--target")
     parser.add_argument("--output", type=Path)
@@ -579,6 +743,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.target or args.output_dir is None or not args.release_tag:
                 raise FirmwareRuntimeError("build-candidate requires --target, --output-dir, and --release-tag")
             result = build_candidate(args.project_dir, args.target, args.output_dir, args.release_tag)
+        elif args.command == "verify-candidate":
+            if not args.target or args.output_dir is None:
+                raise FirmwareRuntimeError(
+                    "verify-candidate requires --target and --output-dir"
+                )
+            result = verify_candidate(args.project_dir, args.target, args.output_dir)
         else:
             if args.output is None or not args.lock_set_id or not args.contract:
                 raise FirmwareRuntimeError("assemble-lock requires --output, --lock-set-id, and --contract")
