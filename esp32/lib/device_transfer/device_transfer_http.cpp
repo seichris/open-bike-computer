@@ -16,8 +16,12 @@ namespace {
 // Map activation is handed off to this worker after the HTTP response completes
 // so the transfer and activation phases do not allocate two large stacks at
 // once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path.
-constexpr uint32_t kHttpWorkerStackBytes = 16384;
+// retain the 16 KiB budget required by that handoff path. Remote debugging does
+// not perform map activation and starts only after its two PSRAM frame buffers
+// have been reserved. Keep that worker smaller so Wi-Fi can still allocate an
+// internal-RAM task stack on the fully initialized device.
+constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
+constexpr uint32_t kDebugHttpWorkerStackBytes = 8192;
 
 static std::string trim(const std::string &value) {
   size_t begin = 0;
@@ -300,13 +304,16 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
+    const uint32_t workerStackBytes =
+        mode == "debug" ? kDebugHttpWorkerStackBytes
+                        : kTransferHttpWorkerStackBytes;
     // Publish the worker handle and persistent power-lock ownership before the
     // new task can observe state. Holding the mutex across xTaskCreate makes
     // an immediately scheduled worker wait until both fields are coherent.
     lockState();
     const BaseType_t created =
-        xTaskCreate(workerTaskThunk, "device_http", kHttpWorkerStackBytes, this,
-                    1, &worker);
+        xTaskCreate(workerTaskThunk, "device_http", workerStackBytes, this, 1,
+                    &worker);
     if (created == pdPASS) {
       workerTask_ = worker;
       powerLockHeld_ = acquiredPowerLock;
@@ -314,8 +321,9 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     unlockState();
     Serial.printf(
         "DEVICE_TRANSFER_HTTP: worker create result=%ld handle=%p "
-        "free_heap=%u\n",
+        "stack_bytes=%u free_heap=%u\n",
         static_cast<long>(created), static_cast<void *>(worker),
+        static_cast<unsigned>(workerStackBytes),
         static_cast<unsigned>(ESP.getFreeHeap()));
     if (created != pdPASS) {
       server_.stop();
