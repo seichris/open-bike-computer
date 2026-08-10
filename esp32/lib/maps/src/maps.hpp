@@ -18,6 +18,7 @@
 #include "mapTransform.hpp"
 #include "map_projection.hpp"
 #include "mapPresentation.hpp"
+#include "mapPoseInputPolicy.hpp"
 #include "mapRenderJob.hpp"
 #include "mapSurface.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
@@ -391,9 +392,8 @@ private:
   uint64_t lastNavigationSignature = 0;
   uint64_t lastProjectionSignature = 0;
   uint64_t lastHeadingSessionSignature = 0;
-  uint64_t lastGpsPositionSignature = 0;
-  uint64_t lastGpsSignature = 0;
   uint32_t headingSessionEpoch = 1;
+  map_pose_input_policy::Tracker poseInputTracker;
   map_presentation::Presenter posePresenter;
   map_presentation::HeadingResolver headingResolver;
   map_presentation::PresentedPose presentedPose{};

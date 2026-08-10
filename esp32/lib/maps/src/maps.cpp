@@ -3642,9 +3642,9 @@ void Maps::invalidateRenderSemantics(uint32_t nowMs) {
     posePresenter.resetHeading(nowMs);
     presentedPose.headingDegrees = 0.0;
     presentedPose.headingValid = false;
-    // Re-run the latest physical fix through the new heading epoch even when
-    // its coordinate, speed, and newly resolved bearing are byte-identical.
-    lastGpsSignature = 0;
+    // Re-run display heading through the new epoch without manufacturing a
+    // fresh physical observation from the retained GPS fix.
+    poseInputTracker.invalidateHeading();
   }
 
   const uint16_t viewportHeight =
@@ -3727,12 +3727,10 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
   uint64_t gpsSignature = gpsPositionSignature;
   gpsSignature = fnvMix64(gpsSignature, headingValid ? 1U : 0U);
   gpsSignature = fnvMix64(gpsSignature, doubleBits(resolvedHeading));
-  if (gpsSignature != lastGpsSignature || !posePresenter.hasFix()) {
-    const bool physicalFixChanged =
-        gpsPositionSignature != lastGpsPositionSignature ||
-        !posePresenter.hasFix();
-    lastGpsPositionSignature = gpsPositionSignature;
-    lastGpsSignature = gpsSignature;
+  const map_pose_input_policy::Action poseInputAction =
+      poseInputTracker.classify(gpsPositionSignature, gpsSignature,
+                                posePresenter.hasFix());
+  if (poseInputAction != map_pose_input_policy::Action::None) {
     map_presentation::Fix fix;
     fix.position = {lon2x(gps.gpsData.longitude),
                     lat2y(gps.gpsData.latitude)};
@@ -3748,7 +3746,8 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
     fix.timestampMs = bleStats.gpsPacketCount != 0
                           ? bleStats.lastGpsPacketMs
                           : nowMs;
-    if (physicalFixChanged) {
+    if (poseInputAction ==
+        map_pose_input_policy::Action::ObservePhysicalFix) {
       posePresenter.observe(fix, nowMs);
     } else {
       posePresenter.updateHeading(resolvedHeading, headingValid, nowMs);

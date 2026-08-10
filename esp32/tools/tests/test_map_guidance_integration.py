@@ -15,6 +15,9 @@ MAP_HEADER_SOURCE = (
 MAP_PRESENTATION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapPresentation.hpp"
 ).read_text(encoding="utf-8")
+MAP_POSE_INPUT_POLICY_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapPoseInputPolicy.hpp"
+).read_text(encoding="utf-8")
 BLE_SOURCE = (
     ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.cpp"
 ).read_text(encoding="utf-8")
@@ -238,8 +241,13 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("bleStats.lastGpsPacketMs", pose)
         self.assertIn("bleStats.gpsPacketCount", pose)
         self.assertIn("fix.timestampMs", pose)
-        self.assertIn("lastGpsPositionSignature", pose)
+        self.assertIn("poseInputTracker.classify", pose)
         self.assertIn("posePresenter.updateHeading", pose)
+        self.assertIn("Action::ObservePhysicalFix", pose)
+        self.assertIn(
+            "positionSignature != lastPositionSignature_",
+            MAP_POSE_INPUT_POLICY_SOURCE,
+        )
         self.assertIn('"MAPIO: presentation gpsAgeMs=%lu lastGpsGapMs=%lu "', pose)
         self.assertIn('"predictionExhausted=%u exhaustionCount=%lu "', pose)
 

@@ -68,7 +68,9 @@ fix converges from the shared pose.
 The full-speed window (1.5 seconds), hard horizon (2.5 seconds), and distance
 cap (70 metres) are static defaults in `mapPresentation.hpp`. The distance cap
 equals 35 m/s multiplied by the curve's 2.0 seconds of integrated motion at
-the hard horizon. They apply to both
+the hard horizon. These static values were implemented in commit
+`3d12fefdb8f13544cc697c0108a3d6f805052103`, based on `origin/main`
+`836030c1bc3cf972a79e73f84e3500fd5a7f9b6a`. They apply to both
 `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` and have no map/navigation
 fixture; they are not runtime or externally measured values. Device validation
 of the timing policy remains part of the physical gate below.
