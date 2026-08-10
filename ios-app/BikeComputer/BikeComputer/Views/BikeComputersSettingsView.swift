@@ -130,6 +130,9 @@ struct BikeComputersSettingsView: View {
             Text("Bicino can connect to one Bike Computer at a time. The current device must disconnect before searching for another.")
         }
         .onAppear {
+            bleManager.setUnknownDeviceDiscoverySuspended(
+                sensorDetectionCoordinator.isLooking
+            )
             if shouldStartBikeComputerDiscovery {
                 beginDiscovery()
             }
@@ -162,23 +165,22 @@ struct BikeComputersSettingsView: View {
         .onChange(of: sensorDetectionCoordinator.isLooking) {
             isLooking in
             if isLooking {
-                ownsDiscoveryLifecycle = false
-                if bleManager.isDiscoveringDevices {
-                    bleManager.cancelDeviceDiscovery(
-                        resumeAutoReconnect: true
-                    )
-                }
+                bleManager.setUnknownDeviceDiscoverySuspended(true)
             } else if shouldStartBikeComputerDiscovery,
                       !ownsDiscoveryLifecycle {
+                bleManager.setUnknownDeviceDiscoverySuspended(false)
                 beginDiscovery()
+            } else {
+                bleManager.setUnknownDeviceDiscoverySuspended(false)
             }
         }
         .onDisappear {
+            sensorDetectionCoordinator.stopLooking()
             if ownsDiscoveryLifecycle {
                 ownsDiscoveryLifecycle = false
                 bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
-            sensorDetectionCoordinator.stopLooking()
+            bleManager.setUnknownDeviceDiscoverySuspended(false)
         }
     }
 
@@ -286,7 +288,8 @@ struct BikeComputersSettingsView: View {
             ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
             isBluetoothPoweredOn:
                 bleManager.centralStateDescription == "powered on",
-            isDiscoveringDevices: bleManager.isDiscoveringDevices,
+            isExplicitDiscoveryActive:
+                bleManager.currentScanPurpose == .explicitDiscovery,
             pairingCompletedDuringPresentation:
                 pairingCompletedDuringPresentation
         ) else {

@@ -225,15 +225,6 @@ struct BLEUnknownScanObservationGate {
     }
 }
 
-enum BLEBackgroundDiscoveryPolicy {
-    static func shouldRestoreTrustedReconnect(
-        isAbandoningExplicitDiscovery: Bool,
-        knownDeviceCount: Int
-    ) -> Bool {
-        isAbandoningExplicitDiscovery && knownDeviceCount > 0
-    }
-}
-
 enum BLEDiscoveryOrigin: Equatable {
     case opportunistic
     case explicit
@@ -451,11 +442,11 @@ enum BikeComputersMenuPolicy {
     static func shouldResumeOwnedDiscovery(
         ownsDiscoveryLifecycle: Bool,
         isBluetoothPoweredOn: Bool,
-        isDiscoveringDevices: Bool,
+        isExplicitDiscoveryActive: Bool,
         pairingCompletedDuringPresentation: Bool
     ) -> Bool {
         ownsDiscoveryLifecycle && isBluetoothPoweredOn &&
-            !isDiscoveringDevices && !pairingCompletedDuringPresentation
+            !isExplicitDiscoveryActive && !pairingCompletedDuringPresentation
     }
 
     static func shouldRestartOwnedDiscoveryOnForeground(

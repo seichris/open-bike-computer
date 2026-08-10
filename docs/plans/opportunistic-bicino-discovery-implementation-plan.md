@@ -291,9 +291,11 @@ In `BLEManager.swift`:
    that permits `isDiscoveringDevices` to scan through an active connection.
 8. Call `stopScanning()` at the beginning of `connectToPeripheral(_:)`, as
    today, and defensively in `didConnect` and the accepted restoration path.
-9. When the app backgrounds, cancel opportunistic/explicit discovery, clear
-   their candidates and freshness timer, and reconcile trusted reconnect
-   separately.
+9. When the app backgrounds, stop opportunistic/explicit scanning and clear
+   candidates and freshness timers. Preserve a still-owned explicit Settings
+   request as suspended intent so trusted reconnect cannot take the transport
+   before foreground restoration; cancelling or leaving that screen releases
+   the intent and reconciles trusted reconnect separately.
 10. When the app becomes active, start opportunistic discovery only if the
     registry is empty. If a trusted device exists, use only the trusted
     reconnect path and ignore advertisements from all other identifiers.
@@ -443,8 +445,14 @@ Extend `NavigationProtocolTests.swift` with deterministic policy coverage:
 18. pairing completion makes the registry non-empty and prevents automatic
     discovery from restarting;
 19. pairing cancellation resumes only a still-owned foreground explicit
-    session; and
-20. Bluetooth-off and Watch-direct handoff clear unknown discovery state.
+    session;
+20. sensor enrollment temporarily stops unknown Bike Computer discovery and
+    resumes the same explicit request afterward;
+21. an explicit request made while Bluetooth is off wins over trusted reconnect
+    when Bluetooth powers on;
+22. foreground/background transitions suspend and resume an owned explicit
+    request without starting trusted reconnect; and
+23. Bluetooth-off and Watch-direct handoff clear unknown discovery state.
 
 Add UI-policy tests for sheet eligibility, modal-route identity, session
 dismissal, in-sheet pairing progression, and the connected-device disconnect
@@ -506,6 +514,14 @@ Validate these scenarios with Core Bluetooth debug events and visible UI:
     trusted reconnect and restoration behavior still works.
 17. Watch-direct ride handoff: the iPhone does not start unknown-device
     discovery while its Bicino connection is yielded to Watch.
+18. Begin explicit Bike Computer discovery, then begin sensor enrollment: the
+    Bike Computer scan stops and the same explicit request resumes only after
+    sensor enrollment ends.
+19. With a trusted Bicino saved, request a new Bike Computer while Bluetooth is
+    off: turning Bluetooth on starts explicit discovery, not trusted reconnect.
+20. Background and foreground an owned explicit Settings flow: no unknown scan
+    runs in the background, and foregrounding resumes the explicit request
+    before trusted reconnect.
 
 Visually verify the sheet in light and dark appearance, portrait and landscape,
 the largest accessibility text sizes, VoiceOver, Reduce Motion, and on the

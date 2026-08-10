@@ -12309,21 +12309,27 @@ struct NavigationProtocolTests {
         assert(BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
             ownsDiscoveryLifecycle: true,
             isBluetoothPoweredOn: true,
-            isDiscoveringDevices: false,
+            isExplicitDiscoveryActive: false,
             pairingCompletedDuringPresentation: false
         ), "an interrupted owned discovery resumes after its sheet closes")
         assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
             ownsDiscoveryLifecycle: true,
             isBluetoothPoweredOn: true,
-            isDiscoveringDevices: false,
+            isExplicitDiscoveryActive: false,
             pairingCompletedDuringPresentation: true
         ), "successful pairing does not restart Nearby discovery")
         assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
             ownsDiscoveryLifecycle: true,
             isBluetoothPoweredOn: false,
-            isDiscoveringDevices: false,
+            isExplicitDiscoveryActive: false,
             pairingCompletedDuringPresentation: false
         ), "discovery waits for Bluetooth to become available")
+        assert(!BikeComputersMenuPolicy.shouldResumeOwnedDiscovery(
+            ownsDiscoveryLifecycle: true,
+            isBluetoothPoweredOn: true,
+            isExplicitDiscoveryActive: true,
+            pairingCompletedDuringPresentation: false
+        ), "an already-active explicit scan is not restarted")
         assertEqual(
             BikeComputerSettingsPresentationPolicy.title(
                 knownDeviceCount: 0,
@@ -13037,21 +13043,6 @@ struct NavigationProtocolTests {
             ),
             "a callback delayed into a replacement scan is quarantined as its first observation"
         )
-        assert(
-            BLEBackgroundDiscoveryPolicy.shouldRestoreTrustedReconnect(
-                isAbandoningExplicitDiscovery: true,
-                knownDeviceCount: 1
-            ),
-            "backgrounding an explicit add-device flow restores trusted reconnect"
-        )
-        assert(
-            !BLEBackgroundDiscoveryPolicy.shouldRestoreTrustedReconnect(
-                isAbandoningExplicitDiscovery: true,
-                knownDeviceCount: 0
-            ),
-            "an empty registry never enables trusted reconnect"
-        )
-
         let now = Date(timeIntervalSince1970: 100)
         let candidate = DiscoveredBikeComputerDevice(
             peripheralIdentifier: selected,
@@ -13327,6 +13318,18 @@ struct NavigationProtocolTests {
         assert(driver.starts[0].allowsDuplicates,
                "unknown-device discovery requests duplicate observations")
 
+        manager.setUnknownDeviceDiscoverySuspended(true)
+        assertEqual(
+            manager.currentScanPurpose,
+            .none,
+            "sensor enrollment suspends opportunistic Bike Computer discovery"
+        )
+        manager.setUnknownDeviceDiscoverySuspended(false)
+        assert(waitForMainLoop(timeout: 1) {
+            manager.currentScanPurpose == .opportunisticDiscovery &&
+                driver.starts.count == 2
+        }, "ending sensor enrollment restores eligible opportunistic discovery")
+
         manager.startDeviceDiscovery()
         assertEqual(
             manager.currentScanPurpose,
@@ -13335,10 +13338,24 @@ struct NavigationProtocolTests {
         )
         assert(manager.isDiscoveringDevices,
                "the explicit transition remains visible while callbacks drain")
-        assertEqual(driver.stopCount, 1,
+        assertEqual(driver.stopCount, 2,
                     "the old physical scan stops before explicit discovery")
-        assert(waitForMainLoop(timeout: 1) { driver.starts.count == 2 },
+        assert(waitForMainLoop(timeout: 1) { driver.starts.count == 3 },
                "explicit discovery starts after the callback-drain boundary")
+
+        manager.setUnknownDeviceDiscoverySuspended(true)
+        assertEqual(
+            manager.currentScanPurpose,
+            .none,
+            "sensor enrollment suspends the owned explicit Bike Computer scan"
+        )
+        assert(!driver.isScanning,
+               "sensor enrollment yields the physical scanner")
+        manager.setUnknownDeviceDiscoverySuspended(false)
+        assert(waitForMainLoop(timeout: 1) {
+            manager.currentScanPurpose == .explicitDiscovery &&
+                driver.starts.count == 4
+        }, "ending sensor enrollment resumes the same explicit request")
 
         manager.setApplicationActive(false)
         assertEqual(manager.currentScanPurpose, .none,
@@ -13374,6 +13391,47 @@ struct NavigationProtocolTests {
                     "trusted background reconnect owns one physical scan")
         assert(!trustedDriver.starts[0].allowsDuplicates,
                "trusted reconnect does not run an unknown-device scan")
+
+        let deferredManager = BLEManager()
+        let deferredDriver = BLEScanDriverForTesting()
+        deferredDriver.isPoweredOn = false
+        deferredManager.installScanDriverForTesting(
+            deferredDriver,
+            knownDevices: [known],
+            trustedPeripheralIdentifier: trustedIdentifier,
+            shouldAutoReconnect: true
+        )
+        deferredManager.setApplicationActive(true)
+        deferredManager.startDeviceDiscovery()
+        assertEqual(
+            deferredManager.currentScanPurpose,
+            .none,
+            "an explicit request waits without scanning while Bluetooth is off"
+        )
+        deferredManager.setScanDriverPoweredOnForTesting(true)
+        assertEqual(
+            deferredManager.currentScanPurpose,
+            .explicitDiscovery,
+            "Bluetooth-on honors the deferred explicit request before reconnect"
+        )
+        assertEqual(deferredDriver.starts.count, 1,
+                    "Bluetooth-on starts only the explicit discovery scan")
+        assert(deferredDriver.starts[0].allowsDuplicates,
+               "the deferred request does not become a trusted reconnect")
+
+        deferredManager.setApplicationActive(false)
+        assertEqual(
+            deferredManager.currentScanPurpose,
+            .none,
+            "backgrounding suspends the explicit scan without reconnecting"
+        )
+        assert(!deferredDriver.isScanning,
+               "no radio scan survives while explicit discovery is backgrounded")
+        deferredManager.setApplicationActive(true)
+        assert(waitForMainLoop(timeout: 1) {
+            deferredManager.currentScanPurpose == .explicitDiscovery &&
+                deferredDriver.starts.count == 2
+        }, "foregrounding resumes explicit discovery before trusted reconnect")
 
         let exclusiveManager = BLEManager()
         let exclusiveDriver = BLEScanDriverForTesting()
