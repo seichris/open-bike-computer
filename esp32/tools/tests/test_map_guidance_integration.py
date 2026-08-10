@@ -80,6 +80,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             self.assertNotIn("lv_", raw_path)
             self.assertNotIn("canvas", raw_path.lower())
 
+    def test_render_worker_stack_uses_psram_to_preserve_wifi_headroom(self):
+        start = function_body(MAP_RENDERER_SOURCE, "bool Maps::startRenderWorker")
+        thunk = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::renderWorkerTaskThunk"
+        )
+        self.assertIn("xTaskCreatePinnedToCoreWithCaps", start)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", start)
+        self.assertNotIn("xTaskCreatePinnedToCore(", start)
+        self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
+        self.assertNotIn("vTaskDelete(nullptr)", thunk)
+
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
         publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
         self.assertLess(

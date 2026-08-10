@@ -53,6 +53,7 @@ const char *TAG PROGMEM = "Maps";
 #include <algorithm>
 #include <atomic>
 #include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -3979,9 +3980,15 @@ bool Maps::startRenderWorker() {
   lastTakenRenderSequence = 0;
   readyRenderResultValid = false;
   renderFailurePending = false;
-  BaseType_t created = xTaskCreatePinnedToCore(
+  // Rasterization needs a deliberately large stack, but Wi-Fi AP startup also
+  // needs a sizeable contiguous internal allocation. Keeping this always-on
+  // worker in internal DRAM can therefore make map transfer crash inside the
+  // Wi-Fi driver before it has a chance to report an allocation failure. The
+  // AMOLED boards have PSRAM and their SDK configuration explicitly permits
+  // external task stacks, so reserve internal RAM for radio/driver work.
+  BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
-      1, &renderWorkerTaskHandle, 0);
+      1, &renderWorkerTaskHandle, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;
     renderWorkerExited.store(true, std::memory_order_release);
@@ -4041,7 +4048,9 @@ void Maps::renderWorkerTaskThunk(void *argument) {
   auto *maps = static_cast<Maps *>(argument);
   if (maps != nullptr)
     maps->renderWorkerLoop();
-  vTaskDelete(nullptr);
+  // Must match xTaskCreatePinnedToCoreWithCaps so the PSRAM stack and static
+  // task control block are reclaimed correctly.
+  vTaskDeleteWithCaps(nullptr);
 }
 
 void Maps::renderWorkerLoop() {
