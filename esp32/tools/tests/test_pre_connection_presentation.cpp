@@ -112,6 +112,52 @@ int main() {
   static_assert(pre_connection_presentation::isVisibleComparisonFrame(
       true, Phase::PairingComparison));
 
+  // A pairing presentation can interrupt an existing Map/Ride Stats session.
+  // Navigation received before or during the comparison cannot hide it. Once
+  // pairing ends, the next fresh GPS fix must be able to restore Map even
+  // though the legacy "GPS received" latch is already true.
+  pre_connection_presentation::MapReentryPolicy gpsReentry;
+  assert(!gpsReentry.updatePhase(Phase::GettingLocation));
+  assert(!gpsReentry.noteNavigationInput(true));
+  assert(gpsReentry.updatePhase(Phase::PairingComparison));
+  assert(!gpsReentry.allowsPendingMapEntry());
+  assert(gpsReentry.needsFreshNavigationInput());
+  assert(!gpsReentry.noteNavigationInput(true));
+  assert(gpsReentry.needsFreshNavigationInput());
+  assert(!gpsReentry.updatePhase(Phase::PairingConfirmed));
+  assert(!gpsReentry.allowsPendingMapEntry());
+  assert(!gpsReentry.updatePhase(Phase::GettingLocation));
+  assert(gpsReentry.allowsPendingMapEntry());
+  assert(gpsReentry.noteNavigationInput(true));
+  assert(!gpsReentry.needsFreshNavigationInput());
+  assert(!gpsReentry.noteNavigationInput(true));
+
+  // Route-only input follows the same re-entry contract after a later pairing
+  // attempt is cancelled or times out to the waiting screen.
+  pre_connection_presentation::MapReentryPolicy routeReentry;
+  assert(routeReentry.updatePhase(Phase::PairingComparison));
+  assert(!routeReentry.noteNavigationInput(true));
+  assert(!routeReentry.updatePhase(Phase::WaitingForIPhone));
+  assert(routeReentry.noteNavigationInput(true));
+  assert(!routeReentry.noteNavigationInput(true));
+
+  // The physical render gate and map policy jointly guarantee that GPS cannot
+  // replace PairingComparison either before or after its first panel flush.
+  pre_connection_presentation::MapReentryPolicy comparisonReentry;
+  ownership_button_policy::ComparisonRenderGate comparisonRenderGate;
+  assert(comparisonReentry.updatePhase(Phase::PairingComparison));
+  comparisonRenderGate.request(19);
+  assert(!comparisonReentry.noteNavigationInput(true));
+  assert(!comparisonReentry.allowsPendingMapEntry());
+  assert(comparisonRenderGate.renderedGeneration() == 0);
+  comparisonRenderGate.displayFlushed();
+  assert(comparisonRenderGate.renderedGeneration() == 19);
+  assert(!comparisonReentry.noteNavigationInput(true));
+  assert(!comparisonReentry.allowsPendingMapEntry());
+  assert(!comparisonReentry.updatePhase(Phase::Connecting));
+  assert(comparisonReentry.noteNavigationInput(true));
+  assert(comparisonReentry.allowsPendingMapEntry());
+
   ownership_button_policy::ComparisonRenderGate renderGate;
   int order[2] = {0, 0};
   int orderCount = 0;

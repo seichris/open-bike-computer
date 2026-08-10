@@ -13,6 +13,7 @@
 #include "ble_connection_policy.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
+#include "ownership_ui_dispatch_policy.hpp"
 #include "device_screen_protocol.hpp"
 #include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
@@ -1202,52 +1203,58 @@ static void handleAuthPayload(const std::string &frame) {
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
     }
-    if (ownershipResult.matched) {
-      switch (ownershipResult.event) {
-      case device_ownership::Event::PairingStarted:
-        ownershipPairingActiveSnapshot = true;
-        Serial.println("BLE: Secure ownership comparison started");
-        break;
-      case device_ownership::Event::Paired:
-        ownershipPairingActiveSnapshot = false;
-        ownershipAdvertisingDirty = true;
-        Serial.println("BLE: Device ownership registered");
-        break;
-      case device_ownership::Event::Authenticated:
-        completeBleSessionAuthentication();
-        Serial.println("BLE: Scoped controller session authenticated");
-        break;
-      case device_ownership::Event::WatchControllerStaged:
-        Serial.println("BLE: Watch controller enrollment staged");
-        break;
-      case device_ownership::Event::WatchControllerCommitted:
-        Serial.println("BLE: Watch controller enrollment committed");
-        break;
-      case device_ownership::Event::WatchControllerRevoked:
-        Serial.println("BLE: Watch controller credential revoked");
-        break;
-      case device_ownership::Event::Renamed:
-        ownershipAdvertisingDirty = true;
-        Serial.println("BLE: Device name updated");
-        break;
-      case device_ownership::Event::Unpaired:
-        bleSessionAuthenticated = false;
-        bleSessionSupportsExplicitInvalidGpsHeading.store(
-            false, std::memory_order_release);
-        bleDebugStats.authenticated = false;
-        ownershipAdvertisingDirty = true;
-        ownershipRestartRequested = true;
-        ownershipRestartRequestedMs = millis();
-        Serial.println("BLE: Device ownership removed; restart scheduled");
-        break;
-      case device_ownership::Event::None:
-        break;
-      }
-      // Some matched failure paths clear pairing without a distinct event
-      // (invalid/expired confirmation or persistence rollback). Always queue
-      // the post-command snapshot so the UI and render gate cannot retain a
-      // stale PairingConfirmed presentation.
-      queueOwnershipUiUpdate();
+    if (ownership_ui_dispatch_policy::dispatchMatchedCommand(
+            ownershipResult.matched, ownershipResult.event,
+            [](device_ownership::Event event) {
+              switch (event) {
+              case device_ownership::Event::PairingStarted:
+                ownershipPairingActiveSnapshot = true;
+                Serial.println("BLE: Secure ownership comparison started");
+                break;
+              case device_ownership::Event::Paired:
+                ownershipPairingActiveSnapshot = false;
+                ownershipAdvertisingDirty = true;
+                Serial.println("BLE: Device ownership registered");
+                break;
+              case device_ownership::Event::Authenticated:
+                completeBleSessionAuthentication();
+                Serial.println("BLE: Scoped controller session authenticated");
+                break;
+              case device_ownership::Event::WatchControllerStaged:
+                Serial.println("BLE: Watch controller enrollment staged");
+                break;
+              case device_ownership::Event::WatchControllerCommitted:
+                Serial.println("BLE: Watch controller enrollment committed");
+                break;
+              case device_ownership::Event::WatchControllerRevoked:
+                Serial.println("BLE: Watch controller credential revoked");
+                break;
+              case device_ownership::Event::Renamed:
+                ownershipAdvertisingDirty = true;
+                Serial.println("BLE: Device name updated");
+                break;
+              case device_ownership::Event::Unpaired:
+                bleSessionAuthenticated = false;
+                bleSessionSupportsExplicitInvalidGpsHeading.store(
+                    false, std::memory_order_release);
+                bleDebugStats.authenticated = false;
+                ownershipAdvertisingDirty = true;
+                ownershipRestartRequested = true;
+                ownershipRestartRequestedMs = millis();
+                Serial.println(
+                    "BLE: Device ownership removed; restart scheduled");
+                break;
+              case device_ownership::Event::None:
+                break;
+              }
+            },
+            [] {
+              // Some matched failure paths clear pairing without a distinct
+              // event (invalid/expired confirmation or persistence rollback).
+              // Always queue the post-command snapshot so the UI and render
+              // gate cannot retain a stale PairingConfirmed presentation.
+              queueOwnershipUiUpdate();
+            })) {
       return;
     }
   }
@@ -2230,6 +2237,26 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  if (len >= 8) {
+    const bool seedMapStart = !gpsReceivedFromApp;
+    int32_t routeStartLat = 0;
+    int32_t routeStartLon = 0;
+    if (seedMapStart) {
+      memcpy(&routeStartLat, data, sizeof(routeStartLat));
+      memcpy(&routeStartLon, data + sizeof(routeStartLon),
+             sizeof(routeStartLon));
+      gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
+      gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
+    }
+    if (noteNavigationInputForMapEntry()) {
+      Serial.println(seedMapStart
+                         ? "BLE route geometry: seeded map start; "
+                           "transitioning to map"
+                         : "BLE route geometry: fresh post-pairing route; "
+                           "transitioning to map");
+    }
+  }
+
   uint32_t hash = 0;
   for (size_t i = 0; i < len; i++) {
     hash = hash * 31 + data[i];
@@ -2246,19 +2273,6 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source, (unsigned)len);
   bleDebugStats.routePacketCount++;
   bleDebugStats.lastRoutePacketMs = millis();
-
-  if (!gpsReceivedFromApp && len >= 8) {
-    int32_t routeStartLat = 0;
-    int32_t routeStartLon = 0;
-    memcpy(&routeStartLat, data, sizeof(routeStartLat));
-    memcpy(&routeStartLon, data + sizeof(routeStartLon), sizeof(routeStartLon));
-    gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
-    gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
-    gpsReceivedFromApp = true;
-    pendingTransitionToMap = true;
-    Serial.println(
-        "BLE route geometry: seeded map start; transitioning to map");
-  }
 
   const bool hadRoute = routeOverlay.hasRoute();
   routeOverlay.parseRouteData(data, len);
@@ -2321,10 +2335,8 @@ static void handleGpsPayload(
   );
 #endif
 
-  if (!gpsReceivedFromApp) {
-    gpsReceivedFromApp = true;
-    pendingTransitionToMap = true;
-    Serial.println("BLE GPS: First position received, transitioning to map...");
+  if (noteNavigationInputForMapEntry()) {
+    Serial.println("BLE GPS: Fresh position received, transitioning to map...");
   }
 
   // Retain every accepted fix. The LVGL owner updates lightweight telemetry and

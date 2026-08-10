@@ -43,6 +43,9 @@ LVGL_CONFIG_TEMPLATE_SOURCE = (
     ESP32_ROOT / "tools" / "lv_conf_template.h"
 ).read_text(encoding="utf-8")
 MAIN_SOURCE = (ESP32_ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
+WAITING_SCREEN_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "waitingScr.cpp"
+).read_text(encoding="utf-8")
 SCHEDULER_DOC = (
     ESP32_ROOT.parent / "docs" / "firmware-map-render-scheduler.md"
 ).read_text(encoding="utf-8")
@@ -487,6 +490,38 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("generateVectorMap", load)
         self.assertNotIn("generateRenderMap", load)
         self.assertNotIn("displayMap", load)
+
+    def test_post_pairing_navigation_can_reenter_map(self):
+        route_handler = function_body(
+            BLE_SOURCE, "static void handleRouteGeometryPayload"
+        )
+        gps_handler = function_body(BLE_SOURCE, "static void handleGpsPayload")
+        ownership_update = function_body(
+            WAITING_SCREEN_SOURCE, "void updateWaitingOwnershipStatus"
+        )
+        pending_transition = function_body(
+            WAITING_SCREEN_SOURCE, "void checkPendingMapTransition"
+        )
+
+        self.assertEqual(route_handler.count("noteNavigationInputForMapEntry()"), 1)
+        self.assertEqual(gps_handler.count("noteNavigationInputForMapEntry()"), 1)
+        self.assertLess(
+            route_handler.index("noteNavigationInputForMapEntry()"),
+            route_handler.index("if (hash == lastRouteHash"),
+        )
+        self.assertIn("mapReentryPolicy.updatePhase(phase)", ownership_update)
+        self.assertIn("pendingTransitionToMap = false", ownership_update)
+        self.assertIn("mapReentryPolicy.allowsPendingMapEntry()", pending_transition)
+
+    def test_matched_ownership_commands_always_queue_ui_snapshot(self):
+        auth_handler = function_body(BLE_SOURCE, "static void handleAuthPayload")
+        self.assertEqual(
+            auth_handler.count(
+                "ownership_ui_dispatch_policy::dispatchMatchedCommand("
+            ),
+            1,
+        )
+        self.assertEqual(auth_handler.count("queueOwnershipUiUpdate();"), 1)
 
     def test_map_profile_transition_waits_for_new_frame_publication(self):
         show = function_body(MAIN_SCREEN_SOURCE, "static void showMainTile")

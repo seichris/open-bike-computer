@@ -17,5 +17,6 @@ extern volatile bool pendingTransitionToMap; // Flag: Transition to map pending
 void createWaitingScr();
 void checkPendingMapTransition(); // Called from main loop
 bool isWaitingPairingComparisonVisible();
+bool noteNavigationInputForMapEntry();
 void updateWaitingOwnershipStatus(
     const pre_connection_presentation::Snapshot &snapshot);

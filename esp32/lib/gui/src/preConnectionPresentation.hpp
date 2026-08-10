@@ -98,6 +98,49 @@ constexpr bool isVisibleComparisonFrame(bool waitingScreenActive,
   return waitingScreenActive && displayedPhase == Phase::PairingComparison;
 }
 
+constexpr bool isPairingPresentation(Phase phase) {
+  return phase == Phase::PairingComparison ||
+         phase == Phase::PairingConfirmed;
+}
+
+// Showing pairing over an existing Map/Ride Stats session must not leave the
+// old "GPS received" latch preventing a later return to Map. Navigation data
+// received while the comparison is on-panel is deliberately ignored for
+// screen entry; after pairing ends, one fresh GPS fix or route is required.
+class MapReentryPolicy {
+public:
+  bool updatePhase(Phase phase) {
+    const bool nextPairingPresentation = isPairingPresentation(phase);
+    const bool enteredPairingPresentation =
+        nextPairingPresentation && !pairingPresentationActive_;
+    if (enteredPairingPresentation) {
+      needsFreshNavigationInput_ = true;
+    }
+    pairingPresentationActive_ = nextPairingPresentation;
+    return enteredPairingPresentation;
+  }
+
+  bool noteNavigationInput(bool navigationInputPreviouslyReceived) {
+    if (pairingPresentationActive_) {
+      return false;
+    }
+    if (!navigationInputPreviouslyReceived || needsFreshNavigationInput_) {
+      needsFreshNavigationInput_ = false;
+      return true;
+    }
+    return false;
+  }
+
+  bool allowsPendingMapEntry() const { return !pairingPresentationActive_; }
+  bool needsFreshNavigationInput() const {
+    return needsFreshNavigationInput_;
+  }
+
+private:
+  bool pairingPresentationActive_ = false;
+  bool needsFreshNavigationInput_ = false;
+};
+
 // Keep the physical comparison gate behind presentation. Firmware supplies
 // the critical-section callbacks; host tests verify the ordering and every
 // phase's request/cancel decision without depending on LVGL or FreeRTOS.

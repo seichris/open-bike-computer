@@ -41,6 +41,7 @@ lv_obj_t *statusArtwork[4] = {nullptr, nullptr, nullptr, nullptr};
 bool hasDisplayedPhase = false;
 Phase displayedPhase = Phase::Welcome;
 uint32_t displayedPairingCode = UINT32_MAX;
+pre_connection_presentation::MapReentryPolicy mapReentryPolicy;
 
 const char *batterySymbol(uint8_t percentage) {
   if (percentage >= 80) {
@@ -220,7 +221,7 @@ void applyPhase(Phase phase, uint32_t pairingCode) {
 void loadMainScreen();
 
 void checkPendingMapTransition() {
-  if (pendingTransitionToMap) {
+  if (pendingTransitionToMap && mapReentryPolicy.allowsPendingMapEntry()) {
     const uint32_t startMs = millis();
     pendingTransitionToMap = false;
     Serial.printf("UI: pending map transition noticed at %lu ms\n",
@@ -304,6 +305,11 @@ void updateWaitingOwnershipStatus(
     return;
   }
   const Phase phase = pre_connection_presentation::resolve(snapshot);
+  if (mapReentryPolicy.updatePhase(phase)) {
+    // Discard any entry request queued before pairing took over the panel. A
+    // fresh authenticated GPS fix or route must restore Map after pairing.
+    pendingTransitionToMap = false;
+  }
   applyPhase(phase, snapshot.pairingCode);
   if (phase == Phase::PairingComparison && lv_scr_act() != waitingScreen) {
     // Pairing is a full pre-connection presentation, never a map/workout
@@ -311,6 +317,16 @@ void updateWaitingOwnershipStatus(
     isMainScreen = false;
     lv_screen_load(waitingScreen);
   }
+}
+
+bool noteNavigationInputForMapEntry() {
+  const bool shouldEnterMap =
+      mapReentryPolicy.noteNavigationInput(gpsReceivedFromApp);
+  gpsReceivedFromApp = true;
+  if (shouldEnterMap) {
+    pendingTransitionToMap = true;
+  }
+  return shouldEnterMap;
 }
 
 bool isWaitingPairingComparisonVisible() {
