@@ -268,6 +268,9 @@ int main() {
   assert(!renderGate.consumeRendered(7));
   renderGate.displayFlushed();
   assert(renderGate.renderedGeneration() == 7);
+  // A duplicate UI snapshot must not revoke an already-rendered comparison.
+  renderGate.request(7);
+  assert(renderGate.renderedGeneration() == 7);
   assert(!renderGate.consumeRendered(8));
   assert(renderGate.consumeRendered(7));
   assert(renderGate.renderedGeneration() == 0);
@@ -318,6 +321,8 @@ int main() {
          "ERROR|invalid_pairing_request");
   const auto firstPair = device.handle(firstApp.command(), 10);
   assert(firstPair.event == Event::PairingStarted);
+  assert(device.hasPairingCode());
+  assert(!device.isPairingConfirmedOnDevice());
   const uint32_t firstPairingGeneration = device.pairingGeneration();
   assert(firstPairingGeneration != 0);
 
@@ -337,10 +342,13 @@ int main() {
 
   assert(device.armPairingConfirmation(firstPairingGeneration));
   assert(device.confirmPairingOnDevice());
+  assert(device.isPairingConfirmedOnDevice());
   assert(!device.confirmPairingOnDevice());
   const auto paired =
       device.handle(firstApp.confirm(firstMaterial, "Cargo bike"), 22);
   assert(paired.event == Event::Paired);
+  assert(!device.hasPairingCode());
+  assert(!device.isPairingConfirmedOnDevice());
   assert(device.isClaimed());
   assert(!device.allowsLegacyAuthentication());
   const auto claimedAdvertisement = device.advertisementManufacturerData();
@@ -772,7 +780,10 @@ int main() {
   const auto expiringMaterial = firstApp.material(expiringPair);
   assert(expiring.armPairingConfirmation(expiring.pairingGeneration()));
   assert(expiring.confirmPairingOnDevice());
+  assert(expiring.isPairingConfirmedOnDevice());
   expiring.process(100 + PAIRING_SESSION_TIMEOUT_MS + 1);
+  assert(!expiring.hasPairingCode());
+  assert(!expiring.isPairingConfirmedOnDevice());
   assert(expiring.handle(firstApp.confirm(expiringMaterial, "Bike"),
                          100 + PAIRING_SESSION_TIMEOUT_MS + 2)
              .response == "ERROR|pairing_confirmation_failed");

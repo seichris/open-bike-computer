@@ -151,11 +151,12 @@ static bool ownershipRestartRequested = false;
 static uint32_t ownershipRestartRequestedMs = 0;
 static portMUX_TYPE ownershipUiMux = portMUX_INITIALIZER_UNLOCKED;
 static bool ownershipUiUpdatePending = false;
-static char ownershipUiName[device_ownership::MAX_DEVICE_NAME_BYTES + 1] = "";
 static bool ownershipUiClaimed = false;
 static bool ownershipUiConnected = false;
 static bool ownershipUiAuthenticated = false;
-static int32_t ownershipUiPairingCode = -1;
+static bool ownershipUiPairingActive = false;
+static bool ownershipUiPairingConfirmedOnDevice = false;
+static uint32_t ownershipUiPairingCode = 0;
 static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
     ownershipComparisonRenderGate;
@@ -327,21 +328,26 @@ static void processRadioCharacterization(uint32_t nowMs,
 }
 #endif
 
-static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
-                                   uint32_t pairingGeneration = 0) {
+static void queueOwnershipUiUpdate() {
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return;
   }
-  const std::string name = deviceOwnership.deviceName();
   const bool claimed = deviceOwnership.isClaimed();
+  const bool pairingActive = deviceOwnership.hasPairingCode();
+  const bool pairingConfirmed =
+      deviceOwnership.isPairingConfirmedOnDevice();
+  const uint32_t pairingCode =
+      pairingActive ? deviceOwnership.pairingCode() : 0;
+  const uint32_t pairingGeneration =
+      pairingActive ? deviceOwnership.pairingGeneration() : 0;
   xSemaphoreGive(deviceOwnershipMutex);
   portENTER_CRITICAL(&ownershipUiMux);
-  strncpy(ownershipUiName, name.c_str(), sizeof(ownershipUiName) - 1);
-  ownershipUiName[sizeof(ownershipUiName) - 1] = '\0';
   ownershipUiClaimed = claimed;
   ownershipUiConnected = bleNavServer.isConnected();
   ownershipUiAuthenticated = bleSessionAuthenticated;
+  ownershipUiPairingActive = pairingActive;
+  ownershipUiPairingConfirmedOnDevice = pairingConfirmed;
   ownershipUiPairingCode = pairingCode;
   ownershipUiPairingGeneration = pairingGeneration;
   ownershipUiUpdatePending = true;
@@ -350,29 +356,27 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
 }
 
 static void applyPendingOwnershipUiUpdate() {
-  char name[sizeof(ownershipUiName)] = "";
-  bool claimed = false;
-  bool connected = false;
-  bool authenticated = false;
-  int32_t pairingCode = -1;
+  pre_connection_presentation::Snapshot snapshot;
   uint32_t pairingGeneration = 0;
   portENTER_CRITICAL(&ownershipUiMux);
   const bool pending = ownershipUiUpdatePending;
   if (pending) {
-    strncpy(name, ownershipUiName, sizeof(name) - 1);
-    claimed = ownershipUiClaimed;
-    connected = ownershipUiConnected;
-    authenticated = ownershipUiAuthenticated;
-    pairingCode = ownershipUiPairingCode;
+    snapshot.claimed = ownershipUiClaimed;
+    snapshot.connected = ownershipUiConnected;
+    snapshot.authenticated = ownershipUiAuthenticated;
+    snapshot.pairingActive = ownershipUiPairingActive;
+    snapshot.pairingConfirmedOnDevice =
+        ownershipUiPairingConfirmedOnDevice;
+    snapshot.pairingCode = ownershipUiPairingCode;
     pairingGeneration = ownershipUiPairingGeneration;
     ownershipUiUpdatePending = false;
   }
   portEXIT_CRITICAL(&ownershipUiMux);
   if (pending) {
-    updateWaitingOwnershipStatus(name, claimed, connected, authenticated,
-                                 pairingCode);
+    updateWaitingOwnershipStatus(snapshot);
     portENTER_CRITICAL(&ownershipUiMux);
-    if (pairingCode >= 0) {
+    if (pre_connection_presentation::resolve(snapshot) ==
+        pre_connection_presentation::Phase::PairingComparison) {
       ownershipComparisonRenderGate.request(pairingGeneration);
     } else {
       ownershipComparisonRenderGate.cancel();
@@ -1148,16 +1152,12 @@ static void handleAuthPayload(const std::string &frame) {
 
   if (deviceOwnershipReady) {
     device_ownership::CommandResult ownershipResult;
-    uint32_t pairingCode = 0;
-    uint32_t pairingGeneration = 0;
     bool ownershipLockAcquired = false;
     bool ownershipSessionAuthenticated = false;
     if (deviceOwnershipMutex != nullptr &&
         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       ownershipLockAcquired = true;
       ownershipResult = deviceOwnership.handle(value, millis());
-      pairingCode = deviceOwnership.pairingCode();
-      pairingGeneration = deviceOwnership.pairingGeneration();
       if (frame.size() >= 2 && frame[0] == 'S' && frame[1] == '2' &&
           !ownershipResult.response.empty() &&
           !(ownershipResult.response.size() >= 2 &&
@@ -1199,9 +1199,7 @@ static void handleAuthPayload(const std::string &frame) {
       switch (ownershipResult.event) {
       case device_ownership::Event::PairingStarted:
         ownershipPairingActiveSnapshot = true;
-        queueOwnershipUiUpdate(
-            static_cast<int32_t>(pairingCode),
-            pairingGeneration);
+        queueOwnershipUiUpdate();
         Serial.println("BLE: Secure ownership comparison started");
         break;
       case device_ownership::Event::Paired:
@@ -3778,14 +3776,12 @@ bool BLENavigationServer::isOwnershipClaimed() {
 
 bool BLENavigationServer::confirmOwnershipPairing() {
   bool confirmed = false;
-  uint32_t pairingCode = 0;
   std::string stableDeviceId;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
     confirmed = deviceOwnership.confirmPairingOnDevice();
     if (confirmed) {
       stableDeviceId = deviceOwnership.deviceIdHex();
-      pairingCode = deviceOwnership.pairingCode();
     }
     xSemaphoreGive(deviceOwnershipMutex);
   }
@@ -3794,7 +3790,7 @@ bool BLENavigationServer::confirmOwnershipPairing() {
   }
   const std::string response = "PAIR_READY|" + stableDeviceId;
   notifyAuthResponse(response.c_str());
-  queueOwnershipUiUpdate(static_cast<int32_t>(pairingCode));
+  queueOwnershipUiUpdate();
   Serial.println("BLE: Ownership pairing confirmed with physical button press");
   return true;
 }

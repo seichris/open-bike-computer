@@ -65,6 +65,7 @@ int main() {
   constexpr auto waitingLayout = waiting_screen_layout::makeLayout(410, 502);
   static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
+  static_assert(!waitingLayout.round);
 #else
   // 1.75-inch viewport: 466px screen with 100px reserved UI space.
   assert(gui_layout::mapViewportHeight(466) == 366);
@@ -76,9 +77,15 @@ int main() {
   constexpr auto waitingLayout = waiting_screen_layout::makeLayout(466, 466);
   static_assert(ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
+  static_assert(waitingLayout.round);
+  static_assert(waiting_screen_layout::roundOpaqueContentIsSafe(
+      waitingLayout));
 #endif
   static_assert(waiting_screen_layout::isValid(waitingLayout));
-  static_assert(waitingLayout.state.width == 112);
+  static_assert(waitingLayout.statusHero.width == 112);
+  static_assert(waitingLayout.statusHero.height == 112);
+  static_assert(waitingLayout.qr.width == 165);
+  static_assert(waitingLayout.qr.height == 165);
   static_assert(batteryLayout.topMargin == batteryLayout.bottomMargin);
   assert(batteryLayout.deviceY == batteryLayout.topMargin);
   assert(batteryLayout.phoneY + batteryLayout.diameter +
