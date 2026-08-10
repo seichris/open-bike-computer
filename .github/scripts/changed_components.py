@@ -21,6 +21,23 @@ MAP_WORKFLOW_PATHS = {
     ".github/workflows/map-platform-ci.yml",
     ".github/workflows/map-platform-image.yml",
 }
+FIRMWARE_CONTRACT_PATHS = {
+    "docs/device-ownership-test-vectors.json",
+    "docs/firmware-battery-life-hardware-validation.md",
+    "docs/firmware-map-memory-diagnostics.md",
+    "docs/firmware-map-render-scheduler.md",
+    "docs/firmware-map-rendering-psram.md",
+    "tools/firmware_manifest.py",
+}
+IOS_CONTRACT_PATHS = {
+    "docs/app-store-privacy-disclosures.md",
+    "docs/device-ownership-test-vectors.json",
+    "docs/releases/watchos-workout-companion.md",
+}
+SHARED_FMB_FIXTURE_PREFIX = "test-fixtures/fmb/"
+SHARED_MAP_STREAM_FIXTURE_PATH = (
+    "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
+)
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
@@ -40,10 +57,15 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
         if path in FULL_CI_PATHS or path.startswith(FULL_CI_PATH_PREFIXES):
             return {component: True for component in COMPONENTS}
 
-        if path.startswith("esp32/") or path in FIRMWARE_WORKFLOW_PATHS:
+        if (
+            path.startswith("esp32/")
+            or path.startswith("tools/tests/")
+            or path in FIRMWARE_WORKFLOW_PATHS
+            or path in FIRMWARE_CONTRACT_PATHS
+        ):
             selected["firmware"] = True
 
-        if path.startswith("ios-app/"):
+        if path.startswith("ios-app/") or path in IOS_CONTRACT_PATHS:
             selected["ios"] = True
 
         if path == ".dockerignore" or path.startswith("map-platform/"):
@@ -53,6 +75,18 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
             # The production backend image copies the extractor into its image.
             selected["map_backend"] = True
             selected["osm"] = True
+
+        if path.startswith(SHARED_FMB_FIXTURE_PREFIX):
+            # Firmware, the backend, and the extractor all assert these bytes.
+            selected["firmware"] = True
+            selected["map_backend"] = True
+            selected["osm"] = True
+
+        if path == SHARED_MAP_STREAM_FIXTURE_PATH:
+            # The same signed-stream bytes are parsed by backend, iOS, and firmware.
+            selected["firmware"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
 
         if path in MAP_WORKFLOW_PATHS:
             selected["map_backend"] = True

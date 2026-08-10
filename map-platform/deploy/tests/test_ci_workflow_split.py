@@ -29,11 +29,20 @@ class CIWorkflowSplitTests(unittest.TestCase):
         map_ci = workflow_source("map-platform-ci.yml")
 
         self.assertIn("  pull_request:\n", general_ci)
-        self.assertIn("    name: CI Gate\n", general_ci)
+        self.assertIn("  gate:\n", general_ci)
+        self.assertIn("&& 'CI Gate' ||", general_ci)
         self.assertIn("uses: ./.github/workflows/map-platform-ci.yml", general_ci)
         self.assertIn("  workflow_call:\n", map_ci)
         self.assertNotIn("  pull_request:\n", map_ci)
         self.assertNotIn("  push:\n", map_ci)
+
+    def test_reusable_map_jobs_follow_inputs_and_manual_defaults_run_both(self) -> None:
+        map_ci = workflow_source("map-platform-ci.yml")
+
+        self.assertIn("    if: inputs.run_backend\n", map_ci)
+        self.assertIn("    if: inputs.run_osm\n", map_ci)
+        self.assertNotIn("github.event_name != 'workflow_call'", map_ci)
+        self.assertEqual(map_ci.count("        default: true\n"), 2)
 
     def test_image_promotion_watches_and_dispatches_dedicated_ci(self) -> None:
         image_workflow = workflow_source("map-platform-image.yml")

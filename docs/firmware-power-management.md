@@ -25,9 +25,9 @@ responsive. Power saving is therefore layered:
 - Disconnected deep sleep is enabled according to the user's timeout setting.
 - Automatic light sleep and FreeRTOS tickless idle are **not** enabled in
   ordinary or production builds.
-- The `*_LIGHT_SLEEP` profiles are built by the weekly/manual **Firmware
-  Diagnostic Builds** workflow for continued validation, but are never selected
-  by the firmware release workflow.
+- The `*_LIGHT_SLEEP` profiles are built by the weekly, release-validation, and
+  manual **Firmware Diagnostic Builds** workflow for continued validation, but
+  are never selected by the firmware release workflow.
 - The Phase 9 light-sleep interaction gate has passed on the available
   1.75-inch board. The 2.06-inch path is build-tested only.
 - No battery-life percentage or runtime improvement has been measured yet.

@@ -22,6 +22,15 @@ DIAGNOSTIC_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_206_POWER_METRICS",
     "WAVESHARE_AMOLED_206_LIGHT_SLEEP",
 }
+SHARED_CONTRACT_PATHS = {
+    "docs/app-store-privacy-disclosures.md",
+    "docs/device-ownership-test-vectors.json",
+    "docs/firmware-battery-life-hardware-validation.md",
+    "docs/firmware-map-memory-diagnostics.md",
+    "docs/firmware-map-render-scheduler.md",
+    "docs/firmware-map-rendering-psram.md",
+    "docs/releases/watchos-workout-companion.md",
+}
 
 
 def workflow_source(filename: str) -> str:
@@ -50,6 +59,49 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("  push:\n    branches:\n      - main\n", general_ci)
         self.assertIn("  pull_request:\n", general_ci)
         self.assertIn("  cancel-in-progress: true\n", general_ci)
+
+    def test_concurrency_separates_events_and_manual_scopes(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("github.event_name", general_ci)
+        self.assertIn("inputs.scope || 'auto'", general_ci)
+
+    def test_partial_manual_runs_do_not_publish_the_protected_gate(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("Manual CI Gate", general_ci)
+        self.assertIn("refs/heads/deploy/map-platform-production", general_ci)
+        self.assertIn("Validate the protected partial gate scope", general_ci)
+        self.assertIn("':(exclude)map-platform/deploy/compose.yaml'", general_ci)
+
+    def test_release_tags_use_one_gated_validation_orchestrator(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        diagnostic_ci = workflow_source("firmware-diagnostics.yml")
+        release = workflow_source("firmware-release.yml")
+
+        self.assertIn("  workflow_call:\n", general_ci)
+        self.assertIn("github.ref_type == 'tag'", general_ci)
+        self.assertNotIn('      - "v*"', general_ci)
+        self.assertIn("  workflow_call:\n", diagnostic_ci)
+        self.assertNotIn('      - "v*"', diagnostic_ci)
+        self.assertIn('      - "v*"', release)
+        self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertIn(
+            "uses: ./.github/workflows/firmware-diagnostics.yml", release
+        )
+        self.assertIn("      - build\n      - diagnostics\n      - validate\n", release)
+        self.assertIn("  attestations: read\n", release)
+        self.assertIn("  packages: read\n", release)
+
+    def test_main_push_filter_includes_shared_contract_inputs(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        for path in SHARED_CONTRACT_PATHS:
+            with self.subTest(path=path):
+                self.assertIn(f'      - "{path}"', general_ci)
+        self.assertIn('      - "test-fixtures/fmb/**"', general_ci)
+        self.assertIn('      - "tools/firmware_manifest.py"', general_ci)
+        self.assertIn('      - "tools/tests/**"', general_ci)
 
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
         for workflow in (

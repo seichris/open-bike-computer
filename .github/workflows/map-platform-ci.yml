@@ -12,6 +12,17 @@ on:
         required: true
         type: boolean
   workflow_dispatch:
+    inputs:
+      run_backend:
+        description: Validate the backend, deployment, and production image
+        required: true
+        default: true
+        type: boolean
+      run_osm:
+        description: Validate the OSM extraction toolchain
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -19,7 +30,7 @@ permissions:
 jobs:
   osm:
     name: OSM Pipeline
-    if: github.event_name != 'workflow_call' || inputs.run_osm
+    if: inputs.run_osm
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -72,7 +83,7 @@ jobs:
 
   backend:
     name: Map Backend
-    if: github.event_name != 'workflow_call' || inputs.run_backend
+    if: inputs.run_backend
     runs-on: ubuntu-latest
     permissions:
       attestations: read

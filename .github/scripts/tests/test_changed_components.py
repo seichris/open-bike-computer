@@ -46,6 +46,90 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(selected["osm"])
         self.assertTrue(selected["map_backend"])
 
+    def test_shared_fmb_fixture_selects_every_consumer(self) -> None:
+        selected = changed_components.classify_paths(
+            ["test-fixtures/fmb/golden_blocks.txt"]
+        )
+
+        self.assertEqual(
+            {
+                "firmware": True,
+                "ios": False,
+                "map_backend": True,
+                "osm": True,
+            },
+            selected,
+        )
+
+    def test_shared_ownership_fixture_selects_firmware_and_ios(self) -> None:
+        selected = changed_components.classify_paths(
+            ["docs/device-ownership-test-vectors.json"]
+        )
+
+        self.assertEqual(
+            {
+                "firmware": True,
+                "ios": True,
+                "map_backend": False,
+                "osm": False,
+            },
+            selected,
+        )
+
+    def test_shared_map_stream_fixture_selects_every_consumer(self) -> None:
+        selected = changed_components.classify_paths(
+            ["map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"]
+        )
+
+        self.assertEqual(
+            {
+                "firmware": True,
+                "ios": True,
+                "map_backend": True,
+                "osm": False,
+            },
+            selected,
+        )
+
+    def test_contract_documents_select_their_consumers(self) -> None:
+        firmware_contracts = (
+            "docs/firmware-battery-life-hardware-validation.md",
+            "docs/firmware-map-memory-diagnostics.md",
+            "docs/firmware-map-render-scheduler.md",
+            "docs/firmware-map-rendering-psram.md",
+        )
+        ios_contracts = (
+            "docs/app-store-privacy-disclosures.md",
+            "docs/releases/watchos-workout-companion.md",
+        )
+
+        for path in firmware_contracts:
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware"])
+                self.assertFalse(selected["ios"])
+        for path in ios_contracts:
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["ios"])
+                self.assertFalse(selected["firmware"])
+
+    def test_firmware_manifest_generator_and_tests_select_firmware(self) -> None:
+        for path in (
+            "tools/firmware_manifest.py",
+            "tools/tests/test_firmware_manifest.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware": True,
+                        "ios": False,
+                        "map_backend": False,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
     def test_ci_router_change_runs_every_component(self) -> None:
         selected = changed_components.classify_paths(
             [".github/scripts/changed_components.py"]
@@ -67,6 +151,21 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(selected["ios"])
         self.assertTrue(selected["map_backend"])
         self.assertTrue(selected["osm"])
+
+    def test_every_explicit_scope_has_the_expected_components(self) -> None:
+        self.assertIsNone(changed_components.select_scope("auto"))
+        self.assertEqual(
+            {component: True for component in changed_components.COMPONENTS},
+            changed_components.select_scope("all"),
+        )
+        for scope, component in (("firmware", "firmware"), ("ios", "ios")):
+            with self.subTest(scope=scope):
+                selected = changed_components.select_scope(scope)
+                assert selected is not None
+                self.assertTrue(selected[component])
+                self.assertEqual(1, sum(selected.values()))
+        with self.assertRaisesRegex(ValueError, "unsupported CI scope"):
+            changed_components.select_scope("unknown")
 
     def test_pull_request_uses_merge_base_diff(self) -> None:
         base = "a" * 40
@@ -105,6 +204,57 @@ class ChangedComponentsTests(unittest.TestCase):
                 "push", changed_components.ZERO_SHA, head
             ),
         )
+
+    def test_normal_push_uses_two_dot_diff(self) -> None:
+        base = "a" * 40
+        head = "b" * 40
+
+        self.assertEqual(
+            (
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{base}..{head}",
+                "--",
+            ),
+            changed_components.git_diff_command("push", base, head),
+        )
+
+    def test_manual_dispatch_does_not_compute_a_git_diff(self) -> None:
+        self.assertIsNone(
+            changed_components.git_diff_command(
+                "workflow_dispatch", "not-needed", "not-needed"
+            )
+        )
+
+    def test_unsupported_event_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported GitHub event"):
+            changed_components.git_diff_command("schedule", "a" * 40, "b" * 40)
+
+    def test_workflow_and_docker_inputs_select_their_components(self) -> None:
+        firmware = changed_components.classify_paths(
+            [".github/workflows/firmware-release.yml"]
+        )
+        map_workflow = changed_components.classify_paths(
+            [".github/workflows/map-platform-image.yml"]
+        )
+        docker = changed_components.classify_paths([".dockerignore"])
+
+        self.assertEqual(
+            {
+                "firmware": True,
+                "ios": False,
+                "map_backend": False,
+                "osm": False,
+            },
+            firmware,
+        )
+        self.assertTrue(map_workflow["map_backend"])
+        self.assertTrue(map_workflow["osm"])
+        self.assertTrue(docker["map_backend"])
+        self.assertEqual(1, sum(docker.values()))
 
     def test_invalid_revision_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "base must be"):
