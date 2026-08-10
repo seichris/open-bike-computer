@@ -20,6 +20,7 @@ from firmware_runtime import (
     extract_verified_bundle,
     host_target_id,
     load_lock,
+    repair_runtime,
     select_target,
 )
 
@@ -204,6 +205,28 @@ class FirmwareRuntimeTests(unittest.TestCase):
         victim.write_bytes(b"tampered")
         with self.assertRaisesRegex(FirmwareRuntimeError, "changed"):
             ensure_shared_runtime(lock, target, cache_root=cache)
+
+    def test_publication_renames_a_writable_root_then_locks_and_repairs_it(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        real_replace = os.replace
+
+        def require_writable_root(source, destination):
+            self.assertNotEqual(Path(source).stat().st_mode & 0o200, 0)
+            return real_replace(source, destination)
+
+        with mock.patch("firmware_runtime.os.replace", require_writable_root):
+            accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        self.assertEqual(accepted.stat().st_mode & 0o200, 0)
+
+        repair_runtime(lock, target, self.root / "project", cache_root=cache)
+        self.assertFalse(accepted.exists())
+        self.assertFalse((base / f"{digest}.tar.gz").exists())
 
     def test_handoff_uses_only_verified_private_python(self) -> None:
         bundle, size, digest = self.make_bundle()
