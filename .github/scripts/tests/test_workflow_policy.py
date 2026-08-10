@@ -37,6 +37,41 @@ def workflow_source(filename: str) -> str:
     return (WORKFLOW_ROOT / filename).read_text(encoding="utf-8")
 
 
+def workflow_sources() -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (path.name, path.read_text(encoding="utf-8"))
+        for path in sorted(WORKFLOW_ROOT.glob("*.yml"))
+    )
+
+
+def firmware_builder_lines(source: str) -> tuple[str, ...]:
+    return tuple(
+        line.strip()
+        for line in source.splitlines()
+        if "build_firmware.py" in line and not line.lstrip().startswith("#")
+    )
+
+
+def mapping_block(source: str, key: str, *, indent: int) -> str:
+    lines = source.splitlines()
+    marker = f"{' ' * indent}{key}:"
+    try:
+        start = lines.index(marker)
+    except ValueError as error:
+        raise AssertionError(f"missing YAML mapping key: {key}") from error
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        line_indent = len(line) - len(line.lstrip())
+        if line_indent <= indent:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
 def matrix_targets(source: str) -> set[str]:
     return set(
         re.findall(r"^\s+- (WAVESHARE_AMOLED_[A-Z0-9_]+)$", source, re.MULTILINE)
@@ -111,45 +146,60 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_host_tests_keep_a_clean_firmware_build_environment(self) -> None:
         general_ci = workflow_source("ci.yml")
-        host_job = general_ci.split("\n  esp32-host:\n", 1)[1].split(
-            "\n  map-platform:\n", 1
-        )[0]
+        host_job = mapping_block(general_ci, "esp32-host", indent=2)
 
         self.assertNotIn("actions/setup-python", host_job)
         self.assertIn("python3-cryptography", host_job)
         self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
 
-    def test_every_setup_python_firmware_builder_clears_library_overrides(
-        self,
-    ) -> None:
-        for workflow in (
-            "ci.yml",
-            "firmware-diagnostics.yml",
-            "firmware-release.yml",
-            "speaker-firmware.yml",
-        ):
-            with self.subTest(workflow=workflow):
-                commands = re.findall(
-                    r"^\s+run: (.+build_firmware\.py.+)$",
-                    workflow_source(workflow),
-                    re.MULTILINE,
-                )
-                self.assertTrue(commands)
-                for command in commands:
+    def test_host_job_mapping_stops_at_the_next_peer(self) -> None:
+        source = (
+            "jobs:\n"
+            "  esp32-host:\n"
+            "    steps:\n"
+            "      - run: python3 -m unittest\n"
+            "  unrelated:\n"
+            "    uses: actions/setup-python@v7\n"
+        )
+
+        host_job = mapping_block(source, "esp32-host", indent=2)
+
+        self.assertIn("python3 -m unittest", host_job)
+        self.assertNotIn("actions/setup-python", host_job)
+
+    def test_builder_scanner_includes_block_scalar_commands(self) -> None:
+        source = (
+            "steps:\n"
+            "  - run: |\n"
+            "      python tools/build_firmware.py WAVESHARE_AMOLED_175\n"
+        )
+
+        self.assertEqual(
+            ("python tools/build_firmware.py WAVESHARE_AMOLED_175",),
+            firmware_builder_lines(source),
+        )
+
+    def test_every_firmware_builder_clears_library_overrides(self) -> None:
+        builder_count = 0
+        for workflow, source in workflow_sources():
+            for command in firmware_builder_lines(source):
+                builder_count += 1
+                with self.subTest(workflow=workflow, command=command):
                     self.assertIn(
                         "env -u LD_LIBRARY_PATH python tools/build_firmware.py",
                         command,
                     )
+        self.assertGreater(builder_count, 0)
 
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
-        for workflow in (
-            "ci.yml",
-            "firmware-diagnostics.yml",
-            "firmware-release.yml",
-            "speaker-firmware.yml",
-        ):
+        builder_workflows = tuple(
+            (workflow, source)
+            for workflow, source in workflow_sources()
+            if firmware_builder_lines(source)
+        )
+        self.assertTrue(builder_workflows)
+        for workflow, source in builder_workflows:
             with self.subTest(workflow=workflow):
-                source = workflow_source(workflow)
                 self.assertIn("uses: actions/cache@v6", source)
                 self.assertIn(".pio/open-bike-build/downloads", source)
 
