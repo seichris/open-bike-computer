@@ -475,21 +475,26 @@ def _load_inventory(archive: tarfile.TarFile) -> dict[str, dict[str, object]]:
     if not isinstance(files, list) or not files:
         raise FirmwareRuntimeError("runtime inventory must list files")
     result: dict[str, dict[str, object]] = {}
-    casefolded: set[str] = set()
+    casefolded: dict[str, str] = {}
     for item in files:
         entry = _strict_object(item, {"path", "size", "sha256", "executable"}, set(), "inventory file")
         name, size, digest, executable = entry["path"], entry["size"], entry["sha256"], entry["executable"]
         if not isinstance(name, str):
             raise FirmwareRuntimeError("inventory path must be a string")
         normalized = str(_safe_member_path(name))
-        if normalized == "inventory.json" or normalized in result or normalized.casefold() in casefolded:
-            raise FirmwareRuntimeError("runtime inventory contains duplicate or case-colliding paths")
+        collision = casefolded.get(normalized.casefold())
+        if normalized == "inventory.json" or normalized in result or collision is not None:
+            detail = collision or normalized
+            raise FirmwareRuntimeError(
+                "runtime inventory contains duplicate or case-colliding paths: "
+                f"{detail!r} and {normalized!r}"
+            )
         if normalized.lower().endswith((".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz")):
             raise FirmwareRuntimeError("runtime inventory contains a nested archive")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0 or not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None or not isinstance(executable, bool):
             raise FirmwareRuntimeError("runtime inventory file metadata is invalid")
         result[normalized] = entry
-        casefolded.add(normalized.casefold())
+        casefolded[normalized.casefold()] = normalized
     return result
 
 
@@ -503,13 +508,18 @@ def extract_verified_bundle(bundle: Path, destination: Path) -> None:
     with archive:
         inventory = _load_inventory(archive)
         members: dict[str, tarfile.TarInfo] = {}
-        casefolded: set[str] = set()
+        casefolded: dict[str, str] = {}
         for member in archive.getmembers():
             name = str(_safe_member_path(member.name))
-            if name in members or name.casefold() in casefolded:
-                raise FirmwareRuntimeError("runtime bundle contains duplicate or case-colliding paths")
+            collision = casefolded.get(name.casefold())
+            if name in members or collision is not None:
+                detail = collision or name
+                raise FirmwareRuntimeError(
+                    "runtime bundle contains duplicate or case-colliding paths: "
+                    f"{detail!r} and {name!r}"
+                )
             members[name] = member
-            casefolded.add(name.casefold())
+            casefolded[name.casefold()] = name
             if name == "inventory.json":
                 continue
             if member.issym() or member.islnk() or member.isdev() or not (member.isfile() or member.isdir()):
