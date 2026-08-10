@@ -75,6 +75,12 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertIn("bool activationAlreadyBegun = false;", HEADER)
         self.assertIn("bool automaticExitOnCleanResponse = true;", HEADER)
 
+    def test_completed_upload_survives_obsolete_cleanup_failure(self):
+        body = method_body("handlePut")
+        self.assertIn("post-upload cleanup incomplete", body)
+        self.assertIn("continuing with completed upload", body)
+        self.assertNotIn('sendError(client, 500, "staging_cleanup"', body)
+
 
 if __name__ == "__main__":
     unittest.main()
