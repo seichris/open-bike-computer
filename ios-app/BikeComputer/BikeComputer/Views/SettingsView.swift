@@ -1552,10 +1552,15 @@ private struct TestNavigationSettingsSection: View {
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @AppStorage("remoteDebug.preferLAN.v1") private var preferLAN = true
     @State private var isWorking = false
     @State private var statusMessage = "Idle"
     @State private var errorMessage: String?
     @State private var copiedBrowserURL: String?
+    @State private var lanSSID = ""
+    @State private var lanPassword = ""
+    @State private var loadedLANCredentials = false
+    private let credentialStore = RemoteDebugLANCredentialStore()
 
     var body: some View {
         Section {
@@ -1568,8 +1573,13 @@ private struct RemoteDeviceDebugSettingsSection: View {
             )
             if let session = activeSession {
                 SettingsValueRow(
+                    title: "Connection",
+                    value: connectionLabel(for: session)
+                )
+                SettingsValueRow(
                     title: "SSID",
-                    value: session.accessPointSSID ?? "Not provided"
+                    value: session.networkSSID ??
+                        session.accessPointSSID ?? "Not provided"
                 )
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Base URL")
@@ -1594,6 +1604,26 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 }
                 .disabled(isWorking)
             } else {
+                Toggle("Prefer Local Wi-Fi", isOn: $preferLAN)
+                if preferLAN {
+                    TextField("Wi-Fi name (SSID)", text: $lanSSID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Wi-Fi password", text: $lanPassword)
+                        .textContentType(.password)
+                    if let lanValidationMessage {
+                        Text(lanValidationMessage)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    if !lanSSID.isEmpty || !lanPassword.isEmpty {
+                        Button(role: .destructive, action: forgetLANCredentials) {
+                            Label("Forget Local Wi-Fi", systemImage: "trash")
+                        }
+                        .disabled(isWorking)
+                    }
+                }
+
                 Button(action: startSession) {
                     if isWorking {
                         HStack {
@@ -1617,6 +1647,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
         } footer: {
             Text(footerText)
         }
+        .onAppear(perform: loadLANCredentialsIfNeeded)
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode != DeviceTransferSession.Mode.debug.rawValue {
                 clearCopiedBrowserURLIfOwned()
@@ -1656,7 +1687,10 @@ private struct RemoteDeviceDebugSettingsSection: View {
             mode: .debug,
             baseURL: baseURL,
             accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-            sessionToken: token
+            sessionToken: token,
+            networkTransport: bleManager.deviceTransferNetworkTransport,
+            networkSSID: bleManager.deviceTransferNetworkSSID,
+            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback
         )
     }
 
@@ -1670,7 +1704,8 @@ private struct RemoteDeviceDebugSettingsSection: View {
         bleManager.isNavigationReady &&
             bleManager.hasReceivedDeviceCapabilities &&
             bleManager.supportsRemoteDeviceDebug &&
-            bleManager.deviceTransferMode.isEmpty
+            bleManager.deviceTransferMode.isEmpty &&
+            lanInputIsValid
     }
 
     private var sessionStatus: String {
@@ -1685,10 +1720,33 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private var footerText: String {
-        if activeSession != nil {
-            return "Join the shown device Wi-Fi on the Mac, then open the copied URL. The URL fragment is the session secret; do not paste it into logs."
+        if let activeSession {
+            if activeSession.networkTransport == "lan" {
+                return "Open the copied URL from a computer on the same local network. The URL fragment is the session secret; do not paste it into logs."
+            }
+            return "Join the shown device Wi-Fi on the Mac, then open the copied URL. The hotspot is used when local Wi-Fi is unavailable. The URL fragment is the session secret; do not paste it into logs."
         }
-        return "Requires an opt-in remote-debug firmware build. This starts the real device framebuffer and synthetic-pointer service; it is not a simulator."
+        return "Local Wi-Fi is tried first with credentials stored in this iPhone's Keychain and sent over authenticated BLE for this session only. The device hotspot is the automatic fallback."
+    }
+
+    private var lanInputIsValid: Bool {
+        guard preferLAN else { return true }
+        if lanSSID.isEmpty { return lanPassword.isEmpty }
+        return RemoteDebugLANCredentials(
+            ssid: lanSSID,
+            password: lanPassword
+        ) != nil
+    }
+
+    private var lanValidationMessage: String? {
+        guard preferLAN else { return nil }
+        if lanSSID.isEmpty {
+            return lanPassword.isEmpty
+                ? "Enter a network to try LAN first, or start with the device hotspot."
+                : "Enter the Wi-Fi name."
+        }
+        guard !lanInputIsValid else { return nil }
+        return "SSID must be at most 32 bytes; password must be empty for an open network or 8-63 bytes."
     }
 
     private func startSession() {
@@ -1698,8 +1756,31 @@ private struct RemoteDeviceDebugSettingsSection: View {
         Task {
             defer { isWorking = false }
             do {
+                let credentials: RemoteDebugLANCredentials?
+                if preferLAN, !lanSSID.isEmpty {
+                    guard let validated = RemoteDebugLANCredentials(
+                        ssid: lanSSID,
+                        password: lanPassword
+                    ) else {
+                        throw RemoteDeviceDebugError.rejected(
+                            lanValidationMessage ?? "Invalid local Wi-Fi credentials."
+                        )
+                    }
+                    guard credentialStore.save(validated) else {
+                        throw RemoteDeviceDebugError.rejected(
+                            "The local Wi-Fi credentials could not be saved to Keychain."
+                        )
+                    }
+                    credentials = validated
+                } else {
+                    if preferLAN {
+                        _ = credentialStore.remove()
+                    }
+                    credentials = nil
+                }
                 _ = try await DeviceTransferManager().enterRemoteDebug(
                     bleManager: bleManager,
+                    lanCredentials: credentials,
                     status: { statusMessage = $0 }
                 )
             } catch is CancellationError {
@@ -1716,6 +1797,36 @@ private struct RemoteDeviceDebugSettingsSection: View {
         UIPasteboard.general.string = browserURL.absoluteString
         copiedBrowserURL = browserURL.absoluteString
         statusMessage = "Browser URL copied"
+    }
+
+    private func connectionLabel(for session: DeviceTransferSession) -> String {
+        switch session.networkTransport {
+        case "lan":
+            return "Local Wi-Fi"
+        case "hotspot":
+            return session.hotspotFallback
+                ? "Device hotspot (fallback)"
+                : "Device hotspot"
+        case "connecting", "starting":
+            return "Connecting"
+        default:
+            return "Unknown"
+        }
+    }
+
+    private func loadLANCredentialsIfNeeded() {
+        guard !loadedLANCredentials else { return }
+        loadedLANCredentials = true
+        guard let credentials = credentialStore.load() else { return }
+        lanSSID = credentials.ssid
+        lanPassword = credentials.password
+    }
+
+    private func forgetLANCredentials() {
+        _ = credentialStore.remove()
+        lanSSID = ""
+        lanPassword = ""
+        statusMessage = "Local Wi-Fi forgotten"
     }
 
     private func copySessionDetails() {

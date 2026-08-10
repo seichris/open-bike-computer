@@ -95,6 +95,16 @@ browser debugging is useful, while keeping normal production/release flashes
 debugger-free. See `docs/remote-device-debugging.md` for session startup and
 security requirements.
 
+Remote-debug sessions prefer a configured normal 2.4 GHz LAN and use the
+device's `BikeComputer-Transfer` access point only as a fallback. Use the fresh
+BLE `DSTS` `networkTransport`, `baseUrl`, and `networkSsid` fields instead of
+assuming `192.168.4.1`: open a `lan` URL from a browser on the same local
+network, and join the advertised AP only for `hotspot`. LAN credentials are
+owned by the iPhone app's device-only Keychain, sent through the authenticated
+BLE command for one session, and held only in device RAM. Never put the
+password in source, shell history, logs, status payloads, screenshots, or task
+notes.
+
 Verified builds use the exact Git commit's committer timestamp as
 `SOURCE_DATE_EPOCH` for PlatformIO, ESP-IDF, and the firmware metadata. The
 `BOOT_META built=` value therefore means source commit time, not workstation

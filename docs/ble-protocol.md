@@ -1034,6 +1034,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
 | `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `15` is present. |
+| `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, or debug transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
@@ -1075,11 +1076,32 @@ is non-empty. A status cached before the enter request is not sufficient. The
 app sends that token as
 `X-BikeComputer-Transfer-Token` on every local HTTP request.
 
-Remote-debug entry has no legacy fallback. iOS requires authenticated
-navigation readiness, CAP2 bit `15`, and a fresh `DSTS` response whose `mode` is
-exactly `debug`, whose `baseUrl` is present, and whose `sessionToken` is
-non-empty. It does not automatically join the accessory AP because the copied
-browser URL is intended for a Mac. That URL is
+Remote-debug entry has no legacy protocol fallback. The plain
+`DTRNenter|debug` form starts the device hotspot directly. The LAN-first form
+starts with ASCII `DTRNenter|debug|lan1|`, followed by one unsigned SSID length
+byte, one unsigned password length byte, then the exact SSID and password bytes.
+The SSID is 1-32 UTF-8 bytes; the password is empty for an open network or 8-63
+UTF-8 bytes. The frame has no delimiters after the two lengths, so spaces and
+`|` characters are preserved. It is accepted only through the existing
+authenticated command channel. The iPhone stores the credentials in its
+device-only Keychain; firmware consumes them for that session and does not
+persist, publish, or log the password.
+
+The firmware attempts station association for six seconds without blocking the
+UI task. Failure starts `BikeComputer-Transfer` and reports a hotspot fallback.
+`DSTS` reports `networkTransport` (`starting`, `connecting`, `lan`, or
+`hotspot`), `networkSsid`, and `hotspotFallback`; `baseUrl` remains empty until
+the selected listener is ready. The app verifies a LAN result against the
+token-authenticated `/device-debug/v1/info` endpoint. If association succeeded
+but the endpoint is unreachable, it exits that session over BLE and sends the
+plain debug-enter form to force the hotspot.
+
+iOS requires authenticated navigation readiness, CAP2 bit `15`, and a fresh
+`DSTS` response whose `mode` is exactly `debug`, whose `baseUrl` is present,
+and whose `sessionToken` is non-empty. It does not automatically join the
+accessory AP because the copied browser URL is intended for a Mac. For a LAN
+result the Mac remains on the same local network; for a hotspot result the user
+joins the reported AP. The browser URL is
 `<baseUrl>/device-debug/#<sessionToken>`: the fragment is removed from the
 address bar by the device-served page and is never sent in the HTTP request
 target. API requests carry the token header. Debug, map, and firmware modes are

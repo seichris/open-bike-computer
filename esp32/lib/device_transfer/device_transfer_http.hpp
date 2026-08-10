@@ -9,6 +9,8 @@
 #include <array>
 #include <string>
 
+#include "device_transfer_network_protocol.hpp"
+
 namespace device_transfer {
 
 struct HttpTransferStatus {
@@ -18,6 +20,9 @@ struct HttpTransferStatus {
   std::string mode;
   std::string baseUrl;
   std::string apSsid;
+  std::string networkTransport;
+  std::string networkSsid;
+  bool hotspotFallback = false;
   std::string sessionToken;
   std::string lastErrorCode;
   std::string lastErrorMessage;
@@ -58,6 +63,8 @@ public:
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
+  bool setPreferredNetwork(const LanCredentials &credentials);
+  void clearPreferredNetwork();
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
@@ -69,6 +76,11 @@ private:
   bool configured_ = false;
   bool enabled_ = false;
   bool startedAp_ = false;
+  bool startedStation_ = false;
+  bool hotspotFallback_ = false;
+  std::string networkTransport_;
+  std::string networkSsid_;
+  LanCredentials preferredNetwork_;
   std::string mode_;
   std::string apSsid_ = "BikeComputer-Transfer";
   std::string sessionToken_;
@@ -92,6 +104,8 @@ private:
 
   void handleClient(WiFiClient &client);
   void runWorker();
+  bool startNetwork();
+  void stopNetwork();
   static void workerTaskThunk(void *arg);
   HttpRequestHandler *handlerForPath(const std::string &path) const;
   std::string generateSessionToken() const;

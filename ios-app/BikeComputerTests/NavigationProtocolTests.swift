@@ -11353,6 +11353,8 @@ struct NavigationProtocolTests {
     static func testDeviceTransferHandshakePolicy() {
         assertEqual(DeviceTransferHandshakePolicy.attemptCount, 32,
                     "transfer handshake retains its eight-second readiness window")
+        assertEqual(DeviceTransferHandshakePolicy.remoteDebugAttemptCount, 64,
+                    "LAN-first debug startup allows station timeout plus hotspot fallback")
         assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
@@ -13138,7 +13140,7 @@ struct NavigationProtocolTests {
 
         var sentPackets: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 64,
+            maximumWriteLength: 180,
             canSend: { true },
             write: { sentPackets.append($0) }
         ))
@@ -13175,6 +13177,35 @@ struct NavigationProtocolTests {
         assertEqual(String(data: sentPackets[1], encoding: .utf8), "DTRNenter|debug", "debug enter command uses DTRN frame")
         assertEqual(String(data: sentPackets[2], encoding: .utf8), "DSTS", "status command uses DSTS frame")
         assertEqual(String(data: sentPackets[3], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
+
+        let credentials = RemoteDebugLANCredentials(
+            ssid: "Home Wi-Fi",
+            password: "local-password"
+        )
+        assert(credentials != nil, "valid LAN credentials are accepted")
+        assert(manager.requestDeviceTransferMode(
+            .debug,
+            remoteDebugLANCredentials: credentials
+        ), "LAN-first debug command should fit one authenticated BLE write")
+        let lanPacket = sentPackets[4]
+        let lanPrefix = Data("DTRNenter|debug|lan1|".utf8)
+        assert(lanPacket.starts(with: lanPrefix),
+               "LAN-first debug command uses the versioned binary envelope")
+        let lengths = lanPacket.dropFirst(lanPrefix.count).prefix(2)
+        assertEqual(Array(lengths), [10, 14],
+                    "LAN-first envelope carries bounded SSID/password lengths")
+        assert(RemoteDebugLANCredentials(ssid: String(repeating: "s", count: 33),
+                                         password: "password") == nil,
+               "oversized SSIDs are rejected before BLE transmission")
+        assert(RemoteDebugLANCredentials(ssid: "Home", password: "short") == nil,
+               "short WPA passwords are rejected before BLE transmission")
+        assert(RemoteDebugLANCredentials(ssid: "Home\0Network",
+                                         password: "password") == nil,
+               "NUL bytes are rejected before BLE transmission")
+
+        manager.markDeviceTransferHotspotFallback()
+        assert(manager.deviceTransferUsedHotspotFallback,
+               "app-forced endpoint fallback remains visible in session state")
 
         let session = DeviceTransferSession(
             mode: .debug,
@@ -13504,7 +13535,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -13512,6 +13543,9 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferMode, "firmware", "status parser exposes transfer mode")
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
+        assertEqual(manager.deviceTransferNetworkTransport, "hotspot", "status parser exposes network transport")
+        assertEqual(manager.deviceTransferNetworkSSID, "BikeComputer-Transfer", "status parser exposes network SSID")
+        assert(manager.deviceTransferUsedHotspotFallback, "status parser exposes LAN fallback state")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")

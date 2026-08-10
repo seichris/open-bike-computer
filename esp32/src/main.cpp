@@ -430,6 +430,7 @@ bool startRemoteDeviceDebugSession() {
   if (status.enabled)
     return status.mode == "debug";
   if (!deviceTransferHttp.waitUntilStopped(2000)) {
+    deviceTransferHttp.clearPreferredNetwork();
     deviceTransferHttp.setLastError("transfer_stopping",
                                     "previous transfer worker is still stopping");
     return false;
@@ -443,11 +444,13 @@ bool startRemoteDeviceDebugSession() {
   const device_debug::FrameStoreStartResult started =
       deviceDebugHttp.beginSession(hasFullScreenRgb565Buffer());
   if (started != device_debug::FrameStoreStartResult::Started) {
+    deviceTransferHttp.clearPreferredNetwork();
     deviceTransferHttp.setLastError(remoteDebugStartErrorCode(started),
                                     "remote debug session could not start");
     return false;
   }
   if (!deviceTransferHttp.setEnabled(true, "debug")) {
+    deviceTransferHttp.clearPreferredNetwork();
     deviceDebugHttp.cancelSession();
     deviceDebugHttp.finishSessionTeardown();
     return false;

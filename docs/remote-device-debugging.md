@@ -22,14 +22,30 @@ CAP2 bit `15`, and reject debug-mode entry.
 2. Connect the iPhone app and complete normal authenticated navigation setup.
 3. In a Debug build of the iPhone app, open **Developer Settings** and then
    **Remote Device Debugging**.
-4. Tap **Start Remote Debugging**. The app requires a fresh BLE `DSTS` response
-   for `debug` mode; cached transfer credentials are not accepted.
-5. Join the displayed `BikeComputer-Transfer` Wi-Fi network on the Mac.
-6. Tap **Copy Browser URL** and open it in Brave (through the Codex browser
+4. Leave **Prefer Local Wi-Fi** enabled and enter the normal 2.4 GHz network's
+   SSID and password. The app stores them only in this iPhone's device-only
+   Keychain. Clear the fields or turn the preference off to start directly on
+   the device hotspot.
+5. Tap **Start Remote Debugging**. The credentials are sent through the
+   authenticated BLE session and retained only in device RAM. The device tries
+   the LAN for six seconds, then starts `BikeComputer-Transfer` automatically
+   if association fails. The app requires a fresh BLE `DSTS` response and also
+   forces hotspot fallback if the device joined the LAN but the authenticated
+   HTTP endpoint is unreachable from the iPhone.
+6. Follow the displayed **Connection** value. For **Local Wi-Fi**, keep the Mac
+   on the same LAN; no Wi-Fi switch is needed. For **Device hotspot**, join the
+   displayed `BikeComputer-Transfer` network on the Mac.
+7. Tap **Copy Browser URL** and open it in Brave (through the Codex browser
    extension for automated checks). The token follows `#` and stays in page
    memory; do not put that URL in logs or screenshots. The page has no external
    resources, so losing internet connectivity while joined to the accessory AP
    does not affect it.
+
+The LAN password is never included in `DSTS`, the debug `/info` response,
+copied session details, or firmware/iOS logs. ESP32-S3 station mode supports
+ordinary 2.4 GHz personal/open networks, not captive portals or enterprise
+authentication. Network client isolation or a firewall can also make the LAN
+endpoint unreachable; those cases use the same hotspot fallback.
 
 The browser displays target identity, dimensions, display state, frame/copy and
 HTTP-duration counters, PSRAM allocation evidence, the live user-oriented
@@ -54,8 +70,8 @@ fail-safe timeout, and every session teardown path forces a release.
 
 Use **End Debug Session** when finished. If a browser disappears without
 exiting, the ordinary five-minute transfer inactivity boundary revokes the
-credential, stops the access point, releases synthetic input, and frees the
-snapshot.
+credential, stops the active Wi-Fi transport, releases synthetic input, and
+frees the snapshot.
 
 ## HTTP contract
 
@@ -65,7 +81,7 @@ same-origin page. All versioned API routes require the existing
 
 | Method | Route | Result |
 | --- | --- | --- |
-| `GET` | `/device-debug/v1/info` | Target, identity, dimensions, display state, sequence, and counters. |
+| `GET` | `/device-debug/v1/info` | Target, identity, dimensions, display/network state, sequence, and counters. |
 | `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. |
 | `POST` | `/device-debug/v1/pointer` | Queue one schema-1 down/move/up/cancel event. |
 | `POST` | `/device-debug/v1/display/wake` | Queue a UI-task display wake and full refresh. |

@@ -18,19 +18,21 @@ The first complete workflow is:
 2. Authenticate the iPhone app to that Bicino over the existing BLE ownership
    protocol.
 3. Start **Remote Device Debugging** from Developer Settings. The authenticated
-   BLE control plane starts a temporary `debug` Wi-Fi/HTTP session and returns
-   its SSID, base URL, and random session token.
-4. Connect the Mac to the advertised Bicino access point and open the supplied
-   URL in Brave. The token lives in the URL fragment, which is not sent in the
-   initial HTTP request; the page keeps it in memory and applies it only as the
-   existing transfer-auth header.
+   BLE control plane sends the optional Keychain-backed LAN credentials for this
+   session, then returns the selected transport, SSID, base URL, and random
+   session token.
+4. Keep the Mac on that LAN when it is reachable, or join the advertised Bicino
+   access point after automatic fallback, then open the supplied URL in Brave.
+   The token lives in the URL fragment, which is not sent in the initial HTTP
+   request; the page keeps it in memory and applies it only as the existing
+   transfer-auth header.
 5. View the real device frame, tap, long-press, or drag in the browser, and see
    the resulting real-device frame.
 6. Save the canvas as PNG or use the repository CLI to capture frames and send
    deterministic input for automated debugging.
 7. End the session explicitly, or let the existing five-minute authorized-
-   traffic timeout stop the HTTP server and access point after the browser
-   disappears.
+   traffic timeout stop the HTTP server and active Wi-Fi transport after the
+   browser disappears.
 
 ## Baseline
 
@@ -142,7 +144,7 @@ Current `main` has no:
 - **Wake Display** is explicit. Fetching frames does not silently wake the
   AMOLED or convert a hidden first touch into an accidental UI action.
 - **End Session** receives a response before the device revokes the token and
-  tears down its access point.
+  tears down its active Wi-Fi transport.
 
 ### Real-device semantics
 
@@ -156,8 +158,8 @@ Current `main` has no:
 - Ending, timing out, or revoking a session always generates a synthetic
   release/cancel before the input source is discarded.
 - Browser frame polling counts as authorized transfer traffic and keeps the
-  debug access point alive, but it does not count as rider interaction for the
-  display inactivity timer.
+  debug network session alive, but it does not count as rider interaction for
+  the display inactivity timer.
 - Accepted synthetic input does count as meaningful UI activity.
 - The transfer power lock means this mode is unsuitable for battery-runtime or
   automatic-light-sleep characterization. The page and documentation must say
@@ -191,8 +193,9 @@ must label its input **Synthetic pointer** rather than **Touch test**.
 
 1. This is a remote view/controller for real hardware, not an LVGL desktop
    simulator.
-2. Reuse the authenticated generic transfer server and temporary Bicino access
-   point. Do not re-enable the legacy CLI or AsyncWebServer.
+2. Reuse the authenticated generic transfer server, preferring a configured
+   normal LAN and retaining the temporary Bicino access point as fallback. Do
+   not re-enable the legacy CLI or AsyncWebServer.
 3. Ship only in dedicated `*_REMOTE_DEBUG` firmware profiles guarded by
    `DEVICE_REMOTE_DEBUG=1`. Production profiles neither register the handler nor
    advertise the capability.
@@ -203,8 +206,7 @@ must label its input **Synthetic pointer** rather than **Touch test**.
 6. Capture the panel-oriented buffer passed to `gfx->writePixels()`, after the
    1.75-inch software rotation.
 7. Allocate one snapshot buffer only while debug mode is entering. Fail closed
-   before enabling the access point if a full contiguous snapshot cannot be
-   allocated.
+   before enabling Wi-Fi if a full contiguous snapshot cannot be allocated.
 8. Never stream directly from LVGL's draw buffer or the active rotation buffer.
 9. Use one snapshot buffer plus non-blocking capture. Network transmission may
    cause a debug frame to be skipped, but must never block LVGL or the panel
@@ -242,13 +244,13 @@ must label its input **Synthetic pointer** rather than **Touch test**.
 
 ```text
 Authenticated iPhone app
-  DTRN enter|debug
+  DTRN enter|debug [optional bounded LAN credentials]
           |
           v
 BLE transfer-control queue -----> main/UI task -----> debug session enable
                                                        |
                                                        v
-                                             temporary Wi-Fi AP + token
+                                         normal LAN or fallback AP + token
                                                        |
                          +-----------------------------+------------------+
                          |                                                |
@@ -330,7 +332,7 @@ Entry rules:
 4. Allocate the exact snapshot size from PSRAM with the same alignment policy
    used by the display buffers.
 5. If allocation fails, free partial state, publish
-   `remote_debug_insufficient_psram`, and do not enable transfer mode/AP.
+   `remote_debug_insufficient_psram`, and do not enable transfer mode or Wi-Fi.
 6. Mark the next eligible physical display flush for capture and notify the UI
    task to invalidate the active screen if no fresh frame is pending.
 
@@ -535,10 +537,15 @@ Add a **Remote Device Debugging** section that:
 - appears only in an iOS Debug build;
 - requires authenticated navigation readiness and the negotiated remote-debug
   capability bit;
-- sends `DTRNenter|debug` and requires a fresh `DSTS` whose mode is exactly
-  `debug`, base URL is present, and token is non-empty;
+- sends plain `DTRNenter|debug` for hotspot-only use or the versioned bounded
+  LAN-credential envelope for LAN-first use, then requires a fresh `DSTS` whose
+  mode is exactly `debug`, base URL is present, and token is non-empty;
 - does not use the map/firmware fallback modes;
-- displays target, SSID, base URL, and session status;
+- stores the preferred LAN only in this iPhone's device-only Keychain and never
+  copies or logs the password;
+- verifies a reported LAN endpoint and restarts the debug session on the device
+  hotspot when association or endpoint reachability fails;
+- displays target, transport, SSID, base URL, fallback state, and session status;
 - offers **Copy Browser URL** using
   `<baseUrl>/device-debug/#<sessionToken>`;
 - offers **Copy Session Details** without writing them into the persistent BLE
@@ -548,10 +555,10 @@ Add a **Remote Device Debugging** section that:
   replaced.
 
 Add `debug` to `DeviceTransferSession.Mode`, but keep map and firmware network-
-join behavior unchanged. The debug preparation path obtains the BLE session
-details without automatically moving the iPhone onto the access point; the Mac
-is the intended browser host. A later, separately reviewed enhancement may add
-**Open on this iPhone**.
+join behavior unchanged. The debug preparation path obtains and verifies the
+BLE session details without automatically moving the iPhone onto the access
+point; the Mac is the intended browser host. On a LAN result it stays on the
+normal network. On a hotspot result the Mac joins the advertised accessory AP.
 
 ### BLE capability and mode contract
 
@@ -561,8 +568,11 @@ is the intended browser host. A later, separately reviewed enhancement may add
   initialized successfully.
 - Extend `ble_transfer::Action` with `EnableDebug` and cover merge/replacement
   behavior in `test_transfer_control_dispatch.cpp`.
-- Accept `DTRNenter|debug` only after BLE authentication and only when the
-  capability is available.
+- Accept plain `DTRNenter|debug` and the versioned LAN-first credential envelope
+  only after BLE authentication and only when the capability is available.
+- Keep LAN credentials session-scoped in RAM, exclude the password from every
+  status/log surface, attempt station mode for six seconds on the HTTP worker,
+  and start the device AP when station association fails.
 - Keep modes mutually exclusive. An active `map` or `firmware` session returns
   `transfer_busy`; an existing `debug` session may return a fresh status without
   silently rotating its token unless a new transfer boundary is requested.
@@ -852,8 +862,9 @@ For each target:
 10. Stream at the browser's maximum supported cadence for at least 30 minutes;
     verify no watchdog, reboot, heap corruption, stuck pointer, torn frame, BLE
     loss, SD error, or unbounded memory decline.
-11. Close the browser without exiting. Verify the session and access point stop
-    after the five-minute inactivity boundary and the pointer is released.
+11. Close the browser without exiting. Verify the session and active Wi-Fi
+    transport stop after the five-minute inactivity boundary and the pointer is
+    released.
 12. Attempt map/firmware transfer while debug mode is active and vice versa;
     require a structured busy rejection with no mode confusion.
 
@@ -878,7 +889,7 @@ Initial acceptance budgets, subject to tightening with baseline evidence:
   panel flush;
 - a locked network snapshot causes a skipped debug frame, never a waiting UI
   task;
-- p95 tap-to-updated-browser-frame is at most 750 ms on the local access point;
+- p95 tap-to-updated-browser-frame is at most 750 ms on the local network;
 - no single capture copy adds more than 30 ms to the flush path;
 - the exact snapshot allocation is recovered on session exit without a
   persistent decline in the largest contiguous PSRAM block; and

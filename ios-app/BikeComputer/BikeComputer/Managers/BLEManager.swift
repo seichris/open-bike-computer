@@ -672,6 +672,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
+    @Published private(set) var deviceTransferNetworkTransport: String?
+    @Published private(set) var deviceTransferNetworkSSID: String?
+    @Published private(set) var deviceTransferUsedHotspotFallback = false
+    private var deviceTransferForcedHotspotFallback = false
     @Published var deviceTransferSessionToken: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
@@ -3550,9 +3554,20 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
+    func requestDeviceTransferMode(
+        _ mode: DeviceTransferSession.Mode,
+        remoteDebugLANCredentials: RemoteDebugLANCredentials? = nil
+    ) -> Bool {
+        if mode == .debug {
+            deviceTransferForcedHotspotFallback = false
+            deviceTransferUsedHotspotFallback = false
+        }
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
-        packet.append(Data("enter|\(mode.rawValue)".utf8))
+        if mode == .debug, let remoteDebugLANCredentials {
+            packet.append(remoteDebugLANCredentials.commandPayload)
+        } else {
+            packet.append(Data("enter|\(mode.rawValue)".utf8))
+        }
         let coalescingKey = mode == .map
             ? "transfer.map.control"
             : "transfer.device.control"
@@ -3561,6 +3576,11 @@ class BLEManager: NSObject, ObservableObject {
             label: "\(mode.rawValue) transfer enter",
             coalescingKey: coalescingKey
         )
+    }
+
+    func markDeviceTransferHotspotFallback() {
+        deviceTransferForcedHotspotFallback = true
+        deviceTransferUsedHotspotFallback = true
     }
 
     @discardableResult
@@ -3923,6 +3943,10 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferMode = ""
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
+        deviceTransferNetworkTransport = nil
+        deviceTransferNetworkSSID = nil
+        deviceTransferUsedHotspotFallback = false
+        deviceTransferForcedHotspotFallback = false
         deviceTransferSessionToken = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
@@ -6641,6 +6665,14 @@ extension BLEManager: CBPeripheralDelegate {
             deviceTransferBaseURL = nil
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
+        deviceTransferNetworkTransport = object["networkTransport"] as? String
+        deviceTransferNetworkSSID = object["networkSsid"] as? String
+        if deviceTransferMode.isEmpty {
+            deviceTransferForcedHotspotFallback = false
+        }
+        deviceTransferUsedHotspotFallback =
+            (object["hotspotFallback"] as? Bool ?? false) ||
+            deviceTransferForcedHotspotFallback
         deviceTransferSessionToken = object["sessionToken"] as? String
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String

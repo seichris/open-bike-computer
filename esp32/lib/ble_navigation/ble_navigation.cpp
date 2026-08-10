@@ -1460,6 +1460,17 @@ static std::string mapTransferStatusJson() {
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
   }
+  if (!transferStatus.networkTransport.empty()) {
+    body += ",\"networkTransport\":\"" +
+            jsonEscape(transferStatus.networkTransport) + "\"";
+  }
+  if (!transferStatus.networkSsid.empty()) {
+    body += ",\"networkSsid\":\"" +
+            jsonEscape(transferStatus.networkSsid) + "\"";
+  }
+  if (transferStatus.hotspotFallback) {
+    body += ",\"hotspotFallback\":true";
+  }
   if (activeStatus.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
     if (!activeMap.sessionId.empty()) {
@@ -2139,6 +2150,51 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
 
 static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
                                                 NimBLECharacteristic *) {
+  device_transfer::LanCredentials lanCredentials;
+  const device_transfer::LanCommandParseResult lanCommand =
+      device_transfer::parseRemoteDebugLanCommand(data, len, lanCredentials);
+  if (lanCommand == device_transfer::LanCommandParseResult::Invalid) {
+    deviceTransferHttp.clearPreferredNetwork();
+    deviceTransferHttp.setLastError(
+        "wifi_credentials",
+        "LAN credentials must contain a 1-32 byte SSID and an empty or "
+        "8-63 byte password");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+    Serial.println(
+        "BLE Device Transfer: rejected invalid remote-debug LAN credentials");
+    return;
+  }
+  if (lanCommand == device_transfer::LanCommandParseResult::Valid) {
+#if DEVICE_REMOTE_DEBUG
+    if (!deviceDebugHttp.initialized()) {
+      deviceTransferHttp.setLastError(
+          "remote_debug_unavailable",
+          "remote debug service did not initialize on this device");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    } else if (!deviceTransferHttp.setPreferredNetwork(lanCredentials)) {
+      deviceTransferHttp.setLastError(
+          "wifi_credentials",
+          "LAN credentials could not be applied to this debug session");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    } else {
+      queueTransferControl(ble_transfer::Action::EnableDebug,
+                           ble_transfer::NotifyGeneric);
+      Serial.println(
+          "BLE Device Transfer: LAN-first debug enter queued");
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "remote_debug_unsupported",
+        "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
+    return;
+  }
+
   std::string command;
   if (data != nullptr && len > 0) {
     command.assign(reinterpret_cast<const char *>(data), len);
@@ -2163,6 +2219,7 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   if (command == "enter|debug") {
 #if DEVICE_REMOTE_DEBUG
     if (deviceDebugHttp.initialized()) {
+      deviceTransferHttp.clearPreferredNetwork();
       queueTransferControl(ble_transfer::Action::EnableDebug,
                            ble_transfer::NotifyGeneric);
       Serial.println("BLE Device Transfer: debug enter queued");

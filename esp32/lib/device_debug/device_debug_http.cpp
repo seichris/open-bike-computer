@@ -222,6 +222,7 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
   const FrameStoreCounters frames = frameStore().counters();
   const FrameStoreMemory memory = frameStore().memory();
   const PointerCounters pointers = pointerInput().counters();
+  const device_transfer::HttpTransferStatus transferStatus = server_->status();
   const uint32_t currentFreePsram =
       heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   const uint32_t currentLargestPsram =
@@ -242,7 +243,11 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
        << static_cast<unsigned>(geometry.panelToLvglRotation)
        << ",\"pixelFormat\":\"rgb565le\",\"displayState\":\""
        << displayStateName(displayPowerManager.state())
-       << "\",\"frameSequence\":" << frameStore().currentSequence()
+       << "\",\"network\":{\"transport\":\""
+       << transferStatus.networkTransport
+       << "\",\"hotspotFallback\":"
+       << (transferStatus.hotspotFallback ? "true" : "false")
+       << "},\"frameSequence\":" << frameStore().currentSequence()
        << ",\"counters\":{\"captured\":" << frames.captured
        << ",\"skippedCadence\":" << frames.skippedCadence
        << ",\"skippedLocked\":" << frames.skippedLocked

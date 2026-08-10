@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Security
 #if os(iOS)
 import NetworkExtension
 #endif
@@ -21,6 +22,123 @@ struct DeviceTransferSession: Equatable {
     let baseURL: URL
     let accessPointSSID: String?
     let sessionToken: String?
+    let networkTransport: String?
+    let networkSSID: String?
+    let hotspotFallback: Bool
+
+    init(
+        mode: Mode,
+        baseURL: URL,
+        accessPointSSID: String?,
+        sessionToken: String?,
+        networkTransport: String? = nil,
+        networkSSID: String? = nil,
+        hotspotFallback: Bool = false
+    ) {
+        self.mode = mode
+        self.baseURL = baseURL
+        self.accessPointSSID = accessPointSSID
+        self.sessionToken = sessionToken
+        self.networkTransport = networkTransport
+        self.networkSSID = networkSSID
+        self.hotspotFallback = hotspotFallback
+    }
+}
+
+struct RemoteDebugLANCredentials: Codable, Equatable {
+    static let maximumSSIDBytes = 32
+    static let minimumPasswordBytes = 8
+    static let maximumPasswordBytes = 63
+    static let commandPrefix = "enter|debug|lan1|"
+
+    let ssid: String
+    let password: String
+
+    init?(ssid: String, password: String) {
+        let ssidBytes = Data(ssid.utf8)
+        let passwordBytes = Data(password.utf8)
+        guard !ssidBytes.isEmpty,
+              ssidBytes.count <= Self.maximumSSIDBytes,
+              !ssid.contains("\0"),
+              passwordBytes.count <= Self.maximumPasswordBytes,
+              !password.contains("\0"),
+              passwordBytes.isEmpty ||
+                passwordBytes.count >= Self.minimumPasswordBytes else {
+            return nil
+        }
+        self.ssid = ssid
+        self.password = password
+    }
+
+    var commandPayload: Data {
+        let ssidBytes = Data(ssid.utf8)
+        let passwordBytes = Data(password.utf8)
+        var payload = Data(Self.commandPrefix.utf8)
+        payload.append(UInt8(ssidBytes.count))
+        payload.append(UInt8(passwordBytes.count))
+        payload.append(ssidBytes)
+        payload.append(passwordBytes)
+        return payload
+    }
+}
+
+struct RemoteDebugLANCredentialStore {
+    private static let service =
+        "LetItRide.BikeComputer.remoteDebugLAN.v1"
+    private static let account = "preferred-network"
+
+    func load() -> RemoteDebugLANCredentials? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let decoded = try? JSONDecoder().decode(
+                RemoteDebugLANCredentials.self,
+                from: data
+              ),
+              let validated = RemoteDebugLANCredentials(
+                ssid: decoded.ssid,
+                password: decoded.password
+              ) else { return nil }
+        return validated
+    }
+
+    @discardableResult
+    func save(_ credentials: RemoteDebugLANCredentials) -> Bool {
+        guard let data = try? JSONEncoder().encode(credentials) else {
+            return false
+        }
+        let query = baseQuery()
+        let update = [kSecValueData as String: data]
+        let updated = SecItemUpdate(
+            query as CFDictionary,
+            update as CFDictionary
+        )
+        if updated == errSecSuccess { return true }
+        guard updated == errSecItemNotFound else { return false }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] =
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+
+    @discardableResult
+    func remove() -> Bool {
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: Self.account,
+            kSecAttrSynchronizable as String: false,
+        ]
+    }
 }
 
 enum RemoteDeviceDebugError: LocalizedError, Equatable {
@@ -71,6 +189,9 @@ enum RemoteDeviceDebugSessionPolicy {
             "Target: \(target.isEmpty ? "unknown" : target)",
             "Device: \(deviceName.isEmpty ? "unknown" : deviceName)",
             "SSID: \(session.accessPointSSID ?? "not provided")",
+            "Network: \(session.networkTransport ?? "unknown")",
+            "Network SSID: \(session.networkSSID ?? "not provided")",
+            "Hotspot fallback: \(session.hotspotFallback ? "yes" : "no")",
             "Base URL: \(session.baseURL.absoluteString)",
             "Token: present (not copied)",
         ].joined(separator: "\n")
@@ -79,7 +200,10 @@ enum RemoteDeviceDebugSessionPolicy {
 
 enum DeviceTransferHandshakePolicy {
     static let attemptCount = 32
+    static let remoteDebugAttemptCount = 64
     static let retryIntervalNanoseconds: UInt64 = 250_000_000
+    static let lanReachabilityTimeout: TimeInterval = 4
+    static let fallbackExitAttemptCount = 16
 
     static func shouldRequestStatus(attempt: Int) -> Bool {
         attempt > 0 && attempt % 4 == 0
@@ -287,9 +411,12 @@ final class DeviceTransferManager {
 
     func enterRemoteDebug(
         bleManager: BLEManager,
+        lanCredentials: RemoteDebugLANCredentials? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
-        status("requesting remote debug mode")
+        status(lanCredentials == nil
+            ? "requesting device hotspot"
+            : "trying local Wi-Fi")
         guard bleManager.isNavigationReady else {
             throw RemoteDeviceDebugError.deviceNotReady
         }
@@ -297,22 +424,58 @@ final class DeviceTransferManager {
             throw RemoteDeviceDebugError.unsupportedFirmware
         }
         let initialRevision = bleManager.deviceTransferStatusRevision
-        guard bleManager.requestDeviceTransferMode(.debug) else {
+        guard bleManager.requestDeviceTransferMode(
+            .debug,
+            remoteDebugLANCredentials: lanCredentials
+        ) else {
             throw RemoteDeviceDebugError.transferCommandNotSent
         }
 
-        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+        var session = try await waitForRemoteDebugSession(
+            bleManager: bleManager,
+            afterRevision: initialRevision
+        )
+        if session.networkTransport == "lan" {
+            status("verifying local Wi-Fi")
+            if try await waitForTransferServer(
+                baseURL: session.baseURL,
+                statusPath: "device-debug/v1/info",
+                sessionToken: session.sessionToken,
+                timeout: DeviceTransferHandshakePolicy.lanReachabilityTimeout
+            ) {
+                status("local Wi-Fi ready")
+                return session
+            }
+
+            status("local Wi-Fi unreachable; starting device hotspot")
+            session = try await restartRemoteDebugOnHotspot(
+                bleManager: bleManager
+            )
+        }
+        status(session.hotspotFallback
+            ? "device hotspot fallback ready"
+            : "remote debug session ready")
+        return session
+    }
+
+    private func waitForRemoteDebugSession(
+        bleManager: BLEManager,
+        afterRevision initialRevision: UInt64
+    ) async throws -> DeviceTransferSession {
+        for attempt in 0..<DeviceTransferHandshakePolicy.remoteDebugAttemptCount {
             if bleManager.deviceTransferStatusRevision != initialRevision,
                bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
                let baseURL = bleManager.deviceTransferBaseURL,
                let token = bleManager.deviceTransferSessionToken,
                !token.isEmpty {
-                status("remote debug session ready")
                 return DeviceTransferSession(
                     mode: .debug,
                     baseURL: baseURL,
                     accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-                    sessionToken: token
+                    sessionToken: token,
+                    networkTransport: bleManager.deviceTransferNetworkTransport,
+                    networkSSID: bleManager.deviceTransferNetworkSSID,
+                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback
                 )
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
@@ -330,6 +493,53 @@ final class DeviceTransferManager {
             throw RemoteDeviceDebugError.rejected(message)
         }
         throw RemoteDeviceDebugError.missingSession
+    }
+
+    private func restartRemoteDebugOnHotspot(
+        bleManager: BLEManager
+    ) async throws -> DeviceTransferSession {
+        let exitRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferExit() else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
+        _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
+
+        for attempt in 0..<DeviceTransferHandshakePolicy.fallbackExitAttemptCount {
+            if bleManager.deviceTransferStatusRevision != exitRevision,
+               bleManager.deviceTransferMode.isEmpty {
+                break
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        guard bleManager.deviceTransferMode.isEmpty else {
+            throw RemoteDeviceDebugError.rejected(
+                "The LAN debug session did not stop for hotspot fallback."
+            )
+        }
+
+        let fallbackRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferMode(.debug) else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
+        let session = try await waitForRemoteDebugSession(
+            bleManager: bleManager,
+            afterRevision: fallbackRevision
+        )
+        bleManager.markDeviceTransferHotspotFallback()
+        return DeviceTransferSession(
+            mode: session.mode,
+            baseURL: session.baseURL,
+            accessPointSSID: session.accessPointSSID,
+            sessionToken: session.sessionToken,
+            networkTransport: session.networkTransport,
+            networkSSID: session.networkSSID,
+            hotspotFallback: true
+        )
     }
 
     func exitRemoteDebug(bleManager: BLEManager) async {
@@ -481,10 +691,11 @@ final class DeviceTransferManager {
     private func waitForTransferServer(
         baseURL: URL,
         statusPath: String,
-        sessionToken: String?
+        sessionToken: String?,
+        timeout: TimeInterval? = nil
     ) async throws -> Bool {
         let deadline = Date().addingTimeInterval(
-            DeviceNetworkJoinPolicy.reachabilityTimeout
+            timeout ?? DeviceNetworkJoinPolicy.reachabilityTimeout
         )
         while true {
             if await isTransferServerReachable(

@@ -459,6 +459,10 @@ jobs:
             tools/tests/test_device_transfer_http_limits.cpp \
             -o /tmp/test_device_transfer_http_limits
           /tmp/test_device_transfer_http_limits
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_transfer_network_protocol.cpp \
+            -o /tmp/test_device_transfer_network_protocol
+          /tmp/test_device_transfer_network_protocol
           python -m unittest tools.tests.test_map_activation_handoff
       - name: Sound protocol host tests
         run: |
