@@ -2333,7 +2333,19 @@ class BLEManager: NSObject, ObservableObject {
         }
 
         if lastConnectedPeripheralIdentifier == nil {
-            startDeviceDiscovery()
+            // There is no trusted device to reconnect and no Settings screen
+            // to own an explicit Nearby list. Re-enable the app-owned first-
+            // device flow so the result is surfaced through the Nearby sheet.
+            autoReconnect = false
+            explicitDiscoveryRequested = false
+            isExplicitDiscoveryPausedForCandidate = false
+            ownershipLifecycle.interrupt()
+            isPairingMode = false
+            isOpportunisticDiscoverySuppressed = false
+            pairingStatusMessage = nil
+            pairingError = nil
+            clearUnknownDiscoveryState()
+            reconcileScanning(reason: "manual first-device rediscovery")
         } else {
             reconnectToLastDevice()
         }
@@ -2371,6 +2383,13 @@ class BLEManager: NSObject, ObservableObject {
         ownershipLifecycle.beginDiscovery()
         clearUnknownDiscoveryState()
         isPairingMode = true
+        guard !isUnknownDeviceDiscoverySuspended else {
+            pairingStatusMessage = nil
+            reconcileScanning(
+                reason: "explicit discovery remains yielded to another enrollment"
+            )
+            return
+        }
         guard isScanDriverPoweredOn else {
             // Retain explicit intent so Bluetooth-on resumes this user request
             // before any trusted reconnect can claim the radio.
@@ -2442,6 +2461,7 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         clearUnknownDiscoveryState()
         pairingStatusMessage = nil
+        pairingError = nil
         if shouldResumeAutoReconnect {
             autoReconnect = true
             resumeAutoReconnectIfNeeded()

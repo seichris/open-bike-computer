@@ -903,6 +903,8 @@ struct ContentView: View {
         HStack(alignment: .center, spacing: 12) {
             ConnectionStatusView(
                 isConnected: coordinator.isConnected,
+                hasRegisteredDevice:
+                    !coordinator.bleManager.knownDevices.isEmpty,
                 onReconnect: { coordinator.reconnect() }
             )
 

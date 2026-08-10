@@ -452,10 +452,11 @@ enum BikeComputersMenuPolicy {
     static func shouldRestartOwnedDiscoveryOnForeground(
         isApplicationActive: Bool,
         ownsDiscoveryLifecycle: Bool,
-        hasPresentedCandidate: Bool
+        hasPresentedCandidate: Bool,
+        isSensorEnrollmentActive: Bool
     ) -> Bool {
         isApplicationActive && ownsDiscoveryLifecycle &&
-            !hasPresentedCandidate
+            !hasPresentedCandidate && !isSensorEnrollmentActive
     }
 }
 

@@ -460,7 +460,13 @@ Extend `NavigationProtocolTests.swift` with deterministic policy coverage:
 26. foreground restoration cannot clear an in-flight pairing failure or replace
     its retry UI with a stale progress state; and
 27. sensor enrollment or Bluetooth loss releases an unpresented candidate seal
-    so eligible opportunistic discovery can resume.
+    so eligible opportunistic discovery can resume;
+28. foreground and Bluetooth-on callbacks cannot restore explicit discovery UI
+    while sensor enrollment still owns the scanner;
+29. cancelling a Bluetooth-off Settings request clears its discovery-scoped
+    error before trusted reconnect resumes; and
+30. a manual reconnect with no registered device re-enables opportunistic sheet
+    discovery instead of starting an invisible, unowned explicit scan.
 
 Add UI-policy tests for sheet eligibility, modal-route identity, session
 dismissal, in-sheet pairing progression, and the connected-device disconnect

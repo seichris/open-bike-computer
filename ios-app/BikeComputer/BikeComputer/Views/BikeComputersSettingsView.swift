@@ -139,7 +139,8 @@ struct BikeComputersSettingsView: View {
         }
         .onChange(of: bleManager.centralStateDescription) { state in
             if state == "powered on", ownsDiscoveryLifecycle,
-               selectedCandidate == nil {
+               selectedCandidate == nil,
+               !sensorDetectionCoordinator.isLooking {
                 bleManager.startDeviceDiscovery()
             }
         }
@@ -148,7 +149,9 @@ struct BikeComputersSettingsView: View {
                     .shouldRestartOwnedDiscoveryOnForeground(
                         isApplicationActive: isActive,
                         ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
-                        hasPresentedCandidate: selectedCandidate != nil
+                        hasPresentedCandidate: selectedCandidate != nil,
+                        isSensorEnrollmentActive:
+                            sensorDetectionCoordinator.isLooking
                     ) else { return }
             bleManager.startDeviceDiscovery()
         }
