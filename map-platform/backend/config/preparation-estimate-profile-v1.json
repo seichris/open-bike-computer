@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "modelVersion": "map-preparation-v1",
+  "featureSchemaVersion": 1,
+  "runtimePerformanceProfileVersion": "map-pipeline-2026-08-v1",
+  "scopePolicyVersion": 1,
+  "buildingProfileVersion": 1,
+  "algorithmVersions": {
+    "buildingNormalization": 1,
+    "buildingSourceIndex": 2,
+    "relationClosure": 1
+  },
+  "baselines": {
+    "1": {
+      "legacy": {
+        "referenceAreaM2": 100000000,
+        "components": {
+          "source": [10, 180],
+          "conversion": [20, 360],
+          "encoding": [10, 180],
+          "packaging": [2, 60]
+        }
+      }
+    },
+    "2": {
+      "legacy": {
+        "referenceAreaM2": 100000000,
+        "components": {
+          "source": [15, 240],
+          "conversion": [30, 480],
+          "encoding": [20, 300],
+          "packaging": [3, 90]
+        }
+      }
+    },
+    "3": {
+      "legacy": {
+        "referenceAreaM2": 785000000,
+        "referenceBlocks": 6,
+        "components": {
+          "source": [30, 600],
+          "dependencies": [60, 1200],
+          "normalization": [120, 5400],
+          "conversion": [30, 900],
+          "encoding": [30, 900],
+          "packaging": [3, 120]
+        }
+      },
+      "shadow": {
+        "referenceAreaM2": 111411200,
+        "referenceBlocks": 6,
+        "components": {
+          "source": [20, 420],
+          "dependencies": [30, 900],
+          "normalization": [90, 4200],
+          "conversion": [25, 720],
+          "encoding": [25, 720],
+          "packaging": [3, 120]
+        }
+      },
+      "selected": {
+        "referenceAreaM2": 111411200,
+        "referenceBlocks": 6,
+        "referenceOutlines": 16493,
+        "referenceParts": 279,
+        "referenceContainmentProduct": 3450000,
+        "referenceVertices": 115781,
+        "components": {
+          "source": [15, 300],
+          "dependencies": [20, 600],
+          "normalization": [60, 3600],
+          "conversion": [20, 600],
+          "encoding": [20, 600],
+          "packaging": [2, 90]
+        }
+      }
+    }
+  },
+  "reuseBaselines": {
+    "exact_reuse": [2, 60],
+    "subset_reuse": [10, 300]
+  }
+}

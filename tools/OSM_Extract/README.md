@@ -158,6 +158,13 @@ Buildings are clipped only when FMB blocks are emitted; new clip edges receive
 a cleared wall bit so adjacent blocks do not render artificial seam facades.
 Plan-aware runs emit exactly one canonical `BUILDING_SCOPE` marker, structured
 `BUILDING_PREPROCESS_PROGRESS` markers while source/index/calibration work is in
-flight, and final `BUILDING_STATS` with encoded-record provenance and seam
-diagnostics. The backend validates the scope marker against the frozen plan and
-keeps calibration units separate from block progress.
+flight, one bounded `BUILDING_COMPLEXITY` marker immediately after the already
+required source-building materialization and before containment/height
+normalization, and final `BUILDING_STATS` with encoded-record provenance and
+seam diagnostics. Complexity includes outline/part counts, unresolved
+containment candidate product, polygon/ring/hole and vertex counts, and known
+preparation rejections; it does not add a second geometry parse. The backend
+strictly validates these counters, uses them only for advisory preparation-time
+refinement/monitoring, validates the scope marker against the frozen plan, and
+keeps calibration units separate from block progress. No complexity field is
+part of the FMB, manifest, or reuse identity.

@@ -48,6 +48,12 @@ class CapturingRunner:
         self.args = args
         return "\n".join(
             (
+                'BUILDING_COMPLEXITY:{"schemaVersion":1,"sourceCount":1,'
+                '"outlineCount":1,"partCount":0,"explicitParentCount":0,'
+                '"unresolvedPartCount":0,"containmentCandidateProduct":0,'
+                '"polygonCount":1,"ringCount":1,"holeCount":0,'
+                '"sourceVertexCount":5,"maximumVerticesPerObject":5,'
+                '"preparationRejectedCount":0}',
                 'LABEL_STATS:{"blocks":1,"phaseTimings":{"labelFontWriting":0.5}}',
                 'BUILDING_STATS:{"recordCount":1,"explicitHeightCount":1,'
                 '"levelsHeightCount":0,"inheritedHeightCount":0,'
