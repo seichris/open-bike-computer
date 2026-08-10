@@ -5,6 +5,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "speaker_gain.h"
+#include "speaker_resource_state.hpp"
 #include "../waveshare_board/axp2101.hpp"
 #include "../waveshare_board/i2c_bus.hpp"
 
@@ -92,6 +93,7 @@ bool powerButtonMonitoringConfigured = false;
 float codecHardwareGainDb = 0.0f;
 float currentDacGainDb = 0.0f;
 speaker_limiter_t playbackLimiter{};
+SpeakerResourceState resourceState{};
 PowerButtonHonkConfig powerButtonHonkConfig{
     false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
 uint32_t lastPowerButtonConfigureAttemptMs = 0;
@@ -266,43 +268,75 @@ void configureWireControl() {
 }
 
 bool releaseCodecResources() {
+  bool cleanupOk = true;
   initialized = false;
   codecHardwareGainDb = 0.0f;
   currentDacGainDb = 0.0f;
   playbackLimiter = {};
-  gpio_set_level(PA_ENABLE, 0);
+  if (gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
+    Serial.println("Speaker: PA shutdown failed; cleanup will retry");
+    return false;
+  }
+  resourceState.powerAmplifierEnabled = false;
 
-  if (speakerDevice != nullptr) {
+  if (resourceState.codecDeviceOpened) {
     if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
       Serial.println("Speaker: codec shutdown failed; cleanup will retry");
       return false;
     }
+    resourceState.codecDeviceOpened = false;
+  }
+  if (resourceState.codecDeviceCreated) {
     esp_codec_dev_delete(speakerDevice);
     speakerDevice = nullptr;
+    resourceState.codecDeviceCreated = false;
   }
-  if (codecInterface != nullptr) {
-    audio_codec_delete_codec_if(codecInterface);
+  if (resourceState.codecInterfaceCreated) {
+    const int result = audio_codec_delete_codec_if(codecInterface);
     codecInterface = nullptr;
+    resourceState.codecInterfaceCreated = false;
+    if (result != ESP_CODEC_DEV_OK) {
+      Serial.println("Speaker: codec interface deletion reported an error");
+      cleanupOk = false;
+    }
   }
-  if (dataInterface != nullptr) {
-    audio_codec_delete_data_if(dataInterface);
+  if (resourceState.dataInterfaceCreated) {
+    const int result = audio_codec_delete_data_if(dataInterface);
     dataInterface = nullptr;
+    resourceState.dataInterfaceCreated = false;
+    if (result != ESP_CODEC_DEV_OK) {
+      Serial.println("Speaker: data interface deletion reported an error");
+      cleanupOk = false;
+    }
   }
-  if (gpioInterface != nullptr) {
-    audio_codec_delete_gpio_if(gpioInterface);
+  if (resourceState.gpioInterfaceCreated) {
+    const int result = audio_codec_delete_gpio_if(gpioInterface);
     gpioInterface = nullptr;
+    resourceState.gpioInterfaceCreated = false;
+    if (result != ESP_CODEC_DEV_OK) {
+      Serial.println("Speaker: GPIO interface deletion reported an error");
+      cleanupOk = false;
+    }
   }
 
-  if (txChannel != nullptr) {
-    i2s_channel_disable(txChannel);
+  if (resourceState.channelEnabled) {
+    if (i2s_channel_disable(txChannel) != ESP_OK) {
+      Serial.println("Speaker: I2S channel disable failed; cleanup will retry");
+      return false;
+    }
+    resourceState.channelEnabled = false;
+  }
+  if (resourceState.channelAllocated) {
     if (i2s_del_channel(txChannel) != ESP_OK) {
       Serial.println("Speaker: I2S channel cleanup failed; cleanup will retry");
       return false;
     }
     txChannel = nullptr;
+    resourceState.channelAllocated = false;
+    resourceState.standardModeInitialized = false;
   }
 
-  return true;
+  return cleanupOk;
 }
 
 bool failInitialization(const char *message) {
@@ -315,9 +349,7 @@ bool initializeCodec() {
   if (initialized) {
     return true;
   }
-  if (speakerDevice != nullptr || codecInterface != nullptr ||
-      dataInterface != nullptr || gpioInterface != nullptr ||
-      txChannel != nullptr) {
+  if (resourceState.any()) {
     if (!releaseCodecResources()) {
       return false;
     }
@@ -328,8 +360,10 @@ bool initializeCodec() {
     return false;
   }
 
-  gpio_set_direction(PA_ENABLE, GPIO_MODE_OUTPUT);
-  gpio_set_level(PA_ENABLE, 0);
+  if (gpio_set_direction(PA_ENABLE, GPIO_MODE_OUTPUT) != ESP_OK ||
+      gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
+    return failInitialization("Speaker: failed to hold PA disabled");
+  }
 
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -337,6 +371,7 @@ bool initializeCodec() {
   if (i2s_new_channel(&channelConfig, &txChannel, nullptr) != ESP_OK) {
     return failInitialization("Speaker: failed to allocate I2S channels");
   }
+  resourceState.channelAllocated = true;
 
   i2s_std_config_t standardConfig{};
   standardConfig.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(22050);
@@ -348,17 +383,23 @@ bool initializeCodec() {
   standardConfig.gpio_cfg.dout = I2S_DOUT;
   standardConfig.gpio_cfg.din = I2S_DIN;
 
-  if (i2s_channel_init_std_mode(txChannel, &standardConfig) != ESP_OK ||
-      i2s_channel_enable(txChannel) != ESP_OK) {
+  if (i2s_channel_init_std_mode(txChannel, &standardConfig) != ESP_OK) {
     return failInitialization("Speaker: failed to configure I2S");
   }
+  resourceState.standardModeInitialized = true;
+  if (i2s_channel_enable(txChannel) != ESP_OK) {
+    return failInitialization("Speaker: failed to enable I2S");
+  }
+  resourceState.channelEnabled = true;
 
   audio_codec_i2s_cfg_t i2sConfig{};
   i2sConfig.port = I2S_NUM_0;
   i2sConfig.rx_handle = nullptr;
   i2sConfig.tx_handle = txChannel;
   dataInterface = audio_codec_new_i2s_data(&i2sConfig);
+  resourceState.dataInterfaceCreated = dataInterface != nullptr;
   gpioInterface = audio_codec_new_gpio();
+  resourceState.gpioInterfaceCreated = gpioInterface != nullptr;
   if (dataInterface == nullptr || gpioInterface == nullptr) {
     return failInitialization("Speaker: failed to create codec interfaces");
   }
@@ -386,6 +427,7 @@ bool initializeCodec() {
   if (codecInterface == nullptr) {
     return failInitialization("Speaker: failed to initialize ES8311");
   }
+  resourceState.codecInterfaceCreated = true;
 
   esp_codec_dev_cfg_t deviceConfig{};
   deviceConfig.dev_type = ESP_CODEC_DEV_TYPE_OUT;
@@ -395,6 +437,7 @@ bool initializeCodec() {
   if (speakerDevice == nullptr) {
     return failInitialization("Speaker: failed to create codec device");
   }
+  resourceState.codecDeviceCreated = true;
 
   esp_codec_dev_vol_map_t volumeMap[SPEAKER_VOLUME_CURVE_POINT_COUNT]{};
   speaker_build_volume_map(volumeMap, codecHardwareGainDb,
@@ -414,10 +457,14 @@ bool initializeCodec() {
   sampleInfo.mclk_multiple = 256;
 
   if (esp_codec_dev_set_out_vol(speakerDevice, DEFAULT_VOLUME_PERCENT) !=
-          ESP_CODEC_DEV_OK ||
-      esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
+      ESP_CODEC_DEV_OK) {
+    return failInitialization("Speaker: failed to configure codec volume");
+  }
+  if (esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
     return failInitialization("Speaker: failed to open codec device");
   }
+  resourceState.codecDeviceOpened = true;
+  resourceState.powerAmplifierEnabled = true;
 
   initialized = true;
   currentDacGainDb = speaker_dac_gain_db(
@@ -581,8 +628,14 @@ void speakerTask(void *) {
       ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
     }
     const bool cleanupRequired = uxQueueMessagesWaiting(soundQueue) == 0;
-    const bool cleanupSucceeded =
-        !cleanupRequired || releaseCodecResources();
+    bool cleanupSucceeded = true;
+    if (cleanupRequired) {
+      cleanupSucceeded = releaseCodecResources();
+      if (!cleanupSucceeded && resourceState.any()) {
+        Serial.println("Speaker: retrying retained cleanup state once");
+        cleanupSucceeded = releaseCodecResources();
+      }
+    }
     recordPlaybackCompletion(
         request.requestId,
         playbackRequestLifecycleSucceeded(

@@ -207,12 +207,13 @@ assert "TrackedPlaybackResult::Succeeded" in speaker_source
 assert "TrackedPlaybackResult::Failed" in speaker_source
 assert "playbackSucceeded = playNow(sound)" in speaker_implementation
 cleanup_call = speaker_implementation.index(
-    "!cleanupRequired || releaseCodecResources();"
+    "cleanupSucceeded = releaseCodecResources();"
 )
 completion_publish = speaker_implementation.index(
     "recordPlaybackCompletion(\n        request.requestId"
 )
 assert cleanup_call < completion_publish
+assert "retrying retained cleanup state once" in speaker_implementation
 assert "playbackRequestLifecycleSucceeded(" in speaker_implementation[
     completion_publish:
 ]
