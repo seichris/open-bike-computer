@@ -650,6 +650,25 @@ private struct WorkoutContractTestSuite {
                 ),
             "recovery must replay only source-state or known automatic transitions"
         )
+        let pendingRequestedAt = Date(timeIntervalSinceReferenceDate: 200)
+        expect(
+            !RideAutomationRecoveryControlPolicy
+                .markerConfirmsPendingTransition(
+                    markerAt: pendingRequestedAt.addingTimeInterval(-1),
+                    pendingRequestedAt: pendingRequestedAt
+                )
+                && RideAutomationRecoveryControlPolicy
+                    .markerConfirmsPendingTransition(
+                        markerAt: pendingRequestedAt,
+                        pendingRequestedAt: pendingRequestedAt
+                    )
+                && RideAutomationRecoveryControlPolicy
+                    .markerConfirmsPendingTransition(
+                        markerAt: pendingRequestedAt.addingTimeInterval(-1),
+                        pendingRequestedAt: nil
+                    ),
+            "recovery markers must not predate a durable transition request"
+        )
         expect(
             RideAutomationStartContextPolicy.disposition(
                 sessionState: .idle,

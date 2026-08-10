@@ -152,6 +152,17 @@ nonisolated enum RideAutomationRecoveryControlPolicy {
             return false
         }
     }
+
+    /// A marker from an earlier transition cannot confirm a durable request
+    /// that was persisted later. Without this boundary, recovery can mistake
+    /// the workout's initial manual start for a pending automatic resume.
+    static func markerConfirmsPendingTransition(
+        markerAt: Date,
+        pendingRequestedAt: Date?
+    ) -> Bool {
+        guard let pendingRequestedAt else { return true }
+        return markerAt >= pendingRequestedAt
+    }
 }
 
 nonisolated enum RideAutomationStartContextDisposition: Equatable, Sendable {

@@ -228,8 +228,45 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 rideGeneration: 7
             ),
             11,
-            "a lost confirmation cannot replay across Watch app relaunch"
+            "only the exact durable pending transition may replay after relaunch"
         )
+
+        var relaunchedPauseCount = 0
+        let relaunchedManager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: relaunched,
+            remotePauseOperation: { _ in relaunchedPauseCount += 1 },
+            initializeOnLaunch: false
+        )
+        let relaunchedIdentity = try XCTUnwrap(
+            relaunched.recoveredIdentity
+        )
+        relaunchedManager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: relaunchedIdentity,
+            state: .running
+        )
+        XCTAssertEqual(
+            relaunchedManager.retryPendingDirectRideAutomationTransition(
+                frame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(31)
+            ),
+            .accepted
+        )
+        XCTAssertEqual(relaunchedPauseCount, 1)
+
+        var unrelatedFrame = frame
+        unrelatedFrame.decisionSequence = 12
+        XCTAssertNil(
+            relaunchedManager.retryPendingDirectRideAutomationTransition(
+                unrelatedFrame,
+                deviceID: "bicino-175",
+                requestedAt: startDate.addingTimeInterval(32)
+            )
+        )
+        XCTAssertEqual(relaunchedPauseCount, 1)
     }
 
     func testDirectRideAutomationHonorsManualGraceAndPersistenceFailure()

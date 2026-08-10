@@ -965,6 +965,63 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
+    /// Replays only the exact durable automatic transition that was persisted
+    /// before HealthKit was mutated. This closes the relaunch window between
+    /// persisting a detector decision and calling pause()/resume() without
+    /// allowing an arbitrary duplicate watermark to control the workout.
+    func retryPendingDirectRideAutomationTransition(
+        _ frame: RideAutomationFrame,
+        deviceID: String,
+        requestedAt: Date = Date()
+    ) -> RideAutomationResult? {
+        guard frame.kind == .decision,
+              frame.origin == .automatic,
+              let frameSessionID = frame.sessionID,
+              frameSessionID == activeSessionID,
+              let durableIdentity = recoveryStore.recoveredIdentity
+                ?? identity else {
+            return nil
+        }
+        let context = WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: frame.rideGeneration,
+            decisionSequence: frame.decisionSequence,
+            detectorProfileVersion: frame.profileVersion
+        )
+        let expectedPaused: Bool
+        switch frame.transition {
+        case .pause:
+            expectedPaused = true
+        case .resume:
+            expectedPaused = false
+        case .none, .start:
+            return nil
+        }
+        guard durableIdentity.pendingTransitionContext == context,
+              durableIdentity.pendingTransitionPaused == expectedPaused,
+              durableIdentity.rideAutomationDeviceID == deviceID,
+              durableIdentity.rideAutomationRideGeneration
+                == frame.rideGeneration,
+              durableIdentity.rideAutomationDecisionWatermark
+                == frame.decisionSequence else {
+            return nil
+        }
+
+        if (expectedPaused && lifecycle.state == .paused)
+            || (!expectedPaused && lifecycle.state == .running) {
+            // HealthKit reached the target before the process exited. Recovery
+            // will make the durable marker authoritative; do not issue the
+            // native transition twice while that reconciliation is in flight.
+            return .accepted
+        }
+        return requestDirectRideAutomationTransition(
+            frame,
+            deviceID: deviceID,
+            requestedAt: requestedAt
+        )
+    }
+
     @discardableResult
     func recordDirectRideAutomationDecision(
         deviceID: String,
@@ -3995,7 +4052,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let expectedTransitions: Set<String> = paused
             ? ["pause"]
             : ["start", "resume"]
-        let marker = builder.workoutEvents.compactMap { event -> (
+        let latestMarker = builder.workoutEvents.compactMap { event -> (
             origin: WorkoutTransitionOrigin,
             at: Date,
             profileVersion: UInt16?
@@ -4037,6 +4094,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             return (origin, event.dateInterval.start, profile)
         }.max { $0.at < $1.at }
+        let pendingRequestedAt = identity?.pendingTransitionContext == nil
+            ? nil
+            : identity?.pendingTransitionRequestedAt
+        let marker = latestMarker.flatMap { candidate in
+            RideAutomationRecoveryControlPolicy
+                .markerConfirmsPendingTransition(
+                    markerAt: candidate.at,
+                    pendingRequestedAt: pendingRequestedAt
+                )
+                ? candidate
+                : nil
+        }
         if marker == nil,
            let context = identity?.pendingTransitionContext,
            identity?.pendingTransitionPaused == paused {

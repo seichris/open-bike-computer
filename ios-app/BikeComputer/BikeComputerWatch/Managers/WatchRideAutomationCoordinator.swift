@@ -177,6 +177,33 @@ final class WatchRideAutomationCoordinator {
                     result: .accepted,
                     sessionID: manager.activeSessionID
                 )
+            } else if let result = manager
+                .retryPendingDirectRideAutomationTransition(
+                    frame,
+                    deviceID: deviceID
+                ) {
+                guard result == .accepted else {
+                    sendResponse(
+                        to: frame,
+                        kind: .acknowledgement,
+                        result: result
+                    )
+                    return
+                }
+                noteDecision(frame)
+                pendingDecision = PendingDecision(
+                    deviceID: deviceID,
+                    frame: frame,
+                    expectedState: frame.transition == .pause
+                        ? .paused
+                        : .running
+                )
+                sendResponse(
+                    to: frame,
+                    kind: .acknowledgement,
+                    result: .accepted
+                )
+                confirmPendingDecisionIfAuthoritative()
             } else {
                 sendResponse(
                     to: frame,
