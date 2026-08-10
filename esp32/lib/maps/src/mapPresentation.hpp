@@ -204,7 +204,11 @@ public:
     uint32_t fullSpeedPredictionMs = 1500;
     uint32_t maximumPredictionMs = 2500;
     uint32_t convergenceMs = 350;
-    double maximumPredictionMeters = 30.0;
+    // The 70 m default equals the most the 35 m/s supported-speed clamp can
+    // travel under the integrated 2.5-second horizon. The time horizon remains
+    // authoritative, so the distance guard cannot end a missed-heartbeat
+    // bridge early at a valid cycling speed.
+    double maximumPredictionMeters = 70.0;
     double maximumSpeedMetersPerSecond = 35.0;
   };
 
@@ -215,7 +219,10 @@ public:
     hasFix_ = false;
     current_ = {};
     previousPresented_ = {};
-    convergenceStartMs_ = 0;
+    predictionHeadingDegrees_ = 0.0;
+    predictionHeadingValid_ = false;
+    positionConvergenceStartMs_ = 0;
+    headingConvergenceStartMs_ = 0;
   }
 
   /** Start a new heading epoch without teleporting the presented position.
@@ -225,18 +232,20 @@ public:
     if (!hasFix_)
       return;
     // Freeze the exact pose that is currently on screen before removing its
-    // direction. Clearing current_.headingValid by itself would make
-    // present() fall back to the last raw GPS coordinate and visibly jump
-    // backwards by as much as the prediction horizon.
+    // direction. Prediction direction belongs to the physical fix, so clear it
+    // with the heading epoch and wait for the next fix before moving again.
     const PresentedPose frozen = present(nowMs);
     current_.position = frozen.position;
     current_.timestampMs = frozen.sourceTimestampMs;
     current_.headingDegrees = 0.0;
     current_.headingValid = false;
+    predictionHeadingDegrees_ = 0.0;
+    predictionHeadingValid_ = false;
     previousPresented_ = frozen;
     previousPresented_.headingDegrees = 0.0;
     previousPresented_.headingValid = false;
-    convergenceStartMs_ = nowMs;
+    positionConvergenceStartMs_ = nowMs;
+    headingConvergenceStartMs_ = nowMs;
   }
 
   void observe(const Fix &fix, uint32_t receivedAtMs) {
@@ -254,7 +263,8 @@ public:
     normalized.headingDegrees = normalizeDegrees(fix.headingDegrees);
     if (hasFix_) {
       previousPresented_ = present(receivedAtMs);
-      convergenceStartMs_ = receivedAtMs;
+      positionConvergenceStartMs_ = receivedAtMs;
+      headingConvergenceStartMs_ = receivedAtMs;
     } else {
       previousPresented_.position = normalized.position;
       previousPresented_.headingDegrees = normalized.headingDegrees;
@@ -264,10 +274,32 @@ public:
       previousPresented_.predictionAgeMs = 0;
       previousPresented_.predictionGraceActive = false;
       previousPresented_.predictionExhausted = false;
-      convergenceStartMs_ = receivedAtMs;
+      positionConvergenceStartMs_ = receivedAtMs;
+      headingConvergenceStartMs_ = receivedAtMs;
     }
     current_ = normalized;
+    predictionHeadingDegrees_ = normalized.headingDegrees;
+    predictionHeadingValid_ = normalized.headingValid;
     hasFix_ = true;
+  }
+
+  /** Update presentation direction without re-observing the physical fix.
+   *
+   * A route window can refine course while the GPS packet is unchanged. It may
+   * rotate the map and marker, but the predicted path remains owned by the last
+   * physical fix. This also preserves an in-progress position correction and
+   * prevents an exhausted endpoint from moving to a newly rotated location.
+   */
+  void updateHeading(double headingDegrees, bool headingValid,
+                     uint32_t nowMs) {
+    if (!hasFix_)
+      return;
+    const PresentedPose frozen = present(nowMs);
+    previousPresented_.headingDegrees = frozen.headingDegrees;
+    previousPresented_.headingValid = frozen.headingValid;
+    current_.headingDegrees = normalizeDegrees(headingDegrees);
+    current_.headingValid = headingValid;
+    headingConvergenceStartMs_ = nowMs;
   }
 
   bool hasFix() const { return hasFix_; }
@@ -277,28 +309,16 @@ public:
       return {};
 
     // Fix::timestampMs is the accepted GPS-packet time. Keep freshness tied to
-    // that source even if a later route-bearing update re-observes the same
-    // physical coordinate for heading convergence.
+    // that source while later route-bearing updates affect only display
+    // heading convergence.
     const uint32_t ageMs = nowMs - current_.timestampMs;
     const uint32_t predictionMs =
         std::min(ageMs, config_.maximumPredictionMs);
     const uint32_t fullSpeedPredictionMs =
         std::min(config_.fullSpeedPredictionMs,
                  config_.maximumPredictionMs);
-    double effectivePredictionMs = predictionMs;
-    if (predictionMs > fullSpeedPredictionMs &&
-        config_.maximumPredictionMs > fullSpeedPredictionMs) {
-      const double graceElapsedMs =
-          static_cast<double>(predictionMs - fullSpeedPredictionMs);
-      const double graceDurationMs = static_cast<double>(
-          config_.maximumPredictionMs - fullSpeedPredictionMs);
-      // Integrate a velocity that falls linearly from 100% to 0% over the
-      // grace window. The predicted position remains monotonic and settles
-      // without the visual reversal caused by scaling total displacement.
-      effectivePredictionMs =
-          fullSpeedPredictionMs + graceElapsedMs -
-          graceElapsedMs * graceElapsedMs / (2.0 * graceDurationMs);
-    }
+    const double effectivePredictionMs =
+        integratedPredictionMs(predictionMs, fullSpeedPredictionMs);
     const double uncappedDistanceMeters =
         current_.speedMetersPerSecond * effectivePredictionMs / 1000.0;
     const double maximumPredictionMeters =
@@ -308,33 +328,33 @@ public:
     const double distance = distanceMeters * current_.worldUnitsPerMeter;
 
     WorldPoint predicted = current_.position;
-    if (current_.headingValid && distance > 0.0) {
-      const double radians = normalizeDegrees(current_.headingDegrees) *
+    if (predictionHeadingValid_ && distance > 0.0) {
+      const double radians = normalizeDegrees(predictionHeadingDegrees_) *
                              kPi / 180.0;
       predicted.x += std::sin(radians) * distance;
       predicted.y += std::cos(radians) * distance;
     }
 
-    double blend = 1.0;
-    if (config_.convergenceMs != 0) {
-      blend = std::min(1.0, static_cast<double>(nowMs - convergenceStartMs_) /
-                                config_.convergenceMs);
-      // Smoothstep has zero slope at both ends and avoids a visible kink.
-      blend = blend * blend * (3.0 - 2.0 * blend);
-    }
+    const double positionBlend =
+        convergenceBlend(nowMs, positionConvergenceStartMs_);
+    const double headingBlend =
+        convergenceBlend(nowMs, headingConvergenceStartMs_);
 
     PresentedPose pose;
     pose.position.x = previousPresented_.position.x +
-                      (predicted.x - previousPresented_.position.x) * blend;
+                      (predicted.x - previousPresented_.position.x) *
+                          positionBlend;
     pose.position.y = previousPresented_.position.y +
-                      (predicted.y - previousPresented_.position.y) * blend;
+                      (predicted.y - previousPresented_.position.y) *
+                          positionBlend;
     pose.headingValid = current_.headingValid || previousPresented_.headingValid;
     if (current_.headingValid) {
       const double from = previousPresented_.headingValid
                               ? previousPresented_.headingDegrees
                               : current_.headingDegrees;
       pose.headingDegrees = normalizeDegrees(
-          from + signedHeadingDelta(from, current_.headingDegrees) * blend);
+          from + signedHeadingDelta(from, current_.headingDegrees) *
+                     headingBlend);
     } else if (previousPresented_.headingValid) {
       // An invalid fix carries no new direction. Keep the last valid heading
       // instead of interpolating its default zero value (north), which would
@@ -355,11 +375,40 @@ public:
   }
 
 private:
+  double convergenceBlend(uint32_t nowMs, uint32_t startedAtMs) const {
+    if (config_.convergenceMs == 0)
+      return 1.0;
+    double blend =
+        std::min(1.0, static_cast<double>(nowMs - startedAtMs) /
+                          config_.convergenceMs);
+    // Smoothstep has zero slope at both ends and avoids a visible kink.
+    return blend * blend * (3.0 - 2.0 * blend);
+  }
+
+  double integratedPredictionMs(uint32_t predictionMs,
+                                uint32_t fullSpeedPredictionMs) const {
+    if (predictionMs <= fullSpeedPredictionMs ||
+        config_.maximumPredictionMs <= fullSpeedPredictionMs) {
+      return predictionMs;
+    }
+    const double graceElapsedMs =
+        static_cast<double>(predictionMs - fullSpeedPredictionMs);
+    const double graceDurationMs = static_cast<double>(
+        config_.maximumPredictionMs - fullSpeedPredictionMs);
+    // Integrate a velocity that falls linearly from 100% to 0% over the grace
+    // window. Position remains monotonic and settles without visual reversal.
+    return fullSpeedPredictionMs + graceElapsedMs -
+           graceElapsedMs * graceElapsedMs / (2.0 * graceDurationMs);
+  }
+
   Config config_{};
   bool hasFix_ = false;
   Fix current_{};
   PresentedPose previousPresented_{};
-  uint32_t convergenceStartMs_ = 0;
+  double predictionHeadingDegrees_ = 0.0;
+  bool predictionHeadingValid_ = false;
+  uint32_t positionConvergenceStartMs_ = 0;
+  uint32_t headingConvergenceStartMs_ = 0;
 };
 
 inline double refreshLeadPixels(double speedMetersPerSecond,

@@ -235,6 +235,8 @@ jobs:
           for test in \
             test_map_render_job \
             test_map_presentation \
+            test_map_pose_input_policy \
+            test_gps_input_freshness \
             test_map_building_admission \
             test_map_route_geometry \
             test_map_building_workspace; do

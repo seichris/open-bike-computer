@@ -73,7 +73,7 @@ int main() {
   Presenter::Config graceConfig;
   assert(graceConfig.fullSpeedPredictionMs == 1500);
   assert(graceConfig.maximumPredictionMs == 2500);
-  assert(graceConfig.maximumPredictionMeters == 30.0);
+  assert(graceConfig.maximumPredictionMeters == 70.0);
   graceConfig.convergenceMs = 0;
   Presenter heartbeatGrace(graceConfig);
   heartbeatGrace.observe(
@@ -101,6 +101,74 @@ int main() {
   assert(longTransportLoss.observationAgeMs == 8000);
   assert(longTransportLoss.predictionAgeMs == 2500);
   assert(longTransportLoss.predictionExhausted);
+
+  // The default distance guard is derived from the supported 35 m/s speed and
+  // integrated horizon. A credible 20 m/s descent therefore stays continuous
+  // through one missed heartbeat and stops only at the hard time horizon.
+  Presenter highSpeedHeartbeat(graceConfig);
+  highSpeedHeartbeat.observe(
+      {{0.0, 0.0}, 90.0, true, 20.0, 1.0, 1000}, 1000);
+  const PresentedPose highSpeedMiss = highSpeedHeartbeat.present(3000);
+  assert(std::fabs(highSpeedMiss.position.x - 37.5) < 1e-6);
+  assert(highSpeedMiss.predictionGraceActive);
+  assert(!highSpeedMiss.predictionExhausted);
+  const PresentedPose highSpeedHorizon = highSpeedHeartbeat.present(3500);
+  assert(std::fabs(highSpeedHorizon.position.x - 40.0) < 1e-6);
+  assert(highSpeedHorizon.predictionExhausted);
+
+  Presenter maximumSupportedSpeed(graceConfig);
+  maximumSupportedSpeed.observe(
+      {{0.0, 0.0}, 90.0, true, 35.0, 1.0, 1000}, 1000);
+  const PresentedPose maximumSpeedMiss = maximumSupportedSpeed.present(3000);
+  assert(std::fabs(maximumSpeedMiss.position.x - 65.625) < 1e-6);
+  assert(maximumSpeedMiss.predictionGraceActive);
+  assert(!maximumSpeedMiss.predictionExhausted);
+  const PresentedPose justBeforeMaximumHorizon =
+      maximumSupportedSpeed.present(3499);
+  assert(!justBeforeMaximumHorizon.predictionExhausted);
+  const PresentedPose maximumSpeedHorizon =
+      maximumSupportedSpeed.present(3500);
+  assert(std::fabs(maximumSpeedHorizon.position.x - 70.0) < 1e-6);
+  assert(maximumSpeedHorizon.predictionExhausted);
+
+  // A route-bearing update can rotate presentation but cannot redefine the
+  // positional path owned by the last physical fix. Once stale motion is
+  // exhausted it cannot move the shared map/route/marker pose to a new endpoint.
+  Presenter::Config headingOnlyConfig;
+  Presenter headingOnly(headingOnlyConfig);
+  headingOnly.observe(
+      {{0.0, 0.0}, 90.0, true, 10.0, 1.0, 1000}, 1000);
+  const PresentedPose exhaustedEast = headingOnly.present(3500);
+  assert(std::fabs(exhaustedEast.position.x - 20.0) < 1e-6);
+  assert(std::fabs(exhaustedEast.position.y) < 1e-6);
+  assert(exhaustedEast.predictionExhausted);
+  headingOnly.updateHeading(0.0, true, 4000);
+  const PresentedPose headingChangedAtStart = headingOnly.present(4000);
+  const PresentedPose headingChangedSettled = headingOnly.present(4350);
+  for (const PresentedPose &pose :
+       {headingChangedAtStart, headingChangedSettled}) {
+    assert(std::fabs(pose.position.x - exhaustedEast.position.x) < 1e-6);
+    assert(std::fabs(pose.position.y - exhaustedEast.position.y) < 1e-6);
+    assert(pose.predictionExhausted);
+  }
+  assert(std::fabs(headingChangedSettled.headingDegrees) < 1e-6);
+
+  Presenter headingDuringPrediction(headingOnlyConfig);
+  headingDuringPrediction.observe(
+      {{0.0, 0.0}, 90.0, true, 10.0, 1.0, 1000}, 1000);
+  const PresentedPose fiveMetersEast = headingDuringPrediction.present(1500);
+  assert(std::fabs(fiveMetersEast.position.x - 5.0) < 1e-6);
+  headingDuringPrediction.updateHeading(0.0, true, 1500);
+  const PresentedPose halfwayThroughHeading =
+      headingDuringPrediction.present(1675);
+  assert(std::fabs(halfwayThroughHeading.position.x - 6.75) < 1e-6);
+  assert(std::fabs(halfwayThroughHeading.position.y) < 1e-6);
+  assert(std::fabs(halfwayThroughHeading.headingDegrees - 45.0) < 1e-6);
+  const PresentedPose continuedAlongPhysicalFix =
+      headingDuringPrediction.present(1850);
+  assert(std::fabs(continuedAlongPhysicalFix.position.x - 8.5) < 1e-6);
+  assert(std::fabs(continuedAlongPhysicalFix.position.y) < 1e-6);
+  assert(std::fabs(continuedAlongPhysicalFix.headingDegrees) < 1e-6);
 
   // Receiving route/heading work later must not make an old physical fix
   // fresh. The source timestamp, not the UI observation time, owns the
