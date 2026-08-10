@@ -67,13 +67,13 @@ class MapActivationHandoffTests(unittest.TestCase):
             DEVICE_TRANSFER_SOURCE,
         )
 
-    def test_remote_debug_worker_uses_its_smaller_http_only_stack(self):
+    def test_remote_debug_worker_retains_network_setup_stack_budget(self):
         self.assertIn(
-            "constexpr uint32_t kDebugHttpWorkerStackBytes = 8192;",
+            "constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;",
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn(
-            'mode == "debug" ? kDebugHttpWorkerStackBytes',
+            'requestedMode == "debug" ? kDebugHttpWorkerStackBytes',
             DEVICE_TRANSFER_SOURCE,
         )
 
