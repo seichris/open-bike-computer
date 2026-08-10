@@ -302,6 +302,7 @@ const lv_image_dsc_t bicino_app_qr = {
     165,
     165,
     21,
+    0,
   },
   sizeof(bicino_app_qr_map),
   bicino_app_qr_map,

@@ -112,6 +112,8 @@ lv_obj_t *create(lv_obj_t *parent, Artwork artwork) {
     lv_obj_set_style_border_width(dot, 5, 0);
     break;
   }
+  case Artwork::None:
+    break;
   }
   return root;
 }

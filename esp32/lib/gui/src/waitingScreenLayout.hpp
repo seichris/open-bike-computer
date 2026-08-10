@@ -32,6 +32,13 @@ struct Layout {
   Rect statusCopy;
 };
 
+// Reviewed against LVGL 9.2's Montserrat 38 font. Keep a small horizontal
+// margin so these one-line labels cannot silently wrap into their fixed-height
+// boxes on either display profile.
+constexpr int16_t kConfirmCodeTextWidth = 346;
+constexpr int16_t kWaitingForIPhoneTextWidth = 368;
+constexpr int16_t kHeadlineHorizontalMargin = 12;
+
 constexpr int16_t centeredX(int16_t screenWidth, int16_t width) {
   return static_cast<int16_t>((screenWidth - width) / 2);
 }
@@ -47,11 +54,11 @@ constexpr Layout makeLayout(int16_t width, int16_t height) {
             {73, 122, 320, 48},
             {150, 174, 165, 165},
             {98, 350, 270, 56},
-            {73, 126, 320, 48},
+            {43, 126, 380, 48},
             {83, 190, 300, 62},
             {63, 286, 340, 64},
             {177, 144, 112, 112},
-            {53, 276, 360, 52},
+            {43, 276, 380, 52},
             {88, 340, 290, 64}};
   }
 
@@ -64,11 +71,11 @@ constexpr Layout makeLayout(int16_t width, int16_t height) {
           {24, 130, static_cast<int16_t>(width - 48), 48},
           {centeredX(width, 165), 182, 165, 165},
           {35, 366, static_cast<int16_t>(width - 70), 66},
-          {24, 148, static_cast<int16_t>(width - 48), 48},
+          {12, 148, static_cast<int16_t>(width - 24), 48},
           {35, 214, static_cast<int16_t>(width - 70), 62},
           {24, 300, static_cast<int16_t>(width - 48), 64},
           {centeredX(width, 112), 150, 112, 112},
-          {24, 286, static_cast<int16_t>(width - 48), 52},
+          {12, 286, static_cast<int16_t>(width - 24), 52},
           {24, 350, static_cast<int16_t>(width - 48), 64}};
 }
 
@@ -109,17 +116,31 @@ constexpr bool isValid(const Layout &layout) {
               layout.screenHeight) &&
          fits(layout.statusCopy, layout.screenWidth, layout.screenHeight) &&
          layout.battery.bottom() <= layout.fullBrand.y &&
+         layout.battery.bottom() <= layout.compactBrand.y &&
          layout.fullBrand.bottom() <= layout.welcomeHeadline.y &&
          layout.welcomeHeadline.bottom() <= layout.qr.y &&
-         layout.qr.bottom() <= layout.welcomeCopy.y;
+         layout.qr.bottom() <= layout.welcomeCopy.y &&
+         layout.compactBrand.bottom() <= layout.pairingHeadline.y &&
+         layout.pairingHeadline.bottom() <= layout.pairingCode.y &&
+         layout.pairingCode.bottom() <= layout.pairingCopy.y &&
+         layout.compactBrand.bottom() <= layout.statusHero.y &&
+         layout.statusHero.bottom() <= layout.statusHeadline.y &&
+         layout.statusHeadline.bottom() <= layout.statusCopy.y &&
+         layout.pairingHeadline.width >=
+             kConfirmCodeTextWidth + kHeadlineHorizontalMargin &&
+         layout.statusHeadline.width >=
+             kWaitingForIPhoneTextWidth + kHeadlineHorizontalMargin;
 }
 
 constexpr bool roundOpaqueContentIsSafe(const Layout &layout) {
   return !layout.round ||
          (cornersFitCircle(layout.battery, layout.screenWidth) &&
           cornersFitCircle(layout.fullBrand, layout.screenWidth) &&
+          cornersFitCircle(layout.compactBrand, layout.screenWidth) &&
+          cornersFitCircle(layout.welcomeHeadline, layout.screenWidth) &&
           cornersFitCircle(layout.qr, layout.screenWidth) &&
           cornersFitCircle(layout.welcomeCopy, layout.screenWidth) &&
+          cornersFitCircle(layout.pairingHeadline, layout.screenWidth) &&
           cornersFitCircle(layout.pairingCode, layout.screenWidth) &&
           cornersFitCircle(layout.pairingCopy, layout.screenWidth) &&
           cornersFitCircle(layout.statusHero, layout.screenWidth) &&

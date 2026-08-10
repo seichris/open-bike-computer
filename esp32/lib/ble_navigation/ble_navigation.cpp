@@ -373,15 +373,22 @@ static void applyPendingOwnershipUiUpdate() {
   }
   portEXIT_CRITICAL(&ownershipUiMux);
   if (pending) {
-    updateWaitingOwnershipStatus(snapshot);
-    portENTER_CRITICAL(&ownershipUiMux);
-    if (pre_connection_presentation::resolve(snapshot) ==
-        pre_connection_presentation::Phase::PairingComparison) {
-      ownershipComparisonRenderGate.request(pairingGeneration);
-    } else {
-      ownershipComparisonRenderGate.cancel();
-    }
-    portEXIT_CRITICAL(&ownershipUiMux);
+    pre_connection_presentation::presentThenUpdateComparisonGate(
+        snapshot, pairingGeneration,
+        [](const pre_connection_presentation::Snapshot &nextSnapshot,
+           pre_connection_presentation::Phase) {
+          updateWaitingOwnershipStatus(nextSnapshot);
+        },
+        [](uint32_t generation) {
+          portENTER_CRITICAL(&ownershipUiMux);
+          ownershipComparisonRenderGate.request(generation);
+          portEXIT_CRITICAL(&ownershipUiMux);
+        },
+        [] {
+          portENTER_CRITICAL(&ownershipUiMux);
+          ownershipComparisonRenderGate.cancel();
+          portEXIT_CRITICAL(&ownershipUiMux);
+        });
   }
 }
 
@@ -1199,18 +1206,15 @@ static void handleAuthPayload(const std::string &frame) {
       switch (ownershipResult.event) {
       case device_ownership::Event::PairingStarted:
         ownershipPairingActiveSnapshot = true;
-        queueOwnershipUiUpdate();
         Serial.println("BLE: Secure ownership comparison started");
         break;
       case device_ownership::Event::Paired:
         ownershipPairingActiveSnapshot = false;
         ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
         Serial.println("BLE: Device ownership registered");
         break;
       case device_ownership::Event::Authenticated:
         completeBleSessionAuthentication();
-        queueOwnershipUiUpdate();
         Serial.println("BLE: Scoped controller session authenticated");
         break;
       case device_ownership::Event::WatchControllerStaged:
@@ -1224,7 +1228,6 @@ static void handleAuthPayload(const std::string &frame) {
         break;
       case device_ownership::Event::Renamed:
         ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
         Serial.println("BLE: Device name updated");
         break;
       case device_ownership::Event::Unpaired:
@@ -1233,7 +1236,6 @@ static void handleAuthPayload(const std::string &frame) {
             false, std::memory_order_release);
         bleDebugStats.authenticated = false;
         ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
         ownershipRestartRequested = true;
         ownershipRestartRequestedMs = millis();
         Serial.println("BLE: Device ownership removed; restart scheduled");
@@ -1241,6 +1243,11 @@ static void handleAuthPayload(const std::string &frame) {
       case device_ownership::Event::None:
         break;
       }
+      // Some matched failure paths clear pairing without a distinct event
+      // (invalid/expired confirmation or persistence rollback). Always queue
+      // the post-command snapshot so the UI and render gate cannot retain a
+      // stale PairingConfirmed presentation.
+      queueOwnershipUiUpdate();
       return;
     }
   }
@@ -3429,7 +3436,15 @@ void BLENavigationServer::init(const char *deviceName) {
   } else {
     portENTER_CRITICAL(&ownershipUiMux);
     ownershipUiClaimed = true;
+    ownershipUiConnected = false;
+    ownershipUiAuthenticated = false;
+    ownershipUiPairingActive = false;
+    ownershipUiPairingConfirmedOnDevice = false;
+    ownershipUiPairingCode = 0;
+    ownershipUiPairingGeneration = 0;
+    ownershipUiUpdatePending = true;
     portEXIT_CRITICAL(&ownershipUiMux);
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     Serial.println("BLE: Ownership storage unavailable; authentication locked");
   }
 
@@ -3541,8 +3556,11 @@ void BLENavigationServer::process() {
     if (pairingExpired) {
       queueOwnershipUiUpdate();
     }
-    applyPendingOwnershipUiUpdate();
   }
+  // A storage failure deliberately queues a fail-closed claimed snapshot even
+  // though ownership processing itself is disabled. Apply it on the UI task so
+  // a locked device never advertises the add-device Welcome experience.
+  applyPendingOwnershipUiUpdate();
   if (ownershipRestartRequested &&
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");

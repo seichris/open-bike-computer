@@ -112,6 +112,7 @@ jobs:
         run: |
           python -m pip install -r tools/preconnection-assets-requirements.txt
           python tools/generate_preconnection_assets.py --check
+          python -m unittest tools.tests.test_preconnection_assets
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \

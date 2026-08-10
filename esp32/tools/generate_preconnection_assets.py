@@ -90,6 +90,7 @@ const lv_image_dsc_t {symbol} = {{
     {width},
     {height},
     {stride},
+    0,
   }},
   sizeof({symbol}_map),
   {symbol}_map,

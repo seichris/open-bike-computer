@@ -810,8 +810,35 @@ int main() {
   assert(persistFailure
              .handle(failingApp.confirm(failingMaterial, "Bike"), 202)
              .response == "ERROR|pairing_persistence_failed");
+  assert(!persistFailure.hasPairingCode());
+  assert(!persistFailure.isPairingConfirmedOnDevice());
   assert(!persistFailure.isClaimed());
   assert(!persistFailure.allowsLegacyAuthentication());
+
+  preferences_test::reset();
+  DeviceOwnership invalidConfirmation;
+  assert(invalidConfirmation.begin());
+  AppPairing invalidConfirmationApp(4);
+  const auto invalidPair = invalidConfirmation.handle(
+      invalidConfirmationApp.command(), 210);
+  const auto invalidMaterial = invalidConfirmationApp.material(invalidPair);
+  assert(invalidConfirmation.armPairingConfirmation(
+      invalidConfirmation.pairingGeneration()));
+  assert(invalidConfirmation.confirmPairingOnDevice());
+  std::string invalidCommand =
+      invalidConfirmationApp.confirm(invalidMaterial, "Bike");
+  const size_t ownerSeparator = invalidCommand.find('|');
+  const size_t proofSeparator = invalidCommand.find('|', ownerSeparator + 1);
+  assert(ownerSeparator != std::string::npos &&
+         proofSeparator != std::string::npos);
+  invalidCommand[proofSeparator + 1] =
+      invalidCommand[proofSeparator + 1] == '0' ? '1' : '0';
+  const auto invalidResult = invalidConfirmation.handle(invalidCommand, 211);
+  assert(invalidResult.matched);
+  assert(invalidResult.event == Event::None);
+  assert(invalidResult.response == "ERROR|pairing_confirmation_failed");
+  assert(!invalidConfirmation.hasPairingCode());
+  assert(!invalidConfirmation.isPairingConfirmedOnDevice());
 
   preferences_test::reset();
   preferences_test::put("bleOwner", "version", {2});

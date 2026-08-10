@@ -13,9 +13,9 @@
     "source_sha256": "c37377cca05d4a9120a23c92ee5f19750b64ff206a8beb1f7863fc2ca1016612"
   },
   "outputs": {
-    "lib/images/src/bicino_app_qr.c": "2d234dc085403c46b2ae81f51bfe9af7b22bbd65fc2bba828f8695a3c86cfe33",
+    "lib/images/src/bicino_app_qr.c": "9177108076805eb052d03aa2796677689dfeee0aaf709279e917c6e0ded7091a",
     "lib/images/src/bicino_app_qr.h": "37f3c82ef8ad73e8cfacf642f267b19ce6ad17771bf392acd22bf1a3c33b01b2",
-    "lib/images/src/bicino_logo.c": "c43b34dcee5d08082ac909b8ae039e724aeb3988b76fbf0a5f709b9c185440d4",
+    "lib/images/src/bicino_logo.c": "495e27460a17ff0f8adc9115a94205c0292024969f75e7fd127813463f2e6a4f",
     "lib/images/src/bicino_logo.h": "1e3729b93417ceac31dee5023697624a3f1d57c795b2d7216740b9e48337ec30"
   },
   "qr": {

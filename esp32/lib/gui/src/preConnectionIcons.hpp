@@ -1,17 +1,11 @@
 #pragma once
 
+#include "preConnectionPresentation.hpp"
 #include "lvgl.h"
-
-#include <cstdint>
 
 namespace pre_connection_icons {
 
-enum class Artwork : uint8_t {
-  PairingConfirmed,
-  WaitingForIPhone,
-  Connecting,
-  GettingLocation,
-};
+using Artwork = pre_connection_presentation::Artwork;
 
 lv_obj_t *create(lv_obj_t *parent, Artwork artwork);
 

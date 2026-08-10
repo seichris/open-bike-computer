@@ -336,6 +336,7 @@ const lv_image_dsc_t bicino_logo = {
     36,
     36,
     72,
+    0,
   },
   sizeof(bicino_logo_map),
   bicino_logo_map,

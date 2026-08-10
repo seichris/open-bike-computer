@@ -25,6 +25,7 @@ extern Battery battery;
 namespace {
 
 using pre_connection_presentation::Phase;
+using pre_connection_presentation::Group;
 
 lv_obj_t *waitingBattery = nullptr;
 lv_timer_t *waitingBatteryTimer = nullptr;
@@ -179,18 +180,22 @@ void showStatusArtwork(pre_connection_icons::Artwork artwork) {
 }
 
 void applyPhase(Phase phase, uint32_t pairingCode) {
-  if (hasDisplayedPhase && phase == displayedPhase &&
-      (phase != Phase::PairingComparison ||
-       pairingCode == displayedPairingCode)) {
+  if (!pre_connection_presentation::needsUpdate(
+          hasDisplayedPhase, displayedPhase, displayedPairingCode, phase,
+          pairingCode)) {
     return;
   }
 
-  setVisible(fullBrand, phase == Phase::Welcome);
-  setVisible(compactBrand, phase != Phase::Welcome);
-  setVisible(welcomeGroup, phase == Phase::Welcome);
-  const bool pairing = phase == Phase::PairingComparison;
+  const pre_connection_presentation::Content content =
+      pre_connection_presentation::content(phase);
+  const bool welcome = content.group == Group::Welcome;
+  const bool pairing = content.group == Group::Pairing;
+  const bool status = content.group == Group::Status;
+  setVisible(fullBrand, welcome);
+  setVisible(compactBrand, !welcome);
+  setVisible(welcomeGroup, welcome);
   setVisible(pairingGroup, pairing);
-  setVisible(statusGroup, phase != Phase::Welcome && !pairing);
+  setVisible(statusGroup, status);
 
   if (pairing && pairingCode != displayedPairingCode) {
     char codeText[8];
@@ -199,32 +204,10 @@ void applyPhase(Phase phase, uint32_t pairingCode) {
     displayedPairingCode = pairingCode;
   }
 
-  switch (phase) {
-  case Phase::Welcome:
-  case Phase::PairingComparison:
-    break;
-  case Phase::PairingConfirmed:
-    showStatusArtwork(pre_connection_icons::Artwork::PairingConfirmed);
-    setLabelTextIfChanged(statusHeadline, "Confirmed here");
-    setLabelTextIfChanged(statusCopy,
-                          "Tap Codes Match\non your iPhone.");
-    break;
-  case Phase::WaitingForIPhone:
-    showStatusArtwork(pre_connection_icons::Artwork::WaitingForIPhone);
-    setLabelTextIfChanged(statusHeadline, "Waiting for iPhone");
-    setLabelTextIfChanged(statusCopy, "Open Bicino on your iPhone.");
-    break;
-  case Phase::Connecting:
-    showStatusArtwork(pre_connection_icons::Artwork::Connecting);
-    setLabelTextIfChanged(statusHeadline, "Connecting...");
-    setLabelTextIfChanged(statusCopy,
-                          "Creating a secure connection.");
-    break;
-  case Phase::GettingLocation:
-    showStatusArtwork(pre_connection_icons::Artwork::GettingLocation);
-    setLabelTextIfChanged(statusHeadline, "iPhone connected");
-    setLabelTextIfChanged(statusCopy, "Getting your location...");
-    break;
+  if (status) {
+    showStatusArtwork(content.artwork);
+    setLabelTextIfChanged(statusHeadline, content.headline);
+    setLabelTextIfChanged(statusCopy, content.copy);
   }
 
   displayedPhase = phase;
@@ -272,25 +255,29 @@ void createWaitingScr() {
                                    &lv_font_montserrat_24, 5);
 
   welcomeGroup = createTransparentGroup(waitingScreen);
+  const pre_connection_presentation::Content welcomeContent =
+      pre_connection_presentation::content(Phase::Welcome);
   createLabel(welcomeGroup, layout.welcomeHeadline, &lv_font_montserrat_42,
-              lv_color_white(), "Welcome");
+              lv_color_white(), welcomeContent.headline);
   lv_obj_t *qr = lv_image_create(welcomeGroup);
   lv_image_set_src(qr, &bicino_app_qr);
   lv_obj_set_pos(qr, layout.qr.x, layout.qr.y);
   createLabel(welcomeGroup, layout.welcomeCopy, &lv_font_montserrat_18,
               lv_color_hex(bicino_visual_style::SECONDARY_TEXT_RGB888),
-              "Download the Bicino app\nand add your new device!");
+              welcomeContent.copy);
 
   pairingGroup = createTransparentGroup(waitingScreen);
+  const pre_connection_presentation::Content pairingContent =
+      pre_connection_presentation::content(Phase::PairingComparison);
   createLabel(pairingGroup, layout.pairingHeadline,
               &lv_font_montserrat_38, lv_color_white(),
-              "Confirm this code");
+              pairingContent.headline);
   pairingCodeLabel = createLabel(
       pairingGroup, layout.pairingCode, &lv_font_montserrat_48,
       lv_color_hex(bicino_visual_style::PAIRING_AMBER_RGB888), "000 000");
   createLabel(pairingGroup, layout.pairingCopy, &lv_font_montserrat_18,
               lv_color_hex(bicino_visual_style::SECONDARY_TEXT_RGB888),
-              "If it matches your iPhone,\npress either device button.");
+              pairingContent.copy);
 
   statusGroup = createTransparentGroup(waitingScreen);
   for (uint8_t index = 0; index < 4; ++index) {
