@@ -62,6 +62,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if (
             path.startswith("esp32/")
+            or path.startswith("tools/tests/")
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
         ):

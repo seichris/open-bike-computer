@@ -130,6 +130,23 @@ class ChangedComponentsTests(unittest.TestCase):
                     changed_components.classify_paths([path]),
                 )
 
+    def test_future_root_tool_tests_select_the_firmware_host_job(self) -> None:
+        for path in (
+            "tools/tests/test_future_release_tool.py",
+            "tools/tests/helpers.py",
+            "tools/tests/fixtures/manifest.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware": True,
+                        "ios": False,
+                        "map_backend": False,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
     def test_ci_router_change_runs_every_component(self) -> None:
         selected = changed_components.classify_paths(
             [".github/scripts/changed_components.py"]
