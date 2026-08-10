@@ -15,6 +15,10 @@ BLE = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text(
 INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
+LV_CONFIG = (ROOT / "lib/lvgl/lv_conf.h").read_text(encoding="utf-8")
+LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
+    encoding="utf-8"
+)
 
 
 class DeviceDebugHttpContractTests(unittest.TestCase):
@@ -93,6 +97,28 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("physicalOverridePending_.store(true", sample)
         self.assertIn("controller_.sample(true, nowMs)", sample)
+
+    def test_debug_profile_moves_fixed_lvgl_pool_to_psram(self):
+        for config in (LV_CONFIG, LV_CONFIG_TEMPLATE):
+            self.assertIn(
+                "#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG",
+                config,
+            )
+            self.assertIn(
+                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
+            )
+            self.assertIn(
+                "heap_caps_aligned_alloc(16, (size), "
+                "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
+                config,
+            )
+            debug_gate = config.index(
+                "#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG"
+            )
+            fallback = config.index("#else", debug_gate)
+            self.assertIn(
+                "#undef LV_MEM_POOL_ALLOC", config[fallback:]
+            )
 
 
 if __name__ == "__main__":
