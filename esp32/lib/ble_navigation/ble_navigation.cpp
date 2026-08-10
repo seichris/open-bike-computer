@@ -2237,19 +2237,31 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
+  const uint32_t gpsPacketReceivedAtMs = millis();
+  if (bleDebugStats.lastGpsPacketMs != 0) {
+    bleDebugStats.lastGpsPacketGapMs =
+        gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs;
+    bleDebugStats.maximumGpsPacketGapMs =
+        std::max(bleDebugStats.maximumGpsPacketGapMs,
+                 bleDebugStats.lastGpsPacketGapMs);
+  }
+  bleDebugStats.gpsPacketCount++;
+  bleDebugStats.lastGpsPacketMs = gpsPacketReceivedAtMs;
+
 #if FIRMWARE_DIAGNOSTICS
-  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
+  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d "
+                "gapMs=%lu maxGapMs=%lu\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-                rtcTimestampSynced
+                rtcTimestampSynced,
 #else
-                0
+                0,
 #endif
+                (unsigned long)bleDebugStats.lastGpsPacketGapMs,
+                (unsigned long)bleDebugStats.maximumGpsPacketGapMs
   );
 #endif
-  bleDebugStats.gpsPacketCount++;
-  bleDebugStats.lastGpsPacketMs = millis();
 
   if (!gpsReceivedFromApp) {
     gpsReceivedFromApp = true;
@@ -3524,7 +3536,7 @@ void BLENavigationServer::process() {
     Serial.printf("BLE Debug: up=%lus init=%d conn=%d auth=%d connects=%lu "
                   "disconnects=%lu authOK=%lu nav=%lu route=%lu gps=%lu "
                   "settings=%lu rejectAuth=%lu lastMs[c=%lu a=%lu n=%lu r=%lu "
-                  "g=%lu s=%lu rej=%lu]\n",
+                  "g=%lu s=%lu rej=%lu] gpsGapMs[last=%lu max=%lu]\n",
                   millis() / 1000, initialized, connected,
                   bleSessionAuthenticated, bleDebugStats.connectCount,
                   bleDebugStats.disconnectCount, bleDebugStats.authSuccessCount,
@@ -3537,7 +3549,9 @@ void BLENavigationServer::process() {
                   bleDebugStats.lastRoutePacketMs,
                   bleDebugStats.lastGpsPacketMs,
                   bleDebugStats.lastSettingsPacketMs,
-                  bleDebugStats.lastRejectedUnauthenticatedMs);
+                  bleDebugStats.lastRejectedUnauthenticatedMs,
+                  bleDebugStats.lastGpsPacketGapMs,
+                  bleDebugStats.maximumGpsPacketGapMs);
   }
 #else
   (void)lastLog;

@@ -12,6 +12,15 @@ MAP_RENDERER_SOURCE = (
 MAP_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
 ).read_text(encoding="utf-8")
+MAP_PRESENTATION_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapPresentation.hpp"
+).read_text(encoding="utf-8")
+BLE_SOURCE = (
+    ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.cpp"
+).read_text(encoding="utf-8")
+BLE_HEADER_SOURCE = (
+    ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.hpp"
+).read_text(encoding="utf-8")
 BUILDING_ADMISSION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapBuildingAdmission.hpp"
 ).read_text(encoding="utf-8")
@@ -171,6 +180,39 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertNotIn("routeOverlay.revision()", semantics)
         self.assertIn("posePresenter.resetHeading(nowMs)", semantics)
+
+    def test_prediction_grace_is_bounded_and_reports_transport_freshness(self):
+        self.assertIn("fullSpeedPredictionMs = 1500", MAP_PRESENTATION_SOURCE)
+        self.assertIn("maximumPredictionMs = 2500", MAP_PRESENTATION_SOURCE)
+        self.assertIn("maximumPredictionMeters = 30.0", MAP_PRESENTATION_SOURCE)
+        self.assertIn("graceElapsedMs * graceElapsedMs", MAP_PRESENTATION_SOURCE)
+        self.assertIn("predictionExhausted", MAP_PRESENTATION_SOURCE)
+
+        pose = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedPose")
+        self.assertIn("bleStats.lastGpsPacketMs", pose)
+        self.assertIn("bleStats.gpsPacketCount", pose)
+        self.assertIn("fix.timestampMs", pose)
+        self.assertIn('"MAPIO: presentation gpsAgeMs=%lu lastGpsGapMs=%lu "', pose)
+        self.assertIn('"predictionExhausted=%u exhaustionCount=%lu "', pose)
+
+        gps_handler = function_body(BLE_SOURCE, "static void handleGpsPayload")
+        self.assertIn("lastGpsPacketGapMs", BLE_HEADER_SOURCE)
+        self.assertIn("maximumGpsPacketGapMs", BLE_HEADER_SOURCE)
+        self.assertIn(
+            "gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs",
+            gps_handler,
+        )
+        self.assertIn("maximumGpsPacketGapMs", gps_handler)
+
+        self.assertIn(
+            '"pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "',
+            MAIN_SOURCE,
+        )
+        self.assertIn(
+            '"exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "',
+            MAIN_SOURCE,
+        )
+        self.assertIn('"gpsGapMs=%lu/%lu] "', MAIN_SOURCE)
 
     def test_live_presentation_does_not_overwrite_gesture_transforms(self):
         service = function_body(

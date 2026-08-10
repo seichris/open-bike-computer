@@ -206,6 +206,8 @@ struct BLEDebugStats {
   uint32_t lastNavPacketMs = 0;
   uint32_t lastRoutePacketMs = 0;
   uint32_t lastGpsPacketMs = 0;
+  uint32_t lastGpsPacketGapMs = 0;
+  uint32_t maximumGpsPacketGapMs = 0;
   uint32_t lastSettingsPacketMs = 0;
   uint32_t lastRejectedUnauthenticatedMs = 0;
   bool connectionParametersValid = false;

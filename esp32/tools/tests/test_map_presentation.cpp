@@ -66,7 +66,54 @@ int main() {
   resolver.setNavigationSession(false, 9);
   assert(!resolver.resolve(true, 0.0, true, 90.0, heading));
 
+  // The default policy keeps the normal 1.5-second full-speed window, then
+  // decelerates through a 2.5-second hard horizon. A two-second gap (one
+  // missed 1 Hz heartbeat) therefore remains continuous, while longer loss
+  // settles at a finite position.
+  Presenter::Config graceConfig;
+  assert(graceConfig.fullSpeedPredictionMs == 1500);
+  assert(graceConfig.maximumPredictionMs == 2500);
+  assert(graceConfig.maximumPredictionMeters == 30.0);
+  graceConfig.convergenceMs = 0;
+  Presenter heartbeatGrace(graceConfig);
+  heartbeatGrace.observe(
+      {{100.0, 200.0}, 90.0, true, 10.0, 1.0, 1000}, 1000);
+  const PresentedPose healthyHeartbeat = heartbeatGrace.present(2000);
+  assert(std::fabs(healthyHeartbeat.position.x - 110.0) < 1e-6);
+  assert(healthyHeartbeat.observationAgeMs == 1000);
+  assert(!healthyHeartbeat.predictionGraceActive);
+  assert(!healthyHeartbeat.predictionExhausted);
+  const PresentedPose oneMissedHeartbeat = heartbeatGrace.present(3000);
+  assert(std::fabs(oneMissedHeartbeat.position.x - 118.75) < 1e-6);
+  assert(oneMissedHeartbeat.observationAgeMs == 2000);
+  assert(oneMissedHeartbeat.predictionAgeMs == 2000);
+  assert(oneMissedHeartbeat.predictionGraceActive);
+  assert(!oneMissedHeartbeat.predictionExhausted);
+  const PresentedPose graceHorizon = heartbeatGrace.present(3500);
+  assert(std::fabs(graceHorizon.position.x - 120.0) < 1e-6);
+  assert(graceHorizon.observationAgeMs == 2500);
+  assert(graceHorizon.predictionAgeMs == 2500);
+  assert(!graceHorizon.predictionGraceActive);
+  assert(graceHorizon.predictionExhausted);
+  const PresentedPose longTransportLoss = heartbeatGrace.present(9000);
+  assert(std::fabs(longTransportLoss.position.x -
+                   graceHorizon.position.x) < 1e-6);
+  assert(longTransportLoss.observationAgeMs == 8000);
+  assert(longTransportLoss.predictionAgeMs == 2500);
+  assert(longTransportLoss.predictionExhausted);
+
+  // Receiving route/heading work later must not make an old physical fix
+  // fresh. The source timestamp, not the UI observation time, owns the
+  // prediction horizon.
+  Presenter delayedObservation(graceConfig);
+  delayedObservation.observe(
+      {{0.0, 0.0}, 90.0, true, 10.0, 1.0, 1000}, 1800);
+  const PresentedPose delayedPose = delayedObservation.present(3000);
+  assert(delayedPose.observationAgeMs == 2000);
+  assert(delayedPose.predictionGraceActive);
+
   Presenter::Config config;
+  config.fullSpeedPredictionMs = 1500;
   config.maximumPredictionMs = 1500;
   config.convergenceMs = 0;
   config.maximumPredictionMeters = 20;
@@ -78,7 +125,9 @@ int main() {
   assert(std::fabs(afterHalfSecond.position.y - 200.0) < 1e-6);
   PresentedPose capped = presenter.present(9000);
   assert(std::fabs(capped.position.x - 115.0) < 1e-6);
+  assert(capped.observationAgeMs == 8000);
   assert(capped.predictionAgeMs == 1500);
+  assert(capped.predictionExhausted);
 
   // The finite prediction limit is expressed in physical metres even though
   // Web Mercator world coordinates stretch by sec(latitude).
@@ -87,6 +136,7 @@ int main() {
   const PresentedPose scaledCapped = scaled.present(9000);
   // The 20 metre physical cap becomes 40 world units at this local scale.
   assert(std::fabs(scaledCapped.position.x - 140.0) < 1e-6);
+  assert(scaledCapped.predictionExhausted);
 
   // A correction converges instead of leaving disconnected dead reckoning.
   config.convergenceMs = 400;

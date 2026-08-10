@@ -109,6 +109,9 @@ struct Fix {
   // the fix lets prediction remain bounded in real metres while producing a
   // position in the exact world-coordinate space used by the map renderer.
   double worldUnitsPerMeter = 1.0;
+  // Local monotonic time when the GPS packet was accepted. This deliberately
+  // remains separate from the later UI time at which heading convergence may
+  // re-observe the same physical fix.
   uint32_t timestampMs = 0;
 };
 
@@ -117,7 +120,10 @@ struct PresentedPose {
   double headingDegrees = 0.0;
   bool headingValid = false;
   uint32_t sourceTimestampMs = 0;
+  uint32_t observationAgeMs = 0;
   uint32_t predictionAgeMs = 0;
+  bool predictionGraceActive = false;
+  bool predictionExhausted = false;
 };
 
 /**
@@ -191,7 +197,12 @@ private:
 class Presenter {
 public:
   struct Config {
-    uint32_t maximumPredictionMs = 1500;
+    // A healthy navigation session supplies a pose heartbeat every second.
+    // Keep ordinary interpolation at full speed through 1.5 seconds, then
+    // decelerate to a bounded stop at 2.5 seconds. This bridges one missed
+    // heartbeat without turning transport loss into unbounded dead reckoning.
+    uint32_t fullSpeedPredictionMs = 1500;
+    uint32_t maximumPredictionMs = 2500;
     uint32_t convergenceMs = 350;
     double maximumPredictionMeters = 30.0;
     double maximumSpeedMetersPerSecond = 35.0;
@@ -225,7 +236,6 @@ public:
     previousPresented_ = frozen;
     previousPresented_.headingDegrees = 0.0;
     previousPresented_.headingValid = false;
-    receivedAtMs_ = nowMs;
     convergenceStartMs_ = nowMs;
   }
 
@@ -250,11 +260,13 @@ public:
       previousPresented_.headingDegrees = normalized.headingDegrees;
       previousPresented_.headingValid = normalized.headingValid;
       previousPresented_.sourceTimestampMs = normalized.timestampMs;
+      previousPresented_.observationAgeMs = 0;
       previousPresented_.predictionAgeMs = 0;
+      previousPresented_.predictionGraceActive = false;
+      previousPresented_.predictionExhausted = false;
       convergenceStartMs_ = receivedAtMs;
     }
     current_ = normalized;
-    receivedAtMs_ = receivedAtMs;
     hasFix_ = true;
   }
 
@@ -264,13 +276,35 @@ public:
     if (!hasFix_)
       return {};
 
-    const uint32_t ageMs = nowMs - receivedAtMs_;
+    // Fix::timestampMs is the accepted GPS-packet time. Keep freshness tied to
+    // that source even if a later route-bearing update re-observes the same
+    // physical coordinate for heading convergence.
+    const uint32_t ageMs = nowMs - current_.timestampMs;
     const uint32_t predictionMs =
         std::min(ageMs, config_.maximumPredictionMs);
-    double distanceMeters =
-        current_.speedMetersPerSecond * predictionMs / 1000.0;
-    distanceMeters =
-        std::min(distanceMeters, config_.maximumPredictionMeters);
+    const uint32_t fullSpeedPredictionMs =
+        std::min(config_.fullSpeedPredictionMs,
+                 config_.maximumPredictionMs);
+    double effectivePredictionMs = predictionMs;
+    if (predictionMs > fullSpeedPredictionMs &&
+        config_.maximumPredictionMs > fullSpeedPredictionMs) {
+      const double graceElapsedMs =
+          static_cast<double>(predictionMs - fullSpeedPredictionMs);
+      const double graceDurationMs = static_cast<double>(
+          config_.maximumPredictionMs - fullSpeedPredictionMs);
+      // Integrate a velocity that falls linearly from 100% to 0% over the
+      // grace window. The predicted position remains monotonic and settles
+      // without the visual reversal caused by scaling total displacement.
+      effectivePredictionMs =
+          fullSpeedPredictionMs + graceElapsedMs -
+          graceElapsedMs * graceElapsedMs / (2.0 * graceDurationMs);
+    }
+    const double uncappedDistanceMeters =
+        current_.speedMetersPerSecond * effectivePredictionMs / 1000.0;
+    const double maximumPredictionMeters =
+        std::max(0.0, config_.maximumPredictionMeters);
+    const double distanceMeters =
+        std::min(uncappedDistanceMeters, maximumPredictionMeters);
     const double distance = distanceMeters * current_.worldUnitsPerMeter;
 
     WorldPoint predicted = current_.position;
@@ -308,7 +342,15 @@ public:
       pose.headingDegrees = previousPresented_.headingDegrees;
     }
     pose.sourceTimestampMs = current_.timestampMs;
+    pose.observationAgeMs = ageMs;
     pose.predictionAgeMs = predictionMs;
+    const bool timeExhausted = ageMs >= config_.maximumPredictionMs;
+    const bool distanceExhausted =
+        current_.speedMetersPerSecond > 0.0 &&
+        uncappedDistanceMeters >= maximumPredictionMeters;
+    pose.predictionExhausted = timeExhausted || distanceExhausted;
+    pose.predictionGraceActive =
+        !pose.predictionExhausted && ageMs > fullSpeedPredictionMs;
     return pose;
   }
 
@@ -317,7 +359,6 @@ private:
   bool hasFix_ = false;
   Fix current_{};
   PresentedPose previousPresented_{};
-  uint32_t receivedAtMs_ = 0;
   uint32_t convergenceStartMs_ = 0;
 };
 

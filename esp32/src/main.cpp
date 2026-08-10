@@ -693,6 +693,8 @@ static void logSystemDebugHeartbeat() {
   lastLogMs = now;
 
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const uint32_t gpsAgeMs =
+      bleStats.gpsPacketCount != 0 ? now - bleStats.lastGpsPacketMs : 0U;
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
@@ -741,7 +743,10 @@ static void logSystemDebugHeartbeat() {
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
-                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu] "
+                "pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "
+                "exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu "
+                "gpsGapMs=%lu/%lu] "
                 "i2c[fail=%lu recover=%lu recovered=%lu missing=%lu] "
                 "rtc[present=%d valid=%d source=%s unix=%lld]\n",
                 (unsigned long)(now / 1000),
@@ -766,11 +771,19 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)lastDisplayFlushMs,
                 (unsigned long)lastDisplayFlushDurationUs,
                 (unsigned long)maxDisplayFlushDurationUs,
+                (unsigned long)gpsAgeMs,
+                (unsigned long)mapView.debugPredictionAgeMs(),
+                mapView.debugPredictionGraceActive(),
+                mapView.debugPredictionExhausted(),
+                (unsigned long)mapView.debugPredictionExhaustionCount(),
+                (unsigned long)mapView.debugLastPredictionExhaustedMs(),
                 bleStats.connected, bleStats.authenticated,
                 (unsigned long)bleStats.navPacketCount,
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount,
+                (unsigned long)bleStats.lastGpsPacketGapMs,
+                (unsigned long)bleStats.maximumGpsPacketGapMs,
                 (unsigned long)i2cStats.failedTransactions,
                 (unsigned long)i2cStats.recoveryAttempts,
                 (unsigned long)i2cStats.recoveredTransactions,
@@ -785,7 +798,10 @@ static void logSystemDebugHeartbeat() {
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
-                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu]\n",
+                "pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "
+                "exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu "
+                "gpsGapMs=%lu/%lu]\n",
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)ESP.getFreePsram(), screenName,
@@ -802,11 +818,19 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)lastLvglHandlerMs,
                 (unsigned long)lastLvglHandlerDurationUs,
                 (unsigned long)maxLvglHandlerDurationUs, 0UL, 0UL, 0UL, 0UL,
+                (unsigned long)gpsAgeMs,
+                (unsigned long)mapView.debugPredictionAgeMs(),
+                mapView.debugPredictionGraceActive(),
+                mapView.debugPredictionExhausted(),
+                (unsigned long)mapView.debugPredictionExhaustionCount(),
+                (unsigned long)mapView.debugLastPredictionExhaustedMs(),
                 bleStats.connected, bleStats.authenticated,
                 (unsigned long)bleStats.navPacketCount,
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
-                (unsigned long)bleStats.settingsPacketCount);
+                (unsigned long)bleStats.settingsPacketCount,
+                (unsigned long)bleStats.lastGpsPacketGapMs,
+                (unsigned long)bleStats.maximumGpsPacketGapMs);
 #endif
 #endif
 }
