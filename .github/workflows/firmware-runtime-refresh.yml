@@ -111,13 +111,13 @@ jobs:
     defaults:
       run:
         working-directory: esp32
-    env:
-      OPEN_BIKE_FIRMWARE_RUNTIME_CACHE: ${{ runner.temp }}/firmware-runtime-cache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Configure the isolated runtime cache
+        run: echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=$RUNNER_TEMP/firmware-runtime-cache" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           pattern: firmware-runtime-candidate-*
