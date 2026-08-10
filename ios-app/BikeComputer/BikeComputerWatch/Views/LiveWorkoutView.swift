@@ -234,10 +234,19 @@ struct LiveWorkoutView: View {
                     )
                 }
 
-                Text(WorkoutValueFormatter.duration(manager.snapshot.elapsedTime?.value))
-                    .font(.system(.title2, design: .rounded, weight: .semibold))
-                    .monospacedDigit()
-                    .accessibilityLabel("Elapsed time")
+                HStack(spacing: 12) {
+                    workoutTime(
+                        "Elapsed",
+                        manager.snapshot.wallElapsedTime?.value
+                            ?? manager.snapshot.elapsedTime?.value
+                    )
+                    if manager.snapshot.wallElapsedTime != nil {
+                        workoutTime(
+                            "Moving",
+                            manager.snapshot.elapsedTime?.value
+                        )
+                    }
+                }
 
                 HStack(spacing: 8) {
                     Button {
@@ -292,6 +301,7 @@ struct LiveWorkoutView: View {
 
                 NavigationLink {
                     WatchSettingsView(
+                        manager: manager,
                         navigationSettings: navigationSettings,
                         favoriteStore: favoriteStore,
                         navigationManager: navigationManager
@@ -476,10 +486,37 @@ struct LiveWorkoutView: View {
         switch manager.state {
         case .starting: "STARTING"
         case .running: nil
-        case .paused: "PAUSED"
+        case .paused:
+            manager.snapshot.pauseOrigin == .automatic
+                ? "AUTO-PAUSED"
+                : "PAUSED"
         case .ending: manager.isDiscarding ? "DISCARDING" : "SAVING"
         case .idle, .ended, .failed: "WORKOUT"
         }
+    }
+
+    private func workoutTime(
+        _ label: String,
+        _ seconds: TimeInterval?
+    ) -> some View {
+        VStack(spacing: 1) {
+            Text(WorkoutValueFormatter.duration(seconds))
+                .font(
+                    .system(
+                        .body,
+                        design: .rounded,
+                        weight: .semibold
+                    )
+                )
+                .monospacedDigit()
+            Text(label)
+                .font(.system(size: 8))
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(label) \(WorkoutValueFormatter.duration(seconds))"
+        )
     }
 
     private var stateColor: Color {

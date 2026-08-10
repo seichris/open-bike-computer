@@ -122,12 +122,14 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("physicalOverridePending_.store(true", sample)
         self.assertIn("controller_.sample(true, nowMs)", sample)
 
-    def test_debug_profile_moves_fixed_lvgl_pool_to_psram(self):
+    def test_amoled_profiles_move_fixed_lvgl_pool_to_psram(self):
+        psram_gate = (
+            "#if defined(BOARD_HAS_PSRAM) && "
+            "(defined(WAVESHARE_AMOLED_175) || "
+            "defined(WAVESHARE_AMOLED_206))"
+        )
         for config in (LV_CONFIG, LV_CONFIG_TEMPLATE):
-            self.assertIn(
-                "#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG",
-                config,
-            )
+            self.assertIn(psram_gate, config)
             self.assertIn(
                 "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
             )
@@ -136,10 +138,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
                 "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
                 config,
             )
-            debug_gate = config.index(
-                "#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG"
-            )
-            fallback = config.index("#else", debug_gate)
+            profile_gate = config.index(psram_gate)
+            fallback = config.index("#else", profile_gate)
             self.assertIn(
                 "#undef LV_MEM_POOL_ALLOC", config[fallback:]
             )

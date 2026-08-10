@@ -1,11 +1,14 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace workout_telemetry_protocol {
 
 constexpr std::size_t FRAME_SIZE = 16;
+constexpr std::size_t ORIGIN_FRAME_SIZE = 28;
+constexpr std::size_t SESSION_ID_SIZE = 16;
 constexpr std::size_t FALLBACK_PREFIX_SIZE = 4;
 constexpr std::size_t FALLBACK_FRAME_SIZE =
     FALLBACK_PREFIX_SIZE + FRAME_SIZE;
@@ -34,6 +37,13 @@ constexpr int16_t UNAVAILABLE_ALTITUDE = INT16_MIN;
 enum class FrameKind : uint8_t {
   Core = 1,
   Extended = 2,
+  Origin = 3,
+};
+
+enum class PauseOrigin : uint8_t {
+  None = 0,
+  Manual = 1,
+  Automatic = 2,
 };
 
 enum class SessionState : uint8_t {
@@ -68,6 +78,15 @@ constexpr uint32_t readUInt32LE(const uint8_t *bytes, std::size_t offset) {
 
 constexpr int16_t readInt16LE(const uint8_t *bytes, std::size_t offset) {
   return static_cast<int16_t>(readUInt16LE(bytes, offset));
+}
+
+constexpr bool hasSessionID(
+    const std::array<uint8_t, SESSION_ID_SIZE> &sessionID) {
+  for (const uint8_t value : sessionID) {
+    if (value != 0)
+      return true;
+  }
+  return false;
 }
 
 } // namespace workout_telemetry_protocol

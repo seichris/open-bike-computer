@@ -14,22 +14,44 @@ extension WCSession: WatchHeartRateZoneConnectivitySession {}
 final class WatchHeartRateZoneSettingsReceiver: NSObject {
     private let session: WatchHeartRateZoneConnectivitySession?
     private let applyMaximumHeartRateBPM: @MainActor (Int) -> Void
+    private let applyRideDetectionSettings:
+        @MainActor (RideDetectionSettings?, UInt32?) -> Void
+    private let applyPendingAutomaticStart:
+        @MainActor (WorkoutControlContextV1?) -> Void
 
     convenience init(
-        applyMaximumHeartRateBPM: @escaping @MainActor (Int) -> Void
+        applyMaximumHeartRateBPM: @escaping @MainActor (Int) -> Void,
+        applyRideDetectionSettings: @escaping @MainActor (
+            RideDetectionSettings?,
+            UInt32?
+        ) -> Void = { _, _ in },
+        applyPendingAutomaticStart: @escaping @MainActor (
+            WorkoutControlContextV1?
+        ) -> Void = { _ in }
     ) {
         self.init(
             session: WCSession.isSupported() ? WCSession.default : nil,
-            applyMaximumHeartRateBPM: applyMaximumHeartRateBPM
+            applyMaximumHeartRateBPM: applyMaximumHeartRateBPM,
+            applyRideDetectionSettings: applyRideDetectionSettings,
+            applyPendingAutomaticStart: applyPendingAutomaticStart
         )
     }
 
     init(
         session: WatchHeartRateZoneConnectivitySession?,
-        applyMaximumHeartRateBPM: @escaping @MainActor (Int) -> Void
+        applyMaximumHeartRateBPM: @escaping @MainActor (Int) -> Void,
+        applyRideDetectionSettings: @escaping @MainActor (
+            RideDetectionSettings?,
+            UInt32?
+        ) -> Void = { _, _ in },
+        applyPendingAutomaticStart: @escaping @MainActor (
+            WorkoutControlContextV1?
+        ) -> Void = { _ in }
     ) {
         self.session = session
         self.applyMaximumHeartRateBPM = applyMaximumHeartRateBPM
+        self.applyRideDetectionSettings = applyRideDetectionSettings
+        self.applyPendingAutomaticStart = applyPendingAutomaticStart
         super.init()
     }
 
@@ -56,11 +78,25 @@ final class WatchHeartRateZoneSettingsReceiver: NSObject {
     }
 
     private func apply(_ applicationContext: [String: Any]) {
-        guard let maximumHeartRateBPM = WorkoutHeartRateZoneSyncContext
-            .maximumHeartRateBPM(from: applicationContext) else {
-            return
+        if let maximumHeartRateBPM = WorkoutHeartRateZoneSyncContext
+            .maximumHeartRateBPM(from: applicationContext) {
+            applyMaximumHeartRateBPM(maximumHeartRateBPM)
         }
-        applyMaximumHeartRateBPM(maximumHeartRateBPM)
+        if let rideDetection = RideDetectionSyncContext.settings(
+            from: applicationContext
+        ) {
+            applyRideDetectionSettings(
+                rideDetection.settings,
+                rideDetection.generation
+            )
+        } else {
+            applyRideDetectionSettings(nil, nil)
+        }
+        applyPendingAutomaticStart(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: applicationContext
+            )
+        )
     }
 }
 

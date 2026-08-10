@@ -24,6 +24,8 @@
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
 #include "workout_telemetry_runtime.hpp"
+#include "ride_automation_protocol.hpp"
+#include "ride_automation_runtime.hpp"
 #include "authenticated_workout_telemetry.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
@@ -1022,9 +1024,12 @@ static void completeBleSessionAuthentication() {
   queueOwnershipUiUpdate();
 }
 
-static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
-                                          const uint8_t *data, size_t length) {
+static bool notifyAuthenticatedPayload(
+    NimBLECharacteristic *characteristic,
+    device_ownership::AuthenticatedChannel channel, const uint8_t *data,
+    size_t length, const char *label) {
   if (characteristic == nullptr || data == nullptr ||
+      characteristic->getSubscribedCount() == 0 ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -1033,7 +1038,7 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
   std::string frame;
   const std::string payload(reinterpret_cast<const char *>(data), length);
   const bool protectedPayload = deviceOwnership.protectAuthenticatedPayload(
-      device_ownership::AuthenticatedChannel::Navigation, payload, frame);
+      channel, payload, frame);
   if (!protectedPayload || activeConnHandle == BLE_HS_CONN_HANDLE_NONE) {
     xSemaphoreGive(deviceOwnershipMutex);
     return false;
@@ -1046,8 +1051,8 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
   NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
   if (server == nullptr ||
       frame.size() > static_cast<size_t>(server->getPeerMTU(activeConnHandle) - 3)) {
-    Serial.printf("BLE: Protected navigation notification too large: %u bytes\n",
-                  static_cast<unsigned>(frame.size()));
+    Serial.printf("BLE: Protected %s notification too large: %u bytes\n",
+                  label, static_cast<unsigned>(frame.size()));
     xSemaphoreGive(notificationTransportMutex);
     xSemaphoreGive(deviceOwnershipMutex);
     return false;
@@ -1061,6 +1066,33 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
   xSemaphoreGive(notificationTransportMutex);
   xSemaphoreGive(deviceOwnershipMutex);
   return true;
+}
+
+static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
+                                          const uint8_t *data, size_t length) {
+  return notifyAuthenticatedPayload(
+      characteristic, device_ownership::AuthenticatedChannel::Navigation,
+      data, length, "navigation");
+}
+
+bool BLENavigationServer::notifyRideAutomationFrame(const uint8_t *data,
+                                                    size_t length) {
+  if (data == nullptr || length != ride_automation_protocol::FRAME_SIZE)
+    return false;
+  const bool native = notifyAuthenticatedPayload(
+      pRideAutomationCharacteristic,
+      device_ownership::AuthenticatedChannel::RideAutomation, data, length,
+      "ride automation");
+  if (native)
+    return true;
+  uint8_t fallback[ride_automation_protocol::FALLBACK_PREFIX_SIZE +
+                   ride_automation_protocol::FRAME_SIZE]{};
+  std::memcpy(fallback, ride_automation_protocol::FALLBACK_PREFIX,
+              ride_automation_protocol::FALLBACK_PREFIX_SIZE);
+  std::memcpy(fallback + ride_automation_protocol::FALLBACK_PREFIX_SIZE, data,
+              length);
+  return notifyAuthenticatedNavigation(mapTransferStatusCharacteristic,
+                                       fallback, sizeof(fallback));
 }
 
 static void logAuthPayloadPreview(const std::string &value) {
@@ -1853,6 +1885,13 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::SCOPED_WATCH_CONTROLLER_FEATURE;
     }
+#if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
+    if (clientVersion >= device_capabilities_protocol::
+                             RIDE_AUTOMATION_V2_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE;
+    }
+#endif
 #if DEVICE_REMOTE_DEBUG
     if (deviceDebugHttp.initialized() &&
         clientVersion >= device_capabilities_protocol::
@@ -2346,19 +2385,31 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
+  const uint32_t gpsPacketReceivedAtMs = millis();
+  if (bleDebugStats.lastGpsPacketMs != 0) {
+    bleDebugStats.lastGpsPacketGapMs =
+        gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs;
+    bleDebugStats.maximumGpsPacketGapMs =
+        std::max(bleDebugStats.maximumGpsPacketGapMs,
+                 bleDebugStats.lastGpsPacketGapMs);
+  }
+  bleDebugStats.gpsPacketCount++;
+  bleDebugStats.lastGpsPacketMs = gpsPacketReceivedAtMs;
+
 #if FIRMWARE_DIAGNOSTICS
-  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d\n",
+  Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d "
+                "gapMs=%lu maxGapMs=%lu\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-                rtcTimestampSynced
+                rtcTimestampSynced,
 #else
-                0
+                0,
 #endif
+                (unsigned long)bleDebugStats.lastGpsPacketGapMs,
+                (unsigned long)bleDebugStats.maximumGpsPacketGapMs
   );
 #endif
-  bleDebugStats.gpsPacketCount++;
-  bleDebugStats.lastGpsPacketMs = millis();
 
   if (!gpsReceivedFromApp) {
     gpsReceivedFromApp = true;
@@ -3038,6 +3089,18 @@ public:
       return;
     }
 
+    if (value.size() == ride_automation_protocol::FALLBACK_PREFIX_SIZE +
+                            ride_automation_protocol::FRAME_SIZE &&
+        std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
+                    ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
+      if (!ride_automation_runtime::ingestTransportFrame(
+              reinterpret_cast<const uint8_t *>(value.data()) +
+                  ride_automation_protocol::FALLBACK_PREFIX_SIZE,
+              ride_automation_protocol::FRAME_SIZE, millis()))
+        Serial.println("BLE Ride Automation: rejected navigation fallback frame");
+      return;
+    }
+
     if (hasPrefix(value, workout_telemetry_protocol::FALLBACK_PREFIX)) {
       handleWorkoutTelemetryPayload(
           reinterpret_cast<const uint8_t *>(value.data()) +
@@ -3209,6 +3272,24 @@ public:
   }
 };
 
+class MyRideAutomationCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *pChar) override {
+    const std::string frame = pChar->getValue();
+    std::string payload;
+    if (!unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::RideAutomation, frame,
+            payload, "ride automation characteristic") ||
+        !requireAuthenticated("ride automation"))
+      return;
+    if (!ride_automation_runtime::ingestTransportFrame(
+            reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
+            millis()))
+      Serial.println("BLE Ride Automation: rejected native frame");
+  }
+};
+
 /**
  * @brief Settings characteristic callback - receives runtime config from iOS
  * app Format: [settingId:1][value:4] = 5 bytes Setting IDs: 1=minPolygonSize,
@@ -3223,6 +3304,18 @@ public:
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Settings, frame, value,
             "settings characteristic")) {
+      return;
+    }
+
+    if (value.size() == ride_automation_protocol::FALLBACK_PREFIX_SIZE +
+                            ride_automation_protocol::FRAME_SIZE &&
+        std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
+                    ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
+      if (!ride_automation_runtime::ingestTransportFrame(
+              reinterpret_cast<const uint8_t *>(value.data()) +
+                  ride_automation_protocol::FALLBACK_PREFIX_SIZE,
+              ride_automation_protocol::FRAME_SIZE, millis()))
+        Serial.println("BLE Ride Automation: rejected fallback frame");
       return;
     }
 
@@ -3495,6 +3588,13 @@ void BLENavigationServer::init(const char *deviceName) {
   pWorkoutTelemetryCharacteristic->setCallbacks(
       new MyWorkoutTelemetryCharacteristicCallbacks());
 
+  pRideAutomationCharacteristic = pService->createCharacteristic(
+      RIDE_AUTOMATION_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
+  pRideAutomationCharacteristic->setCallbacks(
+      new MyRideAutomationCharacteristicCallbacks());
+
   // Start service
   pService->start();
 
@@ -3633,7 +3733,7 @@ void BLENavigationServer::process() {
     Serial.printf("BLE Debug: up=%lus init=%d conn=%d auth=%d connects=%lu "
                   "disconnects=%lu authOK=%lu nav=%lu route=%lu gps=%lu "
                   "settings=%lu rejectAuth=%lu lastMs[c=%lu a=%lu n=%lu r=%lu "
-                  "g=%lu s=%lu rej=%lu]\n",
+                  "g=%lu s=%lu rej=%lu] gpsGapMs[last=%lu max=%lu]\n",
                   millis() / 1000, initialized, connected,
                   bleSessionAuthenticated, bleDebugStats.connectCount,
                   bleDebugStats.disconnectCount, bleDebugStats.authSuccessCount,
@@ -3646,7 +3746,9 @@ void BLENavigationServer::process() {
                   bleDebugStats.lastRoutePacketMs,
                   bleDebugStats.lastGpsPacketMs,
                   bleDebugStats.lastSettingsPacketMs,
-                  bleDebugStats.lastRejectedUnauthenticatedMs);
+                  bleDebugStats.lastRejectedUnauthenticatedMs,
+                  bleDebugStats.lastGpsPacketGapMs,
+                  bleDebugStats.maximumGpsPacketGapMs);
   }
 #else
   (void)lastLog;

@@ -150,6 +150,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
 
         self.assertIn("NavigationStack", watch_root)
         self.assertIn("WatchSettingsView(", watch_start)
+        self.assertIn("manager: manager", watch_start)
         self.assertIn("navigationSettings: navigationSettings", watch_start)
         self.assertIn('Image(systemName: "gearshape")', watch_start)
         self.assertIn('accessibilityLabel("Settings")', watch_start)

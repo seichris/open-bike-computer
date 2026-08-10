@@ -747,14 +747,22 @@ bool MapTransferHttpServer::handlePut(
     sendError(client, 500, "write", "could not finish staged file");
     return true;
   }
-  if (isArchive) {
-    if (!installer_.pruneStagingSessions(sessionId) ||
-        !installer_.pruneObsoleteInstalledMaps()) {
-      ::unlink(destination.c_str());
-      sendError(client, 500, "staging_cleanup",
-                "could not prune obsolete map transfers");
-      return true;
+  const auto pruneObsoleteTransfers = [this, &sessionId]() {
+    const bool stagingPruned = installer_.pruneStagingSessions(sessionId);
+    const bool installedPruned = installer_.pruneObsoleteInstalledMaps();
+    if (!stagingPruned || !installedPruned) {
+      // The requested upload is already complete. Cleanup only reclaims space
+      // from unrelated transfers, so preserve the new archive and let its
+      // transactional activation surface any real storage/install failure.
+      Serial.printf(
+          "MAP_TRANSFER_HTTP: post-upload cleanup incomplete session=%s "
+          "staging=%s installed=%s; continuing with completed upload\n",
+          sessionId.c_str(), stagingPruned ? "ok" : "failed",
+          installedPruned ? "ok" : "failed");
     }
+  };
+  if (isArchive) {
+    pruneObsoleteTransfers();
   } else if (isManifest) {
     MapManifest manifest;
     InstallStatus parsed = installer_.readStagedManifest(sessionId, manifest);
@@ -763,13 +771,7 @@ bool MapTransferHttpServer::handlePut(
       sendError(client, 400, parsed.code, parsed.message);
       return true;
     }
-    if (!installer_.pruneStagingSessions(sessionId) ||
-        !installer_.pruneObsoleteInstalledMaps()) {
-      ::unlink(destination.c_str());
-      sendError(client, 500, "staging_cleanup",
-                "could not prune obsolete map transfers");
-      return true;
-    }
+    pruneObsoleteTransfers();
   } else {
     if (!rendererValidator->finish()) {
       ::unlink(destination.c_str());

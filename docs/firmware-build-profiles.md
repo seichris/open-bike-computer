@@ -13,7 +13,7 @@ target:
   framebuffer and synthetic-pointer service described in
   [Remote device debugging](remote-device-debugging.md). It is built in CI but
   never selected by a release workflow. Ordinary developer and production
-  firmware do not advertise CAP2 bit `15` and cannot enter `debug` transfer
+  firmware do not advertise CAP2 bit `16` and cannot enter `debug` transfer
   mode.
 - `*_LIGHT_SLEEP` is the opt-in Phase 7B validation image. It inherits power
   metrics, enables tickless idle and automatic light sleep, and activates the

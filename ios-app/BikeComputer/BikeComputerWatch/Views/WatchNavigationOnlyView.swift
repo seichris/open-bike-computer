@@ -52,6 +52,7 @@ struct WatchNavigationOnlyView: View {
 
                 NavigationLink {
                     WatchSettingsView(
+                        manager: manager,
                         navigationSettings: navigationSettings,
                         favoriteStore: favoriteStore,
                         navigationManager: navigationManager

@@ -562,7 +562,7 @@ normal network. On a hotspot result the Mac joins the advertised accessory AP.
 
 ### BLE capability and mode contract
 
-- Add `REMOTE_DEVICE_DEBUG_FEATURE = 1 << 15` to CAP2 and advance the client
+- Add `REMOTE_DEVICE_DEBUG_FEATURE = 1 << 16` to CAP2 and advance the client
   capability version.
 - Set the bit only when `DEVICE_REMOTE_DEBUG=1` and the frame/input services
   initialized successfully.

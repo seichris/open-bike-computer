@@ -8,6 +8,7 @@
 
 #include "gps.hpp"
 #include "lvgl.h"
+#include "settings.hpp"
 #include "widgets.hpp"
 
 extern lv_obj_t *sunriseLabel;
@@ -18,6 +19,7 @@ long gpsBaudDetected = 0;
 bool nmea_output_enable = false;
 gps_fix fix;
 NMEAGPS GPS;
+static portMUX_TYPE gpsRideObservationMux = portMUX_INITIALIZER_UNLOCKED;
 
 static const char* TAG PROGMEM = "GPS";
 
@@ -122,6 +124,15 @@ double Gps::getLon()
  */
 void Gps::getGPSData()
 {
+  const uint32_t capturedAtMs = millis();
+  GpsRideObservation ride;
+  ride.fixAvailable = true;
+  // NeoGPS orders statuses by increasing accuracy. Estimated and time-only
+  // reports are not spatial fixes and must never satisfy the detector's
+  // 2D/3D-quality gate.
+  ride.fixValid = fix.status >= gps_fix::STATUS_STD;
+  ride.fixCapturedAtMs = capturedAtMs;
+
   // GPS Fix
   if (fix.status != gps_fix::STATUS_NONE)
     isGpsFixed = true;
@@ -158,13 +169,22 @@ void Gps::getGPSData()
 
   // Speed
   if (fix.valid.speed)
+  {
     gpsData.speed = (uint16_t)fix.speed_kph();
+    ride.speedAvailable = true;
+    ride.speedMetersPerSecond = static_cast<float>(fix.speed_kph()) / 3.6F;
+    ride.speedCapturedAtMs = capturedAtMs;
+  }
 
   // Latitude and Longitude
   if (fix.valid.location)
   {
     gpsData.latitude = getLat();
     gpsData.longitude = getLon();
+    ride.locationAvailable = true;
+    ride.latitude = gpsData.latitude;
+    ride.longitude = gpsData.longitude;
+    ride.locationCapturedAtMs = capturedAtMs;
   }
 
   // Heading validity is explicit. A missing/invalid course must never be
@@ -176,7 +196,12 @@ void Gps::getGPSData()
   // HDOP , PDOP , VDOP
 #ifdef GPS_FIX_HDOP
   if (fix.valid.hdop)
+  {
     gpsData.hdop = (float)fix.hdop / 1000;
+    ride.hdopAvailable = true;
+    ride.hdop = gpsData.hdop;
+    ride.hdopCapturedAtMs = capturedAtMs;
+  }
 #endif
 #ifdef GPS_FIX_PDOP
   if (fix.valid.pdop)
@@ -205,6 +230,24 @@ void Gps::getGPSData()
 #else
   gpsData.satInView = 0;
 #endif
+
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  rideObservation_ = ride;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+}
+
+GpsRideObservation Gps::rideObservation() const
+{
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  const GpsRideObservation snapshot = rideObservation_;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+  return snapshot;
+}
+
+extern Gps gps;
+
+GpsRideObservation currentGpsRideObservation() {
+  return gps.rideObservation();
 }
 
 /**

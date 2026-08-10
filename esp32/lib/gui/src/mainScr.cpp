@@ -10,6 +10,7 @@
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../route_overlay/route_overlay.hpp"
+#include "../../ride_automation/ride_automation_runtime.hpp"
 #include "destinationPickerLayout.hpp"
 #include "guiLayout.hpp"
 #include "mapRenderPolicy.hpp"
@@ -220,6 +221,13 @@ uint64_t workoutSignature(uint32_t nowMs) {
   hashOptionalMetric(hash, state.altitudeMeters);
   hashOptionalMetric(hash, state.heartRateZoneCount);
   hashScalar(hash, snapshot.stale);
+  const ride_automation_runtime::UiSnapshot automation =
+      ride_automation_runtime::uiSnapshot(nowMs);
+  hashScalar(hash, automation.phase);
+  hashScalar(hash, automation.error);
+  hashScalar(hash, automation.progressPercent);
+  hashScalar(hash, automation.decisionSequence);
+  hashScalar(hash, automation.remainingSeconds);
   return hash;
 }
 

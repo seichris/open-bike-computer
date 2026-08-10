@@ -292,12 +292,14 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 12 &&
-                WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14,
-            "Watch requests scoped-controller CAP2 version 12 on bit 14"
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 13 &&
+                WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
+                WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15,
+            "Watch requests RAUT CAP2 version 13 without moving scoped control from bit 14"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
-            WatchDirectBLEProtocolV1.workoutTelemetryFeature
+            WatchDirectBLEProtocolV1.workoutTelemetryFeature |
+            WatchDirectBLEProtocolV1.rideAutomationFeature
         cap2.append(UInt8(flags & 0xFF))
         cap2.append(UInt8((flags >> 8) & 0xFF))
         cap2.append(UInt8((flags >> 16) & 0xFF))
@@ -305,8 +307,9 @@ enum RideSharedTests {
         let capabilities = WatchDeviceCapabilitiesV1.decode(cap2)
         expect(
             capabilities?.supportsScopedController == true &&
-                capabilities?.supportsWorkoutTelemetry == true,
-            "Watch requires the direct-controller and workout capabilities"
+                capabilities?.supportsWorkoutTelemetry == true &&
+                capabilities?.supportsRideAutomation == true,
+            "Watch recognizes direct-controller, workout, and ride-automation capabilities"
         )
         var malformed = cap2
         malformed.append(contentsOf: [1, 4, 0, 0, 0])
@@ -328,6 +331,36 @@ enum RideSharedTests {
             WatchNavigationNotificationV1.decode(Data("CAP2".utf8)) ==
                 .invalidCapabilities,
             "a malformed capability response still fails closed"
+        )
+        let rideFrame = Data((0..<52).map(UInt8.init))
+        expect(
+            WatchRideAutomationTransportV1.outbound(
+                frame: rideFrame,
+                nativeCharacteristicAvailable: true
+            ) == .init(target: .rideAutomation, payload: rideFrame),
+            "Watch RAUT prefers the native channel 7 characteristic"
+        )
+        var rideFallback = Data("RAUT".utf8)
+        rideFallback.append(rideFrame)
+        expect(
+            WatchRideAutomationTransportV1.outbound(
+                frame: rideFrame,
+                nativeCharacteristicAvailable: false
+            ) == .init(target: .navigation, payload: rideFallback) &&
+                WatchRideAutomationTransportV1.decodeNavigationFallback(
+                    rideFallback
+                ) == rideFrame,
+            "cached GATT tables use the bounded RAUT navigation fallback"
+        )
+        expect(
+            WatchRideAutomationTransportV1.decodeNavigationFallback(
+                Data(rideFallback.dropLast())
+            ) == nil &&
+                WatchRideAutomationTransportV1.outbound(
+                    frame: Data(rideFrame.dropLast()),
+                    nativeCharacteristicAvailable: false
+                ) == nil,
+            "RAUT fallback rejects every noncanonical frame size"
         )
         expect(
             WatchNavigationNotificationV1.decode(Data("NOPE".utf8)) ==

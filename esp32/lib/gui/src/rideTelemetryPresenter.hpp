@@ -33,6 +33,9 @@ struct ViewModel {
   workout_telemetry::OptionalMetric<uint8_t> heartRateZoneCount{};
   workout_telemetry::OptionalMetric<uint32_t> distanceMeters{};
   workout_telemetry::OptionalMetric<uint32_t> elapsedSeconds{};
+  workout_telemetry::OptionalMetric<uint32_t> wallElapsedSeconds{};
+  workout_telemetry_protocol::PauseOrigin pauseOrigin =
+      workout_telemetry_protocol::PauseOrigin::None;
   workout_telemetry::OptionalMetric<uint16_t>
       activeEnergyTenthsKilocalorie{};
   workout_telemetry::OptionalMetric<uint16_t> cyclingPowerWatts{};
@@ -42,6 +45,7 @@ struct ViewModel {
 };
 
 enum class BottomMetric : uint8_t {
+  WallElapsed,
   Altitude,
   RouteRemaining,
   Power,
@@ -82,6 +86,10 @@ inline ViewModel makeViewModel(
     model.heartRateZoneCount = state.heartRateZoneCount;
     model.distanceMeters = state.distanceMeters;
     model.elapsedSeconds = state.elapsedSeconds;
+    if (state.originReceived) {
+      model.wallElapsedSeconds = state.wallElapsedSeconds;
+      model.pauseOrigin = state.pauseOrigin;
+    }
     model.activeEnergyTenthsKilocalorie =
         state.activeEnergyTenthsKilocalorie;
     model.cyclingPowerWatts = state.cyclingPowerWatts;
@@ -206,6 +214,17 @@ inline void formatCadence(const ViewModel &model, char *buffer,
 inline BottomMetricSelection selectBottomMetrics(const ViewModel &model) {
   const bool hasPower = model.cyclingPowerWatts.available;
   const bool hasCadence = model.cyclingCadenceTenthsRpm.available;
+  if (model.usesWorkout && model.wallElapsedSeconds.available) {
+    if (hasPower) {
+      return {BottomMetric::WallElapsed, BottomMetric::Power};
+    }
+    if (hasCadence) {
+      return {BottomMetric::WallElapsed, BottomMetric::Cadence};
+    }
+    return {BottomMetric::WallElapsed,
+            model.hasActiveNavigation ? BottomMetric::RouteRemaining
+                                      : BottomMetric::Altitude};
+  }
   if (hasPower && hasCadence) {
     return {BottomMetric::Power, BottomMetric::Cadence};
   }
@@ -220,6 +239,8 @@ inline BottomMetricSelection selectBottomMetrics(const ViewModel &model) {
 
 inline const char *bottomMetricTitle(BottomMetric metric) {
   switch (metric) {
+  case BottomMetric::WallElapsed:
+    return "Elapsed";
   case BottomMetric::Altitude:
     return "Altitude m";
   case BottomMetric::RouteRemaining:
@@ -235,6 +256,9 @@ inline const char *bottomMetricTitle(BottomMetric metric) {
 inline void formatBottomMetric(BottomMetric metric, const ViewModel &model,
                                char *buffer, std::size_t size) {
   switch (metric) {
+  case BottomMetric::WallElapsed:
+    formatElapsed(model.wallElapsedSeconds, buffer, size);
+    return;
   case BottomMetric::Altitude:
     formatInteger(model.altitudeMeters, buffer, size);
     return;
@@ -264,7 +288,10 @@ inline const char *statusLabel(const ViewModel &model) {
   case SessionState::Running:
     return "LIVE";
   case SessionState::Paused:
-    return "PAUSED";
+    return model.pauseOrigin ==
+                   workout_telemetry_protocol::PauseOrigin::Automatic
+               ? "AUTO-PAUSED"
+               : "PAUSED";
   case SessionState::Ending:
     return "ENDING";
   case SessionState::Ended:

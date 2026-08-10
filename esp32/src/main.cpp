@@ -87,6 +87,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "mainScr.hpp"
 #include "power_management.hpp"
 #include "route_overlay.hpp"
+#include "ride_automation_runtime.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -606,6 +607,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     bool activationRunning = false;
     uint32_t lastTransferPollMs = 0;
     bool audioActive = false;
+    bool rideAutomationAttention = false;
     bool touchPending = false;
     uint32_t touchActivityGeneration = 0;
   };
@@ -613,6 +615,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
 
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const bool audioActive = waveshare_board::speaker::isPlaying();
+  const bool rideAutomationAttention =
+      ride_automation_runtime::needsAttention(nowMs);
   const bool touchPending = hasUnattemptedTouchInterrupt();
   const uint32_t touchActivityGeneration = getTouchActivityGeneration();
   lv_obj_t *const activeScreen = lv_screen_active();
@@ -646,6 +650,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.activationRunning = activation.running;
     signals.lastTransferPollMs = nowMs;
     signals.audioActive = audioActive;
+    signals.rideAutomationAttention = rideAutomationAttention;
     signals.touchPending = touchPending;
     signals.touchActivityGeneration = touchActivityGeneration;
   } else {
@@ -661,6 +666,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
         bleStats.authSuccessCount != signals.authSuccessCount ||
         routeRevision != signals.routeRevision ||
         audioActive != signals.audioActive ||
+        rideAutomationAttention != signals.rideAutomationAttention ||
         (touchPending && !signals.touchPending) || decodedTouchActivity;
     signals.screen = activeScreen;
     signals.tile = activeTile;
@@ -668,6 +674,7 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
     signals.authSuccessCount = bleStats.authSuccessCount;
     signals.routeRevision = routeRevision;
     signals.audioActive = audioActive;
+    signals.rideAutomationAttention = rideAutomationAttention;
     signals.touchPending = touchPending;
     signals.touchActivityGeneration = touchActivityGeneration;
 
@@ -736,7 +743,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       workout_telemetry_runtime::isWorkoutActive();
   context.transferActive =
       signals.transferEnabled || signals.activationRunning;
-  context.attentionActive = signals.pairing || audioActive;
+  context.attentionActive =
+      signals.pairing || audioActive || rideAutomationAttention;
   const display_inactivity::Update update =
       displayInactivityPolicy.update(nowMs, context);
   currentDisplayMode = update.current;
@@ -787,6 +795,8 @@ static void logSystemDebugHeartbeat() {
   lastLogMs = now;
 
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
+  const uint32_t gpsAgeMs =
+      bleStats.gpsPacketCount != 0 ? now - bleStats.lastGpsPacketMs : 0U;
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
@@ -835,7 +845,10 @@ static void logSystemDebugHeartbeat() {
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
-                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu] "
+                "pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "
+                "exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu "
+                "gpsGapMs=%lu/%lu] "
                 "i2c[fail=%lu recover=%lu recovered=%lu missing=%lu] "
                 "rtc[present=%d valid=%d source=%s unix=%lld]\n",
                 (unsigned long)(now / 1000),
@@ -860,11 +873,19 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)lastDisplayFlushMs,
                 (unsigned long)lastDisplayFlushDurationUs,
                 (unsigned long)maxDisplayFlushDurationUs,
+                (unsigned long)gpsAgeMs,
+                (unsigned long)mapView.debugPredictionAgeMs(),
+                mapView.debugPredictionGraceActive(),
+                mapView.debugPredictionExhausted(),
+                (unsigned long)mapView.debugPredictionExhaustionCount(),
+                (unsigned long)mapView.debugLastPredictionExhaustedMs(),
                 bleStats.connected, bleStats.authenticated,
                 (unsigned long)bleStats.navPacketCount,
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
                 (unsigned long)bleStats.settingsPacketCount,
+                (unsigned long)bleStats.lastGpsPacketGapMs,
+                (unsigned long)bleStats.maximumGpsPacketGapMs,
                 (unsigned long)i2cStats.failedTransactions,
                 (unsigned long)i2cStats.recoveryAttempts,
                 (unsigned long)i2cStats.recoveredTransactions,
@@ -879,7 +900,10 @@ static void logSystemDebugHeartbeat() {
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
                 "ui[loop=%lu maxGapMs=%lu lvgl=%lu lastLvglMs=%lu "
                 "lvglUs=%lu/%lu flush=%lu lastFlushMs=%lu flushUs=%lu/%lu] "
-                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu]\n",
+                "pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "
+                "exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "
+                "ble[conn=%d auth=%d nav=%lu route=%lu gps=%lu settings=%lu "
+                "gpsGapMs=%lu/%lu]\n",
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)ESP.getFreePsram(), screenName,
@@ -896,11 +920,19 @@ static void logSystemDebugHeartbeat() {
                 (unsigned long)lastLvglHandlerMs,
                 (unsigned long)lastLvglHandlerDurationUs,
                 (unsigned long)maxLvglHandlerDurationUs, 0UL, 0UL, 0UL, 0UL,
+                (unsigned long)gpsAgeMs,
+                (unsigned long)mapView.debugPredictionAgeMs(),
+                mapView.debugPredictionGraceActive(),
+                mapView.debugPredictionExhausted(),
+                (unsigned long)mapView.debugPredictionExhaustionCount(),
+                (unsigned long)mapView.debugLastPredictionExhaustedMs(),
                 bleStats.connected, bleStats.authenticated,
                 (unsigned long)bleStats.navPacketCount,
                 (unsigned long)bleStats.routePacketCount,
                 (unsigned long)bleStats.gpsPacketCount,
-                (unsigned long)bleStats.settingsPacketCount);
+                (unsigned long)bleStats.settingsPacketCount,
+                (unsigned long)bleStats.lastGpsPacketGapMs,
+                (unsigned long)bleStats.maximumGpsPacketGapMs);
 #endif
 #endif
 }
@@ -1287,11 +1319,12 @@ void setup() {
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
   waveshare_board::rtc::restoreSystemTimeFromRtc();
-#ifdef WAVESHARE_IMU_DIAGNOSTICS
+#if defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW)
   waveshare_board::imu::begin();
 #else
   waveshare_board::imu::disable();
 #endif
+  ride_automation_runtime::beginFirmwareShadow();
 #endif
 #endif
 
@@ -1801,9 +1834,10 @@ void loop() {
   }
 
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
-    defined(WAVESHARE_IMU_DIAGNOSTICS)
+    (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
 #endif
+  ride_automation_runtime::processFirmwareShadow(now);
 
   logSystemDebugHeartbeat();
   logPowerMetricsReport();

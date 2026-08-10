@@ -15,7 +15,17 @@ int main() {
   assert(allowed("0|0|"));
   assert(allowed("MAPR\x01\x02"));
   assert(allowed("GPSP\x01\x02"));
-  assert(allowed("WTLM\x01\x02"));
+  assert(allowed(std::string("WTLM", 4) + std::string(16, '\x01')));
+  assert(allowed(std::string("WTLM", 4) + std::string(28, '\x01')));
+  assert(!allowed("WTLM\x01\x02"));
+  assert(!allowed(std::string("WTLM", 4) + std::string(17, '\x01')));
+  const std::string rideAutomationFallback =
+      std::string("RAUT", 4) + std::string(52, '\x01');
+  assert(allowed(rideAutomationFallback));
+  assert(!allowed(rideAutomationFallback.substr(0, 55)));
+  std::string oversizedRideAutomationFallback = rideAutomationFallback;
+  oversizedRideAutomationFallback.push_back('\0');
+  assert(!allowed(oversizedRideAutomationFallback));
   assert(allowed("CAPS\x0a"));
   assert(!allowed("MSET\x01\x02"));
   assert(!allowed("MTRN|erase"));

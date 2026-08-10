@@ -32,7 +32,13 @@ inline bool isUnsignedDecimalAtMost(const uint8_t *data, size_t length,
 // explicit ride fallbacks or the ordinary IconID|Distance|Instruction packet.
 inline bool allowsNavigationPayload(const uint8_t *data, size_t length) {
   if (hasPrefix(data, length, "MAPR") || hasPrefix(data, length, "GPSP") ||
-      hasPrefix(data, length, "WTLM")) {
+      ((length == 20 || length == 32) && hasPrefix(data, length, "WTLM"))) {
+    return true;
+  }
+  // Ride-automation fallback is deliberately fixed-size. Prefix-only
+  // acceptance would reopen this multiplexed characteristic to arbitrary
+  // scoped-Watch payloads.
+  if (length == 56 && hasPrefix(data, length, "RAUT")) {
     return true;
   }
   // Capability discovery is read-only and required before the Watch may use

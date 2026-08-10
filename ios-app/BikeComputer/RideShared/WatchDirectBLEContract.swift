@@ -8,9 +8,12 @@ enum WatchDirectBLEProtocolV1 {
     static let gpsUUID = "2A72"
     static let authUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
     static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
-    static let capabilityClientVersion: UInt8 = 12
+    static let rideAutomationUUID =
+        "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    static let capabilityClientVersion: UInt8 = 13
     static let scopedControllerFeature: UInt32 = 1 << 14
     static let workoutTelemetryFeature: UInt32 = 1 << 7
+    static let rideAutomationFeature: UInt32 = 1 << 15
     static let protectedFrameOverhead = 22
 }
 
@@ -20,6 +23,7 @@ enum WatchAuthenticatedBLEChannelV1: UInt8, Sendable {
     case route = 3
     case gps = 4
     case workout = 6
+    case rideAutomation = 7
 }
 
 enum WatchScopedAuthenticationErrorV1: Error, Equatable {
@@ -294,6 +298,10 @@ struct WatchDeviceCapabilitiesV1: Equatable {
         featureFlags & WatchDirectBLEProtocolV1.workoutTelemetryFeature != 0
     }
 
+    var supportsRideAutomation: Bool {
+        featureFlags & WatchDirectBLEProtocolV1.rideAutomationFeature != 0
+    }
+
     static func decode(_ data: Data) -> Self? {
         guard data.count >= 9,
               data.prefix(4) == Data("CAP2".utf8),
@@ -344,6 +352,7 @@ enum WatchBLEOutboundTargetV1: Equatable, Sendable {
     case route
     case gps
     case workout
+    case rideAutomation
 
     var channel: WatchAuthenticatedBLEChannelV1 {
         switch self {
@@ -351,7 +360,39 @@ enum WatchBLEOutboundTargetV1: Equatable, Sendable {
         case .route: .route
         case .gps: .gps
         case .workout: .workout
+        case .rideAutomation: .rideAutomation
         }
+    }
+}
+
+struct WatchRideAutomationTransportPayloadV1: Equatable, Sendable {
+    let target: WatchBLEOutboundTargetV1
+    let payload: Data
+}
+
+/// Selects the dedicated RAUT characteristic when it is visible and preserves
+/// an exact-size navigation fallback for peers whose GATT table is cached.
+enum WatchRideAutomationTransportV1 {
+    static let frameSize = 52
+    static let fallbackPrefix = Data("RAUT".utf8)
+
+    static func outbound(
+        frame: Data,
+        nativeCharacteristicAvailable: Bool
+    ) -> WatchRideAutomationTransportPayloadV1? {
+        guard frame.count == frameSize else { return nil }
+        if nativeCharacteristicAvailable {
+            return .init(target: .rideAutomation, payload: frame)
+        }
+        var payload = fallbackPrefix
+        payload.append(frame)
+        return .init(target: .navigation, payload: payload)
+    }
+
+    static func decodeNavigationFallback(_ payload: Data) -> Data? {
+        guard payload.count == fallbackPrefix.count + frameSize,
+              payload.starts(with: fallbackPrefix) else { return nil }
+        return Data(payload.dropFirst(fallbackPrefix.count))
     }
 }
 

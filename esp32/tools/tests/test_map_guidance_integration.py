@@ -12,6 +12,15 @@ MAP_RENDERER_SOURCE = (
 MAP_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
 ).read_text(encoding="utf-8")
+MAP_PRESENTATION_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapPresentation.hpp"
+).read_text(encoding="utf-8")
+BLE_SOURCE = (
+    ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.cpp"
+).read_text(encoding="utf-8")
+BLE_HEADER_SOURCE = (
+    ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.hpp"
+).read_text(encoding="utf-8")
 BUILDING_ADMISSION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapBuildingAdmission.hpp"
 ).read_text(encoding="utf-8")
@@ -21,7 +30,19 @@ ROUTE_SOURCE = (
 LVGL_SETUP_SOURCE = (
     ESP32_ROOT / "lib" / "lvgl" / "src" / "lvglSetup.cpp"
 ).read_text(encoding="utf-8")
+LVGL_CONFIG_SOURCE = (
+    ESP32_ROOT / "lib" / "lvgl" / "lv_conf.h"
+).read_text(encoding="utf-8")
+LVGL_CONFIG_TEMPLATE_SOURCE = (
+    ESP32_ROOT / "tools" / "lv_conf_template.h"
+).read_text(encoding="utf-8")
 MAIN_SOURCE = (ESP32_ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
+SCHEDULER_DOC = (
+    ESP32_ROOT.parent / "docs" / "firmware-map-render-scheduler.md"
+).read_text(encoding="utf-8")
+PSRAM_DOC = (
+    ESP32_ROOT.parent / "docs" / "firmware-map-rendering-psram.md"
+).read_text(encoding="utf-8")
 
 
 def function_body(source: str, signature: str) -> str:
@@ -79,6 +100,37 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         for raw_path in (raw_map, raw_labels):
             self.assertNotIn("lv_", raw_path)
             self.assertNotIn("canvas", raw_path.lower())
+
+    def test_render_worker_stack_uses_psram_to_preserve_wifi_headroom(self):
+        start = function_body(MAP_RENDERER_SOURCE, "bool Maps::startRenderWorker")
+        thunk = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::renderWorkerTaskThunk"
+        )
+        self.assertIn("xTaskCreatePinnedToCoreWithCaps", start)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", start)
+        self.assertNotIn("xTaskCreatePinnedToCore(", start)
+        self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
+        self.assertNotIn("vTaskDelete(nullptr)", thunk)
+
+    def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
+        gate = (
+            "#if defined(BOARD_HAS_PSRAM) && "
+            "(defined(WAVESHARE_AMOLED_175) || "
+            "defined(WAVESHARE_AMOLED_206))"
+        )
+        allocator = (
+            "heap_caps_aligned_alloc(16, (size), "
+            "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
+        )
+        for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
+            self.assertIn(gate, config)
+            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
+            self.assertIn(
+                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
+            )
+            self.assertIn(allocator, config)
+            fallback = config.index("#else", config.index(gate))
+            self.assertIn("#undef LV_MEM_POOL_ALLOC", config[fallback:])
 
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
         publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
@@ -171,6 +223,49 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertNotIn("routeOverlay.revision()", semantics)
         self.assertIn("posePresenter.resetHeading(nowMs)", semantics)
+
+    def test_prediction_grace_is_bounded_and_reports_transport_freshness(self):
+        self.assertIn("fullSpeedPredictionMs = 1500", MAP_PRESENTATION_SOURCE)
+        self.assertIn("maximumPredictionMs = 2500", MAP_PRESENTATION_SOURCE)
+        self.assertIn("maximumPredictionMeters = 30.0", MAP_PRESENTATION_SOURCE)
+        self.assertIn("graceElapsedMs * graceElapsedMs", MAP_PRESENTATION_SOURCE)
+        self.assertIn("predictionExhausted", MAP_PRESENTATION_SOURCE)
+
+        pose = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedPose")
+        self.assertIn("bleStats.lastGpsPacketMs", pose)
+        self.assertIn("bleStats.gpsPacketCount", pose)
+        self.assertIn("fix.timestampMs", pose)
+        self.assertIn('"MAPIO: presentation gpsAgeMs=%lu lastGpsGapMs=%lu "', pose)
+        self.assertIn('"predictionExhausted=%u exhaustionCount=%lu "', pose)
+
+        gps_handler = function_body(BLE_SOURCE, "static void handleGpsPayload")
+        self.assertIn("lastGpsPacketGapMs", BLE_HEADER_SOURCE)
+        self.assertIn("maximumGpsPacketGapMs", BLE_HEADER_SOURCE)
+        self.assertIn(
+            "gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs",
+            gps_handler,
+        )
+        self.assertIn("maximumGpsPacketGapMs", gps_handler)
+
+        self.assertIn(
+            '"pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "',
+            MAIN_SOURCE,
+        )
+        self.assertIn(
+            '"exhausted=%d exhaustions=%lu lastExhaustedMs=%lu] "',
+            MAIN_SOURCE,
+        )
+        self.assertIn('"gpsGapMs=%lu/%lu] "', MAIN_SOURCE)
+
+        for documentation in (SCHEDULER_DOC, PSRAM_DOC):
+            for term in (
+                "1 Hz",
+                "1.5",
+                "2.5",
+                "30 metres",
+                "missed heartbeat",
+            ):
+                self.assertIn(term, documentation)
 
     def test_live_presentation_does_not_overwrite_gesture_transforms(self):
         service = function_body(

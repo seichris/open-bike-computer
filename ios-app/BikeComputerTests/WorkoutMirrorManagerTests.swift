@@ -43,6 +43,7 @@ private final class FakeWorkoutWatchConnectivityCoordinator:
     )
     private(set) var activationCount = 0
     private(set) var applicationContexts: [[String: Any]] = []
+    private var applicationContext: [String: Any] = [:]
 
     var workoutStatePublisher:
         AnyPublisher<WorkoutWatchConnectivityStateV1, Never> {
@@ -61,9 +62,16 @@ private final class FakeWorkoutWatchConnectivityCoordinator:
     }
 
     func updateApplicationContextMerging(
-        _ fields: [String: Any]
+        _ fields: [String: Any],
+        removingKeys: Set<String>
     ) throws {
-        applicationContexts.append(fields)
+        for key in removingKeys {
+            applicationContext.removeValue(forKey: key)
+        }
+        for (key, value) in fields {
+            applicationContext[key] = value
+        }
+        applicationContexts.append(applicationContext)
     }
 }
 
@@ -189,6 +197,438 @@ final class WorkoutWatchAvailabilityMonitorProductionTests: XCTestCase {
             ),
             215
         )
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class FakeRideAutomationBLETransport:
+    RideAutomationBLETransport {
+    @Published private(set) var connectedDeviceID: String?
+    @Published private(set) var supportsRideAutomation = false
+    var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
+    private var sendFrame: ((RideAutomationFrame) -> Bool)?
+
+    var rideAutomationSupportPublisher: AnyPublisher<Bool, Never> {
+        $supportsRideAutomation.eraseToAnyPublisher()
+    }
+
+    var rideAutomationDevicePublisher: AnyPublisher<String?, Never> {
+        $connectedDeviceID.eraseToAnyPublisher()
+    }
+
+    func connect(
+        deviceID: String,
+        send: @escaping (RideAutomationFrame) -> Bool
+    ) {
+        sendFrame = send
+        connectedDeviceID = deviceID
+        supportsRideAutomation = true
+    }
+
+    func disconnect() {
+        supportsRideAutomation = false
+        connectedDeviceID = nil
+    }
+
+    func sendRideAutomationFrame(_ frame: RideAutomationFrame) -> Bool {
+        guard supportsRideAutomation, connectedDeviceID != nil else {
+            return false
+        }
+        return sendFrame?(frame) ?? false
+    }
+
+    func receive(_ frame: RideAutomationFrame) {
+        onRideAutomationFrame?(frame)
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class FakeRideAutomationWorkoutController:
+    RideAutomationWorkoutControlling {
+    @Published var rideAutomationPresentation =
+        WorkoutMetricsStore().presentation
+
+    var rideAutomationPresentationPublisher:
+        AnyPublisher<WorkoutMirrorPresentationV1, Never> {
+        $rideAutomationPresentation.eraseToAnyPublisher()
+    }
+
+    func startOutdoorCyclingOnWatch() -> Bool { false }
+
+    func requestAutomaticTransition(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool { false }
+
+    func requestAutomaticTransitionConfirmation(
+        _ transition: RideAutomationTransition,
+        context: WorkoutControlContextV1
+    ) -> Bool { false }
+
+    func requestAutomaticStartAnnotation(
+        context: WorkoutControlContextV1
+    ) -> Bool { false }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class RideAutomationCoordinatorProductionTests: XCTestCase {
+    func testPromptOutboxIsDurableBeforePublicationAndCancellationClearsIt()
+        async throws
+    {
+        let (defaults, settingsStore) = try makeSettingsStore()
+        defer {
+            defaults.removePersistentDomain(forName: defaultsSuiteName(defaults))
+        }
+        let bleManager = FakeRideAutomationBLETransport()
+        let workoutManager = FakeRideAutomationWorkoutController()
+        var sentFrames: [RideAutomationFrame] = []
+        var pendingWasDurableAtAcknowledgement = false
+        var rejectionWasDurableAtPromptResponse = false
+        let coordinator = RideAutomationCoordinator(
+            bleManager: bleManager,
+            workoutManager: workoutManager,
+            settingsStore: settingsStore
+        )
+        bleManager.connect(deviceID: "bicino-175") { frame in
+            sentFrames.append(frame)
+            if frame.kind == .acknowledgement,
+               frame.acknowledgedKind == .decision,
+               frame.result == .accepted {
+                pendingWasDurableAtAcknowledgement =
+                    settingsStore.loadPendingDecision() != nil
+            }
+            if frame.kind == .promptResponse,
+               frame.result == .rejected {
+                rejectionWasDurableAtPromptResponse =
+                    settingsStore.loadPendingDecision()?.resolvedResult
+                        == .rejected
+            }
+            return true
+        }
+        try await waitUntil("initial resynchronization") {
+            sentFrames.contains(where: { $0.kind == .resynchronize })
+        }
+        acknowledgeConfiguration(
+            on: bleManager,
+            settingsStore: settingsStore,
+            rideGeneration: 7,
+            monotonicSeconds: 100
+        )
+        try await waitUntil("configuration acknowledgement") {
+            coordinator.confirmedDeviceSettings == settingsStore.settings
+        }
+
+        let decision = startDecision(
+            settingsStore: settingsStore,
+            rideGeneration: 7,
+            sequence: 11,
+            monotonicSeconds: 100
+        )
+        bleManager.receive(decision)
+        try await waitUntil("first start prompt") {
+            coordinator.startPrompt?.frame == decision
+        }
+        XCTAssertTrue(pendingWasDurableAtAcknowledgement)
+        XCTAssertEqual(
+            settingsStore.loadPendingDecision()?.identity.decisionSequence,
+            11
+        )
+
+        coordinator.dismissStartPrompt()
+        try await waitUntil("durable prompt rejection") {
+            rejectionWasDurableAtPromptResponse
+        }
+        XCTAssertEqual(
+            settingsStore.loadPendingDecision()?.resolvedResult,
+            .rejected
+        )
+
+        bleManager.receive(RideAutomationFrame(
+            kind: .resynchronize,
+            rideGeneration: 7,
+            profileVersion: 1,
+            watermarkOrConfigGeneration: 0,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled: settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            monotonicSeconds: 101
+        ))
+        try await waitUntil("resolved outbox consumption") {
+            settingsStore.loadPendingDecision() == nil
+        }
+
+        let nextDecision = startDecision(
+            settingsStore: settingsStore,
+            rideGeneration: 7,
+            sequence: 12,
+            monotonicSeconds: 102
+        )
+        bleManager.receive(nextDecision)
+        try await waitUntil("second start prompt") {
+            coordinator.startPrompt?.frame == nextDecision
+        }
+        bleManager.receive(RideAutomationFrame(
+            kind: .cancellation,
+            transition: .start,
+            origin: .automatic,
+            result: .stale,
+            rideGeneration: 7,
+            decisionSequence: 12,
+            profileVersion: 1,
+            watermarkOrConfigGeneration: settingsStore.generation,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled: settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            monotonicSeconds: 103
+        ))
+        try await waitUntil("firmware cancellation") {
+            coordinator.startPrompt == nil
+                && settingsStore.loadPendingDecision() == nil
+        }
+    }
+
+    func testReconnectDeduplicationAndFirmwareBootClockReset() async throws {
+        let (defaults, settingsStore) = try makeSettingsStore()
+        defer {
+            defaults.removePersistentDomain(forName: defaultsSuiteName(defaults))
+        }
+        settingsStore.setStartMode(.off)
+        let bleManager = FakeRideAutomationBLETransport()
+        var sentFrames: [RideAutomationFrame] = []
+        let coordinator = RideAutomationCoordinator(
+            bleManager: bleManager,
+            workoutManager: FakeRideAutomationWorkoutController(),
+            settingsStore: settingsStore
+        )
+        let sender: (RideAutomationFrame) -> Bool = { frame in
+            sentFrames.append(frame)
+            return true
+        }
+        bleManager.connect(deviceID: "bicino-175", send: sender)
+        try await waitUntil {
+            sentFrames.contains(where: { $0.kind == .resynchronize })
+        }
+        acknowledgeConfiguration(
+            on: bleManager,
+            settingsStore: settingsStore,
+            rideGeneration: 7,
+            monotonicSeconds: 200
+        )
+        try await waitUntil {
+            coordinator.confirmedDeviceSettings == settingsStore.settings
+        }
+        sentFrames.removeAll()
+
+        let decision = startDecision(
+            settingsStore: settingsStore,
+            rideGeneration: 7,
+            sequence: 2,
+            monotonicSeconds: 200
+        )
+        bleManager.receive(decision)
+        try await waitUntil {
+            sentFrames.contains(where: {
+                $0.kind == .acknowledgement
+                    && $0.decisionSequence == 2
+                    && $0.result == .rejected
+            })
+        }
+        bleManager.receive(decision)
+        var outOfOrder = decision
+        outOfOrder.decisionSequence = 1
+        bleManager.receive(outOfOrder)
+        try await waitUntil {
+            sentFrames.contains(where: {
+                $0.kind == .acknowledgement
+                    && $0.decisionSequence == 1
+                    && $0.result == .stale
+            })
+        }
+        XCTAssertEqual(
+            settingsStore.loadDecisionWatermarks()["bicino-175:7"],
+            2
+        )
+
+        acknowledgeConfiguration(
+            on: bleManager,
+            settingsStore: settingsStore,
+            rideGeneration: 8,
+            monotonicSeconds: 1
+        )
+        let postRebootDecision = startDecision(
+            settingsStore: settingsStore,
+            rideGeneration: 8,
+            sequence: 1,
+            monotonicSeconds: 1
+        )
+        bleManager.receive(postRebootDecision)
+        try await waitUntil {
+            sentFrames.contains(where: {
+                $0.kind == .acknowledgement
+                    && $0.rideGeneration == 8
+                    && $0.decisionSequence == 1
+                    && $0.result == .rejected
+            })
+        }
+
+        let beforeReconnect = sentFrames.count
+        bleManager.disconnect()
+        bleManager.connect(deviceID: "bicino-175", send: sender)
+        try await waitUntil {
+            sentFrames.dropFirst(beforeReconnect).contains(where: {
+                $0.kind == .configuration
+            }) && sentFrames.dropFirst(beforeReconnect).contains(where: {
+                $0.kind == .resynchronize
+            })
+        }
+        _ = coordinator
+    }
+
+    func testPendingPromptTimeoutIsDeterministicAndDurable() async throws {
+        let (defaults, settingsStore) = try makeSettingsStore()
+        defer {
+            defaults.removePersistentDomain(forName: defaultsSuiteName(defaults))
+        }
+        let waiter = ControlledWorkoutTimeoutWaiter()
+        let bleManager = FakeRideAutomationBLETransport()
+        var sentFrames: [RideAutomationFrame] = []
+        let coordinator = RideAutomationCoordinator(
+            bleManager: bleManager,
+            workoutManager: FakeRideAutomationWorkoutController(),
+            settingsStore: settingsStore,
+            pendingDecisionTimeout: 30,
+            pendingDecisionWait: { timeout in
+                try await waiter.wait(timeout)
+            }
+        )
+        bleManager.connect(deviceID: "bicino-175") { frame in
+            sentFrames.append(frame)
+            return true
+        }
+        try await waitUntil("initial resynchronization") {
+            sentFrames.contains(where: { $0.kind == .resynchronize })
+        }
+        acknowledgeConfiguration(
+            on: bleManager,
+            settingsStore: settingsStore,
+            rideGeneration: 9,
+            monotonicSeconds: 300
+        )
+        try await waitUntil("configuration acknowledgement") {
+            coordinator.confirmedDeviceSettings == settingsStore.settings
+        }
+        let decision = startDecision(
+            settingsStore: settingsStore,
+            rideGeneration: 9,
+            sequence: 4,
+            monotonicSeconds: 300
+        )
+        bleManager.receive(decision)
+        try await waitUntil("first timeout registration") {
+            waiter.waitCallCount == 1
+        }
+        XCTAssertEqual(waiter.timeouts, [30])
+        waiter.completeWait(at: 0)
+        try await waitUntil("durable timeout resolution") {
+            settingsStore.loadPendingDecision()?.resolvedResult == .rejected
+                && sentFrames.contains(where: {
+                    $0.kind == .confirmation
+                        && $0.decisionSequence == 4
+                        && $0.result == .rejected
+                })
+        }
+        try await waitUntil("resolved retry registration") {
+            waiter.waitCallCount == 2
+        }
+        bleManager.receive(RideAutomationFrame(
+            kind: .resynchronize,
+            rideGeneration: 9,
+            profileVersion: 1,
+            watermarkOrConfigGeneration: 0,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled: settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            monotonicSeconds: 301
+        ))
+        waiter.completeWait(at: 1)
+        try await waitUntil("firmware resolution consumption") {
+            settingsStore.loadPendingDecision() == nil
+        }
+    }
+
+    private func makeSettingsStore() throws
+        -> (UserDefaults, RideDetectionSettingsStore)
+    {
+        let suiteName = "RideAutomationCoordinatorTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(suiteName, forKey: "testSuiteName")
+        return (defaults, RideDetectionSettingsStore(defaults: defaults))
+    }
+
+    private func defaultsSuiteName(_ defaults: UserDefaults) -> String {
+        defaults.string(forKey: "testSuiteName")!
+    }
+
+    private func acknowledgeConfiguration(
+        on bleManager: FakeRideAutomationBLETransport,
+        settingsStore: RideDetectionSettingsStore,
+        rideGeneration: UInt32,
+        monotonicSeconds: UInt32
+    ) {
+        bleManager.receive(RideAutomationFrame(
+            kind: .configurationAcknowledgement,
+            result: .accepted,
+            rideGeneration: rideGeneration,
+            profileVersion: 1,
+            watermarkOrConfigGeneration: settingsStore.generation,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled: settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            monotonicSeconds: monotonicSeconds
+        ))
+    }
+
+    private func startDecision(
+        settingsStore: RideDetectionSettingsStore,
+        rideGeneration: UInt32,
+        sequence: UInt32,
+        monotonicSeconds: UInt32
+    ) -> RideAutomationFrame {
+        RideAutomationFrame(
+            kind: .decision,
+            transition: .start,
+            origin: .automatic,
+            rideGeneration: rideGeneration,
+            decisionSequence: sequence,
+            evidenceMask: 1,
+            profileVersion: 1,
+            watermarkOrConfigGeneration: settingsStore.generation,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled: settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            candidateBeganSeconds: monotonicSeconds - 1,
+            monotonicSeconds: monotonicSeconds,
+            sourceHealthMask: 1
+        )
+    }
+
+    private func waitUntil(
+        _ label: String = "ride-automation state",
+        timeout: Duration = .seconds(2),
+        condition: @MainActor () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition() {
+            guard clock.now < deadline else {
+                XCTFail("Timed out waiting for \(label)")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 }
 
@@ -2464,7 +2904,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
 
         manager.pause()
 
-        XCTAssertEqual(transport.pauseCallCount, 1)
+        XCTAssertEqual(transport.pauseCallCount, 0)
         XCTAssertEqual(transport.sentData.count, 1)
         XCTAssertEqual(
             try WorkoutContractCodec.decode(transport.sentData[0]).control,
@@ -2479,6 +2919,14 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             try WorkoutContractCodec.decode(transport.sentData[1]),
             originalControl
         )
+
+        transport.completeNext(succeeded: true)
+        try await waitUntil { transport.sentData.count == 3 }
+        let pauseControl = try WorkoutContractCodec.decode(
+            transport.sentData[2]
+        )
+        XCTAssertEqual(pauseControl.control, .pause)
+        XCTAssertEqual(pauseControl.controlContext?.origin, .manual)
     }
 
     func testProductionReconnectResendsControlBeforeSnapshotRequest() async throws {
@@ -2526,7 +2974,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
     }
 
-    func testProductionNativePauseResumeWaitsForConfirmation() async {
+    func testProductionManualPauseResumeUsesDurableControlsAndWaitsForConfirmation()
+        async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_500)
         let manager = WorkoutMirrorManager(now: { now })
         let transport = FakeMirroredSessionTransport()
@@ -2538,7 +2987,13 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
 
         manager.pause()
-        XCTAssertEqual(transport.pauseCallCount, 1)
+        XCTAssertEqual(transport.pauseCallCount, 0)
+        XCTAssertEqual(transport.sentData.count, 1)
+        let pauseControl = try WorkoutContractCodec.decode(
+            transport.sentData[0]
+        )
+        XCTAssertEqual(pauseControl.control, .pause)
+        XCTAssertEqual(pauseControl.controlContext?.origin, .manual)
         XCTAssertEqual(manager.store.presentation.pendingControl, .pause)
         XCTAssertEqual(manager.store.presentation.sessionState, .running)
         manager.applyNativeSessionState(
@@ -2550,7 +3005,19 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(manager.store.presentation.sessionState, .paused)
 
         manager.resume()
-        XCTAssertEqual(transport.resumeCallCount, 1)
+        XCTAssertEqual(transport.resumeCallCount, 0)
+        XCTAssertEqual(
+            transport.sentData.count,
+            1,
+            "Resume must remain ordered behind the outstanding Pause send"
+        )
+        transport.completeNext(succeeded: true)
+        try await waitUntil { transport.sentData.count == 2 }
+        let resumeControl = try WorkoutContractCodec.decode(
+            transport.sentData[1]
+        )
+        XCTAssertEqual(resumeControl.control, .resume)
+        XCTAssertEqual(resumeControl.controlContext?.origin, .manual)
         manager.applyNativeSessionState(
             .running,
             at: now.addingTimeInterval(2),
@@ -3023,10 +3490,16 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
 
     func testTerminalTimeoutBeforeNativeEndIsReclassifiedHonestly() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_401_000)
+        let controlWaiter = ControlledWorkoutTimeoutWaiter()
+        let finalWaiter = ControlledWorkoutTimeoutWaiter()
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02,
-            finalSnapshotTimeout: 0.2
+            controlConfirmationWait: { timeout in
+                try await controlWaiter.wait(timeout)
+            },
+            finalSnapshotWait: { timeout in
+                try await finalWaiter.wait(timeout)
+            }
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
@@ -3041,7 +3514,9 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
 
         manager.endAndSave()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { controlWaiter.waitCallCount == 1 }
+        controlWaiter.completeWait(at: 0)
+        try await waitUntil { controlWaiter.hasReturned(at: 0) }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -3067,6 +3542,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             at: now.addingTimeInterval(1),
             from: transport
         )
+        try await waitUntil { finalWaiter.waitCallCount == 1 }
         XCTAssertEqual(manager.store.presentation.connectionState, .ended)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -3093,7 +3569,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
         XCTAssertNil(manager.store.presentation.errorCode)
         XCTAssertTrue(manager.store.canResetTerminalPresentation)
-        try await Task.sleep(for: .milliseconds(250))
+        finalWaiter.completeWait(at: 0)
+        try await waitUntil { finalWaiter.hasReturned(at: 0) }
         XCTAssertNil(
             manager.store.presentation.errorCode,
             "late timeout continuation must not replace authoritative final truth"
@@ -3117,9 +3594,12 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
                 timeIntervalSinceReferenceDate: 800_401_020
                     + TimeInterval(index * 10)
             )
+            let waiter = ControlledWorkoutTimeoutWaiter()
             let manager = WorkoutMirrorManager(
                 now: { now },
-                controlConfirmationTimeout: 0.02
+                controlConfirmationWait: { timeout in
+                    try await waiter.wait(timeout)
+                }
             )
             let transport = FakeMirroredSessionTransport()
             manager.acceptMirroredTransport(transport)
@@ -3140,7 +3620,9 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             } else {
                 manager.discard()
             }
-            try await Task.sleep(for: .milliseconds(50))
+            try await waitUntil { waiter.waitCallCount == 1 }
+            waiter.completeWait(at: 0)
+            try await waitUntil { waiter.hasReturned(at: 0) }
             XCTAssertEqual(
                 manager.store.presentation.errorCode,
                 .terminalChoiceUnconfirmed
@@ -3161,8 +3643,13 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
                     at: now.addingTimeInterval(0.5),
                     from: transport
                 )
+                try await waitUntil { waiter.waitCallCount == 2 }
+                waiter.completeWait(at: 1)
+                try await waitUntil { waiter.hasReturned(at: 1) }
             } else {
-                try await Task.sleep(for: .milliseconds(50))
+                try await waitUntil { waiter.waitCallCount == 2 }
+                waiter.completeWait(at: 1)
+                try await waitUntil { waiter.hasReturned(at: 1) }
             }
             XCTAssertNil(manager.store.presentation.pendingControl)
             XCTAssertEqual(

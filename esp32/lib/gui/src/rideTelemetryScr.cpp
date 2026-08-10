@@ -11,6 +11,7 @@
 #include "rideMetricFontSelection.hpp"
 #include "rideTelemetryLayout.hpp"
 #include "rideTelemetryPresenter.hpp"
+#include "../../ride_automation/ride_automation_runtime.hpp"
 
 #include <array>
 #include <cstdio>
@@ -35,7 +36,7 @@ MetricLabels rideHeartRate{};
 lv_obj_t *rideHeartRateHeart = nullptr;
 lv_obj_t *rideZoneTitle = nullptr;
 lv_obj_t *rideDistanceValue = nullptr;
-lv_obj_t *rideElapsedValue = nullptr;
+MetricLabels rideMoving{};
 std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
     rideZoneSegments{};
 lv_obj_t *rideZoneHeart = nullptr;
@@ -44,6 +45,11 @@ int8_t displayedZoneIndex = -2;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutButton = nullptr;
+lv_obj_t *rideAutomationPanel = nullptr;
+lv_obj_t *rideAutomationTitle = nullptr;
+lv_obj_t *rideAutomationDetail = nullptr;
+lv_obj_t *rideAutomationProgress = nullptr;
+lv_obj_t *rideAutomationActions = nullptr;
 ride_telemetry_layout::Layout rideLayout{};
 ride_telemetry_layout::MetricPlacement rideMetricPlacement{};
 int8_t displayedMetricLayout = -1;
@@ -398,6 +404,196 @@ void startWorkoutEvent(lv_event_t *event) {
   }
 }
 
+void rideDetectedStartEvent(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED)
+    return;
+  ride_automation_runtime::respondToStartPrompt(true, millis());
+  updateRideTelemetryEvent(nullptr);
+}
+
+void rideDetectedDismissEvent(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED)
+    return;
+  ride_automation_runtime::respondToStartPrompt(false, millis());
+  updateRideTelemetryEvent(nullptr);
+}
+
+lv_obj_t *createAutomationAction(lv_obj_t *parent, const char *title,
+                                 uint32_t color, lv_event_cb_t callback) {
+  lv_obj_t *button = lv_btn_create(parent);
+  lv_obj_set_size(button, (rideLayout.page.width - 52) / 2, 52);
+  lv_obj_set_style_radius(button, 12, 0);
+  lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
+  lv_obj_set_style_shadow_width(button, 0, 0);
+  lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *label = lv_label_create(button);
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(label, lv_color_black(), 0);
+  lv_label_set_text(label, title);
+  lv_obj_center(label);
+  return button;
+}
+
+void createAutomationPanel(lv_obj_t *page) {
+  rideAutomationPanel = lv_obj_create(page);
+  lv_obj_set_width(rideAutomationPanel, rideLayout.page.width - 28);
+  lv_obj_set_height(rideAutomationPanel, 190);
+  lv_obj_align(rideAutomationPanel, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(rideAutomationPanel, 18, 0);
+  lv_obj_set_style_bg_color(rideAutomationPanel, lv_color_hex(0x111815), 0);
+  lv_obj_set_style_bg_opa(rideAutomationPanel, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(rideAutomationPanel, 2, 0);
+  lv_obj_set_style_border_color(rideAutomationPanel,
+                                lv_color_hex(0x66DD88), 0);
+  lv_obj_set_style_pad_all(rideAutomationPanel, 12, 0);
+  lv_obj_clear_flag(rideAutomationPanel, LV_OBJ_FLAG_SCROLLABLE);
+
+  rideAutomationTitle = lv_label_create(rideAutomationPanel);
+  lv_obj_set_width(rideAutomationTitle, rideLayout.page.width - 56);
+  lv_obj_align(rideAutomationTitle, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_text_font(rideAutomationTitle,
+                             &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(rideAutomationTitle, lv_color_white(), 0);
+  lv_obj_set_style_text_align(rideAutomationTitle, LV_TEXT_ALIGN_CENTER, 0);
+
+  rideAutomationDetail = lv_label_create(rideAutomationPanel);
+  lv_obj_set_width(rideAutomationDetail, rideLayout.page.width - 60);
+  lv_obj_align(rideAutomationDetail, LV_ALIGN_TOP_MID, 0, 42);
+  lv_obj_set_style_text_font(rideAutomationDetail,
+                             &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(rideAutomationDetail,
+                              lv_color_hex(0xBBBBBB), 0);
+  lv_obj_set_style_text_align(rideAutomationDetail, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(rideAutomationDetail, LV_LABEL_LONG_WRAP);
+
+  rideAutomationProgress = lv_bar_create(rideAutomationPanel);
+  lv_obj_set_size(rideAutomationProgress, rideLayout.page.width - 70, 12);
+  lv_obj_align(rideAutomationProgress, LV_ALIGN_BOTTOM_MID, 0, -16);
+  lv_obj_set_style_bg_color(rideAutomationProgress,
+                            lv_color_hex(0x26322D), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(rideAutomationProgress,
+                            lv_color_hex(0x66DD88), LV_PART_INDICATOR);
+
+  rideAutomationActions = lv_obj_create(rideAutomationPanel);
+  lv_obj_remove_style_all(rideAutomationActions);
+  lv_obj_set_size(rideAutomationActions, rideLayout.page.width - 48, 58);
+  lv_obj_align(rideAutomationActions, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_flex_flow(rideAutomationActions, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rideAutomationActions, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(rideAutomationActions, LV_OBJ_FLAG_SCROLLABLE);
+  createAutomationAction(rideAutomationActions, "Not Now", 0x777777,
+                         rideDetectedDismissEvent);
+  createAutomationAction(rideAutomationActions, "Start Ride", 0x66DD88,
+                         rideDetectedStartEvent);
+
+  lv_obj_add_flag(rideAutomationPanel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void updateAutomationPanel(uint32_t nowMs) {
+  const ride_automation_runtime::UiSnapshot snapshot =
+      ride_automation_runtime::uiSnapshot(nowMs);
+  if (snapshot.phase == ride_automation_runtime::UiPhase::Hidden) {
+    lv_obj_add_flag(rideAutomationPanel, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  const char *title = "Ride Detection";
+  const char *detail = "";
+  char detailBuffer[128]{};
+  bool showActions = false;
+  bool showProgress = false;
+  uint32_t borderColor = 0x66DD88;
+  switch (snapshot.phase) {
+  case ride_automation_runtime::UiPhase::StartCandidate:
+    title = "Detecting ride";
+    detail = "Checking sustained cycling evidence";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::StartPrompt:
+    title = "Start Ride?";
+    snprintf(detailBuffer, sizeof(detailBuffer),
+             "Cycling detected. Start on Apple Watch? %us remaining",
+             static_cast<unsigned>(snapshot.remainingSeconds));
+    detail = detailBuffer;
+    showActions = true;
+    break;
+  case ride_automation_runtime::UiPhase::Starting:
+    title = "Starting";
+    detail = "Waiting for Apple Watch to confirm the workout";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::PauseCandidate:
+    title = "Checking stop";
+    detail = "The ride stays running until Apple Watch confirms";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::AwaitingPause:
+    title = "Pausing";
+    detail = "Waiting for Apple Watch confirmation";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::ResumeCandidate:
+    title = "Checking motion";
+    detail = "Confirming that the ride has resumed";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::AwaitingResume:
+    title = "Resuming";
+    detail = "Waiting for Apple Watch confirmation";
+    showProgress = true;
+    break;
+  case ride_automation_runtime::UiPhase::RideResumed:
+    title = "Ride resumed";
+    detail = "Apple Watch confirmed moving time is running";
+    break;
+  case ride_automation_runtime::UiPhase::SensorDegraded:
+    title = "Detection limited";
+    detail = "Waiting for GPS + motion, or a direct cycling sensor.";
+    borderColor = 0xFFCC55;
+    break;
+  case ride_automation_runtime::UiPhase::Error:
+    title = "Ride not started";
+    borderColor = 0xFF6666;
+    switch (snapshot.error) {
+    case ride_automation_runtime::UiError::PhoneOrWatchUnavailable:
+      detail = "Open Bicino on iPhone to start the Watch workout";
+      break;
+    case ride_automation_runtime::UiError::SessionMismatch:
+      detail = "Reconnect Bicino to the current Watch workout";
+      break;
+    case ride_automation_runtime::UiError::Rejected:
+      detail = "The ride request was not accepted";
+      break;
+    case ride_automation_runtime::UiError::None:
+      detail = "Apple Watch did not confirm the request";
+      break;
+    }
+    break;
+  case ride_automation_runtime::UiPhase::Hidden:
+    break;
+  }
+
+  lv_obj_set_style_border_color(rideAutomationPanel,
+                                lv_color_hex(borderColor), 0);
+  setLabelIfChanged(rideAutomationTitle, title);
+  setLabelIfChanged(rideAutomationDetail, detail);
+  lv_bar_set_value(rideAutomationProgress, snapshot.progressPercent,
+                   LV_ANIM_OFF);
+  if (showActions) {
+    lv_obj_clear_flag(rideAutomationActions, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rideAutomationActions, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (showProgress) {
+    lv_obj_clear_flag(rideAutomationProgress, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rideAutomationProgress, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_clear_flag(rideAutomationPanel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(rideAutomationPanel);
+}
+
 ride_telemetry_layout::MetricLayoutMode metricLayoutMode(
     const ride_telemetry_presenter::ViewModel &model) {
   if (model.usesWorkout) {
@@ -417,12 +613,14 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
   displayedMetricLayout = nextLayout;
   rideMetricPlacement =
       ride_telemetry_layout::makeMetricPlacement(rideLayout, mode);
+  setLabelIfChanged(rideMoving.title,
+                    model.usesWorkout ? "Moving" : "Elapsed");
 
   positionMetric(rideHeartRate, rideMetricPlacement.heartRate);
   positionMetric({rideZoneTitle, rideZoneLabel},
                  rideMetricPlacement.heartRateZone);
   positionMetric({nullptr, rideDistanceValue}, rideMetricPlacement.distance);
-  positionMetric({nullptr, rideElapsedValue}, rideMetricPlacement.elapsed);
+  positionMetric(rideMoving, rideMetricPlacement.elapsed);
   positionMetric(rideBottomLeft, rideMetricPlacement.bottomLeft);
   positionMetric(rideBottomRight, rideMetricPlacement.bottomRight);
   lv_obj_set_pos(rideStartWorkoutButton,
@@ -546,8 +744,7 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   createZoneMetric(ridePage, rideLayout.metrics[1]);
   rideDistanceValue =
       createMetric(ridePage, "Distance", rideLayout.metrics[2]).value;
-  rideElapsedValue =
-      createMetric(ridePage, "Elapsed", rideLayout.metrics[3]).value;
+  rideMoving = createMetric(ridePage, "Moving", rideLayout.metrics[3]);
   rideBottomLeft =
       createMetric(ridePage, "Altitude m", rideLayout.metrics[4]);
   rideBottomRight =
@@ -584,6 +781,8 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_color(startWorkoutLabel, lv_color_black(), 0);
   lv_label_set_text_static(startWorkoutLabel, "Start Workout");
 
+  createAutomationPanel(ridePage);
+
   displayedMetricLayout = -1;
   updateRideTelemetryEvent(nullptr);
 }
@@ -612,10 +811,11 @@ void updateRideTelemetryEvent(lv_event_t *) {
   setMetricValueIfChanged(rideDistanceValue, value);
   ride_telemetry_presenter::formatElapsed(model.elapsedSeconds, value,
                                           sizeof(value));
-  setMetricValueIfChanged(rideElapsedValue, value);
+  setMetricValueIfChanged(rideMoving.value, value);
 
   const ride_telemetry_presenter::BottomMetricSelection bottomMetrics =
       ride_telemetry_presenter::selectBottomMetrics(model);
   updateBottomMetric(rideBottomLeft, bottomMetrics.left, model);
   updateBottomMetric(rideBottomRight, bottomMetrics.right, model);
+  updateAutomationPanel(millis());
 }

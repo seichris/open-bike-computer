@@ -11,7 +11,7 @@ Flash the profile matching the physical panel. It contains the same application
 firmware being tested plus `DEVICE_REMOTE_DEBUG=1`; the browser service cannot
 be attached to an arbitrary already-flashed firmware image. Production and
 ordinary developer builds do not contain the browser page, do not advertise
-CAP2 bit `15`, and reject debug-mode entry.
+CAP2 bit `16`, and reject debug-mode entry.
 
 ## Start a session
 

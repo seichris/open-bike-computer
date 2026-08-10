@@ -353,6 +353,18 @@ jobs:
             tools/tests/test_workout_telemetry_state.cpp \
             -o /tmp/test_workout_telemetry_state
           /tmp/test_workout_telemetry_state
+      - name: Ride automation policy and trace replay host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_automation_policy.cpp \
+            -o /tmp/test_ride_automation_policy
+          /tmp/test_ride_automation_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_automation_protocol.cpp \
+            -o /tmp/test_ride_automation_protocol
+          /tmp/test_ride_automation_protocol
+          PYTHONPATH=tools python3 -m unittest \
+            tools.tests.test_ride_trace_replay
       - name: Map profile persistence host tests
         run: |
           g++ -std=c++17 \

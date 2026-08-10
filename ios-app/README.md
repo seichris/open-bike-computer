@@ -95,6 +95,35 @@ If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
 old data as current. Reconnection requests the newest coherent snapshot.
 
+### Ride Detection (internal builds)
+
+Compatible internal firmware can detect sustained cycling and coordinate the
+existing Watch-owned workout. Configure **Settings > Workouts > Ride
+Detection** on iPhone:
+
+- **Ask to Start** is the default and displays **Start Ride** / **Not Now** on
+  the bike computer and iPhone.
+- **Start Automatically** is an explicit opt-in. It still requires a reachable,
+  authorized Apple Watch running the Bicino companion; it never starts Apple's
+  Workout app and does not backdate the workout.
+- **Auto-Pause** requests pause after a sustained stop and resumes only a ride
+  that Bicino previously auto-paused. A manual pause stays manually paused.
+- **Start alerts** select sound+haptic, haptic-only, or visual-only feedback.
+
+The Watch remains authoritative. Device/iPhone screens say **Starting**,
+**Pausing**, or **Resuming** until the Watch session callback confirms the
+change. A confirmed automatic transition is written to Watch recovery metadata
+and a HealthKit marker while standard HealthKit pause/resume events continue to
+define active duration.
+
+**Elapsed** is wall time since confirmed start, including pauses. **Moving** is
+the existing `HKLiveWorkoutBuilder.elapsedTime`, excluding confirmed pause
+intervals. Both values remain local to the paired products.
+
+Ride Detection is not advertised by production firmware until the physical
+false-start, recovery, and long-run board gates pass. Standalone device ride
+recording and ride history are not part of this feature.
+
 ## Watch + Bicino navigation without iPhone
 
 The Watch can own location, route progress, maneuvers, and the direct
@@ -144,7 +173,7 @@ memory only and are not written to the offline route archive.
 The physical release matrix—including wrist-down location delivery, Watch BLE
 reconnect, cellular and non-cellular failure behavior, two-hour battery/thermal
 impact, and both supported Bicino targets—is tracked in
-[`../docs/watch-bicino-navigation-validation.md`](../docs/watch-bicino-navigation-validation.md).
+ [`../docs/watch-bicino-navigation-validation.md`](../docs/watch-bicino-navigation-validation.md).
 
 ## Cadence and power sensors
 

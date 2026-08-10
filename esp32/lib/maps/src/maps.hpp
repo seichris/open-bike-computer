@@ -397,6 +397,8 @@ private:
   map_presentation::HeadingResolver headingResolver;
   map_presentation::PresentedPose presentedPose{};
   bool hasPresentedPose = false;
+  uint32_t predictionExhaustionCount = 0;
+  uint32_t lastPredictionExhaustedMs = 0;
   uint64_t lastFramePresentationSignature = 0;
   uint64_t lastForegroundPresentationSignature = 0;
   RenderResult visibleRenderResult{};
@@ -625,6 +627,21 @@ public:
   void toggleRotationMode();
   void updateArrowColor();
   bool debugIsMapFound() const { return publishedMapFound; }
+  uint32_t debugPredictionAgeMs() const {
+    return hasPresentedPose ? presentedPose.predictionAgeMs : 0U;
+  }
+  bool debugPredictionGraceActive() const {
+    return hasPresentedPose && presentedPose.predictionGraceActive;
+  }
+  bool debugPredictionExhausted() const {
+    return hasPresentedPose && presentedPose.predictionExhausted;
+  }
+  uint32_t debugPredictionExhaustionCount() const {
+    return predictionExhaustionCount;
+  }
+  uint32_t debugLastPredictionExhaustedMs() const {
+    return lastPredictionExhaustedMs;
+  }
   size_t debugCachedBlockCount() const {
     return cachedBlockCount.load(std::memory_order_acquire);
   }

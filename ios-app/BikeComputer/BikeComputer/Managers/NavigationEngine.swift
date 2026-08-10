@@ -50,7 +50,9 @@ class NavigationEngine: NSObject, ObservableObject {
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
     private var rideTelemetryTimer: Timer?
-    private let rideTelemetryRefreshInterval: TimeInterval = 1.0
+    // Test and real navigation share one device-pose heartbeat contract. The
+    // firmware grace window is sized to bridge one missed 1 Hz heartbeat.
+    private let devicePoseHeartbeatInterval: TimeInterval = 1.0
     private let now: () -> Date
     
     // Simulation state
@@ -347,7 +349,10 @@ class NavigationEngine: NSObject, ObservableObject {
         lastSimulationUpdate = Date()
         
         simulationTimer?.invalidate()
-        simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        simulationTimer = Timer.scheduledTimer(
+            withTimeInterval: devicePoseHeartbeatInterval,
+            repeats: true
+        ) { [weak self] _ in
             self?.updateSimulation()
         }
         // Add timer to RunLoop to ensure it fires in common run loop modes (including background)
@@ -619,7 +624,7 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func startRideTelemetryTimer() {
         stopRideTelemetryTimer()
-        let timer = Timer(timeInterval: rideTelemetryRefreshInterval,
+        let timer = Timer(timeInterval: devicePoseHeartbeatInterval,
                           repeats: true) { [weak self] _ in
             self?.refreshRideTelemetry()
         }

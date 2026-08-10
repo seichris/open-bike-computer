@@ -29,6 +29,29 @@ static void deviceSettingsEvent(lv_event_t *event) {
     gpsUpdate = lv_dropdown_get_selected(obj);
     saveGPSUpdateRate(gpsUpdate);
   }
+#if defined(RIDE_AUTOMATION_SHADOW)
+  const auto rideConfiguration =
+      ride_automation_runtime::configurationSnapshot();
+  if (strcmp(option, "rideStart") == 0) {
+    ride_automation_runtime::setLocalConfiguration(
+        static_cast<ride_automation::StartMode>(
+            lv_dropdown_get_selected(obj)),
+        rideConfiguration.autoPauseEnabled,
+        rideConfiguration.alertMode);
+  }
+  if (strcmp(option, "ridePause") == 0) {
+    ride_automation_runtime::setLocalConfiguration(
+        rideConfiguration.startMode,
+        lv_dropdown_get_selected(obj) == 0,
+        rideConfiguration.alertMode);
+  }
+  if (strcmp(option, "rideAlert") == 0) {
+    ride_automation_runtime::setLocalConfiguration(
+        rideConfiguration.startMode,
+        rideConfiguration.autoPauseEnabled,
+        static_cast<uint8_t>(lv_dropdown_get_selected(obj)));
+  }
+#endif
   if (strcmp(option, "back") == 0) {
 #ifndef USE_ARDUINO_GFX
     cfg.saveUInt(PKEYS::KDEF_BRIGT, defBright);
@@ -179,6 +202,46 @@ void createDeviceSettingsScr() {
   lv_obj_align_to(dropdown, list, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
   lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
                       (char *)"rate");
+
+#if defined(RIDE_AUTOMATION_SHADOW)
+  const auto rideConfiguration =
+      ride_automation_runtime::configurationSnapshot();
+
+  list = lv_list_add_btn(deviceSettingsOptions, NULL, "Ride\nStart");
+  lv_obj_set_style_text_font(list, fontOptions, 0);
+  lv_obj_clear_flag(list, LV_OBJ_FLAG_CLICKABLE);
+  dropdown = lv_dropdown_create(list);
+  // Automatic start stays behind the physical rollout gate; the device UI is
+  // Ask-only until that gate is attested.
+  lv_dropdown_set_options(dropdown, "Off\nAsk to Start");
+  lv_dropdown_set_selected(
+      dropdown,
+      rideConfiguration.startMode == ride_automation::StartMode::Off ? 0 : 1);
+  lv_obj_set_width(dropdown, TFT_WIDTH / 2);
+  lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
+                      (char *)"rideStart");
+
+  list = lv_list_add_btn(deviceSettingsOptions, NULL, "Auto-Pause");
+  lv_obj_set_style_text_font(list, fontOptions, 0);
+  lv_obj_clear_flag(list, LV_OBJ_FLAG_CLICKABLE);
+  dropdown = lv_dropdown_create(list);
+  lv_dropdown_set_options(dropdown, "On\nOff");
+  lv_dropdown_set_selected(dropdown,
+                           rideConfiguration.autoPauseEnabled ? 0 : 1);
+  lv_obj_set_width(dropdown, TFT_WIDTH / 3);
+  lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
+                      (char *)"ridePause");
+
+  list = lv_list_add_btn(deviceSettingsOptions, NULL, "Start\nAlerts");
+  lv_obj_set_style_text_font(list, fontOptions, 0);
+  lv_obj_clear_flag(list, LV_OBJ_FLAG_CLICKABLE);
+  dropdown = lv_dropdown_create(list);
+  lv_dropdown_set_options(dropdown, "Sound + Haptic\nHaptic only\nVisual only");
+  lv_dropdown_set_selected(dropdown, rideConfiguration.alertMode);
+  lv_obj_set_width(dropdown, TFT_WIDTH / 2);
+  lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
+                      (char *)"rideAlert");
+#endif
 
   // Upgrade button
   list = lv_list_add_btn(deviceSettingsOptions, NULL, NULL);
