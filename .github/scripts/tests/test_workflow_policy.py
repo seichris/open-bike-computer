@@ -32,6 +32,12 @@ SHARED_CONTRACT_PATHS = {
     "docs/firmware-map-rendering-psram.md",
     "docs/releases/watchos-workout-companion.md",
 }
+JOB_KEY_PATTERN = re.compile(
+    r'(?:"(?P<double>[A-Za-z_][A-Za-z0-9_-]*)"|'
+    r"'(?P<single>[A-Za-z_][A-Za-z0-9_-]*)'|"
+    r"(?P<plain>[A-Za-z_][A-Za-z0-9_-]*)):"
+    r"\s*(?:&[A-Za-z_][A-Za-z0-9_-]*\s*)?(?:#.*)?"
+)
 
 
 def workflow_source(filename: str) -> str:
@@ -85,9 +91,9 @@ def child_mapping_blocks(
     children: list[tuple[str, int]] = []
     for index, line in enumerate(parent_lines[1:], start=1):
         line_indent = len(line) - len(line.lstrip())
-        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*):", line.strip())
+        match = JOB_KEY_PATTERN.fullmatch(line.strip())
         if line_indent == child_indent and match:
-            children.append((match.group(1), index))
+            children.append((next(group for group in match.groups() if group), index))
 
     blocks = []
     for child_index, (key, start) in enumerate(children):
@@ -115,6 +121,51 @@ def matrix_targets(source: str) -> set[str]:
 
 
 class WorkflowPolicyTests(unittest.TestCase):
+    def assert_firmware_builders_clear_library_overrides(
+        self, root: Path = WORKFLOW_ROOT
+    ) -> None:
+        builder_count = 0
+        violations = []
+        for workflow, source in workflow_sources(root):
+            for job, block in firmware_builder_jobs(source):
+                for command in firmware_builder_lines(block):
+                    builder_count += 1
+                    if (
+                        "env -u LD_LIBRARY_PATH python tools/build_firmware.py"
+                        not in command
+                    ):
+                        violations.append(
+                            f"{workflow}:{job}: unsafe builder command: {command}"
+                        )
+        self.assertGreater(builder_count, 0)
+        self.assertEqual((), tuple(violations))
+
+    def assert_firmware_builders_reuse_verified_downloads(
+        self, root: Path = WORKFLOW_ROOT
+    ) -> None:
+        builder_jobs = tuple(
+            (workflow, job, block)
+            for workflow, source in workflow_sources(root)
+            for job, block in firmware_builder_jobs(source)
+        )
+        self.assertTrue(builder_jobs)
+        violations = []
+        for workflow, job, block in builder_jobs:
+            has_cache = re.search(
+                r"(?m)^\s+(?:-\s+)?uses:\s*actions/cache@v6\s*(?:#.*)?$",
+                block,
+            )
+            has_download_path = re.search(
+                r"(?m)^\s+path:\s*(?:esp32/)?\.pio/open-bike-build/downloads"
+                r"\s*(?:#.*)?$",
+                block,
+            )
+            if not has_cache or not has_download_path:
+                violations.append(
+                    f"{workflow}:{job}: missing active verified-download cache"
+                )
+        self.assertEqual((), tuple(violations))
+
     def test_default_and_diagnostic_firmware_matrices_stay_separate(self) -> None:
         default_targets = matrix_targets(workflow_source("ci.yml"))
         diagnostic_targets = matrix_targets(
@@ -243,32 +294,82 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("actions/cache", firmware_builder_jobs(source)[0][1])
 
+    def test_quoted_and_commented_job_keys_cannot_hide_unsafe_builders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "safe.yml").write_text(
+                "jobs:\n"
+                "  safe:\n"
+                "    steps:\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py SAFE\n",
+                encoding="utf-8",
+            )
+            (root / "fifth.yaml").write_text(
+                "jobs:\n"
+                '  "fifth-builder": # valid YAML comment\n'
+                "    steps:\n"
+                "      - run: python tools/build_firmware.py UNSAFE\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(AssertionError):
+                self.assert_firmware_builders_clear_library_overrides(root)
+
+    def test_commented_peer_keys_cannot_lend_cache_to_builder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "builder.yaml").write_text(
+                "jobs:\n"
+                "  uncached-builder:\n"
+                "    steps:\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+                "  unrelated: # valid YAML comment\n"
+                "    steps:\n"
+                "      - uses: actions/cache@v6\n"
+                "        with:\n"
+                "          path: .pio/open-bike-build/downloads\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(AssertionError):
+                self.assert_firmware_builders_reuse_verified_downloads(root)
+
+    def test_anchored_job_keys_cannot_hide_unsafe_builders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "builder.yml").write_text(
+                "jobs:\n"
+                "  anchored-builder: &firmware_job\n"
+                "    steps:\n"
+                "      - run: python tools/build_firmware.py UNSAFE\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(AssertionError):
+                self.assert_firmware_builders_clear_library_overrides(root)
+
+    def test_commented_cache_lines_cannot_satisfy_builder_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "builder.yml").write_text(
+                "jobs:\n"
+                "  uncached-builder:\n"
+                "    steps:\n"
+                "      # - uses: actions/cache@v6\n"
+                "      #   with:\n"
+                "      #     path: .pio/open-bike-build/downloads\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(AssertionError):
+                self.assert_firmware_builders_reuse_verified_downloads(root)
+
     def test_every_firmware_builder_clears_library_overrides(self) -> None:
-        builder_count = 0
-        for workflow, source in workflow_sources():
-            for job, block in firmware_builder_jobs(source):
-                for command in firmware_builder_lines(block):
-                    builder_count += 1
-                    with self.subTest(
-                        workflow=workflow, job=job, command=command
-                    ):
-                        self.assertIn(
-                            "env -u LD_LIBRARY_PATH python tools/build_firmware.py",
-                            command,
-                        )
-        self.assertGreater(builder_count, 0)
+        self.assert_firmware_builders_clear_library_overrides()
 
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
-        builder_jobs = tuple(
-            (workflow, job, block)
-            for workflow, source in workflow_sources()
-            for job, block in firmware_builder_jobs(source)
-        )
-        self.assertTrue(builder_jobs)
-        for workflow, job, block in builder_jobs:
-            with self.subTest(workflow=workflow, job=job):
-                self.assertIn("uses: actions/cache@v6", block)
-                self.assertIn(".pio/open-bike-build/downloads", block)
+        self.assert_firmware_builders_reuse_verified_downloads()
 
 
 if __name__ == "__main__":
