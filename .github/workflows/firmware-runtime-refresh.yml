@@ -80,6 +80,7 @@ jobs:
             --output-dir runtime-candidate-a \
             > "runtime-candidate-a/offline-replay-${{ matrix.target }}.json"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: firmware-runtime-candidate-${{ matrix.target }}
           path: |
