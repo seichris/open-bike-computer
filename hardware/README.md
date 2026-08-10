@@ -145,6 +145,25 @@ Arduino_GFX *gfx = new Arduino_CO5300(
 The known-good dimensions and gap are `LCD_WIDTH=410`, `LCD_HEIGHT=502`,
 constructor gap `(22,0,0,0)`, rotation `0`.
 
+## Waveshare SD warm-reset recovery
+
+Both Waveshare profiles own the complete dedicated HSPI lifecycle. Every mount
+sequence is single-flight under the storage mutex and power-management lock,
+first unmounts Arduino SD state, ends HSPI only when begun, drives CS high, and
+then recreates the bus. It makes exactly three 4 MHz operating-frequency
+attempts, with 50 ms and 150 ms recovery delays. Arduino core 3.3.4 continues
+to own its internal 400 kHz initialization and CMD0 sequence; firmware does not
+carry a second SD protocol implementation. A card type and root-directory open
+must both succeed before `isSdLoaded` becomes true.
+
+After three failures the controller emits one `SDIO:` summary with
+`fallback=ffat`, enters a two-second cooldown, and retains the existing FFat
+fallback. It never loops or reboots automatically and does not toggle a PMIC
+rail. Hardware acceptance still requires the plan's cold boot, software reset,
+upload reset, serial reset, runtime remount, no-card, restored-card, checksummed
+read/write, and throughput matrix on both board families and representative
+FAT32 cards. No such physical evidence is inferred from the host policy tests.
+
 Connected-device display findings on 2026-07-02:
 - The board enumerated as ESP32-S3 USB CDC/JTAG on `/dev/cu.usbmodem2101`
   with VID:PID `303A:1001`.
