@@ -57,17 +57,27 @@ signatures make stable ticks no-ops: they do not invalidate the base image or
 clear and redraw the full foreground alpha plane. Test and real navigation use
 the same 1 Hz device-pose heartbeat. Dead reckoning remains at full speed for
 1.5 seconds, then linearly decelerates to a hard stop at 2.5 seconds, with a
-distance cap of 30 metres. This bridges one missed heartbeat without allowing
+distance cap of 70 metres. That cap is derived from the integrated horizon and
+the supported 35 m/s input clamp, so it cannot end the missed-heartbeat bridge
+early at a valid speed. This bridges one missed heartbeat without allowing
 unbounded motion, and all visible layers stop from the same pose when the
-horizon is exhausted. Each new phone fix converges from that shared pose.
+horizon is exhausted. Heading-only route updates can rotate presentation but
+do not redefine the positional path or interrupt convergence; each new phone
+fix converges from the shared pose.
 
 The full-speed window (1.5 seconds), hard horizon (2.5 seconds), and distance
-cap (30 metres) are static policy values from implementation commit
-`a02e24a3139d93a507cc716818ba7bcb151cf736`, based on `origin/main`
-`15d806613b680621b923b311ec30b2470fd4b349`. They apply to both
+cap (70 metres) are static defaults in `mapPresentation.hpp`. The distance cap
+equals 35 m/s multiplied by the curve's 2.0 seconds of integrated motion at
+the hard horizon. They apply to both
 `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` and have no map/navigation
 fixture; they are not runtime or externally measured values. Device validation
 of the timing policy remains part of the physical gate below.
+
+Authenticated GPS arrival time is captured before the NimBLE-to-UI mailbox.
+The mailbox keeps the newest position but retains the count, last gap, and
+maximum gap for valid packets coalesced during a UI stall. Presentation age and
+diagnostics therefore remain tied to BLE transport rather than the later UI
+drain.
 
 The overscanned base canvas remains LVGL center-aligned; its position is an
 offset from the resolved centered origin. Presentation converts the desired
@@ -103,7 +113,9 @@ measured course, route bearing, or prior valid guidance frame.
 
 The focused host contracts cover worker ownership, semantic invalidation,
 position-only coalescing, shared presentation transforms, heading fallback and
-epoch reset, one-missed-heartbeat prediction, finite transport-loss stopping,
+epoch reset, callback-arrival timing across mailbox coalescing,
+one-missed-heartbeat prediction through the supported speed range,
+heading-only updates after exhaustion, finite transport-loss stopping,
 pre-publication overscan coverage, deterministic building
 admission, solid-roof courtyard overflow, asynchronous runtime map activation,
 and cross-version heading protocol behavior. The required physical gate is an exact

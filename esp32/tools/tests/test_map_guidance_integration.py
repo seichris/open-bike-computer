@@ -21,6 +21,9 @@ BLE_SOURCE = (
 BLE_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.hpp"
 ).read_text(encoding="utf-8")
+GPS_FRESHNESS_SOURCE = (
+    ESP32_ROOT / "lib" / "ble_navigation" / "gps_input_freshness.hpp"
+).read_text(encoding="utf-8")
 BUILDING_ADMISSION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapBuildingAdmission.hpp"
 ).read_text(encoding="utf-8")
@@ -227,7 +230,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
     def test_prediction_grace_is_bounded_and_reports_transport_freshness(self):
         self.assertIn("fullSpeedPredictionMs = 1500", MAP_PRESENTATION_SOURCE)
         self.assertIn("maximumPredictionMs = 2500", MAP_PRESENTATION_SOURCE)
-        self.assertIn("maximumPredictionMeters = 30.0", MAP_PRESENTATION_SOURCE)
+        self.assertIn("maximumPredictionMeters = 70.0", MAP_PRESENTATION_SOURCE)
         self.assertIn("graceElapsedMs * graceElapsedMs", MAP_PRESENTATION_SOURCE)
         self.assertIn("predictionExhausted", MAP_PRESENTATION_SOURCE)
 
@@ -235,17 +238,20 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("bleStats.lastGpsPacketMs", pose)
         self.assertIn("bleStats.gpsPacketCount", pose)
         self.assertIn("fix.timestampMs", pose)
+        self.assertIn("lastGpsPositionSignature", pose)
+        self.assertIn("posePresenter.updateHeading", pose)
         self.assertIn('"MAPIO: presentation gpsAgeMs=%lu lastGpsGapMs=%lu "', pose)
         self.assertIn('"predictionExhausted=%u exhaustionCount=%lu "', pose)
 
+        queue = function_body(BLE_SOURCE, "static bool queueMapInput")
         gps_handler = function_body(BLE_SOURCE, "static void handleGpsPayload")
         self.assertIn("lastGpsPacketGapMs", BLE_HEADER_SOURCE)
         self.assertIn("maximumGpsPacketGapMs", BLE_HEADER_SOURCE)
-        self.assertIn(
-            "gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs",
-            gps_handler,
-        )
-        self.assertIn("maximumGpsPacketGapMs", gps_handler)
+        self.assertIn("gps_input_freshness::acceptsPayload", queue)
+        self.assertIn("gpsReceivedAtMs = millis()", queue)
+        self.assertIn("input.gpsArrivals.observe(gpsReceivedAtMs)", queue)
+        self.assertIn("gpsFreshnessState.accept(arrivals)", gps_handler)
+        self.assertIn("batch.firstPacketMs - lastPacketMs", GPS_FRESHNESS_SOURCE)
 
         self.assertIn(
             '"pose[gpsAgeMs=%lu predictionAgeMs=%lu grace=%d "',
@@ -262,7 +268,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
                 "1 Hz",
                 "1.5",
                 "2.5",
-                "30 metres",
+                "70 metres",
                 "missed heartbeat",
             ):
                 self.assertIn(term, documentation)

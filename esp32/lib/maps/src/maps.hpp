@@ -391,6 +391,7 @@ private:
   uint64_t lastNavigationSignature = 0;
   uint64_t lastProjectionSignature = 0;
   uint64_t lastHeadingSessionSignature = 0;
+  uint64_t lastGpsPositionSignature = 0;
   uint64_t lastGpsSignature = 0;
   uint32_t headingSessionEpoch = 1;
   map_presentation::Presenter posePresenter;

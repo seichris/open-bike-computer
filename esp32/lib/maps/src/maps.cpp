@@ -3712,17 +3712,26 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
       resolvedHeading, !bleNavServer.supportsExplicitInvalidGpsHeading());
   const BLEDebugStats bleStats = bleNavServer.getDebugStats();
 
-  uint64_t gpsSignature = 1469598103934665603ULL;
-  gpsSignature = fnvMix64(gpsSignature, doubleBits(gps.gpsData.latitude));
-  gpsSignature = fnvMix64(gpsSignature, doubleBits(gps.gpsData.longitude));
-  gpsSignature = fnvMix64(gpsSignature, gps.gpsData.speed);
+  uint64_t gpsPositionSignature = 1469598103934665603ULL;
+  gpsPositionSignature =
+      fnvMix64(gpsPositionSignature, doubleBits(gps.gpsData.latitude));
+  gpsPositionSignature =
+      fnvMix64(gpsPositionSignature, doubleBits(gps.gpsData.longitude));
+  gpsPositionSignature = fnvMix64(gpsPositionSignature, gps.gpsData.speed);
+  // Identical coordinates are still a new physical fix. Packet timing and
+  // count belong to the position signature; route-derived headings do not.
+  gpsPositionSignature =
+      fnvMix64(gpsPositionSignature, bleStats.lastGpsPacketMs);
+  gpsPositionSignature =
+      fnvMix64(gpsPositionSignature, bleStats.gpsPacketCount);
+  uint64_t gpsSignature = gpsPositionSignature;
   gpsSignature = fnvMix64(gpsSignature, headingValid ? 1U : 0U);
   gpsSignature = fnvMix64(gpsSignature, doubleBits(resolvedHeading));
-  // An identical coordinate is still a fresh convergence anchor. Preserve the
-  // BLE packet time so dead reckoning cannot run past newly received fixes.
-  gpsSignature = fnvMix64(gpsSignature, bleStats.lastGpsPacketMs);
-  gpsSignature = fnvMix64(gpsSignature, bleStats.gpsPacketCount);
   if (gpsSignature != lastGpsSignature || !posePresenter.hasFix()) {
+    const bool physicalFixChanged =
+        gpsPositionSignature != lastGpsPositionSignature ||
+        !posePresenter.hasFix();
+    lastGpsPositionSignature = gpsPositionSignature;
     lastGpsSignature = gpsSignature;
     map_presentation::Fix fix;
     fix.position = {lon2x(gps.gpsData.longitude),
@@ -3734,14 +3743,16 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
         gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
     fix.worldUnitsPerMeter =
         1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
-    // Route-bearing changes may legitimately re-observe this fix for heading
-    // convergence, but they are not fresh GPS packets. Preserve the actual
-    // packet time so the bounded prediction horizon cannot be restarted by
-    // route traffic alone.
+    // The accepted transport timestamp owns physical freshness. Route-bearing
+    // changes use updateHeading below and cannot re-observe this position.
     fix.timestampMs = bleStats.gpsPacketCount != 0
                           ? bleStats.lastGpsPacketMs
                           : nowMs;
-    posePresenter.observe(fix, nowMs);
+    if (physicalFixChanged) {
+      posePresenter.observe(fix, nowMs);
+    } else {
+      posePresenter.updateHeading(resolvedHeading, headingValid, nowMs);
+    }
   }
   if (posePresenter.hasFix()) {
     const bool firstPose = !hasPresentedPose;

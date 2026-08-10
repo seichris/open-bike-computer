@@ -123,13 +123,17 @@ sole control of the image pivot.
 Prediction is deliberately finite. Test and real navigation share one 1 Hz
 device-pose heartbeat. Presentation runs at full reported speed for 1.5
 seconds, then integrates a linear speed decay through a hard horizon at 2.5
-seconds. Distance remains capped at 30 metres. A single missed heartbeat can
-therefore remain continuous, while genuine transport loss settles
-monotonically instead of drifting forever. The accepted GPS-packet timestamp,
-not a later route-bearing update, owns freshness. Repeated GPS packets with
-unchanged coordinates are still fresh observations and drive convergence. A
-new fix converges over a bounded interval rather than moving one visual layer
-independently.
+seconds. Distance remains capped at 70 metres, the maximum integrated travel
+under that horizon at the supported 35 m/s speed clamp. A single missed
+heartbeat can therefore remain continuous. The one missed heartbeat policy is
+independent of speed within that clamp, while genuine transport loss settles
+monotonically instead of drifting forever. The accepted GPS-packet
+timestamp, not a later route-bearing update, owns freshness. Repeated GPS
+packets with unchanged coordinates are still fresh observations and drive
+convergence. A new fix converges over a bounded interval rather than moving one
+visual layer independently. A route-only heading refinement can rotate
+presentation but cannot redefine the positional path owned by the last
+physical fix or move an exhausted pose to a newly rotated endpoint.
 
 ## Course-up state
 
@@ -217,6 +221,10 @@ the last and maximum accepted BLE GPS-packet gaps. `MAPIO: presentation` emits
 an immediate structured sample when presentation first starts or crosses the
 grace/exhausted boundaries. These fields distinguish a renderer stall from a
 missing or delayed device-pose heartbeat without changing render ownership.
+Arrival time and cadence are captured on the authenticated NimBLE callback
+task. If the latest-state mailbox coalesces several healthy packets during a UI
+stall, their timing summary survives even though only the newest position is
+applied when the UI task resumes.
 
 The declared initial UI/work-unit acceptance gate is 50 ms. Display-flush and UI
 maximum-gap telemetry remain the physical source of truth; host tests and a
@@ -227,7 +235,9 @@ successful firmware build do not establish that gate.
 Host tests cover semantic invalidation, position-only coalescing, stale rejection,
 invariant failure,
 bounded fake-clock slices, heading wrap/fallback, a missed 1 Hz heartbeat,
-decelerating finite prediction, source-timestamp freshness and convergence,
+decelerating finite prediction across the supported speed range,
+callback-arrival freshness/coalescing, exhausted heading-only updates,
+source-timestamp freshness and convergence,
 shared presentation transforms, exact route-head anchoring,
 deterministic building admission under block-order permutations, quota
 overflow, bounded courtyard workspace, and legacy protocol behavior.
