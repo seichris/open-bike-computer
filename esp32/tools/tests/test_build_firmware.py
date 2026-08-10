@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -35,11 +36,19 @@ from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
+    WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
+    WAVESHARE_PLATFORM_PACKAGES_SHA256,
     record_generated_sdkconfig_defaults,
     recognized_generated_sdkconfigs,
 )
 from record_flash_plan import record_flash_plan
+from pioarduino_custom_core import (
+    UPSTREAM_AMBIENT_UV_FALLBACK,
+    UPSTREAM_EDITABLE_ESPTOOL,
+    UPSTREAM_NESTED_PIO_BLOCK,
+    UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+)
 
 
 DUMMY_FILES = {
@@ -61,6 +70,62 @@ GENERATED_CONFIG = """# Automatically generated file. DO NOT EDIT.
 CONFIG_PM_ENABLE=y
 """
 
+RUNTIME_PROVENANCE = json.dumps(
+    {
+        "lockSetId": "unit-test-lock",
+        "manifestSha256": "1" * 64,
+        "target": "macos-arm64-cp313",
+        "bundleSha256": "2" * 64,
+        "pythonVersion": "3.13.15",
+        "pythonExecutableSha256": "3" * 64,
+        "runtimeTreeSha256": "4" * 64,
+        "pioSha256": "5" * 64,
+        "uvSha256": "6" * 64,
+        "platformioVersion": "6.1.18",
+        "topLevelDistributionSha256": "7" * 64,
+        "pioarduinoRootDistributionSha256": "8" * 64,
+        "espIdfDistributionSha256": "9" * 64,
+        "uvDistributionSha256": "a" * 64,
+        "esptoolDistributionSha256": "b" * 64,
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
+    },
+    sort_keys=True,
+)
+
+
+def platform_archive_bytes() -> bytes:
+    output = io.BytesIO()
+    penv_source = "\n".join(
+        (
+            UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+            UPSTREAM_AMBIENT_UV_FALLBACK,
+            UPSTREAM_AMBIENT_UV_FALLBACK,
+            UPSTREAM_EDITABLE_ESPTOOL,
+            UPSTREAM_EDITABLE_ESPTOOL,
+        )
+    )
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(
+            "platform-espressif32-test/builder/frameworks/espidf.py",
+            f"before\n{UPSTREAM_NESTED_PIO_BLOCK}\nafter\n",
+        )
+        archive.writestr(
+            "platform-espressif32-test/builder/penv_setup.py",
+            penv_source,
+        )
+        archive.writestr(
+            "platform-espressif32-test/platform.json",
+            '{"name":"espressif32"}\n',
+        )
+    return output.getvalue()
+
+
+def runtime_provenance_for_platform(platform_sha256: str) -> str:
+    value = json.loads(RUNTIME_PROVENANCE)
+    value["platformArchiveSha256"] = platform_sha256
+    return json.dumps(value, sort_keys=True)
+
 
 class FirmwareBuildTests(unittest.TestCase):
     environment = "WAVESHARE_AMOLED_175"
@@ -69,11 +134,27 @@ class FirmwareBuildTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
+        self.runtime_patch = patch.dict(
+            os.environ,
+            {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE},
+        )
+        self.runtime_patch.start()
+        self.addCleanup(self.runtime_patch.stop)
         (self.project_dir / "platformio.ini").write_text(
             f"[env:{self.environment}]\nplatform = test\n"
             f"[env:{self.other_environment}]\nplatform = test\n",
             encoding="utf-8",
         )
+        for relative in (
+            "prebuild.py",
+            "tools/build_firmware.py",
+            "tools/generated_sdkconfig.py",
+            "tools/pioarduino_custom_core.py",
+            "tools/firmware_runtime.py",
+        ):
+            path = self.project_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"unit test {relative}\n", encoding="utf-8")
         self.platform_archive = self.project_dir / ".pio/test-platform.zip"
         self.platform_archive.parent.mkdir()
         self.platform_archive.write_bytes(b"unit-test verified platform")
@@ -291,6 +372,7 @@ class FirmwareBuildTests(unittest.TestCase):
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
             core / "penv/bin/esptool",
+            core / "python_env/idf/bin/python",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
@@ -337,7 +419,11 @@ class FirmwareBuildTests(unittest.TestCase):
             encoding="utf-8",
         )
         subprocess.run(
-            ["git", "add", "platformio.ini", ".gitignore"],
+            [
+                "git", "add", "platformio.ini", ".gitignore", "prebuild.py",
+                "tools/build_firmware.py", "tools/generated_sdkconfig.py",
+                "tools/pioarduino_custom_core.py", "tools/firmware_runtime.py",
+            ],
             cwd=self.project_dir,
             check=True,
         )
@@ -1283,7 +1369,8 @@ class FirmwareBuildTests(unittest.TestCase):
                         "--project-dir",
                         str(self.project_dir),
                         "--upload-port=",
-                    ]
+                    ],
+                    runtime_handoff=lambda _argv, _project: None,
                 )
 
         self.assertEqual(result, 1)
@@ -1304,7 +1391,8 @@ class FirmwareBuildTests(unittest.TestCase):
                     "3C:DC:75:6E:F0:10",
                     "--device-timeout",
                     "12.5",
-                ]
+                ],
+                runtime_handoff=lambda _argv, _project: None,
             )
 
         self.assertEqual(result, 0)
@@ -1328,7 +1416,8 @@ class FirmwareBuildTests(unittest.TestCase):
                     "--project-dir",
                     str(self.project_dir),
                     "--upload-only",
-                ]
+                ],
+                runtime_handoff=lambda _argv, _project: None,
             )
 
         self.assertEqual(result, 1)
@@ -1408,7 +1497,7 @@ class FirmwareBuildTests(unittest.TestCase):
         private_python.write_text("#!/bin/sh\n", encoding="utf-8")
         private_python.chmod(0o755)
         resolver = self.project_dir / "tools/resolve_upload_port.py"
-        resolver.parent.mkdir()
+        resolver.parent.mkdir(exist_ok=True)
         resolver.write_text("# resolver\n", encoding="utf-8")
         manifest = {
             "environment": self.environment,
@@ -1490,7 +1579,7 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertFalse(
             (
                 self.project_dir
-                / ".pio/open-bike-build/sdkconfig-defaults.json"
+                / ".pio/open-bike-build/builds/WAVESHARE_AMOLED_175/current.json"
             ).exists()
         )
 
@@ -1649,10 +1738,13 @@ class FirmwareBuildTests(unittest.TestCase):
         retained_package.write_text("steady core state\n", encoding="utf-8")
 
         def runner(command, cwd):
-            self.assertFalse(stale_cache.exists())
+            self.assertTrue(stale_cache.exists())
             self.assertFalse(injected_global.exists())
             self.assertFalse(injected_board.exists())
             self.assertTrue((expected_root / "build-cache").is_dir())
+            selected_cache = Path(os.environ["PLATFORMIO_BUILD_CACHE_DIR"])
+            self.assertTrue(selected_cache.is_relative_to(expected_root / "build-cache/application"))
+            self.assertNotEqual(selected_cache, stale_cache.parent)
             self.assertTrue((expected_root / "lib").is_dir())
             self.assertTrue((expected_root / "boards").is_dir())
             self.assertTrue(retained_package.is_file())
@@ -1680,7 +1772,7 @@ class FirmwareBuildTests(unittest.TestCase):
 
     def test_downloads_and_content_pins_platform_project_config(self):
         self.platform_config_patch.stop()
-        payload = b"trusted platform archive"
+        payload = platform_archive_bytes()
         expected_sha = hashlib.sha256(payload).hexdigest()
         package_payload = b"trusted package archive"
         package_sha = hashlib.sha256(package_payload).hexdigest()
@@ -1690,6 +1782,10 @@ class FirmwareBuildTests(unittest.TestCase):
             encoding="utf-8",
         )
         with (
+            patch.dict(
+                os.environ,
+                {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": runtime_provenance_for_platform(expected_sha)},
+            ),
             patch(
                 "build_firmware.WAVESHARE_PLATFORM_ARCHIVE_SHA256",
                 expected_sha,
@@ -1714,7 +1810,7 @@ class FirmwareBuildTests(unittest.TestCase):
             )
             self.assertEqual(archive.read_bytes(), payload)
             verified = config.read_text(encoding="utf-8")
-            self.assertIn(archive.as_uri(), verified)
+            self.assertIn("platform-staging", verified)
             self.assertIn("tool-test @ file://", verified)
             self.assertNotIn(WAVESHARE_PLATFORM_URL, verified)
             _verified_platformio_project_config(self.project_dir)
@@ -1723,7 +1819,7 @@ class FirmwareBuildTests(unittest.TestCase):
 
     def test_bootstrap_wrappers_are_absent_from_steady_build_config(self):
         self.platform_config_patch.stop()
-        payload = b"trusted platform archive"
+        payload = platform_archive_bytes()
         expected_sha = hashlib.sha256(payload).hexdigest()
         package_payload = b"trusted wrapper archive"
         package_sha = hashlib.sha256(package_payload).hexdigest()
@@ -1736,6 +1832,10 @@ class FirmwareBuildTests(unittest.TestCase):
             encoding="utf-8",
         )
         with (
+            patch.dict(
+                os.environ,
+                {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": runtime_provenance_for_platform(expected_sha)},
+            ),
             patch("build_firmware.WAVESHARE_PLATFORM_ARCHIVE_SHA256", expected_sha),
             patch("build_firmware.WAVESHARE_PLATFORM_ARCHIVE_SIZE", len(payload)),
             patch(

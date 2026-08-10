@@ -1,0 +1,45 @@
+name: Firmware runtime refresh candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Candidate (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-x86_64-cp313
+          - runner: macos-15
+            target: macos-arm64-cp313
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate tracked candidate inputs and verifier tests
+        working-directory: esp32
+        run: |
+          PYTHONPATH=tools python -m unittest tools.tests.test_firmware_runtime
+          mkdir -p runtime-evidence
+          python tools/refresh_firmware_runtime.py inspect-inputs > runtime-evidence/inputs.json
+          python tools/refresh_firmware_runtime.py verify-python \
+            --target "${{ matrix.target }}" \
+            --output "${RUNNER_TEMP}/${{ matrix.target }}-python.tar.gz" \
+            > runtime-evidence/python.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-runtime-bootstrap-${{ matrix.target }}
+          path: esp32/runtime-evidence
+          if-no-files-found: error
+      - name: Explain acceptance gate
+        run: |
+          echo "This workflow currently verifies the tracked CPython bootstrap artifact and schemas."
+          echo "A complete accepted bundle still requires wheel closure, offline replay, both-board builds, and immutable release publication."
+          echo "It never commits, pushes, opens a PR, or marks a bundle accepted."

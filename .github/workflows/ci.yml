@@ -29,13 +29,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install PlatformIO
-        run: python -m pip install --upgrade platformio
-      - name: Build firmware
-        run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.target }}"
+      - name: Build with the repository-owned firmware runtime
+        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
 
   ios:
     name: iOS
@@ -114,6 +109,8 @@ jobs:
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
+            tools.tests.test_firmware_runtime \
+            tools.tests.test_device_registry \
             tools.tests.test_capture_boot \
             tools.tests.test_resolve_upload_port \
             tools.tests.test_map_guidance_integration \
@@ -442,6 +439,14 @@ jobs:
             tools/tests/test_sound_protocol.cpp \
             -o /tmp/test_sound_protocol
           /tmp/test_sound_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_speaker_resource_state.cpp \
+            -o /tmp/test_speaker_resource_state
+          /tmp/test_speaker_resource_state
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_sd_mount_policy.cpp \
+            -o /tmp/test_sd_mount_policy
+          /tmp/test_sd_mount_policy
       - name: Codec recovery host tests
         run: |
           cc -std=c11 -Wall -Wextra \
