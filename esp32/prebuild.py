@@ -2,11 +2,11 @@
 # Author: @hpsaturn
 # pre-build script, setting up build environment
 
+import json
 import os.path
 from platformio import util
 import shutil
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from SCons.Script import DefaultEnvironment
@@ -131,6 +131,24 @@ def ensure_verified_nested_build_config():
         )
 
     platform_dir = Path(env.PioPlatform().get_dir())
+    marker_path = platform_dir / ".open-bike-runtime-transform.json"
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise RuntimeError("pre-execution pioarduino transform marker is missing")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        runtime_provenance = json.loads(
+            os.environ["OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE"]
+        )
+    except (KeyError, OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("pre-execution pioarduino transform marker is invalid") from error
+    if (
+        not isinstance(marker, dict)
+        or marker.get("schema") != 1
+        or marker.get("platformArchiveSha256")
+        != os.environ.get("OPEN_BIKE_PLATFORM_ARCHIVE_SHA256")
+        or marker.get("runtimeProvenance") != runtime_provenance
+    ):
+        raise RuntimeError("pre-execution pioarduino transform identity changed")
     patches = (
         (
             platform_dir / "builder/frameworks/espidf.py",
@@ -153,29 +171,10 @@ def ensure_verified_nested_build_config():
             corrected = transform(source)
         except ValueError as error:
             raise RuntimeError(str(error)) from error
-        if corrected == source:
-            continue
-
-        temporary_name = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=installed_path.parent,
-                prefix=f".{installed_path.name}.",
-                delete=False,
-            ) as stream:
-                temporary_name = stream.name
-                stream.write(corrected)
-            Path(temporary_name).chmod(installed_path.stat().st_mode & 0o777)
-            os.replace(temporary_name, installed_path)
-            temporary_name = None
-        finally:
-            if temporary_name is not None:
-                try:
-                    Path(temporary_name).unlink()
-                except OSError:
-                    pass
+        if corrected != source:
+            raise RuntimeError(
+                f"pioarduino {label} script was not transformed before execution"
+            )
 
 
 ensure_verified_nested_build_config()

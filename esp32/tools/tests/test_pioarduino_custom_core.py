@@ -8,6 +8,10 @@ from pioarduino_custom_core import (
     CORRECTED_PM_LITERAL_MAPPING,
     CORRECTED_PM_TEXT_MAPPING,
     CORRECTED_PENV_URLLIB3_REQUIREMENT,
+    UPSTREAM_AMBIENT_UV_FALLBACK,
+    VERIFIED_LOCKED_UV_FALLBACK,
+    UPSTREAM_EDITABLE_ESPTOOL,
+    VERIFIED_WHEEL_ESPTOOL,
     PHASE_7A_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_TEXT_MAPPING,
@@ -130,32 +134,47 @@ class CorrectNestedPioCommandTests(unittest.TestCase):
 
 
 class CorrectPenvSetupTextTests(unittest.TestCase):
-    def test_aligns_urllib3_with_pinned_esptool(self):
-        corrected = correct_penv_setup_text(
-            f"before\n{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\nafter"
+    def source(self, requirement=UPSTREAM_PENV_URLLIB3_REQUIREMENT):
+        return "\n".join(
+            (
+                "before",
+                requirement,
+                UPSTREAM_AMBIENT_UV_FALLBACK,
+                UPSTREAM_AMBIENT_UV_FALLBACK,
+                UPSTREAM_EDITABLE_ESPTOOL,
+                UPSTREAM_EDITABLE_ESPTOOL,
+                "after",
+            )
         )
+
+    def test_aligns_urllib3_with_pinned_esptool(self):
+        corrected = correct_penv_setup_text(self.source())
 
         self.assertIn(CORRECTED_PENV_URLLIB3_REQUIREMENT, corrected)
         self.assertNotIn(UPSTREAM_PENV_URLLIB3_REQUIREMENT, corrected)
+        self.assertEqual(corrected.count(VERIFIED_LOCKED_UV_FALLBACK), 2)
+        self.assertEqual(corrected.count(VERIFIED_WHEEL_ESPTOOL), 2)
 
     def test_is_idempotent(self):
-        source = f"before\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}\nafter"
+        source = self.source(CORRECTED_PENV_URLLIB3_REQUIREMENT).replace(
+            UPSTREAM_AMBIENT_UV_FALLBACK, VERIFIED_LOCKED_UV_FALLBACK
+        ).replace(UPSTREAM_EDITABLE_ESPTOOL, VERIFIED_WHEEL_ESPTOOL)
 
         self.assertEqual(correct_penv_setup_text(source), source)
 
     def test_rejects_unknown_or_ambiguous_requirements(self):
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text("no urllib3 requirement")
+            correct_penv_setup_text(self.source().replace(UPSTREAM_PENV_URLLIB3_REQUIREMENT, ""))
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text(
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}"
-            )
+            correct_penv_setup_text(self.source().replace(
+                UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n{UPSTREAM_PENV_URLLIB3_REQUIREMENT}",
+            ))
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text(
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
-                f"{CORRECTED_PENV_URLLIB3_REQUIREMENT}"
-            )
+            correct_penv_setup_text(self.source().replace(
+                UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}",
+            ))
 
 
 if __name__ == "__main__":

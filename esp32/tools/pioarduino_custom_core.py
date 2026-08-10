@@ -34,6 +34,13 @@ VERIFIED_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
 UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
 CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
 
+UPSTREAM_AMBIENT_UV_FALLBACK = '''            if not os.path.isfile(uv_cmd):
+                uv_cmd = "uv"'''
+VERIFIED_LOCKED_UV_FALLBACK = '''            if not os.path.isfile(uv_cmd):
+                uv_cmd = os.environ["OPEN_BIKE_FIRMWARE_UV"]'''
+UPSTREAM_EDITABLE_ESPTOOL = '            "-e", esptool_repo_path'
+VERIFIED_WHEEL_ESPTOOL = '            os.environ["OPEN_BIKE_FIRMWARE_ESPTOOL_WHEEL"]'
+
 
 UPSTREAM_PM_LITERAL_MAPPING = (
     "*libesp_pm.a:pm_impl.*(.literal.esp_pm_get_configuration"
@@ -120,12 +127,29 @@ def correct_penv_setup_text(source: str) -> str:
     supported range lets both passes accept the same installed dependency
     instead of alternately replacing it and invalidating the core attestation.
     """
-    return _replace_exactly_once(
+    corrected = _replace_exactly_once(
         source,
         UPSTREAM_PENV_URLLIB3_REQUIREMENT,
         CORRECTED_PENV_URLLIB3_REQUIREMENT,
         "Python resolver urllib3 requirement",
     )
+    ambient_count = corrected.count(UPSTREAM_AMBIENT_UV_FALLBACK)
+    locked_count = corrected.count(VERIFIED_LOCKED_UV_FALLBACK)
+    if ambient_count == 2 and locked_count == 0:
+        corrected = corrected.replace(
+            UPSTREAM_AMBIENT_UV_FALLBACK, VERIFIED_LOCKED_UV_FALLBACK
+        )
+    elif ambient_count != 0 or locked_count != 2:
+        raise ValueError("pioarduino ambient uv fallback has an unexpected format")
+    editable_count = corrected.count(UPSTREAM_EDITABLE_ESPTOOL)
+    wheel_count = corrected.count(VERIFIED_WHEEL_ESPTOOL)
+    if editable_count == 2 and wheel_count == 0:
+        corrected = corrected.replace(
+            UPSTREAM_EDITABLE_ESPTOOL, VERIFIED_WHEEL_ESPTOOL
+        )
+    elif editable_count != 0 or wheel_count != 2:
+        raise ValueError("pioarduino editable esptool install has an unexpected format")
+    return corrected
 
 
 def correct_sections_text(sections_text: str) -> str:
