@@ -452,7 +452,15 @@ Extend `NavigationProtocolTests.swift` with deterministic policy coverage:
     when Bluetooth powers on;
 22. foreground/background transitions suspend and resume an owned explicit
     request without starting trusted reconnect; and
-23. Bluetooth-off and Watch-direct handoff clear unknown discovery state.
+23. Bluetooth-off and Watch-direct handoff clear unknown discovery state;
+24. production and host tests share the same Bluetooth power-transition
+    handler, including explicit-over-reconnect precedence;
+25. leaving Settings cancels its owned suspended discovery before restoring
+    trusted reconnect;
+26. foreground restoration cannot clear an in-flight pairing failure or replace
+    its retry UI with a stale progress state; and
+27. sensor enrollment or Bluetooth loss releases an unpresented candidate seal
+    so eligible opportunistic discovery can resume.
 
 Add UI-policy tests for sheet eligibility, modal-route identity, session
 dismissal, in-sheet pairing progression, and the connected-device disconnect

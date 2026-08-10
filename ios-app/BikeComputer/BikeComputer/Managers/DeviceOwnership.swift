@@ -459,6 +459,57 @@ enum BikeComputersMenuPolicy {
     }
 }
 
+enum BikeComputerSettingsDiscoveryCommand: Equatable {
+    case suspendUnknownDiscovery
+    case resumeUnknownDiscovery
+    case beginExplicitDiscovery
+    case cancelOwnedDiscovery
+}
+
+struct BikeComputerSettingsDiscoveryTransition: Equatable {
+    let ownsDiscoveryLifecycle: Bool
+    let commands: [BikeComputerSettingsDiscoveryCommand]
+}
+
+enum BikeComputerSettingsDiscoveryLifecyclePolicy {
+    static func sensorEnrollmentChanged(
+        isLooking: Bool,
+        shouldStartDiscovery: Bool,
+        ownsDiscoveryLifecycle: Bool
+    ) -> BikeComputerSettingsDiscoveryTransition {
+        if isLooking {
+            return BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+                commands: [.suspendUnknownDiscovery]
+            )
+        }
+        if shouldStartDiscovery && !ownsDiscoveryLifecycle {
+            return BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: true,
+                commands: [
+                    .resumeUnknownDiscovery,
+                    .beginExplicitDiscovery
+                ]
+            )
+        }
+        return BikeComputerSettingsDiscoveryTransition(
+            ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+            commands: [.resumeUnknownDiscovery]
+        )
+    }
+
+    static func screenDisappeared(
+        ownsDiscoveryLifecycle: Bool
+    ) -> BikeComputerSettingsDiscoveryTransition {
+        BikeComputerSettingsDiscoveryTransition(
+            ownsDiscoveryLifecycle: false,
+            commands: ownsDiscoveryLifecycle
+                ? [.cancelOwnedDiscovery, .resumeUnknownDiscovery]
+                : [.resumeUnknownDiscovery]
+        )
+    }
+}
+
 enum BikeComputerSettingsPresentationPolicy {
     static func title(
         knownDeviceCount: Int,

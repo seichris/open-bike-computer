@@ -12331,6 +12331,44 @@ struct NavigationProtocolTests {
             pairingCompletedDuringPresentation: false
         ), "an already-active explicit scan is not restarted")
         assertEqual(
+            BikeComputerSettingsDiscoveryLifecyclePolicy
+                .sensorEnrollmentChanged(
+                    isLooking: true,
+                    shouldStartDiscovery: true,
+                    ownsDiscoveryLifecycle: true
+                ),
+            BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: true,
+                commands: [.suspendUnknownDiscovery]
+            ),
+            "sensor enrollment yields the scanner without losing ownership"
+        )
+        assertEqual(
+            BikeComputerSettingsDiscoveryLifecyclePolicy
+                .sensorEnrollmentChanged(
+                    isLooking: false,
+                    shouldStartDiscovery: true,
+                    ownsDiscoveryLifecycle: true
+                ),
+            BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: true,
+                commands: [.resumeUnknownDiscovery]
+            ),
+            "ending sensor enrollment resumes an already-owned request"
+        )
+        assertEqual(
+            BikeComputerSettingsDiscoveryLifecyclePolicy
+                .screenDisappeared(ownsDiscoveryLifecycle: true),
+            BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: false,
+                commands: [
+                    .cancelOwnedDiscovery,
+                    .resumeUnknownDiscovery
+                ]
+            ),
+            "leaving Settings cancels its request before releasing suspension"
+        )
+        assertEqual(
             BikeComputerSettingsPresentationPolicy.title(
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
@@ -13351,11 +13389,21 @@ struct NavigationProtocolTests {
         )
         assert(!driver.isScanning,
                "sensor enrollment yields the physical scanner")
+        assertEqual(
+            manager.pairingStatusMessage,
+            nil,
+            "sensor enrollment hides the paused Bike Computer search status"
+        )
         manager.setUnknownDeviceDiscoverySuspended(false)
         assert(waitForMainLoop(timeout: 1) {
             manager.currentScanPurpose == .explicitDiscovery &&
                 driver.starts.count == 4
         }, "ending sensor enrollment resumes the same explicit request")
+        assertEqual(
+            manager.pairingStatusMessage,
+            "Looking for nearby Bike Computers…",
+            "resuming explicit discovery restores its search status"
+        )
 
         manager.setApplicationActive(false)
         assertEqual(manager.currentScanPurpose, .none,
@@ -13408,7 +13456,7 @@ struct NavigationProtocolTests {
             .none,
             "an explicit request waits without scanning while Bluetooth is off"
         )
-        deferredManager.setScanDriverPoweredOnForTesting(true)
+        deferredManager.setBluetoothPoweredOnForTesting(true)
         assertEqual(
             deferredManager.currentScanPurpose,
             .explicitDiscovery,
@@ -13432,6 +13480,95 @@ struct NavigationProtocolTests {
             deferredManager.currentScanPurpose == .explicitDiscovery &&
                 deferredDriver.starts.count == 2
         }, "foregrounding resumes explicit discovery before trusted reconnect")
+
+        deferredManager.setUnknownDeviceDiscoverySuspended(true)
+        let disappearance = BikeComputerSettingsDiscoveryLifecyclePolicy
+            .screenDisappeared(ownsDiscoveryLifecycle: true)
+        for command in disappearance.commands {
+            switch command {
+            case .cancelOwnedDiscovery:
+                deferredManager.cancelDeviceDiscovery(
+                    resumeAutoReconnect: true
+                )
+            case .resumeUnknownDiscovery:
+                deferredManager.setUnknownDeviceDiscoverySuspended(false)
+            case .suspendUnknownDiscovery, .beginExplicitDiscovery:
+                assertionFailure(
+                    "screen disappearance emitted an invalid command"
+                )
+            }
+        }
+        assertEqual(
+            deferredManager.currentScanPurpose,
+            .trustedReconnect(trustedIdentifier),
+            "leaving Settings releases explicit intent to trusted reconnect"
+        )
+        assertEqual(deferredDriver.starts.count, 3,
+                    "screen disappearance starts one trusted reconnect scan")
+
+        let failedManager = BLEManager()
+        let failedDriver = BLEScanDriverForTesting()
+        failedManager.installScanDriverForTesting(failedDriver)
+        failedManager.setApplicationActive(true)
+        failedManager.startDeviceDiscovery()
+        failedManager.installPausedExplicitDiscoveryFailureForTesting(
+            error: "Could not connect to that Bike Computer.",
+            status: "Connecting…"
+        )
+        failedManager.setApplicationActive(false)
+        failedManager.setApplicationActive(true)
+        assertEqual(
+            failedManager.pairingError,
+            "Could not connect to that Bike Computer.",
+            "foregrounding preserves an in-flight explicit pairing failure"
+        )
+        assertEqual(
+            failedManager.pairingStatusMessage,
+            "Connecting…",
+            "foregrounding does not replace a failed pairing with discovery UI"
+        )
+
+        let candidateManager = BLEManager()
+        let candidateDriver = BLEScanDriverForTesting()
+        candidateManager.installScanDriverForTesting(candidateDriver)
+        candidateManager.setApplicationActive(true)
+        let sealedCandidate = DiscoveredBikeComputerDevice(
+            peripheralIdentifier: UUID(
+                uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF"
+            )!,
+            advertisedName: "Bicino",
+            shortIdentifier: "FFFF",
+            identitySuffix: "FFFFFFFF",
+            isClaimed: false,
+            rssi: -42,
+            lastSeenAt: Date()
+        )
+        candidateManager.installNearbyCandidateForTesting(
+            sealedCandidate,
+            isPresented: false
+        )
+        candidateManager.setUnknownDeviceDiscoverySuspended(true)
+        assert(!candidateManager.isOpportunisticDiscoverySuppressed,
+               "sensor interruption releases an unpresented candidate seal")
+        candidateManager.setUnknownDeviceDiscoverySuspended(false)
+        assert(waitForMainLoop(timeout: 1) {
+            candidateManager.currentScanPurpose ==
+                .opportunisticDiscovery &&
+                candidateDriver.starts.count == 2
+        }, "opportunistic discovery resumes after sensor interruption")
+        candidateManager.installNearbyCandidateForTesting(
+            sealedCandidate,
+            isPresented: false
+        )
+        candidateManager.setBluetoothPoweredOnForTesting(false)
+        assert(!candidateManager.isOpportunisticDiscoverySuppressed,
+               "Bluetooth loss releases an unpresented candidate seal")
+        candidateManager.setBluetoothPoweredOnForTesting(true)
+        assert(waitForMainLoop(timeout: 1) {
+            candidateManager.currentScanPurpose ==
+                .opportunisticDiscovery &&
+                candidateDriver.starts.count == 3
+        }, "Bluetooth restoration resumes opportunistic discovery")
 
         let exclusiveManager = BLEManager()
         let exclusiveDriver = BLEScanDriverForTesting()

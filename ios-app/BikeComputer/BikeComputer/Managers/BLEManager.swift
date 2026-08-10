@@ -1662,14 +1662,32 @@ class BLEManager: NSObject, ObservableObject {
             : "powered off"
     }
 
-    func setScanDriverPoweredOnForTesting(_ isPoweredOn: Bool) {
+    func setBluetoothPoweredOnForTesting(_ isPoweredOn: Bool) {
         guard let scanDriverForTesting else { return }
         scanDriverForTesting.isPoweredOn = isPoweredOn
-        centralStateDescription = isPoweredOn ? "powered on" : "powered off"
-        if !isPoweredOn {
-            stopPhysicalScan(reason: "test scan driver powered off")
-        }
-        reconcileScanning(reason: "test scan driver power changed")
+        handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
+    }
+
+    func installNearbyCandidateForTesting(
+        _ candidate: DiscoveredBikeComputerDevice,
+        isPresented: Bool
+    ) {
+        stopPhysicalScan(reason: "test nearby candidate sealed")
+        nearbyBicinoCandidate = candidate
+        isNearbyBicinoCandidatePresented = isPresented
+        isOpportunisticDiscoverySuppressed = true
+    }
+
+    func installPausedExplicitDiscoveryFailureForTesting(
+        error: String,
+        status: String
+    ) {
+        stopPhysicalScan(reason: "test explicit candidate selected")
+        explicitDiscoveryRequested = true
+        isExplicitDiscoveryPausedForCandidate = true
+        isPairingMode = true
+        pairingError = error
+        pairingStatusMessage = status
     }
 #endif
     
@@ -1707,12 +1725,12 @@ class BLEManager: NSObject, ObservableObject {
                 opportunisticCandidateExpiryTimer?.invalidate()
                 opportunisticCandidateExpiryTimer = nil
             }
-            if explicitDiscoveryRequested {
+            if isPureExplicitDiscoveryPhase {
                 autoReconnect = false
                 pairingError = isScanDriverPoweredOn
                     ? nil
                     : "Turn on Bluetooth to add a Bike Computer."
-                if !isExplicitDiscoveryPausedForCandidate {
+                if !isUnknownDeviceDiscoverySuspended {
                     pairingStatusMessage = isScanDriverPoweredOn
                         ? "Looking for nearby Bike Computers…"
                         : nil
@@ -1761,7 +1779,17 @@ class BLEManager: NSObject, ObservableObject {
         guard isUnknownDeviceDiscoverySuspended != isSuspended else { return }
         isUnknownDeviceDiscoverySuspended = isSuspended
         if isSuspended {
-            clearUnknownDiscoveryState()
+            if isPureExplicitDiscoveryPhase {
+                pairingStatusMessage = nil
+            }
+            clearUnknownDiscoveryState(
+                releasingUnpresentedCandidateSuppression: true
+            )
+        } else if isPureExplicitDiscoveryPhase,
+                  isApplicationActive,
+                  isScanDriverPoweredOn {
+            pairingError = nil
+            pairingStatusMessage = "Looking for nearby Bike Computers…"
         }
         reconcileScanning(
             reason: isSuspended
@@ -1848,6 +1876,16 @@ class BLEManager: NSObject, ObservableObject {
                     deviceOperationDeviceID != nil
             )
         )
+    }
+
+    private var isPureExplicitDiscoveryPhase: Bool {
+        explicitDiscoveryRequested &&
+            !isExplicitDiscoveryPausedForCandidate &&
+            pendingPairingSession == nil &&
+            pendingPairingMaterial == nil &&
+            pairingPrompt == nil &&
+            pendingScannedConnectionIdentifier == nil &&
+            !hasActiveBLESession
     }
 
     private func reconcileScanning(reason: String) {
@@ -1970,8 +2008,13 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearUnknownDiscoveryState(
-        keepingCandidate: Bool = false
+        keepingCandidate: Bool = false,
+        releasingUnpresentedCandidateSuppression: Bool = false
     ) {
+        let shouldReleaseCandidateSuppression =
+            releasingUnpresentedCandidateSuppression &&
+            nearbyBicinoCandidate != nil &&
+            !isNearbyBicinoCandidatePresented
         discoveryFreshnessTimer?.invalidate()
         discoveryFreshnessTimer = nil
         opportunisticSelectionTimer?.invalidate()
@@ -1984,6 +2027,9 @@ class BLEManager: NSObject, ObservableObject {
             opportunisticCandidateExpiryTimer = nil
             nearbyBicinoCandidate = nil
             isNearbyBicinoCandidatePresented = false
+        }
+        if shouldReleaseCandidateSuppression {
+            isOpportunisticDiscoverySuppressed = false
         }
     }
     
@@ -4430,7 +4476,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping reconnect while Apple Watch direct ride is active")
             return
         }
-        guard centralManager.state == .poweredOn else {
+        guard isScanDriverPoweredOn else {
             log("Cannot reconnect: Bluetooth not powered on")
             return
         }
@@ -4444,7 +4490,11 @@ class BLEManager: NSObject, ObservableObject {
             reconcileScanning(reason: "no trusted Bike Computer saved")
             return
         }
-        
+
+#if HOST_TESTING
+        reconcileScanning(reason: "test trusted Bike Computer reconnect")
+        return
+#else
         let peripherals = centralManager.retrievePeripherals(withIdentifiers: [uuid])
         
         if let peripheral = peripherals.first {
@@ -4454,6 +4504,7 @@ class BLEManager: NSObject, ObservableObject {
             log("Last device not found, starting scan")
             reconcileScanning(reason: "trusted Bike Computer not cached")
         }
+#endif
     }
     
     // MARK: - Private Methods
@@ -6360,14 +6411,12 @@ extension BLEManager: CBCentralManagerDelegate {
     }
     
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state != .poweredOn {
-            let shouldRetainExplicitDiscovery =
-                explicitDiscoveryRequested &&
-                !isExplicitDiscoveryPausedForCandidate &&
-                pendingPairingSession == nil &&
-                pendingPairingMaterial == nil &&
-                pairingPrompt == nil
-            if shouldRetainExplicitDiscovery {
+        handleCentralStateChange(central.state)
+    }
+
+    private func handleCentralStateChange(_ state: CBManagerState) {
+        if state != .poweredOn {
+            if isPureExplicitDiscoveryPhase {
                 autoReconnect = false
                 pairingStatusMessage = nil
                 pairingError =
@@ -6382,10 +6431,12 @@ extension BLEManager: CBCentralManagerDelegate {
             pendingScannedConnectionIdentifier = nil
             pendingScannedConnectionTimeoutTimer?.invalidate()
             pendingScannedConnectionTimeoutTimer = nil
-            clearUnknownDiscoveryState()
+            clearUnknownDiscoveryState(
+                releasingUnpresentedCandidateSuppression: true
+            )
             stopPhysicalScan(reason: "Bluetooth unavailable")
         }
-        switch central.state {
+        switch state {
         case .poweredOn:
             centralStateDescription = "powered on"
             log("Bluetooth powered on")
@@ -6399,8 +6450,11 @@ extension BLEManager: CBCentralManagerDelegate {
                 log("Using restored Bike Computer connection")
             } else if explicitDiscoveryRequested {
                 autoReconnect = false
-                pairingError = nil
-                if !isExplicitDiscoveryPausedForCandidate {
+                if isPureExplicitDiscoveryPhase {
+                    pairingError = nil
+                }
+                if isPureExplicitDiscoveryPhase &&
+                    !isUnknownDeviceDiscoverySuspended {
                     pairingStatusMessage =
                         "Looking for nearby Bike Computers…"
                 }

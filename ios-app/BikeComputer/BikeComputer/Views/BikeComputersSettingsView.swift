@@ -164,23 +164,24 @@ struct BikeComputersSettingsView: View {
         }
         .onChange(of: sensorDetectionCoordinator.isLooking) {
             isLooking in
-            if isLooking {
-                bleManager.setUnknownDeviceDiscoverySuspended(true)
-            } else if shouldStartBikeComputerDiscovery,
-                      !ownsDiscoveryLifecycle {
-                bleManager.setUnknownDeviceDiscoverySuspended(false)
-                beginDiscovery()
-            } else {
-                bleManager.setUnknownDeviceDiscoverySuspended(false)
-            }
+            applyDiscoveryTransition(
+                BikeComputerSettingsDiscoveryLifecyclePolicy
+                    .sensorEnrollmentChanged(
+                        isLooking: isLooking,
+                        shouldStartDiscovery:
+                            shouldStartBikeComputerDiscovery,
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle
+                    )
+            )
         }
         .onDisappear {
             sensorDetectionCoordinator.stopLooking()
-            if ownsDiscoveryLifecycle {
-                ownsDiscoveryLifecycle = false
-                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
-            }
-            bleManager.setUnknownDeviceDiscoverySuspended(false)
+            applyDiscoveryTransition(
+                BikeComputerSettingsDiscoveryLifecyclePolicy
+                    .screenDisappeared(
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle
+                    )
+            )
         }
     }
 
@@ -262,6 +263,24 @@ struct BikeComputersSettingsView: View {
     private func beginDiscovery() {
         ownsDiscoveryLifecycle = true
         bleManager.startDeviceDiscovery()
+    }
+
+    private func applyDiscoveryTransition(
+        _ transition: BikeComputerSettingsDiscoveryTransition
+    ) {
+        ownsDiscoveryLifecycle = transition.ownsDiscoveryLifecycle
+        for command in transition.commands {
+            switch command {
+            case .suspendUnknownDiscovery:
+                bleManager.setUnknownDeviceDiscoverySuspended(true)
+            case .resumeUnknownDiscovery:
+                bleManager.setUnknownDeviceDiscoverySuspended(false)
+            case .beginExplicitDiscovery:
+                bleManager.startDeviceDiscovery()
+            case .cancelOwnedDiscovery:
+                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+            }
+        }
     }
 
     private func handleConnectNewBikeComputer() {
