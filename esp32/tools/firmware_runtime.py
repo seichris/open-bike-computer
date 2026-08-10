@@ -775,6 +775,20 @@ def ensure_runtime_handoff(
     environment["OPEN_BIKE_FIRMWARE_WHEELHOUSE"] = str(paths.wheelhouse)
     environment["OPEN_BIKE_FIRMWARE_UV"] = str(paths.uv)
     environment["OPEN_BIKE_FIRMWARE_ESPTOOL_WHEEL"] = str(esptool_wheels[0])
+    requirements = paths.root / "requirements"
+    pioarduino_requirements = requirements / "pioarduino-root.txt"
+    esp_idf_requirements = requirements / "esp-idf.txt"
+    for path in (pioarduino_requirements, esp_idf_requirements):
+        if path.is_symlink() or not path.is_file():
+            raise FirmwareRuntimeError(
+                f"locked runtime requirements are missing or unsafe: {path.name}"
+            )
+    environment["OPEN_BIKE_FIRMWARE_PIOARDUINO_REQUIREMENTS"] = str(
+        pioarduino_requirements
+    )
+    environment["OPEN_BIKE_FIRMWARE_ESP_IDF_REQUIREMENTS"] = str(
+        esp_idf_requirements
+    )
     environment["OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS"] = str(
         max(0, round((time.monotonic() - bootstrap_start) * 1000))
     )

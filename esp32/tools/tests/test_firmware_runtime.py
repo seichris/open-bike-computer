@@ -40,6 +40,8 @@ class FirmwareRuntimeTests(unittest.TestCase):
             "bin/pio": b"#!/bin/sh\nexit 0\n",
             "bin/uv": b"#!/bin/sh\nexit 0\n",
             "python/bin/python3": b"#!/bin/sh\nexit 0\n",
+            "requirements/pioarduino-root.txt": b"unit-test==1\n",
+            "requirements/esp-idf.txt": b"unit-test==1\n",
             "wheelhouse/unit_test-1-py3-none-any.whl": b"not executed in verifier tests",
             "wheelhouse/esptool-5.1.0-py3-none-any.whl": b"not executed in verifier tests",
         }

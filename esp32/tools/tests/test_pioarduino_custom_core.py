@@ -8,9 +8,24 @@ from pioarduino_custom_core import (
     CORRECTED_PM_LITERAL_MAPPING,
     CORRECTED_PM_TEXT_MAPPING,
     CORRECTED_PENV_URLLIB3_REQUIREMENT,
+    IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
+    UPSTREAM_ESPTOOL_MATCH,
+    UPSTREAM_EXTERNAL_UV_INSTALL,
+    UPSTREAM_IDF_INSTALL_COMMAND,
+    UPSTREAM_INTERNET_INSTALL_GATE,
+    UPSTREAM_PENV_INSTALL_GUARD,
+    UPSTREAM_PLATFORMIO_REQUIREMENT,
+    UPSTREAM_ROOT_INSTALL_COMMAND,
     VERIFIED_LOCKED_UV_FALLBACK,
     UPSTREAM_EDITABLE_ESPTOOL,
+    VERIFIED_ESPTOOL_MATCH,
+    VERIFIED_EXTERNAL_UV_INSTALL,
+    VERIFIED_IDF_INSTALL_COMMAND,
+    VERIFIED_OFFLINE_INSTALL_GATE,
+    VERIFIED_PENV_INSTALL_GUARD,
+    VERIFIED_PLATFORMIO_REQUIREMENT,
+    VERIFIED_ROOT_INSTALL_COMMAND,
     VERIFIED_WHEEL_ESPTOOL,
     PHASE_7A_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_LITERAL_MAPPING,
@@ -23,6 +38,7 @@ from pioarduino_custom_core import (
     UPSTREAM_NESTED_PIO_BLOCK,
     VERIFIED_NESTED_PIO_BLOCK,
     correct_nested_pio_command,
+    correct_espidf_setup_text,
     correct_penv_setup_text,
     correct_sections_text,
 )
@@ -138,9 +154,16 @@ class CorrectPenvSetupTextTests(unittest.TestCase):
         return "\n".join(
             (
                 "before",
+                UPSTREAM_PLATFORMIO_REQUIREMENT,
                 requirement,
+                UPSTREAM_EXTERNAL_UV_INSTALL,
+                UPSTREAM_PENV_INSTALL_GUARD,
+                UPSTREAM_ROOT_INSTALL_COMMAND,
+                UPSTREAM_INTERNET_INSTALL_GATE,
                 UPSTREAM_AMBIENT_UV_FALLBACK,
                 UPSTREAM_AMBIENT_UV_FALLBACK,
+                UPSTREAM_ESPTOOL_MATCH,
+                UPSTREAM_ESPTOOL_MATCH,
                 UPSTREAM_EDITABLE_ESPTOOL,
                 UPSTREAM_EDITABLE_ESPTOOL,
                 "after",
@@ -154,11 +177,27 @@ class CorrectPenvSetupTextTests(unittest.TestCase):
         self.assertNotIn(UPSTREAM_PENV_URLLIB3_REQUIREMENT, corrected)
         self.assertEqual(corrected.count(VERIFIED_LOCKED_UV_FALLBACK), 2)
         self.assertEqual(corrected.count(VERIFIED_WHEEL_ESPTOOL), 2)
+        self.assertEqual(corrected.count(VERIFIED_ESPTOOL_MATCH), 2)
+        self.assertIn(VERIFIED_PLATFORMIO_REQUIREMENT, corrected)
+        self.assertIn(VERIFIED_EXTERNAL_UV_INSTALL, corrected)
+        self.assertIn(VERIFIED_PENV_INSTALL_GUARD, corrected)
+        self.assertIn(VERIFIED_ROOT_INSTALL_COMMAND, corrected)
+        self.assertIn(VERIFIED_OFFLINE_INSTALL_GATE, corrected)
+        self.assertNotIn("https://github.com/pioarduino/platformio-core", corrected)
 
     def test_is_idempotent(self):
         source = self.source(CORRECTED_PENV_URLLIB3_REQUIREMENT).replace(
             UPSTREAM_AMBIENT_UV_FALLBACK, VERIFIED_LOCKED_UV_FALLBACK
         ).replace(UPSTREAM_EDITABLE_ESPTOOL, VERIFIED_WHEEL_ESPTOOL)
+        for stale, final in (
+            (UPSTREAM_PLATFORMIO_REQUIREMENT, VERIFIED_PLATFORMIO_REQUIREMENT),
+            (UPSTREAM_EXTERNAL_UV_INSTALL, VERIFIED_EXTERNAL_UV_INSTALL),
+            (UPSTREAM_PENV_INSTALL_GUARD, VERIFIED_PENV_INSTALL_GUARD),
+            (UPSTREAM_ROOT_INSTALL_COMMAND, VERIFIED_ROOT_INSTALL_COMMAND),
+            (UPSTREAM_INTERNET_INSTALL_GATE, VERIFIED_OFFLINE_INSTALL_GATE),
+            (UPSTREAM_ESPTOOL_MATCH, VERIFIED_ESPTOOL_MATCH),
+        ):
+            source = source.replace(stale, final)
 
         self.assertEqual(correct_penv_setup_text(source), source)
 
@@ -175,6 +214,31 @@ class CorrectPenvSetupTextTests(unittest.TestCase):
                 UPSTREAM_PENV_URLLIB3_REQUIREMENT,
                 f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}",
             ))
+
+
+class CorrectEspIdfSetupTextTests(unittest.TestCase):
+    def source(self):
+        return "\n".join(
+            ["before", *(stale for stale, _ in IDF_EXACT_REQUIREMENTS), UPSTREAM_IDF_INSTALL_COMMAND, "after"]
+        )
+
+    def test_pins_and_routes_esp_idf_dependencies_offline(self):
+        corrected = correct_espidf_setup_text(self.source())
+
+        for stale, final in IDF_EXACT_REQUIREMENTS:
+            self.assertNotIn(stale, corrected)
+            self.assertIn(final, corrected)
+        self.assertIn(VERIFIED_IDF_INSTALL_COMMAND, corrected)
+        self.assertNotIn(UPSTREAM_IDF_INSTALL_COMMAND, corrected)
+
+    def test_is_idempotent(self):
+        corrected = correct_espidf_setup_text(self.source())
+
+        self.assertEqual(correct_espidf_setup_text(corrected), corrected)
+
+    def test_rejects_an_unknown_idf_dependency_shape(self):
+        with self.assertRaisesRegex(ValueError, "ESP-IDF exact dependency"):
+            correct_espidf_setup_text(self.source().replace(IDF_EXACT_REQUIREMENTS[0][0], ""))
 
 
 if __name__ == "__main__":
