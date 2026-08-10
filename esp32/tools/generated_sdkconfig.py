@@ -25,7 +25,7 @@ from firmware_build_identity import (
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GENERATED_BANNER = b"# Automatically generated file. DO NOT EDIT."
 GENERATED_DESCRIPTION = b"Project Configuration"
-CACHE_SCHEMA = 19
+CACHE_SCHEMA = 20
 FLASH_PLAN_SCHEMA = 2
 FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
@@ -182,6 +182,51 @@ def _canonical_json_sha256(value: object) -> str:
 
 def _cache_manifest_path(project_dir: Path) -> Path:
     return project_dir / ".pio" / "open-bike-build" / "sdkconfig-defaults.json"
+
+
+def _runtime_provenance() -> dict[str, object] | None:
+    raw = os.environ.get("OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    required = {
+        "lockSetId",
+        "manifestSha256",
+        "target",
+        "bundleSha256",
+        "pythonVersion",
+        "pythonExecutableSha256",
+        "runtimeTreeSha256",
+        "pioSha256",
+        "uvSha256",
+        "platformioVersion",
+        "topLevelDistributionSha256",
+        "pioarduinoRootDistributionSha256",
+        "espIdfDistributionSha256",
+        "uvDistributionSha256",
+        "esptoolDistributionSha256",
+        "platformArchiveSha256",
+        "platformPackagesSha256",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        return None
+    if not all(isinstance(value[key], str) and value[key] for key in required):
+        return None
+    for key in required - {
+        "lockSetId", "target", "pythonVersion", "platformioVersion"
+    }:
+        if re.fullmatch(r"[0-9a-f]{64}", value[key]) is None:
+            return None
+    if (
+        value["platformArchiveSha256"] != WAVESHARE_PLATFORM_ARCHIVE_SHA256
+        or value["platformPackagesSha256"]
+        != WAVESHARE_PLATFORM_PACKAGES_SHA256
+    ):
+        return None
+    return value
 
 
 def _tree_sha256(root: Path, *, allow_empty: bool = False) -> str:
@@ -1076,6 +1121,7 @@ def _cached_defaults_match(
         and manifest.get("sourceIdentity") == source_identity
         and manifest.get("sourceDateEpoch") == source_date_epoch
         and manifest.get("buildTimestamp") == build_timestamp
+        and manifest.get("runtimeProvenance") == _runtime_provenance()
         and manifest.get("managedComponentsSha256") == managed_components_sha
         and manifest.get("libraryDependenciesSha256")
         == library_dependencies_sha
@@ -1271,8 +1317,13 @@ def record_generated_sdkconfig_defaults(
             f"cannot fingerprint PlatformIO configuration: {platformio_ini}"
         )
     core_attestation = _core_attestation(project_dir, environment)
+    runtime_provenance = _runtime_provenance()
     source_identity = current_source_identity(project_dir, environment)
-    if core_attestation is None or FULL_GIT_SHA.fullmatch(source_identity) is None:
+    if (
+        core_attestation is None
+        or runtime_provenance is None
+        or FULL_GIT_SHA.fullmatch(source_identity) is None
+    ):
         manifest_path = _cache_manifest_path(project_dir)
         if manifest_path.is_file() or manifest_path.is_symlink():
             manifest_path.unlink()
@@ -1299,6 +1350,7 @@ def record_generated_sdkconfig_defaults(
         "sourceIdentity": source_identity,
         "sourceDateEpoch": source_date_epoch,
         "buildTimestamp": build_timestamp,
+        "runtimeProvenance": runtime_provenance,
         "managedComponentsSha256": managed_components_sha,
         "libraryDependenciesSha256": library_dependencies_sha,
         "sdkconfigDefaultsSha256": _file_sha256(defaults),

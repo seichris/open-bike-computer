@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from generated_sdkconfig import (
     GeneratedSdkconfigError,
+    WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+    WAVESHARE_PLATFORM_PACKAGES_SHA256,
     _default_platformio_core_dir,
     prepare_generated_sdkconfigs,
     record_generated_sdkconfig_defaults,
@@ -28,9 +30,38 @@ GENERATED_CONFIG = """# generated prefix may precede the banner
 CONFIG_PM_ENABLE=y
 """
 
+RUNTIME_PROVENANCE = json.dumps(
+    {
+        "lockSetId": "unit-test-lock",
+        "manifestSha256": "1" * 64,
+        "target": "macos-arm64-cp313",
+        "bundleSha256": "2" * 64,
+        "pythonVersion": "3.13.15",
+        "pythonExecutableSha256": "3" * 64,
+        "runtimeTreeSha256": "4" * 64,
+        "pioSha256": "5" * 64,
+        "uvSha256": "6" * 64,
+        "platformioVersion": "6.1.18",
+        "topLevelDistributionSha256": "7" * 64,
+        "pioarduinoRootDistributionSha256": "8" * 64,
+        "espIdfDistributionSha256": "9" * 64,
+        "uvDistributionSha256": "a" * 64,
+        "esptoolDistributionSha256": "b" * 64,
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
+    },
+    sort_keys=True,
+)
+
 
 class GeneratedSdkconfigTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.runtime_patch = patch.dict(
+            os.environ,
+            {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE},
+        )
+        self.runtime_patch.start()
+        self.addCleanup(self.runtime_patch.stop)
         self.source_identity_patch = patch(
             "generated_sdkconfig.current_source_identity",
             return_value="a" * 40,
@@ -178,7 +209,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 )
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-                self.assertEqual(manifest["schema"], 19)
+                self.assertEqual(manifest["schema"], 20)
+                self.assertEqual(
+                    manifest["runtimeProvenance"], json.loads(RUNTIME_PROVENANCE)
+                )
                 self.assertEqual(manifest["sourceDateEpoch"], "1712345678")
                 self.assertEqual(
                     manifest["buildTimestamp"], "2024-04-05T19:34:38Z"
@@ -191,6 +225,57 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     require_validated_generated_sdkconfig_defaults(
                         project, "WAVESHARE_AMOLED_175"
                     )
+
+    def test_runtime_identity_is_required_and_invalidates_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                self.assertIsNotNone(
+                    record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                )
+                changed = json.loads(RUNTIME_PROVENANCE)
+                changed["bundleSha256"] = "c" * 64
+                with patch.dict(
+                    os.environ,
+                    {
+                        "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": json.dumps(
+                            changed, sort_keys=True
+                        )
+                    },
+                ):
+                    self.assertEqual(
+                        prepare_generated_sdkconfigs(
+                            project, "WAVESHARE_AMOLED_175"
+                        ),
+                        (),
+                    )
+            self.assertFalse(defaults.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project), patch.dict(
+                os.environ,
+                {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": "{}"},
+            ):
+                self.assertIsNone(
+                    record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                )
 
     def test_uploader_mode_change_invalidates_recorded_core(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
