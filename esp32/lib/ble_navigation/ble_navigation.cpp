@@ -3551,10 +3551,6 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
-  // NimBLE callbacks run on the host task. Apply the latest renderer-visible
-  // route, GPS, and per-setting state here on the UI task so a synchronous
-  // rolling build sees one stable generation from first cell through last.
-  processPendingMapInputs();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
@@ -3573,6 +3569,12 @@ void BLENavigationServer::process() {
   // though ownership processing itself is disabled. Apply it on the UI task so
   // a locked device never advertises the add-device Welcome experience.
   applyPendingOwnershipUiUpdate();
+  // NimBLE callbacks run on the host task. Apply ownership presentation first
+  // so a PAIRED/auth result queued in the same interval unblocks the first
+  // post-pairing GPS fix or one-shot route. Then apply the latest
+  // renderer-visible route, GPS, and per-setting state on the UI task so a
+  // synchronous rolling build sees one stable generation throughout.
+  processPendingMapInputs();
   if (ownershipRestartRequested &&
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");

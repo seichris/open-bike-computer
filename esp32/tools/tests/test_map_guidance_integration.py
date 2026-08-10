@@ -512,6 +512,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("mapReentryPolicy.updatePhase(phase)", ownership_update)
         self.assertIn("pendingTransitionToMap = false", ownership_update)
         self.assertIn("mapReentryPolicy.allowsPendingMapEntry()", pending_transition)
+        ble_process = function_body(BLE_SOURCE, "void BLENavigationServer::process()")
+        self.assertLess(
+            ble_process.index("applyPendingOwnershipUiUpdate();"),
+            ble_process.index("processPendingMapInputs();"),
+        )
 
     def test_matched_ownership_commands_always_queue_ui_snapshot(self):
         auth_handler = function_body(BLE_SOURCE, "static void handleAuthPayload")
