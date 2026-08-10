@@ -26,6 +26,7 @@
 | [Watch + Bicino online and offline navigation](plans/watch-bicino-online-offline-navigation-implementation-plan.md) | Implemented in software; physical and provider-policy release gates remain open; tracks [issue #106](https://github.com/seichris/open-bike-computer/issues/106) |
 | [Watch + Bicino navigation release notes](watch-bicino-navigation-release-notes.md) | Draft release copy and release blockers |
 | [watchOS workout companion](plans/watchos-workout-companion-implementation-plan.md) | Implemented |
+| [Firmware runtime, core cache, SD, and maintenance hardening](plans/firmware-runtime-cache-sd-hardening-implementation-plan.md) | Planning only |
 
 ## Releases
 
