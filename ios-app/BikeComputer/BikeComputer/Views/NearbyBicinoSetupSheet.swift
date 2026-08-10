@@ -84,7 +84,7 @@ struct NearbyBicinoSetupSheet: View {
                 .frame(maxWidth: .infinity)
             }
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button {
                         bleManager.dismissNearbyBicinoCandidate(
                             peripheralIdentifier:

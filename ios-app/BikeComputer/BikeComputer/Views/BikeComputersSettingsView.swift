@@ -123,7 +123,7 @@ struct BikeComputersSettingsView: View {
             isPresented: $showingDisconnectForDiscoveryConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Disconnect and Search", role: .destructive) {
+            Button("Disconnect and Search") {
                 ownsDiscoveryLifecycle = true
                 bleManager.disconnectCurrentDeviceAndStartDiscovery()
             }
@@ -143,6 +143,15 @@ struct BikeComputersSettingsView: View {
                selectedCandidate == nil {
                 bleManager.startDeviceDiscovery()
             }
+        }
+        .onChange(of: bleManager.isApplicationActive) { isActive in
+            guard BikeComputersMenuPolicy
+                    .shouldRestartOwnedDiscoveryOnForeground(
+                        isApplicationActive: isActive,
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+                        hasPresentedCandidate: selectedCandidate != nil
+                    ) else { return }
+            bleManager.startDeviceDiscovery()
         }
         .onChange(of: bleManager.knownDevices.count) { count in
             if shouldStartBikeComputerDiscovery {
@@ -432,9 +441,17 @@ struct BikeComputerPairingFlow: View {
                     Section {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
-                        Button("Try Again") {
-                            bleManager.cancelPairing()
-                            didStart = false
+                        switch pairingErrorAction {
+                        case .retry:
+                            Button("Try Again") {
+                                bleManager.cancelPairing()
+                                didStart = false
+                            }
+                        case .close:
+                            Button("Close") {
+                                bleManager.cancelPairing()
+                                dismiss()
+                            }
                         }
                     }
                 }
@@ -467,6 +484,15 @@ struct BikeComputerPairingFlow: View {
             return nil
         }
         return bleManager.pairingPrompt
+    }
+
+    private var pairingErrorAction: BikeComputerPairingErrorAction {
+        BikeComputerPairingErrorActionPolicy.action(
+            hasRetainedNearbyCandidate:
+                bleManager.nearbyCandidate(
+                    peripheralIdentifier: candidate.peripheralIdentifier
+                ) != nil
+        )
     }
 
     private func startPairing() {

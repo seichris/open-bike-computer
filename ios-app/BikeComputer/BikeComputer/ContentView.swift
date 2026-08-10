@@ -315,6 +315,7 @@ struct ContentView: View {
             observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             synchronizeRideMetricsSheet()
+            presentNearbyBicinoIfEligible()
         }
         .onChange(of: scenePhase) { newValue in
             onApplicationActiveChange(newValue == .active)
@@ -324,6 +325,7 @@ struct ContentView: View {
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
@@ -377,6 +379,11 @@ struct ContentView: View {
         }
         .onChange(of: coordinator.bleManager.knownDevices.count) { _ in
             presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: visibleOfflineMapOnboardingStep) { step in
+            if step == nil {
+                presentNearbyBicinoIfEligible()
+            }
         }
         .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
             schedulePendingMapInstallResume()

@@ -12608,6 +12608,15 @@ struct NavigationProtocolTests {
             "restoration never trusts an arbitrary peripheral without a saved current device"
         )
         assertEqual(
+            BLERestorationPolicy.selectedIdentifier(
+                from: [restoredA, restoredB],
+                trustedIdentifier: restoredB,
+                isConnectionExclusiveOperationActive: true
+            ),
+            nil,
+            "restoration cannot bypass an active Watch-direct BLE handoff"
+        )
+        assertEqual(
             BLERestorationPolicy.identifiersToCancel(
                 from: [restoredA, restoredB],
                 keeping: restoredB
@@ -12959,6 +12968,56 @@ struct NavigationProtocolTests {
             .none,
             "Bluetooth-off state prohibits every scan"
         )
+        assert(
+            !BLEScanPurpose.trustedReconnect(trusted).logDescription
+                .contains(trusted.uuidString),
+            "scan diagnostics do not expose a trusted peripheral identifier"
+        )
+        assert(
+            !BLEScanPurpose.selectedPeripheral(selected).logDescription
+                .contains(selected.uuidString),
+            "scan diagnostics do not expose a selected peripheral identifier"
+        )
+
+        let scanStoppedAt = Date(timeIntervalSince1970: 50)
+        let callbackDrainDelay = BLEScanCallbackDrainPolicy.delay(
+            after: scanStoppedAt,
+            now: scanStoppedAt
+        )
+        assert(
+            callbackDrainDelay > 0 &&
+                callbackDrainDelay <= BLEScanCallbackDrainPolicy.interval,
+            "an unknown-device scan waits for callbacks from the prior scan"
+        )
+        assertEqual(
+            BLEScanCallbackDrainPolicy.delay(
+                after: scanStoppedAt,
+                now: scanStoppedAt.addingTimeInterval(
+                    BLEScanCallbackDrainPolicy.interval
+                )
+            ),
+            0,
+            "the callback-drain boundary adds no delay after its interval"
+        )
+        assertEqual(
+            BLEScanCallbackDrainPolicy.delay(after: nil, now: scanStoppedAt),
+            0,
+            "the first scan does not wait for a nonexistent predecessor"
+        )
+        assert(
+            BLEBackgroundDiscoveryPolicy.shouldRestoreTrustedReconnect(
+                isAbandoningExplicitDiscovery: true,
+                knownDeviceCount: 1
+            ),
+            "backgrounding an explicit add-device flow restores trusted reconnect"
+        )
+        assert(
+            !BLEBackgroundDiscoveryPolicy.shouldRestoreTrustedReconnect(
+                isAbandoningExplicitDiscovery: true,
+                knownDeviceCount: 0
+            ),
+            "an empty registry never enables trusted reconnect"
+        )
 
         let now = Date(timeIntervalSince1970: 100)
         let candidate = DiscoveredBikeComputerDevice(
@@ -13059,6 +13118,24 @@ struct NavigationProtocolTests {
             selected,
             "the bounded window selects the strongest eligible candidate"
         )
+        var unavailableSignal = candidate
+        unavailableSignal.rssi = 127
+        assertEqual(
+            BLEOpportunisticCandidatePolicy.strongest(
+                from: [
+                    BLEDiscoveryObservation(
+                        device: unavailableSignal,
+                        generation: 7
+                    ),
+                    BLEDiscoveryObservation(device: weaker, generation: 7)
+                ],
+                activeGeneration: 7,
+                knownDevices: [],
+                now: now
+            )?.device.peripheralIdentifier,
+            weaker.peripheralIdentifier,
+            "an unavailable Core Bluetooth RSSI never outranks a valid signal"
+        )
 
         assertEqual(
             BLEExplicitDiscoveryStartPolicy.action(
@@ -13100,6 +13177,48 @@ struct NavigationProtocolTests {
             isMapAreaSelectionActive: false,
             isSuppressed: false
         ), "automatic setup never stacks over another modal")
+        assert(
+            NearbyBicinoCandidateLifecyclePolicy.suppressesFurtherDiscovery(
+                after: .dismissed
+            ),
+            "closing the nearby offer suppresses repeated prompts for the activation"
+        )
+        assert(
+            !NearbyBicinoCandidateLifecyclePolicy.suppressesFurtherDiscovery(
+                after: .expiredBeforePresentation
+            ),
+            "an offer blocked until expiry can be rediscovered later"
+        )
+        assertEqual(
+            BikeComputerPairingErrorActionPolicy.action(
+                hasRetainedNearbyCandidate: true
+            ),
+            .close,
+            "a failed nearby connection closes instead of offering a broken retry"
+        )
+        assertEqual(
+            BikeComputerPairingErrorActionPolicy.action(
+                hasRetainedNearbyCandidate: false
+            ),
+            .retry,
+            "explicit discovery retains its restartable retry action"
+        )
+        assert(
+            BikeComputersMenuPolicy.shouldRestartOwnedDiscoveryOnForeground(
+                isApplicationActive: true,
+                ownsDiscoveryLifecycle: true,
+                hasPresentedCandidate: false
+            ),
+            "an open explicit setup resumes discovery on foreground entry"
+        )
+        assert(
+            !BikeComputersMenuPolicy.shouldRestartOwnedDiscoveryOnForeground(
+                isApplicationActive: true,
+                ownsDiscoveryLifecycle: true,
+                hasPresentedCandidate: true
+            ),
+            "an explicit setup does not scan behind its selected candidate"
+        )
         var stage = NearbyBicinoSetupStage.offer
         stage.advanceToPairing()
         assertEqual(stage, .pairing,

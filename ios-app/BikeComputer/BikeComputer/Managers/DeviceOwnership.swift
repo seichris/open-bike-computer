@@ -153,6 +153,13 @@ enum BLEDiscoveryFreshnessPolicy {
     }
 }
 
+enum BLEDiscoverySignalPolicy {
+    static func rank(for rssi: Int) -> Int {
+        // Core Bluetooth reserves 127 for an unavailable RSSI measurement.
+        rssi == 127 ? Int.min : rssi
+    }
+}
+
 enum BLEScanPurpose: Equatable {
     case none
     case trustedReconnect(UUID)
@@ -166,6 +173,37 @@ enum BLEScanPurpose: Equatable {
 
     var allowsDuplicateAdvertisements: Bool {
         discoversUnknownDevices
+    }
+
+    var logDescription: String {
+        switch self {
+        case .none: return "none"
+        case .trustedReconnect: return "trusted reconnect"
+        case .opportunisticDiscovery: return "opportunistic discovery"
+        case .explicitDiscovery: return "explicit discovery"
+        case .selectedPeripheral: return "selected peripheral"
+        }
+    }
+}
+
+enum BLEScanCallbackDrainPolicy {
+    static let interval: TimeInterval = 0.1
+
+    static func delay(
+        after lastPhysicalStop: Date?,
+        now: Date = Date()
+    ) -> TimeInterval {
+        guard let lastPhysicalStop else { return 0 }
+        return max(0, interval - now.timeIntervalSince(lastPhysicalStop))
+    }
+}
+
+enum BLEBackgroundDiscoveryPolicy {
+    static func shouldRestoreTrustedReconnect(
+        isAbandoningExplicitDiscovery: Bool,
+        knownDeviceCount: Int
+    ) -> Bool {
+        isAbandoningExplicitDiscovery && knownDeviceCount > 0
     }
 }
 
@@ -267,8 +305,14 @@ enum BLEOpportunisticCandidatePolicy {
                 )
             }
             .sorted {
-                if $0.device.rssi != $1.device.rssi {
-                    return $0.device.rssi > $1.device.rssi
+                let lhsRank = BLEDiscoverySignalPolicy.rank(
+                    for: $0.device.rssi
+                )
+                let rhsRank = BLEDiscoverySignalPolicy.rank(
+                    for: $1.device.rssi
+                )
+                if lhsRank != rhsRank {
+                    return lhsRank > rhsRank
                 }
                 return $0.device.peripheralIdentifier.uuidString <
                     $1.device.peripheralIdentifier.uuidString
@@ -299,6 +343,32 @@ enum NearbyBicinoSetupStage: Equatable {
 
     mutating func advanceToPairing() {
         self = .pairing
+    }
+}
+
+enum NearbyBicinoCandidateEndReason: Equatable {
+    case dismissed
+    case expiredBeforePresentation
+}
+
+enum NearbyBicinoCandidateLifecyclePolicy {
+    static func suppressesFurtherDiscovery(
+        after reason: NearbyBicinoCandidateEndReason
+    ) -> Bool {
+        reason == .dismissed
+    }
+}
+
+enum BikeComputerPairingErrorAction: Equatable {
+    case retry
+    case close
+}
+
+enum BikeComputerPairingErrorActionPolicy {
+    static func action(
+        hasRetainedNearbyCandidate: Bool
+    ) -> BikeComputerPairingErrorAction {
+        hasRetainedNearbyCandidate ? .close : .retry
     }
 }
 
@@ -359,6 +429,15 @@ enum BikeComputersMenuPolicy {
     ) -> Bool {
         ownsDiscoveryLifecycle && isBluetoothPoweredOn &&
             !isDiscoveringDevices && !pairingCompletedDuringPresentation
+    }
+
+    static func shouldRestartOwnedDiscoveryOnForeground(
+        isApplicationActive: Bool,
+        ownsDiscoveryLifecycle: Bool,
+        hasPresentedCandidate: Bool
+    ) -> Bool {
+        isApplicationActive && ownsDiscoveryLifecycle &&
+            !hasPresentedCandidate
     }
 }
 
@@ -601,9 +680,11 @@ enum BLENavigationNotificationPolicy {
 enum BLERestorationPolicy {
     static func selectedIdentifier(
         from available: [UUID],
-        trustedIdentifier: UUID?
+        trustedIdentifier: UUID?,
+        isConnectionExclusiveOperationActive: Bool = false
     ) -> UUID? {
-        guard let trustedIdentifier else { return nil }
+        guard !isConnectionExclusiveOperationActive,
+              let trustedIdentifier else { return nil }
         return available.contains(trustedIdentifier) ? trustedIdentifier : nil
     }
 

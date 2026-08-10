@@ -866,6 +866,8 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingScannedConnectionIdentifier: UUID?
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var discoveryFreshnessTimer: Timer?
+    private var pendingScanStartWorkItem: DispatchWorkItem?
+    private var lastPhysicalScanStoppedAt: Date?
     private var opportunisticSelectionTimer: Timer?
     private var opportunisticCandidateExpiryTimer: Timer?
     private var discoveryGeneration: UInt64 = 0
@@ -1577,6 +1579,8 @@ class BLEManager: NSObject, ObservableObject {
                 opportunisticCandidateExpiryTimer = nil
             }
         } else {
+            let isAbandoningExplicitDiscovery =
+                explicitDiscoveryRequested && pendingPairingSession == nil
             explicitDiscoveryRequested = false
             isExplicitDiscoveryPausedForCandidate = false
             if pendingScannedConnectionIdentifier != nil {
@@ -1586,6 +1590,14 @@ class BLEManager: NSObject, ObservableObject {
             } else if pendingPairingSession == nil {
                 ownershipLifecycle.interrupt()
                 isPairingMode = false
+            }
+            if isAbandoningExplicitDiscovery {
+                autoReconnect = BLEBackgroundDiscoveryPolicy
+                    .shouldRestoreTrustedReconnect(
+                        isAbandoningExplicitDiscovery: true,
+                        knownDeviceCount: knownDevices.count
+                    )
+                pairingStatusMessage = nil
             }
             clearUnknownDiscoveryState(
                 keepingCandidate: NearbyBicinoPresentationPolicy
@@ -1604,15 +1616,39 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func dismissNearbyBicinoCandidate(peripheralIdentifier: UUID) {
+        endNearbyBicinoCandidate(
+            peripheralIdentifier: peripheralIdentifier,
+            reason: .dismissed
+        )
+    }
+
+    private func expireNearbyBicinoCandidate(peripheralIdentifier: UUID) {
+        endNearbyBicinoCandidate(
+            peripheralIdentifier: peripheralIdentifier,
+            reason: .expiredBeforePresentation
+        )
+    }
+
+    private func endNearbyBicinoCandidate(
+        peripheralIdentifier: UUID,
+        reason: NearbyBicinoCandidateEndReason
+    ) {
         guard nearbyBicinoCandidate?.peripheralIdentifier ==
                 peripheralIdentifier else { return }
         nearbyBicinoCandidate = nil
         isNearbyBicinoCandidatePresented = false
-        isOpportunisticDiscoverySuppressed = true
+        isOpportunisticDiscoverySuppressed =
+            NearbyBicinoCandidateLifecyclePolicy
+                .suppressesFurtherDiscovery(after: reason)
         opportunisticCandidateExpiryTimer?.invalidate()
         opportunisticCandidateExpiryTimer = nil
         clearUnknownDiscoveryState(keepingCandidate: false)
-        reconcileScanning(reason: "nearby setup dismissed")
+        pairingStatusMessage = nil
+        reconcileScanning(
+            reason: reason == .dismissed
+                ? "nearby setup dismissed"
+                : "unpresented nearby candidate expired"
+        )
     }
 
     func markNearbyBicinoCandidatePresented(
@@ -1633,9 +1669,8 @@ class BLEManager: NSObject, ObservableObject {
         return nearbyBicinoCandidate
     }
 
-    private func reconcileScanning(reason: String) {
-        guard centralManager != nil else { return }
-        let desiredPurpose = BLEScanLifecyclePolicy.purpose(
+    private func resolvedScanPurpose() -> BLEScanPurpose {
+        BLEScanLifecyclePolicy.purpose(
             for: BLEScanContext(
                 isApplicationActive: isApplicationActive,
                 isBluetoothPoweredOn: centralManager.state == .poweredOn,
@@ -1656,14 +1691,26 @@ class BLEManager: NSObject, ObservableObject {
                     deviceOperationDeviceID != nil
             )
         )
+    }
 
-        if isScanning,
+    private func reconcileScanning(reason: String) {
+        guard centralManager != nil else { return }
+        let desiredPurpose = resolvedScanPurpose()
+
+        if pendingScanStartWorkItem != nil,
            currentScanPurpose == desiredPurpose {
             return
         }
-        if isScanning {
+        if isScanning, centralManager.isScanning,
+           currentScanPurpose == desiredPurpose {
+            return
+        }
+        if isScanning || pendingScanStartWorkItem != nil ||
+            centralManager.isScanning {
+            let previousPurpose = currentScanPurpose.logDescription
             stopPhysicalScan(
-                reason: "purpose transition \(currentScanPurpose) -> \(desiredPurpose): \(reason)"
+                reason: "purpose transition \(previousPurpose) -> " +
+                    "\(desiredPurpose.logDescription): \(reason)"
             )
         }
 
@@ -1674,10 +1721,55 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        if desiredPurpose.discoversUnknownDevices {
+        let callbackDrainDelay = desiredPurpose.discoversUnknownDevices
+            ? BLEScanCallbackDrainPolicy.delay(
+                after: lastPhysicalScanStoppedAt
+            )
+            : 0
+        guard callbackDrainDelay > 0 else {
+            startPhysicalScan(purpose: desiredPurpose, reason: reason)
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingScanStartWorkItem = nil
+            guard self.currentScanPurpose == desiredPurpose,
+                  self.resolvedScanPurpose() == desiredPurpose else {
+                self.reconcileScanning(
+                    reason: "scan purpose changed during callback drain"
+                )
+                return
+            }
+            self.startPhysicalScan(purpose: desiredPurpose, reason: reason)
+        }
+        pendingScanStartWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + callbackDrainDelay,
+            execute: workItem
+        )
+        log(
+            "BLE scan pending for \(desiredPurpose.logDescription) " +
+            "while prior callbacks drain: \(reason)"
+        )
+    }
+
+    private func startPhysicalScan(
+        purpose: BLEScanPurpose,
+        reason: String
+    ) {
+        guard centralManager.state == .poweredOn,
+              !hasActiveBLESession,
+              currentScanPurpose == purpose,
+              resolvedScanPurpose() == purpose else {
+            reconcileScanning(reason: "scan start preconditions changed")
+            return
+        }
+
+        if purpose.discoversUnknownDevices {
             discoveryGeneration &+= 1
             activeDiscoveryGeneration = discoveryGeneration
-            if desiredPurpose == .opportunisticDiscovery {
+            if purpose == .opportunisticDiscovery {
                 opportunisticObservations.removeAll()
             }
             startDiscoveryFreshnessTimer()
@@ -1692,15 +1784,22 @@ class BLEManager: NSObject, ObservableObject {
             withServices: [serviceUUID],
             options: [
                 CBCentralManagerScanOptionAllowDuplicatesKey:
-                    desiredPurpose.allowsDuplicateAdvertisements
+                    purpose.allowsDuplicateAdvertisements
             ]
         )
-        log("BLE scan started for \(desiredPurpose): \(reason)")
+        log("BLE scan started for \(purpose.logDescription): \(reason)")
     }
 
     private func stopPhysicalScan(reason: String) {
-        if centralManager != nil, isScanning {
+        pendingScanStartWorkItem?.cancel()
+        pendingScanStartWorkItem = nil
+        let hadPhysicalScan = isScanning ||
+            (centralManager != nil && centralManager.isScanning)
+        if centralManager != nil {
             centralManager.stopScan()
+        }
+        if hadPhysicalScan {
+            lastPhysicalScanStoppedAt = Date()
         }
         isScanning = false
         currentScanPurpose = .none
@@ -2396,7 +2495,7 @@ class BLEManager: NSObject, ObservableObject {
                   !self.isNearbyBicinoCandidatePresented,
                   self.nearbyBicinoCandidate?.peripheralIdentifier ==
                     selected.device.peripheralIdentifier else { return }
-            self.dismissNearbyBicinoCandidate(
+            self.expireNearbyBicinoCandidate(
                 peripheralIdentifier: selected.device.peripheralIdentifier
             )
         }
@@ -2404,6 +2503,11 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func connect(to device: KnownBikeComputerDevice) {
+        guard watchDirectRidePreparedDeviceID == nil else {
+            pairingError =
+                "End the Apple Watch direct ride before connecting from iPhone."
+            return
+        }
         guard deviceOperationDeviceID == nil else {
             pairingError = "Wait for the current Bike Computer change to finish."
             return
@@ -4160,6 +4264,11 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Attempt to reconnect to last known peripheral
     func reconnectToLastDevice() {
+        guard watchDirectRidePreparedDeviceID == nil else {
+            stopPhysicalScan(reason: "Apple Watch direct ride owns BLE")
+            log("Skipping reconnect while Apple Watch direct ride is active")
+            return
+        }
         guard centralManager.state == .poweredOn else {
             log("Cannot reconnect: Bluetooth not powered on")
             return
@@ -4189,6 +4298,11 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func connectToPeripheral(_ peripheral: CBPeripheral) {
+        guard watchDirectRidePreparedDeviceID == nil else {
+            stopPhysicalScan(reason: "Apple Watch direct ride owns BLE")
+            log("Skipping connection while Apple Watch direct ride is active")
+            return
+        }
         guard !hasActiveBLESession else {
             log("Skipping connect: connection already active")
             return
@@ -6018,6 +6132,14 @@ extension BLEManager: CBCentralManagerDelegate {
         _ central: CBCentralManager,
         willRestoreState dict: [String: Any]
     ) {
+        // Core Bluetooth may restore a system-owned scan before this
+        // instance's shadow state has observed it. Stop unconditionally at
+        // the restoration boundary before accepting any connection.
+        if central.isScanning {
+            lastPhysicalScanStoppedAt = Date()
+        }
+        central.stopScan()
+        stopPhysicalScan(reason: "CoreBluetooth state restoration boundary")
         guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey]
                 as? [CBPeripheral],
               !peripherals.isEmpty else {
@@ -6026,7 +6148,9 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         guard let selectedIdentifier = BLERestorationPolicy.selectedIdentifier(
             from: peripherals.map(\.identifier),
-            trustedIdentifier: lastConnectedPeripheralIdentifier
+            trustedIdentifier: lastConnectedPeripheralIdentifier,
+            isConnectionExclusiveOperationActive:
+                watchDirectRidePreparedDeviceID != nil
         ), let restored = peripherals.first(where: {
             $0.identifier == selectedIdentifier
         }) else {
@@ -6036,7 +6160,6 @@ extension BLEManager: CBCentralManagerDelegate {
             }
             return
         }
-        stopPhysicalScan(reason: "trusted Core Bluetooth state restored")
         clearUnknownDiscoveryState()
         isOpportunisticDiscoverySuppressed = true
         restored.delegate = self
@@ -6093,7 +6216,12 @@ extension BLEManager: CBCentralManagerDelegate {
             centralStateDescription = "powered on"
             log("Bluetooth powered on")
             // Attempt to reconnect to last device, or start scanning
-            if hasActiveBLESession {
+            if watchDirectRidePreparedDeviceID != nil {
+                stopPhysicalScan(
+                    reason: "Apple Watch direct ride remains active"
+                )
+                log("Apple Watch direct ride owns BLE; reconnect deferred")
+            } else if hasActiveBLESession {
                 log("Using restored Bike Computer connection")
             } else if lastConnectedPeripheralIdentifier != nil {
                 reconnectToLastDevice()
@@ -6158,7 +6286,8 @@ extension BLEManager: CBCentralManagerDelegate {
             rssi: RSSI.intValue
         )
         log(
-            "Observed Device \(candidate.shortIdentifier) for \(purpose) " +
+            "Observed Device \(candidate.shortIdentifier) for " +
+            "\(purpose.logDescription) " +
             "(RSSI: \(RSSI))"
         )
 
@@ -6187,7 +6316,9 @@ extension BLEManager: CBCentralManagerDelegate {
                 discoveredDevices.append(candidate)
             }
             discoveredDevices.sort { lhs, rhs in
-                if lhs.rssi != rhs.rssi { return lhs.rssi > rhs.rssi }
+                let lhsRank = BLEDiscoverySignalPolicy.rank(for: lhs.rssi)
+                let rhsRank = BLEDiscoverySignalPolicy.rank(for: rhs.rssi)
+                if lhsRank != rhsRank { return lhsRank > rhsRank }
                 return lhs.peripheralIdentifier.uuidString <
                     rhs.peripheralIdentifier.uuidString
             }
