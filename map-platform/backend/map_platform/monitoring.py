@@ -12,12 +12,14 @@ from .map_labels import renderer_format_version
 from .models import JobStatus, MapJob, utc_now_iso
 
 
-MONITORING_SCHEMA_VERSION = 1
+MONITORING_SCHEMA_VERSION = 2
 DEFAULT_MONITORING_RETENTION_DAYS = 90
 MAX_MONITORING_RETENTION_DAYS = 3_650
 MAX_MONITORING_WINDOW_HOURS = 24 * 365
 DEFAULT_MONITORING_SUMMARY_RUN_LIMIT = 50_000
 MAX_MONITORING_SUMMARY_RUN_LIMIT = 1_000_000
+DEFAULT_MAX_ESTIMATE_REVISIONS = 16
+MAX_ESTIMATE_REVISIONS_LIMIT = 256
 SUMMARY_SAMPLING_STRATEGY = "most_recent_completion_desc"
 MONITORED_TERMINAL_STATUSES = frozenset(
     {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}
@@ -32,7 +34,60 @@ NON_WORK_PHASES = frozenset(
     }
 )
 MONITORING_TABLE = "map_build_runs"
+ESTIMATE_REVISIONS_TABLE = "map_estimate_revisions"
 MONITORING_COLUMNS = frozenset(
+    {
+        "job_id",
+        "status",
+        "completed_at",
+        "completed_epoch",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "queue_wait_seconds",
+        "processing_seconds",
+        "total_seconds",
+        "attempts",
+        "renderer_format_version",
+        "geometry_mode",
+        "area_km2",
+        "reuse_strategy",
+        "phase_timings_json",
+        "source_region_id",
+        "source_provider",
+        "preprocessing_mode",
+        "scope_policy_version",
+        "performance_compatibility_key",
+        "estimator_model_version",
+        "producer_build_sha256",
+        "producer_image_digest",
+        "worker_class",
+        "output_block_count",
+        "output_area_m2",
+        "source_area_m2",
+        "source_bytes",
+        "source_expansion_basis_points",
+        "calibration_cache_outcome",
+        "closure_candidate_count",
+        "closure_way_count",
+        "closure_node_count",
+        "closure_relation_count",
+        "relation_retry_count",
+        "building_source_count",
+        "building_outline_count",
+        "building_part_count",
+        "building_unresolved_part_count",
+        "building_containment_count",
+        "building_point_count",
+        "label_candidate_count",
+        "outcome_class",
+        "initial_estimate_lower_seconds",
+        "initial_estimate_upper_seconds",
+        "final_estimate_lower_seconds",
+        "final_estimate_upper_seconds",
+    }
+)
+MONITORING_V1_COLUMNS = frozenset(
     {
         "job_id",
         "status",
@@ -52,6 +107,79 @@ MONITORING_COLUMNS = frozenset(
         "phase_timings_json",
     }
 )
+MONITORING_V2_COLUMN_TYPES = {
+    "source_region_id": "TEXT",
+    "source_provider": "TEXT",
+    "preprocessing_mode": "TEXT",
+    "scope_policy_version": "INTEGER",
+    "performance_compatibility_key": "TEXT",
+    "estimator_model_version": "TEXT",
+    "producer_build_sha256": "TEXT",
+    "producer_image_digest": "TEXT",
+    "worker_class": "TEXT",
+    "output_block_count": "INTEGER",
+    "output_area_m2": "INTEGER",
+    "source_area_m2": "INTEGER",
+    "source_bytes": "INTEGER",
+    "source_expansion_basis_points": "INTEGER",
+    "calibration_cache_outcome": "TEXT",
+    "closure_candidate_count": "INTEGER",
+    "closure_way_count": "INTEGER",
+    "closure_node_count": "INTEGER",
+    "closure_relation_count": "INTEGER",
+    "relation_retry_count": "INTEGER",
+    "building_source_count": "INTEGER",
+    "building_outline_count": "INTEGER",
+    "building_part_count": "INTEGER",
+    "building_unresolved_part_count": "INTEGER",
+    "building_containment_count": "INTEGER",
+    "building_point_count": "INTEGER",
+    "label_candidate_count": "INTEGER",
+    "outcome_class": "TEXT",
+    "initial_estimate_lower_seconds": "INTEGER",
+    "initial_estimate_upper_seconds": "INTEGER",
+    "final_estimate_lower_seconds": "INTEGER",
+    "final_estimate_upper_seconds": "INTEGER",
+}
+ESTIMATE_REVISION_COLUMNS = frozenset(
+    {
+        "job_id",
+        "revision",
+        "generated_at",
+        "generated_epoch",
+        "attempt",
+        "state",
+        "confidence",
+        "lower_seconds",
+        "upper_seconds",
+        "queue_lower_seconds",
+        "queue_upper_seconds",
+        "model_version",
+        "performance_compatibility_key",
+        "basis_json",
+        "sample_count",
+        "based_on_phase",
+    }
+)
+RUN_RECORD_COLUMNS = (
+    "job_id",
+    "status",
+    "completed_at",
+    "completed_epoch",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "queue_wait_seconds",
+    "processing_seconds",
+    "total_seconds",
+    "attempts",
+    "renderer_format_version",
+    "geometry_mode",
+    "area_km2",
+    "reuse_strategy",
+    "phase_timings_json",
+    *MONITORING_V2_COLUMN_TYPES.keys(),
+)
 
 
 class MonitoringSchemaError(RuntimeError):
@@ -67,6 +195,7 @@ class MapMonitoringStore:
         *,
         retention_days: int = DEFAULT_MONITORING_RETENTION_DAYS,
         summary_run_limit: int = DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
+        max_estimate_revisions: int = DEFAULT_MAX_ESTIMATE_REVISIONS,
         clock=None,
     ):
         if (
@@ -83,10 +212,18 @@ class MapMonitoringStore:
             raise ValueError(
                 "monitoring summary run limit must be between 1 and 1000000"
             )
+        if (
+            isinstance(max_estimate_revisions, bool)
+            or not 1 <= max_estimate_revisions <= MAX_ESTIMATE_REVISIONS_LIMIT
+        ):
+            raise ValueError(
+                "maximum estimate revisions must be between 1 and 256"
+            )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
         self.summary_run_limit = summary_run_limit
+        self.max_estimate_revisions = max_estimate_revisions
         self._clock = clock or time.time
         self._initialize()
 
@@ -95,6 +232,223 @@ class MapMonitoringStore:
         record = self._record_for_job(job)
         result = self._reconcile_records([record] if record is not None else [])
         return result["synced"] == 1
+
+    def record_estimate_revision(self, job: MapJob) -> bool:
+        """Persist one bounded advisory revision without affecting the job."""
+        estimate = job.preparation_estimate
+        context = job.preparation_estimator_context
+        if not isinstance(estimate, dict) or not isinstance(context, dict):
+            return False
+        from .preparation_estimates import validate_preparation_estimate
+
+        estimate = validate_preparation_estimate(estimate)
+        generated_epoch = _timestamp_epoch(estimate["generatedAt"])
+        if generated_epoch is None:
+            return False
+        remaining = estimate.get("remaining") or {}
+        queue = estimate.get("queue") or {}
+        record = (
+            job.job_id,
+            int(estimate["revision"]),
+            estimate["generatedAt"],
+            generated_epoch,
+            int(estimate["attempt"]),
+            estimate["state"],
+            estimate.get("confidence"),
+            remaining.get("lowerSeconds"),
+            remaining.get("upperSeconds"),
+            queue.get("lowerSeconds"),
+            queue.get("upperSeconds"),
+            estimate["modelVersion"],
+            context.get("performanceCompatibilityKey"),
+            json.dumps(
+                estimate.get("basis", []),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+            estimate.get("sampleCount"),
+            estimate["basedOnPhase"],
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT 1 FROM map_estimate_revisions
+                WHERE job_id = ? AND revision = ?
+                """,
+                (job.job_id, int(estimate["revision"])),
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                return False
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM map_estimate_revisions WHERE job_id = ?",
+                    (job.job_id,),
+                ).fetchone()[0]
+            )
+            if count >= self.max_estimate_revisions:
+                connection.commit()
+                return False
+            connection.execute(
+                """
+                INSERT INTO map_estimate_revisions(
+                    job_id, revision, generated_at, generated_epoch, attempt,
+                    state, confidence, lower_seconds, upper_seconds,
+                    queue_lower_seconds, queue_upper_seconds, model_version,
+                    performance_compatibility_key, basis_json, sample_count,
+                    based_on_phase
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                record,
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def estimate_samples(
+        self,
+        *,
+        performance_key: str,
+        renderer: int,
+        preprocessing_mode: str,
+        outcome_class: str,
+        claimed: bool,
+        source_region_id: str | None = None,
+        output_block_count: int | None = None,
+        source_area_m2: int | None = None,
+        building_source_count: int | None = None,
+        cache_outcome: str | None = None,
+        minimum_samples: int = 20,
+        limit: int = 500,
+    ) -> list[float]:
+        column = "processing_seconds" if claimed else "total_seconds"
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT {column} AS duration,
+                       source_region_id,
+                       output_block_count,
+                       source_area_m2,
+                       building_source_count,
+                       calibration_cache_outcome
+                FROM map_build_runs
+                WHERE status = 'ready'
+                  AND attempts = 1
+                  AND performance_compatibility_key = ?
+                  AND renderer_format_version = ?
+                  AND preprocessing_mode = ?
+                  AND outcome_class = ?
+                  AND {column} IS NOT NULL
+                ORDER BY completed_epoch DESC, job_id DESC
+                LIMIT ?
+                """,
+                (
+                    performance_key,
+                    renderer,
+                    preprocessing_mode,
+                    outcome_class,
+                    max(1, min(int(limit), 5_000)),
+                ),
+            ).fetchall()
+        finally:
+            connection.close()
+        valid = [
+            row
+            for row in rows
+            if _is_finite_number(row["duration"])
+            and float(row["duration"]) >= 0
+        ]
+        requested_block_bucket = _block_bucket(output_block_count)
+        requested_density_bucket = _density_bucket(
+            building_source_count, source_area_m2
+        )
+
+        def exact(row: sqlite3.Row) -> bool:
+            return (
+                (source_region_id is None or row["source_region_id"] == source_region_id)
+                and (
+                    requested_block_bucket == "unknown"
+                    or _block_bucket(row["output_block_count"])
+                    == requested_block_bucket
+                )
+                and (
+                    requested_density_bucket == "unknown"
+                    or _density_bucket(
+                        row["building_source_count"], row["source_area_m2"]
+                    )
+                    == requested_density_bucket
+                )
+                and (
+                    cache_outcome is None
+                    or row["calibration_cache_outcome"] == cache_outcome
+                )
+            )
+
+        def neighboring(row: sqlite3.Row) -> bool:
+            return (
+                (
+                    cache_outcome is None
+                    or row["calibration_cache_outcome"] == cache_outcome
+                )
+                and _neighboring_bucket(
+                    requested_block_bucket,
+                    _block_bucket(row["output_block_count"]),
+                    ("1", "2-4", "5-8", "9+"),
+                )
+                and _neighboring_bucket(
+                    requested_density_bucket,
+                    _density_bucket(
+                        row["building_source_count"], row["source_area_m2"]
+                    ),
+                    ("sparse", "medium", "dense", "very_dense"),
+                )
+            )
+
+        tiers = [
+            [row for row in valid if exact(row)],
+            [row for row in valid if neighboring(row)],
+            valid,
+        ]
+        minimum = max(1, min(int(minimum_samples), 10_000))
+        selected = next((tier for tier in tiers if len(tier) >= minimum), None)
+        if selected is None:
+            selected = next((tier for tier in tiers if tier), [])
+        return [float(row["duration"]) for row in selected]
+
+    def queue_samples(
+        self, *, performance_key: str, renderer: int, limit: int = 500
+    ) -> list[float]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT queue_wait_seconds AS duration
+                FROM map_build_runs
+                WHERE status = 'ready'
+                  AND performance_compatibility_key = ?
+                  AND renderer_format_version = ?
+                  AND queue_wait_seconds IS NOT NULL
+                ORDER BY completed_epoch DESC, job_id DESC
+                LIMIT ?
+                """,
+                (performance_key, renderer, max(1, min(int(limit), 5_000))),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            float(row["duration"])
+            for row in rows
+            if _is_finite_number(row["duration"])
+            and float(row["duration"]) >= 0
+        ]
 
     def sync_jobs(self, jobs: Iterable[MapJob]) -> int:
         """Reconcile terminal job records after worker/API restarts."""
@@ -172,6 +526,13 @@ class MapMonitoringStore:
                     total_seconds,
                     attempts,
                     renderer_format_version,
+                    preprocessing_mode,
+                    performance_compatibility_key,
+                    outcome_class,
+                    calibration_cache_outcome,
+                    output_block_count,
+                    source_area_m2,
+                    building_source_count,
                     phase_timings_json
                 FROM map_build_runs
                 WHERE completed_epoch >= ? AND completed_epoch <= ?
@@ -200,6 +561,36 @@ class MapMonitoringStore:
                     (retention_cutoff, now),
                 ).fetchone()[0]
             )
+            revision_rows = connection.execute(
+                """
+                SELECT
+                    revision.job_id,
+                    revision.revision,
+                    revision.generated_at,
+                    revision.generated_epoch,
+                    revision.attempt,
+                    revision.state,
+                    revision.confidence,
+                    revision.lower_seconds,
+                    revision.upper_seconds,
+                    revision.queue_lower_seconds,
+                    revision.queue_upper_seconds,
+                    revision.model_version,
+                    revision.performance_compatibility_key,
+                    revision.basis_json,
+                    revision.sample_count,
+                    revision.based_on_phase,
+                    run.completed_epoch,
+                    run.status AS terminal_status
+                FROM map_estimate_revisions revision
+                LEFT JOIN map_build_runs run ON run.job_id = revision.job_id
+                WHERE revision.generated_epoch >= ?
+                  AND revision.generated_epoch <= ?
+                ORDER BY revision.generated_epoch, revision.job_id, revision.revision
+                LIMIT ?
+                """,
+                (cutoff, now, self.summary_run_limit * 16),
+            ).fetchall()
         finally:
             connection.close()
 
@@ -225,6 +616,13 @@ class MapMonitoringStore:
             "serverTiming": _timing_summary(rows),
             "phaseTimings": _phase_summary(rows),
             "byRendererFormat": _renderer_summary(rows),
+            "estimateCohorts": _cohort_summary(rows),
+            "estimateRevisions": _revision_summary(revision_rows),
+            "estimateAccuracy": _estimate_accuracy(revision_rows),
+            "estimateModelComparison": _estimate_model_comparison(
+                revision_rows
+            ),
+            "estimateExclusions": _estimate_exclusions(rows),
             "lastCompletedAt": rows[-1]["completed_at"] if rows else None,
         }
 
@@ -252,31 +650,8 @@ class MapMonitoringStore:
                     raise MonitoringSchemaError(
                         "monitoring schema version is set but its table is missing"
                     )
-                connection.execute(
-                    """
-                    CREATE TABLE map_build_runs(
-                        job_id TEXT PRIMARY KEY,
-                        status TEXT NOT NULL,
-                        completed_at TEXT NOT NULL,
-                        completed_epoch REAL NOT NULL,
-                        created_at TEXT NOT NULL,
-                        started_at TEXT,
-                        finished_at TEXT,
-                        queue_wait_seconds REAL,
-                        processing_seconds REAL,
-                        total_seconds REAL,
-                        attempts INTEGER NOT NULL,
-                        renderer_format_version INTEGER,
-                        geometry_mode TEXT NOT NULL,
-                        area_km2 REAL NOT NULL,
-                        reuse_strategy TEXT,
-                        phase_timings_json TEXT NOT NULL
-                    )
-                    """
-                )
-                connection.execute(
-                    f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
-                )
+                self._create_v2_tables(connection)
+                version = MONITORING_SCHEMA_VERSION
             else:
                 columns = {
                     str(row[1])
@@ -284,22 +659,69 @@ class MapMonitoringStore:
                         f"PRAGMA table_info({MONITORING_TABLE})"
                     ).fetchall()
                 }
-                missing = sorted(MONITORING_COLUMNS - columns)
-                if missing:
+                missing_v1 = sorted(MONITORING_V1_COLUMNS - columns)
+                if missing_v1:
                     raise MonitoringSchemaError(
                         "monitoring schema is missing required columns: "
-                        + ", ".join(missing)
+                        + ", ".join(missing_v1)
                     )
                 if version == 0:
-                    # PR #198 shipped this exact table before user_version was
-                    # introduced. Adopt it only after validating every column.
+                    # PR #198 shipped this exact v1 table before user_version.
+                    if columns == MONITORING_V1_COLUMNS:
+                        version = 1
+                        connection.execute("PRAGMA user_version = 1")
+                    elif MONITORING_COLUMNS.issubset(columns):
+                        version = MONITORING_SCHEMA_VERSION
+                        connection.execute(
+                            f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+                        )
+                    else:
+                        raise MonitoringSchemaError(
+                            "unversioned monitoring schema cannot be safely adopted"
+                        )
+                if version == 1:
+                    for name, column_type in MONITORING_V2_COLUMN_TYPES.items():
+                        if name not in columns:
+                            connection.execute(
+                                f"ALTER TABLE {MONITORING_TABLE} "
+                                f"ADD COLUMN {name} {column_type}"
+                            )
+                    self._create_revision_table(connection)
                     connection.execute(
                         f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
                     )
+                    version = MONITORING_SCHEMA_VERSION
                 elif version != MONITORING_SCHEMA_VERSION:
                     raise MonitoringSchemaError(
                         f"unsupported monitoring schema version {version}"
                     )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    f"PRAGMA table_info({MONITORING_TABLE})"
+                ).fetchall()
+            }
+            missing = sorted(MONITORING_COLUMNS - columns)
+            if missing:
+                raise MonitoringSchemaError(
+                    "monitoring schema is missing required columns: "
+                    + ", ".join(missing)
+                )
+            self._create_revision_table(connection)
+            revision_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    f"PRAGMA table_info({ESTIMATE_REVISIONS_TABLE})"
+                ).fetchall()
+            }
+            missing_revisions = sorted(
+                ESTIMATE_REVISION_COLUMNS - revision_columns
+            )
+            if missing_revisions:
+                raise MonitoringSchemaError(
+                    "estimate revision schema is missing required columns: "
+                    + ", ".join(missing_revisions)
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS map_build_runs_completed
@@ -312,12 +734,117 @@ class MapMonitoringStore:
                 ON map_build_runs(completed_epoch DESC, job_id DESC)
                 """
             )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS map_estimate_revisions_generated
+                ON map_estimate_revisions(generated_epoch, job_id, revision)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS map_build_runs_estimate_cohort
+                ON map_build_runs(
+                    performance_compatibility_key,
+                    renderer_format_version,
+                    preprocessing_mode,
+                    outcome_class,
+                    completed_epoch DESC
+                )
+                """
+            )
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _create_v2_tables(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE map_build_runs(
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                completed_epoch REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                queue_wait_seconds REAL,
+                processing_seconds REAL,
+                total_seconds REAL,
+                attempts INTEGER NOT NULL,
+                renderer_format_version INTEGER,
+                geometry_mode TEXT NOT NULL,
+                area_km2 REAL NOT NULL,
+                reuse_strategy TEXT,
+                phase_timings_json TEXT NOT NULL,
+                source_region_id TEXT,
+                source_provider TEXT,
+                preprocessing_mode TEXT,
+                scope_policy_version INTEGER,
+                performance_compatibility_key TEXT,
+                estimator_model_version TEXT,
+                producer_build_sha256 TEXT,
+                producer_image_digest TEXT,
+                worker_class TEXT,
+                output_block_count INTEGER,
+                output_area_m2 INTEGER,
+                source_area_m2 INTEGER,
+                source_bytes INTEGER,
+                source_expansion_basis_points INTEGER,
+                calibration_cache_outcome TEXT,
+                closure_candidate_count INTEGER,
+                closure_way_count INTEGER,
+                closure_node_count INTEGER,
+                closure_relation_count INTEGER,
+                relation_retry_count INTEGER,
+                building_source_count INTEGER,
+                building_outline_count INTEGER,
+                building_part_count INTEGER,
+                building_unresolved_part_count INTEGER,
+                building_containment_count INTEGER,
+                building_point_count INTEGER,
+                label_candidate_count INTEGER,
+                outcome_class TEXT,
+                initial_estimate_lower_seconds INTEGER,
+                initial_estimate_upper_seconds INTEGER,
+                final_estimate_lower_seconds INTEGER,
+                final_estimate_upper_seconds INTEGER
+            )
+            """
+        )
+        MapMonitoringStore._create_revision_table(connection)
+        connection.execute(
+            f"PRAGMA user_version = {MONITORING_SCHEMA_VERSION}"
+        )
+
+    @staticmethod
+    def _create_revision_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS map_estimate_revisions(
+                job_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                generated_at TEXT NOT NULL,
+                generated_epoch REAL NOT NULL,
+                attempt INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                confidence TEXT,
+                lower_seconds INTEGER,
+                upper_seconds INTEGER,
+                queue_lower_seconds INTEGER,
+                queue_upper_seconds INTEGER,
+                model_version TEXT NOT NULL,
+                performance_compatibility_key TEXT,
+                basis_json TEXT NOT NULL,
+                sample_count INTEGER,
+                based_on_phase TEXT NOT NULL,
+                PRIMARY KEY(job_id, revision)
+            )
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
@@ -330,6 +857,10 @@ class MapMonitoringStore:
 
     @staticmethod
     def _prune_connection(connection: sqlite3.Connection, cutoff: float) -> int:
+        connection.execute(
+            "DELETE FROM map_estimate_revisions WHERE generated_epoch < ?",
+            (cutoff,),
+        )
         cursor = connection.execute(
             "DELETE FROM map_build_runs WHERE completed_epoch < ?",
             (cutoff,),
@@ -349,7 +880,8 @@ class MapMonitoringStore:
             separators=(",", ":"),
             allow_nan=False,
         )
-        return (
+        estimator_features = _terminal_estimator_features(job)
+        base = (
             job.job_id,
             job.status.value,
             job.finished_at,
@@ -367,47 +899,44 @@ class MapMonitoringStore:
             job.reuse_strategy,
             phase_timings,
         )
+        return base + tuple(
+            estimator_features.get(column)
+            for column in MONITORING_V2_COLUMN_TYPES
+        )
 
     @staticmethod
     def _upsert(connection: sqlite3.Connection, record: tuple[Any, ...]) -> None:
+        if len(record) != len(RUN_RECORD_COLUMNS):
+            raise ValueError("monitoring record column count is invalid")
+        columns = ", ".join(RUN_RECORD_COLUMNS)
+        placeholders = ", ".join("?" for _ in RUN_RECORD_COLUMNS)
+        updates = ", ".join(
+            f"{column} = excluded.{column}"
+            for column in RUN_RECORD_COLUMNS
+            if column != "job_id"
+        )
         connection.execute(
-            """
-            INSERT INTO map_build_runs(
-                job_id,
-                status,
-                completed_at,
-                completed_epoch,
-                created_at,
-                started_at,
-                finished_at,
-                queue_wait_seconds,
-                processing_seconds,
-                total_seconds,
-                attempts,
-                renderer_format_version,
-                geometry_mode,
-                area_km2,
-                reuse_strategy,
-                phase_timings_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(job_id) DO UPDATE SET
-                status = excluded.status,
-                completed_at = excluded.completed_at,
-                completed_epoch = excluded.completed_epoch,
-                created_at = excluded.created_at,
-                started_at = excluded.started_at,
-                finished_at = excluded.finished_at,
-                queue_wait_seconds = excluded.queue_wait_seconds,
-                processing_seconds = excluded.processing_seconds,
-                total_seconds = excluded.total_seconds,
-                attempts = excluded.attempts,
-                renderer_format_version = excluded.renderer_format_version,
-                geometry_mode = excluded.geometry_mode,
-                area_km2 = excluded.area_km2,
-                reuse_strategy = excluded.reuse_strategy,
-                phase_timings_json = excluded.phase_timings_json
+            f"""
+            INSERT INTO map_build_runs({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(job_id) DO UPDATE SET {updates}
             """,
             record,
+        )
+        connection.execute(
+            """
+            UPDATE map_build_runs
+            SET initial_estimate_lower_seconds = (
+                    SELECT lower_seconds FROM map_estimate_revisions
+                    WHERE job_id = ? ORDER BY revision ASC LIMIT 1
+                ),
+                initial_estimate_upper_seconds = (
+                    SELECT upper_seconds FROM map_estimate_revisions
+                    WHERE job_id = ? ORDER BY revision ASC LIMIT 1
+                )
+            WHERE job_id = ?
+            """,
+            (record[0], record[0], record[0]),
         )
 
 
@@ -443,7 +972,149 @@ def build_map_job_monitoring_event(
     }
     if job.reuse_strategy is not None:
         event["reuseStrategy"] = job.reuse_strategy
+    if isinstance(job.preparation_estimate, dict):
+        estimate = job.preparation_estimate
+        event["preparationEstimate"] = {
+            key: estimate[key]
+            for key in (
+                "revision",
+                "attempt",
+                "state",
+                "modelVersion",
+                "confidence",
+                "remaining",
+                "queue",
+                "basis",
+                "basedOnPhase",
+            )
+            if key in estimate
+        }
     return event
+
+
+def _terminal_estimator_features(job: MapJob) -> dict[str, Any]:
+    context = (
+        job.preparation_estimator_context
+        if isinstance(job.preparation_estimator_context, dict)
+        else {}
+    )
+    evidence = context.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    metrics = job.artifact_metrics if isinstance(job.artifact_metrics, dict) else {}
+    scope = evidence.get("scope")
+    if not isinstance(scope, dict):
+        scope = metrics.get("buildingScope")
+    scope = scope if isinstance(scope, dict) else {}
+    dependencies = evidence.get("dependencies")
+    dependencies = dependencies if isinstance(dependencies, dict) else {}
+    preprocessing = metrics.get("buildingPreprocessing")
+    preprocessing = preprocessing if isinstance(preprocessing, dict) else {}
+    source_index = dependencies.get("sourceIndex") or preprocessing.get("sourceIndex")
+    source_index = source_index if isinstance(source_index, dict) else {}
+    closure = dependencies.get("closure") or preprocessing.get("closure")
+    closure = closure if isinstance(closure, dict) else {}
+    complexity = evidence.get("complexity")
+    if not isinstance(complexity, dict):
+        complexity = metrics.get("buildingComplexity")
+    complexity = complexity if isinstance(complexity, dict) else {}
+    building = metrics.get("buildingBuild")
+    building = building if isinstance(building, dict) else {}
+    label = metrics.get("labelBuild")
+    label = label if isinstance(label, dict) else {}
+    calibration = preprocessing.get("calibrationGenerationExecution")
+    if not isinstance(calibration, dict):
+        calibration = preprocessing.get("calibrationExecution")
+    calibration = calibration if isinstance(calibration, dict) else {}
+    cache_outcome = dependencies.get("cacheOutcome") or calibration.get(
+        "cacheOutcome"
+    )
+    relation_retries = preprocessing.get("relationRetries")
+    relation_retry_count = (
+        len(relation_retries) if isinstance(relation_retries, list) else None
+    )
+    if job.reuse_strategy == "exact":
+        outcome = "exact_reuse"
+    elif job.reuse_strategy == "subset":
+        outcome = "subset_reuse"
+    elif job.status != JobStatus.READY:
+        outcome = "failure"
+    elif job.attempts > 1:
+        outcome = "retry"
+    else:
+        outcome = "full_build"
+    estimate = job.preparation_estimate or {}
+    remaining = estimate.get("remaining")
+    remaining = remaining if isinstance(remaining, dict) else {}
+    is_initial = estimate.get("revision") == 1
+    selected = (job.building_preprocessing_mode or context.get("preprocessingMode"))
+    return {
+        "source_region_id": job.source_region.id,
+        "source_provider": job.source_region.provider,
+        "preprocessing_mode": selected,
+        "scope_policy_version": 1 if scope else None,
+        "performance_compatibility_key": context.get(
+            "performanceCompatibilityKey"
+        ),
+        "estimator_model_version": context.get("modelVersion"),
+        "producer_build_sha256": context.get("producerBuildSha256"),
+        "producer_image_digest": context.get("producerImageDigest"),
+        "worker_class": context.get("workerClass"),
+        "output_block_count": _nonnegative_integer(scope.get("outputBlockCount")),
+        "output_area_m2": _nonnegative_integer(scope.get("outputAreaM2")),
+        "source_area_m2": _nonnegative_integer(scope.get("sourceAreaM2")),
+        "source_bytes": _nonnegative_integer(
+            dependencies.get("sourceBytes", preprocessing.get("sourceBytes"))
+        ),
+        "source_expansion_basis_points": _nonnegative_integer(
+            scope.get("sourceToOutputAreaBasisPoints")
+        ),
+        "calibration_cache_outcome": (
+            cache_outcome if isinstance(cache_outcome, str) else None
+        ),
+        "closure_candidate_count": _nonnegative_integer(
+            closure.get("candidateCount")
+        ),
+        "closure_way_count": _nonnegative_integer(closure.get("wayCount")),
+        "closure_node_count": _nonnegative_integer(closure.get("nodeCount")),
+        "closure_relation_count": _nonnegative_integer(
+            closure.get("relationCount")
+        ),
+        "relation_retry_count": relation_retry_count,
+        "building_source_count": _nonnegative_integer(
+            complexity.get("sourceCount", building.get("sourceCount"))
+        ),
+        "building_outline_count": _nonnegative_integer(
+            complexity.get("outlineCount", building.get("outlineCount"))
+        ),
+        "building_part_count": _nonnegative_integer(
+            complexity.get("partCount", building.get("partCount"))
+        ),
+        "building_unresolved_part_count": _nonnegative_integer(
+            complexity.get(
+                "unresolvedPartCount", building.get("unassociatedPartCount")
+            )
+        ),
+        "building_containment_count": _nonnegative_integer(
+            building.get("containmentAssociationCount")
+        ),
+        "building_point_count": _nonnegative_integer(
+            complexity.get("sourceVertexCount", building.get("pointCount"))
+        ),
+        "label_candidate_count": _nonnegative_integer(label.get("candidates")),
+        "outcome_class": outcome,
+        "initial_estimate_lower_seconds": (
+            _nonnegative_integer(remaining.get("lowerSeconds")) if is_initial else None
+        ),
+        "initial_estimate_upper_seconds": (
+            _nonnegative_integer(remaining.get("upperSeconds")) if is_initial else None
+        ),
+        "final_estimate_lower_seconds": _nonnegative_integer(
+            remaining.get("lowerSeconds")
+        ),
+        "final_estimate_upper_seconds": _nonnegative_integer(
+            remaining.get("upperSeconds")
+        ),
+    }
 
 
 def _run_counts(rows: list[sqlite3.Row]) -> dict[str, Any]:
@@ -516,6 +1187,157 @@ def _renderer_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
     }
 
 
+def _cohort_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    groups: dict[str, int] = {}
+    for row in rows:
+        renderer = row["renderer_format_version"]
+        mode = row["preprocessing_mode"] or "unknown"
+        outcome = row["outcome_class"] or "unknown"
+        cache = row["calibration_cache_outcome"] or "unknown"
+        blocks = row["output_block_count"]
+        block_bucket = _block_bucket(blocks)
+        density_bucket = _density_bucket(
+            row["building_source_count"], row["source_area_m2"]
+        )
+        performance = row["performance_compatibility_key"]
+        performance_prefix = (
+            str(performance)[:12] if performance is not None else "unknown"
+        )
+        key = "/".join(
+            [
+                f"renderer-{renderer if renderer is not None else 'unknown'}",
+                str(mode),
+                str(outcome),
+                str(cache),
+                f"blocks-{block_bucket}",
+                f"density-{density_bucket}",
+                f"profile-{performance_prefix}",
+            ]
+        )
+        groups[key] = groups.get(key, 0) + 1
+    return {"count": len(rows), "byCohort": dict(sorted(groups.items()))}
+
+
+def _revision_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    by_state: dict[str, int] = {}
+    by_confidence: dict[str, int] = {}
+    by_model: dict[str, int] = {}
+    by_job: dict[str, int] = {}
+    latencies: list[float] = []
+    for row in rows:
+        state = str(row["state"])
+        by_state[state] = by_state.get(state, 0) + 1
+        if row["confidence"] is not None:
+            confidence = str(row["confidence"])
+            by_confidence[confidence] = by_confidence.get(confidence, 0) + 1
+        model = str(row["model_version"])
+        by_model[model] = by_model.get(model, 0) + 1
+        job_id = str(row["job_id"])
+        by_job[job_id] = by_job.get(job_id, 0) + 1
+        if (
+            row["completed_epoch"] is not None
+            and _is_finite_number(row["completed_epoch"])
+        ):
+            latency = float(row["completed_epoch"]) - float(
+                row["generated_epoch"]
+            )
+            if latency >= 0:
+                latencies.append(latency)
+    return {
+        "count": len(rows),
+        "jobCount": len(by_job),
+        "maximumRevisionsPerJob": max(by_job.values(), default=0),
+        "byState": dict(sorted(by_state.items())),
+        "byConfidence": dict(sorted(by_confidence.items())),
+        "byModelVersion": dict(sorted(by_model.items())),
+        "revisionToReadySeconds": _statistics(latencies),
+    }
+
+
+def _estimate_accuracy(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    actuals: list[float] = []
+    absolute_errors: list[float] = []
+    widths: list[float] = []
+    underprediction_ratios: list[float] = []
+    overprediction_ratios: list[float] = []
+    inside = 0
+    below_upper = 0
+    for row in rows:
+        if (
+            row["state"] != "available"
+            or row["terminal_status"] != JobStatus.READY.value
+            or row["completed_epoch"] is None
+            or row["lower_seconds"] is None
+            or row["upper_seconds"] is None
+        ):
+            continue
+        actual = float(row["completed_epoch"]) - float(row["generated_epoch"])
+        lower = float(row["lower_seconds"])
+        upper = float(row["upper_seconds"])
+        if actual < 0 or not all(
+            _is_finite_number(value) for value in (actual, lower, upper)
+        ):
+            continue
+        actuals.append(actual)
+        absolute_errors.append(abs(actual - (lower + upper) / 2))
+        widths.append(upper - lower)
+        if lower <= actual <= upper:
+            inside += 1
+        if actual <= upper:
+            below_upper += 1
+        underprediction_ratios.append(actual / max(upper, 1.0))
+        overprediction_ratios.append(upper / max(actual, 1.0))
+    count = len(actuals)
+    return {
+        "count": count,
+        "intervalCoverage": round(inside / count, 6) if count else None,
+        "upperBoundCoverage": round(below_upper / count, 6) if count else None,
+        "absoluteErrorSeconds": _statistics(absolute_errors),
+        "rangeWidthSeconds": _statistics(widths),
+        "underpredictionRatio": _number_statistics(underprediction_ratios),
+        "overpredictionRatio": _number_statistics(overprediction_ratios),
+    }
+
+
+def _estimate_model_comparison(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    baseline_rows = []
+    historical_rows = []
+    for row in rows:
+        try:
+            basis = json.loads(row["basis_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(basis, list):
+            continue
+        if "historical_cohort" in basis:
+            historical_rows.append(row)
+        else:
+            baseline_rows.append(row)
+    return {
+        "baselineOnly": _estimate_accuracy(baseline_rows),
+        "historicalCohort": _estimate_accuracy(historical_rows),
+    }
+
+
+def _estimate_exclusions(rows: list[sqlite3.Row]) -> dict[str, int]:
+    exclusions: dict[str, int] = {}
+    for row in rows:
+        reasons = []
+        if row["status"] != JobStatus.READY.value:
+            reasons.append("non_ready")
+        if int(row["attempts"]) != 1:
+            reasons.append("retry")
+        if row["performance_compatibility_key"] is None:
+            reasons.append("missing_performance_key")
+        if row["preprocessing_mode"] is None:
+            reasons.append("missing_preprocessing_mode")
+        if row["outcome_class"] is None:
+            reasons.append("missing_outcome_class")
+        for reason in reasons:
+            exclusions[reason] = exclusions.get(reason, 0) + 1
+    return dict(sorted(exclusions.items()))
+
+
 def _statistics(values: list[float]) -> dict[str, Any]:
     if not values:
         return {
@@ -534,6 +1356,18 @@ def _statistics(values: list[float]) -> dict[str, Any]:
         "p95Seconds": _round_seconds(_percentile(ordered, 95)),
         "avgSeconds": _round_seconds(sum(ordered) / len(ordered)),
         "maxSeconds": _round_seconds(ordered[-1]),
+    }
+
+
+def _number_statistics(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0, "p50": None, "p95": None, "max": None}
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "p50": round(_percentile(ordered, 50), 6),
+        "p95": round(_percentile(ordered, 95), 6),
+        "max": round(ordered[-1], 6),
     }
 
 
@@ -557,6 +1391,59 @@ def _finite_or_none(value: Any) -> float | None:
     if not _is_finite_number(value):
         return None
     return float(value)
+
+
+def _nonnegative_integer(value: Any) -> int | None:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 9_000_000_000_000_000
+    ):
+        return value
+    return None
+
+
+def _block_bucket(value: Any) -> str:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return "unknown"
+    if value <= 1:
+        return "1"
+    if value <= 4:
+        return "2-4"
+    if value <= 8:
+        return "5-8"
+    return "9+"
+
+
+def _density_bucket(building_count: Any, area_m2: Any) -> str:
+    if (
+        not isinstance(building_count, int)
+        or isinstance(building_count, bool)
+        or building_count < 0
+        or not isinstance(area_m2, int)
+        or isinstance(area_m2, bool)
+        or area_m2 <= 0
+    ):
+        return "unknown"
+    per_km2 = building_count * 1_000_000 / area_m2
+    if per_km2 < 100:
+        return "sparse"
+    if per_km2 < 500:
+        return "medium"
+    if per_km2 < 2_000:
+        return "dense"
+    return "very_dense"
+
+
+def _neighboring_bucket(value: str, candidate: str, ordering: tuple[str, ...]) -> bool:
+    if value == "unknown":
+        return True
+    if candidate == "unknown":
+        return False
+    try:
+        return abs(ordering.index(value) - ordering.index(candidate)) <= 1
+    except ValueError:
+        return False
 
 
 def _is_finite_number(value: Any) -> bool:

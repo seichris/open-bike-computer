@@ -308,6 +308,7 @@ struct OfflineMapJob: Decodable, Equatable {
     let artifacts: [OfflineMapArtifact]?
     let userLabel: String?
     let reuseStrategy: String?
+    let preparationEstimate: OfflineMapPreparationEstimate?
     let downloadCount: Int?
     let firstDownloadedAt: String?
     let lastDownloadedAt: String?
@@ -652,18 +653,198 @@ struct OfflineMapJobGeometry: Decodable, Equatable {
     let routePointCount: Int
 }
 
-enum OfflineMapPreparationTimeEstimate {
-    static func description(for areaKm2: Double) -> String {
-        switch max(areaKm2, 0) {
-        case ..<10:
-            return "Usually under a minute"
-        case ..<1_000:
-            return "Usually a few minutes"
-        case ..<15_000:
-            return "May take 15–90 minutes"
-        default:
-            return "May take several hours"
+struct OfflineMapPreparationEstimate: Decodable, Equatable {
+    let schemaVersion: Int?
+    let modelVersion: String?
+    let revision: Int?
+    let state: String?
+    let generatedAt: String?
+    let attempt: Int?
+    let basedOnPhase: String?
+    let confidence: String?
+    let remaining: OfflineMapPreparationEstimateRange?
+    let queue: OfflineMapPreparationEstimateRange?
+    let basis: [String]?
+    let sampleCount: Int?
+    let reason: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, modelVersion, revision, state, generatedAt
+        case attempt, basedOnPhase, confidence, remaining, queue, basis
+        case sampleCount, reason
+    }
+
+    init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            schemaVersion = nil
+            modelVersion = nil
+            revision = nil
+            state = nil
+            generatedAt = nil
+            attempt = nil
+            basedOnPhase = nil
+            confidence = nil
+            remaining = nil
+            queue = nil
+            basis = nil
+            sampleCount = nil
+            reason = nil
+            return
         }
+        schemaVersion = try? container.decode(Int.self, forKey: .schemaVersion)
+        modelVersion = try? container.decode(String.self, forKey: .modelVersion)
+        revision = try? container.decode(Int.self, forKey: .revision)
+        state = try? container.decode(String.self, forKey: .state)
+        generatedAt = try? container.decode(String.self, forKey: .generatedAt)
+        attempt = try? container.decode(Int.self, forKey: .attempt)
+        basedOnPhase = try? container.decode(String.self, forKey: .basedOnPhase)
+        confidence = try? container.decode(String.self, forKey: .confidence)
+        remaining = try? container.decode(
+            OfflineMapPreparationEstimateRange.self,
+            forKey: .remaining
+        )
+        queue = try? container.decode(
+            OfflineMapPreparationEstimateRange.self,
+            forKey: .queue
+        )
+        basis = try? container.decode([String].self, forKey: .basis)
+        sampleCount = try? container.decode(Int.self, forKey: .sampleCount)
+        reason = try? container.decode(String.self, forKey: .reason)
+    }
+
+    var validRemainingRange: OfflineMapPreparationEstimateRange? {
+        guard schemaVersion == 1,
+              state == "available",
+              let modelVersion,
+              !modelVersion.isEmpty,
+              let revision,
+              revision > 0,
+              let attempt,
+              attempt >= 0,
+              let generatedAt,
+              OfflineMapPreparationEstimatePresentation.date(from: generatedAt) != nil,
+              let basedOnPhase,
+              !basedOnPhase.isEmpty,
+              let confidence,
+              ["low", "medium", "high"].contains(confidence),
+              let remaining,
+              remaining.isValid,
+              let sampleCount,
+              sampleCount >= 0 else {
+            return nil
+        }
+        if let queue, !queue.isValid || queue.upperSeconds > remaining.upperSeconds {
+            return nil
+        }
+        return remaining
+    }
+}
+
+struct OfflineMapPreparationEstimateRange: Decodable, Equatable {
+    let lowerSeconds: Int
+    let upperSeconds: Int
+
+    var isValid: Bool {
+        lowerSeconds >= 0 &&
+            lowerSeconds <= upperSeconds &&
+            upperSeconds <= 604_800
+    }
+}
+
+struct OfflineMapPreparationEstimatePresentation: Equatable {
+    let title: String
+    let value: String
+
+    static let fallbackGraceSeconds: TimeInterval = 10
+
+    static func presentation(
+        for job: OfflineMapJob,
+        now: Date = Date()
+    ) -> Self? {
+        guard !job.isTerminal else { return nil }
+        let title = job.status == "queued"
+            ? "Estimated Preparation"
+            : "Estimated Remaining"
+        if let estimate = job.preparationEstimate {
+            if let range = estimate.validRemainingRange {
+                return Self(
+                    title: title,
+                    value: description(for: range)
+                )
+            }
+            if estimate.schemaVersion == 1,
+               estimate.state == "pending",
+               (estimate.attempt ?? 0) > 1 {
+                return Self(
+                    title: title,
+                    value: "Re-estimating after retry…"
+                )
+            }
+        }
+        let age = job.createdAt.flatMap(date(from:)).map {
+            max(0, now.timeIntervalSince($0))
+        }
+        return Self(
+            title: title,
+            value: age.map { $0 < fallbackGraceSeconds } == true
+                ? "Estimating preparation time…"
+                : "Preparation time depends on map complexity"
+        )
+    }
+
+    static func description(
+        for range: OfflineMapPreparationEstimateRange
+    ) -> String {
+        if range.upperSeconds < 60 {
+            return "Less than a minute"
+        }
+        let step: Int
+        switch range.upperSeconds {
+        case ..<600:
+            step = 60
+        case ..<3_600:
+            step = 300
+        default:
+            step = 900
+        }
+        let lower = max(
+            0,
+            (range.lowerSeconds / step) * step
+        )
+        let upper = max(
+            lower,
+            ((range.upperSeconds + step - 1) / step) * step
+        )
+        if lower == upper {
+            return "About \(durationDescription(lower)) remaining"
+        }
+        if lower == 0 {
+            return "Up to \(durationDescription(upper)) remaining"
+        }
+        return "About \(durationDescription(lower))–\(durationDescription(upper)) remaining"
+    }
+
+    static func date(from value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func durationDescription(_ seconds: Int) -> String {
+        if seconds < 3_600 {
+            return "\(max(1, seconds / 60)) min"
+        }
+        if seconds % 3_600 == 0 {
+            let hours = seconds / 3_600
+            return hours == 1 ? "1 hr" : "\(hours) hr"
+        }
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        return "\(hours) hr \(minutes) min"
     }
 }
 

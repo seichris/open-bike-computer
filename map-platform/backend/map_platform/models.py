@@ -176,6 +176,8 @@ class MapJob:
     building_preprocessing_inputs: dict[str, Any] | None = None
     building_preprocessing_runtime: dict[str, Any] | None = None
     building_preprocessing_mode: str | None = None
+    preparation_estimate: dict[str, Any] | None = None
+    preparation_estimator_context: dict[str, Any] | None = None
     reuse_strategy: str | None = None
     reuse_source_job_id: str | None = None
     download_receipts: list[MapDownloadReceipt] = field(default_factory=list)
@@ -247,6 +249,8 @@ class MapJob:
             "events": self.events,
             "phaseTimings": self.phase_timings(),
         }
+        if self.preparation_estimate is not None:
+            result["preparationEstimate"] = self.preparation_estimate
         if include_internal:
             result["buildCacheKey"] = self.build_cache_key
             result["buildCacheAliases"] = self.build_cache_aliases
@@ -255,6 +259,9 @@ class MapJob:
             result["buildingPreprocessingInputs"] = self.building_preprocessing_inputs
             result["buildingPreprocessingRuntime"] = self.building_preprocessing_runtime
             result["buildingPreprocessingMode"] = self.building_preprocessing_mode
+            result["preparationEstimatorContext"] = (
+                self.preparation_estimator_context
+            )
             result["reuseSourceJobId"] = self.reuse_source_job_id
             result["downloadReceipts"] = [
                 receipt.to_dict() for receipt in self.download_receipts
@@ -314,6 +321,12 @@ class MapJob:
             ),
             building_preprocessing_mode=_building_preprocessing_mode(
                 data.get("buildingPreprocessingMode")
+            ),
+            preparation_estimate=_preparation_estimate(
+                data.get("preparationEstimate")
+            ),
+            preparation_estimator_context=_preparation_estimator_context(
+                data.get("preparationEstimatorContext")
             ),
             reuse_strategy=data.get("reuseStrategy"),
             reuse_source_job_id=data.get("reuseSourceJobId"),
@@ -536,6 +549,22 @@ def _build_cache_aliases(value: Any) -> list[str]:
     ):
         raise ValueError("build cache aliases are invalid")
     return list(value)
+
+
+def _preparation_estimate(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    from .preparation_estimates import validate_preparation_estimate
+
+    return validate_preparation_estimate(value)
+
+
+def _preparation_estimator_context(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    from .preparation_estimates import validate_estimator_context
+
+    return validate_estimator_context(value)
 
 
 def _building_preprocessing_mode(value: Any) -> str | None:

@@ -928,6 +928,44 @@ class JobStore:
             self.save(job)
             return job
 
+    def update_preparation_estimate_unless_cancelled(
+        self,
+        job_id: str,
+        *,
+        preparation_estimate: dict[str, Any],
+        estimator_context: dict[str, Any],
+        worker_id: str | None = None,
+    ) -> MapJob:
+        """Atomically persist advisory ETA state without touching build identity."""
+        from .preparation_estimates import (
+            validate_estimator_context,
+            validate_preparation_estimate,
+        )
+
+        estimate = validate_preparation_estimate(preparation_estimate)
+        context = validate_estimator_context(estimator_context)
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.status == JobStatus.CANCELLED:
+                raise RuntimeError("job was cancelled")
+            if worker_id is not None and job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            previous = job.preparation_estimate
+            previous_revision = int(previous.get("revision", 0)) if previous else 0
+            previous_attempt = int(previous.get("attempt", 0)) if previous else 0
+            if estimate["revision"] != previous_revision + 1:
+                raise RuntimeError("preparation estimate revision is not monotonic")
+            if (
+                estimate["attempt"] < previous_attempt
+                or estimate["attempt"] != job.attempts
+            ):
+                raise RuntimeError("preparation estimate attempt is not monotonic")
+            job.preparation_estimate = estimate
+            job.preparation_estimator_context = context
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
     def find_exact_reuse_candidate(
         self,
         *,
@@ -1412,6 +1450,7 @@ class MapJobService:
         label_target2_enabled: bool = False,
         building_target3_enabled: bool = False,
         building_target3_allowlist: frozenset[str] = frozenset(),
+        estimate_coordinator=None,
     ):
         self.source_index = source_index
         self.store = store
@@ -1419,6 +1458,7 @@ class MapJobService:
         self.label_target2_enabled = label_target2_enabled
         self.building_target3_enabled = building_target3_enabled
         self.building_target3_allowlist = building_target3_allowlist
+        self.estimate_coordinator = estimate_coordinator
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1463,8 +1503,21 @@ class MapJobService:
                             "clientRequestId was already used for a different map request"
                         )
                     return existing
-            self.limits.validate_active_jobs(self.store.list_active())
+            active_jobs = self.store.list_active()
+            self.limits.validate_active_jobs(active_jobs)
+            if self.estimate_coordinator is not None:
+                try:
+                    self.estimate_coordinator.prepare_initial(job, active_jobs)
+                except Exception:
+                    # ETA state is advisory and must never reject a valid map.
+                    job.preparation_estimate = None
+                    job.preparation_estimator_context = None
             self.store.save(job)
+            if self.estimate_coordinator is not None:
+                try:
+                    self.estimate_coordinator.record_prepared(job)
+                except Exception:
+                    pass
             return job
 
     @contextmanager

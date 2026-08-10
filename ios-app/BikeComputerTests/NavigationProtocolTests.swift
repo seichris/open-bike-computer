@@ -5199,25 +5199,153 @@ struct NavigationProtocolTests {
     }
 
     static func testOfflineMapPreparationTimeEstimate() {
-        assertEqual(
-            OfflineMapPreparationTimeEstimate.description(for: 1),
-            "Usually under a minute",
-            "small map preparation estimate"
+        func decode(_ json: String) -> OfflineMapJob {
+            do {
+                return try JSONDecoder().decode(
+                    OfflineMapJob.self,
+                    from: Data(json.utf8)
+                )
+            } catch {
+                fatalError("offline map estimate fixture failed: \(error)")
+            }
+        }
+        let now = Date(timeIntervalSince1970: 1_786_330_000)
+        let available = decode(
+            """
+            {
+              "jobId": "estimate-available",
+              "status": "converting_features",
+              "createdAt": "2026-08-10T00:00:00Z",
+              "preparationEstimate": {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 4,
+                "state": "available",
+                "generatedAt": "2026-08-10T01:00:00Z",
+                "attempt": 1,
+                "basedOnPhase": "building_complexity",
+                "confidence": "medium",
+                "remaining": {"lowerSeconds": 1, "upperSeconds": 59},
+                "basis": ["baseline_profile", "future_basis_is_tolerated"],
+                "sampleCount": 24
+              }
+            }
+            """
         )
         assertEqual(
-            OfflineMapPreparationTimeEstimate.description(for: 785),
-            "Usually a few minutes",
-            "city map preparation estimate"
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: available,
+                now: now
+            ),
+            OfflineMapPreparationEstimatePresentation(
+                title: "Estimated Remaining",
+                value: "Less than a minute"
+            ),
+            "valid server estimate replaces requested-area copy"
+        )
+        let oldBackend = decode(
+            """
+            {
+              "jobId": "estimate-old-backend",
+              "status": "queued",
+              "createdAt": "2026-08-10T00:00:00Z",
+              "geometry": {"mode":"bbox","bounds":[0,0,1,1],"areaKm2":1,"vertexCount":4,"routePointCount":0}
+            }
+            """
         )
         assertEqual(
-            OfflineMapPreparationTimeEstimate.description(for: 14_252),
-            "May take 15–90 minutes",
-            "large map preparation estimate"
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: oldBackend,
+                now: Date(timeIntervalSince1970: 1_786_330_020)
+            )?.value,
+            "Preparation time depends on map complexity",
+            "old backend never falls back to requested-area numeric buckets"
+        )
+        let pendingRetry = decode(
+            """
+            {
+              "jobId": "estimate-retry",
+              "status": "queued",
+              "createdAt": "2026-08-10T00:00:00Z",
+              "preparationEstimate": {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 5,
+                "state": "pending",
+                "generatedAt": "2026-08-10T01:00:00Z",
+                "attempt": 2,
+                "basedOnPhase": "retry"
+              }
+            }
+            """
         )
         assertEqual(
-            OfflineMapPreparationTimeEstimate.description(for: 37_019),
-            "May take several hours",
-            "very large map preparation estimate"
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: pendingRetry,
+                now: now
+            )?.value,
+            "Re-estimating after retry…",
+            "retry pending state has explicit copy"
+        )
+        let malformed = decode(
+            """
+            {
+              "jobId": "estimate-malformed",
+              "status": "converting_features",
+              "createdAt": "2026-08-10T00:00:00Z",
+              "preparationEstimate": {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 1,
+                "state": "available",
+                "generatedAt": "2026-08-10T01:00:00Z",
+                "attempt": 1,
+                "basedOnPhase": "scope_plan",
+                "confidence": "low",
+                "remaining": {"lowerSeconds": 600, "upperSeconds": 60},
+                "basis": ["baseline_profile"],
+                "sampleCount": 0
+              }
+            }
+            """
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: malformed,
+                now: now
+            )?.value,
+            "Preparation time depends on map complexity",
+            "malformed range does not break job decoding"
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.description(
+                for: OfflineMapPreparationEstimateRange(
+                    lowerSeconds: 1,
+                    upperSeconds: 61
+                )
+            ),
+            "Up to 2 min remaining",
+            "sub-minute lower bounds round outward"
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.description(
+                for: OfflineMapPreparationEstimateRange(
+                    lowerSeconds: 61,
+                    upperSeconds: 241
+                )
+            ),
+            "About 1 min–5 min remaining",
+            "minute ranges round outward"
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.description(
+                for: OfflineMapPreparationEstimateRange(
+                    lowerSeconds: 3_601,
+                    upperSeconds: 5_401
+                )
+            ),
+            "About 1 hr–1 hr 45 min remaining",
+            "hour ranges round outward in fifteen-minute increments"
         )
     }
 

@@ -30,6 +30,10 @@ contract and operating procedure.
 - Durable map-build timing records and p50/p95 summaries at the admin-only
   `GET /v1/admin/map-monitoring` endpoint. Worker completion logs emit the same
   timing data as structured JSON for Coolify log search.
+- Optional server-owned preparation ranges on installation-scoped map jobs.
+  The versioned estimator combines a checked-in conservative baseline with
+  compatible local timing cohorts, then refines selected 3D jobs from actual
+  scope, dependency/cache, and pre-normalization building complexity signals.
 - Coolify-oriented compose file and Dockerfile.
 
 ## Local API
@@ -79,7 +83,12 @@ python -m map_platform.cli monitoring-summary --window-hours 168
 The production equivalent is the admin-only
 `GET /v1/admin/map-monitoring?windowHours=168` route. It is read-only and
 calculates queue, processing, and total-duration summaries from the bounded
-SQLite sample, including p50/p95 values overall and by renderer format.
+SQLite sample, including p50/p95 values overall and by renderer format. Schema
+version 2 also retains a default maximum of 16 estimate revisions per job and
+reports redacted compatibility cohorts, interval/upper-bound coverage, range
+width, revision-to-ready latency, and exclusion reasons. Existing schema-v1 timing
+rows migrate transactionally and remain usable only for coarse summaries when
+their new compatibility fields are absent.
 Maintenance performs the explicit restart reconciliation and retention prune;
 the CLI command above does the same before producing a local summary. The
 worker emits a `map_job_run_completed` JSON log event for each processed
@@ -269,6 +278,33 @@ Useful production environment variables:
   in-window timing samples loaded for an aggregate summary, default `50000`,
   maximum `1000000`. Responses report the matching count, sampled count, limit,
   and whether the summary was truncated.
+- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default), `shadow`, or
+  `public`. `off` omits generation and the public field; `shadow` stores
+  revisions for accuracy review but omits the public field; `public` returns
+  the latest validated revision on the existing installation-scoped job API.
+- `MAP_PLATFORM_ESTIMATOR_WORKER_CLASS` and
+  `MAP_PLATFORM_ESTIMATOR_WORKER_CONCURRENCY_CLASS`: reviewed performance-class
+  tokens shared by API and worker. The defaults (`unclassified` and `single`)
+  identify the unreviewed default cohort; the separate validated-confidence
+  ceiling keeps confidence low until shadow evidence is approved.
+- `MAP_PLATFORM_ESTIMATE_MIN_HISTORY_SAMPLES` (default `20`) and
+  `MAP_PLATFORM_ESTIMATE_HIGH_CONFIDENCE_SAMPLES` (default `50`): compatible
+  successful samples required for medium/high confidence. Sparse history may
+  widen but cannot narrow the checked-in baseline.
+- `MAP_PLATFORM_ESTIMATE_VALIDATED_CONFIDENCE`: reviewed confidence ceiling,
+  default `low`. Raise it to `medium` or `high` only after the corresponding
+  shadow coverage gates pass; sample count alone cannot exceed this ceiling.
+- `MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB` (default `16`),
+  `MAP_PLATFORM_ESTIMATE_MIN_UPDATE_SECONDS` (default `5`), and
+  `MAP_PLATFORM_ESTIMATE_MATERIAL_CHANGE_BPS` (default `1000`) bound revision
+  churn. Phase, retry, and confirmed reuse transitions may publish immediately.
+- `MAP_PLATFORM_ESTIMATE_MAX_SECONDS`: maximum public range endpoint, default
+  `604800` (seven days). Invalid or larger ranges become unavailable rather
+  than being silently clamped.
+- `MAP_PLATFORM_PREPARATION_ESTIMATE_MODEL_PATH`: optional path to a reviewed
+  profile. The default is the checked-in
+  `config/preparation-estimate-profile-v1.json`; model/profile changes do not
+  enter map IDs, cache keys, manifests, signatures, or artifact bytes.
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted

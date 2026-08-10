@@ -2,12 +2,15 @@
 
 ## Status and scope
 
-This plan was authored from `origin/main` at
-`15d806613b680621b923b311ec30b2470fd4b349`. It is an implementation proposal,
-not a description of functionality that is already deployed. Any thresholds,
-field names, model versions, rollout modes, or performance targets below are
-proposals until code, tests, benchmark evidence, and production rollout records
-prove them.
+This plan was originally authored from `origin/main` at
+`15d806613b680621b923b311ec30b2470fd4b349` and was reconciled before
+implementation against current `origin/main` at
+`344e8b6831cc4ffd3619d3daf74cef1c67b7fc7c` on 2026-08-10. It now serves as the
+design, implementation, and rollout contract for the implementation on
+`agent/offline-map-preparation-estimates`; it is not a claim that the feature is
+deployed. Checked-in configuration defaults are implemented choices. Benchmark,
+accuracy, and production promotion gates remain proposals until retained
+evidence and rollout records prove them.
 
 The feature replaces the iOS app's requested-area-only preparation copy with a
 server-owned estimate for the time between accepting a map job and publishing
@@ -22,9 +25,66 @@ their cost is least correlated with requested area and final archive size. The
 contract should remain general enough for renderer formats 1 and 2 without
 changing their output bytes or reuse behavior.
 
+### Reconciliation with current main
+
+The intervening main-branch changes were audited before implementation and
+again after `main` advanced during verification. They primarily add iOS ride
+automation, workout/navigation behavior, map-transfer recovery, and firmware
+navigation-freshness invariants. The backend job model, monitoring schema,
+selected-area 3D pipeline, `OfflineMapJob` decoding, and existing `Estimated
+Preparation` row did not materially change, so the core architecture below
+still applies. The implementation preserves the newer `SettingsView`
+dependencies and completed-map upload cleanup behavior while changing only the
+estimate row's data source and presentation.
+
+The following v1 decisions are now resolved for implementation:
+
+- keep the public estimate on the existing installation-scoped map-job
+  resource; do not add a preflight or admin-data endpoint;
+- use a checked-in deterministic baseline profile, with production history
+  allowed to widen it immediately and narrow it only after the proposed sample
+  gates;
+- default rollout mode to `off`, support `shadow` and `public`, and keep estimate
+  generation advisory so failures cannot fail map creation or building;
+- publish worker compatibility beside the existing heartbeat without changing
+  the heartbeat's current health-check format;
+- keep confidence operational-only in iOS v1 and include queue time within the
+  displayed preparation range;
+- support renderer formats 1 and 2 with conservative coarse baselines while
+  reserving staged scope/complexity refinement for selected renderer format 3;
+- retain the proposed seven-day public range ceiling and 16-revision monitoring
+  cap;
+- treat the dense-containment hotspot as a performance-profile boundary. It
+  does not block broad shadow estimates, but public medium/high-confidence dense
+  target-3 ranges remain gated on benchmark and coverage evidence;
+- use four explicit building-density buckets by source buildings per source
+  square kilometre: `sparse` below 100, `medium` below 500, `dense` below
+  2,000, and `very_dense` at 2,000 or more; and
+- default the reviewed confidence ceiling to `low`; sample counts can only
+  reach `medium` or `high` after operators raise that ceiling following the
+  corresponding shadow coverage review.
+
+### Implementation status
+
+The branch implements the optional job schema, deterministic checked-in
+profile, exact API/worker compatibility handoff, atomic revisions, queue and
+tiered history cohorts, monitoring schema v2 migration, early
+`BUILDING_COMPLEXITY` evidence, phase/block refinements, public/shadow/off
+rollout behavior, privacy-safe events, and defensive iOS presentation. The
+rollout default remains `off`. A production shadow window, a fresh pinned
+approximately 24 km2 benchmark matrix, and public canary/promotion are
+deliberately not performed by this code-only change.
+
+Pre-commit verification on 2026-08-10 passed 346 backend tests, 110
+OSM/extractor tests, 37 deployment tests, the portable iOS/Catalyst suite, and
+a whole-main-app iOS Simulator Swift typecheck. The ordinary generic-device
+`xcodebuild` was also attempted with isolated derived data, but the shared
+host's Swift build service remained idle before compilation; CI therefore
+remains the authoritative full Xcode build gate.
+
 ## Current evidence
 
-### Current iOS behavior
+### Pre-implementation iOS behavior
 
 `SettingsView` shows an `Estimated Preparation` row for every nonterminal job
 that has `geometry.areaKm2`. `OfflineMapPreparationTimeEstimate` converts only
@@ -447,19 +507,15 @@ counts, closure candidate/way/node/relation counts, relation retries,
 calibration cells, and cache hits/misses. Persist a safe estimator snapshot as
 soon as those stages finish instead of waiting for final `artifactMetrics`.
 
-The request-specific source-index query should additionally report, using
-bounded integer counters:
-
-- building seed ways/relations;
-- provisional outline and part counts from tags/roles;
-- explicit parent associations;
-- candidates requiring containment fallback;
-- total way-node/member counts; and
-- invalid/over-limit counters.
+The request-specific source-index/closure snapshot reports its existing bounded
+object/member counters. Version 1 deliberately obtains the feature-shape
+counters listed in Stage 4 from the single materialized extractor list
+immediately before normalization, rather than adding a second source-index
+feature scan.
 
 The whole source-index node/way totals describe the Geofabrik snapshot and are
-useful for cache cost, but request-specific closure counts are the more useful
-job signal.
+useful for cache cost, while request-specific closure counts and the early
+complexity marker are the more useful job signals.
 
 ### Stage 4: pre-normalization feature complexity
 
@@ -532,7 +588,8 @@ performanceCompatibilityKey = SHA256(canonical JSON of:
   sourceIndex/closure/normalization algorithm versions,
   relevant GDAL/osmium/Shapely runtime profile,
   configured workerClass,
-  workerConcurrencyClass
+  workerConcurrencyClass,
+  validatedConfidenceCap
 )
 ```
 
@@ -589,7 +646,7 @@ Version 1 should favor robust, explainable estimates over a general ML model:
 5. Client formatting rounds outward; the backend never rounds inward and hides
    uncertainty.
 
-A candidate target-3 normalization complexity score is:
+A future fitted target-3 normalization complexity score may be:
 
 ```text
 normalizationScore =
@@ -600,10 +657,12 @@ normalizationScore =
   + relationWeight * closureCandidateCount
 ```
 
-The weights must be nonnegative, fitted and validated offline from compatible
-monitoring exports, then committed in the versioned baseline/model profile.
-This formula is a proposal for evaluation, not an already validated model.
-If the containment implementation becomes spatially indexed, bump the runtime
+The implemented v1 baseline avoids unvalidated fitted weights. It takes the
+arithmetic mean of nonnegative ratios for outlines, parts, unresolved-part by
+outline containment product, and source vertices against the checked-in
+reference profile, bounded to `0.25...20`. Increasing any input cannot reduce
+the normalization estimate. Fitted nonnegative weights remain a later model
+revision. If containment becomes spatially indexed, bump the runtime
 performance profile and replace the feature/formula instead of carrying its
 quadratic assumption forward.
 
@@ -616,7 +675,9 @@ Proposed confidence rules:
   and all per-density coverage/width gates pass.
 
 History may widen a conservative baseline at any sample count. It may narrow
-the baseline only at `medium` or `high` confidence.
+the baseline only at `medium` or `high` confidence. The implemented reviewed
+confidence ceiling defaults to `low`, so sample count alone cannot narrow the
+baseline or claim a validated confidence level.
 
 ## Backend data model and persistence
 
@@ -813,8 +874,9 @@ used by the app.
 1. Publish estimate revisions at claim, confirmed reuse outcome, source-cache
    wait, scope plan, dependency completion, pre-normalization complexity,
    normalization completion, block progress, and packaging.
-2. Extend the source-index/closure result with request-specific part/outline,
-   explicit-parent, member, and coordinate counters without changing closure
+2. Reuse the source-index/closure object/member counters, then publish
+   request-specific part/outline, explicit-parent, and coordinate counters from
+   the extractor's single materialized feature list without changing closure
    semantics or identity.
 3. Refactor building feature collection just enough to emit
    `BUILDING_COMPLEXITY` before containment/normalization, reusing the same
@@ -858,8 +920,10 @@ wall-time/CPU budget; artifact bytes and identities are unchanged.
    when doing so cannot narrow below the server lower bound.
 8. For a retry, show `Re-estimating after retry...` until the next available
    revision. Never keep an under-a-minute reuse estimate after reuse failed.
-9. Add localized strings, Dynamic Type layout, VoiceOver labels, dark/light
-   previews, and deterministic formatter tests.
+9. Follow the app's current English settings-copy convention, preserve the
+   existing Dynamic Type/VoiceOver row behavior, and add deterministic
+   decoder/formatter tests. Move the strings into a catalog when the app gains
+   localization infrastructure rather than creating a feature-only catalog.
 
 **Exit gate:** the app never derives a numeric estimate from requested area;
 old backends receive safe generic copy; new estimates format correctly from
@@ -901,21 +965,24 @@ The app may show a subtle `Based on map complexity` caption in a later UX
 iteration, but raw MB, building counts, source hashes, or confidence jargon are
 not required in the customer-facing row.
 
-## Configuration proposals
+## Configuration
 
 | Configuration | Proposed default | Purpose |
 | --- | --- | --- |
 | `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` | `off` | `off`, `shadow`, or `public` |
 | `MAP_PLATFORM_PREPARATION_ESTIMATE_MODEL_PATH` | checked-in profile | Versioned baseline/model document |
-| `MAP_PLATFORM_ESTIMATOR_WORKER_CLASS` | unset/fail to low confidence | Reviewed performance class, not auto-detected marketing data |
+| `MAP_PLATFORM_ESTIMATOR_WORKER_CLASS` | `unclassified` | Reviewed performance class, not auto-detected marketing data |
+| `MAP_PLATFORM_ESTIMATOR_WORKER_CONCURRENCY_CLASS` | `single` | Reviewed worker concurrency cohort |
 | `MAP_PLATFORM_ESTIMATE_MIN_HISTORY_SAMPLES` | `20` | Minimum before history narrows baseline |
 | `MAP_PLATFORM_ESTIMATE_HIGH_CONFIDENCE_SAMPLES` | `50` | Minimum before high confidence is possible |
+| `MAP_PLATFORM_ESTIMATE_VALIDATED_CONFIDENCE` | `low` | Reviewed ceiling raised only after shadow coverage gates pass |
 | `MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB` | `16` | Bound SQLite/job write amplification |
 | `MAP_PLATFORM_ESTIMATE_MIN_UPDATE_SECONDS` | `5` | Revision throttle |
 | `MAP_PLATFORM_ESTIMATE_MATERIAL_CHANGE_BPS` | `1000` | 10% range-change threshold |
 | `MAP_PLATFORM_ESTIMATE_MAX_SECONDS` | `604800` | Proposed seven-day validation cap |
 
-All values are proposals. Environment changes must remain aligned across
+The table records implemented defaults; changing them for rollout remains an
+operator decision. Environment changes must remain aligned across
 API/worker/maintenance composition and documented in backend/deploy READMEs.
 `off` omits the public field and does not create revision telemetry. `shadow`
 records revisions but omits them publicly. `public` records and returns the
@@ -1190,52 +1257,43 @@ No map artifacts need deletion or regeneration when disabling estimates.
    monitoring?
 4. Should queue wait be shown separately in the UI (`Waiting for server`) or
    remain only a component of the preparation range?
-5. Should low/medium/high confidence be customer-visible, accessibility-only,
-   or operational-only? This plan recommends operational-only for v1.
-6. Is the proposed pre-normalization counter set sufficient, or should the
+5. Is the implemented pre-normalization counter set sufficient, or should the
    source index add a spatial complexity histogram before GDAL conversion?
-7. Should baseline profiles live in checked-in backend config or in a
-   digest-pinned deployment artifact? This plan recommends checked-in config
-   for reviewability.
-8. What public fallback copy should be localized when an old backend omits the
-   field? This plan proposes `Preparation time depends on map complexity`.
-9. When should a picker preflight estimate be added, and can it share job
+6. When should a picker preflight estimate be added, and can it share job
    admission/rate-limit/idempotency logic without creating split behavior?
-10. Should renderer formats 1/2 enter public rollout with target 3, or remain on
-    generic copy until their compatible cohorts and processing-scope metrics
-    are available?
-11. Is seven days the correct maximum range for the largest admitted job?
-12. Should public mode automatically fall back to generic copy when rolling
+7. Is seven days the correct maximum range for the largest admitted job?
+8. Should public mode automatically fall back to generic copy when rolling
     upper-bound coverage drops below the reviewed threshold, or require an
     operator decision?
 
 ## Execution checklist
 
-- [ ] Record the implementation branch's exact `origin/main` base.
-- [ ] Freeze preparation interval, API schema, estimator feature schema, and
+- [x] Record the implementation branch's exact `origin/main` base.
+- [x] Freeze preparation interval, API schema, estimator feature schema, and
       performance compatibility contract.
 - [ ] Profile/reproduce the dense Shanghai normalization observation and rerun
       the pinned approximately 24 km2 benchmark matrix.
-- [ ] Implement and test monitoring schema v2 migration and bounded estimate
+- [x] Implement and test monitoring schema v2 migration and bounded estimate
       revisions.
-- [ ] Add the versioned deterministic estimator and checked-in baseline/model
+- [x] Add the versioned deterministic estimator and checked-in baseline/model
       profile.
-- [ ] Add optional `MapJob` estimate state, atomic updates, and API
+- [x] Add optional `MapJob` estimate state, atomic updates, and API
       serialization without changing artifact identity.
-- [ ] Add the compatible worker-capability record and queue estimation
+- [x] Add the compatible worker-capability record and queue estimation
       fallback without changing the health heartbeat format.
-- [ ] Publish worker revisions for claim, reuse, scope, dependencies,
+- [x] Publish worker revisions for claim, reuse, scope, dependencies,
       pre-normalization complexity, phase/block progress, retry, and packaging.
-- [ ] Add source-index complexity counters and the bounded
+- [x] Add request-specific closure/source counters and the bounded
       `BUILDING_COMPLEXITY` marker without duplicate geometry work.
-- [ ] Extend admin/CLI monitoring with cohort and accuracy summaries.
-- [ ] Replace iOS requested-area buckets with optional server-range decoding,
-      localized formatting, and safe generic fallback.
-- [ ] Pass estimator, migration, API/auth, pipeline, iOS, artifact-identity,
+- [x] Extend admin/CLI monitoring with cohort and accuracy summaries.
+- [x] Replace iOS requested-area buckets with optional server-range decoding,
+      outward formatting, and safe generic fallback.
+- [x] Pass estimator, migration, API/auth, pipeline, portable iOS,
+      artifact-identity,
       retry/restart, and compatibility tests.
 - [ ] Run `off` -> `shadow` -> installation canary -> public rollout and retain
       benchmark/accuracy evidence.
-- [ ] Verify rollback by omitting the API field and restoring generic app copy
+- [x] Verify rollback by omitting the API field and restoring generic app copy
       without affecting map jobs or artifacts.
 
 ## Definition of done

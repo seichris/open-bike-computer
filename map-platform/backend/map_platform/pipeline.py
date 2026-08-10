@@ -217,6 +217,7 @@ _MAP_PROGRESS_PATTERN = re.compile(r"MAP_PROGRESS:(\d+):(\d+)")
 _LABEL_STATS_PREFIX = "LABEL_STATS:"
 _BUILDING_STATS_PREFIX = "BUILDING_STATS:"
 _BUILDING_SCOPE_PREFIX = "BUILDING_SCOPE:"
+_BUILDING_COMPLEXITY_PREFIX = "BUILDING_COMPLEXITY:"
 _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
@@ -255,6 +256,39 @@ def parse_building_stats(line: str) -> dict[str, Any] | None:
 
 def parse_building_scope(line: str) -> dict[str, Any] | None:
     return _parse_structured_stats(line, _BUILDING_SCOPE_PREFIX)
+
+
+def parse_building_complexity(line: str) -> dict[str, int] | None:
+    value = _parse_structured_stats(line, _BUILDING_COMPLEXITY_PREFIX)
+    fields = {
+        "schemaVersion",
+        "sourceCount",
+        "outlineCount",
+        "partCount",
+        "explicitParentCount",
+        "unresolvedPartCount",
+        "containmentCandidateProduct",
+        "polygonCount",
+        "ringCount",
+        "holeCount",
+        "sourceVertexCount",
+        "maximumVerticesPerObject",
+        "preparationRejectedCount",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("schemaVersion") != 1
+        or any(
+            isinstance(value[field], bool)
+            or not isinstance(value[field], int)
+            or value[field] < 0
+            or value[field] > 9_000_000_000_000_000
+            for field in fields - {"schemaVersion"}
+        )
+    ):
+        return None
+    return value
 
 
 def parse_building_failure(output: str) -> dict[str, str] | None:
@@ -545,6 +579,7 @@ class MapBuildPipeline:
                     total=1,
                     total_blocks=len(scope_plan.output_blocks),
                     indeterminate=False,
+                    estimator_evidence={"scope": planned_scope_marker},
                 )
             else:
                 source_bounds = expanded_building_source_bounds(
@@ -758,6 +793,59 @@ class MapBuildPipeline:
             )
             building_phase_timings["preprocessing"] = (
                 time.perf_counter() - preprocessing_started
+            )
+            source_index_evidence = (
+                preprocessing_metrics.get("sourceIndex", {})
+                if isinstance(preprocessing_metrics, dict)
+                else {}
+            )
+            closure_evidence = (
+                preprocessing_metrics.get("closure", {})
+                if isinstance(preprocessing_metrics, dict)
+                else {}
+            )
+            calibration_runtime = (
+                (job.building_preprocessing_runtime or {}).get(
+                    "calibrationGeneration", {}
+                )
+            )
+            dependency_evidence = {
+                "sourceBytes": preprocessing_metrics.get("sourceBytes", 0),
+                "sourceIndex": {
+                    key: source_index_evidence[key]
+                    for key in (
+                        "schemaVersion",
+                        "algorithmVersion",
+                        "nodeCount",
+                        "wayCount",
+                        "relationCount",
+                        "relationMemberCount",
+                    )
+                    if key in source_index_evidence
+                },
+                "closure": {
+                    key: closure_evidence[key]
+                    for key in (
+                        "candidateCount",
+                        "relationCount",
+                        "wayCount",
+                        "nodeCount",
+                        "calibrationCellCount",
+                    )
+                    if key in closure_evidence
+                },
+                "cacheOutcome": calibration_runtime.get(
+                    "cacheOutcome", "unknown"
+                ),
+            }
+            self._emit_phase_progress(
+                on_phase_progress,
+                unit="dependency_snapshot",
+                completed=1,
+                total=1,
+                total_blocks=len(scope_plan.output_blocks),
+                indeterminate=False,
+                estimator_evidence={"dependencies": dependency_evidence},
             )
         conversion_started = time.perf_counter()
         while True:
@@ -1166,6 +1254,7 @@ class MapBuildPipeline:
         total_blocks: int | None,
         indeterminate: bool,
         phase: str = "building_preprocessing",
+        estimator_evidence: dict[str, Any] | None = None,
     ) -> None:
         if callback is None:
             return
@@ -1178,6 +1267,8 @@ class MapBuildPipeline:
             "totalBlocks": total_blocks,
             "indeterminate": indeterminate,
         }
+        if estimator_evidence is not None:
+            progress["estimatorEvidence"] = estimator_evidence
         callback(progress)
 
     def reuse_keys(
@@ -3044,9 +3135,10 @@ class MapBuildPipeline:
         label_stats: dict[str, Any] | None = None
         building_stats: dict[str, Any] | None = None
         building_scope: dict[str, Any] | None = None
+        building_complexity: dict[str, int] | None = None
 
         def handle_output(line: str) -> None:
-            nonlocal label_stats, building_stats, building_scope
+            nonlocal label_stats, building_stats, building_scope, building_complexity
             preprocess_progress = parse_building_preprocess_progress(line)
             if preprocess_progress is not None:
                 self._emit_phase_progress(
@@ -3081,6 +3173,26 @@ class MapBuildPipeline:
             parsed_building_stats = parse_building_stats(line)
             if parsed_building_stats is not None:
                 building_stats = parsed_building_stats
+            parsed_building_complexity = parse_building_complexity(line)
+            if parsed_building_complexity is not None:
+                if building_complexity is None:
+                    building_complexity = parsed_building_complexity
+                    self._emit_phase_progress(
+                        on_phase_progress,
+                        phase="building_preprocessing",
+                        unit="building_complexity",
+                        completed=1,
+                        total=1,
+                        total_blocks=(
+                            planned_scope_marker.get("outputBlockCount")
+                            if isinstance(planned_scope_marker, dict)
+                            else None
+                        ),
+                        indeterminate=False,
+                        estimator_evidence={
+                            "complexity": parsed_building_complexity
+                        },
+                    )
             parsed_building_scope = parse_building_scope(line)
             if parsed_building_scope is not None:
                 if building_scope is not None:
@@ -3102,6 +3214,7 @@ class MapBuildPipeline:
                 label_stats,
                 building_stats,
                 planned_scope_marker or building_scope,
+                building_complexity,
                 require_building_scope=(
                     scope_plan_path is not None and planned_scope_marker is None
                 ),
@@ -3115,6 +3228,7 @@ class MapBuildPipeline:
             label_stats,
             building_stats,
             planned_scope_marker or building_scope,
+            building_complexity,
             require_building_scope=(
                 scope_plan_path is not None and planned_scope_marker is None
             ),
@@ -3126,6 +3240,7 @@ class MapBuildPipeline:
         stats: dict[str, Any] | None,
         building_stats: dict[str, Any] | None,
         building_scope: dict[str, Any] | None = None,
+        building_complexity: dict[str, int] | None = None,
         *,
         require_building_scope: bool = False,
     ) -> dict[str, Any]:
@@ -3166,6 +3281,8 @@ class MapBuildPipeline:
                     "building-aware extraction emitted invalid phase timings"
                 )
             result["buildingBuild"] = building_stats
+            if building_complexity is not None:
+                result["buildingComplexity"] = building_complexity
             result["buildingScriptPhaseTimings"] = building_phase_timings
             if require_building_scope and building_scope is None:
                 raise RuntimeError("selected building extraction did not emit BUILDING_SCOPE")
@@ -3482,10 +3599,18 @@ def run_job(
     *,
     heartbeat_interval_seconds: float = 30.0,
     monitoring_store: MapMonitoringStore | None = None,
+    estimate_coordinator=None,
 ) -> MapJob:
     worker_id = f"api-{uuid.uuid4().hex[:8]}"
     job = store.claim(job_id, worker_id)
     attempt_started_monotonic = time.monotonic()
+    if estimate_coordinator is not None:
+        estimate_coordinator.publish(
+            job_id,
+            worker_id=worker_id,
+            phase=JobStatus.VALIDATING.value,
+            force=True,
+        )
 
     def record_monitoring(job: MapJob) -> None:
         if monitoring_store is None:
@@ -3498,6 +3623,13 @@ def run_job(
 
     def update(status: JobStatus) -> None:
         store.update_status_unless_cancelled(job_id, status, worker_id=worker_id)
+        if estimate_coordinator is not None:
+            estimate_coordinator.publish(
+                job_id,
+                worker_id=worker_id,
+                phase=status.value,
+                force=True,
+            )
 
     def update_progress(completed: int, total: int) -> None:
         store.update_progress_unless_cancelled(job_id, completed, total, worker_id=worker_id)
@@ -3525,6 +3657,20 @@ def run_job(
             indeterminate=progress["indeterminate"],
             worker_id=worker_id,
         )
+        if estimate_coordinator is not None:
+            raw_evidence = progress.get("estimatorEvidence")
+            evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+            evidence["progress"] = {
+                key: progress[key]
+                for key in ("phase", "unit", "completed", "total")
+            }
+            estimate_coordinator.publish(
+                job_id,
+                worker_id=worker_id,
+                phase=progress["phase"],
+                evidence=evidence,
+                force=isinstance(raw_evidence, dict),
+            )
 
     def cancellation_requested() -> bool:
         current = store.get(job_id)
@@ -3613,6 +3759,14 @@ def run_job(
                     if exact is not None and pipeline.validate_exact_reuse_candidate(
                         job, exact
                     ):
+                        if estimate_coordinator is not None:
+                            estimate_coordinator.publish(
+                                job_id,
+                                worker_id=worker_id,
+                                phase="reuse_exact",
+                                outcome_class="exact_reuse",
+                                force=True,
+                            )
                         reused = store.complete_exact_reuse(
                             job_id,
                             worker_id=worker_id,
@@ -3627,6 +3781,14 @@ def run_job(
                             record_monitoring(reused)
                             return reused
                     build_result = None
+                    if estimate_coordinator is not None:
+                        estimate_coordinator.publish(
+                            job_id,
+                            worker_id=worker_id,
+                            phase="reuse_resolved",
+                            outcome_class="full_build",
+                            force=True,
+                        )
                     for parent in store.find_subset_reuse_candidates(
                         job,
                         build_compatibility_key=reuse_identity.compatibility,
@@ -3641,6 +3803,14 @@ def run_job(
                             continue
                         reuse_strategy = "subset"
                         reuse_source_job_id = parent.job_id
+                        if estimate_coordinator is not None:
+                            estimate_coordinator.publish(
+                                job_id,
+                                worker_id=worker_id,
+                                phase="reuse_subset",
+                                outcome_class="subset_reuse",
+                                force=True,
+                            )
                         break
                     if build_result is None:
                         build_result = pipeline.build(job, **build_kwargs)

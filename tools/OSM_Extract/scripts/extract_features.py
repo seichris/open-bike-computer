@@ -176,6 +176,7 @@ def selected_features(features):
 
 buildings = []
 building_report = {}
+building_complexity = {}
 building_rules_sha256 = None
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
@@ -213,6 +214,15 @@ if args.renderer_format == 3:
             or not required_calibration_cells.issubset(calibration_cache.bound_cells())
         ):
             raise ValueError("scope plan calibration inputs are incomplete or incompatible")
+
+    def publish_building_complexity(value):
+        building_complexity.update(value)
+        print(
+            "BUILDING_COMPLEXITY:"
+            + json.dumps(value, sort_keys=True, separators=(",", ":")),
+            flush=True,
+        )
+
     try:
         buildings, building_report, _ = prepare_buildings(
             collect_building_features(
@@ -227,6 +237,7 @@ if args.renderer_format == 3:
             calibration_rules_sha256=building_rules_sha256,
             calibration_source_sha256=args.calibration_source_sha256,
             strict_relations=scope_plan is not None,
+            on_complexity=publish_building_complexity,
         )
     except CalibrationCacheError as exc:
         print(
@@ -489,6 +500,7 @@ if args.renderer_format == 3:
     for key, value in building_report.items():
         if key not in building_totals:
             building_totals[key] = value
+    building_totals["complexity"] = building_complexity
     building_totals["rulesSha256"] = building_rules_sha256
     building_totals["phaseTimings"] = {
         "buildingNormalization": round(building_normalization_seconds, 6),

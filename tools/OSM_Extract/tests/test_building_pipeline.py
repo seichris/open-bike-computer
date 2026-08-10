@@ -2,6 +2,7 @@ import pathlib
 import sys
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from shapely.geometry import box, LineString, mapping, MultiPolygon, Polygon
 from shapely.ops import unary_union
@@ -114,6 +115,35 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual([item.object_key for item in buildings], ["w1", "w2"])
         self.assertEqual(report["partCount"], 1)
         self.assertEqual(report["relationAssociationCount"], 1)
+
+    def test_complexity_snapshot_precedes_containment_and_is_bounded(self):
+        outline = feature(1, box(0, 0, 100, 100), '"building"=>"yes"')
+        part = feature(
+            2,
+            box(10, 10, 20, 20),
+            '"building:part"=>"yes"',
+            building=None,
+        )
+        snapshots = []
+
+        def containment(source, prepared):
+            self.assertTrue(snapshots, "complexity must publish before containment")
+            return None
+
+        with patch("building_pipeline._containment_parent", side_effect=containment):
+            prepare_buildings(
+                [outline, part],
+                self.rules,
+                on_complexity=snapshots.append,
+            )
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["schemaVersion"], 1)
+        self.assertEqual(snapshots[0]["outlineCount"], 1)
+        self.assertEqual(snapshots[0]["partCount"], 1)
+        self.assertEqual(snapshots[0]["unresolvedPartCount"], 1)
+        self.assertEqual(snapshots[0]["containmentCandidateProduct"], 1)
+        self.assertGreater(snapshots[0]["sourceVertexCount"], 0)
 
     def test_explicit_relation_promotes_untagged_parent_and_tagged_parts(self):
         outline = feature(
