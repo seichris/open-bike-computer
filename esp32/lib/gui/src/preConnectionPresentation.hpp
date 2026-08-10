@@ -93,6 +93,11 @@ constexpr bool needsUpdate(bool hasDisplayedPhase, Phase displayedPhase,
           displayedPairingCode != nextPairingCode);
 }
 
+constexpr bool isVisibleComparisonFrame(bool waitingScreenActive,
+                                        Phase displayedPhase) {
+  return waitingScreenActive && displayedPhase == Phase::PairingComparison;
+}
+
 // Keep the physical comparison gate behind presentation. Firmware supplies
 // the critical-section callbacks; host tests verify the ordering and every
 // phase's request/cancel decision without depending on LVGL or FreeRTOS.

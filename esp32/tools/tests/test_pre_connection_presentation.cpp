@@ -105,6 +105,12 @@ int main() {
   static_assert(pre_connection_presentation::needsUpdate(
       true, Phase::PairingComparison, 123456, Phase::PairingComparison,
       654321));
+  static_assert(!pre_connection_presentation::isVisibleComparisonFrame(
+      false, Phase::PairingComparison));
+  static_assert(!pre_connection_presentation::isVisibleComparisonFrame(
+      true, Phase::PairingConfirmed));
+  static_assert(pre_connection_presentation::isVisibleComparisonFrame(
+      true, Phase::PairingComparison));
 
   ownership_button_policy::ComparisonRenderGate renderGate;
   int order[2] = {0, 0};
@@ -126,6 +132,21 @@ int main() {
   assert(renderGate.renderedGeneration() == 0);
   renderGate.displayFlushed();
   assert(renderGate.renderedGeneration() == 7);
+
+  ownership_button_policy::ComparisonRenderGate hiddenScreenGate;
+  hiddenScreenGate.request(11);
+  if (pre_connection_presentation::isVisibleComparisonFrame(
+          false, Phase::PairingComparison)) {
+    hiddenScreenGate.displayFlushed();
+  }
+  assert(hiddenScreenGate.renderedGeneration() == 0);
+  assert(!hiddenScreenGate.consumeRendered(11));
+  if (pre_connection_presentation::isVisibleComparisonFrame(
+          true, Phase::PairingComparison)) {
+    hiddenScreenGate.displayFlushed();
+  }
+  assert(hiddenScreenGate.renderedGeneration() == 11);
+  assert(hiddenScreenGate.consumeRendered(11));
 
   // Replaying the same snapshot must not revoke a comparison that has already
   // reached the panel, while a confirmed or disconnected snapshot cancels it.

@@ -303,6 +303,18 @@ void updateWaitingOwnershipStatus(
   if (waitingScreen == nullptr) {
     return;
   }
-  applyPhase(pre_connection_presentation::resolve(snapshot),
-             snapshot.pairingCode);
+  const Phase phase = pre_connection_presentation::resolve(snapshot);
+  applyPhase(phase, snapshot.pairingCode);
+  if (phase == Phase::PairingComparison && lv_scr_act() != waitingScreen) {
+    // Pairing is a full pre-connection presentation, never a map/workout
+    // overlay. Bring it on-panel before the physical render gate can arm.
+    isMainScreen = false;
+    lv_screen_load(waitingScreen);
+  }
+}
+
+bool isWaitingPairingComparisonVisible() {
+  return waitingScreen != nullptr &&
+         pre_connection_presentation::isVisibleComparisonFrame(
+             lv_scr_act() == waitingScreen, displayedPhase);
 }
