@@ -120,10 +120,15 @@ invalidate nor a full 466 x 466 foreground-alpha clear. Gesture teardown clears
 those signatures, and pinch animation completion leaves the live presenter in
 sole control of the image pivot.
 
-Prediction is deliberately finite: by default it is capped at 1.5 seconds and
-30 metres, then stops instead of drifting without a fresh fix. Repeated packets
-with unchanged coordinates are still fresh observations and drive convergence.
-A new fix converges over a bounded interval rather than moving one visual layer
+Prediction is deliberately finite. Test and real navigation share one 1 Hz
+device-pose heartbeat. Presentation runs at full reported speed for 1.5
+seconds, then integrates a linear speed decay through a hard horizon at 2.5
+seconds. Distance remains capped at 30 metres. A single missed heartbeat can
+therefore remain continuous, while genuine transport loss settles
+monotonically instead of drifting forever. The accepted GPS-packet timestamp,
+not a later route-bearing update, owns freshness. Repeated GPS packets with
+unchanged coordinates are still fresh observations and drive convergence. A
+new fix converges over a bounded interval rather than moving one visual layer
 independently.
 
 ## Course-up state
@@ -206,6 +211,13 @@ capacity, not a promise that a slow render may block the UI.
 - allocation fallback; and
 - free and largest-contiguous PSRAM at completion and surface creation.
 
+The five-second `SYS` heartbeat also reports `gpsAgeMs`, capped
+`predictionAgeMs`, grace/exhausted state, exhaustion count and timestamp, plus
+the last and maximum accepted BLE GPS-packet gaps. `MAPIO: presentation` emits
+an immediate structured sample when presentation first starts or crosses the
+grace/exhausted boundaries. These fields distinguish a renderer stall from a
+missing or delayed device-pose heartbeat without changing render ownership.
+
 The declared initial UI/work-unit acceptance gate is 50 ms. Display-flush and UI
 maximum-gap telemetry remain the physical source of truth; host tests and a
 successful firmware build do not establish that gate.
@@ -214,8 +226,9 @@ successful firmware build do not establish that gate.
 
 Host tests cover semantic invalidation, position-only coalescing, stale rejection,
 invariant failure,
-bounded fake-clock slices, heading wrap/fallback, finite prediction and
-convergence, shared presentation transforms, exact route-head anchoring,
+bounded fake-clock slices, heading wrap/fallback, a missed 1 Hz heartbeat,
+decelerating finite prediction, source-timestamp freshness and convergence,
+shared presentation transforms, exact route-head anchoring,
 deterministic building admission under block-order permutations, quota
 overflow, bounded courtyard workspace, and legacy protocol behavior.
 

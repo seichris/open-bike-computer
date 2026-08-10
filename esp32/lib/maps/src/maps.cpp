@@ -3709,6 +3709,7 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
   const bool headingValid = headingResolver.resolve(
       measuredValid, gps.gpsData.heading, routeValid, routeDegrees,
       resolvedHeading, !bleNavServer.supportsExplicitInvalidGpsHeading());
+  const BLEDebugStats bleStats = bleNavServer.getDebugStats();
 
   uint64_t gpsSignature = 1469598103934665603ULL;
   gpsSignature = fnvMix64(gpsSignature, doubleBits(gps.gpsData.latitude));
@@ -3718,8 +3719,8 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
   gpsSignature = fnvMix64(gpsSignature, doubleBits(resolvedHeading));
   // An identical coordinate is still a fresh convergence anchor. Preserve the
   // BLE packet time so dead reckoning cannot run past newly received fixes.
-  gpsSignature = fnvMix64(gpsSignature,
-                          bleNavServer.getDebugStats().lastGpsPacketMs);
+  gpsSignature = fnvMix64(gpsSignature, bleStats.lastGpsPacketMs);
+  gpsSignature = fnvMix64(gpsSignature, bleStats.gpsPacketCount);
   if (gpsSignature != lastGpsSignature || !posePresenter.hasFix()) {
     lastGpsSignature = gpsSignature;
     map_presentation::Fix fix;
@@ -3732,12 +3733,44 @@ void Maps::updatePresentedPose(uint32_t nowMs) {
         gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
     fix.worldUnitsPerMeter =
         1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
-    fix.timestampMs = nowMs;
+    // Route-bearing changes may legitimately re-observe this fix for heading
+    // convergence, but they are not fresh GPS packets. Preserve the actual
+    // packet time so the bounded prediction horizon cannot be restarted by
+    // route traffic alone.
+    fix.timestampMs = bleStats.gpsPacketCount != 0
+                          ? bleStats.lastGpsPacketMs
+                          : nowMs;
     posePresenter.observe(fix, nowMs);
   }
   if (posePresenter.hasFix()) {
+    const bool firstPose = !hasPresentedPose;
+    const bool wasGraceActive =
+        hasPresentedPose && presentedPose.predictionGraceActive;
+    const bool wasExhausted =
+        hasPresentedPose && presentedPose.predictionExhausted;
     presentedPose = posePresenter.present(nowMs);
     hasPresentedPose = true;
+    if (presentedPose.predictionExhausted && !wasExhausted) {
+      ++predictionExhaustionCount;
+      lastPredictionExhaustedMs = nowMs;
+    }
+    if (firstPose ||
+        wasGraceActive != presentedPose.predictionGraceActive ||
+        wasExhausted != presentedPose.predictionExhausted) {
+      MAPIO_LOG(
+          "MAPIO: presentation gpsAgeMs=%lu lastGpsGapMs=%lu "
+          "maxGpsGapMs=%lu predictionAgeMs=%lu grace=%u "
+          "predictionExhausted=%u exhaustionCount=%lu "
+          "lastExhaustedMs=%lu\n",
+          (unsigned long)presentedPose.observationAgeMs,
+          (unsigned long)bleStats.lastGpsPacketGapMs,
+          (unsigned long)bleStats.maximumGpsPacketGapMs,
+          (unsigned long)presentedPose.predictionAgeMs,
+          presentedPose.predictionGraceActive ? 1U : 0U,
+          presentedPose.predictionExhausted ? 1U : 0U,
+          (unsigned long)predictionExhaustionCount,
+          (unsigned long)lastPredictionExhaustedMs);
+    }
   }
 }
 map_projection::Projection

@@ -54,8 +54,21 @@ While presentation is changing, the visible frame is translated and rotated at
 UI cadence using one `PresentedPose`. The live route head, route line, and arrow
 use the same pivot, anchor, and rotation delta. Pose/frame/route/style
 signatures make stable ticks no-ops: they do not invalidate the base image or
-clear and redraw the full foreground alpha plane. Dead reckoning is finite
-(1.5 seconds and 30 metres by default) and converges to each new phone fix.
+clear and redraw the full foreground alpha plane. Test and real navigation use
+the same 1 Hz device-pose heartbeat. Dead reckoning remains at full speed for
+1.5 seconds, then linearly decelerates to a hard stop at 2.5 seconds, with a
+distance cap of 30 metres. This bridges one missed heartbeat without allowing
+unbounded motion, and all visible layers stop from the same pose when the
+horizon is exhausted. Each new phone fix converges from that shared pose.
+
+The full-speed window (1.5 seconds), hard horizon (2.5 seconds), and distance
+cap (30 metres) are static policy values from implementation commit
+`a02e24a3139d93a507cc716818ba7bcb151cf736`, based on `origin/main`
+`15d806613b680621b923b311ec30b2470fd4b349`. They apply to both
+`WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` and have no map/navigation
+fixture; they are not runtime or externally measured values. Device validation
+of the timing policy remains part of the physical gate below.
+
 The overscanned base canvas remains LVGL center-aligned; its position is an
 offset from the resolved centered origin. Presentation converts the desired
 parent-space pivot target to that aligned offset exactly once, so the 96-pixel
@@ -90,7 +103,8 @@ measured course, route bearing, or prior valid guidance frame.
 
 The focused host contracts cover worker ownership, semantic invalidation,
 position-only coalescing, shared presentation transforms, heading fallback and
-epoch reset, pre-publication overscan coverage, deterministic building
+epoch reset, one-missed-heartbeat prediction, finite transport-loss stopping,
+pre-publication overscan coverage, deterministic building
 admission, solid-roof courtyard overflow, asynchronous runtime map activation,
 and cross-version heading protocol behavior. The required physical gate is an exact
 `WAVESHARE_AMOLED_175` build followed by device navigation with an FMB v4 pack in
