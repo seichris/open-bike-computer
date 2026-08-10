@@ -119,6 +119,28 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("python3-cryptography", host_job)
         self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
 
+    def test_every_setup_python_firmware_builder_clears_library_overrides(
+        self,
+    ) -> None:
+        for workflow in (
+            "ci.yml",
+            "firmware-diagnostics.yml",
+            "firmware-release.yml",
+            "speaker-firmware.yml",
+        ):
+            with self.subTest(workflow=workflow):
+                commands = re.findall(
+                    r"^\s+run: (.+build_firmware\.py.+)$",
+                    workflow_source(workflow),
+                    re.MULTILINE,
+                )
+                self.assertTrue(commands)
+                for command in commands:
+                    self.assertIn(
+                        "env -u LD_LIBRARY_PATH python tools/build_firmware.py",
+                        command,
+                    )
+
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
         for workflow in (
             "ci.yml",
