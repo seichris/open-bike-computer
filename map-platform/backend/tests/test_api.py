@@ -165,6 +165,7 @@ class MapJobRunAPITests(unittest.TestCase):
                     self.hardware_requirements_path
                 ),
                 "MAP_PLATFORM_INLINE_WORKER_ENABLED": "1",
+                "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE": "off",
             },
             clear=False,
         )
@@ -187,6 +188,42 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
+
+    def test_preparation_estimate_rollout_modes_control_public_field(self):
+        observations = {}
+        for mode in ("off", "shadow", "public"):
+            data_root = Path(self.tmp.name) / f"estimate-mode-{mode}"
+            with patch.dict(
+                os.environ,
+                {
+                    "MAP_PLATFORM_DATA_ROOT": str(data_root),
+                    "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE": mode,
+                    "MAP_PLATFORM_ESTIMATOR_WORKER_CLASS": "api-test",
+                },
+                clear=False,
+            ):
+                client = TestClient(create_app())
+                try:
+                    response = client.post(
+                        "/v1/map-jobs",
+                        json={
+                            "mode": "custom_bbox",
+                            "bbox": [103.75, 1.24, 103.93, 1.37],
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.json()
+                    stored = client.app.state.job_store.get(payload["jobId"])
+                    observations[mode] = (
+                        "preparationEstimate" in payload,
+                        stored.preparation_estimate is not None,
+                    )
+                finally:
+                    client.close()
+
+        self.assertEqual(observations["off"], (False, False))
+        self.assertEqual(observations["shadow"], (False, True))
+        self.assertEqual(observations["public"], (True, True))
 
     def test_target_two_generation_requires_explicit_rollout_enablement(self):
         payload = {

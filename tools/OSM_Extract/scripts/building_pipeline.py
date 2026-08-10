@@ -49,6 +49,7 @@ BUILDING_FLAG_PART = 1 << 0
 BUILDING_FLAG_FLAT_BASE = 1 << 1
 RING_FLAG_HOLE = 1 << 0
 EARTH_RADIUS_METERS = 6_378_137
+MAX_BUILDING_COMPLEXITY_PRODUCT = 9_000_000_000_000_000
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,7 @@ def prepare_buildings(
     calibration_rules_sha256: str | None = None,
     calibration_source_sha256: str | None = None,
     strict_relations: bool = False,
+    on_complexity=None,
 ) -> tuple[list[SourceBuilding], dict[str, Any], set[str]]:
     if calibration_cache is not None and (
         calibration_cache.identity.rules_sha256 != calibration_rules_sha256
@@ -280,6 +282,15 @@ def prepare_buildings(
         raise CalibrationCacheError(
             "building_relation_incomplete",
             "output building relations contain ambiguous explicit parents",
+        )
+
+    if on_complexity is not None:
+        on_complexity(
+            building_complexity_snapshot(
+                sources,
+                part_parents=part_parents,
+                diagnostics=diagnostics,
+            )
         )
 
     associated: list[SourceBuilding] = []
@@ -428,6 +439,65 @@ def prepare_buildings(
         **provenance_counts,
     }
     return resolved_sources, report, flat_outline_keys
+
+
+def building_complexity_snapshot(
+    sources: Iterable[SourceBuilding],
+    *,
+    part_parents: Mapping[str, str],
+    diagnostics: Mapping[str, int],
+) -> dict[str, int]:
+    """Return bounded counters from the already materialized building list."""
+    materialized = list(sources)
+    known_keys = {source.object_key for source in materialized}
+    outlines = [source for source in materialized if not source.is_part]
+    parts = [source for source in materialized if source.is_part]
+    explicit = sum(
+        part_parents.get(source.object_key) in known_keys for source in parts
+    )
+    unresolved = len(parts) - explicit
+    product = min(
+        MAX_BUILDING_COMPLEXITY_PRODUCT,
+        unresolved * len(outlines),
+    )
+    polygons = 0
+    rings = 0
+    holes = 0
+    coordinates = 0
+    maximum_coordinates = 0
+    for source in materialized:
+        object_coordinates = 0
+        for polygon in _polygons(source.geometry):
+            polygons += 1
+            polygon_rings = [polygon.exterior, *polygon.interiors]
+            rings += len(polygon_rings)
+            holes += len(polygon.interiors)
+            for ring in polygon_rings:
+                count = len(ring.coords)
+                coordinates += count
+                object_coordinates += count
+        maximum_coordinates = max(maximum_coordinates, object_coordinates)
+    return {
+        "schemaVersion": 1,
+        "sourceCount": len(materialized),
+        "outlineCount": len(outlines),
+        "partCount": len(parts),
+        "explicitParentCount": explicit,
+        "unresolvedPartCount": unresolved,
+        "containmentCandidateProduct": product,
+        "polygonCount": polygons,
+        "ringCount": rings,
+        "holeCount": holes,
+        "sourceVertexCount": coordinates,
+        "maximumVerticesPerObject": maximum_coordinates,
+        "preparationRejectedCount": sum(
+            value
+            for value in diagnostics.values()
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ),
+    }
 
 
 def clip_buildings(
