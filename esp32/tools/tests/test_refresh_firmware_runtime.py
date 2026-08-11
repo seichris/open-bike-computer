@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -14,11 +15,13 @@ from refresh_firmware_runtime import (
     _bundle,
     _inventory,
     _isolated_command_environment,
+    _load_inputs,
     _load_candidate_contract,
     _normalize_name,
     _normalize_wheel,
     _reject_path_leaks,
     _remove_generated_python_state,
+    _reviewed_wheel_license,
     _run,
     _wheel_identity,
     assemble_lock,
@@ -34,12 +37,19 @@ class RuntimeRefreshTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def make_wheel(self) -> Path:
+    def make_wheel(self, *, license_expression: str | None = "MIT") -> Path:
         path = self.root / "Example_Package-1.2.3-py3-none-any.whl"
+        license_metadata = (
+            f"License-Expression: {license_expression}\n"
+            if license_expression is not None
+            else "License-File: LICENSE.txt\n"
+        )
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr(
                 "example_package-1.2.3.dist-info/METADATA",
-                "Metadata-Version: 2.1\nName: Example_Package\nVersion: 1.2.3\nLicense-Expression: MIT\n\n",
+                "Metadata-Version: 2.1\nName: Example_Package\nVersion: 1.2.3\n"
+                + license_metadata
+                + "\n",
             )
             archive.writestr(
                 "example_package-1.2.3.dist-info/WHEEL",
@@ -49,6 +59,11 @@ class RuntimeRefreshTests(unittest.TestCase):
                 "example/_vendor/vendored-9.9.dist-info/METADATA",
                 "Metadata-Version: 2.1\nName: vendored\nVersion: 9.9\n\n",
             )
+            if license_expression is None:
+                archive.writestr(
+                    "example_package-1.2.3.dist-info/licenses/LICENSE.txt",
+                    "reviewed license text\n",
+                )
         return path
 
     def test_wheel_normalization_is_deterministic_and_metadata_driven(self) -> None:
@@ -62,6 +77,67 @@ class RuntimeRefreshTests(unittest.TestCase):
             ("example-package", "1.2.3", ["py3-none-any"], "MIT"),
         )
         self.assertEqual(_normalize_name("Example_Package"), "example-package")
+
+    def test_wheel_license_without_metadata_requires_exact_reviewed_evidence(self) -> None:
+        wheel = self.make_wheel(license_expression=None)
+        evidence_path = "example_package-1.2.3.dist-info/licenses/LICENSE.txt"
+        overrides = {
+            ("example-package", "1.2.3"): {
+                "name": "example-package",
+                "version": "1.2.3",
+                "license": "BSD-3-Clause",
+                "evidenceFiles": [evidence_path],
+            }
+        }
+
+        license_expression, evidence, used_override = _reviewed_wheel_license(
+            wheel,
+            "example-package",
+            "1.2.3",
+            None,
+            overrides,
+        )
+
+        self.assertEqual(license_expression, "BSD-3-Clause")
+        self.assertTrue(used_override)
+        self.assertEqual(evidence["kind"], "tracked-override")
+        self.assertEqual(evidence["files"][0]["path"], evidence_path)
+        self.assertEqual(len(evidence["files"][0]["sha256"]), 64)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "not reviewed"):
+            _reviewed_wheel_license(
+                wheel, "example-package", "1.2.3", None, {}
+            )
+        overrides[("example-package", "1.2.3")]["evidenceFiles"] = [
+            "missing-license.txt"
+        ]
+        with self.assertRaisesRegex(FirmwareRuntimeError, "missing or ambiguous"):
+            _reviewed_wheel_license(
+                wheel,
+                "example-package",
+                "1.2.3",
+                None,
+                overrides,
+            )
+
+    def test_license_inventory_rejects_noncanonical_evidence_entries(self) -> None:
+        project = Path(__file__).resolve().parents[2]
+        runtime = self.root / "tools/firmware-runtime"
+        runtime.parent.mkdir()
+        shutil.copytree(project / "tools/firmware-runtime", runtime)
+        licenses_path = runtime / "licenses.json"
+        licenses = json.loads(licenses_path.read_bytes())
+        licenses["wheelOverrides"][0]["evidenceFiles"] = [{}]
+        licenses_path.write_bytes(
+            (
+                json.dumps(licenses, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+        )
+
+        with self.assertRaisesRegex(
+            FirmwareRuntimeError, "wheel license override is invalid"
+        ):
+            _load_inputs(self.root)
 
     def test_bundle_has_canonical_inventory_and_no_links(self) -> None:
         runtime = self.root / "runtime"
@@ -135,6 +211,11 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(inputs["pythonSource"]["license"], "Python-2.0")
         self.assertEqual(len(inputs["pythonSource"]["sha256"]), 64)
         self.assertEqual(len(inputs["pythonBuilder"]["commit"]), 40)
+        licenses = json.loads(
+            (project / "tools/firmware-runtime/licenses.json").read_bytes()
+        )
+        self.assertEqual(licenses["schema"], 2)
+        self.assertEqual(evidence["wheelLicenseOverrideCount"], 4)
         with self.assertRaisesRegex(FirmwareRuntimeError, "exactly both"):
             assemble_lock(project, (), self.root / "lock.json", "unit-test-lock")
 
