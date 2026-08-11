@@ -42,10 +42,10 @@ inline CleanupAction nextCleanupAction(const SpeakerResourceState &state) {
     return CleanupAction::DeleteCodecDevice;
   if (state.codecInterfaceCreated)
     return CleanupAction::DeleteCodecInterface;
-  if (state.dataInterfaceCreated)
-    return CleanupAction::DeleteDataInterface;
   if (state.gpioInterfaceCreated)
     return CleanupAction::DeleteGpioInterface;
+  if (state.dataInterfaceCreated)
+    return CleanupAction::DeleteDataInterface;
   if (state.channelEnabled)
     return CleanupAction::DisableI2sChannel;
   if (state.channelAllocated)

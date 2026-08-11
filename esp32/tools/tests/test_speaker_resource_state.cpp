@@ -53,8 +53,8 @@ int main() {
       CleanupAction::CloseCodecDevice,
       CleanupAction::DeleteCodecDevice,
       CleanupAction::DeleteCodecInterface,
-      CleanupAction::DeleteDataInterface,
       CleanupAction::DeleteGpioInterface,
+      CleanupAction::DeleteDataInterface,
       CleanupAction::DeleteI2sChannel,
   };
   for (CleanupAction action : expected) {
