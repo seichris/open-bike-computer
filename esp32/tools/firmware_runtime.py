@@ -566,14 +566,34 @@ def default_cache_root() -> Path:
 
 
 def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> Path:
-    current = root.expanduser()
-    if not current.is_absolute():
+    root = root.expanduser()
+    if not root.is_absolute():
         raise FirmwareRuntimeError("runtime cache root must be absolute")
-    if os.path.lexists(current):
-        if current.is_symlink() or not current.is_dir():
-            raise FirmwareRuntimeError(f"unsafe runtime cache root: {current}")
-    elif create:
-        current.mkdir(mode=0o700, parents=True)
+    current = Path(root.anchor)
+    for component in root.parts[1:]:
+        current /= component
+        if os.path.lexists(current):
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                label = "root" if current == root else "ancestor"
+                raise FirmwareRuntimeError(
+                    f"unsafe runtime cache {label}: {current}"
+                )
+        elif create:
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                label = "root" if current == root else "ancestor"
+                raise FirmwareRuntimeError(
+                    f"unsafe runtime cache {label}: {current}"
+                )
+        else:
+            # A descendant cannot exist below the first missing component.
+            current = root
+            break
     for part in parts:
         if part in {"", ".", ".."} or "/" in part or "\\" in part:
             raise FirmwareRuntimeError("unsafe runtime cache path component")
