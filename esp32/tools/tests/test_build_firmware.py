@@ -50,6 +50,7 @@ from pioarduino_custom_core import (
     UPSTREAM_EDITABLE_ESPTOOL,
     UPSTREAM_ESPTOOL_MATCH,
     UPSTREAM_EXTERNAL_UV_INSTALL,
+    UPSTREAM_GENERATED_PROJECT_CLEANUP,
     UPSTREAM_IDF_INSTALL_COMMAND,
     UPSTREAM_INTERNET_INSTALL_GATE,
     UPSTREAM_NESTED_PIO_BLOCK,
@@ -72,6 +73,20 @@ DUMMY_FILES = {
     "arduino-lib-builder-cpp.cpp": "",
     "arduino-lib-builder-as.S": "",
 }
+
+PIOARDUINO_ROOT_CMAKE = """cmake_minimum_required(VERSION 3.16.0)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(esp32)
+"""
+PIOARDUINO_DEPENDENCIES_LOCK = """dependencies:
+  idf:
+    version: '>=5.0'
+direct_dependencies:
+- idf
+manifest_hash: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+target: esp32s3
+version: 2.0.0
+"""
 
 GENERATED_CONFIG = """# Automatically generated file. DO NOT EDIT.
 # Espressif IoT Development Framework (ESP-IDF) Project Configuration
@@ -128,6 +143,7 @@ def platform_archive_bytes() -> bytes:
                 (
                     "before",
                     UPSTREAM_NESTED_PIO_BLOCK,
+                    UPSTREAM_GENERATED_PROJECT_CLEANUP,
                     *(stale for stale, _ in IDF_EXACT_REQUIREMENTS),
                     UPSTREAM_IDF_INSTALL_COMMAND,
                     "after",
@@ -644,6 +660,56 @@ class FirmwareBuildTests(unittest.TestCase):
         build_firmware(self.project_dir, self.environment, runner=runner)
 
         self.assertEqual(len(calls), 2)
+
+    def test_removes_generated_root_project_files_after_failed_pass(self):
+        calls = []
+
+        def runner(command, cwd):
+            calls.append((tuple(command), cwd))
+            (self.project_dir / "CMakeLists.txt").write_text(
+                PIOARDUINO_ROOT_CMAKE, encoding="utf-8"
+            )
+            (self.project_dir / "dependencies.lock").write_text(
+                PIOARDUINO_DEPENDENCIES_LOCK, encoding="utf-8"
+            )
+            if len(calls) == 1:
+                self.write_bootstrapped_toolchain()
+                return subprocess.CompletedProcess(command, 1)
+            self.write_firmware()
+            return subprocess.CompletedProcess(command, 0)
+
+        build_firmware(self.project_dir, self.environment, runner=runner)
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse((self.project_dir / "CMakeLists.txt").exists())
+        self.assertFalse((self.project_dir / "dependencies.lock").exists())
+
+    def test_rejects_preexisting_root_project_artifact(self):
+        (self.project_dir / "CMakeLists.txt").write_text(
+            PIOARDUINO_ROOT_CMAKE, encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(BuildError, "pre-existing root project"):
+            build_firmware(
+                self.project_dir,
+                self.environment,
+                runner=lambda *_args, **_kwargs: None,
+            )
+
+    def test_rejects_unrecognized_root_project_artifact_from_runner(self):
+        def runner(command, cwd):
+            (self.project_dir / "dependencies.lock").write_text(
+                "user-owned content\n", encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(command, 2)
+
+        with self.assertRaisesRegex(BuildError, "unrecognized root project"):
+            build_firmware(self.project_dir, self.environment, runner=runner)
+
+        self.assertEqual(
+            (self.project_dir / "dependencies.lock").read_text(encoding="utf-8"),
+            "user-owned content\n",
+        )
 
     def test_rebuilds_after_fresh_pioarduino_toolchain_bootstrap(self):
         calls = []
@@ -1928,6 +1994,61 @@ class FirmwareBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(BuildError, "permissions changed"):
                 _verified_platformio_project_config(self.project_dir)
         self.platform_config_patch.start()
+
+    def test_platform_staging_identity_includes_transform_source(self):
+        self.platform_config_patch.stop()
+        payload = platform_archive_bytes()
+        expected_sha = hashlib.sha256(payload).hexdigest()
+        package_payload = b"trusted package archive"
+        package_sha = hashlib.sha256(package_payload).hexdigest()
+        package_url = "https://example.invalid/tool.zip"
+        (self.project_dir / "platformio.ini").write_text(
+            f"[env:{self.environment}]\nplatform = {WAVESHARE_PLATFORM_URL}\n",
+            encoding="utf-8",
+        )
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": (
+                            runtime_provenance_for_platform(expected_sha)
+                        )
+                    },
+                ),
+                patch(
+                    "build_firmware.WAVESHARE_PLATFORM_ARCHIVE_SHA256",
+                    expected_sha,
+                ),
+                patch(
+                    "build_firmware.WAVESHARE_PLATFORM_ARCHIVE_SIZE",
+                    len(payload),
+                ),
+                patch(
+                    "build_firmware.WAVESHARE_PLATFORM_PACKAGES",
+                    (("tool-test", package_url, package_sha, len(package_payload)),),
+                ),
+                patch(
+                    "build_firmware.urllib.request.urlopen",
+                    side_effect=lambda url, timeout: io.BytesIO(
+                        payload if url == WAVESHARE_PLATFORM_URL else package_payload
+                    ),
+                ),
+                patch(
+                    "build_firmware._pioarduino_transform_source_sha256",
+                    side_effect=("a" * 64, "b" * 64),
+                ),
+            ):
+                first, _ = _verified_platformio_project_config(self.project_dir)
+                first_text = first.read_text(encoding="utf-8")
+                second, _ = _verified_platformio_project_config(self.project_dir)
+        finally:
+            self.platform_config_patch.start()
+
+        self.assertNotEqual(
+            first_text,
+            second.read_text(encoding="utf-8"),
+        )
 
     def test_bootstrap_wrappers_are_absent_from_steady_build_config(self):
         self.platform_config_patch.stop()
