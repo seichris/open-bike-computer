@@ -32,6 +32,8 @@ int main() {
          PointerQueueResult::Accepted);
   assert(input.enqueue(event(3, PointerPhase::Up, 11, 21, 133)) ==
          PointerQueueResult::Accepted);
+  assert(input.counters().hasAcceptedSequence);
+  assert(input.counters().lastAcceptedSequence == 3);
 
   PointerController<> quickRelease(kWaveshareAmoled175Geometry);
   assert(quickRelease.enqueue(event(1, PointerPhase::Down, 10, 20, 100)) ==
@@ -51,6 +53,7 @@ int main() {
   assert(input.state() == PointerState::Idle);
 
   input.cancelSession();
+  assert(!input.counters().hasAcceptedSequence);
   assert(input.enqueue(event(UINT32_MAX, PointerPhase::Down, 1, 2, 200)) ==
          PointerQueueResult::Accepted);
   assert(input.enqueue(event(0, PointerPhase::Up, 1, 2, 208)) ==

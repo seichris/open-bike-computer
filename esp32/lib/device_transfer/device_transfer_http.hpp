@@ -20,9 +20,11 @@ struct HttpTransferStatus {
   std::string mode;
   std::string baseUrl;
   std::string apSsid;
+  std::string apPassphrase;
   std::string networkTransport;
   std::string networkSsid;
   bool hotspotFallback = false;
+  std::string hotspotFallbackReason;
   std::string sessionToken;
   std::string lastErrorCode;
   std::string lastErrorMessage;
@@ -64,6 +66,7 @@ public:
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
   bool setPreferredNetwork(const LanCredentials &credentials);
+  bool forceHotspotFallbackAfterEndpointFailure();
   void clearPreferredNetwork();
   void setLastError(const std::string &code, const std::string &message);
   void process();
@@ -78,11 +81,14 @@ private:
   bool startedAp_ = false;
   bool startedStation_ = false;
   bool hotspotFallback_ = false;
+  std::string hotspotFallbackReason_;
+  std::string requestedHotspotFallbackReason_;
   std::string networkTransport_;
   std::string networkSsid_;
   LanCredentials preferredNetwork_;
   std::string mode_;
   std::string apSsid_ = "BikeComputer-Transfer";
+  std::string apPassphrase_;
   std::string sessionToken_;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;

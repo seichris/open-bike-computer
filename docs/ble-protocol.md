@@ -1009,7 +1009,7 @@ exclusive writer-lease contract below. Firmware keeps it clear if the durable
 controller store does not boot cleanly. Merely compiling the lease state
 machine is not sufficient to advertise support.
 
-Bit `15` (`0x00008000`) reports the real-device browser-debug service. Firmware
+Bit `16` (`0x00010000`) reports the real-device browser-debug service. Firmware
 keeps it clear outside dedicated `DEVICE_REMOTE_DEBUG=1` profiles and when the
 debug frame/input service does not initialize.
 
@@ -1175,6 +1175,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
+| `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, or debug transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
@@ -1217,7 +1218,9 @@ app sends that token as
 `X-BikeComputer-Transfer-Token` on every local HTTP request.
 
 Remote-debug entry has no legacy protocol fallback. The plain
-`DTRNenter|debug` form starts the device hotspot directly. The LAN-first form
+`DTRNenter|debug` form starts the device hotspot directly. The compact
+`DTRNenter|debug|h1|e` form starts it after endpoint verification fails and
+persists that fallback reason. The LAN-first form
 starts with ASCII `DTRNenter|debug|lan1|`, followed by one unsigned SSID length
 byte, one unsigned password length byte, then the exact SSID and password bytes.
 The SSID is 1-32 UTF-8 bytes; the password is empty for an open network or 8-63
@@ -1228,13 +1231,18 @@ device-only Keychain; firmware consumes them for that session and does not
 persist, publish, or log the password.
 
 The firmware attempts station association for six seconds without blocking the
-UI task. Failure starts `BikeComputer-Transfer` and reports a hotspot fallback.
+UI task. Failure starts `BikeComputer-Transfer` with a fresh per-session WPA2
+password and reports a hotspot fallback.
 `DSTS` reports `networkTransport` (`starting`, `connecting`, `lan`, or
-`hotspot`), `networkSsid`, and `hotspotFallback`; `baseUrl` remains empty until
-the selected listener is ready. The app verifies a LAN result against the
-token-authenticated `/device-debug/v1/info` endpoint. If association succeeded
-but the endpoint is unreachable, it exits that session over BLE and sends the
-plain debug-enter form to force the hotspot.
+`hotspot`), `networkSsid`, `hotspotFallback`, `hotspotFallbackReason`, and (only
+for an active debug hotspot) `apPassphrase`; `baseUrl` remains empty until the
+selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
+`authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
+The normal LAN password is never returned. The app verifies a LAN result
+against the token-authenticated `/device-debug/v1/info` endpoint. If association succeeded
+but the endpoint is unreachable, it exits that session over BLE and sends a
+compact endpoint-fallback debug-enter form to force the hotspot while retaining
+the reason in firmware status.
 
 iOS requires authenticated navigation readiness, CAP2 bit `16`, and a fresh
 `DSTS` response whose `mode` is exactly `debug`, whose `baseUrl` is present,
@@ -1247,9 +1255,16 @@ address bar by the device-served page and is never sent in the HTTP request
 target. API requests carry the token header. Debug, map, and firmware modes are
 mutually exclusive.
 
+The hotspot password is delivered only through authenticated BLE and is never
+part of an HTTP response or copied session diagnostics. It protects hotspot
+traffic from passive nearby observers. LAN debug traffic is plain HTTP and is
+supported only on a trusted local network; it does not defend against other
+LAN clients or administrators observing the bearer token.
+
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,
-the transfer inactivity timeout, and setup failure all use the same
+authenticated BLE disconnect, the transfer inactivity timeout, and setup
+failure all use the same
 mode-aware teardown path so the token is revoked, synthetic input is cancelled,
 the HTTP worker stops, and the session-scoped PSRAM snapshot is freed in that
 order.

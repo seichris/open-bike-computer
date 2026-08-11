@@ -215,14 +215,29 @@ bool HttpTransferServer::setPreferredNetwork(
     return false;
   }
   preferredNetwork_ = credentials;
+  requestedHotspotFallbackReason_.clear();
+  unlockState();
+  return true;
+}
+
+bool HttpTransferServer::forceHotspotFallbackAfterEndpointFailure() {
+  lockState();
+  if (enabled_) {
+    unlockState();
+    return false;
+  }
+  preferredNetwork_ = {};
+  requestedHotspotFallbackReason_ = "endpoint_unreachable";
   unlockState();
   return true;
 }
 
 void HttpTransferServer::clearPreferredNetwork() {
   lockState();
-  if (!enabled_)
+  if (!enabled_) {
     preferredNetwork_ = {};
+    requestedHotspotFallbackReason_.clear();
+  }
   unlockState();
 }
 
@@ -272,6 +287,10 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     lockState();
     enabled_ = false;
     mode_.clear();
+    apPassphrase_.clear();
+    hotspotFallback_ = false;
+    hotspotFallbackReason_.clear();
+    requestedHotspotFallbackReason_.clear();
     sessionToken_.clear();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
     unlockState();
@@ -286,6 +305,9 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     if (enabled) {
       if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
         sessionToken_ = generateSessionToken();
+        apPassphrase_ = mode_ == "debug"
+                            ? generateSessionToken().substr(0, 16)
+                            : "";
       }
       if (!wasEnabled) {
         if (requestedMode != "debug")
@@ -293,12 +315,15 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         startedAp_ = false;
         startedStation_ = false;
         hotspotFallback_ = false;
+        hotspotFallbackReason_.clear();
         networkTransport_ = "starting";
         networkSsid_ = preferredNetwork_.ssid;
       }
     } else {
+      apPassphrase_.clear();
       sessionToken_.clear();
       preferredNetwork_ = {};
+      requestedHotspotFallbackReason_.clear();
     }
     if (transferBoundary) {
       transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
@@ -337,10 +362,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       startedAp_ = false;
       startedStation_ = false;
       hotspotFallback_ = false;
+      hotspotFallbackReason_.clear();
       networkTransport_.clear();
       networkSsid_.clear();
       preferredNetwork_ = {};
+      requestedHotspotFallbackReason_.clear();
       mode_.clear();
+      apPassphrase_.clear();
       sessionToken_.clear();
       rememberError("http_worker", "could not start transfer HTTP worker");
       unlockState();
@@ -367,7 +395,12 @@ bool HttpTransferServer::startNetwork() {
   const bool enabled = enabled_;
   const LanCredentials preferredNetwork = preferredNetwork_;
   preferredNetwork_ = {};
+  const std::string requestedHotspotFallbackReason =
+      requestedHotspotFallbackReason_;
+  requestedHotspotFallbackReason_.clear();
   const std::string apSsid = apSsid_;
+  const std::string apPassphrase = apPassphrase_;
+  const std::string mode = mode_;
   unlockState();
   if (!enabled)
     return false;
@@ -419,12 +452,21 @@ bool HttpTransferServer::startNetwork() {
   }
 
   if (!lanReady) {
+    std::string fallbackReason = requestedHotspotFallbackReason;
     if (preferLan) {
+      const wl_status_t stationStatus = WiFi.status();
+      fallbackReason = lanFallbackReasonForStatus(
+          static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
+          static_cast<int>(WL_CONNECT_FAILED));
       WiFi.disconnect(true, false);
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     WiFi.mode(WIFI_AP);
-    if (!WiFi.softAP(apSsid.c_str())) {
+    const bool apStarted = mode == "debug"
+                               ? WiFi.softAP(apSsid.c_str(),
+                                             apPassphrase.c_str())
+                               : WiFi.softAP(apSsid.c_str());
+    if (!apStarted) {
       lockState();
       rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
       unlockState();
@@ -433,13 +475,16 @@ bool HttpTransferServer::startNetwork() {
     }
     lockState();
     startedAp_ = true;
-    hotspotFallback_ = preferLan;
+    hotspotFallback_ = !fallbackReason.empty();
+    hotspotFallbackReason_ = fallbackReason;
     networkTransport_ = "hotspot";
     networkSsid_ = apSsid;
     unlockState();
     Serial.printf(
-        "DEVICE_TRANSFER_HTTP: started AP fallback=%d ssid=%s ip=%s\n",
-        preferLan, apSsid.c_str(), WiFi.softAPIP().toString().c_str());
+        "DEVICE_TRANSFER_HTTP: started AP fallback=%d reason=%s ssid=%s "
+        "ip=%s\n",
+        !fallbackReason.empty(), fallbackReason.c_str(), apSsid.c_str(),
+        WiFi.softAPIP().toString().c_str());
   }
 
   server_.begin();
@@ -460,9 +505,12 @@ void HttpTransferServer::stopNetwork() {
   startedAp_ = false;
   startedStation_ = false;
   hotspotFallback_ = false;
+  hotspotFallbackReason_.clear();
   networkTransport_.clear();
   networkSsid_.clear();
+  apPassphrase_.clear();
   preferredNetwork_ = {};
+  requestedHotspotFallbackReason_.clear();
   unlockState();
 
   server_.stop();
@@ -484,6 +532,7 @@ void HttpTransferServer::runWorker() {
     const bool startupFailed = enabled_;
     enabled_ = false;
     mode_.clear();
+    apPassphrase_.clear();
     sessionToken_.clear();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
     if (startupFailed && lastErrorCode_.empty()) {
@@ -587,9 +636,11 @@ HttpTransferStatus HttpTransferServer::status() const {
   const uint16_t port = port_;
   const std::string mode = mode_;
   const std::string apSsid = apSsid_;
+  const std::string apPassphrase = apPassphrase_;
   const std::string networkTransport = networkTransport_;
   const std::string networkSsid = networkSsid_;
   const bool hotspotFallback = hotspotFallback_;
+  const std::string hotspotFallbackReason = hotspotFallbackReason_;
   const std::string sessionToken = sessionToken_;
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
@@ -619,9 +670,11 @@ HttpTransferStatus HttpTransferServer::status() const {
           mode,
           baseUrl,
           startedAp ? apSsid : "",
+          startedAp && mode == "debug" ? apPassphrase : "",
           networkTransport,
           networkSsid,
           hotspotFallback,
+          hotspotFallbackReason,
           sessionToken,
           lastErrorCode,
           lastErrorMessage,

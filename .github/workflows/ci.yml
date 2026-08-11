@@ -296,6 +296,10 @@ jobs:
             -o /tmp/test_device_debug_input
           /tmp/test_device_debug_input
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_debug_request_latch.cpp \
+            -o /tmp/test_device_debug_request_latch
+          /tmp/test_device_debug_request_latch
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_transfer_control_dispatch.cpp \
             -o /tmp/test_transfer_control_dispatch
           /tmp/test_transfer_control_dispatch

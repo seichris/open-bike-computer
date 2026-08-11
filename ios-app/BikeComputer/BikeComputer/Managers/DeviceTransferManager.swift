@@ -21,27 +21,43 @@ struct DeviceTransferSession: Equatable {
     let mode: Mode
     let baseURL: URL
     let accessPointSSID: String?
+    let accessPointPassphrase: String?
     let sessionToken: String?
     let networkTransport: String?
     let networkSSID: String?
     let hotspotFallback: Bool
+    let hotspotFallbackReason: String?
 
     init(
         mode: Mode,
         baseURL: URL,
         accessPointSSID: String?,
+        accessPointPassphrase: String? = nil,
         sessionToken: String?,
         networkTransport: String? = nil,
         networkSSID: String? = nil,
-        hotspotFallback: Bool = false
+        hotspotFallback: Bool = false,
+        hotspotFallbackReason: String? = nil
     ) {
         self.mode = mode
         self.baseURL = baseURL
         self.accessPointSSID = accessPointSSID
+        self.accessPointPassphrase = accessPointPassphrase
         self.sessionToken = sessionToken
         self.networkTransport = networkTransport
         self.networkSSID = networkSSID
         self.hotspotFallback = hotspotFallback
+        self.hotspotFallbackReason = hotspotFallbackReason
+    }
+}
+
+enum RemoteDebugHotspotFallbackReason: String {
+    case endpointUnreachable = "endpoint_unreachable"
+
+    var commandCode: String {
+        switch self {
+        case .endpointUnreachable: return "e"
+        }
     }
 }
 
@@ -192,6 +208,7 @@ enum RemoteDeviceDebugSessionPolicy {
             "Network: \(session.networkTransport ?? "unknown")",
             "Network SSID: \(session.networkSSID ?? "not provided")",
             "Hotspot fallback: \(session.hotspotFallback ? "yes" : "no")",
+            "Fallback reason: \(session.hotspotFallbackReason ?? "none")",
             "Base URL: \(session.baseURL.absoluteString)",
             "Token: present (not copied)",
         ].joined(separator: "\n")
@@ -203,7 +220,7 @@ enum DeviceTransferHandshakePolicy {
     static let remoteDebugAttemptCount = 64
     static let retryIntervalNanoseconds: UInt64 = 250_000_000
     static let lanReachabilityTimeout: TimeInterval = 4
-    static let fallbackExitAttemptCount = 16
+    static let remoteDebugExitAttemptCount = 32
 
     static func shouldRequestStatus(attempt: Int) -> Bool {
         attempt > 0 && attempt % 4 == 0
@@ -423,39 +440,52 @@ final class DeviceTransferManager {
         guard bleManager.supportsRemoteDeviceDebug else {
             throw RemoteDeviceDebugError.unsupportedFirmware
         }
-        let initialRevision = bleManager.deviceTransferStatusRevision
-        guard bleManager.requestDeviceTransferMode(
-            .debug,
-            remoteDebugLANCredentials: lanCredentials
-        ) else {
-            throw RemoteDeviceDebugError.transferCommandNotSent
-        }
-
-        var session = try await waitForRemoteDebugSession(
-            bleManager: bleManager,
-            afterRevision: initialRevision
-        )
-        if session.networkTransport == "lan" {
-            status("verifying local Wi-Fi")
-            if try await waitForTransferServer(
-                baseURL: session.baseURL,
-                statusPath: "device-debug/v1/info",
-                sessionToken: session.sessionToken,
-                timeout: DeviceTransferHandshakePolicy.lanReachabilityTimeout
-            ) {
-                status("local Wi-Fi ready")
-                return session
+        var enterWasQueued = false
+        do {
+            let initialRevision = bleManager.deviceTransferStatusRevision
+            guard bleManager.requestDeviceTransferMode(
+                .debug,
+                remoteDebugLANCredentials: lanCredentials
+            ) else {
+                throw RemoteDeviceDebugError.transferCommandNotSent
             }
+            enterWasQueued = true
 
-            status("local Wi-Fi unreachable; starting device hotspot")
-            session = try await restartRemoteDebugOnHotspot(
-                bleManager: bleManager
+            var session = try await waitForRemoteDebugSession(
+                bleManager: bleManager,
+                afterRevision: initialRevision
             )
+            if session.networkTransport == "lan" {
+                status("verifying local Wi-Fi")
+                if try await waitForTransferServer(
+                    baseURL: session.baseURL,
+                    statusPath: "device-debug/v1/info",
+                    sessionToken: session.sessionToken,
+                    timeout: DeviceTransferHandshakePolicy.lanReachabilityTimeout
+                ) {
+                    status("local Wi-Fi ready")
+                    return session
+                }
+
+                status("local Wi-Fi unreachable; starting device hotspot")
+                session = try await restartRemoteDebugOnHotspot(
+                    bleManager: bleManager
+                )
+            }
+            status(session.hotspotFallback
+                ? "device hotspot fallback ready"
+                : "remote debug session ready")
+            return session
+        } catch {
+            // The enter command may already be running even when its status
+            // acknowledgement is lost. Queue a compensating exit on every
+            // post-enqueue failure; a cancelled task may skip the polling but
+            // the command itself is still delivered by the write queue.
+            if enterWasQueued {
+                try? await exitRemoteDebug(bleManager: bleManager)
+            }
+            throw error
         }
-        status(session.hotspotFallback
-            ? "device hotspot fallback ready"
-            : "remote debug session ready")
-        return session
     }
 
     private func waitForRemoteDebugSession(
@@ -472,10 +502,12 @@ final class DeviceTransferManager {
                     mode: .debug,
                     baseURL: baseURL,
                     accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+                    accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
                     sessionToken: token,
                     networkTransport: bleManager.deviceTransferNetworkTransport,
                     networkSSID: bleManager.deviceTransferNetworkSSID,
-                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback
+                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+                    hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
                 )
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
@@ -498,16 +530,32 @@ final class DeviceTransferManager {
     private func restartRemoteDebugOnHotspot(
         bleManager: BLEManager
     ) async throws -> DeviceTransferSession {
-        let exitRevision = bleManager.deviceTransferStatusRevision
+        try await exitRemoteDebug(bleManager: bleManager)
+
+        let fallbackRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferMode(
+            .debug,
+            remoteDebugHotspotFallbackReason: .endpointUnreachable
+        ) else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
+        return try await waitForRemoteDebugSession(
+            bleManager: bleManager,
+            afterRevision: fallbackRevision
+        )
+    }
+
+    func exitRemoteDebug(bleManager: BLEManager) async throws {
+        let initialRevision = bleManager.deviceTransferStatusRevision
         guard bleManager.requestDeviceTransferExit() else {
             throw RemoteDeviceDebugError.transferCommandNotSent
         }
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
-
-        for attempt in 0..<DeviceTransferHandshakePolicy.fallbackExitAttemptCount {
-            if bleManager.deviceTransferStatusRevision != exitRevision,
-               bleManager.deviceTransferMode.isEmpty {
-                break
+        for attempt in 0..<DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision,
+               bleManager.deviceTransferMode.isEmpty,
+               bleManager.deviceTransferSessionToken?.isEmpty != false {
+                return
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
                 _ = bleManager.requestDeviceTransferStatus()
@@ -516,36 +564,9 @@ final class DeviceTransferManager {
                 nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
             )
         }
-        guard bleManager.deviceTransferMode.isEmpty else {
-            throw RemoteDeviceDebugError.rejected(
-                "The LAN debug session did not stop for hotspot fallback."
-            )
-        }
-
-        let fallbackRevision = bleManager.deviceTransferStatusRevision
-        guard bleManager.requestDeviceTransferMode(.debug) else {
-            throw RemoteDeviceDebugError.transferCommandNotSent
-        }
-        let session = try await waitForRemoteDebugSession(
-            bleManager: bleManager,
-            afterRevision: fallbackRevision
+        throw RemoteDeviceDebugError.rejected(
+            "The device did not confirm that the debug session ended."
         )
-        bleManager.markDeviceTransferHotspotFallback()
-        return DeviceTransferSession(
-            mode: session.mode,
-            baseURL: session.baseURL,
-            accessPointSSID: session.accessPointSSID,
-            sessionToken: session.sessionToken,
-            networkTransport: session.networkTransport,
-            networkSSID: session.networkSSID,
-            hotspotFallback: true
-        )
-    }
-
-    func exitRemoteDebug(bleManager: BLEManager) async {
-        guard bleManager.requestDeviceTransferExit() else { return }
-        _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
-        _ = bleManager.requestDeviceTransferStatus()
     }
 
     private func joinDeviceNetworkIfNeeded(

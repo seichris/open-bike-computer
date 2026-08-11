@@ -36,6 +36,16 @@ inline bool validLanCredentials(const LanCredentials &credentials) {
          credentials.password.size() >= kMinLanPasswordBytes;
 }
 
+inline const char *lanFallbackReasonForStatus(int stationStatus,
+                                              int noSsidStatus,
+                                              int connectFailedStatus) {
+  if (stationStatus == noSsidStatus)
+    return "ssid_unavailable";
+  if (stationStatus == connectFailedStatus)
+    return "authentication_failed";
+  return "association_timeout";
+}
+
 inline LanCommandParseResult parseRemoteDebugLanCommand(
     const uint8_t *data, size_t length, LanCredentials &credentials) {
   constexpr size_t prefixLength = sizeof(kRemoteDebugLanCommandPrefix) - 1;

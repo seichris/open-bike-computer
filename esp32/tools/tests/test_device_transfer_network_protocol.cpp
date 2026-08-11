@@ -41,6 +41,13 @@ int main() {
              ordinary.size(), credentials) ==
          LanCommandParseResult::NotLanCommand);
 
+  assert(std::string(device_transfer::lanFallbackReasonForStatus(1, 1, 2)) ==
+         "ssid_unavailable");
+  assert(std::string(device_transfer::lanFallbackReasonForStatus(2, 1, 2)) ==
+         "authentication_failed");
+  assert(std::string(device_transfer::lanFallbackReasonForStatus(3, 1, 2)) ==
+         "association_timeout");
+
   auto truncated = valid;
   truncated.pop_back();
   assert(device_transfer::parseRemoteDebugLanCommand(

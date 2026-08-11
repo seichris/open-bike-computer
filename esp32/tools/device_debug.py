@@ -76,7 +76,8 @@ class DebugClient:
         self.base_url = base_url
         self.token = token
         self.timeout = timeout
-        self._event_sequence = time.monotonic_ns() & 0xFFFFFFFF
+        self._event_sequence = 0
+        self._event_sequence_initialized = False
         self.identity: dict[str, Any] | None = None
         # Accessory credentials must never be forwarded through a developer's
         # ambient HTTP(S)_PROXY configuration.
@@ -136,6 +137,21 @@ class DebugClient:
         device_id = result.get("deviceId")
         if not isinstance(device_id, str) or not device_id:
             raise DebugClientError("device info has no stable device identity")
+        counters = result.get("counters")
+        if not isinstance(counters, dict):
+            raise DebugClientError("device info has no pointer counters")
+        pointer_sequence = counters.get("pointerLastSequence")
+        sequence_initialized = counters.get("pointerSequenceInitialized")
+        if (
+            isinstance(pointer_sequence, bool)
+            or not isinstance(pointer_sequence, int)
+            or not 0 <= pointer_sequence <= 0xFFFFFFFF
+            or not isinstance(sequence_initialized, bool)
+        ):
+            raise DebugClientError("device info has invalid pointer sequence state")
+        if not self._event_sequence_initialized:
+            self._event_sequence = pointer_sequence if sequence_initialized else 0
+            self._event_sequence_initialized = True
         self.identity = result
         return result
 
@@ -193,7 +209,7 @@ class DebugClient:
         return self._event_sequence
 
     def pointer(self, phase: str, x: int, y: int) -> None:
-        info = self.info(refresh=False)
+        info = self.info(refresh=not self._event_sequence_initialized)
         if not (0 <= x < info["width"] and 0 <= y < info["height"]):
             raise DebugClientError("pointer coordinate is outside the validated display")
         self._request(

@@ -5,6 +5,8 @@
 #include "../device_transfer/device_transfer_http.hpp"
 
 #include <atomic>
+
+#include "device_debug_request_latch.hpp"
 #include <cstdint>
 #include <string>
 
@@ -46,7 +48,7 @@ private:
   bool configured_ = false;
   bool runtimeReady_ = false;
   std::atomic<bool> wakeRequested_{false};
-  std::atomic<bool> bootPressRequested_{false};
+  OneShotRequestLatch bootPressRequested_;
   std::atomic<bool> exitRequested_{false};
   std::atomic<bool> exitResponsePending_{false};
   uint32_t lastFrameResponseMs_ = 0;

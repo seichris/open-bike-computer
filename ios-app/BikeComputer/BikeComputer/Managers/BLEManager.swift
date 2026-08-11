@@ -683,10 +683,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
+    @Published private(set) var deviceTransferAccessPointPassphrase: String?
     @Published private(set) var deviceTransferNetworkTransport: String?
     @Published private(set) var deviceTransferNetworkSSID: String?
     @Published private(set) var deviceTransferUsedHotspotFallback = false
-    private var deviceTransferForcedHotspotFallback = false
+    @Published private(set) var deviceTransferHotspotFallbackReason: String?
     @Published var deviceTransferSessionToken: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
@@ -3652,15 +3653,20 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func requestDeviceTransferMode(
         _ mode: DeviceTransferSession.Mode,
-        remoteDebugLANCredentials: RemoteDebugLANCredentials? = nil
+        remoteDebugLANCredentials: RemoteDebugLANCredentials? = nil,
+        remoteDebugHotspotFallbackReason: RemoteDebugHotspotFallbackReason? = nil
     ) -> Bool {
         if mode == .debug {
-            deviceTransferForcedHotspotFallback = false
             deviceTransferUsedHotspotFallback = false
+            deviceTransferHotspotFallbackReason = nil
         }
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         if mode == .debug, let remoteDebugLANCredentials {
             packet.append(remoteDebugLANCredentials.commandPayload)
+        } else if mode == .debug, let remoteDebugHotspotFallbackReason {
+            packet.append(Data(
+                "enter|debug|h1|\(remoteDebugHotspotFallbackReason.commandCode)".utf8
+            ))
         } else {
             packet.append(Data("enter|\(mode.rawValue)".utf8))
         }
@@ -3672,11 +3678,6 @@ class BLEManager: NSObject, ObservableObject {
             label: "\(mode.rawValue) transfer enter",
             coalescingKey: coalescingKey
         )
-    }
-
-    func markDeviceTransferHotspotFallback() {
-        deviceTransferForcedHotspotFallback = true
-        deviceTransferUsedHotspotFallback = true
     }
 
     @discardableResult
@@ -4041,10 +4042,11 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferMode = ""
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
+        deviceTransferAccessPointPassphrase = nil
         deviceTransferNetworkTransport = nil
         deviceTransferNetworkSSID = nil
         deviceTransferUsedHotspotFallback = false
-        deviceTransferForcedHotspotFallback = false
+        deviceTransferHotspotFallbackReason = nil
         deviceTransferSessionToken = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
@@ -5339,6 +5341,11 @@ class BLEManager: NSObject, ObservableObject {
               isConnected,
               isNavigationReady else {
             log("Cannot send fallback \(label): navigation endpoint not ready")
+            return false
+        }
+
+        guard data.count <= endpoint.maximumWriteLength else {
+            log("Fallback \(label) not queued: \(data.count)-byte packet exceeds \(endpoint.maximumWriteLength)-byte endpoint")
             return false
         }
 
@@ -6810,14 +6817,13 @@ extension BLEManager: CBPeripheralDelegate {
             deviceTransferBaseURL = nil
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
+        deviceTransferAccessPointPassphrase = object["apPassphrase"] as? String
         deviceTransferNetworkTransport = object["networkTransport"] as? String
         deviceTransferNetworkSSID = object["networkSsid"] as? String
-        if deviceTransferMode.isEmpty {
-            deviceTransferForcedHotspotFallback = false
-        }
         deviceTransferUsedHotspotFallback =
-            (object["hotspotFallback"] as? Bool ?? false) ||
-            deviceTransferForcedHotspotFallback
+            object["hotspotFallback"] as? Bool ?? false
+        deviceTransferHotspotFallbackReason =
+            object["hotspotFallbackReason"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String

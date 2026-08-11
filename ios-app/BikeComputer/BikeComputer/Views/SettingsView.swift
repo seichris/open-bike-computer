@@ -1665,6 +1665,8 @@ private struct RemoteDeviceDebugSettingsSection: View {
     @State private var statusMessage = "Idle"
     @State private var errorMessage: String?
     @State private var copiedBrowserURL: String?
+    @State private var copiedHotspotPassphrase: String?
+    @State private var revealsHotspotPassphrase = false
     @State private var lanSSID = ""
     @State private var lanPassword = ""
     @State private var loadedLANCredentials = false
@@ -1684,11 +1686,47 @@ private struct RemoteDeviceDebugSettingsSection: View {
                     title: "Connection",
                     value: connectionLabel(for: session)
                 )
+                if let reason = session.hotspotFallbackReason {
+                    SettingsValueRow(
+                        title: "Fallback Reason",
+                        value: fallbackReasonLabel(reason)
+                    )
+                }
                 SettingsValueRow(
                     title: "SSID",
                     value: session.networkSSID ??
                         session.accessPointSSID ?? "Not provided"
                 )
+                if let passphrase = session.accessPointPassphrase,
+                   !passphrase.isEmpty {
+                    SettingsValueRow(
+                        title: "Hotspot Security",
+                        value: "WPA2 (per session)"
+                    )
+                    Button {
+                        revealsHotspotPassphrase.toggle()
+                    } label: {
+                        Label(
+                            revealsHotspotPassphrase
+                                ? "Hide Hotspot Password"
+                                : "Show Hotspot Password",
+                            systemImage: revealsHotspotPassphrase
+                                ? "eye.slash"
+                                : "eye"
+                        )
+                    }
+                    .disabled(isWorking)
+                    if revealsHotspotPassphrase {
+                        Text(passphrase)
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Hotspot password")
+                    }
+                    Button(action: copyHotspotPassphrase) {
+                        Label("Copy Hotspot Password", systemImage: "key")
+                    }
+                    .disabled(isWorking)
+                }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Base URL")
                     Text(session.baseURL.absoluteString)
@@ -1706,6 +1744,15 @@ private struct RemoteDeviceDebugSettingsSection: View {
                     Label("Copy Session Details", systemImage: "doc.on.doc")
                 }
                 .disabled(isWorking)
+
+                Button(role: .destructive, action: endSession) {
+                    Label("End Debug Session", systemImage: "stop.circle")
+                }
+                .disabled(isWorking)
+            } else if debugModeIsActive {
+                Text("The device still reports an active debug session, but its browser connection details are unavailable.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
 
                 Button(role: .destructive, action: endSession) {
                     Label("End Debug Session", systemImage: "stop.circle")
@@ -1759,6 +1806,8 @@ private struct RemoteDeviceDebugSettingsSection: View {
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode != DeviceTransferSession.Mode.debug.rawValue {
                 clearCopiedBrowserURLIfOwned()
+                clearCopiedHotspotPassphraseIfOwned()
+                revealsHotspotPassphrase = false
                 if !isWorking {
                     statusMessage = "Idle"
                     errorMessage = nil
@@ -1795,10 +1844,12 @@ private struct RemoteDeviceDebugSettingsSection: View {
             mode: .debug,
             baseURL: baseURL,
             accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+            accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
             sessionToken: token,
             networkTransport: bleManager.deviceTransferNetworkTransport,
             networkSSID: bleManager.deviceTransferNetworkSSID,
-            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback
+            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+            hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
         )
     }
 
@@ -1806,6 +1857,10 @@ private struct RemoteDeviceDebugSettingsSection: View {
         activeSession.flatMap {
             RemoteDeviceDebugSessionPolicy.browserURL(for: $0)
         }
+    }
+
+    private var debugModeIsActive: Bool {
+        bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue
     }
 
     private var canStart: Bool {
@@ -1818,6 +1873,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
 
     private var sessionStatus: String {
         if activeSession != nil { return "Ready for browser" }
+        if debugModeIsActive { return "Debug connection unavailable" }
         if !bleManager.isNavigationReady { return "Device not ready" }
         if !bleManager.hasReceivedDeviceCapabilities { return "Checking firmware" }
         if !bleManager.supportsRemoteDeviceDebug { return "Unsupported firmware" }
@@ -1832,7 +1888,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
             if activeSession.networkTransport == "lan" {
                 return "Open the copied URL from a computer on the same local network. The URL fragment is the session secret; do not paste it into logs."
             }
-            return "Join the shown device Wi-Fi on the Mac, then open the copied URL. The hotspot is used when local Wi-Fi is unavailable. The URL fragment is the session secret; do not paste it into logs."
+            return "Reveal or copy the per-session hotspot password, join the shown device Wi-Fi on the Mac, then open the copied URL. The URL fragment and hotspot password are secrets; do not paste them into logs."
         }
         return "Local Wi-Fi is tried first with credentials stored in this iPhone's Keychain and sent over authenticated BLE for this session only. The device hotspot is the automatic fallback."
     }
@@ -1858,6 +1914,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private func startSession() {
+        revealsHotspotPassphrase = false
         isWorking = true
         errorMessage = nil
         statusMessage = "Requesting session"
@@ -1907,6 +1964,14 @@ private struct RemoteDeviceDebugSettingsSection: View {
         statusMessage = "Browser URL copied"
     }
 
+    private func copyHotspotPassphrase() {
+        guard let passphrase = activeSession?.accessPointPassphrase,
+              !passphrase.isEmpty else { return }
+        UIPasteboard.general.string = passphrase
+        copiedHotspotPassphrase = passphrase
+        statusMessage = "Hotspot password copied"
+    }
+
     private func connectionLabel(for session: DeviceTransferSession) -> String {
         switch session.networkTransport {
         case "lan":
@@ -1919,6 +1984,16 @@ private struct RemoteDeviceDebugSettingsSection: View {
             return "Connecting"
         default:
             return "Unknown"
+        }
+    }
+
+    private func fallbackReasonLabel(_ reason: String) -> String {
+        switch reason {
+        case "ssid_unavailable": return "Wi-Fi network not found"
+        case "authentication_failed": return "Wi-Fi authentication failed"
+        case "association_timeout": return "Wi-Fi connection timed out"
+        case "endpoint_unreachable": return "LAN debug endpoint unreachable"
+        default: return reason
         }
     }
 
@@ -1948,14 +2023,23 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private func endSession() {
-        clearCopiedBrowserURLIfOwned()
         isWorking = true
         errorMessage = nil
         statusMessage = "Ending session"
         Task {
-            await DeviceTransferManager().exitRemoteDebug(bleManager: bleManager)
-            statusMessage = "Session ended"
-            isWorking = false
+            defer { isWorking = false }
+            do {
+                try await DeviceTransferManager().exitRemoteDebug(
+                    bleManager: bleManager
+                )
+                clearCopiedBrowserURLIfOwned()
+                clearCopiedHotspotPassphraseIfOwned()
+                revealsHotspotPassphrase = false
+                statusMessage = "Session ended"
+            } catch {
+                errorMessage = error.localizedDescription
+                statusMessage = "End failed"
+            }
         }
     }
 
@@ -1965,6 +2049,14 @@ private struct RemoteDeviceDebugSettingsSection: View {
             UIPasteboard.general.string = ""
         }
         self.copiedBrowserURL = nil
+    }
+
+    private func clearCopiedHotspotPassphraseIfOwned() {
+        guard let copiedHotspotPassphrase else { return }
+        if UIPasteboard.general.string == copiedHotspotPassphrase {
+            UIPasteboard.general.string = ""
+        }
+        self.copiedHotspotPassphrase = nil
     }
 }
 #endif

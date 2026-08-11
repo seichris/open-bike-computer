@@ -34,18 +34,28 @@ CAP2 bit `16`, and reject debug-mode entry.
    HTTP endpoint is unreachable from the iPhone.
 6. Follow the displayed **Connection** value. For **Local Wi-Fi**, keep the Mac
    on the same LAN; no Wi-Fi switch is needed. For **Device hotspot**, join the
-   displayed `BikeComputer-Transfer` network on the Mac.
+   displayed `BikeComputer-Transfer` network on the Mac using the per-session
+   password shown by the iPhone app.
 7. Tap **Copy Browser URL** and open it in Brave (through the Codex browser
    extension for automated checks). The token follows `#` and stays in page
    memory; do not put that URL in logs or screenshots. The page has no external
    resources, so losing internet connectivity while joined to the accessory AP
    does not affect it.
 
-The LAN password is never included in `DSTS`, the debug `/info` response,
+The normal LAN password is never included in `DSTS`, the debug `/info` response,
 copied session details, or firmware/iOS logs. ESP32-S3 station mode supports
 ordinary 2.4 GHz personal/open networks, not captive portals or enterprise
 authentication. Network client isolation or a firewall can also make the LAN
 endpoint unreachable; those cases use the same hotspot fallback.
+The iPhone shows a persistent fallback reason distinguishing a missing SSID,
+authentication failure, association timeout, and an unreachable LAN endpoint.
+
+The fallback hotspot uses a fresh WPA2 password for every debug session. That
+password is returned only by authenticated BLE `DSTS`, is not exposed by the
+HTTP API, and is revoked with the session. LAN mode uses plain HTTP with a
+bearer token and therefore must be used only on a trusted local network: other
+clients or administrators on that LAN may be able to observe debug traffic.
+Do not use browser debugging on an untrusted or shared LAN.
 
 The browser displays target identity, dimensions, display state, frame/copy and
 HTTP-duration counters, PSRAM allocation evidence, the live user-oriented
@@ -67,8 +77,12 @@ confirming it. Long-press owner recovery remains physical-only.
 Physical touch always wins. Any hardware contact cancels the synthetic pointer
 and suppresses remote input until physical release. Remote presses also have a
 fail-safe timeout, and every session teardown path forces a release.
+Pointer clients seed their event sequence from `/info`, so reconnecting the
+page or running a new one-shot CLI command cannot replay an older sequence.
 
-Use **End Debug Session** when finished. If a browser disappears without
+Keep the authenticated iPhone connected over BLE for the whole debug session;
+a BLE disconnect immediately revokes browser authorization. Use **End Debug
+Session** when finished. If a browser disappears without
 exiting, the ordinary five-minute transfer inactivity boundary revokes the
 credential, stops the active Wi-Fi transport, releases synthetic input, and
 frees the snapshot.

@@ -14,6 +14,9 @@
 #include <sstream>
 
 namespace device_debug {
+
+#if DEVICE_REMOTE_DEBUG
+
 namespace {
 
 constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
@@ -116,7 +119,7 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
     return result;
   }
   wakeRequested_.store(false, std::memory_order_release);
-  bootPressRequested_.store(false, std::memory_order_release);
+  bootPressRequested_.clear();
   exitRequested_.store(false, std::memory_order_release);
   exitResponsePending_.store(false, std::memory_order_release);
   lastFrameResponseMs_ = 0;
@@ -128,7 +131,9 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
 
 void DeviceDebugHttp::cancelSession() {
   pointerInput().cancelSession();
-  bootPressRequested_.store(false, std::memory_order_release);
+  wakeRequested_.store(false, std::memory_order_release);
+  bootPressRequested_.clear();
+  exitRequested_.store(false, std::memory_order_release);
   exitResponsePending_.store(false, std::memory_order_release);
 }
 
@@ -263,6 +268,9 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
        << ",\"pointerTimeouts\":" << pointers.timeouts
        << ",\"physicalOverrides\":" << pointers.physicalOverrides
        << ",\"pointerSessionCancels\":" << pointers.sessionCancels
+       << ",\"pointerLastSequence\":" << pointers.lastAcceptedSequence
+       << ",\"pointerSequenceInitialized\":"
+       << (pointers.hasAcceptedSequence ? "true" : "false")
        << "},\"memory\":{\"freeBefore\":" << memory.freeBefore
        << ",\"largestBefore\":" << memory.largestBefore
        << ",\"freeAfterAllocate\":" << memory.freeAfterAllocate
@@ -366,6 +374,9 @@ bool DeviceDebugHttp::handlePointer(
   if (!server_->isRequestAuthorized(request))
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  if (displayPowerManager.state() == display_power::State::Off)
+    return device_transfer::sendHttpError(client, 409, "display_off",
+                                          "wake the display before sending input");
   JsonDocument document;
   if (deserializeJson(document, body))
     return device_transfer::sendHttpError(client, 400, "invalid_json",
@@ -413,10 +424,7 @@ bool DeviceDebugHttp::handleBootPress(
   if (!server_->isRequestAuthorized(request))
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
-  bool expected = false;
-  if (!bootPressRequested_.compare_exchange_strong(
-          expected, true, std::memory_order_acq_rel,
-          std::memory_order_acquire))
+  if (!bootPressRequested_.request())
     return device_transfer::sendHttpError(
         client, 409, "boot_press_pending",
         "a BOOT short press is already queued");
@@ -451,15 +459,61 @@ bool DeviceDebugHttp::takeWakeRequest() {
 }
 
 bool DeviceDebugHttp::bootPressRequested() const {
-  return bootPressRequested_.load(std::memory_order_acquire);
+  return bootPressRequested_.pending();
 }
 
 bool DeviceDebugHttp::takeBootPressRequest() {
-  return bootPressRequested_.exchange(false, std::memory_order_acq_rel);
+  return bootPressRequested_.take();
 }
 
 bool DeviceDebugHttp::takeAutomaticExitRequest() {
   return exitRequested_.exchange(false, std::memory_order_acq_rel);
 }
+
+#else
+
+bool DeviceDebugHttp::configure(device_transfer::HttpTransferServer *server) {
+  (void)server;
+  return false;
+}
+
+FrameStoreStartResult
+DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
+  (void)fullFrameRgb565Available;
+  return FrameStoreStartResult::UnsupportedBuild;
+}
+
+void DeviceDebugHttp::cancelSession() {}
+
+void DeviceDebugHttp::finishSessionTeardown() {}
+
+bool DeviceDebugHttp::handleRequest(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  (void)request;
+  (void)client;
+  return false;
+}
+
+bool DeviceDebugHttp::allowShortUnauthenticatedResponseCompletion(
+    const device_transfer::HttpRequest &request) const {
+  (void)request;
+  return false;
+}
+
+void DeviceDebugHttp::responseDidComplete(
+    const device_transfer::HttpRequest &request, bool peerClosedCleanly) {
+  (void)request;
+  (void)peerClosedCleanly;
+}
+
+bool DeviceDebugHttp::takeWakeRequest() { return false; }
+
+bool DeviceDebugHttp::bootPressRequested() const { return false; }
+
+bool DeviceDebugHttp::takeBootPressRequest() { return false; }
+
+bool DeviceDebugHttp::takeAutomaticExitRequest() { return false; }
+
+#endif
 
 } // namespace device_debug

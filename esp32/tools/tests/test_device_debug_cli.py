@@ -136,6 +136,31 @@ class DeviceDebugCliTests(unittest.TestCase):
             [("/device-debug/v1/button/boot", {"method": "POST"})],
         )
 
+    def test_pointer_sequence_continues_across_cli_processes(self):
+        calls = []
+        info = {
+            "target": "WAVESHARE_AMOLED_206",
+            "deviceId": "abc",
+            "width": 410,
+            "height": 502,
+            "counters": {
+                "pointerLastSequence": 41,
+                "pointerSequenceInitialized": True,
+            },
+        }
+        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+
+        def fake_request(path, **kwargs):
+            calls.append((path, kwargs))
+            if path.endswith("/info"):
+                return json.dumps(info).encode()
+            return b"{}"
+
+        client._request = fake_request
+        client.pointer("down", 10, 20)
+        pointer_body = calls[-1][1]["body"]
+        self.assertEqual(pointer_body["eventSequence"], 42)
+
 
 if __name__ == "__main__":
     unittest.main()

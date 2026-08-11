@@ -679,6 +679,8 @@ struct NavigationProtocolTests {
         testMapStreamBackgroundUploadRequest()
         await testDeviceTransferManagerWaitsForMapToken()
         await testDeviceTransferManagerWaitsForFreshDebugToken()
+        await testDeviceTransferManagerCompensatesCancelledDebugEntry()
+        await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
@@ -11444,6 +11446,8 @@ struct NavigationProtocolTests {
                     "transfer handshake retains its eight-second readiness window")
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugAttemptCount, 64,
                     "LAN-first debug startup allows station timeout plus hotspot fallback")
+        assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
+                    "debug teardown allows the worker's bounded stop path to finish")
         assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
@@ -13292,15 +13296,24 @@ struct NavigationProtocolTests {
                                          password: "password") == nil,
                "NUL bytes are rejected before BLE transmission")
 
-        manager.markDeviceTransferHotspotFallback()
-        assert(manager.deviceTransferUsedHotspotFallback,
-               "app-forced endpoint fallback remains visible in session state")
+        assert(manager.requestDeviceTransferMode(
+            .debug,
+            remoteDebugHotspotFallbackReason: .endpointUnreachable
+        ), "endpoint-unreachable fallback command should fit one BLE write")
+        assertEqual(
+            String(data: sentPackets[5], encoding: .utf8),
+            "DTRNenter|debug|h1|e",
+            "endpoint fallback reason is persisted by firmware, not only iOS"
+        )
 
         let session = DeviceTransferSession(
             mode: .debug,
             baseURL: URL(string: "http://192.168.4.1:8080")!,
             accessPointSSID: "BikeComputer-Transfer",
-            sessionToken: "fragment-secret"
+            accessPointPassphrase: "hotspot-secret",
+            sessionToken: "fragment-secret",
+            hotspotFallback: true,
+            hotspotFallbackReason: "endpoint_unreachable"
         )
         assertEqual(
             RemoteDeviceDebugSessionPolicy.browserURL(for: session)?.absoluteString,
@@ -13314,6 +13327,28 @@ struct NavigationProtocolTests {
         )
         assert(!details.contains("fragment-secret"),
                "copyable session details redact the transfer token")
+        assert(!details.contains("hotspot-secret"),
+               "copyable session details redact the hotspot password")
+        assert(details.contains("Fallback reason: endpoint_unreachable"),
+               "secret-free diagnostics retain the firmware fallback reason")
+
+        let shortEndpointManager = BLEManager()
+        shortEndpointManager.isConnected = true
+        shortEndpointManager.isNavigationReady = true
+        var shortEndpointPackets: [Data] = []
+        shortEndpointManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                canSend: { true },
+                write: { shortEndpointPackets.append($0) }
+            )
+        )
+        assert(!shortEndpointManager.requestDeviceTransferMode(
+            .debug,
+            remoteDebugLANCredentials: credentials
+        ), "LAN credentials that exceed the negotiated fallback endpoint are rejected")
+        assert(shortEndpointPackets.isEmpty,
+               "oversized LAN credential commands are never queued")
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {
@@ -13372,6 +13407,84 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "fresh remote-debug handshake should succeed: \(error)")
         }
+    }
+
+    static func testDeviceTransferManagerConfirmsDebugExit() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        let activeStatus = """
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"active-token"}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(activeStatus.utf8)
+        )
+
+        let task = Task {
+            try await DeviceTransferManager().exitRemoteDebug(
+                bleManager: bleManager
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
+                    "DTRNexit",
+                    "debug exit starts with an authenticated exit command")
+        let stoppedStatus = """
+        {"configured":true,"enabled":false,"mode":"","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(stoppedStatus.utf8)
+        )
+        do {
+            try await task.value
+            assert(bleManager.deviceTransferSessionToken == nil,
+                   "confirmed debug exit clears the session token")
+        } catch {
+            assert(false, "fresh empty status should confirm debug exit: \(error)")
+        }
+    }
+
+    static func testDeviceTransferManagerCompensatesCancelledDebugEntry() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 1, 0])
+        _ = bleManager.handleDeviceCapabilitiesNotification(cap2)
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let task = Task {
+            try await DeviceTransferManager().enterRemoteDebug(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        task.cancel()
+        _ = try? await task.value
+
+        assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
+                    "DTRNenter|debug",
+                    "cancelled debug entry was queued before cancellation")
+        assert(sentPackets.contains(Data("DTRNexit".utf8)),
+               "post-enqueue cancellation queues a compensating debug exit")
     }
 
     static func testDeviceTransferManagerWaitsForMapToken() async {
@@ -13624,17 +13737,21 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"firmware","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
         assert(manager.handleDeviceTransferStatusNotification(packet), "DSTS notification should be consumed")
-        assertEqual(manager.deviceTransferMode, "firmware", "status parser exposes transfer mode")
+        assertEqual(manager.deviceTransferMode, "debug", "status parser exposes transfer mode")
         assertEqual(manager.deviceTransferBaseURL?.absoluteString, "http://192.168.4.1:8080", "status parser exposes base URL")
         assertEqual(manager.deviceTransferAccessPointSSID, "BikeComputer-Transfer", "status parser exposes SSID")
+        assertEqual(manager.deviceTransferAccessPointPassphrase, "session-wpa-key", "status parser exposes the authenticated debug hotspot password")
         assertEqual(manager.deviceTransferNetworkTransport, "hotspot", "status parser exposes network transport")
         assertEqual(manager.deviceTransferNetworkSSID, "BikeComputer-Transfer", "status parser exposes network SSID")
         assert(manager.deviceTransferUsedHotspotFallback, "status parser exposes LAN fallback state")
+        assertEqual(manager.deviceTransferHotspotFallbackReason,
+                    "endpoint_unreachable",
+                    "status parser exposes the persistent fallback reason")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")

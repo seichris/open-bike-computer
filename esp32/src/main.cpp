@@ -475,9 +475,13 @@ bool stopActiveDeviceTransfer() {
     const bool revoked = deviceTransferHttp.setEnabled(false);
     deviceDebugHttp.cancelSession();
     const bool stopped = deviceTransferHttp.waitUntilStopped(5500);
-    if (stopped)
+    if (stopped) {
+      // A handler that passed authorization immediately before revocation can
+      // publish a request after the first clear. Once the worker has stopped,
+      // clear session-scoped input again before reclaiming the frame store.
+      deviceDebugHttp.cancelSession();
       deviceDebugHttp.finishSessionTeardown();
-    else
+    } else
       deviceTransferHttp.setLastError(
           "remote_debug_worker_stopping",
           "remote debug HTTP worker did not stop before cleanup deadline");
@@ -742,7 +746,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       bleStats.connected && bleStats.authenticated &&
       workout_telemetry_runtime::isWorkoutActive();
   context.transferActive =
-      signals.transferEnabled || signals.activationRunning;
+      (signals.transferEnabled && signals.transferMode != "debug") ||
+      signals.activationRunning;
   context.attentionActive =
       signals.pairing || audioActive || rideAutomationAttention;
   const display_inactivity::Update update =

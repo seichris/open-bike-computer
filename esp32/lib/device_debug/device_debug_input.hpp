@@ -56,6 +56,8 @@ struct PointerCounters {
   uint32_t physicalOverrides = 0;
   uint32_t timeouts = 0;
   uint32_t sessionCancels = 0;
+  uint32_t lastAcceptedSequence = 0;
+  bool hasAcceptedSequence = false;
 };
 
 template <size_t Capacity = 16> class PointerController {
@@ -184,7 +186,12 @@ public:
 
   PointerState state() const { return state_; }
   size_t pendingCount() const { return size_; }
-  PointerCounters counters() const { return counters_; }
+  PointerCounters counters() const {
+    PointerCounters result = counters_;
+    result.lastAcceptedSequence = lastAcceptedSequence_;
+    result.hasAcceptedSequence = hasAcceptedSequence_;
+    return result;
+  }
 
 private:
   PointerQueueResult reject(PointerQueueResult result) {

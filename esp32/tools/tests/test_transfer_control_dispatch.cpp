@@ -38,6 +38,28 @@ int main() {
   assert(request.action == Action::DisableAll);
   assert(request.notifications == (NotifyMap | NotifyGeneric));
 
+  pending.merge(Action::EnableDebug, NotifyGeneric);
+  pending.merge(Action::DisableOnBleDisconnect, NotifyNone);
+  request = pending.take();
+  assert(request.disconnectCleanup);
+  assert(request.action == Action::None);
+  assert(request.notifications == NotifyNone);
+  assert(pending.take().empty());
+
+  pending.merge(Action::DisableOnBleDisconnect, NotifyNone);
+  pending.merge(Action::EnableMap, NotifyMap);
+  request = pending.take();
+  assert(request.disconnectCleanup);
+  assert(request.action == Action::EnableMap);
+  assert(request.notifications == NotifyMap);
+
+  pending.merge(Action::DisableOnBleDisconnect, NotifyNone);
+  pending.merge(Action::EnableDebug, NotifyGeneric);
+  request = pending.take();
+  assert(request.disconnectCleanup);
+  assert(request.action == Action::EnableDebug);
+  assert(request.notifications == NotifyGeneric);
+
   std::cout << "transfer control dispatch tests passed\n";
   return 0;
 }
