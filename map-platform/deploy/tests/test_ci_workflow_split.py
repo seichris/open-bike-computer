@@ -24,14 +24,25 @@ class CIWorkflowSplitTests(unittest.TestCase):
         self.assertIn("    name: Map Backend\n", map_ci)
         self.assertIn("    name: OSM Pipeline\n", map_ci)
 
-    def test_required_map_backend_check_runs_on_every_pull_request(self) -> None:
+    def test_pull_requests_route_map_jobs_through_the_aggregate_gate(self) -> None:
+        general_ci = workflow_source("ci.yml")
         map_ci = workflow_source("map-platform-ci.yml")
-        pull_request_config = map_ci.split("  pull_request:\n", 1)[1].split(
-            "  workflow_dispatch:\n", 1
-        )[0]
 
-        self.assertEqual("", pull_request_config)
-        self.assertIn("  push:\n    paths:\n", map_ci)
+        self.assertIn("  pull_request:\n", general_ci)
+        self.assertIn("  gate:\n", general_ci)
+        self.assertIn("&& 'CI Gate' ||", general_ci)
+        self.assertIn("uses: ./.github/workflows/map-platform-ci.yml", general_ci)
+        self.assertIn("  workflow_call:\n", map_ci)
+        self.assertNotIn("  pull_request:\n", map_ci)
+        self.assertNotIn("  push:\n", map_ci)
+
+    def test_reusable_map_jobs_follow_inputs_and_manual_defaults_run_both(self) -> None:
+        map_ci = workflow_source("map-platform-ci.yml")
+
+        self.assertIn("    if: inputs.run_backend\n", map_ci)
+        self.assertIn("    if: inputs.run_osm\n", map_ci)
+        self.assertNotIn("github.event_name != 'workflow_call'", map_ci)
+        self.assertEqual(map_ci.count("        default: true\n"), 2)
 
     def test_image_promotion_watches_and_dispatches_dedicated_ci(self) -> None:
         image_workflow = workflow_source("map-platform-image.yml")
@@ -42,8 +53,14 @@ class CIWorkflowSplitTests(unittest.TestCase):
             "python3 map-platform/deploy/export_pending_compose.py",
             image_workflow,
         )
-        self.assertIn("gh workflow run map-platform-ci.yml", image_workflow)
-        self.assertNotIn("gh workflow run ci.yml", image_workflow)
+        self.assertIn("gh workflow run ci.yml", image_workflow)
+        self.assertIn("-f scope=map", image_workflow)
+        self.assertNotIn("gh workflow run map-platform-ci.yml", image_workflow)
+
+    def test_image_publishing_is_automatic_only_on_main(self) -> None:
+        image_workflow = workflow_source("map-platform-image.yml")
+
+        self.assertIn("  push:\n    branches:\n      - main\n", image_workflow)
 
 
 if __name__ == "__main__":
