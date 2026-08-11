@@ -565,6 +565,11 @@ def default_cache_root() -> Path:
     return (Path(cache_home) if cache_home else Path.home() / ".cache") / "open-bike-computer/firmware-runtime"
 
 
+def _require_current_owner(path: Path, label: str) -> None:
+    if hasattr(os, "getuid") and path.lstat().st_uid != os.getuid():
+        raise FirmwareRuntimeError(f"{label} has the wrong owner: {path}")
+
+
 def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> Path:
     root = root.expanduser()
     if not root.is_absolute():
@@ -594,6 +599,8 @@ def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> 
             # A descendant cannot exist below the first missing component.
             current = root
             break
+    if os.path.lexists(root):
+        _require_current_owner(root, "runtime cache root")
     for part in parts:
         if part in {"", ".", ".."} or "/" in part or "\\" in part:
             raise FirmwareRuntimeError("unsafe runtime cache path component")
@@ -601,8 +608,10 @@ def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> 
         if os.path.lexists(current):
             if current.is_symlink() or not current.is_dir():
                 raise FirmwareRuntimeError(f"unsafe runtime cache directory: {current}")
+            _require_current_owner(current, "runtime cache directory")
         elif create:
             current.mkdir(mode=0o700)
+            _require_current_owner(current, "runtime cache directory")
     return current
 
 
@@ -612,6 +621,7 @@ def _safe_project_subtree(
     current = project_dir.resolve()
     if not current.is_dir():
         raise FirmwareRuntimeError("firmware project directory is missing")
+    _require_current_owner(current, "firmware project directory")
     for part in parts:
         if part in {"", ".", ".."} or "/" in part or "\\" in part:
             raise FirmwareRuntimeError("unsafe project-private runtime path component")
@@ -621,8 +631,10 @@ def _safe_project_subtree(
                 raise FirmwareRuntimeError(
                     f"unsafe project-private runtime directory: {current}"
                 )
+            _require_current_owner(current, "project-private runtime directory")
         elif create:
             current.mkdir(mode=0o700)
+            _require_current_owner(current, "project-private runtime directory")
     return current
 
 
@@ -736,8 +748,10 @@ def extract_verified_bundle(bundle: Path, destination: Path) -> None:
             casefolded[name.casefold()] = name
             if name == "inventory.json":
                 continue
-            if member.issym() or member.islnk() or member.isdev() or not (member.isfile() or member.isdir()):
-                raise FirmwareRuntimeError("runtime bundle contains a link or special file")
+            if not member.isfile():
+                raise FirmwareRuntimeError(
+                    "runtime bundle contains a link, directory, or special file"
+                )
         archive_files = {name for name, member in members.items() if member.isfile() and name != "inventory.json"}
         if archive_files != set(inventory):
             raise FirmwareRuntimeError("runtime bundle files do not exactly match inventory")
@@ -789,6 +803,7 @@ def _verify_runtime_tree(
     inventory_path = root / "inventory.json"
     if root.is_symlink() or not root.is_dir() or inventory_path.is_symlink() or not inventory_path.is_file():
         raise FirmwareRuntimeError("accepted runtime tree is missing or unsafe")
+    _require_current_owner(root, "accepted runtime root")
     try:
         value = json.loads(inventory_path.read_bytes(), object_pairs_hook=_duplicate_key_rejector)
     except (OSError, json.JSONDecodeError) as error:
@@ -814,8 +829,14 @@ def _verify_runtime_tree(
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
     for path in root.rglob("*"):
-        if path.is_symlink() or (not path.is_file() and not path.is_dir()):
+        info = path.lstat()
+        if (
+            path.is_symlink()
+            or (not path.is_file() and not path.is_dir())
+            or (path.is_file() and info.st_nlink != 1)
+        ):
             raise FirmwareRuntimeError("accepted runtime contains a link or special file")
+        _require_current_owner(path, "accepted runtime member")
         if path.is_file() and path != inventory_path:
             actual_files.add(path.relative_to(root).as_posix())
         elif path.is_dir():
@@ -892,14 +913,19 @@ def _mark_tree_read_only(root: Path) -> None:
 def _remove_owned_runtime_tree(root: Path) -> None:
     if root.is_symlink() or not root.is_dir():
         raise FirmwareRuntimeError(f"refusing to remove unsafe runtime tree: {root}")
+    _require_current_owner(root, "runtime tree")
     entries = sorted(root.rglob("*"), key=lambda item: len(item.parts))
     if any(
-        path.is_symlink() or (not path.is_file() and not path.is_dir())
+        path.is_symlink()
+        or (not path.is_file() and not path.is_dir())
+        or (path.is_file() and path.lstat().st_nlink != 1)
         for path in entries
     ):
         raise FirmwareRuntimeError(
             f"refusing to remove runtime tree containing an unsafe entry: {root}"
         )
+    for path in entries:
+        _require_current_owner(path, "runtime tree member")
     root.chmod(0o700)
     for path in entries:
         path.chmod(0o700 if path.is_dir() else 0o600)
@@ -913,10 +939,21 @@ def ensure_shared_runtime(lock: RuntimeLock, target: RuntimeTarget, *, cache_roo
     base = _safe_subtree(root, ("locks", lock.lock_set_id, target.target_id), create=True)
     archive = base / f"{target.bundle.sha256}.tar.gz"
     if os.path.lexists(archive):
-        if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != target.bundle.size or _file_sha256(archive) != target.bundle.sha256:
+        if (
+            archive.is_symlink()
+            or not archive.is_file()
+            or archive.lstat().st_nlink != 1
+            or archive.stat().st_size != target.bundle.size
+            or _file_sha256(archive) != target.bundle.sha256
+        ):
             raise FirmwareRuntimeError("cached runtime bundle is corrupt; use --repair-runtime")
+        _require_current_owner(archive, "cached runtime bundle")
     else:
         download_verified(target.bundle, archive)
+        _require_current_owner(archive, "cached runtime bundle")
+    archive.chmod(0o444)
+    if stat.S_IMODE(archive.stat().st_mode) != 0o444:
+        raise FirmwareRuntimeError("cached runtime bundle permissions changed")
     accepted = base / target.bundle.sha256
     if os.path.lexists(accepted):
         provenance = _verify_runtime_tree(accepted, target, require_read_only=True)
@@ -950,9 +987,14 @@ def repair_runtime(lock: RuntimeLock, target: RuntimeTarget, project_dir: Path, 
         if os.path.lexists(candidate):
             if candidate.is_symlink() or candidate.parent != base:
                 raise FirmwareRuntimeError(f"refusing unsafe runtime repair target: {candidate}")
+            _require_current_owner(candidate, "runtime repair target")
             if candidate.is_dir():
                 _remove_owned_runtime_tree(candidate)
             elif candidate.is_file():
+                if candidate.lstat().st_nlink != 1:
+                    raise FirmwareRuntimeError(
+                        f"refusing hard-linked runtime repair target: {candidate}"
+                    )
                 candidate.unlink()
             else:
                 raise FirmwareRuntimeError(f"refusing unsafe runtime repair target: {candidate}")

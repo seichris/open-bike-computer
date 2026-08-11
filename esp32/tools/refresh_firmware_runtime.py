@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import unicodedata
 import urllib.request
 import zipfile
 from email.parser import BytesParser
@@ -434,7 +435,50 @@ def _refresh_work_root(project_dir: Path) -> Path:
     return current
 
 
+def _validate_wheel_archive(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise FirmwareRuntimeError(f"wheel is missing or unsafe: {path}")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names: set[str] = set()
+            casefolded: dict[str, str] = {}
+            entries = archive.infolist()
+            if not entries:
+                raise FirmwareRuntimeError(f"wheel is empty: {path.name}")
+            for info in entries:
+                raw_name = info.filename
+                name = raw_name[:-1] if info.is_dir() else raw_name
+                member = PurePosixPath(name)
+                collision = casefolded.get(name.casefold())
+                mode = info.external_attr >> 16
+                file_type = stat.S_IFMT(mode)
+                if (
+                    not name
+                    or "\\" in name
+                    or unicodedata.normalize("NFC", name) != name
+                    or member.is_absolute()
+                    or any(part in {"", ".", ".."} for part in member.parts)
+                    or member.as_posix() != name
+                    or raw_name in names
+                    or collision is not None
+                    or info.flag_bits & 0x1
+                    or file_type not in {0, stat.S_IFREG, stat.S_IFDIR}
+                    or (info.is_dir() and file_type == stat.S_IFREG)
+                    or (not info.is_dir() and file_type == stat.S_IFDIR)
+                ):
+                    detail = collision or raw_name
+                    raise FirmwareRuntimeError(
+                        f"wheel contains an unsafe or colliding member: "
+                        f"{path.name} {detail!r}"
+                    )
+                names.add(raw_name)
+                casefolded[name.casefold()] = name
+    except zipfile.BadZipFile as error:
+        raise FirmwareRuntimeError(f"wheel is not a valid ZIP: {path.name}") from error
+
+
 def _normalize_wheel(path: Path) -> None:
+    _validate_wheel_archive(path)
     temporary = path.with_suffix(".normalized")
     with zipfile.ZipFile(path) as source, zipfile.ZipFile(
         temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
@@ -448,9 +492,11 @@ def _normalize_wheel(path: Path) -> None:
             normalized.external_attr = info.external_attr
             output.writestr(normalized, source.read(name))
     os.replace(temporary, path)
+    _validate_wheel_archive(path)
 
 
 def _wheel_identity(path: Path) -> tuple[str, str, list[str], str | None]:
+    _validate_wheel_archive(path)
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -488,6 +534,7 @@ def _reviewed_wheel_license(
     metadata_license: str | None,
     overrides: Mapping[tuple[str, str], Mapping[str, object]],
 ) -> tuple[str, dict[str, object], bool]:
+    _validate_wheel_archive(path)
     if metadata_license is not None and metadata_license.strip() and (
         metadata_license.strip().casefold() not in {"unknown", "unlicensed"}
     ):
@@ -734,6 +781,8 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             )
             if requirements:
                 _run((str(python), "-m", "pip", "--isolated", "download", "--index-url", "https://pypi.org/simple", "--disable-pip-version-check", "--no-cache-dir", "--no-deps", "--only-binary=:all:", "--dest", str(wheelhouse), *requirements), environment=command_environment)
+        for wheel_path in sorted(wheelhouse.glob("*.whl")):
+            _validate_wheel_archive(wheel_path)
         top_requirements = sets["topLevel"]
         _run((str(python), "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-cache-dir", "--no-index", "--find-links", str(wheelhouse), "--no-deps", *top_requirements), environment=command_environment)
         setuptools_version = _run(

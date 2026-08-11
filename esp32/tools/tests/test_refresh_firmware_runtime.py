@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 import zipfile
@@ -78,6 +79,33 @@ class RuntimeRefreshTests(unittest.TestCase):
             ("example-package", "1.2.3", ["py3-none-any"], "MIT"),
         )
         self.assertEqual(_normalize_name("Example_Package"), "example-package")
+
+    def test_wheel_validation_rejects_unsafe_zip_members(self) -> None:
+        attacks = {
+            "traversal": [("../escape.py", None)],
+            "backslash": [("example\\escape.py", None)],
+            "non-nfc": [("example/cafe\u0301.py", None)],
+            "case-collision": [
+                ("EXAMPLE/_VENDOR/VENDORED-9.9.DIST-INFO/METADATA", None)
+            ],
+            "symlink": [("example/link", stat.S_IFLNK | 0o777)],
+        }
+        for label, members in attacks.items():
+            with self.subTest(label=label):
+                wheel = self.make_wheel()
+                with zipfile.ZipFile(wheel, "a") as archive:
+                    for name, mode in members:
+                        if mode is None:
+                            archive.writestr(name, "unsafe\n")
+                        else:
+                            info = zipfile.ZipInfo(name)
+                            info.create_system = 3
+                            info.external_attr = mode << 16
+                            archive.writestr(info, "target")
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "unsafe or colliding member"
+                ):
+                    _normalize_wheel(wheel)
 
     def test_wheel_license_without_metadata_requires_exact_reviewed_evidence(self) -> None:
         wheel = self.make_wheel(license_expression=None)
