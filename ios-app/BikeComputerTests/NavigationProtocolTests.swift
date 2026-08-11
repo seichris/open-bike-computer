@@ -677,6 +677,7 @@ struct NavigationProtocolTests {
         testPausedMapUploadResumePolicy()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
+        testDeviceTransferServerProbePolicy()
         await testDeviceTransferManagerWaitsForMapToken()
         await testDeviceTransferManagerWaitsForFreshDebugToken()
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
@@ -13545,6 +13546,38 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "fresh remote-debug handshake should succeed: \(error)")
         }
+    }
+
+    static func testDeviceTransferServerProbePolicy() {
+        let configuration =
+            DeviceTransferServerProbePolicy.makeSessionConfiguration()
+        assertEqual(
+            configuration.requestCachePolicy,
+            .reloadIgnoringLocalAndRemoteCacheData,
+            "local device probes bypass URL caches"
+        )
+        assert(configuration.urlCache == nil,
+               "local device probes do not install a URL cache")
+        assert(configuration.httpCookieStorage == nil,
+               "local device probes do not inherit cookie storage")
+        assert(configuration.connectionProxyDictionary?.isEmpty == true,
+               "local device probes explicitly bypass configured proxies")
+        assert(!configuration.allowsCellularAccess,
+               "local device probes stay on the Wi-Fi route")
+        assert(!configuration.waitsForConnectivity,
+               "failed local routes return in time for retry")
+        assertEqual(
+            configuration.timeoutIntervalForRequest,
+            DeviceTransferServerProbePolicy.requestTimeout,
+            "local device probe request timeout is bounded"
+        )
+        assertEqual(
+            configuration.timeoutIntervalForResource,
+            DeviceTransferServerProbePolicy.requestTimeout,
+            "local device probe resource timeout is bounded"
+        )
+        assert(DeviceTransferHandshakePolicy.lanReachabilityTimeout >= 10,
+               "LAN verification tolerates iOS route convergence")
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {
