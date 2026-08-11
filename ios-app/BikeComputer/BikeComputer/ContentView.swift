@@ -694,19 +694,14 @@ struct ContentView: View {
             isWorkoutActive: workoutStore.presentation.isWorkoutActive
         ) {
         case .presentQueuedSheet:
-            guard let queuedSheetAfterDismiss else {
-                isSheetDismissalInFlight = false
-                presentNearbyBicinoIfEligible()
-                return
-            }
+            guard let queuedSheetAfterDismiss else { return }
+            self.queuedSheetAfterDismiss = nil
             Task { @MainActor in
                 await Task.yield()
                 guard presentedSheet == nil else {
-                    self.queuedSheetAfterDismiss = nil
                     isSheetDismissalInFlight = false
                     return
                 }
-                self.queuedSheetAfterDismiss = nil
                 activeSheetDestination = queuedSheetAfterDismiss
                 presentedSheet = queuedSheetAfterDismiss
                 isSheetDismissalInFlight = false
