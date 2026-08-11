@@ -163,7 +163,8 @@ enum DeviceBLEProtocol {
     static let explicitInvalidGPSHeadingCapabilityMask: UInt32 = 1 << 13
     static let scopedWatchControllerCapabilityMask: UInt32 = 1 << 14
     static let rideAutomationCapabilityMask: UInt32 = 1 << 15
-    static let deviceCapabilitiesVersion: UInt8 = 13
+    static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
+    static let deviceCapabilitiesVersion: UInt8 = 14
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -636,6 +637,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var watchControllerOperationError: String?
     @Published private(set) var watchConnectivityState =
         PhoneWatchConnectivityStateV1()
+    @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -681,6 +683,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
+    @Published private(set) var deviceTransferAccessPointPassphrase: String?
+    @Published private(set) var deviceTransferNetworkTransport: String?
+    @Published private(set) var deviceTransferNetworkSSID: String?
+    @Published private(set) var deviceTransferUsedHotspotFallback = false
+    @Published private(set) var deviceTransferHotspotFallbackReason: String?
     @Published var deviceTransferSessionToken: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
@@ -3291,6 +3298,7 @@ class BLEManager: NSObject, ObservableObject {
         watchControllerIDHex = nil
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -3643,9 +3651,25 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func requestDeviceTransferMode(_ mode: DeviceTransferSession.Mode) -> Bool {
+    func requestDeviceTransferMode(
+        _ mode: DeviceTransferSession.Mode,
+        remoteDebugLANCredentials: RemoteDebugLANCredentials? = nil,
+        remoteDebugHotspotFallbackReason: RemoteDebugHotspotFallbackReason? = nil
+    ) -> Bool {
+        if mode == .debug {
+            deviceTransferUsedHotspotFallback = false
+            deviceTransferHotspotFallbackReason = nil
+        }
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
-        packet.append(Data("enter|\(mode.rawValue)".utf8))
+        if mode == .debug, let remoteDebugLANCredentials {
+            packet.append(remoteDebugLANCredentials.commandPayload)
+        } else if mode == .debug, let remoteDebugHotspotFallbackReason {
+            packet.append(Data(
+                "enter|debug|h1|\(remoteDebugHotspotFallbackReason.commandCode)".utf8
+            ))
+        } else {
+            packet.append(Data("enter|\(mode.rawValue)".utf8))
+        }
         let coalescingKey = mode == .map
             ? "transfer.map.control"
             : "transfer.device.control"
@@ -4018,6 +4042,11 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferMode = ""
         deviceTransferBaseURL = nil
         deviceTransferAccessPointSSID = nil
+        deviceTransferAccessPointPassphrase = nil
+        deviceTransferNetworkTransport = nil
+        deviceTransferNetworkSSID = nil
+        deviceTransferUsedHotspotFallback = false
+        deviceTransferHotspotFallbackReason = nil
         deviceTransferSessionToken = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
@@ -4050,6 +4079,7 @@ class BLEManager: NSObject, ObservableObject {
         isWatchControllerPromotionInFlight = false
         pendingWatchControllerOperation = nil
         watchControllerOperationStatus = nil
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -5314,6 +5344,11 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
+        guard data.count <= endpoint.maximumWriteLength else {
+            log("Fallback \(label) not queued: \(data.count)-byte packet exceeds \(endpoint.maximumWriteLength)-byte endpoint")
+            return false
+        }
+
         guard enqueueNavigationWrite(
             data,
             endpoint: endpoint,
@@ -6389,6 +6424,7 @@ extension BLEManager: CBPeripheralDelegate {
         watchControllerIDHex = nil
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
+        supportsRemoteDeviceDebug = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -6506,6 +6542,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
+        let hasRemoteDeviceDebug =
+            flags & DeviceBLEProtocol.remoteDeviceDebugCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -6585,6 +6623,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController
+        supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
@@ -6778,6 +6817,13 @@ extension BLEManager: CBPeripheralDelegate {
             deviceTransferBaseURL = nil
         }
         deviceTransferAccessPointSSID = object["apSsid"] as? String
+        deviceTransferAccessPointPassphrase = object["apPassphrase"] as? String
+        deviceTransferNetworkTransport = object["networkTransport"] as? String
+        deviceTransferNetworkSSID = object["networkSsid"] as? String
+        deviceTransferUsedHotspotFallback =
+            object["hotspotFallback"] as? Bool ?? false
+        deviceTransferHotspotFallbackReason =
+            object["hotspotFallbackReason"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String

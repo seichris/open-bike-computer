@@ -16,8 +16,14 @@ namespace {
 // Map activation is handed off to this worker after the HTTP response completes
 // so the transfer and activation phases do not allocate two large stacks at
 // once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path.
-constexpr uint32_t kHttpWorkerStackBytes = 16384;
+// retain the 16 KiB budget required by that handoff path. Remote debugging now
+// also performs Wi-Fi station setup and hotspot fallback on this worker. Keep
+// its existing effective 16 KiB budget rather than reducing stack headroom on
+// the fully initialized device.
+constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
+constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;
+constexpr uint32_t kLanConnectTimeoutMs = 6000;
+constexpr uint32_t kLanConnectPollMs = 50;
 
 static std::string trim(const std::string &value) {
   size_t begin = 0;
@@ -46,6 +52,8 @@ static const char *httpReason(int status) {
     return "OK";
   case 202:
     return "Accepted";
+  case 204:
+    return "No Content";
   case 400:
     return "Bad Request";
   case 401:
@@ -62,6 +70,8 @@ static const char *httpReason(int status) {
     return "Payload Too Large";
   case 415:
     return "Unsupported Media Type";
+  case 429:
+    return "Too Many Requests";
   case 431:
     return "Request Header Fields Too Large";
   case 503:
@@ -124,25 +134,25 @@ static std::string jsonEscape(const std::string &value) {
 
 constexpr uint32_t kHttpResponseCloseTimeoutMs = 5000;
 
-static bool writeHttpResponse(WiFiClient &client,
-                              const std::string &response) {
+static bool writeHttpResponse(WiFiClient &client, const std::string &response) {
   if (response.empty())
     return false;
-  return client.write(reinterpret_cast<const uint8_t *>(response.data()),
-                      response.size()) == response.size();
+  return writeHttpBytes(client,
+                        reinterpret_cast<const uint8_t *>(response.data()),
+                        response.size());
 }
 
 // HTTP responses use Connection: close. A write only hands bytes to lwIP; it
 // does not prove the peer received them. Half-closing the write side queues a
 // FIN after the response, then waiting for the peer's close provides a real
 // response-consumption boundary before a handler may tear down the AP.
-static bool finishHttpResponse(WiFiClient &client) {
+static bool finishHttpResponse(WiFiClient &client, uint32_t timeoutMs) {
   const int socket = client.fd();
   if (socket < 0 || ::shutdown(socket, SHUT_WR) != 0)
     return false;
 
   const uint32_t started = millis();
-  while (millis() - started < kHttpResponseCloseTimeoutMs) {
+  while (millis() - started < timeoutMs) {
     uint8_t byte = 0;
     errno = 0;
     const int received =
@@ -195,15 +205,50 @@ bool HttpTransferServer::setEnabled(bool enabled) {
   return setEnabled(enabled, enabled ? mode_ : "");
 }
 
+bool HttpTransferServer::setPreferredNetwork(
+    const LanCredentials &credentials) {
+  if (!validLanCredentials(credentials))
+    return false;
+  lockState();
+  if (enabled_) {
+    unlockState();
+    return false;
+  }
+  preferredNetwork_ = credentials;
+  requestedHotspotFallbackReason_.clear();
+  unlockState();
+  return true;
+}
+
+bool HttpTransferServer::forceHotspotFallbackAfterEndpointFailure() {
+  lockState();
+  if (enabled_) {
+    unlockState();
+    return false;
+  }
+  preferredNetwork_ = {};
+  requestedHotspotFallbackReason_ = "endpoint_unreachable";
+  unlockState();
+  return true;
+}
+
+void HttpTransferServer::clearPreferredNetwork() {
+  lockState();
+  if (!enabled_) {
+    preferredNetwork_ = {};
+    requestedHotspotFallbackReason_.clear();
+  }
+  unlockState();
+}
+
 bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   lockState();
   const bool configured = configured_;
   const bool wasEnabled = enabled_;
-  const bool wasStartedAp = startedAp_;
   const std::string previousMode = mode_;
   const std::string previousSessionToken = sessionToken_;
-  const std::string apSsid = apSsid_;
   unlockState();
+  const std::string requestedMode = mode;
 
   if (!configured || handlerCount_ == 0) {
     lockState();
@@ -234,26 +279,6 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       return false;
     }
     acquiredPowerLock = true;
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.mode(WIFI_AP);
-      if (!WiFi.softAP(apSsid.c_str())) {
-        power_management::release(power_management::LockDomain::Transfer);
-        lockState();
-        rememberError("wifi_ap", "could not start transfer Wi-Fi");
-        unlockState();
-        return false;
-      }
-      lockState();
-      startedAp_ = true;
-      unlockState();
-      Serial.printf("DEVICE_TRANSFER_HTTP: started AP ssid=%s ip=%s\n",
-                    apSsid.c_str(), WiFi.softAPIP().toString().c_str());
-    }
-    server_.begin();
-    server_.setNoDelay(true);
-    Serial.printf(
-        "DEVICE_TRANSFER_HTTP: listener started port=%u free_heap=%u\n",
-        static_cast<unsigned>(port_), static_cast<unsigned>(ESP.getFreeHeap()));
   }
   if (!enabled && wasEnabled) {
     // Revoke the request generation before stopping the listener/AP. Network
@@ -262,17 +287,14 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     lockState();
     enabled_ = false;
     mode_.clear();
+    apPassphrase_.clear();
+    hotspotFallback_ = false;
+    hotspotFallbackReason_.clear();
+    requestedHotspotFallbackReason_.clear();
     sessionToken_.clear();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
     unlockState();
     server_.stop();
-    if (wasStartedAp) {
-      WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_OFF);
-      lockState();
-      startedAp_ = false;
-      unlockState();
-    }
   }
   if (enabled || !wasEnabled) {
     lockState();
@@ -283,9 +305,25 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     if (enabled) {
       if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
         sessionToken_ = generateSessionToken();
+        apPassphrase_ = mode_ == "debug"
+                            ? generateSessionToken().substr(0, 16)
+                            : "";
+      }
+      if (!wasEnabled) {
+        if (requestedMode != "debug")
+          preferredNetwork_ = {};
+        startedAp_ = false;
+        startedStation_ = false;
+        hotspotFallback_ = false;
+        hotspotFallbackReason_.clear();
+        networkTransport_ = "starting";
+        networkSsid_ = preferredNetwork_.ssid;
       }
     } else {
+      apPassphrase_.clear();
       sessionToken_.clear();
+      preferredNetwork_ = {};
+      requestedHotspotFallbackReason_.clear();
     }
     if (transferBoundary) {
       transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
@@ -296,13 +334,16 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
+    const uint32_t workerStackBytes =
+        requestedMode == "debug" ? kDebugHttpWorkerStackBytes
+                                  : kTransferHttpWorkerStackBytes;
     // Publish the worker handle and persistent power-lock ownership before the
     // new task can observe state. Holding the mutex across xTaskCreate makes
     // an immediately scheduled worker wait until both fields are coherent.
     lockState();
     const BaseType_t created =
-        xTaskCreate(workerTaskThunk, "device_http", kHttpWorkerStackBytes, this,
-                    1, &worker);
+        xTaskCreate(workerTaskThunk, "device_http", workerStackBytes, this, 1,
+                    &worker);
     if (created == pdPASS) {
       workerTask_ = worker;
       powerLockHeld_ = acquiredPowerLock;
@@ -310,19 +351,24 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     unlockState();
     Serial.printf(
         "DEVICE_TRANSFER_HTTP: worker create result=%ld handle=%p "
-        "free_heap=%u\n",
+        "stack_bytes=%u free_heap=%u\n",
         static_cast<long>(created), static_cast<void *>(worker),
+        static_cast<unsigned>(workerStackBytes),
         static_cast<unsigned>(ESP.getFreeHeap()));
     if (created != pdPASS) {
       server_.stop();
-      if (startedAp_) {
-        WiFi.softAPdisconnect(true);
-        WiFi.mode(WIFI_OFF);
-      }
       lockState();
       enabled_ = false;
       startedAp_ = false;
+      startedStation_ = false;
+      hotspotFallback_ = false;
+      hotspotFallbackReason_.clear();
+      networkTransport_.clear();
+      networkSsid_.clear();
+      preferredNetwork_ = {};
+      requestedHotspotFallbackReason_.clear();
       mode_.clear();
+      apPassphrase_.clear();
       sessionToken_.clear();
       rememberError("http_worker", "could not start transfer HTTP worker");
       unlockState();
@@ -344,11 +390,166 @@ void HttpTransferServer::setLastError(const std::string &code,
 
 void HttpTransferServer::process() {}
 
+bool HttpTransferServer::startNetwork() {
+  lockState();
+  const bool enabled = enabled_;
+  const LanCredentials preferredNetwork = preferredNetwork_;
+  preferredNetwork_ = {};
+  const std::string requestedHotspotFallbackReason =
+      requestedHotspotFallbackReason_;
+  requestedHotspotFallbackReason_.clear();
+  const std::string apSsid = apSsid_;
+  const std::string apPassphrase = apPassphrase_;
+  const std::string mode = mode_;
+  unlockState();
+  if (!enabled)
+    return false;
+
+  const bool preferLan = validLanCredentials(preferredNetwork);
+  if (preferLan) {
+    lockState();
+    networkTransport_ = "connecting";
+    networkSsid_ = preferredNetwork.ssid;
+    unlockState();
+
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    WiFi.begin(preferredNetwork.ssid.c_str(),
+               preferredNetwork.password.c_str());
+    const uint32_t started = millis();
+    while (millis() - started < kLanConnectTimeoutMs) {
+      lockState();
+      const bool stillEnabled = enabled_;
+      unlockState();
+      if (!stillEnabled) {
+        WiFi.disconnect(true, false);
+        return false;
+      }
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress()) {
+        lockState();
+        startedStation_ = true;
+        networkTransport_ = "lan";
+        networkSsid_ = preferredNetwork.ssid;
+        unlockState();
+        Serial.printf(
+            "DEVICE_TRANSFER_HTTP: joined LAN ssid_bytes=%u ip=%s\n",
+            static_cast<unsigned>(preferredNetwork.ssid.size()),
+            WiFi.localIP().toString().c_str());
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(kLanConnectPollMs));
+    }
+  }
+
+  lockState();
+  const bool lanReady = startedStation_;
+  const bool stillEnabled = enabled_;
+  unlockState();
+  if (!stillEnabled) {
+    WiFi.disconnect(true, false);
+    return false;
+  }
+
+  if (!lanReady) {
+    std::string fallbackReason = requestedHotspotFallbackReason;
+    if (preferLan) {
+      const wl_status_t stationStatus = WiFi.status();
+      fallbackReason = lanFallbackReasonForStatus(
+          static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
+          static_cast<int>(WL_CONNECT_FAILED));
+      WiFi.disconnect(true, false);
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    WiFi.mode(WIFI_AP);
+    const bool apStarted = mode == "debug"
+                               ? WiFi.softAP(apSsid.c_str(),
+                                             apPassphrase.c_str())
+                               : WiFi.softAP(apSsid.c_str());
+    if (!apStarted) {
+      lockState();
+      rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
+      unlockState();
+      WiFi.mode(WIFI_OFF);
+      return false;
+    }
+    lockState();
+    startedAp_ = true;
+    hotspotFallback_ = !fallbackReason.empty();
+    hotspotFallbackReason_ = fallbackReason;
+    networkTransport_ = "hotspot";
+    networkSsid_ = apSsid;
+    unlockState();
+    Serial.printf(
+        "DEVICE_TRANSFER_HTTP: started AP fallback=%d reason=%s ssid=%s "
+        "ip=%s\n",
+        !fallbackReason.empty(), fallbackReason.c_str(), apSsid.c_str(),
+        WiFi.softAPIP().toString().c_str());
+  }
+
+  server_.begin();
+  server_.setNoDelay(true);
+  Serial.printf(
+      "DEVICE_TRANSFER_HTTP: listener started port=%u transport=%s "
+      "free_heap=%u\n",
+      static_cast<unsigned>(port_), lanReady ? "lan" : "hotspot",
+      static_cast<unsigned>(ESP.getFreeHeap()));
+  return true;
+}
+
+void HttpTransferServer::stopNetwork() {
+  lockState();
+  const bool startedAp = startedAp_;
+  const bool startedStation = startedStation_;
+  const bool hadNetworkActivity = !networkTransport_.empty();
+  startedAp_ = false;
+  startedStation_ = false;
+  hotspotFallback_ = false;
+  hotspotFallbackReason_.clear();
+  networkTransport_.clear();
+  networkSsid_.clear();
+  apPassphrase_.clear();
+  preferredNetwork_ = {};
+  requestedHotspotFallbackReason_.clear();
+  unlockState();
+
+  server_.stop();
+  if (startedAp)
+    WiFi.softAPdisconnect(true);
+  if (startedStation)
+    WiFi.disconnect(true, false);
+  if (hadNetworkActivity)
+    WiFi.mode(WIFI_OFF);
+}
+
 void HttpTransferServer::runWorker() {
   Serial.printf(
       "DEVICE_TRANSFER_HTTP: worker started core=%d free_heap=%u stack_words=%u\n",
       xPortGetCoreID(), static_cast<unsigned>(ESP.getFreeHeap()),
       static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  if (!startNetwork()) {
+    lockState();
+    const bool startupFailed = enabled_;
+    enabled_ = false;
+    mode_.clear();
+    apPassphrase_.clear();
+    sessionToken_.clear();
+    transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    if (startupFailed && lastErrorCode_.empty()) {
+      rememberError("wifi_unavailable",
+                    "could not start LAN or device hotspot");
+    }
+    unlockState();
+    stopNetwork();
+    lockState();
+    workerTask_ = nullptr;
+    const bool releasePowerLock = powerLockHeld_;
+    powerLockHeld_ = false;
+    unlockState();
+    if (releasePowerLock)
+      power_management::release(power_management::LockDomain::Transfer);
+    return;
+  }
   uint32_t lastHealthLogMs = 0;
   while (true) {
     lockState();
@@ -360,6 +561,9 @@ void HttpTransferServer::runWorker() {
         unlockState();
         continue;
       }
+      unlockState();
+      stopNetwork();
+      lockState();
       workerTask_ = nullptr;
       const bool releasePowerLock = powerLockHeld_;
       powerLockHeld_ = false;
@@ -371,10 +575,14 @@ void HttpTransferServer::runWorker() {
     }
     WiFiClient client = server_.accept();
     if (client) {
+      const HttpTransferStatus networkStatus = status();
       Serial.printf(
-          "DEVICE_TRANSFER_HTTP: accepted client stations=%u free_heap=%u "
-          "stack_words=%u\n",
-          static_cast<unsigned>(WiFi.softAPgetStationNum()),
+          "DEVICE_TRANSFER_HTTP: accepted client transport=%s stations=%u "
+          "free_heap=%u stack_words=%u\n",
+          networkStatus.networkTransport.c_str(),
+          static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
+                                    ? WiFi.softAPgetStationNum()
+                                    : 0),
           static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
       lockState();
@@ -395,11 +603,15 @@ void HttpTransferServer::runWorker() {
       const uint32_t now = millis();
       if (now - lastHealthLogMs >= 1000) {
         lastHealthLogMs = now;
+        const HttpTransferStatus networkStatus = status();
         Serial.printf(
-            "DEVICE_TRANSFER_HTTP: waiting stations=%u ip=%s free_heap=%u "
-            "stack_words=%u\n",
-            static_cast<unsigned>(WiFi.softAPgetStationNum()),
-            WiFi.softAPIP().toString().c_str(),
+            "DEVICE_TRANSFER_HTTP: waiting transport=%s clients=%u url=%s "
+            "free_heap=%u stack_words=%u\n",
+            networkStatus.networkTransport.c_str(),
+            static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
+                                      ? WiFi.softAPgetStationNum()
+                                      : 0),
+            networkStatus.baseUrl.c_str(),
             static_cast<unsigned>(ESP.getFreeHeap()),
             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
       }
@@ -420,9 +632,15 @@ HttpTransferStatus HttpTransferServer::status() const {
   const bool configured = configured_;
   const bool enabled = enabled_;
   const bool startedAp = startedAp_;
+  const bool startedStation = startedStation_;
   const uint16_t port = port_;
   const std::string mode = mode_;
   const std::string apSsid = apSsid_;
+  const std::string apPassphrase = apPassphrase_;
+  const std::string networkTransport = networkTransport_;
+  const std::string networkSsid = networkSsid_;
+  const bool hotspotFallback = hotspotFallback_;
+  const std::string hotspotFallbackReason = hotspotFallbackReason_;
   const std::string sessionToken = sessionToken_;
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
@@ -437,9 +655,10 @@ HttpTransferStatus HttpTransferServer::status() const {
   std::string baseUrl;
   if (enabled) {
     IPAddress ip =
-        startedAp ? WiFi.softAPIP() : (WiFi.status() == WL_CONNECTED
-                                           ? WiFi.localIP()
-                                           : IPAddress());
+        startedAp ? WiFi.softAPIP()
+                  : (startedStation && WiFi.status() == WL_CONNECTED
+                         ? WiFi.localIP()
+                         : IPAddress());
     if (ip != IPAddress()) {
       baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
                 std::to_string(port);
@@ -451,6 +670,11 @@ HttpTransferStatus HttpTransferServer::status() const {
           mode,
           baseUrl,
           startedAp ? apSsid : "",
+          startedAp && mode == "debug" ? apPassphrase : "",
+          networkTransport,
+          networkSsid,
+          hotspotFallback,
+          hotspotFallbackReason,
           sessionToken,
           lastErrorCode,
           lastErrorMessage,
@@ -469,9 +693,9 @@ bool HttpTransferServer::isRequestAuthorized(
       isHttpTransferGenerationCurrent(enabled, transferGeneration,
                                       request.transferGeneration) &&
       !sessionToken.empty() && request.transferToken == sessionToken;
+  currentRequestAuthorized_ = authorized;
   if (authorized) {
     lastUsefulTrafficMs_ = millis();
-    currentRequestAuthorized_ = true;
   }
   unlockState();
   return authorized;
@@ -578,7 +802,13 @@ void HttpTransferServer::handleClient(WiFiClient &client) {
     // An unauthenticated client must not occupy the single transfer worker for
     // the graceful-close deadline. Authenticated requests receive the durable
     // response boundary needed before a handler may change transfer state.
-    const bool peerClosedCleanly = authorized && finishHttpResponse(client);
+    const bool shortUnauthenticatedCompletion =
+        !authorized &&
+        handler->allowShortUnauthenticatedResponseCompletion(request);
+    const bool peerClosedCleanly =
+        (authorized || shortUnauthenticatedCompletion) &&
+        finishHttpResponse(client, authorized ? kHttpResponseCloseTimeoutMs
+                                              : 250U);
     client.stop();
     handler->responseDidComplete(request, peerClosedCleanly);
     return;
@@ -642,12 +872,54 @@ void HttpTransferServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength) {
-  const std::string response =
-      std::string("HTTP/1.1 ") + std::to_string(status) + " " +
-      httpReason(status) + "\r\nConnection: close\r\nContent-Length: " +
-      std::to_string(contentLength) + "\r\n\r\n";
+bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength,
+                  const char *contentType,
+                  const HttpResponseHeader *additionalHeaders,
+                  size_t additionalHeaderCount) {
+  std::string response = std::string("HTTP/1.1 ") + std::to_string(status) +
+                         " " + httpReason(status) + "\r\n";
+  if (contentType != nullptr && contentType[0] != '\0') {
+    const std::string value(contentType);
+    if (value.find('\r') != std::string::npos ||
+        value.find('\n') != std::string::npos)
+      return false;
+    response += "Content-Type: " + value + "\r\n";
+  }
+  for (size_t index = 0; index < additionalHeaderCount; ++index) {
+    if (additionalHeaders == nullptr || additionalHeaders[index].name == nullptr ||
+        additionalHeaders[index].value == nullptr)
+      return false;
+    const std::string name(additionalHeaders[index].name);
+    const std::string value(additionalHeaders[index].value);
+    if (!validHttpHeaderName(name) || value.find('\r') != std::string::npos ||
+        value.find('\n') != std::string::npos)
+      return false;
+    response += name + ": " + value + "\r\n";
+  }
+  response += "Connection: close\r\nContent-Length: " +
+              std::to_string(contentLength) + "\r\n\r\n";
   return writeHttpResponse(client, response);
+}
+
+bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+                    uint32_t timeoutMs) {
+  if (data == nullptr && length != 0)
+    return false;
+  size_t offset = 0;
+  uint32_t lastProgressMs = millis();
+  while (offset < length && millis() - lastProgressMs < timeoutMs) {
+    if (!client.connected())
+      return false;
+    const size_t chunk = std::min<size_t>(4096, length - offset);
+    const size_t written = client.write(data + offset, chunk);
+    if (written == 0) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+    offset += written;
+    lastProgressMs = millis();
+  }
+  return offset == length;
 }
 
 bool sendHttpJson(WiFiClient &client, int status, const std::string &body) {

@@ -63,11 +63,14 @@ int main() {
       ui_scheduler::reasonBits(ui_scheduler::WakeReason::Boot) |
       ui_scheduler::reasonBits(ui_scheduler::WakeReason::Display) |
       ui_scheduler::reasonBits(ui_scheduler::WakeReason::Transfer) |
-      ui_scheduler::reasonBits(ui_scheduler::WakeReason::Audio);
+      ui_scheduler::reasonBits(ui_scheduler::WakeReason::Audio) |
+      ui_scheduler::reasonBits(ui_scheduler::WakeReason::RemoteDebug);
   assert(ui_scheduler::hasReason(allReasons,
                                  ui_scheduler::WakeReason::Ble));
   assert(ui_scheduler::hasReason(allReasons,
                                  ui_scheduler::WakeReason::Transfer));
+  assert(ui_scheduler::hasReason(allReasons,
+                                 ui_scheduler::WakeReason::RemoteDebug));
   assert(!ui_scheduler::hasReason(
       ui_scheduler::reasonBits(ui_scheduler::WakeReason::Boot),
       ui_scheduler::WakeReason::Touch));
