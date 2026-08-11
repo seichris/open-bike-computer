@@ -14,6 +14,7 @@ from refresh_firmware_runtime import (
     _bundle,
     _inventory,
     _isolated_command_environment,
+    _load_candidate_contract,
     _normalize_name,
     _normalize_wheel,
     _reject_path_leaks,
@@ -136,6 +137,39 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(len(inputs["pythonBuilder"]["commit"]), 40)
         with self.assertRaisesRegex(FirmwareRuntimeError, "exactly both"):
             assemble_lock(project, (), self.root / "lock.json", "unit-test-lock")
+
+    def test_candidate_contract_pins_one_exact_generator(self) -> None:
+        project = Path(__file__).resolve().parents[2]
+        evidence = inspect_inputs(project)
+        generator = {
+            "version": "2",
+            "commit": "a" * 40,
+            "refreshInputsSha256": evidence["refreshInputsSha256"],
+            "licensesSha256": evidence["licensesSha256"],
+        }
+        contracts = []
+        for target_id in ("linux-x86_64-cp313", "macos-arm64-cp313"):
+            path = self.root / f"contract-{target_id}.json"
+            path.write_bytes(
+                (json.dumps(
+                    {"schema": 1, "generator": generator, "target": {"id": target_id}},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ) + "\n").encode()
+            )
+            self.assertEqual(
+                _load_candidate_contract(project, path, expected_target=target_id)["generator"],
+                generator,
+            )
+            contracts.append(path)
+
+        changed = json.loads(contracts[1].read_bytes())
+        changed["generator"]["commit"] = "b" * 40
+        contracts[1].write_bytes(
+            (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        with self.assertRaisesRegex(FirmwareRuntimeError, "different generators"):
+            assemble_lock(project, contracts, self.root / "lock.json", "unit-test-lock")
 
     def test_candidate_commands_do_not_inherit_or_accept_ambient_injection(self) -> None:
         command_root = self.root / "command-environment"
