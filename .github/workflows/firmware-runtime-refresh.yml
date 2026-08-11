@@ -42,10 +42,10 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Validate host and tracked inputs
@@ -117,10 +117,10 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Configure the isolated runtime cache
@@ -171,13 +171,8 @@ jobs:
               | grep 'runtimeTarget=${{ matrix.target }}' \
               >> "$evidence/provenance.txt"
 
-            env -u LD_LIBRARY_PATH \
-              HTTP_PROXY=http://127.0.0.1:9 \
-              HTTPS_PROXY=http://127.0.0.1:9 \
-              ALL_PROXY=http://127.0.0.1:9 \
-              NO_PROXY= \
-              python3 tools/build_firmware.py "$environment" \
-              2>&1 | tee "$evidence/${environment}-warm.log"
+          env -u LD_LIBRARY_PATH HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= python3 tools/build_firmware.py "$environment" \
+            2>&1 | tee "$evidence/${environment}-warm.log"
             cp .pio/open-bike-build/sdkconfig-defaults.json \
               "$evidence/${environment}-warm-sdkconfig-defaults.json"
             grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-warm.log" \
