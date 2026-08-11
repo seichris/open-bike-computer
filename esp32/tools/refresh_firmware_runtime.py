@@ -976,8 +976,32 @@ def assemble_lock(project_dir: Path, contracts: Sequence[Path], output: Path, lo
         },
         "targets": sorted(targets, key=lambda item: item["id"]),
     }
-    output.write_bytes(_canonical(value))
-    load_lock(output)
+    if output.is_symlink() or (output.exists() and not output.is_file()):
+        raise FirmwareRuntimeError("accepted lock output is unsafe")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(_canonical(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary = Path(temporary_name)
+        load_lock(temporary)
+        temporary.chmod(0o644)
+        os.replace(temporary, output)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
     return value
 
 

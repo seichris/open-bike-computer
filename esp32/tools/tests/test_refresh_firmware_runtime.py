@@ -171,6 +171,15 @@ class RuntimeRefreshTests(unittest.TestCase):
         with self.assertRaisesRegex(FirmwareRuntimeError, "different generators"):
             assemble_lock(project, contracts, self.root / "lock.json", "unit-test-lock")
 
+        contracts[1].write_bytes(contracts[0].read_bytes().replace(
+            b"linux-x86_64-cp313", b"macos-arm64-cp313"
+        ))
+        output = self.root / "preserved-lock.json"
+        output.write_text("preserve me\n")
+        with self.assertRaises(FirmwareRuntimeError):
+            assemble_lock(project, contracts, output, "unit-test-lock")
+        self.assertEqual(output.read_text(), "preserve me\n")
+
     def test_candidate_commands_do_not_inherit_or_accept_ambient_injection(self) -> None:
         command_root = self.root / "command-environment"
         environment = _isolated_command_environment(command_root)
