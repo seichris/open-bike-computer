@@ -291,6 +291,7 @@ class FirmwareBuildTests(unittest.TestCase):
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
             core / "penv/bin/esptool",
+            core / "penv/.espidf-5.5.1/bin/python",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
