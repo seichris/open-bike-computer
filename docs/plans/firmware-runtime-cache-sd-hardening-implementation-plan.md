@@ -11,14 +11,18 @@ The plan is based on freshly fetched GitHub `origin/main` at
 must rebase onto the then-current `origin/main` and re-check every schema,
 version, path, and invariant before editing code.
 
+Owner scope amendment (2026-08-11): the one-time playback-demo documentation
+coordination originally included in point 8 is no longer required. This
+implementation contains no playback-demo code, documentation, build, flash, or
+physical-validation work, and none is a completion gate below.
+
 The retained scope is deliberately limited to the earlier recommendations:
 
 1. replace ambient/global PlatformIO with a repository-owned, content-pinned
    host runtime;
 2. separate reusable custom-core identity from firmware source identity;
 3. make Waveshare SD initialization recover safely from warm-reset bus state;
-4. make speaker teardown idempotent, add a local device-name registry, and
-   correct the video-demo documentation after that feature is rebased.
+4. make speaker teardown idempotent and add a local device-name registry.
 
 The following recommendations are explicitly excluded and must not be smuggled
 into this work:
@@ -54,8 +58,8 @@ After all retained workstreams are complete:
   are invalid for the current resource state;
 - developers may refer to explicitly enrolled boards by a local nickname while
   board family and stable USB serial remain visible and validated; and
-- build, SD, hardware, and video-demo documentation reflects the implemented
-  behavior and the evidence actually collected.
+- build, SD, hardware, and device-registry documentation reflects the
+  implemented behavior and the evidence actually collected.
 
 ## Current implementation and concrete failure modes
 
@@ -69,10 +73,10 @@ toolchain, uploader, SCons, generated SDK configuration, and final firmware
 artifacts, but its first executable is still selected by mutable workstation or
 runner state.
 
-The video-demo session exposed the operational consequence: an initial private
-environment inherited an unhealthy global Python 3.11/PlatformIO path, while a
-later ad-hoc Python 3.13 launcher worked. The global launcher happens to execute
-today; that does not make it a durable build input.
+A prior local firmware session exposed the operational consequence: an initial
+private environment inherited an unhealthy global Python 3.11/PlatformIO path,
+while a later ad-hoc Python 3.13 launcher worked. The global launcher happens
+to execute today; that does not make it a durable build input.
 
 The current firmware baseline is:
 
@@ -143,19 +147,15 @@ real audio failures harder to distinguish from cleanup noise.
 The same function also needs explicit knowledge of whether the codec device was
 opened before deciding which close operation is valid.
 
-### Device identity and video documentation
+### Device identity and superseded demo context
 
 `resolve_upload_port.py` correctly resolves an explicitly supplied stable USB
 serial and refuses ambiguity. Developers still have to remember or paste raw
 serials, however, which is slow and error-prone when several 1.75-inch devices
 share transient `/dev/cu.usbmodem*` paths.
 
-The video-demo README is not present on this plan's `origin/main` base. It
-currently exists on `feature/video-playback-demo` at
-`esp32/video-demo/README.md`, where it documents raw `pio run` and says the
-demo has not been physically validated. The documentation change must be
-coordinated with that feature branch; main must not gain an orphan README for a
-target it does not contain.
+The former one-time playback-demo branch is not part of this implementation.
+Main must not gain an orphan README or target for that retired workflow.
 
 ## Design invariants
 
@@ -240,8 +240,8 @@ rather than inheriting whichever global launcher happens to exist:
 | `linux-x86_64-cp313` | PR CI, tagged release, manual speaker builds | CPython 3.13 |
 | `macos-arm64-cp313` | Apple Silicon local firmware work | CPython 3.13 |
 
-Python 3.13 is the initial target because the video-demo build completed under
-Python 3.13 and pioarduino 55.03.34 accepts Python 3.10 through 3.13. Before
+Python 3.13 is the initial target because the reviewed pioarduino 55.03.34
+dependency closure supports it. Before
 locking assets, the refresh job must prove both host targets with clean 1.75 and
 2.06 builds. If an exact dependency has no compatible CPython 3.13 wheel, the
 implementation must resolve that in the reviewed refresh inputs or amend this
@@ -484,7 +484,7 @@ Deliberately exclude:
   compiled after the core;
 - final ELF/BIN/bootloader/partition image hashes;
 - flash plan and upload port/device state; and
-- video/map/media content.
+- map/media content.
 
 Using the full canonical effective PlatformIO environment is intentionally
 conservative: a configuration edit may rebuild unnecessarily, but a source-only
@@ -603,9 +603,8 @@ application compile, link, and attestation. On the same host and target:
 - output provenance must explicitly report `coreCache=hit|miss`,
   `coreInputKey`, and the measured phase durations.
 
-The observed video-demo session's roughly five-minute cold rebuild versus
-roughly 50-second application rebuild is motivation, not a hardcoded universal
-timing claim.
+The observed roughly five-minute cold rebuild versus roughly 50-second
+application rebuild is motivation, not a hardcoded universal timing claim.
 
 ## Workstream C: bounded Waveshare SD warm-reset recovery
 
@@ -640,7 +639,7 @@ Arduino's pinned SD driver already initializes every attempt at 400 kHz and
 sends the required idle clocks/CMD0. Do not add a frequency ladder until logs
 show a post-initialization high-speed failure. If later evidence supports a
 lower operating-frequency fallback, make it a separate measured change and
-record the map/video throughput impact.
+record the map and sequential-read throughput impact.
 
 Each attempt must:
 
@@ -729,7 +728,7 @@ For both Waveshare board families, when hardware is available:
 Use at least three representative FAT32 cards, including the known-good 32 GB
 SDHC card and another vendor/capacity. For each successful mount, read a fixed
 checksummed file; for one writable test card, perform a temporary write,
-`fflush`/close, reread, and verify without touching user map/video data.
+`fflush`/close, reread, and verify without touching user map data.
 
 Acceptance requires:
 
@@ -738,8 +737,8 @@ Acceptance requires:
 - no Guru Meditation, watchdog, or repeated boot;
 - no filesystem corruption or leaked file handles;
 - final-failure latency no greater than six seconds before FFat fallback; and
-- map block and video sequential-read performance at 4 MHz remaining within 5%
-  of baseline medians.
+- map-block and sequential-read performance at 4 MHz remaining within 5% of
+  baseline medians.
 
 If the 2.06 board is unavailable, software may be reviewed but the workstream
 is not reported physically complete for that board.
@@ -848,22 +847,8 @@ After behavior exists and tests pass:
 - add this plan to `docs/README.md`; and
 - update workflow comments where floating PlatformIO installation is removed.
 
-For `feature/video-playback-demo`:
-
-1. rebase the feature onto the main commits that implement Workstreams A, C,
-   and D1;
-2. build `WAVESHARE_AMOLED_175_VIDEO` through
-   `python3 tools/build_firmware.py WAVESHARE_AMOLED_175_VIDEO`;
-3. rerun the SD/video/audio loop smoke test on the exact rebased commit;
-4. update `esp32/video-demo/README.md` to remove raw `pio run`;
-5. record the exact board model, Git SHA, artifact hash, clip properties,
-   observed loop duration/frame counts, SD recovery status, and audio cleanup
-   status; and
-6. distinguish “physically smoke-tested video demo” from production firmware
-   readiness.
-
-Do not add `esp32/video-demo/README.md` to main before the video target itself
-lands. Do not add media-copy automation; that recommendation is excluded.
+Do not add playback-demo files or media-copy automation; both are outside the
+amended implementation scope.
 
 ## Dependency and merge order
 
@@ -882,9 +867,6 @@ rewrite:
 6. **Speaker lifecycle:** resource-state cleanup, failure tests, repeated
    physical playback.
 7. **Device registry:** schema/tool/build integration and documentation.
-8. **Video feature coordination:** rebase, rebuild, physical retest, and README
-   correction on the video feature branch.
-
 Workstreams C and D may proceed in parallel with A/B in separate branches, but
 the final documentation must describe only merged behavior. Workstream B's core
 key must include the final runtime identity from Workstream A, so do not merge a
@@ -918,7 +900,6 @@ cache design that plans to retrofit runtime identity later.
 | `.github/workflows/firmware-runtime-refresh.yml` | Manual-only candidate bundle/lock generation |
 | `AGENTS.md`, `CONTRIBUTING.md`, `esp32/README.md` | Runtime/cache/device workflow and trust boundary |
 | `hardware/README.md` | SD recovery design and physical evidence |
-| `esp32/video-demo/README.md` on the video branch | Wrapper command and exact post-rebase physical evidence |
 | `docs/README.md` | Link this implementation plan |
 
 ## Rollout and rollback
@@ -981,16 +962,15 @@ The retained plan is complete only when all of these are true:
 10. Warm reset, software restart, and upload reset meet the SD matrix without a
     manual power cycle on every available supported board/card.
 11. Missing-card failure is bounded and falls back once to FFat.
-12. SD map/video throughput remains within the stated baseline tolerance.
+12. SD map-block and sequential-read throughput remains within the stated
+    baseline tolerance.
 13. Speaker partial failures and 100-cycle physical playback produce no invalid
     I2S disable warning or resource leak.
 14. Device nicknames resolve only explicit, unique stable serials and reject
     board-family mismatch before build/upload work.
 15. The ordinary developer docs contain no raw Waveshare `pio run` path and
     make runtime repair deterministic.
-16. The rebased video README records exact physical smoke-test evidence without
-    overstating production readiness.
-17. The implementation contains no approval-token flash workflow, generic
+16. The implementation contains no approval-token flash workflow, generic
     runtime acceptance framework, unified test runner, or SD media installer.
 
 ## Superseded planning context
