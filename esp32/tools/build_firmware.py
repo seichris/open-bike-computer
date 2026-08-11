@@ -11,12 +11,16 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
+import unicodedata
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
@@ -39,6 +43,17 @@ from firmware_build_identity import (
     build_timestamp_from_source_date_epoch,
     git_commit_source_date_epoch,
     git_head_identity,
+)
+from firmware_runtime import (
+    FirmwareRuntimeError,
+    PROVENANCE_ENV,
+    RuntimeProvenance,
+    ensure_runtime_handoff,
+    runtime_pio_path,
+)
+from pioarduino_custom_core import (
+    correct_espidf_text,
+    correct_penv_setup_text,
 )
 
 
@@ -111,6 +126,13 @@ BUILD_ENVIRONMENT_PASSTHROUGH = {
     "LC_CTYPE",
     "LOGNAME",
     "NO_PROXY",
+    "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE",
+    "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS",
+    "OPEN_BIKE_FIRMWARE_WHEELHOUSE",
+    "OPEN_BIKE_FIRMWARE_UV",
+    "OPEN_BIKE_FIRMWARE_ESPTOOL_WHEEL",
+    "OPEN_BIKE_FIRMWARE_PIOARDUINO_REQUIREMENTS",
+    "OPEN_BIKE_FIRMWARE_ESP_IDF_REQUIREMENTS",
     "PATH",
     "PATHEXT",
     "RUNNER_ARCH",
@@ -260,8 +282,13 @@ def _resolved_device_port(
         or actual_serial.strip().casefold() != requested.casefold()
     ):
         raise BuildError("upload device resolver returned a mismatched device")
+    vid = resolved.get("vid")
+    pid = resolved.get("pid")
+    description = resolved.get("description")
+    usb_identity = f" vid={vid!s} pid={pid!s} description={description!r}"
     print(
-        f"FIRMWARE_UPLOAD_DEVICE serial={actual_serial} port={port}",
+        f"FIRMWARE_UPLOAD_DEVICE serial={actual_serial}"
+        f" port={port}{usb_identity}",
         flush=True,
     )
     return port
@@ -340,7 +367,6 @@ def _pinned_nested_scons_piopm() -> str:
 
 def _reject_source_affecting_environment() -> None:
     allowed = {
-        "PLATFORMIO_CMD",
         "PLATFORMIO_CORE_DIR",
         "PLATFORMIO_HOME_DIR",
     }
@@ -437,6 +463,202 @@ def _download_verified_archive(
     return archive
 
 
+def _tree_digest_without_marker(root: Path, marker_name: str) -> str:
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or (not path.is_file() and not path.is_dir()):
+            raise BuildError(f"verified platform staging contains an unsafe entry: {path}")
+        if path.is_file() and path != root / marker_name:
+            files.append(path)
+    if not files:
+        raise BuildError("verified platform staging is empty")
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(b"x" if path.stat().st_mode & 0o111 else b"-")
+        digest.update(bytes.fromhex(_file_sha256(path)))
+    return digest.hexdigest()
+
+
+def _runtime_stage_identity() -> tuple[dict[str, object], str]:
+    raw = os.environ.get(PROVENANCE_ENV)
+    try:
+        provenance = json.loads(raw) if raw else None
+    except json.JSONDecodeError as error:
+        raise BuildError("locked runtime provenance is invalid") from error
+    if not isinstance(provenance, dict) or not provenance:
+        raise BuildError("locked runtime provenance is missing before platform staging")
+    if (
+        provenance.get("platformArchiveSha256")
+        != WAVESHARE_PLATFORM_ARCHIVE_SHA256
+        or provenance.get("platformPackagesSha256")
+        != WAVESHARE_PLATFORM_PACKAGES_SHA256
+    ):
+        raise BuildError(
+            "locked runtime platform identity does not match the firmware pins"
+        )
+    encoded = json.dumps(
+        provenance, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return provenance, hashlib.sha256(encoded).hexdigest()
+
+
+def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
+    """Extract and transform the pinned platform before any of its code runs."""
+    marker_name = ".open-bike-runtime-transform.json"
+    provenance, runtime_identity = _runtime_stage_identity()
+    parent = _ensure_private_directory(
+        project_dir,
+        Path(".pio/open-bike-build/platform-staging")
+        / WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+    )
+    destination = parent / runtime_identity
+    expected_marker = {
+        "schema": 1,
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "runtimeProvenance": provenance,
+    }
+
+    def validate_existing(root: Path) -> None:
+        marker = root / marker_name
+        if root.is_symlink() or not root.is_dir() or marker.is_symlink() or not marker.is_file():
+            raise BuildError("verified platform staging is missing or unsafe")
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise BuildError("verified platform transform marker is invalid") from error
+        if not isinstance(value, dict):
+            raise BuildError("verified platform transform marker is invalid")
+        tree_digest = value.get("platformTreeSha256")
+        if (
+            set(value) != {*expected_marker, "platformTreeSha256"}
+            or stat.S_IMODE(root.stat().st_mode) != 0o755
+            or stat.S_IMODE(marker.stat().st_mode) != 0o444
+            or {key: value.get(key) for key in expected_marker} != expected_marker
+            or not isinstance(tree_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", tree_digest) is None
+            or tree_digest != _tree_digest_without_marker(root, marker_name)
+        ):
+            raise BuildError("verified platform staging changed after pre-execution transform")
+        for path in root.rglob("*"):
+            expected_modes = {0o755} if path.is_dir() else {0o444, 0o555}
+            if stat.S_IMODE(path.stat().st_mode) not in expected_modes:
+                raise BuildError(
+                    "verified platform staging permissions changed after "
+                    "pre-execution transform"
+                )
+
+    if os.path.lexists(destination):
+        validate_existing(destination)
+        return destination
+
+    temporary = Path(tempfile.mkdtemp(prefix=f".{runtime_identity}.", dir=parent))
+    try:
+        temporary.rmdir()
+        extraction_root = temporary / "platform"
+        extraction_root.mkdir(parents=True)
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                names: set[str] = set()
+                casefolded: set[str] = set()
+                root_name: str | None = None
+                for member in bundle.infolist():
+                    name = member.filename
+                    if (
+                        not name
+                        or "\\" in name
+                        or unicodedata.normalize("NFC", name) != name
+                        or member.flag_bits & 0x1
+                    ):
+                        raise BuildError("pinned platform archive has an unsafe member name")
+                    relative = Path(name)
+                    if (
+                        relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or len(relative.parts) < 1
+                    ):
+                        raise BuildError("pinned platform archive contains path traversal")
+                    unix_mode = member.external_attr >> 16
+                    if unix_mode and stat.S_ISLNK(unix_mode):
+                        raise BuildError("pinned platform archive contains a symlink")
+                    normalized = relative.as_posix().rstrip("/")
+                    if normalized in names or normalized.casefold() in casefolded:
+                        raise BuildError("pinned platform archive contains duplicate paths")
+                    names.add(normalized)
+                    casefolded.add(normalized.casefold())
+                    if root_name is None:
+                        root_name = relative.parts[0]
+                    if relative.parts[0] != root_name:
+                        raise BuildError("pinned platform archive has multiple roots")
+                    output_relative = Path(*relative.parts[1:])
+                    if not output_relative.parts:
+                        continue
+                    output = extraction_root / output_relative
+                    if member.is_dir():
+                        output.mkdir(parents=True, exist_ok=True)
+                        continue
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with bundle.open(member) as source, output.open("xb") as target:
+                        shutil.copyfileobj(source, target)
+                    if output.stat().st_size != member.file_size:
+                        raise BuildError("pinned platform member size changed during extraction")
+                    output.chmod((unix_mode & 0o777) or 0o644)
+        except (OSError, zipfile.BadZipFile) as error:
+            raise BuildError(f"could not stage the pinned PlatformIO platform: {error}") from error
+
+        patches = (
+            (
+                extraction_root / "builder/frameworks/espidf.py",
+                correct_espidf_text,
+                "nested PlatformIO and ESP-IDF resolver",
+            ),
+            (
+                extraction_root / "builder/penv_setup.py",
+                correct_penv_setup_text,
+                "Python resolver",
+            ),
+        )
+        for path, transform, label in patches:
+            if path.is_symlink() or not path.is_file():
+                raise BuildError(f"pinned pioarduino {label} source is missing")
+            try:
+                corrected = transform(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as error:
+                raise BuildError(f"pinned pioarduino {label} transform failed: {error}") from error
+            path.write_text(corrected, encoding="utf-8")
+
+        tree_digest = _tree_digest_without_marker(extraction_root, marker_name)
+        marker = {**expected_marker, "platformTreeSha256": tree_digest}
+        (extraction_root / marker_name).write_text(
+            json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(extraction_root, destination)
+        temporary.rmdir()
+        for path in sorted(
+            destination.rglob("*"), key=lambda item: len(item.parts), reverse=True
+        ):
+            path.chmod(0o755 if path.is_dir() else (
+                0o555 if os.access(path, os.X_OK) else 0o444
+            ))
+        # PlatformIO copies source modes into a private package-install staging
+        # directory and must create its own .piopm metadata there. Keep source
+        # files immutable and content-attested, but leave directories traversable
+        # and writable so the private copy does not inherit an unusable 0555 root.
+        destination.chmod(0o755)
+        validate_existing(destination)
+    except Exception:
+        if temporary.exists() and not temporary.is_symlink():
+            for path in temporary.rglob("*"):
+                if not path.is_symlink():
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+            shutil.rmtree(temporary)
+        raise
+    return destination
+
+
 def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
     """Content-pin the platform and its tracked PlatformIO package archives."""
     source_config = project_dir / "platformio.ini"
@@ -467,6 +689,8 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
         ),
     )
 
+    staged_platform = _stage_verified_platform(project_dir, archive)
+
     package_downloads = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/downloads/platform-packages")
     )
@@ -496,7 +720,7 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
         )
         verified_text = source_text.replace(
             f"platform = {WAVESHARE_PLATFORM_URL}",
-            f"platform = {archive.as_uri()}{package_override.rstrip()}",
+            f"platform = {staged_platform.as_uri()}{package_override.rstrip()}",
         )
         if WAVESHARE_PLATFORM_URL in verified_text:
             raise BuildError(
@@ -735,6 +959,9 @@ def _deterministic_build_environment(
             "IDF_COMPONENT_CHECK_NEW_VERSION": "0",
             "IDF_COMPONENT_STRICT_CHECKSUM": "1",
             "IDF_COMPONENT_VERIFY_SSL": "1",
+            "PIP_NO_INDEX": "1",
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "UV_NO_INDEX": "1",
             "IDF_TOOLS_PATH": str(store_root),
             "GIT_CONFIG_GLOBAL": str(isolated_git_config),
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -751,6 +978,13 @@ def _deterministic_build_environment(
             ),
         }
     )
+    wheelhouse = os.environ.get("OPEN_BIKE_FIRMWARE_WHEELHOUSE")
+    if wheelhouse:
+        wheelhouse_path = Path(wheelhouse)
+        if wheelhouse_path.is_symlink() or not wheelhouse_path.is_dir():
+            raise BuildError("locked firmware wheelhouse is missing or unsafe")
+        os.environ["PIP_FIND_LINKS"] = str(wheelhouse_path)
+        os.environ["UV_FIND_LINKS"] = str(wheelhouse_path)
     try:
         yield
     finally:
@@ -799,6 +1033,27 @@ def _reset_profile_build_cache(project_dir: Path, environment: str) -> None:
     _ensure_private_directory(project_dir, relative)
 
 
+def _select_profile_build_cache(
+    project_dir: Path,
+    environment: str,
+    phase: str,
+    identity: str,
+) -> Path:
+    if phase not in {"bootstrap", "application"}:
+        raise BuildError(f"invalid compiler-cache phase: {phase}")
+    safe_identity = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    relative = (
+        Path(".pio/open-bike-build/platformio")
+        / environment
+        / "build-cache"
+        / phase
+        / safe_identity
+    )
+    selected = _ensure_private_directory(project_dir, relative)
+    os.environ["PLATFORMIO_BUILD_CACHE_DIR"] = str(selected)
+    return selected
+
+
 def _reset_profile_override_inputs(project_dir: Path, environment: str) -> None:
     """Remove private global-library and board overrides before use."""
     for child, label in (
@@ -829,9 +1084,65 @@ def _print_provenance(
         result = manifest.get(key)
         return "absent" if result is None else result
 
+    runtime = (
+        manifest.get("runtimeProvenance")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("runtimeProvenance"), dict)
+        else {}
+    )
+
+    def runtime_value(key: str) -> object:
+        result = runtime.get(key)
+        return "missing" if result is None else result
+
+    core = (
+        manifest.get("coreAttestation")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("coreAttestation"), dict)
+        else {}
+    )
+    phases = (
+        manifest.get("phaseTimingsMs")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("phaseTimingsMs"), dict)
+        else {}
+    )
+
+    def nested_value(values: dict[str, object], key: str) -> object:
+        result = values.get(key)
+        return "missing" if result is None else result
+
     print(
         f"{marker} schema=1 environment={environment} git={source_identity} "
         f"uploadEligible={1 if manifest else 0} "
+        f"coreCache={value('coreCache')} "
+        f"coreInputKey={value('coreInputKey')} "
+        f"runtimeLockSetId={runtime_value('lockSetId')} "
+        f"runtimeManifestSha256={runtime_value('manifestSha256')} "
+        f"runtimeTarget={runtime_value('target')} "
+        f"runtimeBundleSha256={runtime_value('bundleSha256')} "
+        f"runtimeTreeSha256={runtime_value('runtimeTreeSha256')} "
+        f"runtimePythonSha256={runtime_value('pythonExecutableSha256')} "
+        f"runtimePioSha256={runtime_value('pioSha256')} "
+        f"runtimeUvSha256={runtime_value('uvSha256')} "
+        f"runtimePythonVersion={runtime_value('pythonVersion')} "
+        f"runtimePlatformioVersion={runtime_value('platformioVersion')} "
+        f"runtimeTopLevelDistributionsSha256={runtime_value('topLevelDistributionSha256')} "
+        f"runtimePioarduinoRootDistributionsSha256={runtime_value('pioarduinoRootDistributionSha256')} "
+        f"runtimeEspIdfDistributionsSha256={runtime_value('espIdfDistributionSha256')} "
+        f"runtimeUvDistributionsSha256={runtime_value('uvDistributionSha256')} "
+        f"runtimeEsptoolDistributionsSha256={runtime_value('esptoolDistributionSha256')} "
+        f"runtimeBootstrapMs={os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS', 'missing')} "
+        f"runtimePioarduinoPenvTreeSha256={nested_value(core, 'penvTreeSha256')} "
+        f"runtimeEspIdfVenvTreeSha256={nested_value(core, 'espIdfPythonEnvTreeSha256')} "
+        f"runtimeTransformedPlatformTreeSha256={nested_value(core, 'platformTreeSha256')} "
+        f"phasePlatformPreparationMs={nested_value(phases, 'platformPreparation')} "
+        f"phaseCustomCoreBootstrapMs={nested_value(phases, 'customCoreBootstrap')} "
+        f"phaseApplicationCompileMs={nested_value(phases, 'applicationCompile')} "
+        f"phaseApplicationBuildMs={nested_value(phases, 'applicationBuild')} "
+        f"phaseLinkMs={nested_value(phases, 'link')} "
+        f"phaseAttestationMs={nested_value(phases, 'attestation')} "
+        f"phaseTotalMs={nested_value(phases, 'total')} "
         f"sourceDateEpoch={value('sourceDateEpoch')} "
         f"buildTimestamp={value('buildTimestamp')} "
         f"firmwareBinSha256={value('firmwareBinSha256')} "
@@ -945,6 +1256,73 @@ def _pioarduino_toolchain_bootstrap_ready(
     )
 
 
+def _record_build_phase_timings(
+    manifest_path: Path, timings: dict[str, int]
+) -> dict[str, object]:
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise BuildError("recorded build manifest is missing or unsafe")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"could not read recorded build provenance: {error}") from error
+    if not isinstance(manifest, dict) or any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in timings.values()
+    ):
+        raise BuildError("recorded build provenance or phase timings are invalid")
+    manifest["phaseTimingsMs"] = timings
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=manifest_path.parent,
+            prefix=f".{manifest_path.name}.", delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, manifest_path)
+        temporary_name = None
+    except OSError as error:
+        raise BuildError(f"could not record build phase timings: {error}") from error
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
+    return manifest
+
+
+def _consume_link_timing(project_dir: Path, environment: str) -> int | None:
+    path = (
+        project_dir
+        / ".pio/open-bike-build/phase-timings"
+        / f"{environment}-link.json"
+    )
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise BuildError("firmware link timing evidence is unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"firmware link timing evidence is invalid: {error}") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "environment", "linkMs"}
+        or value.get("schema") != 1
+        or value.get("environment") != environment
+        or not isinstance(value.get("linkMs"), int)
+        or isinstance(value.get("linkMs"), bool)
+        or value["linkMs"] < 0
+    ):
+        raise BuildError("firmware link timing evidence is invalid")
+    return value["linkMs"]
+
+
 def _artifact_contains_real_target_identity(
     firmware_elf: Path, environment: str, expected_identity: str
 ) -> bool:
@@ -978,6 +1356,7 @@ def build_firmware(
     entry points. In both cases a clean second invocation is required.
     """
 
+    build_started = time.monotonic()
     project_dir = project_dir.resolve()
     if max_passes < 1:
         raise BuildError("max_passes must be at least 1")
@@ -989,8 +1368,15 @@ def build_firmware(
     firmware_bin = project_dir / ".pio" / "build" / environment / "firmware.bin"
 
     with _project_build_lock(project_dir):
+        _ensure_private_directory(
+            project_dir, Path(".pio/open-bike-build/phase-timings")
+        )
+        platform_prepare_started = time.monotonic()
         verified_config, platform_archive = _verified_platformio_project_config(
             project_dir
+        )
+        platform_prepare_ms = round(
+            (time.monotonic() - platform_prepare_started) * 1000
         )
         command: Sequence[str] = (
             pio_command,
@@ -1031,22 +1417,39 @@ def build_firmware(
                     environment,
                 )
                 command = bootstrap_command
-            _reset_profile_build_cache(project_dir, environment)
+            if preserved_sdkconfigs:
+                _select_profile_build_cache(
+                    project_dir, environment, "application", expected_identity
+                )
+            else:
+                _select_profile_build_cache(
+                    project_dir,
+                    environment,
+                    "bootstrap",
+                    f"{environment}:{WAVESHARE_PLATFORM_ARCHIVE_SHA256}",
+                )
             toolchain_ready_before_pass = _pioarduino_toolchain_bootstrap_ready(
                 project_dir, environment
             )
+            custom_core_bootstrap_ms = 0
+            application_compile_ms = 0
+            application_build_ms = 0
+            link_ms = 0
             for pass_number in range(1, max_passes + 1):
                 print(
                     f"=== PlatformIO real-target build: {environment} "
                     f"(pass {pass_number}/{max_passes}) ===",
                     flush=True,
                 )
+                _consume_link_timing(project_dir, environment)
+                pass_started = time.monotonic()
                 try:
                     result = runner(command, cwd=project_dir)
                 except OSError as error:
                     raise BuildError(
                         f"could not run {pio_command!r}: {error}"
                     ) from error
+                pass_elapsed_ms = round((time.monotonic() - pass_started) * 1000)
 
                 dummy_exists = os.path.lexists(project_dir / ".dummy")
                 real_target_finished = (
@@ -1058,6 +1461,7 @@ def build_firmware(
                     )
                 )
                 if dummy_exists and not real_target_finished:
+                    custom_core_bootstrap_ms += pass_elapsed_ms
                     toolchain_ready_after_pass = (
                         _pioarduino_toolchain_bootstrap_ready(
                             project_dir, environment
@@ -1076,6 +1480,27 @@ def build_firmware(
                             environment,
                         )
                         toolchain_ready_before_pass = True
+                        _select_profile_build_cache(
+                            project_dir,
+                            environment,
+                            "application",
+                            expected_identity,
+                        )
+                    else:
+                        command = (
+                            pio_command,
+                            "run",
+                            "--project-conf",
+                            str(verified_config),
+                            "-e",
+                            environment,
+                        )
+                        _select_profile_build_cache(
+                            project_dir,
+                            environment,
+                            "application",
+                            expected_identity,
+                        )
                     _remove_pioarduino_dummy(project_dir)
                     _remove_environment_build(project_dir, environment)
                     if pass_number == max_passes:
@@ -1107,6 +1532,7 @@ def build_firmware(
                         and toolchain_ready_after_pass
                         and pass_number < max_passes
                     ):
+                        custom_core_bootstrap_ms += pass_elapsed_ms
                         _remove_environment_build(project_dir, environment)
                         toolchain_ready_before_pass = True
                         command = (
@@ -1116,6 +1542,12 @@ def build_firmware(
                             str(verified_config),
                             "-e",
                             environment,
+                        )
+                        _select_profile_build_cache(
+                            project_dir,
+                            environment,
+                            "application",
+                            expected_identity,
                         )
                         print(
                             "Detected completed pioarduino toolchain bootstrap; "
@@ -1127,6 +1559,11 @@ def build_firmware(
                         "PlatformIO exited with status "
                         f"{result.returncode} while building {environment}"
                     )
+                observed_link_ms = _consume_link_timing(project_dir, environment)
+                bounded_link_ms = min(pass_elapsed_ms, observed_link_ms or 0)
+                link_ms += bounded_link_ms
+                application_compile_ms += pass_elapsed_ms - bounded_link_ms
+                application_build_ms += pass_elapsed_ms
                 if firmware_elf.is_symlink() or not firmware_elf.is_file():
                     raise BuildError(
                         "PlatformIO returned success without the expected real-target "
@@ -1142,23 +1579,33 @@ def build_firmware(
                         "firmware source identity changed during the deterministic build"
                     )
 
+                attestation_started = time.monotonic()
                 try:
                     manifest_path = record_generated_sdkconfig_defaults(
                         project_dir, environment
                     )
                 except GeneratedSdkconfigError as error:
                     raise BuildError(str(error)) from error
+                attestation_ms = round(
+                    (time.monotonic() - attestation_started) * 1000
+                )
                 manifest = None
                 if manifest_path is not None:
-                    try:
-                        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                        raise BuildError(
-                            f"could not read recorded build provenance: {error}"
-                        ) from error
-                    if not isinstance(loaded, dict):
-                        raise BuildError("recorded build provenance is not an object")
-                    manifest = loaded
+                    manifest = _record_build_phase_timings(
+                        manifest_path,
+                        {
+                            "runtimeBootstrap": int(os.environ.get(
+                                "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS", "0"
+                            )),
+                            "platformPreparation": platform_prepare_ms,
+                            "customCoreBootstrap": custom_core_bootstrap_ms,
+                            "applicationCompile": application_compile_ms,
+                            "applicationBuild": application_build_ms,
+                            "link": link_ms,
+                            "attestation": attestation_ms,
+                            "total": round((time.monotonic() - build_started) * 1000),
+                        },
+                    )
                 if (
                     environment.startswith("WAVESHARE_AMOLED_")
                     and FULL_GIT_SHA.fullmatch(expected_identity) is not None
@@ -1294,9 +1741,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="PlatformIO project directory (default: esp32/)",
     )
     parser.add_argument(
-        "--pio",
-        default=os.environ.get("PLATFORMIO_CMD", "pio"),
-        help="PlatformIO executable (default: pio or PLATFORMIO_CMD)",
+        "--repair-runtime",
+        action="store_true",
+        help="safely recreate only the exact locked runtime target before building",
     )
     upload_selector = parser.add_mutually_exclusive_group()
     upload_selector.add_argument(
@@ -1327,24 +1774,46 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runtime_handoff: Callable[
+        [Sequence[str], Path], RuntimeProvenance | None
+    ] = ensure_runtime_handoff,
+) -> int:
+    raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
+    args = _parse_args(raw_arguments)
     try:
-        if args.upload_only and args.upload_port is None and args.device_serial is None:
-            raise BuildError("--upload-only requires --upload-port or --device-serial")
-        if args.device_serial is None and args.device_timeout != 60.0:
+        device_serial = args.device_serial
+        try:
+            runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
+            pio_command = (
+                "unit-test-pio"
+                if runtime is None
+                else str(runtime_pio_path(args.project_dir.resolve(), runtime))
+            )
+        except FirmwareRuntimeError as error:
+            raise BuildError(str(error)) from error
+        if args.upload_only and args.upload_port is None and device_serial is None:
+            raise BuildError(
+                "--upload-only requires --upload-port or --device-serial"
+            )
+        if device_serial is None and args.device_timeout != 60.0:
             raise BuildError("--device-timeout requires --device-serial")
         if not math.isfinite(args.device_timeout) or args.device_timeout < 0:
             raise BuildError("device timeout must be a finite nonnegative value")
         if not args.upload_only:
-            build_firmware(args.project_dir, args.environment, pio_command=args.pio)
-        if args.upload_port is not None or args.device_serial is not None:
+            build_firmware(args.project_dir, args.environment, pio_command=pio_command)
+        if args.upload_port is not None or device_serial is not None:
+            upload_options: dict[str, object] = {
+                "device_serial": device_serial,
+                "device_timeout": args.device_timeout,
+            }
             upload_firmware(
                 args.project_dir,
                 args.environment,
                 args.upload_port,
-                device_serial=args.device_serial,
-                device_timeout=args.device_timeout,
+                **upload_options,
             )
     except BuildError as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)
