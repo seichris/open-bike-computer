@@ -724,13 +724,17 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
     configs = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/config")
     )
-    def write_verified_config(path: Path, excluded: set[str]) -> None:
+    def write_verified_config(
+        path: Path,
+        excluded: set[str],
+        project_text: str,
+    ) -> None:
         package_override = "\nplatform_packages =\n" + "".join(
             f"  {name} @ {package.as_uri()}\n"
             for name, package in verified_packages
             if name not in excluded
         )
-        verified_text = source_text.replace(
+        verified_text = project_text.replace(
             f"platform = {WAVESHARE_PLATFORM_URL}",
             f"platform = {staged_platform.as_uri()}{package_override.rstrip()}",
         )
@@ -763,14 +767,74 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
                 f"could not write verified PlatformIO config: {error}"
             ) from error
 
+    custom_core_source_text = _custom_core_project_text(source_text)
     verified_config = configs / "platformio-verified.ini"
     bootstrap_config = configs / "platformio-bootstrap.ini"
-    write_verified_config(bootstrap_config, PLATFORMIO_CORE_PACKAGES)
+    custom_core_config = configs / "platformio-custom-core.ini"
+    write_verified_config(
+        bootstrap_config,
+        PLATFORMIO_CORE_PACKAGES,
+        custom_core_source_text,
+    )
+    write_verified_config(
+        custom_core_config,
+        PLATFORMIO_CORE_PACKAGES | PIOARDUINO_BOOTSTRAP_PACKAGES,
+        custom_core_source_text,
+    )
     write_verified_config(
         verified_config,
         PLATFORMIO_CORE_PACKAGES | PIOARDUINO_BOOTSTRAP_PACKAGES,
+        source_text,
     )
     return verified_config, archive
+
+
+def _custom_core_project_text(source_text: str) -> str:
+    """Exclude standalone diagnostic sketches only during core bootstrap."""
+    lines = source_text.splitlines(keepends=True)
+    output: list[str] = []
+    section = ""
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        section_match = re.fullmatch(r"\[([^\]\r\n]+)\]\r?\n?", line)
+        if section_match is not None:
+            section = section_match.group(1)
+        if (
+            section.startswith("env:WAVESHARE_AMOLED_")
+            and re.fullmatch(r"build_src_filter\s*=\s*\r?\n?", line)
+            is not None
+        ):
+            end = index + 1
+            while end < len(lines) and (
+                not lines[end].strip()
+                or lines[end][0].isspace()
+                or lines[end].lstrip().startswith(("#", ";"))
+            ):
+                end += 1
+            values = [
+                candidate.strip()
+                for candidate in lines[index + 1 : end]
+                if candidate.strip()
+                and not candidate.lstrip().startswith(("#", ";"))
+            ]
+            external = [value for value in values if value.startswith("+<../")]
+            if external:
+                if values[0] != "-<*>" or any(
+                    value != "-<*>" and not value.startswith("+<../")
+                    for value in values
+                ):
+                    raise BuildError(
+                        "unsupported external Waveshare source filter in "
+                        f"[{section}]"
+                    )
+                newline = "\r\n" if line.endswith("\r\n") else "\n"
+                output.extend((line, f"  -<*>{newline}"))
+                index = end
+                continue
+        output.append(line)
+        index += 1
+    return "".join(output)
 
 
 def _verified_platform_package_archive(project_dir: Path, name: str) -> Path:
@@ -1476,6 +1540,14 @@ def build_firmware(
             "-e",
             environment,
         )
+        custom_core_command: Sequence[str] = (
+            pio_command,
+            "run",
+            "--project-conf",
+            str(verified_config.with_name("platformio-custom-core.ini")),
+            "-e",
+            environment,
+        )
         with _deterministic_build_environment(
             project_dir,
             environment,
@@ -1557,14 +1629,7 @@ def build_firmware(
                         not toolchain_ready_before_pass
                         and toolchain_ready_after_pass
                     ):
-                        command = (
-                            pio_command,
-                            "run",
-                            "--project-conf",
-                            str(verified_config),
-                            "-e",
-                            environment,
-                        )
+                        command = custom_core_command
                         toolchain_ready_before_pass = True
                         _select_profile_build_cache(
                             project_dir,
@@ -1621,14 +1686,7 @@ def build_firmware(
                         custom_core_bootstrap_ms += pass_elapsed_ms
                         _remove_environment_build(project_dir, environment)
                         toolchain_ready_before_pass = True
-                        command = (
-                            pio_command,
-                            "run",
-                            "--project-conf",
-                            str(verified_config),
-                            "-e",
-                            environment,
-                        )
+                        command = custom_core_command
                         _select_profile_build_cache(
                             project_dir,
                             environment,
