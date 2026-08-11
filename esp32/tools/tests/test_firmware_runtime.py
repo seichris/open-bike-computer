@@ -343,6 +343,39 @@ class FirmwareRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(FirmwareRuntimeError, "changed"):
             ensure_shared_runtime(lock, target, cache_root=cache)
 
+    def test_accepted_runtime_rejects_invalid_inventory_schema_and_metadata(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        inventory_path = accepted / "inventory.json"
+        original = json.loads(inventory_path.read_bytes())
+
+        for field, value, message in (
+            ("schema", True, "unsupported runtime inventory schema"),
+            ("size", True, "accepted runtime file metadata is invalid"),
+            ("sha256", "invalid", "accepted runtime file metadata is invalid"),
+            ("executable", "yes", "accepted runtime file metadata is invalid"),
+        ):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                if field == "schema":
+                    changed[field] = value
+                else:
+                    changed["files"][0][field] = value
+                inventory_path.chmod(0o644)
+                inventory_path.write_bytes(canonical(changed))
+                inventory_path.chmod(0o444)
+                with self.assertRaisesRegex(FirmwareRuntimeError, message):
+                    _verify_runtime_tree(accepted, target, require_read_only=True)
+                inventory_path.chmod(0o644)
+                inventory_path.write_bytes(canonical(original))
+                inventory_path.chmod(0o444)
+
     def test_shared_runtime_rejects_permission_changes_and_cache_symlinks(self) -> None:
         bundle, size, digest = self.make_bundle()
         lock = load_lock(self.make_lock(bundle, size, digest))

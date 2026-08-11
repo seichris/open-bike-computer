@@ -695,7 +695,11 @@ def _load_inventory(archive: tarfile.TarFile) -> dict[str, dict[str, object]]:
     if raw != _canonical_json(value):
         raise FirmwareRuntimeError("runtime bundle inventory is not canonical")
     root = _strict_object(value, {"schema", "files"}, set(), "runtime inventory")
-    if root["schema"] != INVENTORY_SCHEMA:
+    if (
+        not isinstance(root["schema"], int)
+        or isinstance(root["schema"], bool)
+        or root["schema"] != INVENTORY_SCHEMA
+    ):
         raise FirmwareRuntimeError("unsupported runtime inventory schema")
     files = root["files"]
     if not isinstance(files, list) or not files:
@@ -812,15 +816,32 @@ def _verify_runtime_tree(
         raise FirmwareRuntimeError("accepted runtime inventory changed")
     if stat.S_IMODE(inventory_path.stat().st_mode) != 0o444:
         raise FirmwareRuntimeError("accepted runtime inventory permissions changed")
-    files = _strict_object(value, {"schema", "files"}, set(), "runtime inventory")["files"]
-    if not isinstance(files, list):
+    inventory = _strict_object(
+        value, {"schema", "files"}, set(), "runtime inventory"
+    )
+    if (
+        not isinstance(inventory["schema"], int)
+        or isinstance(inventory["schema"], bool)
+        or inventory["schema"] != INVENTORY_SCHEMA
+    ):
+        raise FirmwareRuntimeError("unsupported runtime inventory schema")
+    files = inventory["files"]
+    if not isinstance(files, list) or not files:
         raise FirmwareRuntimeError("accepted runtime inventory is invalid")
     expected: dict[str, dict[str, object]] = {}
     casefolded: set[str] = set()
     for item in files:
         entry = _strict_object(item, {"path", "size", "sha256", "executable"}, set(), "inventory file")
-        if not isinstance(entry["path"], str):
-            raise FirmwareRuntimeError("accepted runtime path is invalid")
+        if (
+            not isinstance(entry["path"], str)
+            or not isinstance(entry["size"], int)
+            or isinstance(entry["size"], bool)
+            or entry["size"] < 0
+            or not isinstance(entry["sha256"], str)
+            or SHA256_PATTERN.fullmatch(entry["sha256"]) is None
+            or not isinstance(entry["executable"], bool)
+        ):
+            raise FirmwareRuntimeError("accepted runtime file metadata is invalid")
         name = str(_safe_member_path(entry["path"]))
         if name in expected or name.casefold() in casefolded:
             raise FirmwareRuntimeError("accepted runtime inventory has duplicate paths")
