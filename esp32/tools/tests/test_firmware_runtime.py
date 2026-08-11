@@ -42,6 +42,7 @@ class FirmwareRuntimeTests(unittest.TestCase):
             "bin/pio": b"#!/bin/sh\nexit 0\n",
             "bin/uv": b"#!/bin/sh\nexit 0\n",
             "python/bin/python3": b"#!/bin/sh\nexit 0\n",
+            "python/bin/uv": b"#!/bin/sh\nexit 0\n",
             "requirements/pioarduino-root.txt": b"unit-test==1\n",
             "requirements/esp-idf.txt": b"unit-test==1\n",
             "wheelhouse/unit_test-1-py3-none-any.whl": b"not executed in verifier tests",
@@ -336,6 +337,15 @@ class FirmwareRuntimeTests(unittest.TestCase):
         self.assertIn("host-runtime", calls[0][0])
         self.assertTrue(Path(calls[0][0]).is_relative_to(project.resolve()))
         self.assertEqual(calls[0][2]["PYTHONNOUSERSITE"], "1")
+        private_python = Path(calls[0][0])
+        self.assertEqual(
+            calls[0][2]["OPEN_BIKE_FIRMWARE_UV"],
+            str(private_python.with_name("uv")),
+        )
+        self.assertNotEqual(
+            calls[0][2]["OPEN_BIKE_FIRMWARE_UV"],
+            str(private_python.parents[2] / "bin/uv"),
+        )
         self.assertNotIn(str(Path.home() / ".local/bin"), calls[0][2]["PATH"])
 
     def test_handoff_rejects_loader_injection_and_symlinked_private_stores(self) -> None:
