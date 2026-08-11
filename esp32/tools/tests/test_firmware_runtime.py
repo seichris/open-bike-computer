@@ -1,0 +1,580 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from firmware_runtime import (
+    FirmwareRuntimeError,
+    RuntimeLock,
+    RuntimeTarget,
+    _verify_runtime_tree,
+    ensure_runtime_handoff,
+    ensure_shared_runtime,
+    extract_verified_bundle,
+    host_target_id,
+    load_lock,
+    repair_runtime,
+    select_target,
+)
+
+
+def canonical(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+class FirmwareRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def make_bundle(self, *, extra_member: tuple[str, bytes, str] | None = None) -> tuple[Path, int, str]:
+        files = {
+            "bin/pio": b"#!/bin/sh\nexit 0\n",
+            "bin/uv": b"#!/bin/sh\nexit 0\n",
+            "python/bin/python3": b"#!/bin/sh\nexit 0\n",
+            "python/bin/uv": b"#!/bin/sh\nexit 0\n",
+            "requirements/pioarduino-root.txt": b"unit-test==1\n",
+            "requirements/esp-idf.txt": b"unit-test==1\n",
+            "wheelhouse/unit_test-1-py3-none-any.whl": b"not executed in verifier tests",
+            "wheelhouse/esptool-5.1.0-py3-none-any.whl": b"not executed in verifier tests",
+        }
+        inventory = {
+            "schema": 1,
+            "files": [
+                {
+                    "path": name,
+                    "size": len(contents),
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "executable": name.startswith(("bin/", "python/bin/")),
+                }
+                for name, contents in sorted(files.items())
+            ],
+        }
+        bundle = self.root / "bundle.tar.gz"
+        with tarfile.open(bundle, "w:gz") as archive:
+            inventory_bytes = canonical(inventory)
+            info = tarfile.TarInfo("inventory.json")
+            info.size = len(inventory_bytes)
+            archive.addfile(info, io.BytesIO(inventory_bytes))
+            for name, contents in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(contents)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(contents))
+            if extra_member is not None:
+                name, contents, kind = extra_member
+                info = tarfile.TarInfo(name)
+                info.size = len(contents)
+                if kind == "symlink":
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = "/tmp/escape"
+                    info.size = 0
+                    archive.addfile(info)
+                elif kind == "directory":
+                    info.type = tarfile.DIRTYPE
+                    info.size = 0
+                    archive.addfile(info)
+                else:
+                    archive.addfile(info, io.BytesIO(contents))
+        return bundle, bundle.stat().st_size, hashlib.sha256(bundle.read_bytes()).hexdigest()
+
+    def make_lock(self, bundle: Path, size: int, digest: str, *, accepted: bool = True) -> Path:
+        unit_wheel = b"not executed in verifier tests"
+        esptool_wheel = b"not executed in verifier tests"
+        unit_filename = "unit_test-1-py3-none-any.whl"
+        esptool_filename = "esptool-5.1.0-py3-none-any.whl"
+        def distribution_digest(members):
+            return hashlib.sha256(canonical(sorted(members))).hexdigest()
+        contents = {
+            "platformioVersion": "6.1.18",
+            "wheels": [
+                {
+                    "filename": unit_filename,
+                    "normalizedName": "unit-test",
+                    "version": "1",
+                    "tags": ["py3-none-any"],
+                    "size": len(unit_wheel),
+                    "sha256": hashlib.sha256(unit_wheel).hexdigest(),
+                    "sourceUrl": "https://example.invalid/unit.whl",
+                    "sourceSha256": hashlib.sha256(unit_wheel).hexdigest(),
+                    "group": "top-level",
+                },
+                {
+                    "filename": esptool_filename,
+                    "normalizedName": "esptool",
+                    "version": "5.1.0",
+                    "tags": ["py3-none-any"],
+                    "size": len(esptool_wheel),
+                    "sha256": hashlib.sha256(esptool_wheel).hexdigest(),
+                    "sourceUrl": "https://example.invalid/esptool.whl",
+                    "sourceSha256": hashlib.sha256(esptool_wheel).hexdigest(),
+                    "group": "esptool",
+                },
+            ],
+            "distributionSets": {
+                "topLevel": {"sha256": distribution_digest([unit_filename]), "wheels": [unit_filename]},
+                "pioarduinoRoot": {"sha256": distribution_digest([unit_filename]), "wheels": [unit_filename]},
+                "espIdf": {"sha256": distribution_digest([unit_filename]), "wheels": [unit_filename]},
+                "uv": {"sha256": distribution_digest([unit_filename]), "wheels": [unit_filename]},
+                "esptool": {"sha256": distribution_digest([esptool_filename]), "wheels": [esptool_filename]},
+            },
+            "platform": {"archiveSha256": "e" * 64, "packagesSha256": "f" * 64},
+        }
+        value = {
+            "schema": 1,
+            "lockSetId": "unit-test-lock",
+            "generator": {
+                "version": "2",
+                "commit": "a" * 40,
+                "refreshInputsSha256": "b" * 64,
+                "licensesSha256": "c" * 64,
+            },
+            "targets": [
+                {
+                    "id": "macos-arm64-cp313",
+                    "os": "macos",
+                    "architecture": "arm64",
+                    "pythonVersion": "3.13.15",
+                    "abi": "cp313",
+                    "minimumPlatformTag": "macosx_11_0_arm64",
+                    "accepted": accepted,
+                    "python": {
+                        "url": "https://example.invalid/python.tar.gz",
+                        "size": 1,
+                        "sha256": "d" * 64,
+                        "license": "Python-2.0",
+                        "source": {
+                            "url": "https://www.python.org/ftp/python/3.13.15/Python-3.13.15.tar.xz",
+                            "size": 2,
+                            "sha256": "9" * 64,
+                        },
+                        "builder": {
+                            "url": "https://github.com/astral-sh/python-build-standalone",
+                            "commit": "8" * 40,
+                        },
+                    },
+                    "bundle": None if not accepted else {"url": "https://example.invalid/runtime.tar.gz", "size": size, "sha256": digest},
+                    "contents": None if not accepted else contents,
+                }
+            ],
+        }
+        path = self.root / "lock.json"
+        path.write_bytes(canonical(value))
+        return path
+
+    def test_strict_canonical_lock_and_duplicate_key_rejection(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        lock = load_lock(path)
+        self.assertEqual(lock.lock_set_id, "unit-test-lock")
+        path.write_text('{"schema":1,"schema":1}\n')
+        with self.assertRaisesRegex(FirmwareRuntimeError, "duplicate JSON key"):
+            load_lock(path)
+        path.write_text(json.dumps({"schema": 1}) + "\n")
+        with self.assertRaisesRegex(FirmwareRuntimeError, "canonical|missing"):
+            load_lock(path)
+
+    def test_lock_rejects_an_unknown_generator_version(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        value = json.loads(path.read_bytes())
+        value["generator"]["version"] = "3"
+        path.write_bytes(canonical(value))
+
+        with self.assertRaisesRegex(FirmwareRuntimeError, "generator identity"):
+            load_lock(path)
+
+    def test_lock_rejects_wrong_abi_platform_and_python_minor(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+        for field, value in (
+            ("abi", "cp312"),
+            ("minimumPlatformTag", "macosx_10_9_x86_64"),
+            ("pythonVersion", "3.12.12"),
+        ):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed["targets"][0][field] = value
+                path.write_bytes(canonical(changed))
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "ABI|platform tag|CPython 3.13"
+                ):
+                    load_lock(path)
+
+    def test_lock_rejects_wrong_or_misrepresented_wheel_tags(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+
+        changed = json.loads(json.dumps(original))
+        changed["targets"][0]["contents"]["wheels"][0]["tags"] = [
+            "cp313-cp313-macosx_11_0_arm64"
+        ]
+        path.write_bytes(canonical(changed))
+        with self.assertRaisesRegex(FirmwareRuntimeError, "tags disagree"):
+            load_lock(path)
+
+        changed = json.loads(json.dumps(original))
+        contents = changed["targets"][0]["contents"]
+        old = contents["wheels"][0]["filename"]
+        new = "unit_test-1-cp313-cp313-manylinux_2_17_x86_64.whl"
+        contents["wheels"][0]["filename"] = new
+        contents["wheels"][0]["tags"] = [
+            "cp313-cp313-manylinux_2_17_x86_64"
+        ]
+        for distribution in contents["distributionSets"].values():
+            distribution["wheels"] = [
+                new if member == old else member
+                for member in distribution["wheels"]
+            ]
+            distribution["sha256"] = hashlib.sha256(
+                canonical(sorted(distribution["wheels"]))
+            ).hexdigest()
+        path.write_bytes(canonical(changed))
+        with self.assertRaisesRegex(FirmwareRuntimeError, "incompatible"):
+            load_lock(path)
+
+    def test_linux_runtime_rejects_an_older_or_unknown_glibc(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        value = json.loads(path.read_bytes())
+        target = value["targets"][0]
+        target.update(
+            {
+                "id": "linux-x86_64-cp313",
+                "os": "linux",
+                "architecture": "x86_64",
+                "minimumPlatformTag": "manylinux_2_34_x86_64",
+            }
+        )
+        path.write_bytes(canonical(value))
+        lock = load_lock(path)
+        for observed in (("glibc", "2.33"), ("musl", "1.2.5"), ("", "")):
+            with self.subTest(observed=observed), mock.patch(
+                "firmware_runtime.host_target_id",
+                return_value="linux-x86_64-cp313",
+            ), mock.patch("firmware_runtime.platform.libc_ver", return_value=observed):
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "requires glibc 2.34 or newer"
+                ):
+                    select_target(lock)
+        with mock.patch(
+            "firmware_runtime.host_target_id",
+            return_value="linux-x86_64-cp313",
+        ), mock.patch(
+            "firmware_runtime.platform.libc_ver", return_value=("glibc", "2.34")
+        ):
+            self.assertEqual(select_target(lock).target_id, "linux-x86_64-cp313")
+
+    def test_lock_requires_exact_cpython_license_and_source_provenance(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+        mutations = (
+            ("license", "MIT"),
+            ("source", {"url": "https://example.invalid/source", "size": 1, "sha256": "x" * 64}),
+            ("builder", {"url": "https://example.invalid/builder", "commit": "8" * 40}),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed["targets"][0]["python"][field] = value
+                path.write_bytes(canonical(changed))
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "license|SHA-256|builder provenance"
+                ):
+                    load_lock(path)
+
+    def test_target_selection_and_unsupported_host_fail_before_bundle_use(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        self.assertEqual(select_target(lock, "macos-arm64-cp313").abi, "cp313")
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsupported.*supported targets"):
+            select_target(lock, "linux-arm64-cp313")
+        self.assertEqual(host_target_id(system="Darwin", machine="arm64"), "macos-arm64-cp313")
+        self.assertEqual(host_target_id(system="Linux", machine="x86_64"), "linux-x86_64-cp313")
+
+    def test_unaccepted_target_fails_closed(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest, accepted=False))
+        with self.assertRaisesRegex(FirmwareRuntimeError, "no accepted bundle"):
+            select_target(lock, "macos-arm64-cp313")
+
+    def test_safe_extract_rejects_traversal_symlink_and_extra_files(self) -> None:
+        for extra in (
+            ("../escape", b"x", "file"),
+            ("link", b"", "symlink"),
+            ("extra-dir", b"", "directory"),
+            ("extra", b"x", "file"),
+        ):
+            with self.subTest(extra=extra[0]):
+                bundle, _, _ = self.make_bundle(extra_member=extra)
+                destination = self.root / f"out-{extra[0].replace('/', '_')}"
+                with self.assertRaises(FirmwareRuntimeError):
+                    extract_verified_bundle(bundle, destination)
+
+    def test_shared_runtime_is_inventory_verified_and_mutation_fails(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        cached_bundle = base / f"{digest}.tar.gz"
+        cached_bundle.write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        provenance = _verify_runtime_tree(accepted, target)
+        self.assertEqual(provenance.bundle_sha256, digest)
+        self.assertEqual(cached_bundle.stat().st_mode & 0o777, 0o444)
+        victim = accepted / "bin/pio"
+        victim.chmod(0o755)
+        victim.write_bytes(b"tampered")
+        with self.assertRaisesRegex(FirmwareRuntimeError, "changed"):
+            ensure_shared_runtime(lock, target, cache_root=cache)
+
+    def test_accepted_runtime_rejects_invalid_inventory_schema_and_metadata(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        inventory_path = accepted / "inventory.json"
+        original = json.loads(inventory_path.read_bytes())
+
+        for field, value, message in (
+            ("schema", True, "unsupported runtime inventory schema"),
+            ("size", True, "accepted runtime file metadata is invalid"),
+            ("sha256", "invalid", "accepted runtime file metadata is invalid"),
+            ("executable", "yes", "accepted runtime file metadata is invalid"),
+        ):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                if field == "schema":
+                    changed[field] = value
+                else:
+                    changed["files"][0][field] = value
+                inventory_path.chmod(0o644)
+                inventory_path.write_bytes(canonical(changed))
+                inventory_path.chmod(0o444)
+                with self.assertRaisesRegex(FirmwareRuntimeError, message):
+                    _verify_runtime_tree(accepted, target, require_read_only=True)
+                inventory_path.chmod(0o644)
+                inventory_path.write_bytes(canonical(original))
+                inventory_path.chmod(0o444)
+
+    def test_shared_runtime_rejects_permission_changes_and_cache_symlinks(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        accepted.chmod(0o755)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "permissions changed"):
+            ensure_shared_runtime(lock, target, cache_root=cache)
+
+        external = self.root / "external-cache"
+        external.mkdir()
+        linked = self.root / "linked-cache"
+        linked.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsafe runtime cache root"):
+            ensure_shared_runtime(lock, target, cache_root=linked)
+
+        ancestor_target = self.root / "ancestor-target"
+        ancestor_target.mkdir()
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(ancestor_target, target_is_directory=True)
+        nested_cache = linked_ancestor / "nested/cache"
+        with self.assertRaisesRegex(
+            FirmwareRuntimeError, "unsafe runtime cache ancestor"
+        ):
+            ensure_shared_runtime(lock, target, cache_root=nested_cache)
+        self.assertFalse((ancestor_target / "nested").exists())
+
+    def test_shared_runtime_rejects_wrong_ownership_and_hard_links(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+
+        if hasattr(os, "getuid"):
+            with mock.patch(
+                "firmware_runtime.os.getuid", return_value=os.getuid() + 1
+            ):
+                with self.assertRaisesRegex(FirmwareRuntimeError, "wrong owner"):
+                    ensure_shared_runtime(lock, target, cache_root=cache)
+
+        victim = accepted / "bin/pio"
+        external = self.root / "external-pio"
+        external.write_bytes(victim.read_bytes())
+        external.chmod(0o555)
+        victim.parent.chmod(0o755)
+        victim.unlink()
+        os.link(external, victim)
+        victim.parent.chmod(0o555)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "link or special"):
+            ensure_shared_runtime(lock, target, cache_root=cache)
+        project = self.root / "project"
+        project.mkdir()
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsafe entry"):
+            repair_runtime(lock, target, project, cache_root=cache)
+
+    def test_publication_renames_a_writable_root_then_locks_and_repairs_it(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        real_replace = os.replace
+
+        def require_writable_root(source, destination):
+            self.assertNotEqual(Path(source).stat().st_mode & 0o200, 0)
+            return real_replace(source, destination)
+
+        with mock.patch("firmware_runtime.os.replace", require_writable_root):
+            accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        self.assertEqual(accepted.stat().st_mode & 0o200, 0)
+
+        project = self.root / "project"
+        project.mkdir()
+        repair_runtime(lock, target, project, cache_root=cache)
+        self.assertFalse(accepted.exists())
+        self.assertFalse((base / f"{digest}.tar.gz").exists())
+
+    def test_handoff_uses_only_verified_private_python(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock_path = self.make_lock(bundle, size, digest)
+        lock = load_lock(lock_path)
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        project = self.root / "project"
+        (project / "tools").mkdir(parents=True)
+        calls = []
+
+        def capture(executable, command, environment):
+            calls.append((executable, tuple(command), dict(environment)))
+            raise RuntimeError("captured")
+
+        real_replace = os.replace
+
+        def require_writable_private_root(source, destination):
+            if "host-runtime" in str(destination):
+                self.assertNotEqual(Path(source).stat().st_mode & 0o200, 0)
+            return real_replace(source, destination)
+
+        with mock.patch.dict(os.environ, {"PYTHONPATH": ""}), mock.patch(
+            "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
+        ), mock.patch("firmware_runtime.os.replace", require_writable_private_root):
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                ensure_runtime_handoff(
+                    ("WAVESHARE_AMOLED_175",), project,
+                    lock_path=lock_path, cache_root=cache, execve=capture,
+                )
+        self.assertIn("host-runtime", calls[0][0])
+        self.assertTrue(Path(calls[0][0]).is_relative_to(project.resolve()))
+        self.assertEqual(calls[0][2]["PYTHONNOUSERSITE"], "1")
+        private_python = Path(calls[0][0])
+        self.assertEqual(
+            calls[0][2]["OPEN_BIKE_FIRMWARE_UV"],
+            str(private_python.with_name("uv")),
+        )
+        self.assertNotEqual(
+            calls[0][2]["OPEN_BIKE_FIRMWARE_UV"],
+            str(private_python.parents[2] / "bin/uv"),
+        )
+        self.assertNotIn(str(Path.home() / ".local/bin"), calls[0][2]["PATH"])
+
+    def test_handoff_rejects_loader_injection_and_symlinked_private_stores(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock_path = self.make_lock(bundle, size, digest)
+        lock = load_lock(lock_path)
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        project = self.root / "project"
+        (project / "tools").mkdir(parents=True)
+
+        with mock.patch.dict(
+            os.environ, {"PYTHONPATH": "/malicious", "LD_PRELOAD": "/evil.so"}
+        ), self.assertRaisesRegex(FirmwareRuntimeError, "PYTHONPATH.*LD_PRELOAD|LD_PRELOAD.*PYTHONPATH"):
+            ensure_runtime_handoff(
+                ("WAVESHARE_AMOLED_175",), project,
+                lock_path=lock_path, cache_root=cache,
+            )
+
+        external = self.root / "other-worktree-pio"
+        external.mkdir()
+        (project / ".pio").symlink_to(external, target_is_directory=True)
+        with mock.patch.dict(
+            os.environ, {"PYTHONPATH": "", "LD_PRELOAD": ""}
+        ), mock.patch(
+            "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
+        ), self.assertRaisesRegex(
+            FirmwareRuntimeError, "unsafe project-private runtime directory"
+        ):
+            ensure_runtime_handoff(
+                ("WAVESHARE_AMOLED_175",), project,
+                lock_path=lock_path, cache_root=cache,
+            )
+
+    def test_production_handoff_rejects_another_project_directory(self) -> None:
+        project = self.root / "other-project"
+        project.mkdir()
+
+        with self.assertRaisesRegex(FirmwareRuntimeError, "another worktree"):
+            ensure_runtime_handoff(("WAVESHARE_AMOLED_175",), project)
+
+    def test_recovery_bootstrap_matches_tracked_python_artifacts(self) -> None:
+        project = Path(__file__).resolve().parents[2]
+        lock = load_lock(project / "tools/firmware-runtime/lock-v1.json")
+        recovery = (project / "tools/build_firmware_bootstrap.sh").read_text(
+            encoding="utf-8"
+        )
+        for target in lock.targets:
+            self.assertIn(target.target_id, recovery)
+            self.assertIn(str(target.python.size), recovery)
+            self.assertIn(target.python.sha256, recovery)
+            self.assertIn(target.python.url, recovery)
+        self.assertNotIn("runtime_root=", recovery)
+        self.assertLess(
+            recovery.index("PATH=/usr/bin:/bin"), recovery.index("script_dir=")
+        )
+        self.assertIn('staging=$(mktemp -d "$target_root/.recovery.XXXXXX")', recovery)
+        self.assertIn('rm -rf -- "$staging"', recovery)
+        self.assertIn('--max-filesize "$archive_size"', recovery)
+        self.assertLess(
+            recovery.index('verify_archive "$partial"'),
+            recovery.index('mv "$partial" "$archive"'),
+        )
+        self.assertEqual(recovery.count("env -i PATH=/usr/bin:/bin"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

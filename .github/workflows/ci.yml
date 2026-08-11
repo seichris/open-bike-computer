@@ -123,18 +123,13 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - name: Restore pinned PlatformIO downloads
         uses: actions/cache@v6
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
-      - name: Install PlatformIO
-        run: python -m pip install --upgrade platformio
-      - name: Build firmware
-        run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.target }}"
+      - name: Build with the repository-owned firmware runtime
+        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
       - name: Verify ordinary artifacts exclude remote-debug routes
         run: |
           if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then
@@ -239,8 +234,11 @@ jobs:
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
+            tools.tests.test_firmware_runtime \
+            tools.tests.test_refresh_firmware_runtime \
             tools.tests.test_capture_boot \
             tools.tests.test_resolve_upload_port \
+            tools.tests.test_device_registry \
             tools.tests.test_map_guidance_integration \
             tools.tests.test_map_memory_diagnostics
           g++ -std=c++17 \

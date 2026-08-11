@@ -18,13 +18,22 @@ pinouts.
 
 ## Build
 
-Install [PlatformIO](https://platformio.org/), then build the profile matching
-your device:
+Do not install or select an ambient PlatformIO, pip, or uv. Run the tracked
+stdlib bootstrap; it verifies the repository-owned runtime lock and re-executes
+under its private CPython 3.13 and PlatformIO closure:
 
 ```sh
 python3 tools/build_firmware.py WAVESHARE_AMOLED_175
 python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 ```
+
+If the host has no usable `python3`, use
+`tools/build_firmware_bootstrap.sh` with the same arguments. It obtains only the
+exact tracked standalone-Python archive and then delegates to the same verifier.
+The checked-in `firmware-runtime-2026-08-10-1` lock accepts exact Linux x86-64
+and Apple Silicon bundles from the matching immutable tooling prerelease.
+Unsupported hosts and any runtime whose locked bytes have changed fail before
+PlatformIO.
 
 The helper handles pioarduino's one-time tool-package conversion and
 custom-core bootstrap, keeps pioarduino's recursive build on the verified
@@ -32,6 +41,14 @@ local project config, and confirms that PlatformIO produced the requested
 firmware rather than its generated bootstrap sketch. The speaker test profiles
 remain available through the manual **Speaker firmware builds** GitHub Actions
 workflow.
+
+Runtime bundles are immutable release assets selected by
+[`tools/firmware-runtime/lock-v1.json`](tools/firmware-runtime/lock-v1.json).
+The user cache transports reverified read-only bytes; mutable host and
+PlatformIO stores remain under this worktree's `.pio/open-bike-build/`. If the
+exact target is missing or corrupt, the build fails before PlatformIO executes.
+Repair the selected subtree with the same command plus `--repair-runtime`; it
+never resolves newer dependencies or falls back to another worktree or `/tmp`.
 
 After confirming the connected hardware profile, use the same helper for
 upload. It revalidates the exact Git identity, toolchain, and image hashes, then
@@ -57,6 +74,18 @@ hardware serial reported by `pio device list`, especially when multiple boards
 are attached. The helper resolves that serial immediately before flashing and
 waits up to 60 seconds for it to appear; use `--device-timeout` to change the
 wait. `--upload-port` remains available when stable serial metadata is not.
+
+You may explicitly enroll a nickname without committing a serial:
+
+```sh
+python3 tools/device_registry.py add desk-206 WAVESHARE_AMOLED_206 SERIAL
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 --device-name desk-206
+```
+
+The registry uses the macOS user Application Support directory or Linux XDG
+config directory, requires private non-symlink storage, and rejects nickname,
+serial, or board-family ambiguity before building. It does not replace the
+required physical model confirmation immediately before flashing.
 
 If the verified build succeeded but the upload failed because the selected
 device disappeared, entered the wrong USB mode, or needed a cable reconnect,
@@ -96,12 +125,21 @@ therefore the reproducible source commit time, not the local compilation time;
 the manifest records both the epoch and ISO UTC timestamp. Public dependency
 fetches use an empty isolated Git configuration so workstation URL rewrites do
 not change the transport.
-The host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
-online Python dependency resolver (its registries, external `uv`, private
-`penv`, and ESP-IDF venv before their resulting trees are attested) are part of
-the trusted workstation or CI boundary and are not pre-execution-proven by
-`coreAttestationSha256`. The digest records the resulting installed trees and
-rejects later mutation or mismatched reuse; it is not a Python dependency lock.
+The initial OS and system-Python standard library remain trusted to run the
+verifier. All subsequently executed Python, PlatformIO, uv, pioarduino root
+environment, ESP-IDF environment, and esptool distributions are selected by
+the content-pinned runtime bundle and re-attested after installation.
+
+Custom-core reuse and upload eligibility are separate. A source-only change may
+reuse a validated project-private core entry, while the firmware build manifest
+is always regenerated for the exact Git SHA, commit clock, runtime/core
+identity, generated state, artifacts, and flash plan. Dirty builds may consume
+an existing core but never publish one or become upload eligible. Each clean
+miss atomically publishes generated SDK sidecars plus an inventoried
+`core-artifacts.tar`; each hit rehashes the entry and hydrates a private mutable
+PlatformIO store. Corruption or post-build mutation quarantines only the exact
+core key. Cross-worktree core sharing stays disabled until the recorded
+artifacts pass the absolute-path relocatability gate.
 
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).

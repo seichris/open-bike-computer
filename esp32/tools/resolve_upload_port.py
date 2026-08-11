@@ -10,7 +10,14 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+from device_registry import (
+    DeviceRegistryError,
+    default_registry_path,
+    resolve_device_name,
+)
 
 
 class DeviceResolutionError(RuntimeError):
@@ -124,7 +131,10 @@ def resolve_device_port(
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device-serial", required=True)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--device-serial")
+    selector.add_argument("--device-name")
+    parser.add_argument("--device-registry", type=Path, default=default_registry_path())
     parser.add_argument("--timeout", type=float, default=60.0)
     return parser.parse_args(argv)
 
@@ -132,11 +142,22 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        resolved = resolve_device_port(args.device_serial, args.timeout)
-    except DeviceResolutionError as error:
+        entry = None
+        serial = args.device_serial
+        if args.device_name is not None:
+            entry = resolve_device_name(args.device_name, args.device_registry)
+            serial = entry.serial
+        if serial is None:
+            raise AssertionError("validated selector did not resolve")
+        resolved = resolve_device_port(serial, args.timeout)
+    except (DeviceResolutionError, DeviceRegistryError) as error:
         print(f"Device resolution failed: {error}", file=sys.stderr)
         return 1
-    print(json.dumps(resolved.as_json(), sort_keys=True))
+    result = resolved.as_json()
+    if entry is not None:
+        result["nickname"] = entry.nickname
+        result["boardFamily"] = entry.board_family
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

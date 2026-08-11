@@ -1,0 +1,212 @@
+name: Firmware runtime refresh candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-runtime-refresh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    name: Candidate (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64-cp313
+          - runner: macos-15
+            target: macos-arm64-cp313
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Require a clean exact generator checkout
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+        working-directory: ${{ github.workspace }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Validate host and tracked inputs
+        run: |
+          test "$(uname -m)" = "$(test '${{ matrix.target }}' = linux-x86_64-cp313 && echo x86_64 || echo arm64)"
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python -m unittest \
+            tools.tests.test_build_firmware \
+            tools.tests.test_firmware_runtime \
+            tools.tests.test_firmware_profile_config \
+            tools.tests.test_generated_sdkconfig \
+            tools.tests.test_pioarduino_custom_core \
+            tools.tests.test_refresh_firmware_runtime
+          mkdir -p runtime-candidate-a runtime-candidate-b
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py inspect-inputs \
+            > runtime-candidate-a/inputs.json
+      - name: Build independent candidate A
+        run: |
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py build-candidate \
+            --target "${{ matrix.target }}" \
+            --output-dir runtime-candidate-a \
+            --release-tag firmware-runtime-2026-08-10-1 \
+            > runtime-candidate-a/build.json
+      - name: Build independent candidate B
+        run: |
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py build-candidate \
+            --target "${{ matrix.target }}" \
+            --output-dir runtime-candidate-b \
+            --release-tag firmware-runtime-2026-08-10-1 \
+            > runtime-candidate-b/build.json
+      - name: Require byte-identical clean rebuilds
+        run: |
+          for name in \
+            "open-bike-firmware-runtime-${{ matrix.target }}.tar.gz" \
+            "contract-${{ matrix.target }}.json" \
+            "evidence-${{ matrix.target }}.json" \
+            "licenses-${{ matrix.target }}.json"; do
+            cmp "runtime-candidate-a/${name}" "runtime-candidate-b/${name}"
+          done
+      - name: Replay nested environments offline with an empty cache
+        run: |
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py verify-candidate \
+            --target "${{ matrix.target }}" \
+            --output-dir runtime-candidate-a \
+            > "runtime-candidate-a/offline-replay-${{ matrix.target }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firmware-runtime-candidate-${{ matrix.target }}
+          path: |
+            esp32/runtime-candidate-a/*.json
+            esp32/runtime-candidate-a/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  firmware-build-validation:
+    name: Firmware build validation (${{ matrix.target }})
+    needs: candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64-cp313
+          - runner: macos-15
+            target: macos-arm64-cp313
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Require a clean exact validation checkout
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+        working-directory: ${{ github.workspace }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Configure the isolated runtime cache
+        run: echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=$RUNNER_TEMP/firmware-runtime-cache" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-runtime-candidate-*
+          path: ${{ runner.temp }}/runtime-candidates
+      - name: Assemble the reviewed dual-host lock
+        run: |
+          candidates="$RUNNER_TEMP/runtime-candidates"
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py assemble-lock \
+            --output tools/firmware-runtime/lock-v1.json \
+            --lock-set-id firmware-runtime-2026-08-10-1 \
+            --contract "$candidates/firmware-runtime-candidate-linux-x86_64-cp313/contract-linux-x86_64-cp313.json" \
+            --contract "$candidates/firmware-runtime-candidate-macos-arm64-cp313/contract-macos-arm64-cp313.json"
+
+          git config user.name "Open Bike Runtime Refresh"
+          git config user.email "runtime-refresh@open-bike-computer.invalid"
+          source_date="$(git show -s --format=%cI HEAD)"
+          git add tools/firmware-runtime/lock-v1.json
+          GIT_AUTHOR_DATE="$source_date" GIT_COMMITTER_DATE="$source_date" \
+            git commit -m "Validate accepted firmware runtime candidate"
+          test -z "$(git status --porcelain)"
+      - name: Seed the exact host bundle into the isolated cache
+        run: |
+          candidate="$RUNNER_TEMP/runtime-candidates/firmware-runtime-candidate-${{ matrix.target }}"
+          contract="$candidate/contract-${{ matrix.target }}.json"
+          bundle="$candidate/open-bike-firmware-runtime-${{ matrix.target }}.tar.gz"
+          digest="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"])' "$contract")"
+          size="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["size"])' "$contract")"
+          env -u LD_LIBRARY_PATH python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.stat().st_size == int(sys.argv[2]); assert hashlib.sha256(p.read_bytes()).hexdigest() == sys.argv[3]' \
+            "$bundle" "$size" "$digest"
+          destination="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/firmware-runtime-2026-08-10-1/${{ matrix.target }}"
+          mkdir -p "$destination"
+          cp "$bundle" "$destination/$digest.tar.gz"
+      - name: Prove clean and warm firmware builds
+        run: |
+          set -o pipefail
+          evidence="$RUNNER_TEMP/firmware-build-evidence"
+          mkdir -p "$evidence"
+          for environment in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "$environment" \
+              2>&1 | tee "$evidence/${environment}-clean.log"
+            cp ".pio/open-bike-build/builds/$environment/current.json" \
+              "$evidence/${environment}-clean-build-manifest.json"
+            grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-clean.log" \
+              | grep 'uploadEligible=1' \
+              | grep 'runtimeTarget=${{ matrix.target }}' \
+              | grep -E 'runtimePioarduinoPenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeEspIdfVenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
+              >> "$evidence/provenance.txt"
+
+            env -u LD_LIBRARY_PATH HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= python3 tools/build_firmware.py "$environment" \
+              2>&1 | tee "$evidence/${environment}-warm.log"
+            cp ".pio/open-bike-build/builds/$environment/current.json" \
+              "$evidence/${environment}-warm-build-manifest.json"
+            grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-warm.log" \
+              | grep 'uploadEligible=1' \
+              | grep 'runtimeTarget=${{ matrix.target }}' \
+              | grep -E 'runtimePioarduinoPenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeEspIdfVenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
+              >> "$evidence/provenance.txt"
+            env -u LD_LIBRARY_PATH python -c 'import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); keys=("sourceIdentity","sourceDateEpoch","buildTimestamp","firmwareBinSha256","firmwareElfSha256","bootloaderBinSha256","partitionTableBinSha256","bootApp0Sha256","flashPlanSha256","coreAttestationSha256","runtimeProvenance"); assert all(a.get(k) == b.get(k) for k in keys)' \
+              "$evidence/${environment}-clean-build-manifest.json" \
+              "$evidence/${environment}-warm-build-manifest.json"
+          done
+      - name: Prove runtime tampering fails before PlatformIO
+        run: |
+          evidence="$RUNNER_TEMP/firmware-build-evidence"
+          contract="$RUNNER_TEMP/runtime-candidates/firmware-runtime-candidate-${{ matrix.target }}/contract-${{ matrix.target }}.json"
+          digest="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"])' "$contract")"
+          shared="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/firmware-runtime-2026-08-10-1/${{ matrix.target }}/$digest"
+          chmod u+w "$shared/bin/pio"
+          printf '\n' >> "$shared/bin/pio"
+
+          set +e
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py WAVESHARE_AMOLED_175 \
+            > "$evidence/runtime-tamper.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep 'accepted runtime member changed: bin/pio' \
+            "$evidence/runtime-tamper.log"
+          if grep -q '=== PlatformIO real-target build' \
+            "$evidence/runtime-tamper.log"; then
+            echo "tampered runtime reached PlatformIO" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firmware-build-validation-${{ matrix.target }}
+          path: ${{ runner.temp }}/firmware-build-evidence
+          if-no-files-found: error
+          retention-days: 14
