@@ -85,6 +85,43 @@ configure or build again. The uploader and hardware-serial resolver suppress
 Python bytecode writes inside the attested private environment so a connection
 failure cannot invalidate an otherwise unchanged retry.
 
+When a task requires viewing or controlling the real device from a browser,
+build and flash the matching opt-in profile:
+
+```sh
+cd esp32
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175_REMOTE_DEBUG \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206_REMOTE_DEBUG \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+```
+
+These profiles contain the firmware under test plus `DEVICE_REMOTE_DEBUG=1`;
+the debugger is not a separate image and cannot be attached to arbitrary
+already-flashed firmware. Ordinary `WAVESHARE_AMOLED_*` and
+`*_PRODUCTION` profiles intentionally omit the browser service, and release
+workflows never select `*_REMOTE_DEBUG`. Therefore, choose the matching
+`*_REMOTE_DEBUG` profile for an explicitly authorized development flash when
+browser debugging is useful, while keeping normal production/release flashes
+debugger-free. See `docs/remote-device-debugging.md` for session startup and
+security requirements.
+
+Remote-debug sessions prefer a configured normal 2.4 GHz LAN and use the
+device's `BikeComputer-Transfer` access point only as a fallback. Use the fresh
+BLE `DSTS` `networkTransport`, `baseUrl`, and `networkSsid` fields instead of
+assuming `192.168.4.1`: open a `lan` URL from a browser on the same local
+network, and join the advertised AP only for `hotspot`. Debug hotspots use a
+fresh WPA2 password delivered only in authenticated BLE `DSTS`; never copy it
+into logs or task notes. LAN debug uses plain HTTP and is permitted only on a
+trusted local network. LAN credentials are
+owned by the iPhone app's device-only Keychain, sent through the authenticated
+BLE command for one session, and held only in device RAM. Never put the
+password in source, shell history, logs, status payloads, screenshots, or task
+notes.
+Keep the authenticated iPhone connected over BLE during browser debugging; a
+BLE disconnect revokes the session. Use `hotspotFallbackReason` to distinguish
+SSID, authentication, association-timeout, and endpoint-reachability fallback.
+
 Verified builds use the exact Git commit's committer timestamp as
 `SOURCE_DATE_EPOCH` for PlatformIO, ESP-IDF, and the firmware metadata. The
 `BOOT_META built=` value therefore means source commit time, not workstation

@@ -598,6 +598,37 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertTrue(firmware.is_file())
         self.assertFalse((self.project_dir / ".dummy").exists())
 
+    def test_accepts_real_target_when_custom_core_leaves_dummy(self):
+        calls = []
+
+        def runner(command, cwd):
+            calls.append((tuple(command), cwd))
+            self.write_dummy()
+            self.write_firmware()
+            firmware = (
+                self.project_dir
+                / ".pio/build"
+                / self.environment
+                / "firmware.elf"
+            )
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.project_dir,
+                text=True,
+            ).strip()
+            with firmware.open("ab") as stream:
+                stream.write(self.environment.encode("utf-8"))
+                stream.write(git_sha.encode("ascii"))
+            return subprocess.CompletedProcess(command, 0)
+
+        firmware = build_firmware(
+            self.project_dir, self.environment, runner=runner
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(firmware.is_file())
+        self.assertFalse((self.project_dir / ".dummy").exists())
+
     def test_rebuilds_after_failed_speaker_profile_dummy_bootstrap(self):
         return_codes = iter((1, 0))
         calls = []

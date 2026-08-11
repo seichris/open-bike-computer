@@ -21,9 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - WAVESHARE_AMOLED_175_REMOTE_DEBUG
           - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_175_POWER_METRICS
           - WAVESHARE_AMOLED_175_LIGHT_SLEEP
+          - WAVESHARE_AMOLED_206_REMOTE_DEBUG
           - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_206_DISPLAY_TEST
           - WAVESHARE_AMOLED_206_POWER_METRICS
@@ -40,3 +42,15 @@ jobs:
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
         run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
+      - name: Verify remote-debug artifact includes the browser service
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        run: |
+          grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"
+          grep -aFq "Bicino real-device debugger" ".pio/build/${{ matrix.target }}/firmware.elf"
+      - name: Verify non-debug artifacts exclude remote-debug routes
+        if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
+        run: |
+          if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then
+            echo "Non-debug firmware contains remote-debug routes"
+            exit 1
+          fi
