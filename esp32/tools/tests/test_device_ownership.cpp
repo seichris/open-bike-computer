@@ -3,6 +3,8 @@
 #include "../../lib/ble_navigation/ble_connection_policy.hpp"
 #include "../../lib/ble_navigation/disconnected_shutdown_policy.hpp"
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
+#include "../../lib/ble_navigation/ownership_ui_dispatch_policy.hpp"
+#include "../../lib/gui/src/preConnectionPresentation.hpp"
 #include "host_stubs/Preferences.h"
 
 #include <array>
@@ -156,7 +158,60 @@ struct AppPairing {
   }
 };
 
+static void assertMatchedFailureQueuesClearedUiSnapshot(
+    const CommandResult &result, const DeviceOwnership &ownership) {
+  assert(result.matched);
+  assert(result.event == Event::None);
+
+  ownership_button_policy::ComparisonRenderGate renderGate;
+  renderGate.request(41);
+  renderGate.displayFlushed();
+  assert(renderGate.renderedGeneration() == 41);
+
+  int eventDispatches = 0;
+  int queuedSnapshots = 0;
+  pre_connection_presentation::Phase presentedPhase =
+      pre_connection_presentation::Phase::PairingConfirmed;
+  const bool handled = ownership_ui_dispatch_policy::dispatchMatchedCommand(
+      result.matched, result.event,
+      [&](Event event) {
+        eventDispatches++;
+        assert(event == Event::None);
+      },
+      [&] {
+        queuedSnapshots++;
+        const bool pairingActive = ownership.hasPairingCode();
+        const pre_connection_presentation::Snapshot snapshot{
+            ownership.isClaimed(), true, false, pairingActive,
+            ownership.isPairingConfirmedOnDevice(),
+            pairingActive ? ownership.pairingCode() : 0};
+        pre_connection_presentation::presentThenUpdateComparisonGate(
+            snapshot,
+            pairingActive ? ownership.pairingGeneration() : 0,
+            [&](const pre_connection_presentation::Snapshot &,
+                pre_connection_presentation::Phase phase) {
+              presentedPhase = phase;
+            },
+            [&](uint32_t generation) { renderGate.request(generation); },
+            [&] { renderGate.cancel(); });
+      });
+
+  assert(handled);
+  assert(eventDispatches == 1);
+  assert(queuedSnapshots == 1);
+  assert(presentedPhase !=
+         pre_connection_presentation::Phase::PairingComparison);
+  assert(presentedPhase != pre_connection_presentation::Phase::PairingConfirmed);
+  assert(renderGate.renderedGeneration() == 0);
+}
+
 int main() {
+  int unmatchedCallbacks = 0;
+  assert(!ownership_ui_dispatch_policy::dispatchMatchedCommand(
+      false, Event::None, [&](Event) { unmatchedCallbacks++; },
+      [&] { unmatchedCallbacks++; }));
+  assert(unmatchedCallbacks == 0);
+
   assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(120, true) ==
          120);
   assert(disconnected_shutdown_policy::effectiveTimeoutSeconds(120, false) ==
@@ -268,6 +323,9 @@ int main() {
   assert(!renderGate.consumeRendered(7));
   renderGate.displayFlushed();
   assert(renderGate.renderedGeneration() == 7);
+  // A duplicate UI snapshot must not revoke an already-rendered comparison.
+  renderGate.request(7);
+  assert(renderGate.renderedGeneration() == 7);
   assert(!renderGate.consumeRendered(8));
   assert(renderGate.consumeRendered(7));
   assert(renderGate.renderedGeneration() == 0);
@@ -318,6 +376,8 @@ int main() {
          "ERROR|invalid_pairing_request");
   const auto firstPair = device.handle(firstApp.command(), 10);
   assert(firstPair.event == Event::PairingStarted);
+  assert(device.hasPairingCode());
+  assert(!device.isPairingConfirmedOnDevice());
   const uint32_t firstPairingGeneration = device.pairingGeneration();
   assert(firstPairingGeneration != 0);
 
@@ -337,10 +397,13 @@ int main() {
 
   assert(device.armPairingConfirmation(firstPairingGeneration));
   assert(device.confirmPairingOnDevice());
+  assert(device.isPairingConfirmedOnDevice());
   assert(!device.confirmPairingOnDevice());
   const auto paired =
       device.handle(firstApp.confirm(firstMaterial, "Cargo bike"), 22);
   assert(paired.event == Event::Paired);
+  assert(!device.hasPairingCode());
+  assert(!device.isPairingConfirmedOnDevice());
   assert(device.isClaimed());
   assert(!device.allowsLegacyAuthentication());
   const auto claimedAdvertisement = device.advertisementManufacturerData();
@@ -772,7 +835,10 @@ int main() {
   const auto expiringMaterial = firstApp.material(expiringPair);
   assert(expiring.armPairingConfirmation(expiring.pairingGeneration()));
   assert(expiring.confirmPairingOnDevice());
+  assert(expiring.isPairingConfirmedOnDevice());
   expiring.process(100 + PAIRING_SESSION_TIMEOUT_MS + 1);
+  assert(!expiring.hasPairingCode());
+  assert(!expiring.isPairingConfirmedOnDevice());
   assert(expiring.handle(firstApp.confirm(expiringMaterial, "Bike"),
                          100 + PAIRING_SESSION_TIMEOUT_MS + 2)
              .response == "ERROR|pairing_confirmation_failed");
@@ -796,11 +862,42 @@ int main() {
       persistFailure.pairingGeneration()));
   assert(persistFailure.confirmPairingOnDevice());
   preferences_test::failPutKey = "ownerKey";
-  assert(persistFailure
-             .handle(failingApp.confirm(failingMaterial, "Bike"), 202)
-             .response == "ERROR|pairing_persistence_failed");
+  const auto persistFailureResult =
+      persistFailure.handle(failingApp.confirm(failingMaterial, "Bike"), 202);
+  assert(persistFailureResult.response == "ERROR|pairing_persistence_failed");
+  assert(!persistFailure.hasPairingCode());
+  assert(!persistFailure.isPairingConfirmedOnDevice());
   assert(!persistFailure.isClaimed());
   assert(!persistFailure.allowsLegacyAuthentication());
+  assertMatchedFailureQueuesClearedUiSnapshot(persistFailureResult,
+                                              persistFailure);
+
+  preferences_test::reset();
+  DeviceOwnership invalidConfirmation;
+  assert(invalidConfirmation.begin());
+  AppPairing invalidConfirmationApp(4);
+  const auto invalidPair = invalidConfirmation.handle(
+      invalidConfirmationApp.command(), 210);
+  const auto invalidMaterial = invalidConfirmationApp.material(invalidPair);
+  assert(invalidConfirmation.armPairingConfirmation(
+      invalidConfirmation.pairingGeneration()));
+  assert(invalidConfirmation.confirmPairingOnDevice());
+  std::string invalidCommand =
+      invalidConfirmationApp.confirm(invalidMaterial, "Bike");
+  const size_t ownerSeparator = invalidCommand.find('|');
+  const size_t proofSeparator = invalidCommand.find('|', ownerSeparator + 1);
+  assert(ownerSeparator != std::string::npos &&
+         proofSeparator != std::string::npos);
+  invalidCommand[proofSeparator + 1] =
+      invalidCommand[proofSeparator + 1] == '0' ? '1' : '0';
+  const auto invalidResult = invalidConfirmation.handle(invalidCommand, 211);
+  assert(invalidResult.matched);
+  assert(invalidResult.event == Event::None);
+  assert(invalidResult.response == "ERROR|pairing_confirmation_failed");
+  assert(!invalidConfirmation.hasPairingCode());
+  assert(!invalidConfirmation.isPairingConfirmedOnDevice());
+  assertMatchedFailureQueuesClearedUiSnapshot(invalidResult,
+                                              invalidConfirmation);
 
   preferences_test::reset();
   preferences_test::put("bleOwner", "version", {2});
