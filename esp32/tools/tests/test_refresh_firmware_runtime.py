@@ -14,12 +14,14 @@ from unittest import mock
 from firmware_runtime import FirmwareRuntimeError, extract_verified_bundle
 from refresh_firmware_runtime import (
     _bundle,
+    _clean_generator_commit,
     _inventory,
     _isolated_command_environment,
     _load_inputs,
     _load_candidate_contract,
     _normalize_name,
     _normalize_wheel,
+    _pypi_wheel_source,
     _reject_path_leaks,
     _refresh_work_root,
     _remove_generated_python_state,
@@ -106,6 +108,62 @@ class RuntimeRefreshTests(unittest.TestCase):
                     FirmwareRuntimeError, "unsafe or colliding member"
                 ):
                     _normalize_wheel(wheel)
+
+    def test_pypi_provenance_uses_os_https_and_requires_a_strict_digest(self) -> None:
+        digest = "a" * 64
+        response = json.dumps(
+            {
+                "urls": [
+                    {
+                        "filename": "example-1.2.3-py3-none-any.whl",
+                        "url": "https://files.pythonhosted.org/packages/example.whl",
+                        "digests": {"sha256": digest},
+                    }
+                ]
+            }
+        )
+        environment = {"HOME": "/isolated"}
+        with mock.patch(
+            "refresh_firmware_runtime._run", return_value=response
+        ) as runner:
+            self.assertEqual(
+                _pypi_wheel_source(
+                    "example", "1.2.3+local", "example-1.2.3-py3-none-any.whl", environment
+                ),
+                ("https://files.pythonhosted.org/packages/example.whl", digest),
+            )
+        command = runner.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/curl")
+        self.assertIn("=https", command)
+        self.assertTrue(command[-1].endswith("/1.2.3%2Blocal/json"))
+        self.assertEqual(runner.call_args.kwargs["environment"], environment)
+
+        unsafe = response.replace(
+            "https://files.pythonhosted.org/", "https://example.invalid/"
+        )
+        with mock.patch("refresh_firmware_runtime._run", return_value=unsafe):
+            with self.assertRaisesRegex(FirmwareRuntimeError, "provenance is invalid"):
+                _pypi_wheel_source(
+                    "example", "1.2.3", "example-1.2.3-py3-none-any.whl", environment
+                )
+
+    def test_candidate_generator_requires_a_clean_exact_git_identity(self) -> None:
+        commit = "a" * 40
+        with mock.patch(
+            "refresh_firmware_runtime._run", side_effect=[commit, ""]
+        ) as runner:
+            self.assertEqual(_clean_generator_commit(self.root), commit)
+        self.assertEqual(
+            runner.call_args_list[1].args[0],
+            ("git", "status", "--porcelain=v1", "--untracked-files=no"),
+        )
+
+        with mock.patch(
+            "refresh_firmware_runtime._run",
+            side_effect=[commit, " M tools/refresh_firmware_runtime.py"],
+        ):
+            with self.assertRaisesRegex(FirmwareRuntimeError, "clean tracked Git"):
+                _clean_generator_commit(self.root)
 
     def test_wheel_license_without_metadata_requires_exact_reviewed_evidence(self) -> None:
         wheel = self.make_wheel(license_expression=None)
