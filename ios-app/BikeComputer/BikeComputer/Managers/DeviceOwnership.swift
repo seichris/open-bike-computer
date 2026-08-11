@@ -153,6 +153,272 @@ enum BLEDiscoveryFreshnessPolicy {
     }
 }
 
+enum BLEDiscoverySignalPolicy {
+    static func rank(for rssi: Int) -> Int {
+        // Core Bluetooth reserves 127 for an unavailable RSSI measurement.
+        rssi == 127 ? Int.min : rssi
+    }
+
+    static func description(for rssi: Int) -> String {
+        rssi == 127 ? "Unavailable" : "\(rssi) dBm"
+    }
+}
+
+enum BLEScanPurpose: Equatable {
+    case none
+    case trustedReconnect(UUID)
+    case opportunisticDiscovery
+    case explicitDiscovery
+    case selectedPeripheral(UUID)
+
+    var discoversUnknownDevices: Bool {
+        self == .opportunisticDiscovery || self == .explicitDiscovery
+    }
+
+    var allowsDuplicateAdvertisements: Bool {
+        discoversUnknownDevices
+    }
+
+    var logDescription: String {
+        switch self {
+        case .none: return "none"
+        case .trustedReconnect: return "trusted reconnect"
+        case .opportunisticDiscovery: return "opportunistic discovery"
+        case .explicitDiscovery: return "explicit discovery"
+        case .selectedPeripheral: return "selected peripheral"
+        }
+    }
+}
+
+enum BLEScanCallbackDrainPolicy {
+    static let interval: TimeInterval = 0.1
+
+    static func delay(
+        after lastPhysicalStop: Date?,
+        now: Date = Date()
+    ) -> TimeInterval {
+        guard let lastPhysicalStop else { return 0 }
+        return max(0, interval - now.timeIntervalSince(lastPhysicalStop))
+    }
+}
+
+struct BLEUnknownScanObservationGate {
+    private(set) var activeGeneration: UInt64?
+    private var identifiersSeenOnce: Set<UUID> = []
+
+    mutating func begin(generation: UInt64) {
+        activeGeneration = generation
+        identifiersSeenOnce.removeAll()
+    }
+
+    mutating func end() {
+        activeGeneration = nil
+        identifiersSeenOnce.removeAll()
+    }
+
+    mutating func acceptsRepeatedObservation(
+        peripheralIdentifier: UUID,
+        generation: UInt64
+    ) -> Bool {
+        guard activeGeneration == generation else { return false }
+        return !identifiersSeenOnce.insert(peripheralIdentifier).inserted
+    }
+}
+
+enum BLEDiscoveryOrigin: Equatable {
+    case opportunistic
+    case explicit
+}
+
+struct BLEScanContext: Equatable {
+    let isApplicationActive: Bool
+    let isBluetoothPoweredOn: Bool
+    let hasActiveBLESession: Bool
+    let knownDeviceCount: Int
+    let trustedPeripheralIdentifier: UUID?
+    let shouldReconnectTrustedPeripheral: Bool
+    let explicitDiscoveryRequested: Bool
+    let selectedPeripheralIdentifier: UUID?
+    let isUnknownDiscoverySuppressed: Bool
+    let isExclusiveOperationActive: Bool
+}
+
+enum BLEScanLifecyclePolicy {
+    static func purpose(for context: BLEScanContext) -> BLEScanPurpose {
+        guard context.isBluetoothPoweredOn,
+              !context.hasActiveBLESession,
+              !context.isExclusiveOperationActive else {
+            return .none
+        }
+
+        if context.isApplicationActive,
+           let selected = context.selectedPeripheralIdentifier {
+            return .selectedPeripheral(selected)
+        }
+        if context.isApplicationActive,
+           context.explicitDiscoveryRequested {
+            return .explicitDiscovery
+        }
+        if context.shouldReconnectTrustedPeripheral,
+           let trusted = context.trustedPeripheralIdentifier {
+            return .trustedReconnect(trusted)
+        }
+        if context.isApplicationActive,
+           context.knownDeviceCount == 0,
+           !context.isUnknownDiscoverySuppressed {
+            return .opportunisticDiscovery
+        }
+        return .none
+    }
+}
+
+struct BLEDiscoveryObservation: Equatable {
+    let device: DiscoveredBikeComputerDevice
+    let generation: UInt64
+}
+
+enum BLEOpportunisticCandidatePolicy {
+    static func isEligible(
+        _ observation: BLEDiscoveryObservation,
+        activeGeneration: UInt64?,
+        knownDevices: [KnownBikeComputerDevice],
+        serviceMatched: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard serviceMatched,
+              observation.generation == activeGeneration,
+              knownDevices.isEmpty,
+              observation.device.isClaimed == false,
+              observation.device.identitySuffix != nil,
+              now.timeIntervalSince(observation.device.lastSeenAt) <=
+                BLEDiscoveryFreshnessPolicy.maximumAge else {
+            return false
+        }
+
+        let observedSuffix = observation.device.identitySuffix?.uppercased()
+        return !knownDevices.contains { known in
+            if known.peripheralIdentifier == observation.device.peripheralIdentifier {
+                return true
+            }
+            guard !known.isLegacy,
+                  let observedSuffix else { return false }
+            return known.deviceID.uppercased().hasSuffix(observedSuffix)
+        }
+    }
+
+    static func strongest(
+        from observations: [BLEDiscoveryObservation],
+        activeGeneration: UInt64?,
+        knownDevices: [KnownBikeComputerDevice],
+        now: Date = Date()
+    ) -> BLEDiscoveryObservation? {
+        observations
+            .filter {
+                isEligible(
+                    $0,
+                    activeGeneration: activeGeneration,
+                    knownDevices: knownDevices,
+                    serviceMatched: true,
+                    now: now
+                )
+            }
+            .sorted {
+                let lhsRank = BLEDiscoverySignalPolicy.rank(
+                    for: $0.device.rssi
+                )
+                let rhsRank = BLEDiscoverySignalPolicy.rank(
+                    for: $1.device.rssi
+                )
+                if lhsRank != rhsRank {
+                    return lhsRank > rhsRank
+                }
+                return $0.device.peripheralIdentifier.uuidString <
+                    $1.device.peripheralIdentifier.uuidString
+            }
+            .first
+    }
+}
+
+enum BLEExplicitDiscoveryStartAction: Equatable {
+    case start
+    case confirmDisconnect
+    case disabledWhileConnecting
+}
+
+enum BLEExplicitDiscoveryStartPolicy {
+    static func action(
+        hasActiveBLESession: Bool,
+        isConnecting: Bool
+    ) -> BLEExplicitDiscoveryStartAction {
+        if isConnecting { return .disabledWhileConnecting }
+        return hasActiveBLESession ? .confirmDisconnect : .start
+    }
+}
+
+enum NearbyBicinoSetupStage: Equatable {
+    case offer
+    case pairing
+
+    mutating func advanceToPairing() {
+        self = .pairing
+    }
+}
+
+enum NearbyBicinoCandidateEndReason: Equatable {
+    case dismissed
+    case expiredBeforePresentation
+}
+
+enum NearbyBicinoCandidateLifecyclePolicy {
+    static func suppressesFurtherDiscovery(
+        after reason: NearbyBicinoCandidateEndReason
+    ) -> Bool {
+        reason == .dismissed
+    }
+}
+
+enum BikeComputerPairingErrorAction: Equatable {
+    case retry
+    case close
+}
+
+enum BikeComputerPairingErrorActionPolicy {
+    static func action(
+        hasRetainedNearbyCandidate: Bool
+    ) -> BikeComputerPairingErrorAction {
+        hasRetainedNearbyCandidate ? .close : .retry
+    }
+}
+
+enum NearbyBicinoPresentationPolicy {
+    static func shouldPresent(
+        isApplicationActive: Bool,
+        knownDeviceCount: Int,
+        hasActiveBLESession: Bool,
+        hasBlockingPresentation: Bool,
+        isMapAreaSelectionActive: Bool,
+        isSuppressed: Bool
+    ) -> Bool {
+        isApplicationActive &&
+            knownDeviceCount == 0 &&
+            !hasActiveBLESession &&
+            !hasBlockingPresentation &&
+            !isMapAreaSelectionActive &&
+            !isSuppressed
+    }
+
+    static func routeID(peripheralIdentifier: UUID) -> String {
+        "nearby-bicino:\(peripheralIdentifier.uuidString.lowercased())"
+    }
+
+    static func shouldRetainCandidateDuringConnection(
+        discoveryOrigin: BLEDiscoveryOrigin?,
+        hasPendingPairingSession: Bool
+    ) -> Bool {
+        discoveryOrigin == .opportunistic && hasPendingPairingSession
+    }
+}
+
 enum BikeComputersMenuPolicy {
     static func title(knownDeviceCount: Int) -> String {
         switch knownDeviceCount {
@@ -176,11 +442,72 @@ enum BikeComputersMenuPolicy {
     static func shouldResumeOwnedDiscovery(
         ownsDiscoveryLifecycle: Bool,
         isBluetoothPoweredOn: Bool,
-        isDiscoveringDevices: Bool,
+        isExplicitDiscoveryActive: Bool,
         pairingCompletedDuringPresentation: Bool
     ) -> Bool {
         ownsDiscoveryLifecycle && isBluetoothPoweredOn &&
-            !isDiscoveringDevices && !pairingCompletedDuringPresentation
+            !isExplicitDiscoveryActive && !pairingCompletedDuringPresentation
+    }
+
+    static func shouldRestartOwnedDiscoveryOnForeground(
+        isApplicationActive: Bool,
+        ownsDiscoveryLifecycle: Bool,
+        hasPresentedCandidate: Bool,
+        isSensorEnrollmentActive: Bool
+    ) -> Bool {
+        isApplicationActive && ownsDiscoveryLifecycle &&
+            !hasPresentedCandidate && !isSensorEnrollmentActive
+    }
+}
+
+enum BikeComputerSettingsDiscoveryCommand: Equatable {
+    case suspendUnknownDiscovery
+    case resumeUnknownDiscovery
+    case beginExplicitDiscovery
+    case cancelOwnedDiscovery
+}
+
+struct BikeComputerSettingsDiscoveryTransition: Equatable {
+    let ownsDiscoveryLifecycle: Bool
+    let commands: [BikeComputerSettingsDiscoveryCommand]
+}
+
+enum BikeComputerSettingsDiscoveryLifecyclePolicy {
+    static func sensorEnrollmentChanged(
+        isLooking: Bool,
+        shouldStartDiscovery: Bool,
+        ownsDiscoveryLifecycle: Bool
+    ) -> BikeComputerSettingsDiscoveryTransition {
+        if isLooking {
+            return BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+                commands: [.suspendUnknownDiscovery]
+            )
+        }
+        if shouldStartDiscovery && !ownsDiscoveryLifecycle {
+            return BikeComputerSettingsDiscoveryTransition(
+                ownsDiscoveryLifecycle: true,
+                commands: [
+                    .resumeUnknownDiscovery,
+                    .beginExplicitDiscovery
+                ]
+            )
+        }
+        return BikeComputerSettingsDiscoveryTransition(
+            ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+            commands: [.resumeUnknownDiscovery]
+        )
+    }
+
+    static func screenDisappeared(
+        ownsDiscoveryLifecycle: Bool
+    ) -> BikeComputerSettingsDiscoveryTransition {
+        BikeComputerSettingsDiscoveryTransition(
+            ownsDiscoveryLifecycle: false,
+            commands: ownsDiscoveryLifecycle
+                ? [.cancelOwnedDiscovery, .resumeUnknownDiscovery]
+                : [.resumeUnknownDiscovery]
+        )
     }
 }
 
@@ -221,6 +548,19 @@ enum BikeComputerSettingsPresentationPolicy {
             || BikeComputersMenuPolicy.shouldShowConnectNewDeviceAction(
                 knownDeviceCount: knownDeviceCount
             )
+    }
+
+    static func shouldShowExplicitDiscoveryState(
+        scanPurpose: BLEScanPurpose
+    ) -> Bool {
+        scanPurpose == .explicitDiscovery
+    }
+
+    static func shouldShowConnectAction(
+        baseEligibility: Bool,
+        scanPurpose: BLEScanPurpose
+    ) -> Bool {
+        baseEligibility && scanPurpose != .explicitDiscovery
     }
 }
 
@@ -423,9 +763,11 @@ enum BLENavigationNotificationPolicy {
 enum BLERestorationPolicy {
     static func selectedIdentifier(
         from available: [UUID],
-        trustedIdentifier: UUID?
+        trustedIdentifier: UUID?,
+        isConnectionExclusiveOperationActive: Bool = false
     ) -> UUID? {
-        guard let trustedIdentifier else { return nil }
+        guard !isConnectionExclusiveOperationActive,
+              let trustedIdentifier else { return nil }
         return available.contains(trustedIdentifier) ? trustedIdentifier : nil
     }
 

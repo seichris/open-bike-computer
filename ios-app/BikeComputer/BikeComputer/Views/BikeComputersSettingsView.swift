@@ -8,6 +8,7 @@ struct BikeComputersSettingsView: View {
     @State private var selectedCandidate: DiscoveredBikeComputerDevice?
     @State private var presentedPairingCompletionGeneration: UInt64?
     @State private var ownsDiscoveryLifecycle = false
+    @State private var showingDisconnectForDiscoveryConfirmation = false
     private let focusSensorsOnAppear: Bool
     private let startsBikeComputerDiscoveryOnAppear: Bool
 
@@ -39,8 +40,7 @@ struct BikeComputersSettingsView: View {
             bikeComputerSection
             sensorProfilesSection
 
-            if bleManager.isDiscoveringDevices ||
-                !bleManager.discoveredDevices.isEmpty {
+            if shouldShowExplicitDiscoveryState {
                 Section {
                     if bleManager.discoveredDevices.isEmpty {
                         HStack(spacing: 12) {
@@ -53,6 +53,9 @@ struct BikeComputersSettingsView: View {
                             Button {
                                 presentedPairingCompletionGeneration =
                                     bleManager.completedPairingGeneration
+                                bleManager.selectDiscoveredDeviceForPairing(
+                                    device
+                                )
                                 selectedCandidate = device
                             } label: {
                                 DiscoveredBikeComputerRow(device: device)
@@ -68,18 +71,20 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            if shouldShowConnectBikeComputerAction,
-               !bleManager.isDiscoveringDevices {
+            if shouldShowConnectBikeComputerAction {
                 Section {
                     Button {
-                        beginDiscovery()
+                        handleConnectNewBikeComputer()
                     } label: {
                         Label(
                             "Connect a new Bike Computer",
                             systemImage: "plus.circle"
                         )
                     }
-                    .disabled(bleManager.deviceOperationDeviceID != nil)
+                    .disabled(
+                        bleManager.deviceOperationDeviceID != nil ||
+                        bleManager.isConnecting
+                    )
                 }
             }
 
@@ -108,21 +113,47 @@ struct BikeComputersSettingsView: View {
         .sheet(item: $selectedCandidate, onDismiss: {
             resumeOwnedDiscoveryIfNeeded()
         }) { candidate in
-            PairBikeComputerSheet(candidate: candidate)
+            BikeComputerPairingFlow(candidate: candidate)
                 .environmentObject(bleManager)
         }
+        .confirmationDialog(
+            "Disconnect the current Bike Computer?",
+            isPresented: $showingDisconnectForDiscoveryConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect and Search") {
+                ownsDiscoveryLifecycle = true
+                bleManager.disconnectCurrentDeviceAndStartDiscovery()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Bicino can connect to one Bike Computer at a time. The current device must disconnect before searching for another.")
+        }
         .onAppear {
+            bleManager.setUnknownDeviceDiscoverySuspended(
+                sensorDetectionCoordinator.isLooking
+            )
             if shouldStartBikeComputerDiscovery {
                 beginDiscovery()
-            } else if bleManager.isDiscoveringDevices {
-                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
             }
         }
         .onChange(of: bleManager.centralStateDescription) { state in
             if state == "powered on", ownsDiscoveryLifecycle,
-               selectedCandidate == nil {
+               selectedCandidate == nil,
+               !sensorDetectionCoordinator.isLooking {
                 bleManager.startDeviceDiscovery()
             }
+        }
+        .onChange(of: bleManager.isApplicationActive) { isActive in
+            guard BikeComputersMenuPolicy
+                    .shouldRestartOwnedDiscoveryOnForeground(
+                        isApplicationActive: isActive,
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
+                        hasPresentedCandidate: selectedCandidate != nil,
+                        isSensorEnrollmentActive:
+                            sensorDetectionCoordinator.isLooking
+                    ) else { return }
+            bleManager.startDeviceDiscovery()
         }
         .onChange(of: bleManager.knownDevices.count) { count in
             if shouldStartBikeComputerDiscovery {
@@ -136,24 +167,24 @@ struct BikeComputersSettingsView: View {
         }
         .onChange(of: sensorDetectionCoordinator.isLooking) {
             isLooking in
-            if isLooking {
-                ownsDiscoveryLifecycle = false
-                if bleManager.isDiscoveringDevices {
-                    bleManager.cancelDeviceDiscovery(
-                        resumeAutoReconnect: true
+            applyDiscoveryTransition(
+                BikeComputerSettingsDiscoveryLifecyclePolicy
+                    .sensorEnrollmentChanged(
+                        isLooking: isLooking,
+                        shouldStartDiscovery:
+                            shouldStartBikeComputerDiscovery,
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle
                     )
-                }
-            } else if shouldStartBikeComputerDiscovery,
-                      !ownsDiscoveryLifecycle {
-                beginDiscovery()
-            }
+            )
         }
         .onDisappear {
-            if ownsDiscoveryLifecycle || bleManager.isDiscoveringDevices {
-                ownsDiscoveryLifecycle = false
-                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
-            }
             sensorDetectionCoordinator.stopLooking()
+            applyDiscoveryTransition(
+                BikeComputerSettingsDiscoveryLifecyclePolicy
+                    .screenDisappeared(
+                        ownsDiscoveryLifecycle: ownsDiscoveryLifecycle
+                    )
+            )
         }
     }
 
@@ -204,10 +235,21 @@ struct BikeComputersSettingsView: View {
 
     private var shouldShowConnectBikeComputerAction: Bool {
         BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
-            knownDeviceCount: bleManager.knownDevices.count,
-            isExplicitBikeComputerSetup:
-                startsBikeComputerDiscoveryOnAppear
+            baseEligibility:
+                BikeComputerSettingsPresentationPolicy.shouldShowConnectAction(
+                    knownDeviceCount: bleManager.knownDevices.count,
+                    isExplicitBikeComputerSetup:
+                        startsBikeComputerDiscoveryOnAppear
+                ),
+            scanPurpose: bleManager.currentScanPurpose
         )
+    }
+
+    private var shouldShowExplicitDiscoveryState: Bool {
+        BikeComputerSettingsPresentationPolicy
+            .shouldShowExplicitDiscoveryState(
+                scanPurpose: bleManager.currentScanPurpose
+            )
     }
 
     private var shouldStartBikeComputerDiscovery: Bool {
@@ -226,6 +268,38 @@ struct BikeComputersSettingsView: View {
         bleManager.startDeviceDiscovery()
     }
 
+    private func applyDiscoveryTransition(
+        _ transition: BikeComputerSettingsDiscoveryTransition
+    ) {
+        ownsDiscoveryLifecycle = transition.ownsDiscoveryLifecycle
+        for command in transition.commands {
+            switch command {
+            case .suspendUnknownDiscovery:
+                bleManager.setUnknownDeviceDiscoverySuspended(true)
+            case .resumeUnknownDiscovery:
+                bleManager.setUnknownDeviceDiscoverySuspended(false)
+            case .beginExplicitDiscovery:
+                bleManager.startDeviceDiscovery()
+            case .cancelOwnedDiscovery:
+                bleManager.cancelDeviceDiscovery(resumeAutoReconnect: true)
+            }
+        }
+    }
+
+    private func handleConnectNewBikeComputer() {
+        switch BLEExplicitDiscoveryStartPolicy.action(
+            hasActiveBLESession: bleManager.hasActiveTransportSession,
+            isConnecting: bleManager.isConnecting
+        ) {
+        case .start:
+            beginDiscovery()
+        case .confirmDisconnect:
+            showingDisconnectForDiscoveryConfirmation = true
+        case .disabledWhileConnecting:
+            break
+        }
+    }
+
     private func resumeOwnedDiscoveryIfNeeded() {
         let pairingCompletedDuringPresentation =
             presentedPairingCompletionGeneration.map {
@@ -236,7 +310,8 @@ struct BikeComputersSettingsView: View {
             ownsDiscoveryLifecycle: ownsDiscoveryLifecycle,
             isBluetoothPoweredOn:
                 bleManager.centralStateDescription == "powered on",
-            isDiscoveringDevices: bleManager.isDiscoveringDevices,
+            isExplicitDiscoveryActive:
+                bleManager.currentScanPurpose == .explicitDiscovery,
             pairingCompletedDuringPresentation:
                 pairingCompletedDuringPresentation
         ) else {
@@ -305,19 +380,22 @@ private struct DiscoveredBikeComputerRow: View {
             }
             Image(systemName: signalImage)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("Signal \(device.rssi) dBm")
+                .accessibilityLabel(
+                    "Signal \(BLEDiscoverySignalPolicy.description(for: device.rssi))"
+                )
         }
         .contentShape(Rectangle())
     }
 
     private var signalImage: String {
-        if device.rssi >= -60 { return "wifi" }
-        if device.rssi >= -75 { return "wifi.exclamationmark" }
+        let rank = BLEDiscoverySignalPolicy.rank(for: device.rssi)
+        if rank >= -60 { return "wifi" }
+        if rank >= -75 { return "wifi.exclamationmark" }
         return "antenna.radiowaves.left.and.right.slash"
     }
 }
 
-private struct PairBikeComputerSheet: View {
+struct BikeComputerPairingFlow: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
     let candidate: DiscoveredBikeComputerDevice
@@ -330,7 +408,12 @@ private struct PairBikeComputerSheet: View {
             Form {
                 Section {
                     DeviceValueRow(title: "Device", value: candidate.shortIdentifier)
-                    DeviceValueRow(title: "Signal", value: "\(candidate.rssi) dBm")
+                    DeviceValueRow(
+                        title: "Signal",
+                        value: BLEDiscoverySignalPolicy.description(
+                            for: candidate.rssi
+                        )
+                    )
                 }
 
                 if let prompt = matchingPrompt {
@@ -398,9 +481,17 @@ private struct PairBikeComputerSheet: View {
                     Section {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
-                        Button("Try Again") {
-                            bleManager.cancelPairing()
-                            didStart = false
+                        switch pairingErrorAction {
+                        case .retry:
+                            Button("Try Again") {
+                                bleManager.cancelPairing()
+                                didStart = false
+                            }
+                        case .close:
+                            Button("Close") {
+                                bleManager.cancelPairing()
+                                dismiss()
+                            }
                         }
                     }
                 }
@@ -433,6 +524,15 @@ private struct PairBikeComputerSheet: View {
             return nil
         }
         return bleManager.pairingPrompt
+    }
+
+    private var pairingErrorAction: BikeComputerPairingErrorAction {
+        BikeComputerPairingErrorActionPolicy.action(
+            hasRetainedNearbyCandidate:
+                bleManager.nearbyCandidate(
+                    peripheralIdentifier: candidate.peripheralIdentifier
+                ) != nil
+        )
     }
 
     private func startPairing() {
