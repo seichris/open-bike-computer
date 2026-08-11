@@ -29,8 +29,23 @@ esac
 
 recovery_root=$project_dir/.pio/open-bike-build/recovery-python
 target_root=$recovery_root/$target
-runtime_root=$target_root/$archive_sha
 archive=$target_root/$archive_sha.tar.gz
+staging=
+
+cleanup() {
+  if [ -n "$staging" ]; then
+    case "$staging" in
+      "$target_root"/.recovery.*)
+        chmod -R u+w "$staging" 2>/dev/null || true
+        rm -rf -- "$staging"
+        ;;
+      *)
+        echo "Refusing to clean unexpected recovery staging path: $staging" >&2
+        ;;
+    esac
+  fi
+}
+trap cleanup EXIT HUP INT TERM
 
 for checked in "$project_dir/.pio" "$project_dir/.pio/open-bike-build" "$recovery_root" "$target_root"; do
   if [ -L "$checked" ]; then
@@ -69,18 +84,23 @@ if ! verify_archive; then
   fi
 fi
 
-if [ ! -x "$runtime_root/python/bin/python3" ]; then
-  if [ -e "$runtime_root" ] || [ -L "$runtime_root" ]; then
-    echo "Refusing to replace unexpected recovery runtime: $runtime_root" >&2
-    exit 1
-  fi
-  staging=$(mktemp -d "$target_root/.recovery.XXXXXX")
-  tar -xzf "$archive" -C "$staging"
-  if [ ! -x "$staging/python/bin/python3" ]; then
-    echo "Tracked recovery archive has no expected Python executable" >&2
-    exit 1
-  fi
-  mv "$staging" "$runtime_root"
+staging=$(mktemp -d "$target_root/.recovery.XXXXXX")
+tar -xzf "$archive" -C "$staging"
+if [ ! -x "$staging/python/bin/python3" ]; then
+  echo "Tracked recovery archive has no expected Python executable" >&2
+  exit 1
 fi
 
-exec "$runtime_root/python/bin/python3" "$script_dir/build_firmware.py" "$@"
+# Never reuse an extracted recovery interpreter: the verified archive is the
+# trust anchor, and a fresh project-private extraction prevents persisted
+# mutation from becoming executable on a later repair invocation. The child
+# re-execs into the accepted runtime; this shell then removes only its owned
+# staging directory.
+if [ "${OPEN_BIKE_FIRMWARE_RUNTIME_CACHE+x}" = x ]; then
+  env -i PATH=/usr/bin:/bin \
+    OPEN_BIKE_FIRMWARE_RUNTIME_CACHE="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE" \
+    "$staging/python/bin/python3" "$script_dir/build_firmware.py" "$@"
+else
+  env -i PATH=/usr/bin:/bin \
+    "$staging/python/bin/python3" "$script_dir/build_firmware.py" "$@"
+fi

@@ -37,6 +37,7 @@ from generated_sdkconfig import (
 
 
 GROUP_NAMES = ("topLevel", "pioarduinoRoot", "espIdf", "uv", "esptool")
+COMMAND_ENVIRONMENT_KEYS = {"HOME", "TMPDIR", "UV_CACHE_DIR", "XDG_CACHE_HOME"}
 GROUP_LABELS = {
     "topLevel": "top-level",
     "pioarduinoRoot": "pioarduino-root",
@@ -65,11 +66,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _download_artifact(artifact: Artifact, output: Path) -> None:
+def _download_artifact(
+    artifact: Artifact, output: Path, *, environment: Mapping[str, str] | None = None
+) -> None:
     if output.exists() or output.is_symlink():
         raise FirmwareRuntimeError(f"runtime refresh output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    _run(("/usr/bin/curl", "--fail", "--location", "--silent", "--show-error", "--output", str(output), artifact.url))
+    _run(
+        ("/usr/bin/curl", "--fail", "--location", "--silent", "--show-error", "--output", str(output), artifact.url),
+        environment=environment,
+    )
     if output.stat().st_size != artifact.size or _sha256(output) != artifact.sha256:
         raise FirmwareRuntimeError(f"downloaded refresh artifact failed verification: {artifact.url}")
 
@@ -169,13 +175,28 @@ def _run(
     cwd: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> str:
-    subprocess_environment = os.environ.copy()
-    subprocess_environment.update({
+    subprocess_environment = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "HOME": "/nonexistent/open-bike-firmware-runtime",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
         "SOURCE_DATE_EPOCH": "0",
-    })
+        "UV_NO_CONFIG": "1",
+    }
     if environment:
+        unexpected = set(environment) - COMMAND_ENVIRONMENT_KEYS
+        if unexpected:
+            raise FirmwareRuntimeError(
+                "candidate command environment contains unsupported names: "
+                + ", ".join(sorted(unexpected))
+            )
         subprocess_environment.update(environment)
     result = subprocess.run(
         command,
@@ -190,6 +211,20 @@ def _run(
             f"candidate command failed ({result.returncode}): {' '.join(command)}\n{result.stdout}\n{result.stderr}"
         )
     return result.stdout.strip()
+
+
+def _isolated_command_environment(root: Path) -> dict[str, str]:
+    home = root / "home"
+    temporary = root / "tmp"
+    cache = root / "cache"
+    for path in (home, temporary, cache):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return {
+        "HOME": str(home),
+        "TMPDIR": str(temporary),
+        "XDG_CACHE_HOME": str(cache),
+        "UV_CACHE_DIR": str(cache / "uv"),
+    }
 
 
 def _normalize_wheel(path: Path) -> None:
@@ -240,8 +275,11 @@ def _pypi_wheel_source(name: str, version: str, filename: str, cafile: str) -> t
     import ssl
 
     context = ssl.create_default_context(cafile=cafile)
-    with urllib.request.urlopen(
-        f"https://pypi.org/pypi/{name}/{version}/json", timeout=30, context=context
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context)
+    )
+    with opener.open(
+        f"https://pypi.org/pypi/{name}/{version}/json", timeout=30
     ) as response:
         value = json.load(response)
     matches = [item for item in value.get("urls", []) if item.get("filename") == filename]
@@ -386,8 +424,13 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="open-bike-runtime-") as temporary_name:
         temporary = Path(temporary_name)
+        command_environment = _isolated_command_environment(
+            temporary / "command-environment"
+        )
         python_archive = temporary / "python.tar.gz"
-        _download_artifact(target.python, python_archive)
+        _download_artifact(
+            target.python, python_archive, environment=command_environment
+        )
         staging = temporary / "runtime"
         staging.mkdir()
         python = _extract_python(python_archive, staging / "python")
@@ -413,15 +456,16 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
                 key=str.casefold,
             )
             if requirements:
-                _run((str(python), "-m", "pip", "download", "--disable-pip-version-check", "--no-cache-dir", "--no-deps", "--only-binary=:all:", "--dest", str(wheelhouse), *requirements))
+                _run((str(python), "-m", "pip", "--isolated", "download", "--index-url", "https://pypi.org/simple", "--disable-pip-version-check", "--no-cache-dir", "--no-deps", "--only-binary=:all:", "--dest", str(wheelhouse), *requirements), environment=command_environment)
         top_requirements = sets["topLevel"]
-        _run((str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "--no-index", "--find-links", str(wheelhouse), "--no-deps", *top_requirements))
+        _run((str(python), "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-cache-dir", "--no-index", "--find-links", str(wheelhouse), "--no-deps", *top_requirements), environment=command_environment)
         setuptools_version = _run(
             (
                 str(python),
                 "-c",
                 "import importlib.metadata; print(importlib.metadata.version('setuptools'))",
-            )
+            ),
+            environment=command_environment,
         )
         source_paths = {
             "pioarduino-core": temporary / "pioarduino-core.zip",
@@ -432,9 +476,10 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             _download_artifact(
                 Artifact(source["url"], source["size"], source["sha256"]),
                 source_archive,
+                environment=command_environment,
             )
             before = set(wheelhouse.glob("*.whl"))
-            _run((str(python), "-m", "pip", "wheel", "--disable-pip-version-check", "--no-cache-dir", "--no-build-isolation", "--no-deps", "--wheel-dir", str(wheelhouse), str(source_archive)))
+            _run((str(python), "-m", "pip", "--isolated", "wheel", "--disable-pip-version-check", "--no-cache-dir", "--no-build-isolation", "--no-deps", "--wheel-dir", str(wheelhouse), str(source_archive)), environment=command_environment)
             built = set(wheelhouse.glob("*.whl")) - before
             if len(built) != 1:
                 raise FirmwareRuntimeError(f"{source_name} did not produce one wheel")
@@ -443,10 +488,10 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         bin_dir.mkdir()
         _write_wrapper(bin_dir / "pio", "platformio")
         _write_uv_wrapper(bin_dir / "uv")
-        pio_version = _run((str(bin_dir / "pio"), "--version"))
-        uv_version = _run((str(bin_dir / "uv"), "--version"))
-        _run((str(python), "-m", "pip", "check"))
-        cafile = _run((str(python), "-c", "import certifi; print(certifi.where())"))
+        pio_version = _run((str(bin_dir / "pio"), "--version"), environment=command_environment)
+        uv_version = _run((str(bin_dir / "uv"), "--version"), environment=command_environment)
+        _run((str(python), "-m", "pip", "--isolated", "check"), environment=command_environment)
+        cafile = _run((str(python), "-c", "import certifi; print(certifi.where())"), environment=command_environment)
         identities: dict[tuple[str, str], tuple[Path, list[str], str | None]] = {}
         for wheel_path in sorted(wheelhouse.glob("*.whl")):
             name, version, tags, license_expression = _wheel_identity(wheel_path)
@@ -625,7 +670,10 @@ def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> 
         runtime = temporary / "runtime"
         extract_verified_bundle(bundle_path, runtime)
         provenance = _verify_runtime_tree(runtime, target)
-        replay_environment = {"UV_CACHE_DIR": str(temporary / "empty-uv-cache")}
+        replay_environment = _isolated_command_environment(
+            temporary / "command-environment"
+        )
+        replay_environment["UV_CACHE_DIR"] = str(temporary / "empty-uv-cache")
         pio_output = _run((str(runtime / "bin/pio"), "--version"), environment=replay_environment)
         uv_output = _run((str(runtime / "bin/uv"), "--version"), environment=replay_environment)
         observed: dict[str, dict[str, str]] = {}

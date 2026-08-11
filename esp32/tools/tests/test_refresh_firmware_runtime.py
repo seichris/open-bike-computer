@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from firmware_runtime import FirmwareRuntimeError, extract_verified_bundle
 from refresh_firmware_runtime import (
     _bundle,
     _inventory,
+    _isolated_command_environment,
     _normalize_name,
     _normalize_wheel,
     _reject_path_leaks,
     _remove_generated_python_state,
+    _run,
     _wheel_identity,
     assemble_lock,
     inspect_inputs,
@@ -126,6 +130,41 @@ class RuntimeRefreshTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(FirmwareRuntimeError, "exactly both"):
             assemble_lock(project, (), self.root / "lock.json", "unit-test-lock")
+
+    def test_candidate_commands_do_not_inherit_or_accept_ambient_injection(self) -> None:
+        command_root = self.root / "command-environment"
+        environment = _isolated_command_environment(command_root)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HTTPS_PROXY": "https://attacker.invalid",
+                "LD_PRELOAD": "/attacker/library.so",
+                "PIP_CONFIG_FILE": "/attacker/pip.conf",
+                "PIP_INDEX_URL": "https://attacker.invalid/simple",
+                "PYTHONPATH": "/attacker/python",
+                "UV_CONFIG_FILE": "/attacker/uv.toml",
+            },
+            clear=False,
+        ):
+            values = dict(
+                line.split("=", 1)
+                for line in _run(("/usr/bin/env",), environment=environment).splitlines()
+            )
+        self.assertEqual(values["HOME"], str(command_root / "home"))
+        self.assertEqual(values["TMPDIR"], str(command_root / "tmp"))
+        self.assertEqual(values["XDG_CACHE_HOME"], str(command_root / "cache"))
+        self.assertEqual(values["UV_CACHE_DIR"], str(command_root / "cache/uv"))
+        for rejected in (
+            "HTTPS_PROXY",
+            "LD_PRELOAD",
+            "PIP_INDEX_URL",
+            "PYTHONPATH",
+            "UV_CONFIG_FILE",
+        ):
+            self.assertNotIn(rejected, values)
+        self.assertEqual(values["PIP_CONFIG_FILE"], os.devnull)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsupported names: LD_PRELOAD"):
+            _run(("/usr/bin/env",), environment={"LD_PRELOAD": "/attacker/library.so"})
 
 
 if __name__ == "__main__":
