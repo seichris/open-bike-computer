@@ -13,6 +13,7 @@ on:
       - "esp32/tools/refresh_firmware_runtime.py"
       - "esp32/tools/tests/test_build_firmware.py"
       - "esp32/tools/tests/test_firmware_runtime.py"
+      - "esp32/tools/tests/test_firmware_profile_config.py"
       - "esp32/tools/tests/test_generated_sdkconfig.py"
       - "esp32/tools/tests/test_pioarduino_custom_core.py"
       - "esp32/tools/tests/test_refresh_firmware_runtime.py"
@@ -51,6 +52,7 @@ jobs:
           env -u LD_LIBRARY_PATH PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_runtime \
+            tools.tests.test_firmware_profile_config \
             tools.tests.test_generated_sdkconfig \
             tools.tests.test_pioarduino_custom_core \
             tools.tests.test_refresh_firmware_runtime
