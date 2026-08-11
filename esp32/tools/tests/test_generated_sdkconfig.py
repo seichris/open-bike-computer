@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from generated_sdkconfig import (
     GeneratedSdkconfigError,
+    WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+    WAVESHARE_PLATFORM_PACKAGES_SHA256,
     _default_platformio_core_dir,
     prepare_generated_sdkconfigs,
     record_generated_sdkconfig_defaults,
@@ -28,9 +30,38 @@ GENERATED_CONFIG = """# generated prefix may precede the banner
 CONFIG_PM_ENABLE=y
 """
 
+RUNTIME_PROVENANCE = json.dumps(
+    {
+        "lockSetId": "unit-test-lock",
+        "manifestSha256": "1" * 64,
+        "target": "macos-arm64-cp313",
+        "bundleSha256": "2" * 64,
+        "pythonVersion": "3.13.15",
+        "pythonExecutableSha256": "3" * 64,
+        "runtimeTreeSha256": "4" * 64,
+        "pioSha256": "5" * 64,
+        "uvSha256": "6" * 64,
+        "platformioVersion": "6.1.18",
+        "topLevelDistributionSha256": "7" * 64,
+        "pioarduinoRootDistributionSha256": "8" * 64,
+        "espIdfDistributionSha256": "9" * 64,
+        "uvDistributionSha256": "a" * 64,
+        "esptoolDistributionSha256": "b" * 64,
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
+    },
+    sort_keys=True,
+)
+
 
 class GeneratedSdkconfigTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.runtime_patch = patch.dict(
+            os.environ,
+            {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE},
+        )
+        self.runtime_patch.start()
+        self.addCleanup(self.runtime_patch.stop)
         self.source_identity_patch = patch(
             "generated_sdkconfig.current_source_identity",
             return_value="a" * 40,
@@ -119,6 +150,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
             core / "penv/bin/esptool",
+            core / "penv/.espidf-5.5.1/bin/python",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
@@ -163,6 +195,33 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         )
                     )
 
+    def test_requires_one_executable_esp_idf_python_environment(self) -> None:
+        for state in ("missing", "multiple", "not-executable"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                defaults = project / "sdkconfig.defaults"
+                (project / "platformio.ini").write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                    encoding="utf-8",
+                )
+                defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+                with self.fake_core(project) as core:
+                    python = core / "penv/.espidf-5.5.1/bin/python"
+                    if state == "missing":
+                        python.unlink()
+                    elif state == "multiple":
+                        other = core / "penv/.espidf-other/bin/python"
+                        other.parent.mkdir(parents=True)
+                        other.write_text("attested python\n", encoding="utf-8")
+                        other.chmod(0o755)
+                    else:
+                        python.chmod(0o644)
+                    self.assertIsNone(
+                        record_generated_sdkconfig_defaults(
+                            project, "WAVESHARE_AMOLED_175"
+                        )
+                    )
+
     def test_manifest_attests_the_git_derived_build_clock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -178,7 +237,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 )
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-                self.assertEqual(manifest["schema"], 19)
+                self.assertEqual(manifest["schema"], 20)
+                self.assertEqual(
+                    manifest["runtimeProvenance"], json.loads(RUNTIME_PROVENANCE)
+                )
                 self.assertEqual(manifest["sourceDateEpoch"], "1712345678")
                 self.assertEqual(
                     manifest["buildTimestamp"], "2024-04-05T19:34:38Z"
@@ -191,6 +253,57 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     require_validated_generated_sdkconfig_defaults(
                         project, "WAVESHARE_AMOLED_175"
                     )
+
+    def test_runtime_identity_is_required_and_invalidates_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                self.assertIsNotNone(
+                    record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                )
+                changed = json.loads(RUNTIME_PROVENANCE)
+                changed["bundleSha256"] = "c" * 64
+                with patch.dict(
+                    os.environ,
+                    {
+                        "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": json.dumps(
+                            changed, sort_keys=True
+                        )
+                    },
+                ):
+                    self.assertEqual(
+                        prepare_generated_sdkconfigs(
+                            project, "WAVESHARE_AMOLED_175"
+                        ),
+                        (),
+                    )
+            self.assertFalse(defaults.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project), patch.dict(
+                os.environ,
+                {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": "{}"},
+            ):
+                self.assertIsNone(
+                    record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                )
 
     def test_uploader_mode_change_invalidates_recorded_core(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -451,6 +564,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             "packages/tool-esptoolpy/esptool.py",
             "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             "penv/bin/platformio-runtime.py",
+            "penv/.espidf-5.5.1/bin/python",
         ):
             with self.subTest(relative=relative):
                 with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,80 @@
+{
+  "distributionSets": {
+    "espIdf": [
+      "annotated-types==0.8.0", "certifi==2026.7.22", "cffi==2.1.1",
+      "chardet==3.0.4", "charset-normalizer==3.4.9", "click==8.4.2",
+      "colorama==0.4.6", "cryptography==44.0.3", "esp-idf-kconfig==2.5.4",
+      "idf-component-manager==2.5.0", "idna==3.18", "jsonref==1.1.0",
+      "pathvalidate==3.3.1", "psutil==7.2.2", "pycparser==3.0",
+      "pydantic-core==2.46.4", "pydantic-settings==2.15.0", "pydantic==2.13.4",
+      "pyparsing==3.3.2", "python-dotenv==1.2.2", "requests-file==3.0.1",
+      "requests-toolbelt==1.0.0", "requests==2.34.2", "ruamel-yaml==0.19.1",
+      "tqdm==4.70.0", "truststore==0.10.4", "typing-extensions==4.16.0",
+      "typing-inspection==0.4.2", "urllib3==1.26.20"
+    ],
+    "esptool": [
+      "PyYAML==6.0.3", "Pygments==2.20.0", "bitarray==3.10.1",
+      "bitstring==4.4.0", "cffi==2.1.1", "click==8.4.2",
+      "cryptography==50.0.0", "esptool==5.1.0", "intelhex==2.3.0",
+      "markdown-it-py==4.2.0", "mdurl==0.1.2", "pycparser==3.0",
+      "pyserial==3.5", "reedsolo==1.7.0", "rich-click==1.9.8",
+      "rich==15.0.0", "tibs==0.5.7"
+    ],
+    "pioarduinoRoot": [
+      "PyYAML==6.0.3", "Pygments==2.20.0", "ajsonrpc==1.2.0",
+      "anyio==4.14.2", "bitarray==3.10.1", "bitstring==4.4.0",
+      "bottle==0.13.4", "certifi==2026.7.22", "cffi==2.1.1",
+      "chardet==5.2.0", "charset-normalizer==3.4.9", "click==8.1.7",
+      "colorama==0.4.6", "construct==2.10.70", "cryptography==50.0.0",
+      "ecdsa==0.19.2", "esp-coredump==1.16.0", "esp-idf-size==2.2.1",
+      "esptool==5.1.0", "h11==0.16.0", "idna==3.18", "intelhex==2.3.0",
+      "markdown-it-py==4.2.0", "marshmallow==3.26.2", "mdurl==0.1.2",
+      "packaging==26.3", "pioarduino-core==6.1.18", "pycparser==3.0",
+      "pyelftools==0.33", "pygdbmi==0.11.0.0", "pyserial==3.5",
+      "reedsolo==1.7.0", "requests==2.34.2", "rich-click==1.9.8",
+      "rich==15.0.0", "semantic-version==2.10.0", "six==1.17.0",
+      "starlette==0.48.0", "tabulate==0.10.0", "tibs==0.5.7",
+      "typing-extensions==4.16.0", "urllib3==2.7.0", "uv==0.12.3",
+      "uvicorn==0.36.1", "wsproto==1.3.2", "zopfli==0.4.3"
+    ],
+    "topLevel": [
+      "ajsonrpc==1.2.0", "anyio==4.14.2", "bottle==0.13.4",
+      "certifi==2026.7.22", "chardet==5.2.0", "charset-normalizer==3.4.9",
+      "click==8.1.7", "colorama==0.4.6", "h11==0.16.0", "idna==3.18",
+      "marshmallow==3.26.2", "packaging==26.3", "platformio==6.1.18",
+      "pyelftools==0.33", "pyserial==3.5", "requests==2.34.2",
+      "semantic-version==2.10.0", "setuptools==84.0.0", "starlette==0.46.2", "tabulate==0.10.0",
+      "typing-extensions==4.16.0", "urllib3==2.7.0", "uv==0.12.3",
+      "uvicorn==0.34.3", "wsproto==1.3.2"
+    ],
+    "uv": ["uv==0.12.3"]
+  },
+  "platformio": "6.1.18",
+  "pythonBuilder": {
+    "commit": "00c8a06113f11220667c3bcf5fab1672ff9e78ef",
+    "url": "https://github.com/astral-sh/python-build-standalone"
+  },
+  "pythonStandaloneRelease": "20260807",
+  "pythonSource": {
+    "license": "Python-2.0",
+    "sha256": "1e66a7945a48390ee4c2a4268a0e4185884059a13c4aab6d148aa208deea4a76",
+    "size": 23160540,
+    "url": "https://www.python.org/ftp/python/3.13.15/Python-3.13.15.tar.xz"
+  },
+  "pythonVersion": "3.13.15",
+  "schema": 2,
+  "sources": {
+    "esptool": {
+      "sha256": "2ea9bcd7eb263d380a4fe0170856a10e4c65e3f38c757ebdc73584c8dd8322da",
+      "size": 383926,
+      "url": "https://files.pythonhosted.org/packages/c2/03/d7d79a77dd787dbe6029809c5f81ad88912340a131c88075189f40df3aba/esptool-5.1.0.tar.gz"
+    },
+    "pioarduino-core": {
+      "sha256": "f2d1d450ff05e11e007eee8a2fb8bcb1d023ffd2b423cdf504cabb6b56c88e1e",
+      "size": 537930,
+      "url": "https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.18.zip"
+    }
+  },
+  "targets": ["linux-x86_64-cp313", "macos-arm64-cp313"],
+  "uv": "0.12.3"
+}

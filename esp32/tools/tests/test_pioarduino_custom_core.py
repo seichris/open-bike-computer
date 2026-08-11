@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import hashlib
 import unittest
+from pathlib import Path
 
 from pioarduino_custom_core import (
     CORRECTED_FREERTOS_TICKLESS_LITERAL_MAPPING,
@@ -8,6 +10,27 @@ from pioarduino_custom_core import (
     CORRECTED_PM_LITERAL_MAPPING,
     CORRECTED_PM_TEXT_MAPPING,
     CORRECTED_PENV_URLLIB3_REQUIREMENT,
+    IDF_EXACT_REQUIREMENTS,
+    UPSTREAM_AMBIENT_UV_FALLBACK,
+    UPSTREAM_ESPTOOL_MATCH,
+    UPSTREAM_EXTERNAL_UV_INSTALL,
+    UPSTREAM_IDF_INSTALL_COMMAND,
+    UPSTREAM_INTERNET_INSTALL_GATE,
+    UPSTREAM_GENERATED_PROJECT_CLEANUP,
+    UPSTREAM_PENV_INSTALL_GUARD,
+    UPSTREAM_PLATFORMIO_REQUIREMENT,
+    UPSTREAM_ROOT_INSTALL_COMMAND,
+    VERIFIED_LOCKED_UV_FALLBACK,
+    UPSTREAM_EDITABLE_ESPTOOL,
+    VERIFIED_ESPTOOL_MATCH,
+    VERIFIED_EXTERNAL_UV_INSTALL,
+    VERIFIED_IDF_INSTALL_COMMAND,
+    VERIFIED_GENERATED_PROJECT_CLEANUP,
+    VERIFIED_OFFLINE_INSTALL_GATE,
+    VERIFIED_PENV_INSTALL_GUARD,
+    VERIFIED_PLATFORMIO_REQUIREMENT,
+    VERIFIED_ROOT_INSTALL_COMMAND,
+    VERIFIED_WHEEL_ESPTOOL,
     PHASE_7A_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_LITERAL_MAPPING,
     PHASE_9_ISR_PM_TEXT_MAPPING,
@@ -19,8 +42,12 @@ from pioarduino_custom_core import (
     UPSTREAM_NESTED_PIO_BLOCK,
     VERIFIED_NESTED_PIO_BLOCK,
     correct_nested_pio_command,
+    correct_generated_project_cleanup,
+    correct_espidf_setup_text,
     correct_penv_setup_text,
     correct_sections_text,
+    pioarduino_transform_source_sha256,
+    verified_transform_marker_matches,
 )
 
 
@@ -129,33 +156,174 @@ class CorrectNestedPioCommandTests(unittest.TestCase):
             )
 
 
-class CorrectPenvSetupTextTests(unittest.TestCase):
-    def test_aligns_urllib3_with_pinned_esptool(self):
-        corrected = correct_penv_setup_text(
-            f"before\n{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\nafter"
+class CorrectGeneratedProjectCleanupTests(unittest.TestCase):
+    def test_removes_generated_paths_independently_and_fails_closed(self):
+        corrected = correct_generated_project_cleanup(
+            f"before\n{UPSTREAM_GENERATED_PROJECT_CLEANUP}\nafter"
         )
+
+        self.assertIn(VERIFIED_GENERATED_PROJECT_CLEANUP, corrected)
+        self.assertNotIn(UPSTREAM_GENERATED_PROJECT_CLEANUP, corrected)
+        self.assertIn(
+            'for generated_project_name in ("dependencies.lock", "CMakeLists.txt")',
+            corrected,
+        )
+        self.assertIn("raise RuntimeError(", corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{VERIFIED_GENERATED_PROJECT_CLEANUP}\nafter"
+
+        self.assertEqual(correct_generated_project_cleanup(source), source)
+
+    def test_rejects_unknown_or_ambiguous_cleanup(self):
+        with self.assertRaisesRegex(ValueError, "generated project cleanup"):
+            correct_generated_project_cleanup("no generated cleanup")
+        with self.assertRaisesRegex(ValueError, "generated project cleanup"):
+            correct_generated_project_cleanup(
+                f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}\n"
+                f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}"
+            )
+
+    def test_transform_source_identity_matches_repository_file(self):
+        source = Path(__file__).resolve().parents[1] / "pioarduino_custom_core.py"
+
+        self.assertEqual(
+            pioarduino_transform_source_sha256(),
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+
+    def test_transform_marker_binds_schema_source_and_complete_shape(self):
+        runtime = {"lockSetId": "test"}
+        marker = {
+            "schema": 2,
+            "platformArchiveSha256": "a" * 64,
+            "runtimeProvenance": runtime,
+            "transformSourceSha256": "b" * 64,
+            "platformTreeSha256": "c" * 64,
+        }
+
+        self.assertTrue(
+            verified_transform_marker_matches(
+                marker, "a" * 64, runtime, "b" * 64
+            )
+        )
+        for field, value in (
+            ("schema", 1),
+            ("transformSourceSha256", "d" * 64),
+            ("platformTreeSha256", "not-a-digest"),
+        ):
+            tampered = dict(marker)
+            tampered[field] = value
+            self.assertFalse(
+                verified_transform_marker_matches(
+                    tampered, "a" * 64, runtime, "b" * 64
+                )
+            )
+        self.assertFalse(
+            verified_transform_marker_matches(
+                {**marker, "unexpected": True},
+                "a" * 64,
+                runtime,
+                "b" * 64,
+            )
+        )
+
+
+class CorrectPenvSetupTextTests(unittest.TestCase):
+    def source(self, requirement=UPSTREAM_PENV_URLLIB3_REQUIREMENT):
+        return "\n".join(
+            (
+                "before",
+                UPSTREAM_PLATFORMIO_REQUIREMENT,
+                requirement,
+                UPSTREAM_EXTERNAL_UV_INSTALL,
+                UPSTREAM_PENV_INSTALL_GUARD,
+                UPSTREAM_ROOT_INSTALL_COMMAND,
+                UPSTREAM_INTERNET_INSTALL_GATE,
+                UPSTREAM_AMBIENT_UV_FALLBACK,
+                UPSTREAM_AMBIENT_UV_FALLBACK,
+                UPSTREAM_ESPTOOL_MATCH,
+                UPSTREAM_ESPTOOL_MATCH,
+                UPSTREAM_EDITABLE_ESPTOOL,
+                UPSTREAM_EDITABLE_ESPTOOL,
+                "after",
+            )
+        )
+
+    def test_aligns_urllib3_with_pinned_esptool(self):
+        corrected = correct_penv_setup_text(self.source())
 
         self.assertIn(CORRECTED_PENV_URLLIB3_REQUIREMENT, corrected)
         self.assertNotIn(UPSTREAM_PENV_URLLIB3_REQUIREMENT, corrected)
+        self.assertEqual(corrected.count(VERIFIED_LOCKED_UV_FALLBACK), 2)
+        self.assertEqual(corrected.count(VERIFIED_WHEEL_ESPTOOL), 2)
+        self.assertEqual(corrected.count(VERIFIED_ESPTOOL_MATCH), 2)
+        self.assertIn(VERIFIED_PLATFORMIO_REQUIREMENT, corrected)
+        self.assertIn(VERIFIED_EXTERNAL_UV_INSTALL, corrected)
+        self.assertIn(VERIFIED_PENV_INSTALL_GUARD, corrected)
+        self.assertIn(
+            "external_uv_executable not in (None, locked_uv_executable)",
+            corrected,
+        )
+        self.assertIn("external_uv_executable = locked_uv_executable", corrected)
+        self.assertIn(VERIFIED_ROOT_INSTALL_COMMAND, corrected)
+        self.assertIn(VERIFIED_OFFLINE_INSTALL_GATE, corrected)
+        self.assertNotIn("https://github.com/pioarduino/platformio-core", corrected)
 
     def test_is_idempotent(self):
-        source = f"before\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}\nafter"
+        source = self.source(CORRECTED_PENV_URLLIB3_REQUIREMENT).replace(
+            UPSTREAM_AMBIENT_UV_FALLBACK, VERIFIED_LOCKED_UV_FALLBACK
+        ).replace(UPSTREAM_EDITABLE_ESPTOOL, VERIFIED_WHEEL_ESPTOOL)
+        for stale, final in (
+            (UPSTREAM_PLATFORMIO_REQUIREMENT, VERIFIED_PLATFORMIO_REQUIREMENT),
+            (UPSTREAM_EXTERNAL_UV_INSTALL, VERIFIED_EXTERNAL_UV_INSTALL),
+            (UPSTREAM_PENV_INSTALL_GUARD, VERIFIED_PENV_INSTALL_GUARD),
+            (UPSTREAM_ROOT_INSTALL_COMMAND, VERIFIED_ROOT_INSTALL_COMMAND),
+            (UPSTREAM_INTERNET_INSTALL_GATE, VERIFIED_OFFLINE_INSTALL_GATE),
+            (UPSTREAM_ESPTOOL_MATCH, VERIFIED_ESPTOOL_MATCH),
+        ):
+            source = source.replace(stale, final)
 
         self.assertEqual(correct_penv_setup_text(source), source)
 
     def test_rejects_unknown_or_ambiguous_requirements(self):
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text("no urllib3 requirement")
+            correct_penv_setup_text(self.source().replace(UPSTREAM_PENV_URLLIB3_REQUIREMENT, ""))
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text(
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}"
-            )
+            correct_penv_setup_text(self.source().replace(
+                UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n{UPSTREAM_PENV_URLLIB3_REQUIREMENT}",
+            ))
         with self.assertRaisesRegex(ValueError, "urllib3 requirement"):
-            correct_penv_setup_text(
-                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n"
-                f"{CORRECTED_PENV_URLLIB3_REQUIREMENT}"
-            )
+            correct_penv_setup_text(self.source().replace(
+                UPSTREAM_PENV_URLLIB3_REQUIREMENT,
+                f"{UPSTREAM_PENV_URLLIB3_REQUIREMENT}\n{CORRECTED_PENV_URLLIB3_REQUIREMENT}",
+            ))
+
+
+class CorrectEspIdfSetupTextTests(unittest.TestCase):
+    def source(self):
+        return "\n".join(
+            ["before", *(stale for stale, _ in IDF_EXACT_REQUIREMENTS), UPSTREAM_IDF_INSTALL_COMMAND, "after"]
+        )
+
+    def test_pins_and_routes_esp_idf_dependencies_offline(self):
+        corrected = correct_espidf_setup_text(self.source())
+
+        for stale, final in IDF_EXACT_REQUIREMENTS:
+            self.assertNotIn(stale, corrected)
+            self.assertIn(final, corrected)
+        self.assertIn(VERIFIED_IDF_INSTALL_COMMAND, corrected)
+        self.assertNotIn(UPSTREAM_IDF_INSTALL_COMMAND, corrected)
+
+    def test_is_idempotent(self):
+        corrected = correct_espidf_setup_text(self.source())
+
+        self.assertEqual(correct_espidf_setup_text(corrected), corrected)
+
+    def test_rejects_an_unknown_idf_dependency_shape(self):
+        with self.assertRaisesRegex(ValueError, "ESP-IDF exact dependency"):
+            correct_espidf_setup_text(self.source().replace(IDF_EXACT_REQUIREMENTS[0][0], ""))
 
 
 if __name__ == "__main__":
