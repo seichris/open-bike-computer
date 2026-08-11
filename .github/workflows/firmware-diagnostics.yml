@@ -1,18 +1,33 @@
-name: Speaker firmware builds
+name: Firmware Diagnostic Builds
 
 on:
+  workflow_call:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  esp32-speaker:
-    name: ESP32 Speaker (${{ matrix.target }})
+  esp32-diagnostics:
+    name: ESP32 Diagnostic (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         target:
-          - WAVESHARE_AMOLED_175_SPEAKER_HONK
-          - WAVESHARE_AMOLED_206_SPEAKER_HONK
+          - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS
+          - WAVESHARE_AMOLED_175_POWER_METRICS
+          - WAVESHARE_AMOLED_175_LIGHT_SLEEP
+          - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
+          - WAVESHARE_AMOLED_206_DISPLAY_TEST
+          - WAVESHARE_AMOLED_206_POWER_METRICS
+          - WAVESHARE_AMOLED_206_LIGHT_SLEEP
     defaults:
       run:
         working-directory: esp32
@@ -28,5 +43,5 @@ jobs:
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
-      - name: Build speaker firmware
+      - name: Build diagnostic firmware
         run: env -u LD_LIBRARY_PATH python tools/build_firmware.py "${{ matrix.target }}"

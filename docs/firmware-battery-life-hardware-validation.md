@@ -136,7 +136,9 @@ transfer, RF, wake-cycle, and overnight checks remain part of the final matrix.
 ## Automatic light-sleep experiment
 
 `WAVESHARE_AMOLED_175_LIGHT_SLEEP` and
-`WAVESHARE_AMOLED_206_LIGHT_SLEEP` are dedicated, CI-built validation profiles.
+`WAVESHARE_AMOLED_206_LIGHT_SLEEP` are dedicated validation profiles built by
+the weekly, release-validation, and manual **Firmware Diagnostic Builds**
+workflow.
 They inherit power metrics, enable FreeRTOS tickless idle, and request automatic
 light sleep while retaining the 80-240 MHz DFS range. Ordinary, metrics-only,
 and production profiles continue to compile with tickless idle off and never

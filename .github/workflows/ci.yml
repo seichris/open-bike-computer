@@ -1,37 +1,136 @@
 name: CI
 
 on:
+  workflow_call:
+    inputs:
+      scope:
+        description: CI component to run
+        required: false
+        default: all
+        type: string
   push:
+    branches:
+      - main
+    paths:
+      - ".dockerignore"
+      - ".github/scripts/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/firmware-diagnostics.yml"
+      - ".github/workflows/firmware-release.yml"
+      - ".github/workflows/map-platform-ci.yml"
+      - ".github/workflows/map-platform-image.yml"
+      - ".github/workflows/speaker-firmware.yml"
+      - "docs/app-store-privacy-disclosures.md"
+      - "docs/device-ownership-test-vectors.json"
+      - "docs/firmware-battery-life-hardware-validation.md"
+      - "docs/firmware-map-memory-diagnostics.md"
+      - "docs/firmware-map-render-scheduler.md"
+      - "docs/firmware-map-rendering-psram.md"
+      - "docs/releases/watchos-workout-companion.md"
+      - "esp32/**"
+      - "ios-app/**"
+      - "map-platform/**"
+      - "test-fixtures/fmb/**"
+      - "tools/firmware_manifest.py"
+      - "tools/tests/**"
+      - "tools/OSM_Extract/**"
   pull_request:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: CI component to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - firmware
+          - ios
+          - map
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+    github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'auto' }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select CI components
+    runs-on: ubuntu-latest
+    outputs:
+      firmware: ${{ steps.components.outputs.firmware }}
+      ios: ${{ steps.components.outputs.ios }}
+      map_backend: ${{ steps.components.outputs.map_backend }}
+      osm: ${{ steps.components.outputs.osm }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test CI component routing
+        run: python3 -m unittest discover -s .github/scripts/tests
+      - name: Validate the protected partial gate scope
+        if: >-
+          github.event_name == 'workflow_dispatch' && inputs.scope == 'map' &&
+          github.ref == 'refs/heads/deploy/map-platform-production'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          default_ref="origin/${DEFAULT_BRANCH}"
+          if ! git diff --quiet "$default_ref...$GITHUB_SHA" -- \
+            . ':(exclude)map-platform/deploy/compose.yaml'; then
+            echo "::error::Protected map-only CI contains changes outside the production lock"
+            exit 1
+          fi
+          if git diff --quiet "$default_ref...$GITHUB_SHA" -- \
+            map-platform/deploy/compose.yaml; then
+            echo "::error::Protected map-only CI does not change the production lock"
+            exit 1
+          fi
+      - id: components
+        name: Select changed components
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '0000000000000000000000000000000000000000' }}
+          CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 .github/scripts/changed_components.py
+          --event "$EVENT_NAME"
+          --base "$BASE_SHA"
+          --head "$HEAD_SHA"
+          --scope "$CI_SCOPE"
+          >> "$GITHUB_OUTPUT"
+
   esp32:
     name: ESP32 (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         target:
           - WAVESHARE_AMOLED_175
-          - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS
-          - WAVESHARE_AMOLED_175_POWER_METRICS
-          - WAVESHARE_AMOLED_175_LIGHT_SLEEP
           - WAVESHARE_AMOLED_175_PRODUCTION
           - WAVESHARE_AMOLED_206
-          - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
-          - WAVESHARE_AMOLED_206_DISPLAY_TEST
-          - WAVESHARE_AMOLED_206_POWER_METRICS
-          - WAVESHARE_AMOLED_206_LIGHT_SLEEP
           - WAVESHARE_AMOLED_206_PRODUCTION
     defaults:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Restore pinned PlatformIO downloads
+        uses: actions/cache@v6
+        with:
+          path: esp32/.pio/open-bike-build/downloads
+          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
       - name: Build firmware
@@ -39,9 +138,11 @@ jobs:
 
   ios:
     name: iOS
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Test generated app build identity
         run: python3 -m unittest discover -s scripts/tests
         working-directory: ios-app
@@ -100,14 +201,21 @@ jobs:
 
   esp32-host:
     name: ESP32 Host Tests
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v4
-      - name: Install host crypto dependency
-        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+      - uses: actions/checkout@v7
+      - name: Install host crypto dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev python3-cryptography
+      - name: Firmware manifest tests
+        run: python3 -m unittest discover -s tools/tests
+        working-directory: ${{ github.workspace }}
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \
@@ -464,3 +572,77 @@ jobs:
             -lm \
             -o /tmp/test_es8311_recovery
           /tmp/test_es8311_recovery
+
+  map-platform:
+    name: Map Platform
+    needs: changes
+    if: >-
+      needs.changes.outputs.map_backend == 'true' ||
+      needs.changes.outputs.osm == 'true'
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    uses: ./.github/workflows/map-platform-ci.yml
+    with:
+      run_backend: ${{ needs.changes.outputs.map_backend == 'true' }}
+      run_osm: ${{ needs.changes.outputs.osm == 'true' }}
+
+  gate:
+    name: >-
+      ${{ (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' ||
+      (inputs.scope == 'map' && github.ref ==
+      'refs/heads/deploy/map-platform-production')) && 'CI Gate' ||
+      format('Manual CI Gate ({0})', inputs.scope) }}
+    needs:
+      - changes
+      - esp32
+      - esp32-host
+      - ios
+      - map-platform
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected component
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          ESP32_RESULT: ${{ needs.esp32.result }}
+          FIRMWARE_CHANGED: ${{ needs.changes.outputs.firmware }}
+          HOST_RESULT: ${{ needs.esp32-host.result }}
+          IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          IOS_RESULT: ${{ needs.ios.result }}
+          MAP_BACKEND_CHANGED: ${{ needs.changes.outputs.map_backend }}
+          MAP_RESULT: ${{ needs.map-platform.result }}
+          OSM_CHANGED: ${{ needs.changes.outputs.osm }}
+        run: |
+          require_result() {
+            label="$1"
+            actual="$2"
+            expected="$3"
+            if test "$actual" != "$expected"; then
+              echo "::error::${label} result was ${actual}; expected ${expected}"
+              exit 1
+            fi
+          }
+
+          require_result "CI component selection" "$CHANGES_RESULT" success
+
+          if test "$FIRMWARE_CHANGED" = true; then
+            require_result "ESP32 builds" "$ESP32_RESULT" success
+            require_result "ESP32 host tests" "$HOST_RESULT" success
+          else
+            require_result "ESP32 builds" "$ESP32_RESULT" skipped
+            require_result "ESP32 host tests" "$HOST_RESULT" skipped
+          fi
+
+          if test "$IOS_CHANGED" = true; then
+            require_result "iOS" "$IOS_RESULT" success
+          else
+            require_result "iOS" "$IOS_RESULT" skipped
+          fi
+
+          if test "$MAP_BACKEND_CHANGED" = true || test "$OSM_CHANGED" = true; then
+            require_result "Map Platform" "$MAP_RESULT" success
+          else
+            require_result "Map Platform" "$MAP_RESULT" skipped
+          fi
