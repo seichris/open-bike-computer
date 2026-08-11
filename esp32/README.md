@@ -30,9 +30,10 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 If the host has no usable `python3`, use
 `tools/build_firmware_bootstrap.sh` with the same arguments. It obtains only the
 exact tracked standalone-Python archive and then delegates to the same verifier.
-The current checked-in lock is an unaccepted candidate, so all ordinary build
-entry points intentionally fail before PlatformIO until reviewed runtime
-bundles are published and pinned.
+The checked-in `firmware-runtime-2026-08-10-1` lock accepts exact Linux x86-64
+and Apple Silicon bundles from the matching immutable tooling prerelease.
+Unsupported hosts and any runtime whose locked bytes have changed fail before
+PlatformIO.
 
 The helper handles pioarduino's one-time tool-package conversion and
 custom-core bootstrap, keeps pioarduino's recursive build on the verified

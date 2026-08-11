@@ -114,9 +114,10 @@ Ordinary contributors consume accepted runtime locks only. Maintainers use the
 manual **Firmware runtime refresh candidate** workflow as the first bootstrap
 check, then must produce and review both-host offline replay, dependency graphs,
 licenses, clean/warm builds, and tamper evidence before publishing immutable
-assets and marking a target accepted. The checked-in candidate currently has
-no accepted bundles, so ordinary firmware builds deliberately stop before
-PlatformIO until that external release-asset gate is completed.
+assets and marking a target accepted. The checked-in lock now references
+accepted Linux x86-64 and Apple Silicon bundles in the
+`firmware-runtime-2026-08-10-1` prerelease. Unsupported hosts and any runtime
+whose locked bytes have changed still stop before PlatformIO.
 
 View ESP32 serial logs:
 
