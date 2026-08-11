@@ -1154,6 +1154,14 @@ static void processDisconnectedShutdown() {
  *
  */
 void setup() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  // A warm reset can interrupt an SD transfer while the card is selected.
+  // Deselect it before diagnostics, display setup, or any other peripheral
+  // initialization so the card cannot consume stray clocks while the
+  // dedicated HSPI controller is being recreated later in setup().
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+#endif
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif

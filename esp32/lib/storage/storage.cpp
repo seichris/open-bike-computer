@@ -479,11 +479,6 @@ bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
 FILE *Storage::open(const char *path, const char *mode) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  // Reconfigure SPI bus before SD access - QSPI display operations may have
-  // altered SPI state. This ensures the SD card SPI is properly configured.
-  SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
-#endif
   return fopen(path, mode);
 }
 

@@ -252,6 +252,12 @@ assert (
     "        power_management::LockDomain::Storage);\n"
     "    result = initSPIFFSLocked();"
 ) in storage_fallback
+storage_open_start = storage_implementation.index("FILE *Storage::open(")
+storage_open_end = storage_implementation.index(
+    "int Storage::close(", storage_open_start
+)
+storage_open = storage_implementation[storage_open_start:storage_open_end]
+assert "SPI.begin(" not in storage_open
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"
@@ -294,6 +300,13 @@ boot_policy_source = (
 ).read_text()
 assert "kStructuredSerialTxBufferSize = 4096" in boot_policy_source
 main_source = (project_dir / "src/main.cpp").read_text()
+setup_start = main_source.index("void setup()")
+setup_end = main_source.index("void loop()", setup_start)
+setup_source = main_source[setup_start:setup_end]
+sd_deselect = setup_source.index("digitalWrite(SD_CS, HIGH);")
+assert sd_deselect < setup_source.index("delay(2000);")
+assert sd_deselect < setup_source.index("initTFT();")
+assert sd_deselect < setup_source.index("storage.initSD();")
 for source in (main_source, speaker_source):
     assert "Serial.setTxBufferSize(" in source
     assert "boot_diagnostics::kStructuredSerialTxBufferSize" in source
