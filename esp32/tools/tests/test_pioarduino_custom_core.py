@@ -14,6 +14,7 @@ from pioarduino_custom_core import (
     UPSTREAM_EXTERNAL_UV_INSTALL,
     UPSTREAM_IDF_INSTALL_COMMAND,
     UPSTREAM_INTERNET_INSTALL_GATE,
+    UPSTREAM_GENERATED_PROJECT_CLEANUP,
     UPSTREAM_PENV_INSTALL_GUARD,
     UPSTREAM_PLATFORMIO_REQUIREMENT,
     UPSTREAM_ROOT_INSTALL_COMMAND,
@@ -22,6 +23,7 @@ from pioarduino_custom_core import (
     VERIFIED_ESPTOOL_MATCH,
     VERIFIED_EXTERNAL_UV_INSTALL,
     VERIFIED_IDF_INSTALL_COMMAND,
+    VERIFIED_GENERATED_PROJECT_CLEANUP,
     VERIFIED_OFFLINE_INSTALL_GATE,
     VERIFIED_PENV_INSTALL_GUARD,
     VERIFIED_PLATFORMIO_REQUIREMENT,
@@ -38,6 +40,7 @@ from pioarduino_custom_core import (
     UPSTREAM_NESTED_PIO_BLOCK,
     VERIFIED_NESTED_PIO_BLOCK,
     correct_nested_pio_command,
+    correct_generated_project_cleanup,
     correct_espidf_setup_text,
     correct_penv_setup_text,
     correct_sections_text,
@@ -146,6 +149,35 @@ class CorrectNestedPioCommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nested PlatformIO command"):
             correct_nested_pio_command(
                 f"{UPSTREAM_NESTED_PIO_BLOCK}\n{UPSTREAM_NESTED_PIO_BLOCK}"
+            )
+
+
+class CorrectGeneratedProjectCleanupTests(unittest.TestCase):
+    def test_removes_generated_paths_independently_and_fails_closed(self):
+        corrected = correct_generated_project_cleanup(
+            f"before\n{UPSTREAM_GENERATED_PROJECT_CLEANUP}\nafter"
+        )
+
+        self.assertIn(VERIFIED_GENERATED_PROJECT_CLEANUP, corrected)
+        self.assertNotIn(UPSTREAM_GENERATED_PROJECT_CLEANUP, corrected)
+        self.assertIn(
+            'for generated_project_name in ("dependencies.lock", "CMakeLists.txt")',
+            corrected,
+        )
+        self.assertIn("raise RuntimeError(", corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{VERIFIED_GENERATED_PROJECT_CLEANUP}\nafter"
+
+        self.assertEqual(correct_generated_project_cleanup(source), source)
+
+    def test_rejects_unknown_or_ambiguous_cleanup(self):
+        with self.assertRaisesRegex(ValueError, "generated project cleanup"):
+            correct_generated_project_cleanup("no generated cleanup")
+        with self.assertRaisesRegex(ValueError, "generated project cleanup"):
+            correct_generated_project_cleanup(
+                f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}\n"
+                f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}"
             )
 
 

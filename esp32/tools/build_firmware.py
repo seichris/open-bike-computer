@@ -166,6 +166,12 @@ PIOARDUINO_DUMMY_REQUIRED_FILES = {
     "arduino-lib-builder-cpp.cpp",
     "arduino-lib-builder-as.S",
 }
+PIOARDUINO_PROJECT_CMAKE = """cmake_minimum_required(VERSION 3.16.0)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(esp32)
+"""
+PIOARDUINO_PROJECT_ARTIFACTS = ("dependencies.lock", "CMakeLists.txt")
+PIOARDUINO_DEPENDENCIES_LOCK_MAX_BYTES = 1024 * 1024
 PLATFORMIO_CORE_PACKAGES = {"tool-scons"}
 PIOARDUINO_BOOTSTRAP_PACKAGES = {
     "tool-cmake",
@@ -505,20 +511,32 @@ def _runtime_stage_identity() -> tuple[dict[str, object], str]:
     return provenance, hashlib.sha256(encoded).hexdigest()
 
 
+def _pioarduino_transform_source_sha256() -> str:
+    transform_source = Path(__file__).with_name("pioarduino_custom_core.py")
+    if transform_source.is_symlink() or not transform_source.is_file():
+        raise BuildError("pioarduino transform source is missing or unsafe")
+    try:
+        return _file_sha256(transform_source)
+    except OSError as error:
+        raise BuildError("could not hash pioarduino transform source") from error
+
+
 def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
     """Extract and transform the pinned platform before any of its code runs."""
     marker_name = ".open-bike-runtime-transform.json"
     provenance, runtime_identity = _runtime_stage_identity()
+    transform_sha256 = _pioarduino_transform_source_sha256()
     parent = _ensure_private_directory(
         project_dir,
         Path(".pio/open-bike-build/platform-staging")
         / WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     )
-    destination = parent / runtime_identity
+    destination = parent / f"{runtime_identity}-{transform_sha256}"
     expected_marker = {
-        "schema": 1,
+        "schema": 2,
         "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
         "runtimeProvenance": provenance,
+        "transformSourceSha256": transform_sha256,
     }
 
     def validate_existing(root: Path) -> None:
@@ -1200,6 +1218,76 @@ def _remove_pioarduino_dummy(project_dir: Path) -> bool:
     return True
 
 
+def _is_pioarduino_dependencies_lock(path: Path) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        if path.stat().st_size > PIOARDUINO_DEPENDENCIES_LOCK_MAX_BYTES:
+            return False
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return (
+        content.startswith("dependencies:\n")
+        and "\ndirect_dependencies:\n" in content
+        and re.search(r"\nmanifest_hash: [0-9a-f]{64}\n", content) is not None
+        and "\ntarget: esp32s3\n" in content
+        and content.endswith("\nversion: 2.0.0\n")
+        and all(
+            character in "\n\r\t" or 32 <= ord(character) <= 126
+            for character in content
+        )
+    )
+
+
+def _require_absent_pioarduino_project_artifacts(project_dir: Path) -> None:
+    for name in PIOARDUINO_PROJECT_ARTIFACTS:
+        path = project_dir / name
+        if os.path.lexists(path):
+            raise BuildError(
+                "refusing to start PlatformIO with a pre-existing root project "
+                f"artifact: {path}"
+            )
+
+
+def _remove_pioarduino_project_artifacts(project_dir: Path) -> None:
+    """Remove only root files positively identified as pioarduino output.
+
+    The verified builder removes these before its recursive application pass.
+    This outer cleanup handles an ordinary failed or successful PlatformIO
+    return before another deterministic invocation can begin. A hard-killed
+    process leaves the paths in place, and the next invocation refuses to
+    guess that pre-existing files are disposable.
+    """
+    for name in PIOARDUINO_PROJECT_ARTIFACTS:
+        path = project_dir / name
+        if not os.path.lexists(path):
+            continue
+        recognized = False
+        if name == "CMakeLists.txt":
+            try:
+                recognized = (
+                    not path.is_symlink()
+                    and path.is_file()
+                    and path.read_text(encoding="utf-8")
+                    == PIOARDUINO_PROJECT_CMAKE
+                )
+            except (OSError, UnicodeError):
+                recognized = False
+        elif name == "dependencies.lock":
+            recognized = _is_pioarduino_dependencies_lock(path)
+        if not recognized:
+            raise BuildError(
+                f"refusing to remove unrecognized root project artifact: {path}"
+            )
+        try:
+            path.unlink()
+        except OSError as error:
+            raise BuildError(
+                f"could not remove pioarduino root project artifact: {path}"
+            ) from error
+
+
 def _remove_environment_build(project_dir: Path, environment: str) -> None:
     pio_dir = project_dir / ".pio"
     build_root = pio_dir / "build"
@@ -1443,8 +1531,12 @@ def build_firmware(
                 )
                 _consume_link_timing(project_dir, environment)
                 pass_started = time.monotonic()
+                _require_absent_pioarduino_project_artifacts(project_dir)
                 try:
-                    result = runner(command, cwd=project_dir)
+                    try:
+                        result = runner(command, cwd=project_dir)
+                    finally:
+                        _remove_pioarduino_project_artifacts(project_dir)
                 except OSError as error:
                     raise BuildError(
                         f"could not run {pio_command!r}: {error}"

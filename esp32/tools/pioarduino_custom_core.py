@@ -31,6 +31,27 @@ VERIFIED_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
                     + " ".join(['"%s"' % pio_cmd])
                 ),'''
 
+UPSTREAM_GENERATED_PROJECT_CLEANUP = '''        try:
+            os.remove(str(Path(env.subst("$PROJECT_DIR")) / "dependencies.lock"))
+            os.remove(str(Path(env.subst("$PROJECT_DIR")) / "CMakeLists.txt"))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"Warning: cleanup failed: {e}")'''
+VERIFIED_GENERATED_PROJECT_CLEANUP = '''        for generated_project_name in ("dependencies.lock", "CMakeLists.txt"):
+            generated_project_path = (
+                Path(env.subst("$PROJECT_DIR")) / generated_project_name
+            )
+            try:
+                generated_project_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise RuntimeError(
+                    "failed to remove pioarduino generated project file: "
+                    f"{generated_project_path}"
+                ) from error'''
+
 UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
 CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
 
@@ -199,6 +220,24 @@ def correct_nested_pio_command(source: str) -> str:
     )
 
 
+def correct_generated_project_cleanup(source: str) -> str:
+    """Remove each pioarduino project artifact independently and fail closed.
+
+    The pinned builder puts both files in the repository root before its
+    recursive Arduino pass. Its shared ``try`` skips ``CMakeLists.txt`` when
+    ``dependencies.lock`` is already absent, which makes the verified nested
+    prebuild see a dirty source tree. Treat each generated path independently
+    so every supported diagnostic profile reaches the recursive build with the
+    exact clean Git identity.
+    """
+    return _replace_exactly_once(
+        source,
+        UPSTREAM_GENERATED_PROJECT_CLEANUP,
+        VERIFIED_GENERATED_PROJECT_CLEANUP,
+        "generated project cleanup",
+    )
+
+
 def correct_penv_setup_text(source: str) -> str:
     """Keep pioarduino's root HTTP dependency stable across nested passes.
 
@@ -283,7 +322,9 @@ def correct_espidf_setup_text(source: str) -> str:
 
 def correct_espidf_text(source: str) -> str:
     """Apply every verified transform to pioarduino's ESP-IDF builder."""
-    return correct_espidf_setup_text(correct_nested_pio_command(source))
+    return correct_generated_project_cleanup(
+        correct_espidf_setup_text(correct_nested_pio_command(source))
+    )
 
 
 def correct_sections_text(sections_text: str) -> str:
