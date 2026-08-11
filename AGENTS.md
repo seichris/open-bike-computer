@@ -266,7 +266,11 @@ for that stronger claim.
 
 ### iOS app
 
-Open `ios-app/BikeComputer/BikeComputer.xcodeproj`. Run the portable Swift
+Open `ios-app/BikeComputer/BikeComputer.xcodeproj` only when GUI-specific setup
+or debugging is required. For command-line builds, use
+`ios-app/scripts/xcodebuild-cli.sh` with normal `xcodebuild` arguments. Do not
+call `xcodebuild` directly on Xcode 26.6; its verbose clang discovery probe can
+deadlock inside `SWBBuildService` on this Mac. Run the portable Swift
 navigation/BLE tests with:
 
 ```sh
@@ -278,7 +282,7 @@ The CI build shape is:
 
 ```sh
 cd ios-app
-xcodebuild -project BikeComputer/BikeComputer.xcodeproj \
+./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj \
   -scheme BikeComputer -destination 'generic/platform=iOS' \
   CODE_SIGNING_ALLOWED=NO build
 ```
