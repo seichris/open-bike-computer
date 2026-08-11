@@ -417,6 +417,23 @@ def _isolated_command_environment(root: Path) -> dict[str, str]:
     }
 
 
+def _refresh_work_root(project_dir: Path) -> Path:
+    """Return a symlink-free, project-private root for executable staging."""
+    if project_dir.is_symlink() or not project_dir.is_dir():
+        raise FirmwareRuntimeError("runtime refresh project directory is unsafe")
+    current = project_dir.resolve()
+    for component in (".pio", "open-bike-build", "runtime-refresh"):
+        current /= component
+        if os.path.lexists(current):
+            if current.is_symlink() or not current.is_dir():
+                raise FirmwareRuntimeError(
+                    f"runtime refresh work directory is unsafe: {current}"
+                )
+        else:
+            current.mkdir(mode=0o700)
+    return current
+
+
 def _normalize_wheel(path: Path) -> None:
     temporary = path.with_suffix(".normalized")
     with zipfile.ZipFile(path) as source, zipfile.ZipFile(
@@ -675,7 +692,9 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
     if host_target_id() != target_id:
         raise FirmwareRuntimeError(f"candidate {target_id} must be built on its matching host")
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="open-bike-runtime-") as temporary_name:
+    with tempfile.TemporaryDirectory(
+        prefix="open-bike-runtime-", dir=_refresh_work_root(project_dir)
+    ) as temporary_name:
         temporary = Path(temporary_name)
         command_environment = _isolated_command_environment(
             temporary / "command-environment"
@@ -954,7 +973,9 @@ def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> 
         project_dir, contract_path, expected_target=target_id
     )
     contract = contract_wrapper["target"]
-    with tempfile.TemporaryDirectory(prefix="open-bike-runtime-replay-") as temporary_name:
+    with tempfile.TemporaryDirectory(
+        prefix="open-bike-runtime-replay-", dir=_refresh_work_root(project_dir)
+    ) as temporary_name:
         temporary = Path(temporary_name)
         candidate_lock = {
             "schema": 1,

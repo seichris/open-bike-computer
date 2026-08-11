@@ -20,6 +20,7 @@ from refresh_firmware_runtime import (
     _normalize_name,
     _normalize_wheel,
     _reject_path_leaks,
+    _refresh_work_root,
     _remove_generated_python_state,
     _reviewed_wheel_license,
     _run,
@@ -295,6 +296,22 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(values["PIP_CONFIG_FILE"], os.devnull)
         with self.assertRaisesRegex(FirmwareRuntimeError, "unsupported names: LD_PRELOAD"):
             _run(("/usr/bin/env",), environment={"LD_PRELOAD": "/attacker/library.so"})
+
+    def test_executable_refresh_staging_is_project_private_and_symlink_free(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        expected = project.resolve() / ".pio/open-bike-build/runtime-refresh"
+        self.assertEqual(_refresh_work_root(project), expected)
+        self.assertTrue(expected.is_dir())
+
+        shutil.rmtree(project / ".pio")
+        external = self.root / "external"
+        external.mkdir()
+        (project / ".pio").symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(
+            FirmwareRuntimeError, "runtime refresh work directory is unsafe"
+        ):
+            _refresh_work_root(project)
 
 
 if __name__ == "__main__":
