@@ -77,7 +77,21 @@ def _download_artifact(
         raise FirmwareRuntimeError(f"runtime refresh output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     _run(
-        ("/usr/bin/curl", "--fail", "--location", "--silent", "--show-error", "--output", str(output), artifact.url),
+        (
+            "/usr/bin/curl",
+            "--disable",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--output",
+            str(output),
+            artifact.url,
+        ),
         environment=environment,
     )
     if output.stat().st_size != artifact.size or _sha256(output) != artifact.sha256:
@@ -614,11 +628,14 @@ def _pypi_wheel_source(
     raw = _run(
         (
             "/usr/bin/curl",
+            "--disable",
             "--fail",
             "--location",
             "--silent",
             "--show-error",
             "--proto",
+            "=https",
+            "--proto-redir",
             "=https",
             "--tlsv1.2",
             url,
