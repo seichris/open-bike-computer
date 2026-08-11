@@ -19,6 +19,7 @@ from build_firmware import (
     BuildError,
     WAVESHARE_PLATFORM_URL,
     _resolved_device_port,
+    _consume_link_timing,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
     _print_provenance,
@@ -204,6 +205,31 @@ class FirmwareBuildTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_consumes_only_exact_link_timing_evidence(self):
+        timing = (
+            self.project_dir
+            / ".pio/open-bike-build/phase-timings"
+            / f"{self.environment}-link.json"
+        )
+        timing.parent.mkdir(parents=True)
+        timing.write_text(
+            json.dumps(
+                {"schema": 1, "environment": self.environment, "linkMs": 17}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            _consume_link_timing(self.project_dir, self.environment), 17
+        )
+        self.assertFalse(timing.exists())
+        timing.write_text(
+            '{"schema":1,"environment":"wrong","linkMs":17}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BuildError, "timing evidence is invalid"):
+            _consume_link_timing(self.project_dir, self.environment)
 
     def write_dummy(self):
         dummy_dir = self.project_dir / ".dummy"

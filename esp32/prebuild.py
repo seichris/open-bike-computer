@@ -7,6 +7,8 @@ import os.path
 from platformio import util
 import shutil
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from SCons.Script import DefaultEnvironment
@@ -239,6 +241,65 @@ else:
     # outside the tracked repository. Never let those images claim an exact
     # clean Git SHA in BOOT_META.
     git_sha = f"unverified-{detected_git_sha}"
+
+
+link_started_ns = None
+
+
+def record_link_start(target, source, environment):
+    """Start the separately observable final-link phase."""
+    del target, source, environment
+    global link_started_ns
+    link_started_ns = time.monotonic_ns()
+
+
+def record_link_finish(target, source, environment):
+    """Atomically publish the link duration for the verified wrapper."""
+    del target, source, environment
+    if link_started_ns is None:
+        raise RuntimeError("firmware link timing started from an invalid state")
+    elapsed_ms = max(0, round((time.monotonic_ns() - link_started_ns) / 1_000_000))
+    output = (
+        project_dir
+        / ".pio/open-bike-build/phase-timings"
+        / f"{flavor}-link.json"
+    )
+    output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if output.parent.is_symlink() or not output.parent.is_dir():
+        raise RuntimeError("firmware link timing directory is unsafe")
+    temporary_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            json.dump(
+                {"schema": 1, "environment": flavor, "linkMs": elapsed_ms},
+                stream,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, output)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
+
+
+if deterministic_build and firmware_target.startswith("WAVESHARE_AMOLED_"):
+    link_target = "$BUILD_DIR/${PROGNAME}.elf"
+    env.AddPreAction(link_target, record_link_start)
+    env.AddPostAction(link_target, record_link_finish)
 
 dfl_lat = os.environ.get('ICENAV3_LAT')
 dfl_lon = os.environ.get('ICENAV3_LON')

@@ -1132,7 +1132,9 @@ def _print_provenance(
         f"runtimeTransformedPlatformTreeSha256={nested_value(core, 'platformTreeSha256')} "
         f"phasePlatformPreparationMs={nested_value(phases, 'platformPreparation')} "
         f"phaseCustomCoreBootstrapMs={nested_value(phases, 'customCoreBootstrap')} "
+        f"phaseApplicationCompileMs={nested_value(phases, 'applicationCompile')} "
         f"phaseApplicationBuildMs={nested_value(phases, 'applicationBuild')} "
+        f"phaseLinkMs={nested_value(phases, 'link')} "
         f"phaseAttestationMs={nested_value(phases, 'attestation')} "
         f"phaseTotalMs={nested_value(phases, 'total')} "
         f"sourceDateEpoch={value('sourceDateEpoch')} "
@@ -1287,6 +1289,34 @@ def _record_build_phase_timings(
     return manifest
 
 
+def _consume_link_timing(project_dir: Path, environment: str) -> int | None:
+    path = (
+        project_dir
+        / ".pio/open-bike-build/phase-timings"
+        / f"{environment}-link.json"
+    )
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise BuildError("firmware link timing evidence is unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"firmware link timing evidence is invalid: {error}") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "environment", "linkMs"}
+        or value.get("schema") != 1
+        or value.get("environment") != environment
+        or not isinstance(value.get("linkMs"), int)
+        or isinstance(value.get("linkMs"), bool)
+        or value["linkMs"] < 0
+    ):
+        raise BuildError("firmware link timing evidence is invalid")
+    return value["linkMs"]
+
+
 def build_firmware(
     project_dir: Path,
     environment: str,
@@ -1316,6 +1346,9 @@ def build_firmware(
     firmware_bin = project_dir / ".pio" / "build" / environment / "firmware.bin"
 
     with _project_build_lock(project_dir):
+        _ensure_private_directory(
+            project_dir, Path(".pio/open-bike-build/phase-timings")
+        )
         platform_prepare_started = time.monotonic()
         verified_config, platform_archive = _verified_platformio_project_config(
             project_dir
@@ -1377,13 +1410,16 @@ def build_firmware(
                 project_dir, environment
             )
             custom_core_bootstrap_ms = 0
+            application_compile_ms = 0
             application_build_ms = 0
+            link_ms = 0
             for pass_number in range(1, max_passes + 1):
                 print(
                     f"=== PlatformIO real-target build: {environment} "
                     f"(pass {pass_number}/{max_passes}) ===",
                     flush=True,
                 )
+                _consume_link_timing(project_dir, environment)
                 pass_started = time.monotonic()
                 try:
                     result = runner(command, cwd=project_dir)
@@ -1486,6 +1522,10 @@ def build_firmware(
                         "PlatformIO exited with status "
                         f"{result.returncode} while building {environment}"
                     )
+                observed_link_ms = _consume_link_timing(project_dir, environment)
+                bounded_link_ms = min(pass_elapsed_ms, observed_link_ms or 0)
+                link_ms += bounded_link_ms
+                application_compile_ms += pass_elapsed_ms - bounded_link_ms
                 application_build_ms += pass_elapsed_ms
                 if firmware_elf.is_symlink() or not firmware_elf.is_file():
                     raise BuildError(
@@ -1522,7 +1562,9 @@ def build_firmware(
                             )),
                             "platformPreparation": platform_prepare_ms,
                             "customCoreBootstrap": custom_core_bootstrap_ms,
+                            "applicationCompile": application_compile_ms,
                             "applicationBuild": application_build_ms,
+                            "link": link_ms,
                             "attestation": attestation_ms,
                             "total": round((time.monotonic() - build_started) * 1000),
                         },
