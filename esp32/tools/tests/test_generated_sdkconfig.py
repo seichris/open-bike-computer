@@ -150,6 +150,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             core / "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             core / "penv/bin/platformio-runtime.py",
             core / "penv/bin/esptool",
+            core / "penv/.espidf-5.5.1/bin/python",
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"attested {path.name}\n", encoding="utf-8")
@@ -188,6 +189,33 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         uploader.symlink_to(external)
                     else:
                         uploader.chmod(0o644)
+                    self.assertIsNone(
+                        record_generated_sdkconfig_defaults(
+                            project, "WAVESHARE_AMOLED_175"
+                        )
+                    )
+
+    def test_requires_one_executable_esp_idf_python_environment(self) -> None:
+        for state in ("missing", "multiple", "not-executable"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                defaults = project / "sdkconfig.defaults"
+                (project / "platformio.ini").write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                    encoding="utf-8",
+                )
+                defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+                with self.fake_core(project) as core:
+                    python = core / "penv/.espidf-5.5.1/bin/python"
+                    if state == "missing":
+                        python.unlink()
+                    elif state == "multiple":
+                        other = core / "penv/.espidf-other/bin/python"
+                        other.parent.mkdir(parents=True)
+                        other.write_text("attested python\n", encoding="utf-8")
+                        other.chmod(0o755)
+                    else:
+                        python.chmod(0o644)
                     self.assertIsNone(
                         record_generated_sdkconfig_defaults(
                             project, "WAVESHARE_AMOLED_175"
@@ -536,6 +564,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             "packages/tool-esptoolpy/esptool.py",
             "tools/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
             "penv/bin/platformio-runtime.py",
+            "penv/.espidf-5.5.1/bin/python",
         ):
             with self.subTest(relative=relative):
                 with tempfile.TemporaryDirectory() as directory:

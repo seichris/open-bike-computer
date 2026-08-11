@@ -170,6 +170,9 @@ jobs:
             grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-clean.log" \
               | grep 'uploadEligible=1' \
               | grep 'runtimeTarget=${{ matrix.target }}' \
+              | grep -E 'runtimePioarduinoPenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeEspIdfVenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
               >> "$evidence/provenance.txt"
 
           env -u LD_LIBRARY_PATH HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= python3 tools/build_firmware.py "$environment" \
@@ -179,6 +182,9 @@ jobs:
             grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-warm.log" \
               | grep 'uploadEligible=1' \
               | grep 'runtimeTarget=${{ matrix.target }}' \
+              | grep -E 'runtimePioarduinoPenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeEspIdfVenvTreeSha256=[0-9a-f]{64}' \
+              | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
               >> "$evidence/provenance.txt"
             env -u LD_LIBRARY_PATH python -c 'import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); keys=("sourceIdentity","sourceDateEpoch","buildTimestamp","firmwareBinSha256","firmwareElfSha256","bootloaderBinSha256","partitionTableBinSha256","bootApp0Sha256","flashPlanSha256","coreAttestationSha256","runtimeProvenance"); assert all(a.get(k) == b.get(k) for k in keys)' \
               "$evidence/${environment}-clean-sdkconfig-defaults.json" \

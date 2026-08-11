@@ -549,6 +549,20 @@ def _core_attestation(
         or not boards_root.is_dir()
     ):
         return None
+    esp_idf_python_envs = sorted(penv_root.glob(".espidf-*"))
+    if len(esp_idf_python_envs) != 1:
+        return None
+    esp_idf_python_env_root = esp_idf_python_envs[0]
+    esp_idf_python = esp_idf_python_env_root / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    if (
+        esp_idf_python_env_root.is_symlink()
+        or not esp_idf_python_env_root.is_dir()
+        or not esp_idf_python.is_file()
+        or not os.access(esp_idf_python, os.X_OK)
+    ):
+        return None
     try:
         evidence = {key: _file_sha256(path) for key, path in evidence_paths.items()}
         evidence["frameworkSourceTreeSha256"] = _tree_sha256(framework_root)
@@ -557,6 +571,9 @@ def _core_attestation(
         evidence["packagesTreeSha256"] = _execution_tree_sha256(package_root)
         evidence["toolsTreeSha256"] = _execution_tree_sha256(tools_root)
         evidence["penvTreeSha256"] = _execution_tree_sha256(penv_root)
+        evidence["espIdfPythonEnvTreeSha256"] = _execution_tree_sha256(
+            esp_idf_python_env_root
+        )
         evidence["globalLibrariesTreeSha256"] = _tree_sha256(
             globallib_root, allow_empty=True
         )
