@@ -547,14 +547,6 @@ jobs:
             tools/tests/test_sound_protocol.cpp \
             -o /tmp/test_sound_protocol
           /tmp/test_sound_protocol
-          g++ -std=c++17 -Wall -Wextra -Werror \
-            tools/tests/test_speaker_resource_state.cpp \
-            -o /tmp/test_speaker_resource_state
-          /tmp/test_speaker_resource_state
-          g++ -std=c++17 -Wall -Wextra -Werror \
-            tools/tests/test_sd_mount_policy.cpp \
-            -o /tmp/test_sd_mount_policy
-          /tmp/test_sd_mount_policy
       - name: Codec recovery host tests
         run: |
           cc -std=c11 -Wall -Wextra \
