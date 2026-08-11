@@ -230,6 +230,20 @@ assert cleanup_call < completion_publish
 assert "retrying retained cleanup state once" in speaker_implementation
 assert "codecInterface->close" not in speaker_implementation
 assert "dataInterface->close" not in speaker_implementation
+assert "i2s_channel_enable(txChannel)" not in speaker_implementation
+codec_open = speaker_implementation.index("esp_codec_dev_open(speakerDevice")
+channel_enabled = speaker_implementation.index(
+    "resourceState.channelEnabled = true;", codec_open
+)
+assert codec_open < channel_enabled
+failed_init = speaker_implementation[
+    speaker_implementation.index("bool failInitialization("):
+    speaker_implementation.index("bool initializeCodec()")
+]
+assert "releaseCodecResources()" not in failed_init
+assert "!codecReady || uxQueueMessagesWaiting(soundQueue) == 0" in (
+    speaker_implementation
+)
 assert "cleanupSucceeded = releaseCodecResources();" in speaker_implementation
 assert "(void)releaseCodecResources();" in speaker_implementation
 assert "playbackRequestLifecycleSucceeded(" in speaker_implementation[

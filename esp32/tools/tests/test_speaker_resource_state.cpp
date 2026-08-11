@@ -14,6 +14,8 @@ static void complete(CleanupAction action, SpeakerResourceState &state) {
     break;
   case CleanupAction::CloseCodecDevice:
     state.codecDeviceOpened = false;
+    // esp_codec_dev_close() disables the data interface's I2S channel.
+    state.channelEnabled = false;
     break;
   case CleanupAction::DeleteCodecDevice:
     state.codecDeviceCreated = false;
@@ -53,7 +55,6 @@ int main() {
       CleanupAction::DeleteCodecInterface,
       CleanupAction::DeleteDataInterface,
       CleanupAction::DeleteGpioInterface,
-      CleanupAction::DisableI2sChannel,
       CleanupAction::DeleteI2sChannel,
   };
   for (CleanupAction action : expected) {
@@ -80,18 +81,22 @@ int main() {
   complete(CleanupAction::DisableI2sChannel, retry);
   assert(nextCleanupAction(retry) == CleanupAction::DeleteI2sChannel);
 
-  // Every partial initialization prefix has a bounded reverse cleanup.
-  for (int prefix = 1; prefix <= 9; ++prefix) {
+  // Every valid partial initialization prefix has a bounded reverse cleanup.
+  // The codec device owns I2S enable and PA activation, so those states appear
+  // only together after esp_codec_dev_open() succeeds.
+  for (int prefix = 1; prefix <= 7; ++prefix) {
     SpeakerResourceState state{};
     if (prefix >= 1) state.channelAllocated = true;
     if (prefix >= 2) state.standardModeInitialized = true;
-    if (prefix >= 3) state.channelEnabled = true;
-    if (prefix >= 4) state.dataInterfaceCreated = true;
-    if (prefix >= 5) state.gpioInterfaceCreated = true;
-    if (prefix >= 6) state.codecInterfaceCreated = true;
-    if (prefix >= 7) state.codecDeviceCreated = true;
-    if (prefix >= 8) state.codecDeviceOpened = true;
-    if (prefix >= 9) state.powerAmplifierEnabled = true;
+    if (prefix >= 3) state.dataInterfaceCreated = true;
+    if (prefix >= 4) state.gpioInterfaceCreated = true;
+    if (prefix >= 5) state.codecInterfaceCreated = true;
+    if (prefix >= 6) state.codecDeviceCreated = true;
+    if (prefix >= 7) {
+      state.codecDeviceOpened = true;
+      state.channelEnabled = true;
+      state.powerAmplifierEnabled = true;
+    }
     int actions = 0;
     while (nextCleanupAction(state) != CleanupAction::None) {
       complete(nextCleanupAction(state), state);

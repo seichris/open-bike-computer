@@ -290,6 +290,10 @@ bool releaseCodecResources() {
         return false;
       }
       resourceState.codecDeviceOpened = false;
+      // A successful device close also disables its data interface. Keep the
+      // I2S lifecycle state aligned so cleanup does not issue a second disable
+      // and mistake ESP_ERR_INVALID_STATE for a retryable teardown failure.
+      resourceState.channelEnabled = false;
       break;
     case CleanupAction::DeleteCodecDevice:
       esp_codec_dev_delete(speakerDevice);
@@ -350,7 +354,6 @@ bool releaseCodecResources() {
 
 bool failInitialization(const char *message) {
   Serial.println(message);
-  releaseCodecResources();
   return false;
 }
 
@@ -396,10 +399,6 @@ bool initializeCodec() {
     return failInitialization("Speaker: failed to configure I2S");
   }
   resourceState.standardModeInitialized = true;
-  if (i2s_channel_enable(txChannel) != ESP_OK) {
-    return failInitialization("Speaker: failed to enable I2S");
-  }
-  resourceState.channelEnabled = true;
 
   audio_codec_i2s_cfg_t i2sConfig{};
   i2sConfig.port = I2S_NUM_0;
@@ -473,6 +472,8 @@ bool initializeCodec() {
     return failInitialization("Speaker: failed to open codec device");
   }
   resourceState.codecDeviceOpened = true;
+  // esp_codec_dev_open() owns data-interface activation and enables I2S.
+  resourceState.channelEnabled = true;
   resourceState.powerAmplifierEnabled = true;
 
   initialized = true;
@@ -611,7 +612,8 @@ void speakerTask(void *) {
         power_management::LockDomain::Audio);
     Sound sound = static_cast<Sound>(request.sound);
     bool playbackSucceeded = false;
-    if (!initializeCodec()) {
+    const bool codecReady = initializeCodec();
+    if (!codecReady) {
       playbackActive.store(false, std::memory_order_relaxed);
       Serial.println("Speaker: playback skipped because initialization failed");
     } else {
@@ -636,7 +638,10 @@ void speakerTask(void *) {
       playbackActive.store(false, std::memory_order_relaxed);
       ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
     }
-    const bool cleanupRequired = uxQueueMessagesWaiting(soundQueue) == 0;
+    // A partial initialization is always torn down immediately. A successful
+    // codec stays open only while another already-queued request can reuse it.
+    const bool cleanupRequired =
+        !codecReady || uxQueueMessagesWaiting(soundQueue) == 0;
     bool cleanupSucceeded = true;
     if (cleanupRequired) {
       cleanupSucceeded = releaseCodecResources();
