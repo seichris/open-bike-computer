@@ -397,6 +397,11 @@ class FirmwareRuntimeTests(unittest.TestCase):
         self.assertNotIn("runtime_root=", recovery)
         self.assertIn('staging=$(mktemp -d "$target_root/.recovery.XXXXXX")', recovery)
         self.assertIn('rm -rf -- "$staging"', recovery)
+        self.assertIn('--max-filesize "$archive_size"', recovery)
+        self.assertLess(
+            recovery.index('verify_archive "$partial"'),
+            recovery.index('mv "$partial" "$archive"'),
+        )
         self.assertEqual(recovery.count("env -i PATH=/usr/bin:/bin"), 2)
 
 
