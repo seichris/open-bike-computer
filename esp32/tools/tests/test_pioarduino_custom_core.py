@@ -181,6 +181,11 @@ class CorrectPenvSetupTextTests(unittest.TestCase):
         self.assertIn(VERIFIED_PLATFORMIO_REQUIREMENT, corrected)
         self.assertIn(VERIFIED_EXTERNAL_UV_INSTALL, corrected)
         self.assertIn(VERIFIED_PENV_INSTALL_GUARD, corrected)
+        self.assertIn(
+            "external_uv_executable not in (None, locked_uv_executable)",
+            corrected,
+        )
+        self.assertIn("external_uv_executable = locked_uv_executable", corrected)
         self.assertIn(VERIFIED_ROOT_INSTALL_COMMAND, corrected)
         self.assertIn(VERIFIED_OFFLINE_INSTALL_GATE, corrected)
         self.assertNotIn("https://github.com/pioarduino/platformio-core", corrected)

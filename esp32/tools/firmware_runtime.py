@@ -663,7 +663,12 @@ def _runtime_paths(root: Path) -> RuntimePaths:
         root,
         root / "python/bin/python3",
         root / "bin/pio",
-        root / "bin/uv",
+        # pioarduino derives the external uv executable from PYTHONEXE's
+        # directory and passes that exact path back to its dependency setup.
+        # Select the content-pinned executable installed beside CPython, not
+        # the convenience shell wrapper in bin/, so the strict path identity
+        # check cannot fall through to an ambient uv.
+        root / "python/bin/uv",
         root / "wheelhouse",
     )
 
