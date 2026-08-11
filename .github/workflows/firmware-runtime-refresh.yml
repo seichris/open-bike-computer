@@ -48,7 +48,7 @@ jobs:
       - name: Validate host and tracked inputs
         run: |
           test "$(uname -m)" = "$(test '${{ matrix.target }}' = linux-x86_64-cp313 && echo x86_64 || echo arm64)"
-          PYTHONPATH=tools python -m unittest \
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
             tools.tests.test_firmware_runtime \
             tools.tests.test_generated_sdkconfig \
