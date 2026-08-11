@@ -27,6 +27,24 @@ PROVENANCE_ENV = "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TARGET_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 LOCK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]{2,63}$")
+PRE_EXECUTION_INJECTION_ENV = {
+    "PYTHONEXECUTABLE",
+    "PYTHONHOME",
+    "PYTHONINSPECT",
+    "PYTHONPATH",
+    "PYTHONPLATLIBDIR",
+    "PYTHONSTARTUP",
+    "PYTHONUSERBASE",
+    "PYTHONWARNINGS",
+}
+SUPPORTED_TARGET_SHAPES = {
+    "linux-x86_64-cp313": (
+        "linux", "x86_64", "cp313", "manylinux_2_17_x86_64"
+    ),
+    "macos-arm64-cp313": (
+        "macos", "arm64", "cp313", "macosx_11_0_arm64"
+    ),
+}
 
 
 class FirmwareRuntimeError(RuntimeError):
@@ -343,6 +361,17 @@ def load_lock(path: Path) -> RuntimeLock:
         target_id = strings["id"]
         if TARGET_PATTERN.fullmatch(target_id) is None or target_id in seen:
             raise FirmwareRuntimeError(f"target {index} ID is invalid or duplicate")
+        expected_shape = SUPPORTED_TARGET_SHAPES.get(target_id)
+        actual_shape = (
+            strings["os"], strings["architecture"], strings["abi"],
+            strings["minimumPlatformTag"],
+        )
+        if expected_shape is None or actual_shape != expected_shape:
+            raise FirmwareRuntimeError(
+                f"target {index} OS, architecture, ABI, or platform tag is invalid"
+            )
+        if re.fullmatch(r"3\.13\.\d+", strings["pythonVersion"]) is None:
+            raise FirmwareRuntimeError(f"target {index} Python version is not CPython 3.13")
         seen.add(target_id)
         accepted = target["accepted"]
         if not isinstance(accepted, bool):
@@ -400,6 +429,11 @@ def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> 
     current = root.expanduser()
     if not current.is_absolute():
         raise FirmwareRuntimeError("runtime cache root must be absolute")
+    if os.path.lexists(current):
+        if current.is_symlink() or not current.is_dir():
+            raise FirmwareRuntimeError(f"unsafe runtime cache root: {current}")
+    elif create:
+        current.mkdir(mode=0o700, parents=True)
     for part in parts:
         if part in {"", ".", ".."} or "/" in part or "\\" in part:
             raise FirmwareRuntimeError("unsafe runtime cache path component")
@@ -407,6 +441,26 @@ def _safe_subtree(root: Path, parts: Sequence[str], *, create: bool = False) -> 
         if os.path.lexists(current):
             if current.is_symlink() or not current.is_dir():
                 raise FirmwareRuntimeError(f"unsafe runtime cache directory: {current}")
+        elif create:
+            current.mkdir(mode=0o700)
+    return current
+
+
+def _safe_project_subtree(
+    project_dir: Path, parts: Sequence[str], *, create: bool
+) -> Path:
+    current = project_dir.resolve()
+    if not current.is_dir():
+        raise FirmwareRuntimeError("firmware project directory is missing")
+    for part in parts:
+        if part in {"", ".", ".."} or "/" in part or "\\" in part:
+            raise FirmwareRuntimeError("unsafe project-private runtime path component")
+        current /= part
+        if os.path.lexists(current):
+            if current.is_symlink() or not current.is_dir():
+                raise FirmwareRuntimeError(
+                    f"unsafe project-private runtime directory: {current}"
+                )
         elif create:
             current.mkdir(mode=0o700)
     return current
@@ -564,7 +618,9 @@ def _runtime_paths(root: Path) -> RuntimePaths:
     )
 
 
-def _verify_runtime_tree(root: Path, target: RuntimeTarget) -> RuntimeProvenance:
+def _verify_runtime_tree(
+    root: Path, target: RuntimeTarget, *, require_read_only: bool = False
+) -> RuntimeProvenance:
     inventory_path = root / "inventory.json"
     if root.is_symlink() or not root.is_dir() or inventory_path.is_symlink() or not inventory_path.is_file():
         raise FirmwareRuntimeError("accepted runtime tree is missing or unsafe")
@@ -574,6 +630,8 @@ def _verify_runtime_tree(root: Path, target: RuntimeTarget) -> RuntimeProvenance
         raise FirmwareRuntimeError("accepted runtime inventory is invalid") from error
     if inventory_path.read_bytes() != _canonical_json(value):
         raise FirmwareRuntimeError("accepted runtime inventory changed")
+    if stat.S_IMODE(inventory_path.stat().st_mode) != 0o444:
+        raise FirmwareRuntimeError("accepted runtime inventory permissions changed")
     files = _strict_object(value, {"schema", "files"}, set(), "runtime inventory")["files"]
     if not isinstance(files, list):
         raise FirmwareRuntimeError("accepted runtime inventory is invalid")
@@ -613,7 +671,21 @@ def _verify_runtime_tree(root: Path, target: RuntimeTarget) -> RuntimeProvenance
         entry = expected[name]
         if path.stat().st_size != entry["size"] or _file_sha256(path) != entry["sha256"]:
             raise FirmwareRuntimeError(f"accepted runtime member changed: {name}")
+        expected_mode = 0o555 if entry["executable"] else 0o444
+        if stat.S_IMODE(path.stat().st_mode) != expected_mode:
+            raise FirmwareRuntimeError(
+                f"accepted runtime member permissions changed: {name}"
+            )
         digest.update(name.encode("utf-8") + b"\0" + str(entry["size"]).encode("ascii") + b"\0" + str(entry["sha256"]).encode("ascii") + b"\n")
+    if require_read_only:
+        if stat.S_IMODE(root.stat().st_mode) != 0o555:
+            raise FirmwareRuntimeError("accepted runtime root permissions changed")
+        for name in actual_directories:
+            directory = root.joinpath(*PurePosixPath(name).parts)
+            if stat.S_IMODE(directory.stat().st_mode) != 0o555:
+                raise FirmwareRuntimeError(
+                    f"accepted runtime directory permissions changed: {name}"
+                )
     paths = _runtime_paths(root)
     for executable in (paths.python, paths.pio, paths.uv):
         if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
@@ -682,7 +754,7 @@ def ensure_shared_runtime(lock: RuntimeLock, target: RuntimeTarget, *, cache_roo
         download_verified(target.bundle, archive)
     accepted = base / target.bundle.sha256
     if os.path.lexists(accepted):
-        provenance = _verify_runtime_tree(accepted, target)
+        provenance = _verify_runtime_tree(accepted, target, require_read_only=True)
         if not provenance.tree_sha256:
             raise AssertionError("verified runtime tree has no digest")
         return accepted
@@ -695,7 +767,7 @@ def ensure_shared_runtime(lock: RuntimeLock, target: RuntimeTarget, *, cache_roo
         os.replace(staging, accepted)
         published = True
         _mark_tree_read_only(accepted)
-        _verify_runtime_tree(accepted, target)
+        _verify_runtime_tree(accepted, target, require_read_only=True)
     except Exception:
         cleanup = accepted if published else staging
         if cleanup.exists() and not cleanup.is_symlink():
@@ -719,9 +791,11 @@ def repair_runtime(lock: RuntimeLock, target: RuntimeTarget, project_dir: Path, 
                 candidate.unlink()
             else:
                 raise FirmwareRuntimeError(f"refusing unsafe runtime repair target: {candidate}")
-    private = project_dir / ".pio/open-bike-build/host-runtime" / lock.lock_set_id / target.target_id
+    root_private = _safe_project_subtree(
+        project_dir, (".pio", "open-bike-build", "host-runtime"), create=False
+    )
+    private = root_private / lock.lock_set_id / target.target_id
     if os.path.lexists(private):
-        root_private = project_dir / ".pio/open-bike-build/host-runtime"
         if private.is_symlink() or not private.is_dir() or root_private.resolve() not in private.resolve().parents:
             raise FirmwareRuntimeError("refusing unsafe private runtime repair target")
         _remove_owned_runtime_tree(private)
@@ -730,13 +804,14 @@ def repair_runtime(lock: RuntimeLock, target: RuntimeTarget, project_dir: Path, 
 def _hydrate_private(shared: Path, project_dir: Path, lock: RuntimeLock, target: RuntimeTarget) -> Path:
     if target.bundle is None:
         raise FirmwareRuntimeError("runtime target has no bundle")
-    parent = project_dir / ".pio/open-bike-build/host-runtime" / lock.lock_set_id
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if parent.is_symlink() or not parent.is_dir():
-        raise FirmwareRuntimeError("private runtime parent is unsafe")
+    parent = _safe_project_subtree(
+        project_dir,
+        (".pio", "open-bike-build", "host-runtime", lock.lock_set_id),
+        create=True,
+    )
     destination = parent / target.target_id
     if os.path.lexists(destination):
-        _verify_runtime_tree(destination, target)
+        _verify_runtime_tree(destination, target, require_read_only=True)
         return destination
     staging = Path(tempfile.mkdtemp(prefix=f".{target.target_id}.", dir=parent))
     published = False
@@ -752,7 +827,7 @@ def _hydrate_private(shared: Path, project_dir: Path, lock: RuntimeLock, target:
         os.replace(staging, destination)
         published = True
         _mark_tree_read_only(destination)
-        _verify_runtime_tree(destination, target)
+        _verify_runtime_tree(destination, target, require_read_only=True)
     except Exception:
         cleanup = destination if published else staging
         if cleanup.exists() and not cleanup.is_symlink():
@@ -768,13 +843,28 @@ def ensure_runtime_handoff(
     execve: Callable[[str, Sequence[str], Mapping[str, str]], object] = os.execve,
 ) -> RuntimeProvenance:
     bootstrap_start = time.monotonic()
+    injection = sorted(
+        name
+        for name, value in os.environ.items()
+        if value
+        and (
+            name in PRE_EXECUTION_INJECTION_ENV
+            or name.startswith("DYLD_")
+            or name.startswith("LD_")
+        )
+    )
+    if injection:
+        raise FirmwareRuntimeError(
+            "pre-execution runtime injection variables are not allowed: "
+            + ", ".join(injection)
+        )
     lock = load_lock(lock_path or project_dir / "tools/firmware-runtime/lock-v1.json")
     target = select_target(lock)
     if "--repair-runtime" in argv and HANDOFF_ENV not in os.environ:
         repair_runtime(lock, target, project_dir, cache_root=cache_root)
     shared = ensure_shared_runtime(lock, target, cache_root=cache_root)
     private = _hydrate_private(shared, project_dir, lock, target)
-    provenance = _verify_runtime_tree(private, target)
+    provenance = _verify_runtime_tree(private, target, require_read_only=True)
     provenance = RuntimeProvenance(
         lock.lock_set_id, lock.manifest_sha256, provenance.target,
         provenance.bundle_sha256, provenance.python_version,

@@ -165,6 +165,24 @@ class FirmwareRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(FirmwareRuntimeError, "canonical|missing"):
             load_lock(path)
 
+    def test_lock_rejects_wrong_abi_platform_and_python_minor(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+        for field, value in (
+            ("abi", "cp312"),
+            ("minimumPlatformTag", "macosx_10_9_x86_64"),
+            ("pythonVersion", "3.12.12"),
+        ):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed["targets"][0][field] = value
+                path.write_bytes(canonical(changed))
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "ABI|platform tag|CPython 3.13"
+                ):
+                    load_lock(path)
+
     def test_target_selection_and_unsupported_host_fail_before_bundle_use(self) -> None:
         bundle, size, digest = self.make_bundle()
         lock = load_lock(self.make_lock(bundle, size, digest))
@@ -206,6 +224,26 @@ class FirmwareRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(FirmwareRuntimeError, "changed"):
             ensure_shared_runtime(lock, target, cache_root=cache)
 
+    def test_shared_runtime_rejects_permission_changes_and_cache_symlinks(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+        accepted.chmod(0o755)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "permissions changed"):
+            ensure_shared_runtime(lock, target, cache_root=cache)
+
+        external = self.root / "external-cache"
+        external.mkdir()
+        linked = self.root / "linked-cache"
+        linked.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsafe runtime cache root"):
+            ensure_shared_runtime(lock, target, cache_root=linked)
+
     def test_publication_renames_a_writable_root_then_locks_and_repairs_it(self) -> None:
         bundle, size, digest = self.make_bundle()
         lock = load_lock(self.make_lock(bundle, size, digest))
@@ -224,7 +262,9 @@ class FirmwareRuntimeTests(unittest.TestCase):
             accepted = ensure_shared_runtime(lock, target, cache_root=cache)
         self.assertEqual(accepted.stat().st_mode & 0o200, 0)
 
-        repair_runtime(lock, target, self.root / "project", cache_root=cache)
+        project = self.root / "project"
+        project.mkdir()
+        repair_runtime(lock, target, project, cache_root=cache)
         self.assertFalse(accepted.exists())
         self.assertFalse((base / f"{digest}.tar.gz").exists())
 
@@ -252,7 +292,7 @@ class FirmwareRuntimeTests(unittest.TestCase):
                 self.assertNotEqual(Path(source).stat().st_mode & 0o200, 0)
             return real_replace(source, destination)
 
-        with mock.patch(
+        with mock.patch.dict(os.environ, {"PYTHONPATH": ""}), mock.patch(
             "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
         ), mock.patch("firmware_runtime.os.replace", require_writable_private_root):
             with self.assertRaisesRegex(RuntimeError, "captured"):
@@ -261,9 +301,44 @@ class FirmwareRuntimeTests(unittest.TestCase):
                     lock_path=lock_path, cache_root=cache, execve=capture,
                 )
         self.assertIn("host-runtime", calls[0][0])
-        self.assertTrue(Path(calls[0][0]).is_relative_to(project))
+        self.assertTrue(Path(calls[0][0]).is_relative_to(project.resolve()))
         self.assertEqual(calls[0][2]["PYTHONNOUSERSITE"], "1")
         self.assertNotIn(str(Path.home() / ".local/bin"), calls[0][2]["PATH"])
+
+    def test_handoff_rejects_loader_injection_and_symlinked_private_stores(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock_path = self.make_lock(bundle, size, digest)
+        lock = load_lock(lock_path)
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        project = self.root / "project"
+        (project / "tools").mkdir(parents=True)
+
+        with mock.patch.dict(
+            os.environ, {"PYTHONPATH": "/malicious", "LD_PRELOAD": "/evil.so"}
+        ), self.assertRaisesRegex(FirmwareRuntimeError, "PYTHONPATH.*LD_PRELOAD|LD_PRELOAD.*PYTHONPATH"):
+            ensure_runtime_handoff(
+                ("WAVESHARE_AMOLED_175",), project,
+                lock_path=lock_path, cache_root=cache,
+            )
+
+        external = self.root / "other-worktree-pio"
+        external.mkdir()
+        (project / ".pio").symlink_to(external, target_is_directory=True)
+        with mock.patch.dict(
+            os.environ, {"PYTHONPATH": "", "LD_PRELOAD": ""}
+        ), mock.patch(
+            "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
+        ), self.assertRaisesRegex(
+            FirmwareRuntimeError, "unsafe project-private runtime directory"
+        ):
+            ensure_runtime_handoff(
+                ("WAVESHARE_AMOLED_175",), project,
+                lock_path=lock_path, cache_root=cache,
+            )
 
     def test_recovery_bootstrap_matches_tracked_python_artifacts(self) -> None:
         project = Path(__file__).resolve().parents[2]
@@ -276,6 +351,10 @@ class FirmwareRuntimeTests(unittest.TestCase):
             self.assertIn(str(target.python.size), recovery)
             self.assertIn(target.python.sha256, recovery)
             self.assertIn(target.python.url, recovery)
+        self.assertNotIn("runtime_root=", recovery)
+        self.assertIn('staging=$(mktemp -d "$target_root/.recovery.XXXXXX")', recovery)
+        self.assertIn('rm -rf -- "$staging"', recovery)
+        self.assertEqual(recovery.count("env -i PATH=/usr/bin:/bin"), 2)
 
 
 if __name__ == "__main__":
