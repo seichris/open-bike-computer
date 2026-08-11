@@ -1,5 +1,8 @@
 """Pure helpers for pioarduino custom-core build workarounds."""
 
+import hashlib
+from pathlib import Path
+
 
 UPSTREAM_NESTED_PIO_BLOCK = '''        pio_cmd = env["PIOENV"]
         env.Execute(
@@ -235,6 +238,46 @@ def correct_generated_project_cleanup(source: str) -> str:
         UPSTREAM_GENERATED_PROJECT_CLEANUP,
         VERIFIED_GENERATED_PROJECT_CLEANUP,
         "generated project cleanup",
+    )
+
+
+def pioarduino_transform_source_sha256() -> str:
+    """Identify the exact repository-owned pre-execution transform source."""
+    source = Path(__file__)
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("pioarduino transform source is missing or unsafe")
+    try:
+        return hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError as error:
+        raise ValueError("could not hash pioarduino transform source") from error
+
+
+def verified_transform_marker_matches(
+    marker: object,
+    platform_archive_sha256: str,
+    runtime_provenance: object,
+    transform_source_sha256: str,
+) -> bool:
+    """Validate the complete installed-platform transform identity."""
+    if not isinstance(marker, dict):
+        return False
+    platform_tree_sha256 = marker.get("platformTreeSha256")
+    return (
+        set(marker)
+        == {
+            "schema",
+            "platformArchiveSha256",
+            "runtimeProvenance",
+            "transformSourceSha256",
+            "platformTreeSha256",
+        }
+        and marker.get("schema") == 2
+        and marker.get("platformArchiveSha256") == platform_archive_sha256
+        and marker.get("runtimeProvenance") == runtime_provenance
+        and marker.get("transformSourceSha256") == transform_source_sha256
+        and isinstance(platform_tree_sha256, str)
+        and len(platform_tree_sha256) == 64
+        and all(character in "0123456789abcdef" for character in platform_tree_sha256)
     )
 
 

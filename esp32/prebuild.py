@@ -27,6 +27,8 @@ from pioarduino_custom_core import (
     correct_espidf_text,
     correct_penv_setup_text,
     correct_sections_text,
+    pioarduino_transform_source_sha256,
+    verified_transform_marker_matches,
 )
 
 
@@ -141,14 +143,20 @@ def ensure_verified_nested_build_config():
         runtime_provenance = json.loads(
             os.environ["OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE"]
         )
-    except (KeyError, OSError, UnicodeError, json.JSONDecodeError) as error:
+        transform_sha256 = pioarduino_transform_source_sha256()
+    except (
+        KeyError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
         raise RuntimeError("pre-execution pioarduino transform marker is invalid") from error
-    if (
-        not isinstance(marker, dict)
-        or marker.get("schema") != 1
-        or marker.get("platformArchiveSha256")
-        != os.environ.get("OPEN_BIKE_PLATFORM_ARCHIVE_SHA256")
-        or marker.get("runtimeProvenance") != runtime_provenance
+    if not verified_transform_marker_matches(
+        marker,
+        os.environ.get("OPEN_BIKE_PLATFORM_ARCHIVE_SHA256", ""),
+        runtime_provenance,
+        transform_sha256,
     ):
         raise RuntimeError("pre-execution pioarduino transform identity changed")
     patches = (
