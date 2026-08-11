@@ -80,6 +80,10 @@ class FirmwareRuntimeTests(unittest.TestCase):
                     info.linkname = "/tmp/escape"
                     info.size = 0
                     archive.addfile(info)
+                elif kind == "directory":
+                    info.type = tarfile.DIRTYPE
+                    info.size = 0
+                    archive.addfile(info)
                 else:
                     archive.addfile(info, io.BytesIO(contents))
         return bundle, bundle.stat().st_size, hashlib.sha256(bundle.read_bytes()).hexdigest()
@@ -298,7 +302,12 @@ class FirmwareRuntimeTests(unittest.TestCase):
             select_target(lock, "macos-arm64-cp313")
 
     def test_safe_extract_rejects_traversal_symlink_and_extra_files(self) -> None:
-        for extra in (("../escape", b"x", "file"), ("link", b"", "symlink"), ("extra", b"x", "file")):
+        for extra in (
+            ("../escape", b"x", "file"),
+            ("link", b"", "symlink"),
+            ("extra-dir", b"", "directory"),
+            ("extra", b"x", "file"),
+        ):
             with self.subTest(extra=extra[0]):
                 bundle, _, _ = self.make_bundle(extra_member=extra)
                 destination = self.root / f"out-{extra[0].replace('/', '_')}"
@@ -317,6 +326,7 @@ class FirmwareRuntimeTests(unittest.TestCase):
         accepted = ensure_shared_runtime(lock, target, cache_root=cache)
         provenance = _verify_runtime_tree(accepted, target)
         self.assertEqual(provenance.bundle_sha256, digest)
+        self.assertEqual(cached_bundle.stat().st_mode & 0o777, 0o444)
         victim = accepted / "bin/pio"
         victim.chmod(0o755)
         victim.write_bytes(b"tampered")
@@ -353,6 +363,38 @@ class FirmwareRuntimeTests(unittest.TestCase):
         ):
             ensure_shared_runtime(lock, target, cache_root=nested_cache)
         self.assertFalse((ancestor_target / "nested").exists())
+
+    def test_shared_runtime_rejects_wrong_ownership_and_hard_links(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        lock = load_lock(self.make_lock(bundle, size, digest))
+        target = select_target(lock, "macos-arm64-cp313")
+        cache = self.root / "cache"
+        base = cache / "locks" / lock.lock_set_id / target.target_id
+        base.mkdir(parents=True)
+        (base / f"{digest}.tar.gz").write_bytes(bundle.read_bytes())
+        accepted = ensure_shared_runtime(lock, target, cache_root=cache)
+
+        if hasattr(os, "getuid"):
+            with mock.patch(
+                "firmware_runtime.os.getuid", return_value=os.getuid() + 1
+            ):
+                with self.assertRaisesRegex(FirmwareRuntimeError, "wrong owner"):
+                    ensure_shared_runtime(lock, target, cache_root=cache)
+
+        victim = accepted / "bin/pio"
+        external = self.root / "external-pio"
+        external.write_bytes(victim.read_bytes())
+        external.chmod(0o555)
+        victim.parent.chmod(0o755)
+        victim.unlink()
+        os.link(external, victim)
+        victim.parent.chmod(0o555)
+        with self.assertRaisesRegex(FirmwareRuntimeError, "link or special"):
+            ensure_shared_runtime(lock, target, cache_root=cache)
+        project = self.root / "project"
+        project.mkdir()
+        with self.assertRaisesRegex(FirmwareRuntimeError, "unsafe entry"):
+            repair_runtime(lock, target, project, cache_root=cache)
 
     def test_publication_renames_a_writable_root_then_locks_and_repairs_it(self) -> None:
         bundle, size, digest = self.make_bundle()
