@@ -38,6 +38,9 @@ JOB_KEY_PATTERN = re.compile(
     r"(?P<plain>[A-Za-z_][A-Za-z0-9_-]*)):"
     r"\s*(?:&[A-Za-z_][A-Za-z0-9_-]*\s*)?(?:#.*)?"
 )
+CLEAN_BUILDER_PATTERN = re.compile(
+    r"(?:run:\s*)?env -u LD_LIBRARY_PATH python tools/build_firmware\.py\s+.+"
+)
 
 
 def workflow_source(filename: str) -> str:
@@ -169,6 +172,14 @@ def firmware_builder_jobs(source: str) -> tuple[tuple[str, str], ...]:
     )
 
 
+def firmware_builder_steps(job_block: str) -> tuple[str, ...]:
+    return tuple(
+        step
+        for step in sequence_mapping_blocks(job_block, "steps", indent=4)
+        if firmware_builder_lines(step)
+    )
+
+
 def matrix_targets(source: str) -> set[str]:
     return set(
         re.findall(r"^\s+- (WAVESHARE_AMOLED_[A-Z0-9_]+)$", source, re.MULTILINE)
@@ -182,16 +193,38 @@ class WorkflowPolicyTests(unittest.TestCase):
         builder_count = 0
         violations = []
         for workflow, source in workflow_sources(root):
-            for job, block in firmware_builder_jobs(source):
-                for command in firmware_builder_lines(block):
-                    builder_count += 1
-                    if (
-                        "env -u LD_LIBRARY_PATH python tools/build_firmware.py"
-                        not in command
-                    ):
+            jobs = firmware_builder_jobs(source)
+            all_commands = firmware_builder_lines(source)
+            job_commands = tuple(
+                command
+                for _, block in jobs
+                for command in firmware_builder_lines(block)
+            )
+            builder_count += len(all_commands)
+            if sorted(all_commands) != sorted(job_commands):
+                violations.append(
+                    f"{workflow}: builder command exists outside a recognized job"
+                )
+            for job, block in jobs:
+                steps = firmware_builder_steps(block)
+                block_commands = firmware_builder_lines(block)
+                step_commands = tuple(
+                    command for step in steps for command in firmware_builder_lines(step)
+                )
+                if sorted(block_commands) != sorted(step_commands):
+                    violations.append(
+                        f"{workflow}:{job}: builder command exists outside a run step"
+                    )
+                for step in steps:
+                    if re.search(r"(?m)^if:", step):
                         violations.append(
-                            f"{workflow}:{job}: unsafe builder command: {command}"
+                            f"{workflow}:{job}: builder step is conditional"
                         )
+                    for command in firmware_builder_lines(step):
+                        if not CLEAN_BUILDER_PATTERN.fullmatch(command):
+                            violations.append(
+                                f"{workflow}:{job}: unsafe builder command: {command}"
+                            )
         self.assertGreater(builder_count, 0)
         self.assertEqual((), tuple(violations))
 
@@ -207,9 +240,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         violations = []
         for workflow, job, block in builder_jobs:
             steps = sequence_mapping_blocks(block, "steps", indent=4)
-            if not any(is_verified_download_cache_step(step) for step in steps):
+            cache_indices = tuple(
+                index
+                for index, step in enumerate(steps)
+                if is_verified_download_cache_step(step)
+            )
+            builder_indices = tuple(
+                index
+                for index, step in enumerate(steps)
+                if firmware_builder_lines(step)
+            )
+            if not builder_indices or not all(
+                any(cache_index < builder_index for cache_index in cache_indices)
+                for builder_index in builder_indices
+            ):
                 violations.append(
-                    f"{workflow}:{job}: missing active verified-download cache"
+                    f"{workflow}:{job}: missing active verified-download cache "
+                    "before builder step"
                 )
         self.assertEqual((), tuple(violations))
 
@@ -453,6 +500,15 @@ class WorkflowPolicyTests(unittest.TestCase):
                 "          echo 'path: .pio/open-bike-build/downloads'\n"
                 "          env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
             ),
+            "late-cache.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+                "      - uses: actions/cache@v6\n"
+                "        with:\n"
+                "          path: .pio/open-bike-build/downloads\n"
+            ),
         }
         for filename, source in mutations.items():
             with self.subTest(filename=filename):
@@ -462,6 +518,55 @@ class WorkflowPolicyTests(unittest.TestCase):
 
                     with self.assertRaises(AssertionError):
                         self.assert_firmware_builders_reuse_verified_downloads(root)
+
+    def test_builder_policy_requires_an_active_exact_run_command(self) -> None:
+        mutations = {
+            "job-env.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    env:\n"
+                "      NOTE: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+                "    steps:\n"
+                "      - uses: actions/cache@v6\n"
+                "        with:\n"
+                "          path: .pio/open-bike-build/downloads\n"
+            ),
+            "echo.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - run: echo env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+            ),
+            "disabled.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+                "        if: ${{ false }}\n"
+            ),
+        }
+        for filename, source in mutations.items():
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    (root / filename).write_text(source, encoding="utf-8")
+
+                    with self.assertRaises(AssertionError):
+                        self.assert_firmware_builders_clear_library_overrides(root)
+
+    def test_block_scalar_builder_is_bound_to_its_run_step(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "builder.yml").write_text(
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - run: |\n"
+                "          env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n",
+                encoding="utf-8",
+            )
+
+            self.assert_firmware_builders_clear_library_overrides(root)
 
     def test_every_firmware_builder_clears_library_overrides(self) -> None:
         self.assert_firmware_builders_clear_library_overrides()
