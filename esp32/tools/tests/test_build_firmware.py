@@ -1884,6 +1884,15 @@ class FirmwareBuildTests(unittest.TestCase):
             )
             staged_platform = next(staging_parent.iterdir())
             platform_json = staged_platform / "platform.json"
+            self.assertEqual(staged_platform.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(platform_json.stat().st_mode & 0o777, 0o444)
+            self.assertTrue(
+                all(
+                    path.stat().st_mode & 0o777 == 0o755
+                    for path in staged_platform.rglob("*")
+                    if path.is_dir()
+                )
+            )
             platform_json.chmod(0o644)
             with self.assertRaisesRegex(BuildError, "permissions changed"):
                 _verified_platformio_project_config(self.project_dir)

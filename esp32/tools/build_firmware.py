@@ -534,7 +534,7 @@ def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
         tree_digest = value.get("platformTreeSha256")
         if (
             set(value) != {*expected_marker, "platformTreeSha256"}
-            or stat.S_IMODE(root.stat().st_mode) != 0o555
+            or stat.S_IMODE(root.stat().st_mode) != 0o755
             or stat.S_IMODE(marker.stat().st_mode) != 0o444
             or {key: value.get(key) for key in expected_marker} != expected_marker
             or not isinstance(tree_digest, str)
@@ -543,7 +543,7 @@ def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
         ):
             raise BuildError("verified platform staging changed after pre-execution transform")
         for path in root.rglob("*"):
-            expected_modes = {0o555} if path.is_dir() else {0o444, 0o555}
+            expected_modes = {0o755} if path.is_dir() else {0o444, 0o555}
             if stat.S_IMODE(path.stat().st_mode) not in expected_modes:
                 raise BuildError(
                     "verified platform staging permissions changed after "
@@ -640,8 +640,14 @@ def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
         for path in sorted(
             destination.rglob("*"), key=lambda item: len(item.parts), reverse=True
         ):
-            path.chmod(0o555 if path.is_dir() or os.access(path, os.X_OK) else 0o444)
-        destination.chmod(0o555)
+            path.chmod(0o755 if path.is_dir() else (
+                0o555 if os.access(path, os.X_OK) else 0o444
+            ))
+        # PlatformIO copies source modes into a private package-install staging
+        # directory and must create its own .piopm metadata there. Keep source
+        # files immutable and content-attested, but leave directories traversable
+        # and writable so the private copy does not inherit an unusable 0555 root.
+        destination.chmod(0o755)
         validate_existing(destination)
     except Exception:
         if temporary.exists() and not temporary.is_symlink():
