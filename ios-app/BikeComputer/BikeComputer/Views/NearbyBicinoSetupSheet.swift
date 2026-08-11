@@ -4,7 +4,7 @@ struct NearbyBicinoSetupSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var bleManager: BLEManager
-    @ScaledMetric(relativeTo: .title) private var artworkSize: CGFloat = 210
+    @ScaledMetric(relativeTo: .title) private var artworkSize: CGFloat = 180
 
     let candidate: DiscoveredBikeComputerDevice
     @State private var stage: NearbyBicinoSetupStage = .offer
@@ -30,59 +30,49 @@ struct NearbyBicinoSetupSheet: View {
 
     private var offerView: some View {
         NavigationView {
-            ScrollView {
-                VStack(spacing: 20) {
-                    Text("Bicino")
-                        .font(.largeTitle.bold())
-                        .multilineTextAlignment(.center)
-
-                    Image("NearbyBicino")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(
-                            maxWidth: min(artworkSize, 280),
-                            maxHeight: min(artworkSize, 280)
-                        )
-                        .accessibilityHidden(true)
-
-                    VStack(spacing: 8) {
-                        Text("Device \(candidate.shortIdentifier)")
-                            .font(.headline)
-                            .accessibilityLabel(
-                                "Bicino device \(candidate.shortIdentifier)"
-                            )
-                        Text("Connect this Bicino to your iPhone for maps, navigation, and ride data.")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 14) {
+                        Text("Bicino")
+                            .font(.largeTitle.bold())
                             .multilineTextAlignment(.center)
-                    }
 
-                    Button {
-                        if reduceMotion {
-                            stage.advanceToPairing()
-                        } else {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                stage.advanceToPairing()
-                            }
+                        Image("NearbyBicino")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(
+                                maxWidth: min(artworkSize, 240),
+                                maxHeight: min(artworkSize, 240)
+                            )
+                            .accessibilityHidden(true)
+
+                        VStack(spacing: 8) {
+                            Text("Device \(candidate.shortIdentifier)")
+                                .font(.headline)
+                                .accessibilityLabel(
+                                    "Bicino device \(candidate.shortIdentifier)"
+                                )
+                            Text("Connect this Bicino to your iPhone for maps, navigation, and ride data.")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
                         }
-                    } label: {
-                        Text("Connect")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .accessibilityHint(
-                        "Continues to naming and secure code confirmation"
-                    )
+                    .frame(maxWidth: 520)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: 520)
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .padding(.bottom, 28)
-                .frame(maxWidth: .infinity)
+                .scrollIndicators(.hidden)
+
+                connectButton
+                    .frame(maxWidth: 520)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
             }
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -98,6 +88,28 @@ struct NearbyBicinoSetupSheet: View {
                 }
             }
         }
+    }
+
+    private var connectButton: some View {
+        Button {
+            if reduceMotion {
+                stage.advanceToPairing()
+            } else {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    stage.advanceToPairing()
+                }
+            }
+        } label: {
+            Text("Connect")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .accessibilityHint(
+            "Continues to naming and secure code confirmation"
+        )
     }
 }
 
