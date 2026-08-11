@@ -945,6 +945,22 @@ def _pioarduino_toolchain_bootstrap_ready(
     )
 
 
+def _artifact_contains_real_target_identity(
+    firmware_elf: Path, environment: str, expected_identity: str
+) -> bool:
+    """Distinguish the real app from pioarduino's dummy core-builder image."""
+    if firmware_elf.is_symlink() or not firmware_elf.is_file():
+        return False
+    try:
+        artifact = firmware_elf.read_bytes()
+    except OSError:
+        return False
+    return all(
+        marker.encode("utf-8") in artifact
+        for marker in (environment, expected_identity)
+    )
+
+
 def build_firmware(
     project_dir: Path,
     environment: str,
@@ -1032,7 +1048,16 @@ def build_firmware(
                         f"could not run {pio_command!r}: {error}"
                     ) from error
 
-                if os.path.lexists(project_dir / ".dummy"):
+                dummy_exists = os.path.lexists(project_dir / ".dummy")
+                real_target_finished = (
+                    result.returncode == 0
+                    and firmware_bin.is_file()
+                    and not firmware_bin.is_symlink()
+                    and _artifact_contains_real_target_identity(
+                        firmware_elf, environment, expected_identity
+                    )
+                )
+                if dummy_exists and not real_target_finished:
                     toolchain_ready_after_pass = (
                         _pioarduino_toolchain_bootstrap_ready(
                             project_dir, environment
@@ -1064,6 +1089,12 @@ def build_firmware(
                         flush=True,
                     )
                     continue
+                if dummy_exists:
+                    # A completed custom-core build can leave its recognized
+                    # generated sketch behind even after PlatformIO has linked
+                    # the identity-bearing application. Remove only that known
+                    # generator output and preserve the verified real target.
+                    _remove_pioarduino_dummy(project_dir)
 
                 if result.returncode != 0:
                     toolchain_ready_after_pass = (
