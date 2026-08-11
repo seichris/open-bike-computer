@@ -601,6 +601,10 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.setViewingMap(viewing)
     }
 
+    func setApplicationActive(_ isActive: Bool) {
+        bleManager.setApplicationActive(isActive)
+    }
+
     func requestLocationAuthorization() {
         locationManager.requestWhenInUseAuthorization()
     }

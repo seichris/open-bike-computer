@@ -11,6 +11,7 @@ import SwiftUI
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
+    let hasRegisteredDevice: Bool
     let onReconnect: () -> Void
     
     var body: some View {
@@ -34,7 +35,13 @@ struct ConnectionStatusView: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityLabel(isConnected ? "Bicino connected" : "Reconnect Bicino")
+        .accessibilityLabel(
+            isConnected
+                ? "Bicino connected"
+                : hasRegisteredDevice
+                    ? "Reconnect Bicino"
+                    : "Connect Bicino"
+        )
     }
 }
 

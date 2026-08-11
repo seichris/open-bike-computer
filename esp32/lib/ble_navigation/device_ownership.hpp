@@ -107,6 +107,9 @@ public:
   std::vector<uint8_t> advertisementManufacturerData() const;
 
   bool hasPairingCode() const { return pairingActive_; }
+  bool isPairingConfirmedOnDevice() const {
+    return pairingActive_ && pairingConfirmedOnDevice_;
+  }
   uint32_t pairingCode() const { return pendingPairing_.comparisonCode; }
   uint32_t pairingGeneration() const { return pairingGeneration_; }
 
