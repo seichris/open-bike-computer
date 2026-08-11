@@ -12,6 +12,7 @@
 - [Firmware power management](firmware-power-management.md)
 - [Firmware map memory diagnostics](firmware-map-memory-diagnostics.md)
 - [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
+- [Remote device debugging](remote-device-debugging.md)
 - [Waveshare AMOLED 2.06 audio bring-up](waveshare-amoled-206-audio-bringup.md)
 - [App Store privacy disclosures](app-store-privacy-disclosures.md)
 
@@ -27,6 +28,7 @@
 | [Watch + Bicino online and offline navigation](plans/watch-bicino-online-offline-navigation-implementation-plan.md) | Implemented in software; physical and provider-policy release gates remain open; tracks [issue #106](https://github.com/seichris/open-bike-computer/issues/106) |
 | [Watch + Bicino navigation release notes](watch-bicino-navigation-release-notes.md) | Draft release copy and release blockers |
 | [watchOS workout companion](plans/watchos-workout-companion-implementation-plan.md) | Implemented |
+| [Bicino real-device browser debugging](plans/bicino-real-device-browser-debugging-implementation-plan.md) | Implemented in branch; two-target physical validation pending |
 
 ## Releases
 

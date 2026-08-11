@@ -115,6 +115,24 @@ for environment, target in expected_targets.items():
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
+    assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+
+remote_debug_profiles = {
+    "env:WAVESHARE_AMOLED_175_REMOTE_DEBUG": (
+        "env:WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_175",
+    ),
+    "env:WAVESHARE_AMOLED_206_REMOTE_DEBUG": (
+        "env:WAVESHARE_AMOLED_206",
+        "WAVESHARE_AMOLED_206",
+    ),
+}
+for environment, (base, target) in remote_debug_profiles.items():
+    assert config.get(environment, "extends") == base
+    assert inherited_option(environment, "custom_firmware_target") == target
+    flags = config.get(environment, "build_flags")
+    assert f"${{{base}.build_flags}}" in flags
+    assert "-DDEVICE_REMOTE_DEBUG=1" in flags
 
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
@@ -179,7 +197,7 @@ assert "workflow_dispatch:" in speaker_workflow
 assert "push:" not in speaker_workflow
 assert "pull_request:" not in speaker_workflow
 assert "python tools/build_firmware.py" in speaker_workflow
-for environment in light_sleep_profiles:
+for environment in (*light_sleep_profiles, *remote_debug_profiles):
     profile = environment.removeprefix("env:")
     assert profile not in ci_workflow
     assert profile in diagnostic_workflow
@@ -268,6 +286,8 @@ assert not raw_write_offenders, (
 
 release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
 assert "python tools/build_firmware.py" in release_workflow
+for environment in remote_debug_profiles:
+    assert environment.removeprefix("env:") not in release_workflow
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"

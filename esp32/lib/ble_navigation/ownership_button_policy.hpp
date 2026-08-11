@@ -7,6 +7,9 @@ namespace ownership_button_policy {
 class ComparisonRenderGate {
 public:
   void request(uint32_t pairingGeneration) {
+    if (pairingGeneration == pendingGeneration_) {
+      return;
+    }
     pendingGeneration_ = pairingGeneration;
     renderedGeneration_ = 0;
   }
