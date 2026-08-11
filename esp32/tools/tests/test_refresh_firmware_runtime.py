@@ -128,6 +128,12 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(set(evidence["distributionCounts"]), {
             "topLevel", "pioarduinoRoot", "espIdf", "uv", "esptool"
         })
+        inputs = json.loads(
+            (project / "tools/firmware-runtime/refresh-inputs.json").read_bytes()
+        )
+        self.assertEqual(inputs["pythonSource"]["license"], "Python-2.0")
+        self.assertEqual(len(inputs["pythonSource"]["sha256"]), 64)
+        self.assertEqual(len(inputs["pythonBuilder"]["commit"]), 40)
         with self.assertRaisesRegex(FirmwareRuntimeError, "exactly both"):
             assemble_lock(project, (), self.root / "lock.json", "unit-test-lock")
 

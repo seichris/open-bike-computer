@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -25,6 +26,7 @@ from typing import Mapping, Sequence
 from firmware_runtime import (
     Artifact,
     FirmwareRuntimeError,
+    _duplicate_key_rejector,
     _verify_runtime_tree,
     extract_verified_bundle,
     load_lock,
@@ -94,9 +96,28 @@ def _load_inputs(project_dir: Path) -> tuple[dict[str, object], Path, Path]:
     for path in (refresh, licenses):
         if path.is_symlink() or not path.is_file():
             raise FirmwareRuntimeError(f"runtime refresh input is missing or unsafe: {path}")
-    value = json.loads(refresh.read_bytes())
+    try:
+        value = json.loads(
+            refresh.read_bytes(), object_pairs_hook=_duplicate_key_rejector
+        )
+        licenses_value = json.loads(
+            licenses.read_bytes(), object_pairs_hook=_duplicate_key_rejector
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise FirmwareRuntimeError(
+            f"could not parse runtime refresh metadata: {error}"
+        ) from error
     if not isinstance(value, dict) or value.get("schema") != 2:
         raise FirmwareRuntimeError("runtime refresh inputs must use schema 2")
+    expected_fields = {
+        "schema", "distributionSets", "platformio", "pythonBuilder",
+        "pythonStandaloneRelease", "pythonSource", "pythonVersion", "sources",
+        "targets", "uv",
+    }
+    if set(value) != expected_fields:
+        raise FirmwareRuntimeError(
+            "runtime refresh inputs have missing or unexpected fields"
+        )
     sets = value.get("distributionSets")
     sources = value.get("sources")
     if not isinstance(sets, dict) or set(sets) != set(GROUP_NAMES) or not isinstance(sources, dict):
@@ -107,15 +128,112 @@ def _load_inputs(project_dir: Path) -> tuple[dict[str, object], Path, Path]:
             not isinstance(requirements, list)
             or not requirements
             or len(requirements) != len(set(requirements))
-            or not all(isinstance(item, str) and item.count("==") == 1 for item in requirements)
+            or not all(
+                isinstance(item, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]*==[^<>=~,*\s]+", item
+                )
+                for item in requirements
+            )
         ):
             raise FirmwareRuntimeError(f"runtime refresh set {name} is not exact and canonical")
+    if (
+        not isinstance(value["platformio"], str)
+        or f"platformio=={value['platformio']}" not in sets["topLevel"]
+        or not isinstance(value["uv"], str)
+        or f"uv=={value['uv']}" not in sets["uv"]
+        or value["pythonVersion"] != "3.13.15"
+        or not isinstance(value["pythonStandaloneRelease"], str)
+        or re.fullmatch(r"[0-9]{8}", value["pythonStandaloneRelease"]) is None
+        or value["targets"]
+        != ["linux-x86_64-cp313", "macos-arm64-cp313"]
+    ):
+        raise FirmwareRuntimeError("runtime refresh versions or targets are invalid")
+    if (
+        not isinstance(sources, dict)
+        or set(sources) != {"pioarduino-core", "esptool"}
+    ):
+        raise FirmwareRuntimeError("runtime refresh sources are incomplete")
+    for source_name, source in sources.items():
+        if not isinstance(source, dict) or set(source) != {"url", "size", "sha256"}:
+            raise FirmwareRuntimeError(f"runtime refresh source {source_name} is invalid")
+        _validate_input_artifact(source, f"runtime refresh source {source_name}")
+    python_source = value["pythonSource"]
+    if (
+        not isinstance(python_source, dict)
+        or set(python_source) != {"url", "size", "sha256", "license"}
+        or python_source.get("license") != "Python-2.0"
+    ):
+        raise FirmwareRuntimeError("CPython source provenance is incomplete")
+    source_artifact = _validate_input_artifact(
+        python_source, "CPython source artifact", allow_license=True
+    )
+    if not source_artifact.url.startswith("https://www.python.org/ftp/python/"):
+        raise FirmwareRuntimeError("CPython source artifact is invalid")
+    python_builder = value["pythonBuilder"]
+    if (
+        not isinstance(python_builder, dict)
+        or set(python_builder) != {"url", "commit"}
+        or python_builder.get("url")
+        != "https://github.com/astral-sh/python-build-standalone"
+        or not isinstance(python_builder.get("commit"), str)
+        or len(python_builder["commit"]) != 40
+        or any(character not in "0123456789abcdef" for character in python_builder["commit"])
+    ):
+        raise FirmwareRuntimeError("CPython builder provenance is invalid")
+    if (
+        not isinstance(licenses_value, dict)
+        or set(licenses_value) != {"schema", "components"}
+        or licenses_value.get("schema") != 1
+        or not isinstance(licenses_value.get("components"), list)
+        or not licenses_value["components"]
+        or licenses.read_bytes() != _canonical(licenses_value)
+    ):
+        raise FirmwareRuntimeError("runtime license inventory is invalid")
+    component_names: set[str] = set()
+    for component in licenses_value["components"]:
+        if (
+            not isinstance(component, dict)
+            or set(component) != {"name", "license", "source"}
+            or not all(
+                isinstance(component[key], str) and component[key]
+                for key in ("name", "license", "source")
+            )
+            or not component["source"].startswith("https://")
+            or component["name"] in component_names
+        ):
+            raise FirmwareRuntimeError("runtime license inventory component is invalid")
+        component_names.add(component["name"])
+    if {"CPython", "python-build-standalone", "uv", "PlatformIO Core"} - component_names:
+        raise FirmwareRuntimeError("runtime license inventory is incomplete")
     return value, refresh, licenses
+
+
+def _validate_input_artifact(
+    value: Mapping[str, object], label: str, *, allow_license: bool = False
+) -> Artifact:
+    expected = {"url", "size", "sha256"} | ({"license"} if allow_license else set())
+    if set(value) != expected:
+        raise FirmwareRuntimeError(f"{label} has missing or unexpected fields")
+    artifact = Artifact(value["url"], value["size"], value["sha256"])
+    if (
+        not isinstance(artifact.url, str)
+        or not artifact.url.startswith("https://")
+        or not isinstance(artifact.size, int)
+        or isinstance(artifact.size, bool)
+        or artifact.size <= 0
+        or not isinstance(artifact.sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact.sha256) is None
+    ):
+        raise FirmwareRuntimeError(f"{label} is invalid")
+    return artifact
 
 
 def inspect_inputs(project_dir: Path) -> dict[str, object]:
     value, refresh, licenses = _load_inputs(project_dir)
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
+    for target in lock.targets:
+        _require_matching_python_provenance(value, target)
     return {
         "schema": 2,
         "lockSetId": lock.lock_set_id,
@@ -127,12 +245,34 @@ def inspect_inputs(project_dir: Path) -> dict[str, object]:
     }
 
 
+def _require_matching_python_provenance(
+    inputs: Mapping[str, object], target: object
+) -> Artifact:
+    source_value = inputs["pythonSource"]
+    expected_source = Artifact(
+        source_value["url"], source_value["size"], source_value["sha256"]
+    )
+    builder_value = inputs["pythonBuilder"]
+    if (
+        target.python.license != source_value["license"]
+        or target.python.source != expected_source
+        or target.python.builder.url != builder_value["url"]
+        or target.python.builder.commit != builder_value["commit"]
+    ):
+        raise FirmwareRuntimeError(
+            f"runtime target {target.target_id} CPython provenance disagrees with refresh inputs"
+        )
+    return expected_source
+
+
 def verify_python_input(project_dir: Path, target_id: str, output: Path) -> dict[str, object]:
+    inputs, _, _ = _load_inputs(project_dir)
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
     matches = [target for target in lock.targets if target.target_id == target_id]
     if len(matches) != 1:
         raise FirmwareRuntimeError(f"unknown runtime refresh target: {target_id}")
     target = matches[0]
+    _require_matching_python_provenance(inputs, target)
     _download_artifact(target.python, output)
     return {
         "schema": 1,
@@ -418,6 +558,7 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
     if len(matches) != 1:
         raise FirmwareRuntimeError(f"unknown runtime refresh target: {target_id}")
     target = matches[0]
+    python_source = _require_matching_python_provenance(inputs, target)
     from firmware_runtime import host_target_id
     if host_target_id() != target_id:
         raise FirmwareRuntimeError(f"candidate {target_id} must be built on its matching host")
@@ -426,6 +567,11 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         temporary = Path(temporary_name)
         command_environment = _isolated_command_environment(
             temporary / "command-environment"
+        )
+        _download_artifact(
+            python_source,
+            temporary / "Python-3.13.15.tar.xz",
+            environment=command_environment,
         )
         python_archive = temporary / "python.tar.gz"
         _download_artifact(
@@ -569,7 +715,17 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             "abi": target.abi,
             "minimumPlatformTag": target.minimum_platform_tag,
             "accepted": True,
-            "python": {"url": target.python.url, "size": target.python.size, "sha256": target.python.sha256},
+            "python": {
+                "url": target.python.url,
+                "size": target.python.size,
+                "sha256": target.python.sha256,
+                "license": inputs["pythonSource"]["license"],
+                "source": {
+                    key: inputs["pythonSource"][key]
+                    for key in ("url", "size", "sha256")
+                },
+                "builder": inputs["pythonBuilder"],
+            },
             "bundle": {
                 "url": f"https://github.com/seichris/open-bike-computer/releases/download/{release_tag}/{bundle_name}",
                 "size": bundle_path.stat().st_size,
@@ -593,6 +749,9 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             "platformioOutput": pio_version,
             "setuptoolsVersion": setuptools_version,
             "uvOutput": uv_version,
+            "pythonLicense": target.python.license,
+            "pythonSourceSha256": python_source.sha256,
+            "pythonBuilderCommit": target.python.builder.commit,
             "networkDisabledReplayCommand": ["uv", "pip", "install", "--offline", "--no-cache", "--find-links", "wheelhouse"],
             "wheelCount": len(wheels),
             "bundleSha256": contract["bundle"]["sha256"],

@@ -59,6 +59,19 @@ class Artifact:
 
 
 @dataclass(frozen=True)
+class SourceRepository:
+    url: str
+    commit: str
+
+
+@dataclass(frozen=True)
+class PythonArtifact(Artifact):
+    license: str
+    source: Artifact
+    builder: SourceRepository
+
+
+@dataclass(frozen=True)
 class WheelArtifact:
     filename: str
     normalized_name: str
@@ -95,7 +108,7 @@ class RuntimeTarget:
     abi: str
     minimum_platform_tag: str
     accepted: bool
-    python: Artifact
+    python: PythonArtifact
     bundle: Artifact | None
     contents: RuntimeContents | None
 
@@ -203,6 +216,41 @@ def _artifact(value: object, label: str) -> Artifact:
     if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
         raise FirmwareRuntimeError(f"{label} SHA-256 is invalid")
     return Artifact(url, size, digest)
+
+
+def _python_artifact(value: object, label: str) -> PythonArtifact:
+    item = _strict_object(
+        value,
+        {"url", "size", "sha256", "license", "source", "builder"},
+        set(),
+        label,
+    )
+    archive = _artifact(
+        {key: item[key] for key in ("url", "size", "sha256")}, label
+    )
+    license_expression = item["license"]
+    if license_expression != "Python-2.0":
+        raise FirmwareRuntimeError(f"{label} license must be Python-2.0")
+    source = _artifact(item["source"], f"{label} source")
+    builder = _strict_object(
+        item["builder"], {"url", "commit"}, set(), f"{label} builder"
+    )
+    builder_url, builder_commit = builder["url"], builder["commit"]
+    if (
+        not isinstance(builder_url, str)
+        or builder_url != "https://github.com/astral-sh/python-build-standalone"
+        or not isinstance(builder_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", builder_commit) is None
+    ):
+        raise FirmwareRuntimeError(f"{label} builder provenance is invalid")
+    return PythonArtifact(
+        archive.url,
+        archive.size,
+        archive.sha256,
+        license_expression,
+        source,
+        SourceRepository(builder_url, builder_commit),
+    )
 
 
 def _runtime_contents(value: object, label: str) -> RuntimeContents:
@@ -376,7 +424,9 @@ def load_lock(path: Path) -> RuntimeLock:
         accepted = target["accepted"]
         if not isinstance(accepted, bool):
             raise FirmwareRuntimeError(f"target {index} accepted must be boolean")
-        python_artifact = _artifact(target["python"], f"target {index} Python")
+        python_artifact = _python_artifact(
+            target["python"], f"target {index} Python"
+        )
         bundle_value = target["bundle"]
         bundle = None if bundle_value is None else _artifact(bundle_value, f"target {index} bundle")
         contents_value = target["contents"]

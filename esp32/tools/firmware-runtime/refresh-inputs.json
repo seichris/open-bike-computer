@@ -50,7 +50,17 @@
     "uv": ["uv==0.12.3"]
   },
   "platformio": "6.1.18",
+  "pythonBuilder": {
+    "commit": "00c8a06113f11220667c3bcf5fab1672ff9e78ef",
+    "url": "https://github.com/astral-sh/python-build-standalone"
+  },
   "pythonStandaloneRelease": "20260807",
+  "pythonSource": {
+    "license": "Python-2.0",
+    "sha256": "1e66a7945a48390ee4c2a4268a0e4185884059a13c4aab6d148aa208deea4a76",
+    "size": 23160540,
+    "url": "https://www.python.org/ftp/python/3.13.15/Python-3.13.15.tar.xz"
+  },
   "pythonVersion": "3.13.15",
   "schema": 2,
   "sources": {

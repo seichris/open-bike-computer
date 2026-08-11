@@ -143,7 +143,21 @@ class FirmwareRuntimeTests(unittest.TestCase):
                     "abi": "cp313",
                     "minimumPlatformTag": "macosx_11_0_arm64",
                     "accepted": accepted,
-                    "python": {"url": "https://example.invalid/python.tar.gz", "size": 1, "sha256": "d" * 64},
+                    "python": {
+                        "url": "https://example.invalid/python.tar.gz",
+                        "size": 1,
+                        "sha256": "d" * 64,
+                        "license": "Python-2.0",
+                        "source": {
+                            "url": "https://www.python.org/ftp/python/3.13.15/Python-3.13.15.tar.xz",
+                            "size": 2,
+                            "sha256": "9" * 64,
+                        },
+                        "builder": {
+                            "url": "https://github.com/astral-sh/python-build-standalone",
+                            "commit": "8" * 40,
+                        },
+                    },
                     "bundle": None if not accepted else {"url": "https://example.invalid/runtime.tar.gz", "size": size, "sha256": digest},
                     "contents": None if not accepted else contents,
                 }
@@ -180,6 +194,25 @@ class FirmwareRuntimeTests(unittest.TestCase):
                 path.write_bytes(canonical(changed))
                 with self.assertRaisesRegex(
                     FirmwareRuntimeError, "ABI|platform tag|CPython 3.13"
+                ):
+                    load_lock(path)
+
+    def test_lock_requires_exact_cpython_license_and_source_provenance(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+        mutations = (
+            ("license", "MIT"),
+            ("source", {"url": "https://example.invalid/source", "size": 1, "sha256": "x" * 64}),
+            ("builder", {"url": "https://example.invalid/builder", "commit": "8" * 40}),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(original))
+                changed["targets"][0]["python"][field] = value
+                path.write_bytes(canonical(changed))
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "license|SHA-256|builder provenance"
                 ):
                     load_lock(path)
 
