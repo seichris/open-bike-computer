@@ -32,7 +32,7 @@ def canonical(value: object) -> bytes:
 class FirmwareRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -342,6 +342,17 @@ class FirmwareRuntimeTests(unittest.TestCase):
         linked.symlink_to(external, target_is_directory=True)
         with self.assertRaisesRegex(FirmwareRuntimeError, "unsafe runtime cache root"):
             ensure_shared_runtime(lock, target, cache_root=linked)
+
+        ancestor_target = self.root / "ancestor-target"
+        ancestor_target.mkdir()
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(ancestor_target, target_is_directory=True)
+        nested_cache = linked_ancestor / "nested/cache"
+        with self.assertRaisesRegex(
+            FirmwareRuntimeError, "unsafe runtime cache ancestor"
+        ):
+            ensure_shared_runtime(lock, target, cache_root=nested_cache)
+        self.assertFalse((ancestor_target / "nested").exists())
 
     def test_publication_renames_a_writable_root_then_locks_and_repairs_it(self) -> None:
         bundle, size, digest = self.make_bundle()
