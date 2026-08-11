@@ -212,6 +212,15 @@ storage_health = storage_implementation[storage_health_start:storage_health_end]
 assert "defined(SPI_SHARED)" in storage_health
 assert "SD.cardType() == CARD_NONE" in storage_health
 assert 'SD.open("/")' in storage_health
+storage_ensure_start = storage_implementation.index("bool Storage::ensureSdMounted()")
+storage_ensure_end = storage_implementation.index(
+    "void Storage::markSdUnavailable()", storage_ensure_start
+)
+storage_ensure = storage_implementation[storage_ensure_start:storage_ensure_end]
+assert (
+    "power_management::LockDomain::Storage);\n"
+    "    ready = sdMountHealthyLocked();"
+) in storage_ensure
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"

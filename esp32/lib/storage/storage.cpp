@@ -200,10 +200,7 @@ bool Storage::ensureSdMounted() {
   {
     power_management::ScopedLock powerLock(
         power_management::LockDomain::Storage);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
-    defined(SPI_SHARED)
     ready = sdMountHealthyLocked();
-#endif
     if (!ready) {
       isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
