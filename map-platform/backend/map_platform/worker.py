@@ -99,6 +99,7 @@ class MapWorker:
         heartbeat_interval_seconds: float = 30.0,
         on_heartbeat=None,
         monitoring_store: MapMonitoringStore | None = None,
+        estimate_coordinator=None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -107,6 +108,7 @@ class MapWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.on_heartbeat = on_heartbeat
         self.monitoring_store = monitoring_store
+        self.estimate_coordinator = estimate_coordinator
 
     def run_next(self) -> WorkerResult:
         self.store.requeue_retryable_failures()
@@ -118,9 +120,23 @@ class MapWorker:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
         attempt_started_at = job.updated_at
         attempt_started_monotonic = time.monotonic()
+        if self.estimate_coordinator is not None:
+            self.estimate_coordinator.publish(
+                job.job_id,
+                worker_id=self.worker_id,
+                phase=JobStatus.VALIDATING.value,
+                force=True,
+            )
 
         def update(status: JobStatus) -> None:
             self.store.update_status_unless_cancelled(job.job_id, status, worker_id=self.worker_id)
+            if self.estimate_coordinator is not None:
+                self.estimate_coordinator.publish(
+                    job.job_id,
+                    worker_id=self.worker_id,
+                    phase=status.value,
+                    force=True,
+                )
 
         def update_progress(completed: int, total: int) -> None:
             self.store.update_progress_unless_cancelled(
@@ -153,6 +169,20 @@ class MapWorker:
                 indeterminate=progress["indeterminate"],
                 worker_id=self.worker_id,
             )
+            if self.estimate_coordinator is not None:
+                raw_evidence = progress.get("estimatorEvidence")
+                evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+                evidence["progress"] = {
+                    key: progress[key]
+                    for key in ("phase", "unit", "completed", "total")
+                }
+                self.estimate_coordinator.publish(
+                    job.job_id,
+                    worker_id=self.worker_id,
+                    phase=progress["phase"],
+                    evidence=evidence,
+                    force=isinstance(raw_evidence, dict),
+                )
 
         def cancellation_requested() -> bool:
             current = self.store.get(job.job_id)
@@ -248,6 +278,14 @@ class MapWorker:
                             exact is not None
                             and self.pipeline.validate_exact_reuse_candidate(job, exact)
                         ):
+                            if self.estimate_coordinator is not None:
+                                self.estimate_coordinator.publish(
+                                    job.job_id,
+                                    worker_id=self.worker_id,
+                                    phase="reuse_exact",
+                                    outcome_class="exact_reuse",
+                                    force=True,
+                                )
                             finished = self.store.complete_exact_reuse(
                                 job.job_id,
                                 worker_id=self.worker_id,
@@ -271,6 +309,14 @@ class MapWorker:
                                     monitoring_event=monitoring_event,
                                 )
                         build_result = None
+                        if self.estimate_coordinator is not None:
+                            self.estimate_coordinator.publish(
+                                job.job_id,
+                                worker_id=self.worker_id,
+                                phase="reuse_resolved",
+                                outcome_class="full_build",
+                                force=True,
+                            )
                         for parent in self.store.find_subset_reuse_candidates(
                             job,
                             build_compatibility_key=reuse_keys.compatibility,
@@ -285,6 +331,14 @@ class MapWorker:
                                 continue
                             reuse_strategy = "subset"
                             reuse_source_job_id = parent.job_id
+                            if self.estimate_coordinator is not None:
+                                self.estimate_coordinator.publish(
+                                    job.job_id,
+                                    worker_id=self.worker_id,
+                                    phase="reuse_subset",
+                                    outcome_class="subset_reuse",
+                                    force=True,
+                                )
                             break
                         if build_result is None:
                             build_result = self.pipeline.build(job, **build_kwargs)
@@ -378,6 +432,11 @@ class MapWorker:
                 persist=failed.attempts >= failed.max_attempts,
             )
             if failed.attempts < failed.max_attempts:
+                if self.estimate_coordinator is not None:
+                    self.estimate_coordinator.publish_pending_retry(
+                        job.job_id,
+                        worker_id=self.worker_id,
+                    )
                 failed = self.store.update_status_unless_cancelled(
                     job.job_id,
                     JobStatus.QUEUED,

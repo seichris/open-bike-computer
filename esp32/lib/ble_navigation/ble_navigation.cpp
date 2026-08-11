@@ -14,6 +14,7 @@
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
 #include "device_screen_protocol.hpp"
+#include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
 #include "map_setting_packet.hpp"
 #include "map_setting_redraw_policy.hpp"
@@ -111,6 +112,7 @@ static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static BLEDebugStats bleDebugStats;
+static gps_input_freshness::State gpsFreshnessState;
 static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
@@ -658,6 +660,7 @@ struct PendingMapInput {
   bool fallback = false;
   bool pending = false;
   uint8_t *data = nullptr;
+  gps_input_freshness::ArrivalBatch gpsArrivals{};
 };
 static SemaphoreHandle_t pendingMapInputMutex = nullptr;
 static PendingMapInput pendingRouteInput;
@@ -675,6 +678,18 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     Serial.printf("BLE: rejected queued map input type=%u len=%u\n",
                   static_cast<unsigned>(type), static_cast<unsigned>(len));
     return false;
+  }
+  uint32_t gpsReceivedAtMs = 0;
+  if (type == PendingMapInputType::Gps) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
+    if (!gps_input_freshness::acceptsPayload(data, len)) {
+      Serial.printf("BLE: Rejected %s GPS position: expected at least 8 bytes\n",
+                    source == nullptr ? "unknown" : source);
+      return false;
+    }
+    // Capture transport freshness on the authenticated NimBLE callback task,
+    // before allocation or a potentially delayed UI-task mailbox drain.
+    gpsReceivedAtMs = millis();
   }
   PendingMapInput input;
   input.type = type;
@@ -713,6 +728,10 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     return false;
   }
   PendingMapInput replaced = *slot;
+  if (type == PendingMapInputType::Gps) {
+    input.gpsArrivals = replaced.gpsArrivals;
+    input.gpsArrivals.observe(gpsReceivedAtMs);
+  }
   *slot = input;
   if (!replaced.pending) {
     pendingMapInputCount.fetch_add(1, std::memory_order_release);
@@ -2432,9 +2451,9 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     requestMapRender(map_render_policy::Reason::Route);
 }
 
-static void handleGpsPayload(const uint8_t *data, size_t len,
-                             const char *source) {
-  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
+static void handleGpsPayload(
+    const uint8_t *data, size_t len, const char *source,
+    const gps_input_freshness::ArrivalBatch &arrivals) {
   gps_position_protocol::Packet packet{};
   if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
                                              &packet)) {
@@ -2460,16 +2479,11 @@ static void handleGpsPayload(const uint8_t *data, size_t len,
   }
 #endif
 
-  const uint32_t gpsPacketReceivedAtMs = millis();
-  if (bleDebugStats.lastGpsPacketMs != 0) {
-    bleDebugStats.lastGpsPacketGapMs =
-        gpsPacketReceivedAtMs - bleDebugStats.lastGpsPacketMs;
-    bleDebugStats.maximumGpsPacketGapMs =
-        std::max(bleDebugStats.maximumGpsPacketGapMs,
-                 bleDebugStats.lastGpsPacketGapMs);
-  }
-  bleDebugStats.gpsPacketCount++;
-  bleDebugStats.lastGpsPacketMs = gpsPacketReceivedAtMs;
+  gpsFreshnessState.accept(arrivals);
+  bleDebugStats.gpsPacketCount = gpsFreshnessState.packetCount;
+  bleDebugStats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
+  bleDebugStats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
+  bleDebugStats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
 
 #if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d "
@@ -2913,7 +2927,7 @@ static void processPendingMapInputs() {
       handleRouteGeometryPayload(input.data, input.length, source);
       break;
     case PendingMapInputType::Gps:
-      handleGpsPayload(input.data, input.length, source);
+      handleGpsPayload(input.data, input.length, source, input.gpsArrivals);
       break;
     case PendingMapInputType::Setting:
       handleMapSettingPayload(input.data, input.length, source);

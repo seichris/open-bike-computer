@@ -460,8 +460,11 @@ private struct DownloadingMapsSettingsSection: View {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
-            if let preparationTimeEstimate {
-                SettingsValueRow(title: "Estimated Preparation", value: preparationTimeEstimate)
+            if let preparationEstimatePresentation {
+                SettingsValueRow(
+                    title: preparationEstimatePresentation.title,
+                    value: preparationEstimatePresentation.value
+                )
             }
 
             if let error = manager.errorMessage {
@@ -499,13 +502,10 @@ private struct DownloadingMapsSettingsSection: View {
         return regionName
     }
 
-    private var preparationTimeEstimate: String? {
-        guard let job = manager.currentJob,
-              !job.isTerminal,
-              let areaKm2 = job.geometry?.areaKm2 else {
-            return nil
-        }
-        return OfflineMapPreparationTimeEstimate.description(for: areaKm2)
+    private var preparationEstimatePresentation:
+        OfflineMapPreparationEstimatePresentation? {
+        guard let job = manager.currentJob else { return nil }
+        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
     }
 
     private var generationProgress: OfflineMapJobProgress? {

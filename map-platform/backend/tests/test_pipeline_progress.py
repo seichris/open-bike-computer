@@ -21,6 +21,7 @@ from map_platform.pipeline import (
     ProgressCoalescer,
     parse_label_stats,
     parse_building_preprocess_progress,
+    parse_building_complexity,
     parse_building_scope,
     parse_map_progress,
 )
@@ -78,6 +79,12 @@ class BuildingPhaseStreamingRunner:
             '"unit":"building_normalization"}',
             'BUILDING_PREPROCESS_PROGRESS:{"completed":1,"indeterminate":false,'
             '"total":1,"unit":"building_normalization"}',
+            'BUILDING_COMPLEXITY:{"schemaVersion":1,"sourceCount":0,'
+            '"outlineCount":0,"partCount":0,"explicitParentCount":0,'
+            '"unresolvedPartCount":0,"containmentCandidateProduct":0,'
+            '"polygonCount":0,"ringCount":0,"holeCount":0,'
+            '"sourceVertexCount":0,"maximumVerticesPerObject":0,'
+            '"preparationRejectedCount":0}',
             "MAP_PROGRESS:0:1",
             "MAP_PROGRESS:1:1",
             'LABEL_STATS:{"blocks":1,"phaseTimings":{}}',
@@ -132,6 +139,24 @@ class PipelineProgressTests(unittest.TestCase):
                 "total": 5,
                 "indeterminate": False,
             },
+        )
+        complexity = (
+            'BUILDING_COMPLEXITY:{"schemaVersion":1,"sourceCount":10,'
+            '"outlineCount":8,"partCount":2,"explicitParentCount":1,'
+            '"unresolvedPartCount":1,"containmentCandidateProduct":8,'
+            '"polygonCount":10,"ringCount":11,"holeCount":1,'
+            '"sourceVertexCount":100,"maximumVerticesPerObject":20,'
+            '"preparationRejectedCount":0}'
+        )
+        self.assertEqual(
+            parse_building_complexity(complexity)["containmentCandidateProduct"],
+            8,
+        )
+        self.assertIsNone(
+            parse_building_complexity(
+                complexity.replace('"containmentCandidateProduct":8',
+                                   '"containmentCandidateProduct":true')
+            )
         )
         self.assertEqual(
             parse_building_preprocess_progress(
@@ -386,9 +411,16 @@ class PipelineProgressTests(unittest.TestCase):
                 [
                     "building_preprocessing",
                     "building_preprocessing",
+                    "building_preprocessing",
                     "block_encoding",
                     "block_encoding",
                 ],
+            )
+            self.assertEqual(
+                phase_progress[2]["estimatorEvidence"]["complexity"][
+                    "schemaVersion"
+                ],
+                1,
             )
             self.assertEqual(block_progress, [(0, 1), (1, 1)])
             self.assertEqual(
@@ -468,6 +500,20 @@ class PipelineProgressTests(unittest.TestCase):
                     {"blocks": 1, "phaseTimings": {"phase": value}},
                     None,
                 )
+
+    def test_missing_building_complexity_marker_is_advisory(self):
+        metrics = MapBuildPipeline._build_metrics(
+            3,
+            {"blocks": 1, "phaseTimings": {}},
+            {
+                "recordCount": 0,
+                "phaseTimings": {
+                    "buildingNormalization": 0.25,
+                    "blockEncoding": 0.5,
+                },
+            },
+        )
+        self.assertNotIn("buildingComplexity", metrics)
 
     def test_selected_extraction_rejects_duplicate_scope_markers(self):
         source = SourceRegion(
