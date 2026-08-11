@@ -297,32 +297,18 @@ bool releaseCodecResources() {
       resourceState.codecDeviceCreated = false;
       break;
     case CleanupAction::DeleteCodecInterface:
-      if (codecInterface->close != nullptr &&
-          codecInterface->close(codecInterface) != ESP_CODEC_DEV_OK) {
-        Serial.println(
-            "Speaker: codec interface close failed; cleanup will retry");
-        return false;
-      }
       if (audio_codec_delete_codec_if(codecInterface) != ESP_CODEC_DEV_OK) {
-        codecInterface = nullptr;
-        resourceState.codecInterfaceCreated = false;
-        Serial.println("Speaker: codec interface deletion reported an error");
+        Serial.println(
+            "Speaker: codec interface deletion failed; cleanup will retry");
         return false;
       }
       codecInterface = nullptr;
       resourceState.codecInterfaceCreated = false;
       break;
     case CleanupAction::DeleteDataInterface:
-      if (dataInterface->close != nullptr &&
-          dataInterface->close(dataInterface) != ESP_CODEC_DEV_OK) {
-        Serial.println(
-            "Speaker: data interface close failed; cleanup will retry");
-        return false;
-      }
       if (audio_codec_delete_data_if(dataInterface) != ESP_CODEC_DEV_OK) {
-        dataInterface = nullptr;
-        resourceState.dataInterfaceCreated = false;
-        Serial.println("Speaker: data interface deletion reported an error");
+        Serial.println(
+            "Speaker: data interface deletion failed; cleanup will retry");
         return false;
       }
       dataInterface = nullptr;
@@ -656,7 +642,9 @@ void speakerTask(void *) {
       cleanupSucceeded = releaseCodecResources();
       if (!cleanupSucceeded && resourceState.any()) {
         Serial.println("Speaker: retrying retained cleanup state once");
-        cleanupSucceeded = releaseCodecResources();
+        // Preserve the first failure in playback completion even if the
+        // controlled retry finishes releasing the retained state.
+        (void)releaseCodecResources();
       }
     }
     recordPlaybackCompletion(

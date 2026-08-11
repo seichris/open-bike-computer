@@ -214,6 +214,10 @@ completion_publish = speaker_implementation.index(
 )
 assert cleanup_call < completion_publish
 assert "retrying retained cleanup state once" in speaker_implementation
+assert "codecInterface->close" not in speaker_implementation
+assert "dataInterface->close" not in speaker_implementation
+assert "cleanupSucceeded = releaseCodecResources();" in speaker_implementation
+assert "(void)releaseCodecResources();" in speaker_implementation
 assert "playbackRequestLifecycleSucceeded(" in speaker_implementation[
     completion_publish:
 ]

@@ -17,9 +17,12 @@ int audio_codec_delete_codec_if(const audio_codec_if_t *h)
         int ret = 0;
         if (h->close) {
             ret = h->close(h);
+            if (ret != ESP_CODEC_DEV_OK) {
+                return ret;
+            }
         }
         free((void *) h);
-        return ret;
+        return ESP_CODEC_DEV_OK;
     }
     return ESP_CODEC_DEV_INVALID_ARG;
 }
@@ -43,9 +46,12 @@ int audio_codec_delete_data_if(const audio_codec_data_if_t *h)
         int ret = 0;
         if (h->close) {
             ret = h->close(h);
+            if (ret != ESP_CODEC_DEV_OK) {
+                return ret;
+            }
         }
         free((void *) h);
-        return ret;
+        return ESP_CODEC_DEV_OK;
     }
     return ESP_CODEC_DEV_INVALID_ARG;
 }
