@@ -39,8 +39,7 @@ namespace {
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 SPIClass waveshareHspi(HSPI);
-bool waveshareHspiBegun = false;
-bool waveshareSdLifecycleTouched = false;
+storage_policy::LifecycleState waveshareSdLifecycle{};
 #endif
 
 std::string formatSize(uint64_t size) {
@@ -87,16 +86,12 @@ bool Storage::sdMountHealthyLocked() {
 void Storage::teardownSdLocked() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   isSdLoaded = false;
-  if (waveshareSdLifecycleTouched) {
-    SD.end();
-    waveshareSdLifecycleTouched = false;
-  }
-  if (waveshareHspiBegun) {
-    waveshareHspi.end();
-    waveshareHspiBegun = false;
-  }
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
+  storage_policy::teardownLifecycle(
+      waveshareSdLifecycle, []() { SD.end(); },
+      []() { waveshareHspi.end(); }, []() {
+        pinMode(SD_CS, OUTPUT);
+        digitalWrite(SD_CS, HIGH);
+      });
 #endif
 }
 
@@ -132,8 +127,8 @@ esp_err_t Storage::mountSdLocked(bool ignoreCooldown) {
         pinMode(SD_CS, OUTPUT);
         digitalWrite(SD_CS, HIGH);
         waveshareHspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
-        waveshareHspiBegun = true;
-        waveshareSdLifecycleTouched = true;
+        waveshareSdLifecycle.busBegun = true;
+        waveshareSdLifecycle.sdTouched = true;
         const bool mounted = SD.begin(SD_CS, waveshareHspi,
                                       WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard");
         bool rootHealthy = false;

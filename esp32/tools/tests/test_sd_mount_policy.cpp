@@ -6,7 +6,33 @@
 #include <vector>
 
 int main() {
+  using storage_policy::LifecycleState;
   using storage_policy::MountAttemptResult;
+
+  // Teardown uses the exact production policy and is safe before or after
+  // every partial initialization state, including repeated calls.
+  for (int mask = 0; mask < 4; ++mask) {
+    LifecycleState lifecycle{
+        static_cast<bool>(mask & 1), static_cast<bool>(mask & 2)};
+    int sdEnds = 0;
+    int busEnds = 0;
+    int deselects = 0;
+    storage_policy::teardownLifecycle(
+        lifecycle, [&]() { ++sdEnds; }, [&]() { ++busEnds; },
+        [&]() { ++deselects; });
+    assert(sdEnds == ((mask & 2) != 0 ? 1 : 0));
+    assert(busEnds == ((mask & 1) != 0 ? 1 : 0));
+    assert(deselects == 1);
+    assert(!lifecycle.sdTouched);
+    assert(!lifecycle.busBegun);
+
+    storage_policy::teardownLifecycle(
+        lifecycle, [&]() { ++sdEnds; }, [&]() { ++busEnds; },
+        [&]() { ++deselects; });
+    assert(sdEnds == ((mask & 2) != 0 ? 1 : 0));
+    assert(busEnds == ((mask & 1) != 0 ? 1 : 0));
+    assert(deselects == 2);
+  }
 
   for (std::size_t successAttempt = 1; successAttempt <= 3; ++successAttempt) {
     std::size_t teardowns = 0;

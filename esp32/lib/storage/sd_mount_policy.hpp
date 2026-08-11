@@ -21,6 +21,25 @@ struct MountSequenceResult {
   std::size_t attempts;
 };
 
+struct LifecycleState {
+  bool busBegun = false;
+  bool sdTouched = false;
+};
+
+template <typename EndSd, typename EndBus, typename Deselect>
+void teardownLifecycle(LifecycleState &state, EndSd endSd, EndBus endBus,
+                       Deselect deselect) {
+  if (state.sdTouched) {
+    endSd();
+    state.sdTouched = false;
+  }
+  if (state.busBegun) {
+    endBus();
+    state.busBegun = false;
+  }
+  deselect();
+}
+
 inline bool cooldownActive(uint32_t nowMs, uint32_t retryAfterMs) {
   return static_cast<int32_t>(retryAfterMs - nowMs) > 0;
 }
