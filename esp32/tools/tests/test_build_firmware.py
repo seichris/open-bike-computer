@@ -1657,6 +1657,86 @@ build_src_filter =
         mocked_upload.assert_not_called()
         self.assertIn("requires --upload-port or --device-serial", errors.getvalue())
 
+    def test_cli_device_name_rejects_family_mismatch_before_build(self):
+        registry = (self.project_dir / "devices.json").resolve()
+        registry.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "devices": [
+                        {
+                            "nickname": "desk-206",
+                            "boardFamily": "WAVESHARE_AMOLED_206",
+                            "serialNumber": "SERIAL-206",
+                            "updatedAt": "2026-08-10T00:00:00Z",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        registry.chmod(0o600)
+        errors = StringIO()
+        handoffs = []
+        with patch("build_firmware.build_firmware") as mocked_build, patch(
+            "build_firmware.upload_firmware"
+        ) as mocked_upload, redirect_stderr(errors):
+            result = main(
+                [
+                    self.environment,
+                    "--project-dir", str(self.project_dir),
+                    "--device-name", "desk-206",
+                    "--device-registry", str(registry),
+                ],
+                runtime_handoff=lambda argv, project: handoffs.append(
+                    (argv, project)
+                ),
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(len(handoffs), 1)
+        mocked_build.assert_not_called()
+        mocked_upload.assert_not_called()
+        self.assertIn("enrolled as WAVESHARE_AMOLED_206", errors.getvalue())
+
+    def test_cli_device_name_passes_enrolled_serial_and_context_to_upload(self):
+        registry = (self.project_dir / "devices.json").resolve()
+        registry.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "devices": [
+                        {
+                            "nickname": "desk-175",
+                            "boardFamily": "WAVESHARE_AMOLED_175",
+                            "serialNumber": "SERIAL-175",
+                            "updatedAt": "2026-08-10T00:00:00Z",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        registry.chmod(0o600)
+        with patch("build_firmware.build_firmware") as mocked_build, patch(
+            "build_firmware.upload_firmware"
+        ) as mocked_upload:
+            result = main(
+                [
+                    self.environment,
+                    "--project-dir", str(self.project_dir),
+                    "--device-name", "desk-175",
+                    "--device-registry", str(registry),
+                ],
+                runtime_handoff=lambda _argv, _project: None,
+            )
+        self.assertEqual(result, 0)
+        mocked_build.assert_called_once()
+        upload_arguments = mocked_upload.call_args
+        self.assertEqual(upload_arguments.kwargs["device_serial"], "SERIAL-175")
+        self.assertEqual(
+            upload_arguments.kwargs["device_entry"].nickname, "desk-175"
+        )
+
     def test_upload_device_serial_binds_the_resolved_port(self):
         core = self.write_core_attestation()
         defaults = self.project_dir / "sdkconfig.defaults"

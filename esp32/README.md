@@ -75,6 +75,18 @@ are attached. The helper resolves that serial immediately before flashing and
 waits up to 60 seconds for it to appear; use `--device-timeout` to change the
 wait. `--upload-port` remains available when stable serial metadata is not.
 
+You may explicitly enroll a nickname without committing a serial:
+
+```sh
+python3 tools/device_registry.py add desk-206 WAVESHARE_AMOLED_206 SERIAL
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206 --device-name desk-206
+```
+
+The registry uses the macOS user Application Support directory or Linux XDG
+config directory, requires private non-symlink storage, and rejects nickname,
+serial, or board-family ambiguity before building. It does not replace the
+required physical model confirmation immediately before flashing.
+
 If the verified build succeeded but the upload failed because the selected
 device disappeared, entered the wrong USB mode, or needed a cable reconnect,
 retry the same attested build without compiling again:

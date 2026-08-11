@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/seichris/open-bike-computer/esp32/tools/device-registry.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "devices": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "boardFamily": {
+            "enum": ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"]
+          },
+          "nickname": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "type": "string"},
+          "note": {"maxLength": 256, "minLength": 1, "type": "string"},
+          "serialNumber": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$", "type": "string"},
+          "updatedAt": {"format": "date-time", "type": "string"}
+        },
+        "required": ["nickname", "boardFamily", "serialNumber", "updatedAt"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema": {"const": 1}
+  },
+  "required": ["schema", "devices"],
+  "type": "object"
+}

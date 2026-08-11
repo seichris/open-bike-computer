@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 from resolve_upload_port import (
@@ -110,6 +112,42 @@ class ResolveUploadPortTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("not connected", errors.getvalue())
+
+    def test_cli_resolves_explicit_registry_name_and_reports_family(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = (Path(directory) / "devices.json").resolve()
+            registry.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "devices": [
+                            {
+                                "nickname": "desk-175",
+                                "boardFamily": "WAVESHARE_AMOLED_175",
+                                "serialNumber": "SERIAL",
+                                "updatedAt": "2026-08-10T00:00:00Z",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry.chmod(0o600)
+            output = StringIO()
+            with patch(
+                "resolve_upload_port.resolve_device_port",
+                return_value=resolve_device_port(
+                    "serial", 0,
+                    list_ports_provider=lambda: [port("/dev/cu.named", "serial")],
+                ),
+            ), redirect_stdout(output):
+                result = main(
+                    ["--device-name", "desk-175", "--device-registry", str(registry)]
+                )
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["nickname"], "desk-175")
+        self.assertEqual(payload["boardFamily"], "WAVESHARE_AMOLED_175")
 
 
 if __name__ == "__main__":

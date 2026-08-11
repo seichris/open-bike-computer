@@ -76,6 +76,12 @@ state, artifacts, and flash plan. Dirty builds may consume an entry but never
 publish or upload. Cross-worktree core sharing is disabled until artifacts pass
 the documented relocatability gate.
 
+Optional device nicknames are stored outside Git with
+`tools/device_registry.py`. `--device-name NAME` must resolve to one enrolled
+board family and stable serial, and the environment must match that family.
+This shorthand never guesses a board or replaces the required connected-model
+confirmation immediately before flashing.
+
 After the locked runtime handoff, a clean pioarduino installation first
 converts content-pinned tool wrappers into the
 host compiler/runtime packages, then compiles a custom core against a generated

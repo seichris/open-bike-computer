@@ -1,0 +1,12 @@
+{
+  "devices": [
+    {
+      "boardFamily": "WAVESHARE_AMOLED_175",
+      "nickname": "desk-175",
+      "note": "Example only; never commit a real serial",
+      "serialNumber": "EXAMPLE-SERIAL",
+      "updatedAt": "2026-08-10T00:00:00Z"
+    }
+  ],
+  "schema": 1
+}
