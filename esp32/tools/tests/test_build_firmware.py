@@ -2035,7 +2035,7 @@ class FirmwareBuildTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "build_firmware._pioarduino_transform_source_sha256",
+                    "build_firmware.pioarduino_transform_source_sha256",
                     side_effect=("a" * 64, "b" * 64),
                 ),
             ):

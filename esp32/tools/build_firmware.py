@@ -54,6 +54,7 @@ from firmware_runtime import (
 from pioarduino_custom_core import (
     correct_espidf_text,
     correct_penv_setup_text,
+    pioarduino_transform_source_sha256,
 )
 
 
@@ -511,21 +512,14 @@ def _runtime_stage_identity() -> tuple[dict[str, object], str]:
     return provenance, hashlib.sha256(encoded).hexdigest()
 
 
-def _pioarduino_transform_source_sha256() -> str:
-    transform_source = Path(__file__).with_name("pioarduino_custom_core.py")
-    if transform_source.is_symlink() or not transform_source.is_file():
-        raise BuildError("pioarduino transform source is missing or unsafe")
-    try:
-        return _file_sha256(transform_source)
-    except OSError as error:
-        raise BuildError("could not hash pioarduino transform source") from error
-
-
 def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
     """Extract and transform the pinned platform before any of its code runs."""
     marker_name = ".open-bike-runtime-transform.json"
     provenance, runtime_identity = _runtime_stage_identity()
-    transform_sha256 = _pioarduino_transform_source_sha256()
+    try:
+        transform_sha256 = pioarduino_transform_source_sha256()
+    except ValueError as error:
+        raise BuildError(str(error)) from error
     parent = _ensure_private_directory(
         project_dir,
         Path(".pio/open-bike-build/platform-staging")

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import hashlib
 import unittest
+from pathlib import Path
 
 from pioarduino_custom_core import (
     CORRECTED_FREERTOS_TICKLESS_LITERAL_MAPPING,
@@ -44,6 +46,8 @@ from pioarduino_custom_core import (
     correct_espidf_setup_text,
     correct_penv_setup_text,
     correct_sections_text,
+    pioarduino_transform_source_sha256,
+    verified_transform_marker_matches,
 )
 
 
@@ -179,6 +183,50 @@ class CorrectGeneratedProjectCleanupTests(unittest.TestCase):
                 f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}\n"
                 f"{UPSTREAM_GENERATED_PROJECT_CLEANUP}"
             )
+
+    def test_transform_source_identity_matches_repository_file(self):
+        source = Path(__file__).resolve().parents[1] / "pioarduino_custom_core.py"
+
+        self.assertEqual(
+            pioarduino_transform_source_sha256(),
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+
+    def test_transform_marker_binds_schema_source_and_complete_shape(self):
+        runtime = {"lockSetId": "test"}
+        marker = {
+            "schema": 2,
+            "platformArchiveSha256": "a" * 64,
+            "runtimeProvenance": runtime,
+            "transformSourceSha256": "b" * 64,
+            "platformTreeSha256": "c" * 64,
+        }
+
+        self.assertTrue(
+            verified_transform_marker_matches(
+                marker, "a" * 64, runtime, "b" * 64
+            )
+        )
+        for field, value in (
+            ("schema", 1),
+            ("transformSourceSha256", "d" * 64),
+            ("platformTreeSha256", "not-a-digest"),
+        ):
+            tampered = dict(marker)
+            tampered[field] = value
+            self.assertFalse(
+                verified_transform_marker_matches(
+                    tampered, "a" * 64, runtime, "b" * 64
+                )
+            )
+        self.assertFalse(
+            verified_transform_marker_matches(
+                {**marker, "unexpected": True},
+                "a" * 64,
+                runtime,
+                "b" * 64,
+            )
+        )
 
 
 class CorrectPenvSetupTextTests(unittest.TestCase):
