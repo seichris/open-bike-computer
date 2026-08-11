@@ -106,6 +106,61 @@ def child_mapping_blocks(
     return tuple(blocks)
 
 
+def sequence_mapping_blocks(
+    source: str, parent_key: str, *, indent: int
+) -> tuple[str, ...]:
+    parent_lines = mapping_block(source, parent_key, indent=indent).splitlines()
+    item_indent = indent + 2
+    item_starts = []
+    for index, line in enumerate(parent_lines[1:], start=1):
+        line_indent = len(line) - len(line.lstrip())
+        if line_indent == item_indent and line.lstrip().startswith("-"):
+            item_starts.append(index)
+
+    blocks = []
+    property_indent = item_indent + 2
+    for item_index, start in enumerate(item_starts):
+        end = (
+            item_starts[item_index + 1]
+            if item_index + 1 < len(item_starts)
+            else len(parent_lines)
+        )
+        raw_lines = parent_lines[start:end]
+        first_match = re.fullmatch(rf"\s{{{item_indent}}}-\s*(.*)", raw_lines[0])
+        if not first_match:
+            continue
+        normalized = [first_match.group(1)]
+        for line in raw_lines[1:]:
+            normalized.append(
+                line[property_indent:]
+                if line.startswith(" " * property_indent)
+                else line
+            )
+        blocks.append("\n".join(normalized))
+    return tuple(blocks)
+
+
+def is_verified_download_cache_step(step: str) -> bool:
+    if not re.search(
+        r"(?m)^uses:\s*actions/cache@v6\s*(?:#.*)?$",
+        step,
+    ):
+        return False
+    if re.search(r"(?m)^if:", step):
+        return False
+    try:
+        with_block = mapping_block(step, "with", indent=0)
+    except AssertionError:
+        return False
+    return bool(
+        re.search(
+            r"(?m)^\s{2}path:\s*(?:esp32/)?\.pio/open-bike-build/downloads"
+            r"\s*(?:#.*)?$",
+            with_block,
+        )
+    )
+
+
 def firmware_builder_jobs(source: str) -> tuple[tuple[str, str], ...]:
     return tuple(
         (job, block)
@@ -151,16 +206,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertTrue(builder_jobs)
         violations = []
         for workflow, job, block in builder_jobs:
-            has_cache = re.search(
-                r"(?m)^\s+(?:-\s+)?uses:\s*actions/cache@v6\s*(?:#.*)?$",
-                block,
-            )
-            has_download_path = re.search(
-                r"(?m)^\s+path:\s*(?:esp32/)?\.pio/open-bike-build/downloads"
-                r"\s*(?:#.*)?$",
-                block,
-            )
-            if not has_cache or not has_download_path:
+            steps = sequence_mapping_blocks(block, "steps", indent=4)
+            if not any(is_verified_download_cache_step(step) for step in steps):
                 violations.append(
                     f"{workflow}:{job}: missing active verified-download cache"
                 )
@@ -364,6 +411,57 @@ class WorkflowPolicyTests(unittest.TestCase):
 
             with self.assertRaises(AssertionError):
                 self.assert_firmware_builders_reuse_verified_downloads(root)
+
+    def test_unrelated_yaml_fields_cannot_satisfy_builder_cache_policy(self) -> None:
+        mutations = {
+            "job-env.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    env:\n"
+                "      uses: actions/cache@v6\n"
+                "      path: .pio/open-bike-build/downloads\n"
+                "    steps:\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+            ),
+            "disabled-cache.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - uses: actions/cache@v6\n"
+                "        if: ${{ false }}\n"
+                "        with:\n"
+                "          path: .pio/open-bike-build/downloads\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+            ),
+            "split-cache.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - uses: actions/cache@v6\n"
+                "        with:\n"
+                "          path: /tmp/unrelated\n"
+                "      - run: env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+                "        env:\n"
+                "          path: .pio/open-bike-build/downloads\n"
+            ),
+            "block-scalar.yml": (
+                "jobs:\n"
+                "  builder:\n"
+                "    steps:\n"
+                "      - run: |\n"
+                "          echo 'uses: actions/cache@v6'\n"
+                "          echo 'path: .pio/open-bike-build/downloads'\n"
+                "          env -u LD_LIBRARY_PATH python tools/build_firmware.py TEST\n"
+            ),
+        }
+        for filename, source in mutations.items():
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    (root / filename).write_text(source, encoding="utf-8")
+
+                    with self.assertRaises(AssertionError):
+                        self.assert_firmware_builders_reuse_verified_downloads(root)
 
     def test_every_firmware_builder_clears_library_overrides(self) -> None:
         self.assert_firmware_builders_clear_library_overrides()
