@@ -18,7 +18,7 @@ import sys
 import tarfile
 import tempfile
 import unicodedata
-import urllib.request
+import urllib.parse
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
@@ -418,6 +418,21 @@ def _isolated_command_environment(root: Path) -> dict[str, str]:
     }
 
 
+def _clean_generator_commit(project_dir: Path) -> str:
+    commit = _run(("git", "rev-parse", "HEAD"), cwd=project_dir)
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise FirmwareRuntimeError("runtime generator Git identity is invalid")
+    changed = _run(
+        ("git", "status", "--porcelain=v1", "--untracked-files=no"),
+        cwd=project_dir,
+    )
+    if changed:
+        raise FirmwareRuntimeError(
+            "runtime candidates require a clean tracked Git checkout"
+        )
+    return commit
+
+
 def _refresh_work_root(project_dir: Path) -> Path:
     """Return a symlink-free, project-private root for executable staging."""
     if project_dir.is_symlink() or not project_dir.is_dir():
@@ -585,21 +600,57 @@ def _reviewed_wheel_license(
     )
 
 
-def _pypi_wheel_source(name: str, version: str, filename: str, cafile: str) -> tuple[str, str]:
-    import ssl
-
-    context = ssl.create_default_context(cafile=cafile)
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context)
+def _pypi_wheel_source(
+    name: str,
+    version: str,
+    filename: str,
+    environment: Mapping[str, str],
+) -> tuple[str, str]:
+    url = (
+        "https://pypi.org/pypi/"
+        f"{urllib.parse.quote(name, safe='')}/"
+        f"{urllib.parse.quote(version, safe='')}/json"
     )
-    with opener.open(
-        f"https://pypi.org/pypi/{name}/{version}/json", timeout=30
-    ) as response:
-        value = json.load(response)
-    matches = [item for item in value.get("urls", []) if item.get("filename") == filename]
+    raw = _run(
+        (
+            "/usr/bin/curl",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            url,
+        ),
+        environment=environment,
+    )
+    try:
+        value = json.loads(raw, object_pairs_hook=_duplicate_key_rejector)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise FirmwareRuntimeError(
+            f"PyPI provenance is invalid for {filename}"
+        ) from error
+    if not isinstance(value, dict) or not isinstance(value.get("urls"), list):
+        raise FirmwareRuntimeError(f"PyPI provenance is invalid for {filename}")
+    matches = [
+        item
+        for item in value["urls"]
+        if isinstance(item, dict) and item.get("filename") == filename
+    ]
     if len(matches) != 1:
         raise FirmwareRuntimeError(f"PyPI provenance is missing for {filename}")
-    return matches[0]["url"], matches[0]["digests"]["sha256"]
+    source_url = matches[0].get("url")
+    digests = matches[0].get("digests")
+    source_sha = digests.get("sha256") if isinstance(digests, dict) else None
+    if (
+        not isinstance(source_url, str)
+        or not source_url.startswith("https://files.pythonhosted.org/")
+        or not isinstance(source_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None
+    ):
+        raise FirmwareRuntimeError(f"PyPI provenance is invalid for {filename}")
+    return source_url, source_sha
 
 
 def _write_wrapper(path: Path, module: str) -> None:
@@ -729,6 +780,7 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
     inputs, wheel_license_overrides, refresh_path, licenses_path = _load_inputs(
         project_dir
     )
+    generator_commit = _clean_generator_commit(project_dir)
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
     matches = [target for target in lock.targets if target.target_id == target_id]
     if len(matches) != 1:
@@ -783,6 +835,36 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
                 _run((str(python), "-m", "pip", "--isolated", "download", "--index-url", "https://pypi.org/simple", "--disable-pip-version-check", "--no-cache-dir", "--no-deps", "--only-binary=:all:", "--dest", str(wheelhouse), *requirements), environment=command_environment)
         for wheel_path in sorted(wheelhouse.glob("*.whl")):
             _validate_wheel_archive(wheel_path)
+        downloaded_identities: dict[tuple[str, str], Path] = {}
+        for wheel_path in sorted(wheelhouse.glob("*.whl")):
+            name, version, _, _ = _wheel_identity(wheel_path)
+            key = (name, version)
+            if key in downloaded_identities or name in source_names:
+                raise FirmwareRuntimeError(
+                    f"unexpected or duplicate downloaded wheel: {name}=={version}"
+                )
+            downloaded_identities[key] = wheel_path
+        pypi_sources: dict[tuple[str, str], tuple[str, str]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            pending = {
+                executor.submit(
+                    _pypi_wheel_source,
+                    name,
+                    version,
+                    wheel_path.name,
+                    command_environment,
+                ): (name, version)
+                for (name, version), wheel_path in downloaded_identities.items()
+            }
+            for future in concurrent.futures.as_completed(pending):
+                key = pending[future]
+                source_url, source_sha = future.result()
+                if source_sha != _sha256(downloaded_identities[key]):
+                    raise FirmwareRuntimeError(
+                        "downloaded wheel hash disagrees with PyPI before install: "
+                        f"{downloaded_identities[key].name}"
+                    )
+                pypi_sources[key] = (source_url, source_sha)
         top_requirements = sets["topLevel"]
         _run((str(python), "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-cache-dir", "--no-index", "--find-links", str(wheelhouse), "--no-deps", *top_requirements), environment=command_environment)
         setuptools_version = _run(
@@ -817,7 +899,6 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         pio_version = _run((str(bin_dir / "pio"), "--version"), environment=command_environment)
         uv_version = _run((str(bin_dir / "uv"), "--version"), environment=command_environment)
         _run((str(python), "-m", "pip", "--isolated", "check"), environment=command_environment)
-        cafile = _run((str(python), "-c", "import certifi; print(certifi.where())"), environment=command_environment)
         identities: dict[tuple[str, str], tuple[Path, list[str], str | None]] = {}
         for wheel_path in sorted(wheelhouse.glob("*.whl")):
             name, version, tags, license_expression = _wheel_identity(wheel_path)
@@ -838,21 +919,6 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
                 members.append(filename)
                 wheel_groups.setdefault(filename, GROUP_LABELS[set_name])
             set_members[set_name] = sorted(members)
-        pypi_sources: dict[tuple[str, str], tuple[str, str]] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            pending = {
-                executor.submit(
-                    _pypi_wheel_source,
-                    name,
-                    version,
-                    wheel_path.name,
-                    cafile,
-                ): (name, version)
-                for (name, version), (wheel_path, _, _) in identities.items()
-                if name not in inputs["sources"]
-            }
-            for future in concurrent.futures.as_completed(pending):
-                pypi_sources[pending[future]] = future.result()
         wheels = []
         license_rows = []
         used_license_overrides: set[tuple[str, str]] = set()
@@ -963,7 +1029,7 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             "schema": 1,
             "generator": {
                 "version": "2",
-                "commit": _run(("git", "rev-parse", "HEAD"), cwd=project_dir),
+                "commit": generator_commit,
                 "refreshInputsSha256": _sha256(refresh_path),
                 "licensesSha256": _sha256(licenses_path),
             },
