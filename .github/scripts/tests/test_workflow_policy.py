@@ -336,6 +336,18 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("python3-cryptography", host_job)
         self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
 
+    def test_runtime_refresh_reads_the_wrapped_candidate_contract(self) -> None:
+        runtime_refresh = workflow_source("firmware-runtime-refresh.yml")
+
+        self.assertIn(
+            'json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"]',
+            runtime_refresh,
+        )
+        self.assertNotIn(
+            'json.load(open(sys.argv[1]))["bundle"]["sha256"]',
+            runtime_refresh,
+        )
+
     def test_host_job_mapping_stops_at_the_next_peer(self) -> None:
         source = (
             "jobs:\n"
