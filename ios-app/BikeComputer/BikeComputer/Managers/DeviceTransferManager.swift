@@ -219,7 +219,6 @@ enum DeviceTransferHandshakePolicy {
     static let attemptCount = 32
     static let remoteDebugAttemptCount = 64
     static let retryIntervalNanoseconds: UInt64 = 250_000_000
-    static let lanReachabilityTimeout: TimeInterval = 10
     static let remoteDebugExitAttemptCount = 32
 
     static func shouldRequestStatus(attempt: Int) -> Bool {
@@ -472,26 +471,18 @@ final class DeviceTransferManager {
             }
             enterWasQueued = true
 
-            var session = try await waitForRemoteDebugSession(
+            let session = try await waitForRemoteDebugSession(
                 bleManager: bleManager,
                 afterRevision: initialRevision
             )
             if session.networkTransport == "lan" {
-                status("verifying local Wi-Fi")
-                if try await waitForTransferServer(
-                    baseURL: session.baseURL,
-                    statusPath: "device-debug/v1/info",
-                    sessionToken: session.sessionToken,
-                    timeout: DeviceTransferHandshakePolicy.lanReachabilityTimeout
-                ) {
-                    status("local Wi-Fi ready")
-                    return session
-                }
-
-                status("local Wi-Fi unreachable; starting device hotspot")
-                session = try await restartRemoteDebugOnHotspot(
-                    bleManager: bleManager
-                )
+                // The browser can run on a different computer. The ESP's
+                // authenticated BLE status is authoritative that it joined
+                // the LAN and published the debug endpoint; the iPhone's own
+                // route must not tear down a session another LAN client can
+                // already reach.
+                status("local Wi-Fi ready")
+                return session
             }
             status(session.hotspotFallback
                 ? "device hotspot fallback ready"
@@ -546,24 +537,6 @@ final class DeviceTransferManager {
             throw RemoteDeviceDebugError.rejected(message)
         }
         throw RemoteDeviceDebugError.missingSession
-    }
-
-    private func restartRemoteDebugOnHotspot(
-        bleManager: BLEManager
-    ) async throws -> DeviceTransferSession {
-        try await exitRemoteDebug(bleManager: bleManager)
-
-        let fallbackRevision = bleManager.deviceTransferStatusRevision
-        guard bleManager.requestDeviceTransferMode(
-            .debug,
-            remoteDebugHotspotFallbackReason: .endpointUnreachable
-        ) else {
-            throw RemoteDeviceDebugError.transferCommandNotSent
-        }
-        return try await waitForRemoteDebugSession(
-            bleManager: bleManager,
-            afterRevision: fallbackRevision
-        )
     }
 
     func exitRemoteDebug(bleManager: BLEManager) async throws {

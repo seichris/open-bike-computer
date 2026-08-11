@@ -680,6 +680,7 @@ struct NavigationProtocolTests {
         testDeviceTransferServerProbePolicy()
         await testDeviceTransferManagerWaitsForMapToken()
         await testDeviceTransferManagerWaitsForFreshDebugToken()
+        await testDeviceTransferManagerKeepsConfirmedLANDebugSession()
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
@@ -13576,8 +13577,60 @@ struct NavigationProtocolTests {
             DeviceTransferServerProbePolicy.requestTimeout,
             "local device probe resource timeout is bounded"
         )
-        assert(DeviceTransferHandshakePolicy.lanReachabilityTimeout >= 10,
-               "LAN verification tolerates iOS route convergence")
+    }
+
+    static func testDeviceTransferManagerKeepsConfirmedLANDebugSession() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 1, 0])
+        _ = bleManager.handleDeviceCapabilitiesNotification(cap2)
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        let credentials = RemoteDebugLANCredentials(
+            ssid: "Home Wi-Fi",
+            password: "session-secret"
+        )!
+        var statuses: [String] = []
+        let task = Task {
+            try await DeviceTransferManager().enterRemoteDebug(
+                bleManager: bleManager,
+                lanCredentials: credentials,
+                status: { statuses.append($0) }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        let lanStatus = """
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"lan-token"}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(lanStatus.utf8)
+        )
+
+        do {
+            let session = try await task.value
+            assertEqual(session.networkTransport, "lan",
+                        "firmware-confirmed LAN debug remains on LAN")
+            assertEqual(session.baseURL.absoluteString,
+                        "http://192.168.31.195:8080",
+                        "LAN debug preserves the firmware endpoint")
+            assert(statuses.contains("local Wi-Fi ready"),
+                   "LAN debug reports browser readiness without a phone probe")
+            assert(!sentPackets.contains(Data("DTRNexit".utf8)),
+                   "phone reachability never tears down a confirmed LAN session")
+        } catch {
+            assert(false, "confirmed LAN debug should remain active: \(error)")
+        }
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {

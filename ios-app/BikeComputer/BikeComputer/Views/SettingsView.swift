@@ -1890,7 +1890,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
             }
             return "Reveal or copy the per-session hotspot password, join the shown device Wi-Fi on the Mac, then open the copied URL. The URL fragment and hotspot password are secrets; do not paste them into logs."
         }
-        return "Local Wi-Fi is tried first with credentials stored in this iPhone's Keychain and sent over authenticated BLE for this session only. The device hotspot is the automatic fallback."
+        return "Local Wi-Fi is tried first with credentials stored in this iPhone's Keychain and sent over authenticated BLE for this session only. The device hotspot is used if the device cannot join; turn off Prefer Local Wi-Fi to choose it directly."
     }
 
     private var lanInputIsValid: Bool {
