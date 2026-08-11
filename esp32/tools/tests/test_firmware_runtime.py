@@ -245,9 +245,16 @@ class FirmwareRuntimeTests(unittest.TestCase):
             calls.append((executable, tuple(command), dict(environment)))
             raise RuntimeError("captured")
 
+        real_replace = os.replace
+
+        def require_writable_private_root(source, destination):
+            if "host-runtime" in str(destination):
+                self.assertNotEqual(Path(source).stat().st_mode & 0o200, 0)
+            return real_replace(source, destination)
+
         with mock.patch(
             "firmware_runtime.host_target_id", return_value="macos-arm64-cp313"
-        ):
+        ), mock.patch("firmware_runtime.os.replace", require_writable_private_root):
             with self.assertRaisesRegex(RuntimeError, "captured"):
                 ensure_runtime_handoff(
                     ("WAVESHARE_AMOLED_175",), project,

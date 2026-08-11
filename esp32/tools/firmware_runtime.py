@@ -744,6 +744,11 @@ def _hydrate_private(shared: Path, project_dir: Path, lock: RuntimeLock, target:
         staging.rmdir()
         shutil.copytree(shared, staging, symlinks=False)
         _verify_runtime_tree(staging, target)
+        # copytree preserves the accepted shared root's read-only mode. macOS
+        # refuses to rename that directory even though its parent is writable,
+        # so restore write permission only on our private staging root. The
+        # published tree is locked again immediately after the atomic rename.
+        staging.chmod(0o700)
         os.replace(staging, destination)
         published = True
         _mark_tree_read_only(destination)
