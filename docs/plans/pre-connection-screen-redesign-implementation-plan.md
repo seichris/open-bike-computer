@@ -487,12 +487,12 @@ repository's complete existing host suite. The minimum production builds are:
 
 ```sh
 cd esp32
-pio run -e WAVESHARE_AMOLED_175
-pio run -e WAVESHARE_AMOLED_206
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175
+python3 tools/build_firmware.py WAVESHARE_AMOLED_206
 ```
 
-CI must also retain the speaker-honk and display-test variants already defined
-by the repository.
+CI must also retain the speaker-honk and display-test variants in the
+repository's separate firmware-diagnostics workflow.
 
 ## Physical validation matrix
 
