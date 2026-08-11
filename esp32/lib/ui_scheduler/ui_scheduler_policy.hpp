@@ -18,6 +18,7 @@ enum class WakeReason : uint32_t {
   Display = 1u << 3,
   Transfer = 1u << 4,
   Audio = 1u << 5,
+  RemoteDebug = 1u << 6,
 };
 
 constexpr uint32_t reasonBits(WakeReason reason) {

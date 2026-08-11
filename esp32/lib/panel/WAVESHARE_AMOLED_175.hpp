@@ -41,6 +41,7 @@ void setMultiTouchSuppressionPolicy(MultiTouchSuppressionPolicy policy);
 bool hasUnattemptedTouchInterrupt();
 void configureTouchWakeInterrupt();
 bool isTouchWakeSourceActive();
+bool hasFullScreenRgb565Buffer();
 
 // Function declarations
 void setupDisplay();

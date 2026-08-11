@@ -9,6 +9,8 @@
 #include <array>
 #include <string>
 
+#include "device_transfer_network_protocol.hpp"
+
 namespace device_transfer {
 
 struct HttpTransferStatus {
@@ -18,6 +20,11 @@ struct HttpTransferStatus {
   std::string mode;
   std::string baseUrl;
   std::string apSsid;
+  std::string apPassphrase;
+  std::string networkTransport;
+  std::string networkSsid;
+  bool hotspotFallback = false;
+  std::string hotspotFallbackReason;
   std::string sessionToken;
   std::string lastErrorCode;
   std::string lastErrorMessage;
@@ -41,6 +48,10 @@ public:
   virtual ~HttpRequestHandler() = default;
   virtual bool handleRequest(const HttpRequest &request,
                              WiFiClient &client) = 0;
+  virtual bool allowShortUnauthenticatedResponseCompletion(
+      const HttpRequest &request) const {
+    return false;
+  }
   virtual void responseDidComplete(const HttpRequest &request,
                                    bool peerClosedCleanly) {}
 };
@@ -54,6 +65,9 @@ public:
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
+  bool setPreferredNetwork(const LanCredentials &credentials);
+  bool forceHotspotFallbackAfterEndpointFailure();
+  void clearPreferredNetwork();
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
@@ -65,8 +79,16 @@ private:
   bool configured_ = false;
   bool enabled_ = false;
   bool startedAp_ = false;
+  bool startedStation_ = false;
+  bool hotspotFallback_ = false;
+  std::string hotspotFallbackReason_;
+  std::string requestedHotspotFallbackReason_;
+  std::string networkTransport_;
+  std::string networkSsid_;
+  LanCredentials preferredNetwork_;
   std::string mode_;
   std::string apSsid_ = "BikeComputer-Transfer";
+  std::string apPassphrase_;
   std::string sessionToken_;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
@@ -88,6 +110,8 @@ private:
 
   void handleClient(WiFiClient &client);
   void runWorker();
+  bool startNetwork();
+  void stopNetwork();
   static void workerTaskThunk(void *arg);
   HttpRequestHandler *handlerForPath(const std::string &path) const;
   std::string generateSessionToken() const;
@@ -98,8 +122,17 @@ private:
   void unlockState() const;
 };
 
-bool sendHttpHead(WiFiClient &client, int status,
-                  uint64_t contentLength = 0);
+struct HttpResponseHeader {
+  const char *name = nullptr;
+  const char *value = nullptr;
+};
+
+bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength = 0,
+                  const char *contentType = nullptr,
+                  const HttpResponseHeader *additionalHeaders = nullptr,
+                  size_t additionalHeaderCount = 0);
+bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+                    uint32_t timeoutMs = 5000);
 bool sendHttpJson(WiFiClient &client, int status, const std::string &body);
 bool sendHttpError(WiFiClient &client, int status, const std::string &code,
                    const std::string &message);
