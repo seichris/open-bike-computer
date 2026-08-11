@@ -56,13 +56,14 @@ done
 mkdir -p "$target_root"
 
 verify_archive() {
-  [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
-  actual_size=$(wc -c < "$archive" | tr -d ' ')
+  candidate=$1
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  actual_size=$(wc -c < "$candidate" | tr -d ' ')
   [ "$actual_size" = "$archive_size" ] || return 1
   if command -v shasum >/dev/null 2>&1; then
-    actual_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
+    actual_sha=$(shasum -a 256 "$candidate" | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    actual_sha=$(sha256sum "$archive" | awk '{print $1}')
+    actual_sha=$(sha256sum "$candidate" | awk '{print $1}')
   else
     echo "Recovery requires shasum or sha256sum" >&2
     exit 1
@@ -70,18 +71,20 @@ verify_archive() {
   [ "$actual_sha" = "$archive_sha" ]
 }
 
-if ! verify_archive; then
+if ! verify_archive "$archive"; then
   partial=$target_root/.$archive_sha.download
   if [ -e "$partial" ] || [ -L "$partial" ]; then
     echo "Refusing to replace unexpected recovery partial: $partial" >&2
     exit 1
   fi
-  curl --fail --location --proto '=https' --tlsv1.2 --output "$partial" "$archive_url"
-  mv "$partial" "$archive"
-  if ! verify_archive; then
+  curl --fail --location --proto '=https' --tlsv1.2 \
+    --max-filesize "$archive_size" --output "$partial" "$archive_url"
+  if ! verify_archive "$partial"; then
+    rm -f -- "$partial"
     echo "Downloaded recovery Python did not match the tracked size and SHA-256" >&2
     exit 1
   fi
+  mv "$partial" "$archive"
 fi
 
 staging=$(mktemp -d "$target_root/.recovery.XXXXXX")
