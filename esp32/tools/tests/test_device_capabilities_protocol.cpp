@@ -34,6 +34,10 @@ int main() {
       device_capabilities_protocol::RIDE_AUTOMATION_V2_CLIENT_VERSION == 13);
   static_assert(device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE ==
                 (1UL << 15));
+  static_assert(
+      device_capabilities_protocol::REMOTE_DEVICE_DEBUG_CLIENT_VERSION == 14);
+  static_assert(device_capabilities_protocol::REMOTE_DEVICE_DEBUG_FEATURE ==
+                (1UL << 16));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -58,6 +62,22 @@ int main() {
   assert(scopedControllerSize == sizeof(expectedScopedController));
   for (size_t index = 0; index < scopedControllerSize; ++index)
     assert(output[index] == expectedScopedController[index]);
+  const size_t rideAutomationSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE, nullptr, false,
+      output, sizeof(output));
+  const uint8_t expectedRideAutomation[] = {'C', 'A', 'P', '2', 1,
+                                            0x00, 0x80, 0x00, 0x00};
+  assert(rideAutomationSize == sizeof(expectedRideAutomation));
+  for (size_t index = 0; index < rideAutomationSize; ++index)
+    assert(output[index] == expectedRideAutomation[index]);
+  const size_t remoteDebugSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::REMOTE_DEVICE_DEBUG_FEATURE, nullptr,
+      false, output, sizeof(output));
+  const uint8_t expectedRemoteDebug[] = {'C', 'A', 'P', '2', 1,
+                                          0x00, 0x00, 0x01, 0x00};
+  assert(remoteDebugSize == sizeof(expectedRemoteDebug));
+  for (size_t index = 0; index < remoteDebugSize; ++index)
+    assert(output[index] == expectedRemoteDebug[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

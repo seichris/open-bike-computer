@@ -35,6 +35,7 @@
 #include "../gui/src/mapRenderPolicy.hpp"
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
+#include "../device_debug/device_debug_http.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #endif
@@ -71,6 +72,9 @@ extern Gps gps;
 extern device_transfer::HttpTransferServer deviceTransferHttp;
 extern map_transfer::MapTransferHttpServer mapTransferHttp;
 extern firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
+extern device_debug::DeviceDebugHttp deviceDebugHttp;
+extern bool startRemoteDeviceDebugSession();
+extern bool stopActiveDeviceTransfer();
 extern Maps mapView;
 extern Storage storage;
 
@@ -1472,6 +1476,12 @@ static std::string jsonEscape(const std::string &value) {
       out += "\\n";
     } else if (c == '\r') {
       out += "\\r";
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      static constexpr char kHex[] = "0123456789abcdef";
+      const unsigned char value = static_cast<unsigned char>(c);
+      out += "\\u00";
+      out.push_back(kHex[value >> 4]);
+      out.push_back(kHex[value & 0x0f]);
     } else {
       out.push_back(c);
     }
@@ -1518,6 +1528,21 @@ static std::string mapTransferStatusJson() {
 
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+  }
+  if (!transferStatus.networkTransport.empty()) {
+    body += ",\"networkTransport\":\"" +
+            jsonEscape(transferStatus.networkTransport) + "\"";
+  }
+  if (!transferStatus.networkSsid.empty()) {
+    body += ",\"networkSsid\":\"" +
+            jsonEscape(transferStatus.networkSsid) + "\"";
+  }
+  if (transferStatus.hotspotFallback) {
+    body += ",\"hotspotFallback\":true";
+  }
+  if (!transferStatus.hotspotFallbackReason.empty()) {
+    body += ",\"hotspotFallbackReason\":\"" +
+            jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
   }
   if (activeStatus.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
@@ -1580,6 +1605,25 @@ static std::string genericTransferStatusJson() {
   }
   if (!transferStatus.apSsid.empty()) {
     body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+  }
+  if (!transferStatus.apPassphrase.empty()) {
+    body += ",\"apPassphrase\":\"" +
+            jsonEscape(transferStatus.apPassphrase) + "\"";
+  }
+  if (!transferStatus.networkTransport.empty()) {
+    body += ",\"networkTransport\":\"" +
+            jsonEscape(transferStatus.networkTransport) + "\"";
+  }
+  if (!transferStatus.networkSsid.empty()) {
+    body += ",\"networkSsid\":\"" +
+            jsonEscape(transferStatus.networkSsid) + "\"";
+  }
+  if (transferStatus.hotspotFallback) {
+    body += ",\"hotspotFallback\":true";
+  }
+  if (!transferStatus.hotspotFallbackReason.empty()) {
+    body += ",\"hotspotFallbackReason\":\"" +
+            jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
   }
   if (!transferStatus.sessionToken.empty()) {
     body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
@@ -1728,6 +1772,23 @@ static void processPendingTransferControl() {
     return;
   }
 
+  if (request.disconnectCleanup) {
+    // Pending LAN credentials were synchronously cleared by the BLE
+    // disconnect callback before a new session could authenticate. Revoke
+    // modes whose lifetime must not outlive that old session. Firmware upload
+    // intentionally retains its existing disconnect behavior.
+    const std::string mode = deviceTransferHttp.status().mode;
+    bool disabled = true;
+    if (mode == "map") {
+      disabled = mapTransferHttp.setEnabled(false);
+    } else if (mode == "debug" || device_debug::frameStore().active()) {
+      disabled = stopActiveDeviceTransfer();
+    }
+    Serial.printf("BLE Device Transfer: disconnect cleanup applied, "
+                  "mode=%s disabled=%d\n",
+                  mode.c_str(), disabled);
+  }
+
   switch (request.action) {
   case ble_transfer::Action::EnableMap: {
     const device_transfer::HttpTransferStatus transferStatus =
@@ -1783,6 +1844,23 @@ static void processPendingTransferControl() {
     }
     break;
   }
+  case ble_transfer::Action::EnableDebug: {
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (transferStatus.enabled && transferStatus.mode != "debug") {
+      deviceTransferHttp.setLastError("transfer_busy",
+                                      "another transfer mode is active");
+      Serial.println(
+          "BLE Device Transfer: debug enter rejected, transfer is busy");
+    } else if (transferStatus.enabled && transferStatus.mode == "debug") {
+      Serial.println("BLE Device Transfer: debug enter already applied");
+    } else {
+      const bool enabled = startRemoteDeviceDebugSession();
+      Serial.printf("BLE Device Transfer: debug enter applied, enabled=%d\n",
+                    enabled);
+    }
+    break;
+  }
   case ble_transfer::Action::DisableMap: {
     bool disabled = true;
     if (deviceTransferHttp.status().mode == "map") {
@@ -1792,9 +1870,13 @@ static void processPendingTransferControl() {
     break;
   }
   case ble_transfer::Action::DisableAll: {
-    const bool disabled = deviceTransferHttp.setEnabled(false);
+    const bool disabled = stopActiveDeviceTransfer();
     Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
                   disabled);
+    break;
+  }
+  case ble_transfer::Action::DisableOnBleDisconnect: {
+    // This action is consumed into Request::disconnectCleanup by merge().
     break;
   }
   case ble_transfer::Action::None:
@@ -1889,6 +1971,14 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_AUTOMATION_V2_CLIENT_VERSION) {
       featureFlags |=
           device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE;
+    }
+#endif
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.initialized() &&
+        clientVersion >= device_capabilities_protocol::
+                             REMOTE_DEVICE_DEBUG_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::REMOTE_DEVICE_DEBUG_FEATURE;
     }
 #endif
     responseSize = device_capabilities_protocol::encodeCap2(
@@ -2180,6 +2270,51 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
 
 static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
                                                 NimBLECharacteristic *) {
+  device_transfer::LanCredentials lanCredentials;
+  const device_transfer::LanCommandParseResult lanCommand =
+      device_transfer::parseRemoteDebugLanCommand(data, len, lanCredentials);
+  if (lanCommand == device_transfer::LanCommandParseResult::Invalid) {
+    deviceTransferHttp.clearPreferredNetwork();
+    deviceTransferHttp.setLastError(
+        "wifi_credentials",
+        "LAN credentials must contain a 1-32 byte SSID and an empty or "
+        "8-63 byte password");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+    Serial.println(
+        "BLE Device Transfer: rejected invalid remote-debug LAN credentials");
+    return;
+  }
+  if (lanCommand == device_transfer::LanCommandParseResult::Valid) {
+#if DEVICE_REMOTE_DEBUG
+    if (!deviceDebugHttp.initialized()) {
+      deviceTransferHttp.setLastError(
+          "remote_debug_unavailable",
+          "remote debug service did not initialize on this device");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    } else if (!deviceTransferHttp.setPreferredNetwork(lanCredentials)) {
+      deviceTransferHttp.setLastError(
+          "wifi_credentials",
+          "LAN credentials could not be applied to this debug session");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    } else {
+      queueTransferControl(ble_transfer::Action::EnableDebug,
+                           ble_transfer::NotifyGeneric);
+      Serial.println(
+          "BLE Device Transfer: LAN-first debug enter queued");
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "remote_debug_unsupported",
+        "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
+    return;
+  }
+
   std::string command;
   if (data != nullptr && len > 0) {
     command.assign(reinterpret_cast<const char *>(data), len);
@@ -2198,6 +2333,55 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::EnableFirmware,
                          ble_transfer::NotifyGeneric);
     Serial.println("BLE Device Transfer: firmware enter queued");
+    return;
+  }
+
+  if (command == "enter|debug") {
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.initialized()) {
+      deviceTransferHttp.clearPreferredNetwork();
+      queueTransferControl(ble_transfer::Action::EnableDebug,
+                           ble_transfer::NotifyGeneric);
+      Serial.println("BLE Device Transfer: debug enter queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "remote_debug_unavailable",
+          "remote debug service did not initialize on this device");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "remote_debug_unsupported",
+        "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
+    return;
+  }
+
+  if (command == "enter|debug|h1|e") {
+#if DEVICE_REMOTE_DEBUG
+    if (deviceDebugHttp.initialized() &&
+        deviceTransferHttp.forceHotspotFallbackAfterEndpointFailure()) {
+      queueTransferControl(ble_transfer::Action::EnableDebug,
+                           ble_transfer::NotifyGeneric);
+      Serial.println(
+          "BLE Device Transfer: endpoint-fallback debug enter queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "remote_debug_unavailable",
+          "endpoint-fallback debug session could not be prepared");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "remote_debug_unsupported",
+        "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
     return;
   }
 
@@ -2931,7 +3115,11 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
-    queueTransferControl(ble_transfer::Action::DisableMap,
+    // Prepared LAN credentials and forced-fallback metadata belong to this
+    // authenticated session. Clear them synchronously on NimBLE's serialized
+    // host callback before a reconnect can submit new session state.
+    deviceTransferHttp.clearPreferredNetwork();
+    queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
                          ble_transfer::NotifyNone);
     server->connected = false;
     bleSessionAuthenticated = false;
@@ -3746,6 +3934,10 @@ bool BLENavigationServer::forgetOwner() {
   bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                     std::memory_order_release);
   bleDebugStats.authenticated = false;
+  // Physical owner recovery is an immediate authorization boundary. Revoke
+  // the token before the scheduled restart rather than relying on that later
+  // restart to eventually tear the session down.
+  stopActiveDeviceTransfer();
   ownershipAdvertisingDirty = true;
   queueOwnershipUiUpdate();
   ownershipRestartRequested = true;
