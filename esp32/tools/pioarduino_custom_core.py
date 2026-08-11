@@ -62,9 +62,14 @@ VERIFIED_EXTERNAL_UV_INSTALL = (
 
 UPSTREAM_PENV_INSTALL_GUARD = '''    # Get the penv directory to locate uv within it
     penv_dir = os.path.dirname(os.path.dirname(python_exe))'''
-VERIFIED_PENV_INSTALL_GUARD = '''    if external_uv_executable != os.environ["OPEN_BIKE_FIRMWARE_UV"]:
+VERIFIED_PENV_INSTALL_GUARD = '''    locked_uv_executable = os.environ["OPEN_BIKE_FIRMWARE_UV"]
+    if external_uv_executable not in (None, locked_uv_executable):
         print("Error: locked external uv executable is required")
         return False
+    if not os.path.isfile(locked_uv_executable):
+        print("Error: locked external uv executable is missing")
+        return False
+    external_uv_executable = locked_uv_executable
 
     # Get the penv directory to locate uv within it
     penv_dir = str(Path(python_exe).parent.parent)'''
