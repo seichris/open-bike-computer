@@ -159,6 +159,7 @@ jobs:
           cp "$bundle" "$destination/$digest.tar.gz"
       - name: Prove clean and warm firmware builds
         run: |
+          set -o pipefail
           evidence="$RUNNER_TEMP/firmware-build-evidence"
           mkdir -p "$evidence"
           for environment in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
