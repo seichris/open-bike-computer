@@ -19,6 +19,7 @@ from build_firmware import (
     BuildError,
     WAVESHARE_PLATFORM_URL,
     _resolved_device_port,
+    _custom_core_project_text,
     _consume_link_timing,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
@@ -725,6 +726,63 @@ class FirmwareBuildTests(unittest.TestCase):
         build_firmware(self.project_dir, self.environment, runner=runner)
 
         self.assertEqual(len(calls), 2)
+        self.assertTrue(
+            calls[0][0][3].endswith("platformio-bootstrap.ini")
+        )
+        self.assertTrue(
+            calls[1][0][3].endswith("platformio-custom-core.ini")
+        )
+
+    def test_toolchain_then_custom_core_then_diagnostic_application(self):
+        calls = []
+
+        def runner(command, cwd):
+            calls.append((tuple(command), cwd))
+            if len(calls) == 1:
+                self.write_bootstrapped_toolchain()
+                return subprocess.CompletedProcess(command, 1)
+            if len(calls) == 2:
+                self.write_dummy()
+                return subprocess.CompletedProcess(command, 1)
+            self.write_firmware()
+            return subprocess.CompletedProcess(command, 0)
+
+        build_firmware(self.project_dir, self.environment, runner=runner)
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0][0][3].endswith("platformio-bootstrap.ini"))
+        self.assertTrue(calls[1][0][3].endswith("platformio-custom-core.ini"))
+        self.assertEqual(
+            calls[2][0][3], str(self.project_dir / "platformio.ini")
+        )
+
+    def test_custom_core_config_excludes_only_external_diagnostic_source(self):
+        source = """[env:WAVESHARE_AMOLED_175_SPEAKER_HONK]
+extends = env:WAVESHARE_AMOLED_175
+build_src_filter =
+  -<*>
+  +<../speaker_honk_test.cpp>
+
+[env:WAVESHARE_AMOLED_175]
+build_flags = -DTEST=1
+"""
+
+        corrected = _custom_core_project_text(source)
+
+        self.assertIn("build_src_filter =\n  -<*>\n", corrected)
+        self.assertNotIn("speaker_honk_test.cpp", corrected)
+        self.assertIn("[env:WAVESHARE_AMOLED_175]\n", corrected)
+
+    def test_custom_core_config_rejects_mixed_external_source_filter(self):
+        source = """[env:WAVESHARE_AMOLED_175_DIAGNOSTIC]
+build_src_filter =
+  -<*>
+  +<src/main.cpp>
+  +<../diagnostic.cpp>
+"""
+
+        with self.assertRaisesRegex(BuildError, "unsupported external"):
+            _custom_core_project_text(source)
 
     def test_rejects_failed_build_with_incomplete_toolchain_bootstrap(self):
         def runner(command, cwd):
@@ -2099,6 +2157,7 @@ class FirmwareBuildTests(unittest.TestCase):
         ):
             steady, _ = _verified_platformio_project_config(self.project_dir)
         bootstrap = steady.with_name("platformio-bootstrap.ini")
+        custom_core = steady.with_name("platformio-custom-core.ini")
         self.assertNotIn(
             "toolchain-xtensa-esp-elf @ file://",
             steady.read_text(encoding="utf-8"),
@@ -2114,6 +2173,10 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertNotIn(
             "tool-scons @ file://",
             bootstrap.read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "toolchain-xtensa-esp-elf @ file://",
+            custom_core.read_text(encoding="utf-8"),
         )
         self.platform_config_patch.start()
 
