@@ -13,6 +13,7 @@
 #include "ble_connection_policy.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
+#include "ownership_ui_dispatch_policy.hpp"
 #include "device_screen_protocol.hpp"
 #include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
@@ -155,11 +156,12 @@ static bool ownershipRestartRequested = false;
 static uint32_t ownershipRestartRequestedMs = 0;
 static portMUX_TYPE ownershipUiMux = portMUX_INITIALIZER_UNLOCKED;
 static bool ownershipUiUpdatePending = false;
-static char ownershipUiName[device_ownership::MAX_DEVICE_NAME_BYTES + 1] = "";
 static bool ownershipUiClaimed = false;
 static bool ownershipUiConnected = false;
 static bool ownershipUiAuthenticated = false;
-static int32_t ownershipUiPairingCode = -1;
+static bool ownershipUiPairingActive = false;
+static bool ownershipUiPairingConfirmedOnDevice = false;
+static uint32_t ownershipUiPairingCode = 0;
 static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
     ownershipComparisonRenderGate;
@@ -331,21 +333,26 @@ static void processRadioCharacterization(uint32_t nowMs,
 }
 #endif
 
-static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
-                                   uint32_t pairingGeneration = 0) {
+static void queueOwnershipUiUpdate() {
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return;
   }
-  const std::string name = deviceOwnership.deviceName();
   const bool claimed = deviceOwnership.isClaimed();
+  const bool pairingActive = deviceOwnership.hasPairingCode();
+  const bool pairingConfirmed =
+      deviceOwnership.isPairingConfirmedOnDevice();
+  const uint32_t pairingCode =
+      pairingActive ? deviceOwnership.pairingCode() : 0;
+  const uint32_t pairingGeneration =
+      pairingActive ? deviceOwnership.pairingGeneration() : 0;
   xSemaphoreGive(deviceOwnershipMutex);
   portENTER_CRITICAL(&ownershipUiMux);
-  strncpy(ownershipUiName, name.c_str(), sizeof(ownershipUiName) - 1);
-  ownershipUiName[sizeof(ownershipUiName) - 1] = '\0';
   ownershipUiClaimed = claimed;
   ownershipUiConnected = bleNavServer.isConnected();
   ownershipUiAuthenticated = bleSessionAuthenticated;
+  ownershipUiPairingActive = pairingActive;
+  ownershipUiPairingConfirmedOnDevice = pairingConfirmed;
   ownershipUiPairingCode = pairingCode;
   ownershipUiPairingGeneration = pairingGeneration;
   ownershipUiUpdatePending = true;
@@ -354,34 +361,39 @@ static void queueOwnershipUiUpdate(int32_t pairingCode = -1,
 }
 
 static void applyPendingOwnershipUiUpdate() {
-  char name[sizeof(ownershipUiName)] = "";
-  bool claimed = false;
-  bool connected = false;
-  bool authenticated = false;
-  int32_t pairingCode = -1;
+  pre_connection_presentation::Snapshot snapshot;
   uint32_t pairingGeneration = 0;
   portENTER_CRITICAL(&ownershipUiMux);
   const bool pending = ownershipUiUpdatePending;
   if (pending) {
-    strncpy(name, ownershipUiName, sizeof(name) - 1);
-    claimed = ownershipUiClaimed;
-    connected = ownershipUiConnected;
-    authenticated = ownershipUiAuthenticated;
-    pairingCode = ownershipUiPairingCode;
+    snapshot.claimed = ownershipUiClaimed;
+    snapshot.connected = ownershipUiConnected;
+    snapshot.authenticated = ownershipUiAuthenticated;
+    snapshot.pairingActive = ownershipUiPairingActive;
+    snapshot.pairingConfirmedOnDevice =
+        ownershipUiPairingConfirmedOnDevice;
+    snapshot.pairingCode = ownershipUiPairingCode;
     pairingGeneration = ownershipUiPairingGeneration;
     ownershipUiUpdatePending = false;
   }
   portEXIT_CRITICAL(&ownershipUiMux);
   if (pending) {
-    updateWaitingOwnershipStatus(name, claimed, connected, authenticated,
-                                 pairingCode);
-    portENTER_CRITICAL(&ownershipUiMux);
-    if (pairingCode >= 0) {
-      ownershipComparisonRenderGate.request(pairingGeneration);
-    } else {
-      ownershipComparisonRenderGate.cancel();
-    }
-    portEXIT_CRITICAL(&ownershipUiMux);
+    pre_connection_presentation::presentThenUpdateComparisonGate(
+        snapshot, pairingGeneration,
+        [](const pre_connection_presentation::Snapshot &nextSnapshot,
+           pre_connection_presentation::Phase) {
+          updateWaitingOwnershipStatus(nextSnapshot);
+        },
+        [](uint32_t generation) {
+          portENTER_CRITICAL(&ownershipUiMux);
+          ownershipComparisonRenderGate.request(generation);
+          portEXIT_CRITICAL(&ownershipUiMux);
+        },
+        [] {
+          portENTER_CRITICAL(&ownershipUiMux);
+          ownershipComparisonRenderGate.cancel();
+          portEXIT_CRITICAL(&ownershipUiMux);
+        });
   }
 }
 
@@ -1152,16 +1164,12 @@ static void handleAuthPayload(const std::string &frame) {
 
   if (deviceOwnershipReady) {
     device_ownership::CommandResult ownershipResult;
-    uint32_t pairingCode = 0;
-    uint32_t pairingGeneration = 0;
     bool ownershipLockAcquired = false;
     bool ownershipSessionAuthenticated = false;
     if (deviceOwnershipMutex != nullptr &&
         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       ownershipLockAcquired = true;
       ownershipResult = deviceOwnership.handle(value, millis());
-      pairingCode = deviceOwnership.pairingCode();
-      pairingGeneration = deviceOwnership.pairingGeneration();
       if (frame.size() >= 2 && frame[0] == 'S' && frame[1] == '2' &&
           !ownershipResult.response.empty() &&
           !(ownershipResult.response.size() >= 2 &&
@@ -1199,54 +1207,58 @@ static void handleAuthPayload(const std::string &frame) {
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
     }
-    if (ownershipResult.matched) {
-      switch (ownershipResult.event) {
-      case device_ownership::Event::PairingStarted:
-        ownershipPairingActiveSnapshot = true;
-        queueOwnershipUiUpdate(
-            static_cast<int32_t>(pairingCode),
-            pairingGeneration);
-        Serial.println("BLE: Secure ownership comparison started");
-        break;
-      case device_ownership::Event::Paired:
-        ownershipPairingActiveSnapshot = false;
-        ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
-        Serial.println("BLE: Device ownership registered");
-        break;
-      case device_ownership::Event::Authenticated:
-        completeBleSessionAuthentication();
-        queueOwnershipUiUpdate();
-        Serial.println("BLE: Scoped controller session authenticated");
-        break;
-      case device_ownership::Event::WatchControllerStaged:
-        Serial.println("BLE: Watch controller enrollment staged");
-        break;
-      case device_ownership::Event::WatchControllerCommitted:
-        Serial.println("BLE: Watch controller enrollment committed");
-        break;
-      case device_ownership::Event::WatchControllerRevoked:
-        Serial.println("BLE: Watch controller credential revoked");
-        break;
-      case device_ownership::Event::Renamed:
-        ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
-        Serial.println("BLE: Device name updated");
-        break;
-      case device_ownership::Event::Unpaired:
-        bleSessionAuthenticated = false;
-        bleSessionSupportsExplicitInvalidGpsHeading.store(
-            false, std::memory_order_release);
-        bleDebugStats.authenticated = false;
-        ownershipAdvertisingDirty = true;
-        queueOwnershipUiUpdate();
-        ownershipRestartRequested = true;
-        ownershipRestartRequestedMs = millis();
-        Serial.println("BLE: Device ownership removed; restart scheduled");
-        break;
-      case device_ownership::Event::None:
-        break;
-      }
+    if (ownership_ui_dispatch_policy::dispatchMatchedCommand(
+            ownershipResult.matched, ownershipResult.event,
+            [](device_ownership::Event event) {
+              switch (event) {
+              case device_ownership::Event::PairingStarted:
+                ownershipPairingActiveSnapshot = true;
+                Serial.println("BLE: Secure ownership comparison started");
+                break;
+              case device_ownership::Event::Paired:
+                ownershipPairingActiveSnapshot = false;
+                ownershipAdvertisingDirty = true;
+                Serial.println("BLE: Device ownership registered");
+                break;
+              case device_ownership::Event::Authenticated:
+                completeBleSessionAuthentication();
+                Serial.println("BLE: Scoped controller session authenticated");
+                break;
+              case device_ownership::Event::WatchControllerStaged:
+                Serial.println("BLE: Watch controller enrollment staged");
+                break;
+              case device_ownership::Event::WatchControllerCommitted:
+                Serial.println("BLE: Watch controller enrollment committed");
+                break;
+              case device_ownership::Event::WatchControllerRevoked:
+                Serial.println("BLE: Watch controller credential revoked");
+                break;
+              case device_ownership::Event::Renamed:
+                ownershipAdvertisingDirty = true;
+                Serial.println("BLE: Device name updated");
+                break;
+              case device_ownership::Event::Unpaired:
+                bleSessionAuthenticated = false;
+                bleSessionSupportsExplicitInvalidGpsHeading.store(
+                    false, std::memory_order_release);
+                bleDebugStats.authenticated = false;
+                ownershipAdvertisingDirty = true;
+                ownershipRestartRequested = true;
+                ownershipRestartRequestedMs = millis();
+                Serial.println(
+                    "BLE: Device ownership removed; restart scheduled");
+                break;
+              case device_ownership::Event::None:
+                break;
+              }
+            },
+            [] {
+              // Some matched failure paths clear pairing without a distinct
+              // event (invalid/expired confirmation or persistence rollback).
+              // Always queue the post-command snapshot so the UI and render
+              // gate cannot retain a stale PairingConfirmed presentation.
+              queueOwnershipUiUpdate();
+            })) {
       return;
     }
   }
@@ -2409,6 +2421,26 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  if (len >= 8) {
+    const bool seedMapStart = !gpsReceivedFromApp;
+    int32_t routeStartLat = 0;
+    int32_t routeStartLon = 0;
+    if (seedMapStart) {
+      memcpy(&routeStartLat, data, sizeof(routeStartLat));
+      memcpy(&routeStartLon, data + sizeof(routeStartLon),
+             sizeof(routeStartLon));
+      gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
+      gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
+    }
+    if (noteNavigationInputForMapEntry()) {
+      Serial.println(seedMapStart
+                         ? "BLE route geometry: seeded map start; "
+                           "transitioning to map"
+                         : "BLE route geometry: fresh post-pairing route; "
+                           "transitioning to map");
+    }
+  }
+
   uint32_t hash = 0;
   for (size_t i = 0; i < len; i++) {
     hash = hash * 31 + data[i];
@@ -2425,19 +2457,6 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
                 source == nullptr ? "unknown" : source, (unsigned)len);
   bleDebugStats.routePacketCount++;
   bleDebugStats.lastRoutePacketMs = millis();
-
-  if (!gpsReceivedFromApp && len >= 8) {
-    int32_t routeStartLat = 0;
-    int32_t routeStartLon = 0;
-    memcpy(&routeStartLat, data, sizeof(routeStartLat));
-    memcpy(&routeStartLon, data + sizeof(routeStartLon), sizeof(routeStartLon));
-    gps.gpsData.latitude = (double)routeStartLat / 1000000.0;
-    gps.gpsData.longitude = (double)routeStartLon / 1000000.0;
-    gpsReceivedFromApp = true;
-    pendingTransitionToMap = true;
-    Serial.println(
-        "BLE route geometry: seeded map start; transitioning to map");
-  }
 
   const bool hadRoute = routeOverlay.hasRoute();
   routeOverlay.parseRouteData(data, len);
@@ -2500,10 +2519,8 @@ static void handleGpsPayload(
   );
 #endif
 
-  if (!gpsReceivedFromApp) {
-    gpsReceivedFromApp = true;
-    pendingTransitionToMap = true;
-    Serial.println("BLE GPS: First position received, transitioning to map...");
+  if (noteNavigationInputForMapEntry()) {
+    Serial.println("BLE GPS: Fresh position received, transitioning to map...");
   }
 
   // Retain every accepted fix. The LVGL owner updates lightweight telemetry and
@@ -3619,7 +3636,15 @@ void BLENavigationServer::init(const char *deviceName) {
   } else {
     portENTER_CRITICAL(&ownershipUiMux);
     ownershipUiClaimed = true;
+    ownershipUiConnected = false;
+    ownershipUiAuthenticated = false;
+    ownershipUiPairingActive = false;
+    ownershipUiPairingConfirmedOnDevice = false;
+    ownershipUiPairingCode = 0;
+    ownershipUiPairingGeneration = 0;
+    ownershipUiUpdatePending = true;
     portEXIT_CRITICAL(&ownershipUiMux);
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     Serial.println("BLE: Ownership storage unavailable; authentication locked");
   }
 
@@ -3714,10 +3739,6 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
-  // NimBLE callbacks run on the host task. Apply the latest renderer-visible
-  // route, GPS, and per-setting state here on the UI task so a synchronous
-  // rolling build sees one stable generation from first cell through last.
-  processPendingMapInputs();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
@@ -3731,8 +3752,17 @@ void BLENavigationServer::process() {
     if (pairingExpired) {
       queueOwnershipUiUpdate();
     }
-    applyPendingOwnershipUiUpdate();
   }
+  // A storage failure deliberately queues a fail-closed claimed snapshot even
+  // though ownership processing itself is disabled. Apply it on the UI task so
+  // a locked device never advertises the add-device Welcome experience.
+  applyPendingOwnershipUiUpdate();
+  // NimBLE callbacks run on the host task. Apply ownership presentation first
+  // so a PAIRED/auth result queued in the same interval unblocks the first
+  // post-pairing GPS fix or one-shot route. Then apply the latest
+  // renderer-visible route, GPS, and per-setting state on the UI task so a
+  // synchronous rolling build sees one stable generation throughout.
+  processPendingMapInputs();
   if (ownershipRestartRequested &&
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");
@@ -3970,14 +4000,12 @@ bool BLENavigationServer::isOwnershipClaimed() {
 
 bool BLENavigationServer::confirmOwnershipPairing() {
   bool confirmed = false;
-  uint32_t pairingCode = 0;
   std::string stableDeviceId;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
     confirmed = deviceOwnership.confirmPairingOnDevice();
     if (confirmed) {
       stableDeviceId = deviceOwnership.deviceIdHex();
-      pairingCode = deviceOwnership.pairingCode();
     }
     xSemaphoreGive(deviceOwnershipMutex);
   }
@@ -3986,7 +4014,7 @@ bool BLENavigationServer::confirmOwnershipPairing() {
   }
   const std::string response = "PAIR_READY|" + stableDeviceId;
   notifyAuthResponse(response.c_str());
-  queueOwnershipUiUpdate(static_cast<int32_t>(pairingCode));
+  queueOwnershipUiUpdate();
   Serial.println("BLE: Ownership pairing confirmed with physical button press");
   return true;
 }

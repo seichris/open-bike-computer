@@ -187,7 +187,9 @@ static uint32_t wavesharePowerPairingGeneration = 0;
 // Called by the panel driver only after a frame has reached the display. This
 // keeps physical confirmation disabled until the comparison code is visible.
 void appDisplayFlushCompleted() {
-  bleNavServer.noteOwnershipDisplayFlushCompleted();
+  if (isWaitingPairingComparisonVisible()) {
+    bleNavServer.noteOwnershipDisplayFlushCompleted();
+  }
 }
 
 static void IRAM_ATTR latchWaveshareBootScreenCycle() {
