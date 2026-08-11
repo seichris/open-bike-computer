@@ -39,6 +39,7 @@ from generated_sdkconfig import (
 
 
 GROUP_NAMES = ("topLevel", "pioarduinoRoot", "espIdf", "uv", "esptool")
+LICENSE_REPORT_SCHEMA = 2
 COMMAND_ENVIRONMENT_KEYS = {"HOME", "TMPDIR", "UV_CACHE_DIR", "XDG_CACHE_HOME"}
 GROUP_LABELS = {
     "topLevel": "top-level",
@@ -903,7 +904,9 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         evidence["generatorCommit"] = contract["generator"]["commit"]
         (output_dir / f"contract-{target_id}.json").write_bytes(_canonical(contract))
         (output_dir / f"evidence-{target_id}.json").write_bytes(_canonical(evidence))
-        (output_dir / f"licenses-{target_id}.json").write_bytes(_canonical({"schema": 1, "wheels": license_rows}))
+        (output_dir / f"licenses-{target_id}.json").write_bytes(
+            _canonical({"schema": LICENSE_REPORT_SCHEMA, "wheels": license_rows})
+        )
         return contract
 
 
