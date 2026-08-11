@@ -187,6 +187,9 @@ diagnostic_workflow = (
 speaker_workflow = (
     repo_root / ".github/workflows/speaker-firmware.yml"
 ).read_text()
+runtime_refresh_workflow = (
+    repo_root / ".github/workflows/firmware-runtime-refresh.yml"
+).read_text()
 assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in ci_workflow
 assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in diagnostic_workflow
 assert "workflow_dispatch:" in diagnostic_workflow
@@ -199,6 +202,8 @@ assert "workflow_dispatch:" in speaker_workflow
 assert "push:" not in speaker_workflow
 assert "pull_request:" not in speaker_workflow
 assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in speaker_workflow
+assert '.pio/open-bike-build/builds/$environment/current.json' in runtime_refresh_workflow
+assert ".pio/open-bike-build/sdkconfig-defaults.json" not in runtime_refresh_workflow
 for environment in (*light_sleep_profiles, *remote_debug_profiles):
     profile = environment.removeprefix("env:")
     assert profile not in ci_workflow

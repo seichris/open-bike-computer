@@ -103,6 +103,15 @@ that runs the verifier, not mutable global Python packages. Command success is
 not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
+Custom-core reuse is also content addressed, but remains project-private. A
+clean miss atomically publishes SDK sidecars and an inventoried
+`core-artifacts.tar`; a hit verifies the archive and hydrates the environment's
+private mutable store. Cache corruption quarantines only that exact core key.
+Application compiler-cache paths include both the exact source and core
+identities. Dirty builds may read a verified core entry but cannot publish one
+or become upload eligible, and no core entry is shared across worktrees before
+the relocatability gate is recorded.
+
 If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then use the
 upload-only command. For the 2.06 board, use the `WAVESHARE_AMOLED_206`
 environment. Confirm the expected target/profile/Git identity from `BOOT_META`

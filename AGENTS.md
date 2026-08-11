@@ -69,6 +69,13 @@ cache is user-level, content-addressed, rehashed, and read-only; mutable host,
 PlatformIO, build, and manifest state stays below this worktree's
 `.pio/open-bike-build/`.
 
+Custom-core and firmware identities are separate. A source-only commit may
+reuse an attested project-private core key, but upload-only always revalidates
+the exact clean Git identity, source clock, runtime/core reference, generated
+state, artifacts, and flash plan. Dirty builds may consume an entry but never
+publish or upload. Cross-worktree core sharing is disabled until artifacts pass
+the documented relocatability gate.
+
 After the locked runtime handoff, a clean pioarduino installation first
 converts content-pinned tool wrappers into the
 host compiler/runtime packages, then compiles a custom core against a generated
@@ -194,18 +201,18 @@ component-manager configuration stores below
 `.pio/open-bike-build/platformio/`. Another project or another profile therefore
 cannot replace the effective custom core during validation or upload.
 
-The helper preserves pioarduino's defaults cache only when it was produced from
-the same exact clean Git commit and environment and its exact contents,
-`platformio.ini`, generated environment-config state, full
-`managed_components/` tree, pinned platform/build scripts and manifests, full
-installed package, compiler, uploader, PlatformIO runtime, Arduino framework,
-platform, and ESP32-S3 library trees still match. A cache miss, branch/commit
-switch, dirty source tree, profile
-change, generated-component edit, or installed-core change removes the generated
-state and rebuilds it. Dirty builds remain available for diagnosis but do not
-produce a reusable cache and cannot be uploaded through this exact-identity
-path. Nested passes exclude only recognized generated SDK configs from the Git
-identity.
+The helper computes a source-independent `coreInputKey` from the environment,
+effective tracked configuration, generated SDK configuration, locked runtime,
+platform/package pins, and core build tools. A clean miss atomically publishes
+an immutable project-private entry containing SDK sidecars and an inventoried
+`core-artifacts.tar`; a hit rehashes the complete entry and hydrates a mutable
+profile-private copy. Missing, extra, truncated, symlinked, wrong-owner, or
+post-build-mutated entries fail closed and only the exact entry is quarantined.
+A source-only commit may reuse the same core key, but every build writes a new
+exact-source firmware manifest. Dirty builds may consume a verified entry but
+cannot publish, upload, or replace it. Cross-worktree core lookup remains
+disabled until the separate relocatability gate passes. Nested passes exclude
+only recognized generated SDK configs from the Git identity.
 
 The helper accepts `PLATFORMIO_CORE_DIR` (or the legacy
 `PLATFORMIO_HOME_DIR`) only as an ambient value to restore afterward; the
