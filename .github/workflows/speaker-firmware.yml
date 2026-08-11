@@ -19,4 +19,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build with the repository-owned firmware runtime
-        run: python3 tools/build_firmware.py "${{ matrix.target }}"
+        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
