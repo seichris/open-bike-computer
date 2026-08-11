@@ -89,7 +89,14 @@ def _normalize_name(value: str) -> str:
     return result.strip("-")
 
 
-def _load_inputs(project_dir: Path) -> tuple[dict[str, object], Path, Path]:
+def _load_inputs(
+    project_dir: Path,
+) -> tuple[
+    dict[str, object],
+    dict[tuple[str, str], dict[str, object]],
+    Path,
+    Path,
+]:
     runtime_dir = project_dir / "tools/firmware-runtime"
     refresh = runtime_dir / "refresh-inputs.json"
     licenses = runtime_dir / "licenses.json"
@@ -183,10 +190,11 @@ def _load_inputs(project_dir: Path) -> tuple[dict[str, object], Path, Path]:
         raise FirmwareRuntimeError("CPython builder provenance is invalid")
     if (
         not isinstance(licenses_value, dict)
-        or set(licenses_value) != {"schema", "components"}
-        or licenses_value.get("schema") != 1
+        or set(licenses_value) != {"schema", "components", "wheelOverrides"}
+        or licenses_value.get("schema") != 2
         or not isinstance(licenses_value.get("components"), list)
         or not licenses_value["components"]
+        or not isinstance(licenses_value.get("wheelOverrides"), list)
         or licenses.read_bytes() != _canonical(licenses_value)
     ):
         raise FirmwareRuntimeError("runtime license inventory is invalid")
@@ -206,7 +214,47 @@ def _load_inputs(project_dir: Path) -> tuple[dict[str, object], Path, Path]:
         component_names.add(component["name"])
     if {"CPython", "python-build-standalone", "uv", "PlatformIO Core"} - component_names:
         raise FirmwareRuntimeError("runtime license inventory is incomplete")
-    return value, refresh, licenses
+    wheel_overrides: dict[tuple[str, str], dict[str, object]] = {}
+    for override in licenses_value["wheelOverrides"]:
+        if (
+            not isinstance(override, dict)
+            or set(override) != {"name", "version", "license", "evidenceFiles"}
+            or not isinstance(override.get("name"), str)
+            or not override["name"]
+            or override["name"] != _normalize_name(override["name"])
+            or not isinstance(override.get("version"), str)
+            or re.fullmatch(r"[^<>=~,*\s]+", override["version"]) is None
+            or not isinstance(override.get("license"), str)
+            or override["license"].casefold() in {"unknown", "unlicensed"}
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9.+-]*(?: (?:AND|OR|WITH) [A-Za-z0-9][A-Za-z0-9.+-]*)*",
+                override["license"],
+            )
+            is None
+            or not isinstance(override.get("evidenceFiles"), list)
+            or not override["evidenceFiles"]
+            or not all(
+                isinstance(name, str) for name in override["evidenceFiles"]
+            )
+            or len(override["evidenceFiles"]) != len(set(override["evidenceFiles"]))
+        ):
+            raise FirmwareRuntimeError("runtime wheel license override is invalid")
+        for name in override["evidenceFiles"]:
+            if (
+                not name
+                or re.fullmatch(r"[A-Za-z0-9_.+/-]+", name) is None
+                or PurePosixPath(name).is_absolute()
+                or any(part in {"", ".", ".."} for part in PurePosixPath(name).parts)
+                or str(PurePosixPath(name)) != name
+            ):
+                raise FirmwareRuntimeError(
+                    "runtime wheel license evidence path is invalid"
+                )
+        key = (override["name"], override["version"])
+        if key in wheel_overrides:
+            raise FirmwareRuntimeError("runtime wheel license override is duplicated")
+        wheel_overrides[key] = override
+    return value, wheel_overrides, refresh, licenses
 
 
 def _validate_input_artifact(
@@ -230,7 +278,7 @@ def _validate_input_artifact(
 
 
 def inspect_inputs(project_dir: Path) -> dict[str, object]:
-    value, refresh, licenses = _load_inputs(project_dir)
+    value, wheel_license_overrides, refresh, licenses = _load_inputs(project_dir)
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
     for target in lock.targets:
         _require_matching_python_provenance(value, target)
@@ -242,6 +290,7 @@ def inspect_inputs(project_dir: Path) -> dict[str, object]:
         "licensesSha256": _sha256(licenses),
         "targets": [{"id": target.target_id, "accepted": target.accepted} for target in lock.targets],
         "distributionCounts": {name: len(value["distributionSets"][name]) for name in GROUP_NAMES},
+        "wheelLicenseOverrideCount": len(wheel_license_overrides),
     }
 
 
@@ -266,7 +315,7 @@ def _require_matching_python_provenance(
 
 
 def verify_python_input(project_dir: Path, target_id: str, output: Path) -> dict[str, object]:
-    inputs, _, _ = _load_inputs(project_dir)
+    inputs, _, _, _ = _load_inputs(project_dir)
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
     matches = [target for target in lock.targets if target.target_id == target_id]
     if len(matches) != 1:
@@ -385,16 +434,19 @@ def _normalize_wheel(path: Path) -> None:
 
 def _wheel_identity(path: Path) -> tuple[str, str, list[str], str | None]:
     with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        if len(names) != len(set(names)):
+            raise FirmwareRuntimeError(f"wheel contains duplicate members: {path.name}")
         metadata_names = [
             name
-            for name in archive.namelist()
+            for name in names
             if len(PurePosixPath(name).parts) == 2
             and PurePosixPath(name).parts[0].endswith(".dist-info")
             and PurePosixPath(name).parts[1] == "METADATA"
         ]
         wheel_names = [
             name
-            for name in archive.namelist()
+            for name in names
             if len(PurePosixPath(name).parts) == 2
             and PurePosixPath(name).parts[0].endswith(".dist-info")
             and PurePosixPath(name).parts[1] == "WHEEL"
@@ -409,6 +461,63 @@ def _wheel_identity(path: Path) -> tuple[str, str, list[str], str | None]:
     if not name or not version or not tags:
         raise FirmwareRuntimeError(f"wheel identity is incomplete: {path.name}")
     return _normalize_name(name), version, sorted(tags), license_expression
+
+
+def _reviewed_wheel_license(
+    path: Path,
+    name: str,
+    version: str,
+    metadata_license: str | None,
+    overrides: Mapping[tuple[str, str], Mapping[str, object]],
+) -> tuple[str, dict[str, object], bool]:
+    if metadata_license is not None and metadata_license.strip() and (
+        metadata_license.strip().casefold() not in {"unknown", "unlicensed"}
+    ):
+        return metadata_license.strip(), {"kind": "wheel-metadata"}, False
+    key = (name, version)
+    override = overrides.get(key)
+    if override is None:
+        raise FirmwareRuntimeError(
+            f"wheel license is not reviewed: {name}=={version}"
+        )
+    evidence = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            for evidence_name in override["evidenceFiles"]:
+                if names.count(evidence_name) != 1:
+                    raise FirmwareRuntimeError(
+                        f"wheel license evidence is missing or ambiguous: "
+                        f"{name}=={version} {evidence_name}"
+                    )
+                info = archive.getinfo(evidence_name)
+                mode = info.external_attr >> 16
+                if info.is_dir() or stat.S_ISLNK(mode):
+                    raise FirmwareRuntimeError(
+                        f"wheel license evidence is unsafe: "
+                        f"{name}=={version} {evidence_name}"
+                    )
+                contents = archive.read(info)
+                if not contents.strip():
+                    raise FirmwareRuntimeError(
+                        f"wheel license evidence is empty: "
+                        f"{name}=={version} {evidence_name}"
+                    )
+                evidence.append(
+                    {
+                        "path": evidence_name,
+                        "sha256": hashlib.sha256(contents).hexdigest(),
+                    }
+                )
+    except zipfile.BadZipFile as error:
+        raise FirmwareRuntimeError(
+            f"wheel license evidence could not be read: {path.name}"
+        ) from error
+    return (
+        str(override["license"]),
+        {"kind": "tracked-override", "files": evidence},
+        True,
+    )
 
 
 def _pypi_wheel_source(name: str, version: str, filename: str, cafile: str) -> tuple[str, str]:
@@ -552,7 +661,9 @@ def _bundle(root: Path, output: Path) -> None:
 
 
 def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release_tag: str) -> dict[str, object]:
-    inputs, refresh_path, licenses_path = _load_inputs(project_dir)
+    inputs, wheel_license_overrides, refresh_path, licenses_path = _load_inputs(
+        project_dir
+    )
     lock = load_lock(project_dir / "tools/firmware-runtime/lock-v1.json")
     matches = [target for target in lock.targets if target.target_id == target_id]
     if len(matches) != 1:
@@ -675,6 +786,7 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
                 pypi_sources[pending[future]] = future.result()
         wheels = []
         license_rows = []
+        used_license_overrides: set[tuple[str, str]] = set()
         for (name, version), (wheel_path, tags, license_expression) in sorted(identities.items()):
             if name in inputs["sources"]:
                 source = inputs["sources"][name]
@@ -694,7 +806,29 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
                 "sourceSha256": source_sha,
                 "group": wheel_groups[wheel_path.name],
             })
-            license_rows.append({"name": name, "version": version, "license": license_expression or "UNKNOWN"})
+            reviewed_license, license_evidence, used_override = _reviewed_wheel_license(
+                wheel_path,
+                name,
+                version,
+                license_expression,
+                wheel_license_overrides,
+            )
+            if used_override:
+                used_license_overrides.add((name, version))
+            license_rows.append(
+                {
+                    "name": name,
+                    "version": version,
+                    "license": reviewed_license,
+                    "evidence": license_evidence,
+                }
+            )
+        if used_license_overrides != set(wheel_license_overrides):
+            missing = sorted(set(wheel_license_overrides) - used_license_overrides)
+            raise FirmwareRuntimeError(
+                "runtime wheel license overrides were not used by this candidate: "
+                + ", ".join(f"{name}=={version}" for name, version in missing)
+            )
         distribution_sets = {
             name: {
                 "wheels": set_members[name],
@@ -803,7 +937,7 @@ def _installed_distributions(python: Path, environment: Mapping[str, str]) -> di
 
 
 def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> dict[str, object]:
-    inputs, refresh_path, _ = _load_inputs(project_dir)
+    inputs, _, refresh_path, _ = _load_inputs(project_dir)
     contract_path = candidate_dir / f"contract-{target_id}.json"
     bundle_path = candidate_dir / f"open-bike-firmware-runtime-{target_id}.tar.gz"
     if (
@@ -923,7 +1057,7 @@ def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> 
 def _load_candidate_contract(
     project_dir: Path, path: Path, *, expected_target: str | None = None
 ) -> dict[str, object]:
-    _, refresh, licenses = _load_inputs(project_dir)
+    _, _, refresh, licenses = _load_inputs(project_dir)
     if path.is_symlink() or not path.is_file():
         raise FirmwareRuntimeError(f"candidate contract is missing or unsafe: {path}")
     try:
@@ -956,7 +1090,7 @@ def _load_candidate_contract(
 
 
 def assemble_lock(project_dir: Path, contracts: Sequence[Path], output: Path, lock_set_id: str) -> dict[str, object]:
-    _, refresh, licenses = _load_inputs(project_dir)
+    _, _, refresh, licenses = _load_inputs(project_dir)
     wrappers = [_load_candidate_contract(project_dir, path) for path in contracts]
     targets = [wrapper["target"] for wrapper in wrappers]
     if len(targets) != 2 or {target.get("id") for target in targets} != {"linux-x86_64-cp313", "macos-arm64-cp313"}:
