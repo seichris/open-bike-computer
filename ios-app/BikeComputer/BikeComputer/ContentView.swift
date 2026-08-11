@@ -9,14 +9,27 @@ import SwiftUI
 import MapKit
 import UIKit
 
-private enum ContentSheetDestination: String, Identifiable {
+private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
     case rideMetrics
+    case nearbyBicino(peripheralIdentifier: UUID)
 
-    var id: String { rawValue }
+    var id: String {
+        switch self {
+        case .settings: return "settings"
+        case .bikeComputerSetup: return "bike-computer-setup"
+        case .sensorSettings: return "sensor-settings"
+        case .workoutDashboard: return "workout-dashboard"
+        case .rideMetrics: return "ride-metrics"
+        case .nearbyBicino(let identifier):
+            return NearbyBicinoPresentationPolicy.routeID(
+                peripheralIdentifier: identifier
+            )
+        }
+    }
 }
 
 private struct RideMetricsCompactDetent: CustomPresentationDetent {
@@ -61,6 +74,8 @@ struct ContentView: View {
     @State private var presentedSheet: ContentSheetDestination?
     @State private var queuedSheetAfterDismiss:
         ContentSheetDestination?
+    @State private var activeSheetDestination: ContentSheetDestination?
+    @State private var isSheetDismissalInFlight = false
     @State private var rideMetricsDetent = PresentationDetent.rideMetricsCompact
     @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
     @State private var observedWorkoutSegmentIndex: UInt32?
@@ -301,6 +316,15 @@ struct ContentView: View {
             observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             synchronizeRideMetricsSheet()
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: presentedSheet) { destination in
+            if let destination {
+                activeSheetDestination = destination
+                isSheetDismissalInFlight = false
+            } else if activeSheetDestination != nil {
+                isSheetDismissalInFlight = true
+            }
         }
         .onChange(of: scenePhase) { newValue in
             onApplicationActiveChange(newValue == .active)
@@ -310,6 +334,7 @@ struct ContentView: View {
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
@@ -347,6 +372,27 @@ struct ContentView: View {
         }
         .onChange(of: coordinator.bleManager.isConnected) { _ in
             schedulePendingMapInstallResume()
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: coordinator.bleManager.isConnecting) { _ in
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: coordinator.bleManager.nearbyBicinoCandidate) {
+            candidate in
+            if candidate == nil,
+               case .nearbyBicino = presentedSheet {
+                presentedSheet = nil
+                return
+            }
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: coordinator.bleManager.knownDevices.count) { _ in
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: visibleOfflineMapOnboardingStep) { step in
+            if step == nil {
+                presentNearbyBicinoIfEligible()
+            }
         }
         .onChange(of: coordinator.bleManager.isNavigationReady) { _ in
             schedulePendingMapInstallResume()
@@ -366,6 +412,7 @@ struct ContentView: View {
                 offlineMapSelectionCenterY = nil
             } else {
                 offlineMapSelectionDragStartFrame = nil
+                presentNearbyBicinoIfEligible()
             }
         }
         .task(id: deviceMapMissingCandidate) {
@@ -552,6 +599,17 @@ struct ContentView: View {
             .presentationDetents([.large])
             .presentationBackgroundInteraction(.disabled)
 
+        case .nearbyBicino(let peripheralIdentifier):
+            if let candidate = coordinator.bleManager.nearbyCandidate(
+                peripheralIdentifier: peripheralIdentifier
+            ) {
+                NearbyBicinoSetupSheet(candidate: candidate)
+                    .environmentObject(coordinator.bleManager)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.hidden)
+                    .presentationBackgroundInteraction(.disabled)
+            }
+
         case .workoutDashboard:
             WorkoutDashboardView(
                 store: workoutStore,
@@ -601,19 +659,36 @@ struct ContentView: View {
     }
 
     private func restoreRideMetricsSheetIfNeeded() {
-        guard workoutStore.presentation.isWorkoutActive else { return }
+        guard workoutStore.presentation.isWorkoutActive else {
+            isSheetDismissalInFlight = false
+            presentNearbyBicinoIfEligible()
+            return
+        }
         Task { @MainActor in
             await Task.yield()
             guard presentedSheet == nil,
                   workoutStore.presentation.isWorkoutActive else {
+                isSheetDismissalInFlight = false
+                presentNearbyBicinoIfEligible()
                 return
             }
             rideMetricsDetent = .rideMetricsCompact
+            activeSheetDestination = .rideMetrics
             presentedSheet = .rideMetrics
+            isSheetDismissalInFlight = false
         }
     }
 
     private func handleSheetDismissal() {
+        isSheetDismissalInFlight = true
+        let dismissedDestination = activeSheetDestination
+        activeSheetDestination = nil
+        if case .nearbyBicino(let peripheralIdentifier) =
+            dismissedDestination {
+            coordinator.bleManager.dismissNearbyBicinoCandidate(
+                peripheralIdentifier: peripheralIdentifier
+            )
+        }
         switch SensorSettingsRoutingPolicy.dismissalDecision(
             hasQueuedSheet: queuedSheetAfterDismiss != nil,
             isWorkoutActive: workoutStore.presentation.isWorkoutActive
@@ -623,14 +698,53 @@ struct ContentView: View {
             self.queuedSheetAfterDismiss = nil
             Task { @MainActor in
                 await Task.yield()
-                guard presentedSheet == nil else { return }
+                guard presentedSheet == nil else {
+                    isSheetDismissalInFlight = false
+                    return
+                }
+                activeSheetDestination = queuedSheetAfterDismiss
                 presentedSheet = queuedSheetAfterDismiss
+                isSheetDismissalInFlight = false
             }
         case .restoreRideMetrics:
             restoreRideMetricsSheetIfNeeded()
         case .doNothing:
-            break
+            isSheetDismissalInFlight = false
+            presentNearbyBicinoIfEligible()
         }
+    }
+
+    private func presentNearbyBicinoIfEligible() {
+        guard let candidate =
+                coordinator.bleManager.nearbyBicinoCandidate,
+              Date().timeIntervalSince(candidate.lastSeenAt) <=
+                BLEDiscoveryFreshnessPolicy.maximumAge,
+              NearbyBicinoPresentationPolicy.shouldPresent(
+                isApplicationActive: scenePhase == .active,
+                knownDeviceCount:
+                    coordinator.bleManager.knownDevices.count,
+                hasActiveBLESession:
+                    coordinator.bleManager.hasActiveTransportSession,
+                hasBlockingPresentation:
+                    presentedSheet != nil ||
+                    activeSheetDestination != nil ||
+                    isSheetDismissalInFlight ||
+                    queuedSheetAfterDismiss != nil ||
+                    visibleOfflineMapOnboardingStep != nil,
+                isMapAreaSelectionActive:
+                    offlineMapManager.isMapAreaSelectionActive,
+                // A sealed candidate suppresses additional scanning, but is
+                // still eligible for this one presentation.
+                isSuppressed: false
+              ) else { return }
+        coordinator.bleManager.markNearbyBicinoCandidatePresented(
+            peripheralIdentifier: candidate.peripheralIdentifier
+        )
+        let destination = ContentSheetDestination.nearbyBicino(
+            peripheralIdentifier: candidate.peripheralIdentifier
+        )
+        activeSheetDestination = destination
+        presentedSheet = destination
     }
 
     private func openSensorSettings() {
@@ -784,6 +898,8 @@ struct ContentView: View {
         HStack(alignment: .center, spacing: 12) {
             ConnectionStatusView(
                 isConnected: coordinator.isConnected,
+                hasRegisteredDevice:
+                    !coordinator.bleManager.knownDevices.isEmpty,
                 onReconnect: { coordinator.reconnect() }
             )
 

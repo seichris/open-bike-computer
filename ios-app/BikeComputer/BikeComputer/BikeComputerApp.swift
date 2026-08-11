@@ -229,6 +229,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func setApplicationActive(_ isActive: Bool) {
+        coordinator.setApplicationActive(isActive)
         if #available(iOS 17.0, *),
            let controller =
                workoutLiveActivityController
