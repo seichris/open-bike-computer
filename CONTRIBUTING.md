@@ -23,7 +23,9 @@ telemetry to a small handlebar display over BLE.
 
 Prerequisites:
 
-- PlatformIO CLI (`pio`) or VS Code with the PlatformIO extension.
+- A system `python3` capable of running the tracked stdlib-only bootstrap. The
+  build then re-executes under the repository-locked CPython 3.13 runtime; do
+  not install PlatformIO, pip packages, or uv globally for firmware builds.
 - Xcode for the iOS app.
 - A USB-C data cable and the correct serial port for the connected board.
 
@@ -90,12 +92,15 @@ It is exported as `SOURCE_DATE_EPOCH` to the full toolchain and embedded as
 compile time. The manifest attests both the epoch and its ISO UTC rendering.
 Public dependency fetches use an empty isolated Git configuration so ambient
 URL rewrites cannot alter the transport. The
-host Python interpreter, top-level `pio` launcher, and pioarduino's first-run
-online Python dependency resolver (including its registries, external `uv`,
-private `penv`, and ESP-IDF venv before their resulting trees are attested)
-remain part of the trusted host boundary. The resulting installed trees are
-included in the later core attestation, but this is not a pre-execution Python
-dependency lock. Command success is not a flash
+tracked runtime lock verifies the standalone Python archive, complete runtime
+bundle, exact PlatformIO/uv executables, installed distribution closures, and
+canonical file inventory before any bundled code executes. Shared user cache
+entries are content-addressed and read-only; every worktree receives its own
+private mutable PlatformIO store. Use `--repair-runtime` to remove and recreate
+only the selected lock/target subtree after a validation failure. The residual
+trust boundary is the operating system and the initial Python standard library
+that runs the verifier, not mutable global Python packages. Command success is
+not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
 If upload fails, hold BOOT (`GPIO0`) while reconnecting USB, then use the
@@ -104,6 +109,15 @@ environment. Confirm the expected target/profile/Git identity from `BOOT_META`
 before reporting a physical installation as complete. Pass the same stable
 hardware identity to `tools/capture_boot.py --device-serial ...`; this prevents
 boot verification from following a different board after USB re-enumeration.
+
+Ordinary contributors consume accepted runtime locks only. Maintainers use the
+manual **Firmware runtime refresh candidate** workflow as the first bootstrap
+check, then must produce and review both-host offline replay, dependency graphs,
+licenses, clean/warm builds, and tamper evidence before publishing immutable
+assets and marking a target accepted. The checked-in lock now references
+accepted Linux x86-64 and Apple Silicon bundles in the
+`firmware-runtime-2026-08-10-1` prerelease. Unsupported hosts and any runtime
+whose locked bytes have changed still stop before PlatformIO.
 
 View ESP32 serial logs:
 

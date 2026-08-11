@@ -33,6 +33,8 @@ assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
 assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
 assert 'env.subst("$PROJECT_LIBDEPS_DIR")' in prebuild_source
 assert '".pio/libdeps/" + flavor' not in prebuild_source
+assert "def record_link_start(target, source, env):" in prebuild_source
+assert "def record_link_finish(target, source, env):" in prebuild_source
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
@@ -185,8 +187,8 @@ diagnostic_workflow = (
 speaker_workflow = (
     repo_root / ".github/workflows/speaker-firmware.yml"
 ).read_text()
-assert "python tools/build_firmware.py" in ci_workflow
-assert "python tools/build_firmware.py" in diagnostic_workflow
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in ci_workflow
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in diagnostic_workflow
 assert "workflow_dispatch:" in diagnostic_workflow
 assert "workflow_call:" in diagnostic_workflow
 assert "schedule:" in diagnostic_workflow
@@ -196,7 +198,7 @@ assert "branches:" not in diagnostic_workflow
 assert "workflow_dispatch:" in speaker_workflow
 assert "push:" not in speaker_workflow
 assert "pull_request:" not in speaker_workflow
-assert "python tools/build_firmware.py" in speaker_workflow
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in speaker_workflow
 for environment in (*light_sleep_profiles, *remote_debug_profiles):
     profile = environment.removeprefix("env:")
     assert profile not in ci_workflow
@@ -285,7 +287,7 @@ assert not raw_write_offenders, (
 )
 
 release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
-assert "python tools/build_firmware.py" in release_workflow
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in release_workflow
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_workflow
 for environment, target in expected_targets.items():

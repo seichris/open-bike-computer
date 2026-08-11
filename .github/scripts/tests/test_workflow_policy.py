@@ -41,7 +41,8 @@ JOB_KEY_PATTERN = re.compile(
     r"\s*(?:&[A-Za-z_][A-Za-z0-9_-]*\s*)?(?:#.*)?"
 )
 CLEAN_BUILDER_PATTERN = re.compile(
-    r"(?:run:\s*)?env -u LD_LIBRARY_PATH python tools/build_firmware\.py\s+.+"
+    r"(?:run:\s*)?env -u LD_LIBRARY_PATH(?:\s+[A-Z_]+=\S*)* "
+    r"python3? tools/build_firmware\.py\s+.+"
 )
 
 
@@ -64,7 +65,8 @@ def firmware_builder_lines(source: str) -> tuple[str, ...]:
     return tuple(
         line.strip()
         for line in source.splitlines()
-        if "build_firmware.py" in line and not line.lstrip().startswith("#")
+        if re.search(r"\bpython3?\s+tools/build_firmware\.py\b", line)
+        and not line.lstrip().startswith("#")
     )
 
 
@@ -236,6 +238,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         builder_jobs = tuple(
             (workflow, job, block)
             for workflow, source in workflow_sources(root)
+            if workflow != "firmware-runtime-refresh.yml"
             for job, block in firmware_builder_jobs(source)
         )
         self.assertTrue(builder_jobs)
@@ -334,6 +337,27 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("actions/setup-python", host_job)
         self.assertIn("python3-cryptography", host_job)
         self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
+
+    def test_runtime_refresh_reads_the_wrapped_candidate_contract(self) -> None:
+        runtime_refresh = workflow_source("firmware-runtime-refresh.yml")
+
+        self.assertRegex(runtime_refresh, r"(?m)^on:\n  workflow_dispatch:\n")
+        self.assertNotRegex(runtime_refresh, r"(?m)^  pull_request:")
+        self.assertEqual(
+            runtime_refresh.count(
+                'test -z "$(git status --porcelain=v1 --untracked-files=all)"'
+            ),
+            2,
+        )
+        self.assertIn("set -o pipefail", runtime_refresh)
+        self.assertIn(
+            'json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"]',
+            runtime_refresh,
+        )
+        self.assertNotIn(
+            'json.load(open(sys.argv[1]))["bundle"]["sha256"]',
+            runtime_refresh,
+        )
 
     def test_host_job_mapping_stops_at_the_next_peer(self) -> None:
         source = (
