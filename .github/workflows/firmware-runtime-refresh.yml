@@ -2,21 +2,6 @@ name: Firmware runtime refresh candidate
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/firmware-runtime-refresh.yml"
-      - "esp32/tools/firmware-runtime/**"
-      - "esp32/tools/build_firmware.py"
-      - "esp32/tools/firmware_runtime.py"
-      - "esp32/tools/generated_sdkconfig.py"
-      - "esp32/tools/pioarduino_custom_core.py"
-      - "esp32/tools/refresh_firmware_runtime.py"
-      - "esp32/tools/tests/test_build_firmware.py"
-      - "esp32/tools/tests/test_firmware_runtime.py"
-      - "esp32/tools/tests/test_firmware_profile_config.py"
-      - "esp32/tools/tests/test_generated_sdkconfig.py"
-      - "esp32/tools/tests/test_pioarduino_custom_core.py"
-      - "esp32/tools/tests/test_refresh_firmware_runtime.py"
 
 permissions:
   contents: read

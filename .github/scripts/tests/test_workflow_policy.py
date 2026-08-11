@@ -339,6 +339,8 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_runtime_refresh_reads_the_wrapped_candidate_contract(self) -> None:
         runtime_refresh = workflow_source("firmware-runtime-refresh.yml")
 
+        self.assertRegex(runtime_refresh, r"(?m)^on:\n  workflow_dispatch:\n")
+        self.assertNotRegex(runtime_refresh, r"(?m)^  pull_request:")
         self.assertIn("set -o pipefail", runtime_refresh)
         self.assertIn(
             'json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"]',
