@@ -221,6 +221,19 @@ assert (
     "power_management::LockDomain::Storage);\n"
     "    ready = sdMountHealthyLocked();"
 ) in storage_ensure
+assert "initSPIFFSLocked();" in storage_ensure
+storage_fallback_start = storage_implementation.index(
+    "esp_err_t Storage::initSPIFFS()"
+)
+storage_fallback = storage_implementation[storage_fallback_start:]
+assert storage_fallback.index("xSemaphoreTake(mountMutex, portMAX_DELAY)") < (
+    storage_fallback.index("initSPIFFSLocked()")
+)
+assert (
+    "power_management::ScopedLock powerLock(\n"
+    "        power_management::LockDomain::Storage);\n"
+    "    result = initSPIFFSLocked();"
+) in storage_fallback
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"

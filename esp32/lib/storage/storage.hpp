@@ -130,6 +130,7 @@ private:
   bool fallbackMounted = false;
 
   esp_err_t mountSdLocked(bool ignoreCooldown);
+  esp_err_t initSPIFFSLocked();
   void teardownSdLocked();
   bool sdMountHealthyLocked();
 

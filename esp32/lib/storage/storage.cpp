@@ -196,7 +196,6 @@ bool Storage::ensureSdMounted() {
   xSemaphoreTake(mountMutex, portMAX_DELAY);
 
   bool ready = false;
-  bool needsFallback = false;
   {
     power_management::ScopedLock powerLock(
         power_management::LockDomain::Storage);
@@ -214,14 +213,13 @@ bool Storage::ensureSdMounted() {
       const bool cooldownWasActive = sdCooldownArmed &&
           storage_policy::cooldownActive(millis(), sdRetryAfterMs);
       ready = mountSdLocked(false) == ESP_OK;
-      needsFallback = !ready && !cooldownWasActive;
+      if (!ready && !cooldownWasActive)
+        initSPIFFSLocked();
 #else
       ready = initSD() == ESP_OK;
 #endif
     }
   }
-  if (needsFallback)
-    initSPIFFS();
   xSemaphoreGive(mountMutex);
   return ready;
 }
@@ -352,9 +350,9 @@ esp_err_t Storage::initSD() {
  *
  * @return esp_err_t Error code
  */
-esp_err_t Storage::initSPIFFS() {
-  power_management::ScopedLock powerLock(
-      power_management::LockDomain::Storage);
+esp_err_t Storage::initSPIFFSLocked() {
+  if (fallbackMounted)
+    return ESP_OK;
   ESP_LOGI(TAG, "Initializing FFat as /sdcard");
 
   // Mount FFat at "/sdcard" so the rest of the application thinks it's
@@ -390,6 +388,22 @@ esp_err_t Storage::initSPIFFS() {
 #endif
 
   return ESP_OK;
+}
+
+esp_err_t Storage::initSPIFFS() {
+  if (mountMutex == nullptr)
+    mountMutex = xSemaphoreCreateMutex();
+  if (mountMutex == nullptr)
+    return ESP_ERR_NO_MEM;
+  xSemaphoreTake(mountMutex, portMAX_DELAY);
+  esp_err_t result = ESP_FAIL;
+  {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
+    result = initSPIFFSLocked();
+  }
+  xSemaphoreGive(mountMutex);
+  return result;
 }
 
 /**
