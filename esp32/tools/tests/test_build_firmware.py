@@ -160,7 +160,11 @@ class FirmwareBuildTests(unittest.TestCase):
         self.project_dir = Path(self.temp_dir.name)
         self.runtime_patch = patch.dict(
             os.environ,
-            {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE},
+            {
+                "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE,
+                "OPEN_BIKE_FIRMWARE_PIOARDUINO_REQUIREMENTS": "/verified/pioarduino-root.txt",
+                "OPEN_BIKE_FIRMWARE_ESP_IDF_REQUIREMENTS": "/verified/esp-idf.txt",
+            },
         )
         self.runtime_patch.start()
         self.addCleanup(self.runtime_patch.stop)
@@ -728,6 +732,14 @@ class FirmwareBuildTests(unittest.TestCase):
             self.assertEqual(isolated_git_config.read_text(encoding="utf-8"), "")
             self.assertEqual(os.environ.get("GIT_CONFIG_NOSYSTEM"), "1")
             self.assertEqual(os.environ.get("GIT_TERMINAL_PROMPT"), "0")
+            self.assertEqual(
+                os.environ.get("OPEN_BIKE_FIRMWARE_PIOARDUINO_REQUIREMENTS"),
+                "/verified/pioarduino-root.txt",
+            )
+            self.assertEqual(
+                os.environ.get("OPEN_BIKE_FIRMWARE_ESP_IDF_REQUIREMENTS"),
+                "/verified/esp-idf.txt",
+            )
             observed_build_clocks.append(
                 (
                     os.environ.get("SOURCE_DATE_EPOCH"),
@@ -1839,6 +1851,16 @@ class FirmwareBuildTests(unittest.TestCase):
             self.assertNotIn(WAVESHARE_PLATFORM_URL, verified)
             _verified_platformio_project_config(self.project_dir)
             self.assertEqual(download.call_count, 2)
+            staging_parent = (
+                self.project_dir
+                / ".pio/open-bike-build/platform-staging"
+                / expected_sha
+            )
+            staged_platform = next(staging_parent.iterdir())
+            platform_json = staged_platform / "platform.json"
+            platform_json.chmod(0o644)
+            with self.assertRaisesRegex(BuildError, "permissions changed"):
+                _verified_platformio_project_config(self.project_dir)
         self.platform_config_patch.start()
 
     def test_bootstrap_wrappers_are_absent_from_steady_build_config(self):

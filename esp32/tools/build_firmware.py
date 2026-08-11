@@ -131,6 +131,8 @@ BUILD_ENVIRONMENT_PASSTHROUGH = {
     "OPEN_BIKE_FIRMWARE_WHEELHOUSE",
     "OPEN_BIKE_FIRMWARE_UV",
     "OPEN_BIKE_FIRMWARE_ESPTOOL_WHEEL",
+    "OPEN_BIKE_FIRMWARE_PIOARDUINO_REQUIREMENTS",
+    "OPEN_BIKE_FIRMWARE_ESP_IDF_REQUIREMENTS",
     "PATH",
     "PATHEXT",
     "RUNNER_ARCH",
@@ -475,6 +477,7 @@ def _tree_digest_without_marker(root: Path, marker_name: str) -> str:
         relative = path.relative_to(root).as_posix().encode("utf-8")
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
+        digest.update(b"x" if path.stat().st_mode & 0o111 else b"-")
         digest.update(bytes.fromhex(_file_sha256(path)))
     return digest.hexdigest()
 
@@ -530,12 +533,22 @@ def _stage_verified_platform(project_dir: Path, archive: Path) -> Path:
             raise BuildError("verified platform transform marker is invalid")
         tree_digest = value.get("platformTreeSha256")
         if (
-            {key: value.get(key) for key in expected_marker} != expected_marker
+            set(value) != {*expected_marker, "platformTreeSha256"}
+            or stat.S_IMODE(root.stat().st_mode) != 0o555
+            or stat.S_IMODE(marker.stat().st_mode) != 0o444
+            or {key: value.get(key) for key in expected_marker} != expected_marker
             or not isinstance(tree_digest, str)
             or re.fullmatch(r"[0-9a-f]{64}", tree_digest) is None
             or tree_digest != _tree_digest_without_marker(root, marker_name)
         ):
             raise BuildError("verified platform staging changed after pre-execution transform")
+        for path in root.rglob("*"):
+            expected_modes = {0o555} if path.is_dir() else {0o444, 0o555}
+            if stat.S_IMODE(path.stat().st_mode) not in expected_modes:
+                raise BuildError(
+                    "verified platform staging permissions changed after "
+                    "pre-execution transform"
+                )
 
     if os.path.lexists(destination):
         validate_existing(destination)
