@@ -43,6 +43,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -116,6 +118,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -146,8 +150,8 @@ jobs:
           candidate="$RUNNER_TEMP/runtime-candidates/firmware-runtime-candidate-${{ matrix.target }}"
           contract="$candidate/contract-${{ matrix.target }}.json"
           bundle="$candidate/open-bike-firmware-runtime-${{ matrix.target }}.tar.gz"
-          digest="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"]["sha256"])' "$contract")"
-          size="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"]["size"])' "$contract")"
+          digest="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"])' "$contract")"
+          size="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["size"])' "$contract")"
           env -u LD_LIBRARY_PATH python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.stat().st_size == int(sys.argv[2]); assert hashlib.sha256(p.read_bytes()).hexdigest() == sys.argv[3]' \
             "$bundle" "$size" "$digest"
           destination="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/firmware-runtime-2026-08-10-1/${{ matrix.target }}"

@@ -707,7 +707,7 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
         _remove_generated_python_state(staging, baseline_python_bin)
         _reject_path_leaks(staging, (temporary, project_dir))
         _bundle(staging, bundle_path)
-        contract = {
+        target_contract = {
             "id": target.target_id,
             "os": target.os_name,
             "architecture": target.architecture,
@@ -754,8 +754,19 @@ def build_candidate(project_dir: Path, target_id: str, output_dir: Path, release
             "pythonBuilderCommit": target.python.builder.commit,
             "networkDisabledReplayCommand": ["uv", "pip", "install", "--offline", "--no-cache", "--find-links", "wheelhouse"],
             "wheelCount": len(wheels),
-            "bundleSha256": contract["bundle"]["sha256"],
+            "bundleSha256": target_contract["bundle"]["sha256"],
         }
+        contract = {
+            "schema": 1,
+            "generator": {
+                "version": "2",
+                "commit": _run(("git", "rev-parse", "HEAD"), cwd=project_dir),
+                "refreshInputsSha256": _sha256(refresh_path),
+                "licensesSha256": _sha256(licenses_path),
+            },
+            "target": target_contract,
+        }
+        evidence["generatorCommit"] = contract["generator"]["commit"]
         (output_dir / f"contract-{target_id}.json").write_bytes(_canonical(contract))
         (output_dir / f"evidence-{target_id}.json").write_bytes(_canonical(evidence))
         (output_dir / f"licenses-{target_id}.json").write_bytes(_canonical({"schema": 1, "wheels": license_rows}))
@@ -802,7 +813,10 @@ def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> 
         or not bundle_path.is_file()
     ):
         raise FirmwareRuntimeError("candidate contract or bundle is missing or unsafe")
-    contract = json.loads(contract_path.read_bytes())
+    contract_wrapper = _load_candidate_contract(
+        project_dir, contract_path, expected_target=target_id
+    )
+    contract = contract_wrapper["target"]
     with tempfile.TemporaryDirectory(prefix="open-bike-runtime-replay-") as temporary_name:
         temporary = Path(temporary_name)
         candidate_lock = {
@@ -906,18 +920,57 @@ def verify_candidate(project_dir: Path, target_id: str, candidate_dir: Path) -> 
         }
 
 
+def _load_candidate_contract(
+    project_dir: Path, path: Path, *, expected_target: str | None = None
+) -> dict[str, object]:
+    _, refresh, licenses = _load_inputs(project_dir)
+    if path.is_symlink() or not path.is_file():
+        raise FirmwareRuntimeError(f"candidate contract is missing or unsafe: {path}")
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw, object_pairs_hook=_duplicate_key_rejector)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise FirmwareRuntimeError(f"candidate contract is invalid: {error}") from error
+    if raw != _canonical(value):
+        raise FirmwareRuntimeError("candidate contract is not canonical UTF-8 JSON")
+    if not isinstance(value, dict) or set(value) != {"schema", "generator", "target"} or value.get("schema") != 1:
+        raise FirmwareRuntimeError("candidate contract schema is invalid")
+    generator = value["generator"]
+    if (
+        not isinstance(generator, dict)
+        or set(generator)
+        != {"version", "commit", "refreshInputsSha256", "licensesSha256"}
+        or generator.get("version") != "2"
+        or not isinstance(generator.get("commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", generator["commit"]) is None
+        or generator.get("refreshInputsSha256") != _sha256(refresh)
+        or generator.get("licensesSha256") != _sha256(licenses)
+    ):
+        raise FirmwareRuntimeError("candidate generator identity is invalid")
+    target = value["target"]
+    if not isinstance(target, dict) or (
+        expected_target is not None and target.get("id") != expected_target
+    ):
+        raise FirmwareRuntimeError("candidate target identity is invalid")
+    return value
+
+
 def assemble_lock(project_dir: Path, contracts: Sequence[Path], output: Path, lock_set_id: str) -> dict[str, object]:
     _, refresh, licenses = _load_inputs(project_dir)
-    targets = [json.loads(path.read_bytes()) for path in contracts]
+    wrappers = [_load_candidate_contract(project_dir, path) for path in contracts]
+    targets = [wrapper["target"] for wrapper in wrappers]
     if len(targets) != 2 or {target.get("id") for target in targets} != {"linux-x86_64-cp313", "macos-arm64-cp313"}:
         raise FirmwareRuntimeError("accepted lock requires exactly both reviewed host contracts")
-    commit = _run(("git", "rev-parse", "HEAD"), cwd=project_dir)
+    generators = {json.dumps(wrapper["generator"], sort_keys=True) for wrapper in wrappers}
+    if len(generators) != 1:
+        raise FirmwareRuntimeError("accepted runtime candidates have different generators")
+    generator = wrappers[0]["generator"]
     value = {
         "schema": 1,
         "lockSetId": lock_set_id,
         "generator": {
-            "version": "2",
-            "commit": commit,
+            "version": generator["version"],
+            "commit": generator["commit"],
             "refreshInputsSha256": _sha256(refresh),
             "licensesSha256": _sha256(licenses),
         },
