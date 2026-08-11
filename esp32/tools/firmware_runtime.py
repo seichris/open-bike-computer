@@ -39,7 +39,7 @@ PRE_EXECUTION_INJECTION_ENV = {
 }
 SUPPORTED_TARGET_SHAPES = {
     "linux-x86_64-cp313": (
-        "linux", "x86_64", "cp313", "manylinux_2_17_x86_64"
+        "linux", "x86_64", "cp313", "manylinux_2_34_x86_64"
     ),
     "macos-arm64-cp313": (
         "macos", "arm64", "cp313", "macosx_11_0_arm64"
@@ -253,7 +253,70 @@ def _python_artifact(value: object, label: str) -> PythonArtifact:
     )
 
 
-def _runtime_contents(value: object, label: str) -> RuntimeContents:
+def _expanded_filename_tags(filename: str) -> set[str]:
+    try:
+        _, python_tags, abi_tags, platform_tags = filename[:-4].rsplit("-", 3)
+    except ValueError as error:
+        raise FirmwareRuntimeError("runtime wheel filename has no exact tags") from error
+    return {
+        f"{python_tag}-{abi_tag}-{platform_tag}"
+        for python_tag in python_tags.split(".")
+        for abi_tag in abi_tags.split(".")
+        for platform_tag in platform_tags.split(".")
+    }
+
+
+def _wheel_tag_matches_target(
+    tag: str, target_id: str, minimum_platform_tag: str
+) -> bool:
+    try:
+        python_tag, abi_tag, platform_tag = tag.split("-", 2)
+    except ValueError:
+        return False
+    if python_tag == "py3":
+        python_compatible = abi_tag == "none"
+    else:
+        match = re.fullmatch(r"cp3(\d+)", python_tag)
+        python_compatible = bool(
+            match
+            and (
+                abi_tag == "cp313"
+                and python_tag == "cp313"
+                or abi_tag == "abi3"
+                and int(match.group(1)) <= 13
+            )
+        )
+    if not python_compatible:
+        return False
+    if platform_tag == "any":
+        return abi_tag == "none"
+    if target_id == "macos-arm64-cp313":
+        minimum = re.fullmatch(r"macosx_(\d+)_(\d+)_arm64", minimum_platform_tag)
+        candidate = re.fullmatch(
+            r"macosx_(\d+)_(\d+)_(?:arm64|universal2)", platform_tag
+        )
+    else:
+        minimum = re.fullmatch(
+            r"manylinux_(\d+)_(\d+)_x86_64", minimum_platform_tag
+        )
+        candidate = re.fullmatch(
+            r"manylinux_(\d+)_(\d+)_x86_64", platform_tag
+        )
+        if platform_tag == "manylinux2014_x86_64":
+            candidate = re.fullmatch(
+                r"manylinux_(\d+)_(\d+)_x86_64", "manylinux_2_17_x86_64"
+            )
+    return bool(
+        minimum
+        and candidate
+        and (int(candidate.group(1)), int(candidate.group(2)))
+        <= (int(minimum.group(1)), int(minimum.group(2)))
+    )
+
+
+def _runtime_contents(
+    value: object, label: str, target_id: str, minimum_platform_tag: str
+) -> RuntimeContents:
     root = _strict_object(
         value,
         {"platformioVersion", "wheels", "distributionSets", "platform"},
@@ -307,6 +370,17 @@ def _runtime_contents(value: object, label: str) -> RuntimeContents:
             or group not in groups
         ):
             raise FirmwareRuntimeError(f"{label} wheel {index} identity is invalid")
+        if set(tags) != _expanded_filename_tags(filename):
+            raise FirmwareRuntimeError(
+                f"{label} wheel {index} tags disagree with its filename"
+            )
+        if not any(
+            _wheel_tag_matches_target(tag, target_id, minimum_platform_tag)
+            for tag in tags
+        ):
+            raise FirmwareRuntimeError(
+                f"{label} wheel {index} is incompatible with {target_id}"
+            )
         size, digest = wheel["size"], wheel["sha256"]
         source_url, source_digest = wheel["sourceUrl"], wheel["sourceSha256"]
         if (
@@ -431,7 +505,10 @@ def load_lock(path: Path) -> RuntimeLock:
         bundle = None if bundle_value is None else _artifact(bundle_value, f"target {index} bundle")
         contents_value = target["contents"]
         contents = None if contents_value is None else _runtime_contents(
-            contents_value, f"target {index} contents"
+            contents_value,
+            f"target {index} contents",
+            target_id,
+            strings["minimumPlatformTag"],
         )
         if accepted and (bundle is None or contents is None):
             raise FirmwareRuntimeError(f"accepted target {target_id} has no bundle or content contract")
@@ -462,6 +539,19 @@ def select_target(lock: RuntimeLock, target_id: str | None = None) -> RuntimeTar
         raise FirmwareRuntimeError(
             f"firmware runtime target {requested} has no accepted bundle; run the maintainer refresh workflow and review its offline evidence"
         )
+    if target_id is None and target.target_id == "linux-x86_64-cp313":
+        libc_name, libc_version = platform.libc_ver()
+        match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?", libc_version)
+        if (
+            libc_name.lower() != "glibc"
+            or match is None
+            or (int(match.group(1)), int(match.group(2))) < (2, 34)
+        ):
+            observed = f"{libc_name or 'unknown'} {libc_version or 'unknown'}"
+            raise FirmwareRuntimeError(
+                "unsupported firmware runtime host C library "
+                f"{observed}; linux-x86_64-cp313 requires glibc 2.34 or newer"
+            )
     return target
 
 

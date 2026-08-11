@@ -198,6 +198,71 @@ class FirmwareRuntimeTests(unittest.TestCase):
                 ):
                     load_lock(path)
 
+    def test_lock_rejects_wrong_or_misrepresented_wheel_tags(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        original = json.loads(path.read_bytes())
+
+        changed = json.loads(json.dumps(original))
+        changed["targets"][0]["contents"]["wheels"][0]["tags"] = [
+            "cp313-cp313-macosx_11_0_arm64"
+        ]
+        path.write_bytes(canonical(changed))
+        with self.assertRaisesRegex(FirmwareRuntimeError, "tags disagree"):
+            load_lock(path)
+
+        changed = json.loads(json.dumps(original))
+        contents = changed["targets"][0]["contents"]
+        old = contents["wheels"][0]["filename"]
+        new = "unit_test-1-cp313-cp313-manylinux_2_17_x86_64.whl"
+        contents["wheels"][0]["filename"] = new
+        contents["wheels"][0]["tags"] = [
+            "cp313-cp313-manylinux_2_17_x86_64"
+        ]
+        for distribution in contents["distributionSets"].values():
+            distribution["wheels"] = [
+                new if member == old else member
+                for member in distribution["wheels"]
+            ]
+            distribution["sha256"] = hashlib.sha256(
+                canonical(sorted(distribution["wheels"]))
+            ).hexdigest()
+        path.write_bytes(canonical(changed))
+        with self.assertRaisesRegex(FirmwareRuntimeError, "incompatible"):
+            load_lock(path)
+
+    def test_linux_runtime_rejects_an_older_or_unknown_glibc(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        value = json.loads(path.read_bytes())
+        target = value["targets"][0]
+        target.update(
+            {
+                "id": "linux-x86_64-cp313",
+                "os": "linux",
+                "architecture": "x86_64",
+                "minimumPlatformTag": "manylinux_2_34_x86_64",
+            }
+        )
+        path.write_bytes(canonical(value))
+        lock = load_lock(path)
+        for observed in (("glibc", "2.33"), ("musl", "1.2.5"), ("", "")):
+            with self.subTest(observed=observed), mock.patch(
+                "firmware_runtime.host_target_id",
+                return_value="linux-x86_64-cp313",
+            ), mock.patch("firmware_runtime.platform.libc_ver", return_value=observed):
+                with self.assertRaisesRegex(
+                    FirmwareRuntimeError, "requires glibc 2.34 or newer"
+                ):
+                    select_target(lock)
+        with mock.patch(
+            "firmware_runtime.host_target_id",
+            return_value="linux-x86_64-cp313",
+        ), mock.patch(
+            "firmware_runtime.platform.libc_ver", return_value=("glibc", "2.34")
+        ):
+            self.assertEqual(select_target(lock).target_id, "linux-x86_64-cp313")
+
     def test_lock_requires_exact_cpython_license_and_source_provenance(self) -> None:
         bundle, size, digest = self.make_bundle()
         path = self.make_lock(bundle, size, digest)
