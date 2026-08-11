@@ -187,6 +187,17 @@ assert display_probe_profile.removeprefix("env:") in ci_workflow
 
 speaker_source = (project_dir / "speaker_honk_test.cpp").read_text()
 speaker_implementation = (project_dir / "lib/speaker/speaker.cpp").read_text()
+storage_implementation = (project_dir / "lib/storage/storage.cpp").read_text()
+storage_health_start = storage_implementation.index(
+    "bool Storage::sdMountHealthyLocked()"
+)
+storage_health_end = storage_implementation.index(
+    "void Storage::teardownSdLocked()", storage_health_start
+)
+storage_health = storage_implementation[storage_health_start:storage_health_end]
+assert "defined(SPI_SHARED)" in storage_health
+assert "SD.cardType() == CARD_NONE" in storage_health
+assert 'SD.open("/")' in storage_health
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"

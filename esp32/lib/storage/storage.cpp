@@ -64,7 +64,8 @@ std::string formatSize(uint64_t size) {
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
 bool Storage::sdMountHealthyLocked() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
   if (!isSdLoaded.load() || SD.cardType() == CARD_NONE) {
     return false;
   }
