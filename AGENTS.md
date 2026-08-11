@@ -285,7 +285,7 @@ For changes under `map-platform/backend/` or other image inputs listed in
    the generated `deploy/map-platform-production` pull request. Production is
    defined by the immutable digest pins in `map-platform/deploy/compose.yaml`.
 3. If the promotion moves the signed worker, complete the worker/hardware gates
-   in `docs/map-stream-rollout-runbook.md`. Merge only after **Map Backend** CI
+   in `docs/map-stream-rollout-runbook.md`. Merge only after **CI Gate**
    passes; the manifest merge triggers the production deployment.
 4. Verify the deployment and `/healthz`. Roll back through a pull request that
    restores the complete previous Compose lock, including both image anchors

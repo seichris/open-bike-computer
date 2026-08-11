@@ -161,16 +161,28 @@ for section in config.sections():
         )
 
 ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+diagnostic_workflow = (
+    repo_root / ".github/workflows/firmware-diagnostics.yml"
+).read_text()
 speaker_workflow = (
     repo_root / ".github/workflows/speaker-firmware.yml"
 ).read_text()
 assert "python tools/build_firmware.py" in ci_workflow
+assert "python tools/build_firmware.py" in diagnostic_workflow
+assert "workflow_dispatch:" in diagnostic_workflow
+assert "workflow_call:" in diagnostic_workflow
+assert "schedule:" in diagnostic_workflow
+assert "pull_request:" not in diagnostic_workflow
+assert '      - "v*"' not in diagnostic_workflow
+assert "branches:" not in diagnostic_workflow
 assert "workflow_dispatch:" in speaker_workflow
 assert "push:" not in speaker_workflow
 assert "pull_request:" not in speaker_workflow
 assert "python tools/build_firmware.py" in speaker_workflow
 for environment in light_sleep_profiles:
-    assert environment.removeprefix("env:") in ci_workflow
+    profile = environment.removeprefix("env:")
+    assert profile not in ci_workflow
+    assert profile in diagnostic_workflow
 
 battery_validation = (
     repo_root / "docs/firmware-battery-life-hardware-validation.md"
@@ -183,7 +195,9 @@ display_probe_profile = "env:WAVESHARE_AMOLED_206_DISPLAY_TEST"
 assert config.get(display_probe_profile, "extends") == "env:WAVESHARE_AMOLED_206"
 display_probe_flags = config.get(display_probe_profile, "build_flags")
 assert "-DWAVESHARE_DISPLAY_PROBE=1" in display_probe_flags
-assert display_probe_profile.removeprefix("env:") in ci_workflow
+display_probe = display_probe_profile.removeprefix("env:")
+assert display_probe not in ci_workflow
+assert display_probe in diagnostic_workflow
 
 speaker_source = (project_dir / "speaker_honk_test.cpp").read_text()
 speaker_implementation = (project_dir / "lib/speaker/speaker.cpp").read_text()

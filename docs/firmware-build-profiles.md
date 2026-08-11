@@ -17,8 +17,9 @@ target:
   is only a transient hint, so the profile also uses throttled, PM-locked frame
   sampling from tickless task deadlines. On 2.06-inch hardware, GPIO interrupt
   control remains in IRAM so each low-level live interrupt can mask itself
-  until its source is released. The profile is built in CI but is never
-  selected by the release workflow.
+  until its source is released. The profile is built by the weekly,
+  release-validation, and manual **Firmware Diagnostic Builds** workflow but is
+  never selected by the release workflow.
 - `*_PRODUCTION` compiles with `CORE_DEBUG_LEVEL=0`, leaves `DEBUG` undefined,
   and sets `FIRMWARE_DIAGNOSTICS=0`. It does not start USB CDC at application
   boot and does not wait for a serial host. GitHub firmware releases use these
