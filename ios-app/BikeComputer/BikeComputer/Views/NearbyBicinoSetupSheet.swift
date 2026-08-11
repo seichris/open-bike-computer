@@ -46,17 +46,12 @@ struct NearbyBicinoSetupSheet: View {
                             )
                             .accessibilityHidden(true)
 
-                        VStack(spacing: 8) {
-                            Text("Device \(candidate.shortIdentifier)")
-                                .font(.headline)
-                                .accessibilityLabel(
-                                    "Bicino device \(candidate.shortIdentifier)"
-                                )
-                            Text("Connect this Bicino to your iPhone for maps, navigation, and ride data.")
-                                .font(.body)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
+                        Text(
+                            "Connect this Bicino to your iPhone to show maps, navigation and ride workout data."
+                        )
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: 520)
                     .padding(.horizontal, 24)
