@@ -296,6 +296,14 @@ bool releaseCodecResources() {
       resourceState.channelEnabled = false;
       break;
     case CleanupAction::DeleteCodecDevice:
+      // A failed open can leave an internally tracked disable pending even
+      // though codecDeviceOpened was never published. close() is a no-op when
+      // no stage remains enabled and retains this device on a real failure.
+      if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: codec partial-open cleanup failed; cleanup will retry");
+        return false;
+      }
       esp_codec_dev_delete(speakerDevice);
       speakerDevice = nullptr;
       resourceState.codecDeviceCreated = false;
