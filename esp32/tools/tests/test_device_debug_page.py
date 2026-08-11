@@ -37,6 +37,10 @@ class DeviceDebugPageTests(unittest.TestCase):
             "requestAnimationFrame",
             "AbortController",
             "pointerChain",
+            "frameAbortController",
+            "pointerInteractionActive",
+            "beginPointerInteraction",
+            "finishPointerInteraction",
             "canvas.toBlob",
             "capturedAtMs",
             "lastRequestLatencyMs",
@@ -119,6 +123,76 @@ sendPointerNow('down',{x:7,y:9}).then(()=>process.stdout.write(JSON.stringify({b
             [2, 42],
         )
         self.assertEqual(result["resyncs"], [True])
+
+    def test_pointer_interaction_pauses_and_resumes_frame_polling(self):
+        definitions = []
+        for name in (
+            "requestPoll",
+            "beginPointerInteraction",
+            "finishPointerInteraction",
+        ):
+            match = re.search(rf"^.*function {name}.*$", PAGE, re.MULTILINE)
+            self.assertIsNotNone(match)
+            definitions.append(match.group(0))
+        script = """
+let running=true,pointerInteractionActive=false,pollRequested=false,polling=false;
+let pollTimer=17,pointerDown=false,pointerChain=Promise.resolve();
+let aborts=0,scheduled=0;
+let frameAbortController={abort(){aborts++}};
+const clearTimeout=()=>{};
+const setTimeout=()=>{scheduled++;return 18};
+function poll(){}
+""" + "".join(definitions) + """
+beginPointerInteraction();
+const during={pointerInteractionActive,pollRequested,aborts,scheduled};
+requestPoll();
+finishPointerInteraction().then(()=>process.stdout.write(JSON.stringify({
+  during,
+  after:{pointerInteractionActive,pollRequested,aborts,scheduled}
+})));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["during"],
+            {
+                "pointerInteractionActive": True,
+                "pollRequested": False,
+                "aborts": 1,
+                "scheduled": 0,
+            },
+        )
+        self.assertEqual(
+            result["after"],
+            {
+                "pointerInteractionActive": False,
+                "pollRequested": True,
+                "aborts": 1,
+                "scheduled": 1,
+            },
+        )
+
+    def test_pointer_handlers_bracket_input_with_poll_coordination(self):
+        self.assertRegex(
+            PAGE,
+            r"pointerdown'.*?beginPointerInteraction\(\).*?enqueuePointer\('down'",
+        )
+        self.assertRegex(
+            PAGE,
+            r"function release.*?enqueuePointer\(phase,p\).*?finishPointerInteraction",
+        )
+        self.assertRegex(
+            PAGE,
+            r"function requestPoll\(\)\{if\(!running\|\|pointerInteractionActive\)return",
+        )
+        self.assertIn("timedFetch(`/device-debug/v1/frame?after=${sequence}`", PAGE)
+        self.assertIn("frameController", PAGE)
+        self.assertIn("frameAbortController===frameController", PAGE)
 
 
 if __name__ == "__main__":
