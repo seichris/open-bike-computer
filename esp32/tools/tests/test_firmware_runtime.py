@@ -134,7 +134,7 @@ class FirmwareRuntimeTests(unittest.TestCase):
             "schema": 1,
             "lockSetId": "unit-test-lock",
             "generator": {
-                "version": "1",
+                "version": "2",
                 "commit": "a" * 40,
                 "refreshInputsSha256": "b" * 64,
                 "licensesSha256": "c" * 64,
@@ -182,6 +182,16 @@ class FirmwareRuntimeTests(unittest.TestCase):
             load_lock(path)
         path.write_text(json.dumps({"schema": 1}) + "\n")
         with self.assertRaisesRegex(FirmwareRuntimeError, "canonical|missing"):
+            load_lock(path)
+
+    def test_lock_rejects_an_unknown_generator_version(self) -> None:
+        bundle, size, digest = self.make_bundle()
+        path = self.make_lock(bundle, size, digest)
+        value = json.loads(path.read_bytes())
+        value["generator"]["version"] = "3"
+        path.write_bytes(canonical(value))
+
+        with self.assertRaisesRegex(FirmwareRuntimeError, "generator identity"):
             load_lock(path)
 
     def test_lock_rejects_wrong_abi_platform_and_python_minor(self) -> None:
@@ -501,6 +511,13 @@ class FirmwareRuntimeTests(unittest.TestCase):
                 lock_path=lock_path, cache_root=cache,
             )
 
+    def test_production_handoff_rejects_another_project_directory(self) -> None:
+        project = self.root / "other-project"
+        project.mkdir()
+
+        with self.assertRaisesRegex(FirmwareRuntimeError, "another worktree"):
+            ensure_runtime_handoff(("WAVESHARE_AMOLED_175",), project)
+
     def test_recovery_bootstrap_matches_tracked_python_artifacts(self) -> None:
         project = Path(__file__).resolve().parents[2]
         lock = load_lock(project / "tools/firmware-runtime/lock-v1.json")
@@ -513,6 +530,9 @@ class FirmwareRuntimeTests(unittest.TestCase):
             self.assertIn(target.python.sha256, recovery)
             self.assertIn(target.python.url, recovery)
         self.assertNotIn("runtime_root=", recovery)
+        self.assertLess(
+            recovery.index("PATH=/usr/bin:/bin"), recovery.index("script_dir=")
+        )
         self.assertIn('staging=$(mktemp -d "$target_root/.recovery.XXXXXX")', recovery)
         self.assertIn('rm -rf -- "$staging"', recovery)
         self.assertIn('--max-filesize "$archive_size"', recovery)

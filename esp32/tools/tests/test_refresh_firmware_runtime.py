@@ -134,7 +134,8 @@ class RuntimeRefreshTests(unittest.TestCase):
             )
         command = runner.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/curl")
-        self.assertIn("=https", command)
+        self.assertEqual(command[1], "--disable")
+        self.assertEqual(command.count("=https"), 2)
         self.assertTrue(command[-1].endswith("/1.2.3%2Blocal/json"))
         self.assertEqual(runner.call_args.kwargs["environment"], environment)
 

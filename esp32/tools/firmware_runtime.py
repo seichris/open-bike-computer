@@ -457,7 +457,7 @@ def load_lock(path: Path) -> RuntimeLock:
         raise FirmwareRuntimeError("runtime lock-set ID is invalid")
     generator = _strict_object(root["generator"], {"version", "commit", "refreshInputsSha256", "licensesSha256"}, set(), "generator")
     if (
-        not isinstance(generator["version"], str)
+        generator["version"] != "2"
         or not isinstance(generator["commit"], str)
         or re.fullmatch(r"[0-9a-f]{40}", generator["commit"]) is None
         or not isinstance(generator["refreshInputsSha256"], str)
@@ -1050,6 +1050,12 @@ def ensure_runtime_handoff(
     execve: Callable[[str, Sequence[str], Mapping[str, str]], object] = os.execve,
 ) -> RuntimeProvenance:
     bootstrap_start = time.monotonic()
+    project_dir = project_dir.resolve()
+    helper_project = Path(__file__).resolve().parents[1]
+    if lock_path is None and project_dir != helper_project:
+        raise FirmwareRuntimeError(
+            "firmware runtime helper cannot operate on another worktree"
+        )
     injection = sorted(
         name
         for name, value in os.environ.items()

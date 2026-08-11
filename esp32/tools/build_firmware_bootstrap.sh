@@ -2,6 +2,8 @@
 # Recovery entry point for hosts without a usable python3. Keep these two
 # target records byte-for-byte aligned with firmware-runtime/lock-v1.json.
 set -eu
+PATH=/usr/bin:/bin
+export PATH
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 project_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
@@ -77,7 +79,7 @@ if ! verify_archive "$archive"; then
     echo "Refusing to replace unexpected recovery partial: $partial" >&2
     exit 1
   fi
-  curl --fail --location --proto '=https' --tlsv1.2 \
+  curl --disable --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --max-filesize "$archive_size" --output "$partial" "$archive_url"
   if ! verify_archive "$partial"; then
     rm -f -- "$partial"
