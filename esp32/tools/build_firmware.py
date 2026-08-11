@@ -45,6 +45,12 @@ from firmware_build_identity import (
     git_commit_source_date_epoch,
     git_head_identity,
 )
+from device_registry import (
+    DeviceEntry,
+    DeviceRegistryError,
+    environment_matches_family,
+    resolve_device_name,
+)
 from firmware_runtime import (
     FirmwareRuntimeError,
     PROVENANCE_ENV,
@@ -210,6 +216,7 @@ def _resolved_device_port(
     device_serial: str,
     timeout_seconds: float,
     *,
+    device_entry: DeviceEntry | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> str:
     """Resolve a stable USB hardware serial using the attested private Python."""
@@ -294,8 +301,14 @@ def _resolved_device_port(
     pid = resolved.get("pid")
     description = resolved.get("description")
     usb_identity = f" vid={vid!s} pid={pid!s} description={description!r}"
+    details = ""
+    if device_entry is not None:
+        details = (
+            f" nickname={device_entry.nickname}"
+            f" boardFamily={device_entry.board_family}"
+        )
     print(
-        f"FIRMWARE_UPLOAD_DEVICE serial={actual_serial}"
+        f"FIRMWARE_UPLOAD_DEVICE{details} serial={actual_serial}"
         f" port={port}{usb_identity}",
         flush=True,
     )
@@ -1826,6 +1839,7 @@ def upload_firmware(
     upload_port: str | None = None,
     *,
     device_serial: str | None = None,
+    device_entry: DeviceEntry | None = None,
     device_timeout: float = 60.0,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     resolver_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -1891,6 +1905,7 @@ def upload_firmware(
                     manifest,
                     device_serial,
                     device_timeout,
+                    device_entry=device_entry,
                     runner=resolver_runner,
                 )
             if resolved_port is None:
@@ -1947,6 +1962,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "USB hardware serial"
         ),
     )
+    upload_selector.add_argument(
+        "--device-name",
+        help=(
+            "resolve an explicitly enrolled nickname to its board family and "
+            "stable USB serial"
+        ),
+    )
+    parser.add_argument(
+        "--device-registry",
+        type=Path,
+        help="override the platform user-config registry path (primarily for tests)",
+    )
     parser.add_argument(
         "--device-timeout",
         type=float,
@@ -1971,7 +1998,6 @@ def main(
     raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = _parse_args(raw_arguments)
     try:
-        device_serial = args.device_serial
         try:
             runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
             pio_command = (
@@ -1981,12 +2007,25 @@ def main(
             )
         except FirmwareRuntimeError as error:
             raise BuildError(str(error)) from error
+        device_entry = None
+        device_serial = args.device_serial
+        if args.device_name is not None:
+            try:
+                device_entry = resolve_device_name(args.device_name, args.device_registry)
+            except DeviceRegistryError as error:
+                raise BuildError(str(error)) from error
+            if not environment_matches_family(args.environment, device_entry.board_family):
+                raise BuildError(
+                    f"device {device_entry.nickname!r} is enrolled as "
+                    f"{device_entry.board_family}, not {args.environment}"
+                )
+            device_serial = device_entry.serial
         if args.upload_only and args.upload_port is None and device_serial is None:
             raise BuildError(
-                "--upload-only requires --upload-port or --device-serial"
+                "--upload-only requires --upload-port or --device-serial/--device-name"
             )
         if device_serial is None and args.device_timeout != 60.0:
-            raise BuildError("--device-timeout requires --device-serial")
+            raise BuildError("--device-timeout requires --device-serial or --device-name")
         if not math.isfinite(args.device_timeout) or args.device_timeout < 0:
             raise BuildError("device timeout must be a finite nonnegative value")
         if not args.upload_only:
@@ -1996,6 +2035,8 @@ def main(
                 "device_serial": device_serial,
                 "device_timeout": args.device_timeout,
             }
+            if device_entry is not None:
+                upload_options["device_entry"] = device_entry
             upload_firmware(
                 args.project_dir,
                 args.environment,

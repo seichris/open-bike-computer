@@ -238,6 +238,7 @@ jobs:
             tools.tests.test_refresh_firmware_runtime \
             tools.tests.test_capture_boot \
             tools.tests.test_resolve_upload_port \
+            tools.tests.test_device_registry \
             tools.tests.test_map_guidance_integration \
             tools.tests.test_map_memory_diagnostics
           g++ -std=c++17 \

@@ -119,6 +119,19 @@ before reporting a physical installation as complete. Pass the same stable
 hardware identity to `tools/capture_boot.py --device-serial ...`; this prevents
 boot verification from following a different board after USB re-enumeration.
 
+Optional local nicknames map only to an explicitly enrolled board family and
+stable USB serial. Real serials live outside Git:
+
+```sh
+python3 tools/device_registry.py add desk-175 WAVESHARE_AMOLED_175 SERIAL
+python3 tools/device_registry.py list
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175 --device-name desk-175
+```
+
+A nickname does not select the only attached board, infer a model, or grant
+flash approval. Confirm the connected physical model immediately before any
+flash as usual.
+
 Ordinary contributors consume accepted runtime locks only. Maintainers use the
 manual **Firmware runtime refresh candidate** workflow as the first bootstrap
 check, then must produce and review both-host offline replay, dependency graphs,
