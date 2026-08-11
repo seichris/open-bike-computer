@@ -5,13 +5,16 @@ import hashlib
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shutil
 import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 from firmware_build_identity import (
@@ -25,7 +28,9 @@ from firmware_build_identity import (
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 GENERATED_BANNER = b"# Automatically generated file. DO NOT EDIT."
 GENERATED_DESCRIPTION = b"Project Configuration"
-CACHE_SCHEMA = 20
+CORE_CACHE_SCHEMA = 2
+BUILD_MANIFEST_SCHEMA = 20
+CACHE_SCHEMA = BUILD_MANIFEST_SCHEMA
 FLASH_PLAN_SCHEMA = 2
 FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
@@ -138,6 +143,9 @@ WAVESHARE_PLATFORM_PACKAGES = (
 WAVESHARE_PLATFORM_PACKAGES_SHA256 = hashlib.sha256(
     json.dumps(WAVESHARE_PLATFORM_PACKAGES, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
+CORE_ARCHIVE_FILENAME = "core-artifacts.tar"
+CORE_DEFAULTS_FILENAME = "sdkconfig.defaults"
+CORE_PROJECT_SYMLINK_PREFIX = "__OPEN_BIKE_PROJECT__/"
 
 
 class GeneratedSdkconfigError(RuntimeError):
@@ -181,7 +189,11 @@ def _canonical_json_sha256(value: object) -> str:
 
 
 def _cache_manifest_path(project_dir: Path) -> Path:
-    return project_dir / ".pio" / "open-bike-build" / "sdkconfig-defaults.json"
+    return project_dir / ".pio" / "open-bike-build" / "builds"
+
+
+def _build_manifest_path(project_dir: Path, environment: str) -> Path:
+    return _cache_manifest_path(project_dir) / environment / "current.json"
 
 
 def _runtime_provenance() -> dict[str, object] | None:
@@ -189,8 +201,8 @@ def _runtime_provenance() -> dict[str, object] | None:
     if not raw:
         return None
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
+        value = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+    except (json.JSONDecodeError, ValueError):
         return None
     required = {
         "lockSetId",
@@ -227,6 +239,114 @@ def _runtime_provenance() -> dict[str, object] | None:
     ):
         return None
     return value
+
+
+def _core_input_key(project_dir: Path, environment: str) -> str | None:
+    platformio_ini = project_dir / "platformio.ini"
+    runtime = _runtime_provenance()
+    if runtime is None or platformio_ini.is_symlink() or not platformio_ini.is_file():
+        return None
+    try:
+        defaults, environment_config = _sdkconfig_paths(project_dir, environment)
+    except GeneratedSdkconfigError:
+        return None
+    if not _is_generated_sdkconfig(defaults):
+        return None
+    if os.path.lexists(environment_config):
+        if not _is_generated_sdkconfig(environment_config):
+            return None
+        environment_sdkconfig_sha256 = _file_sha256(environment_config)
+    else:
+        environment_sdkconfig_sha256 = None
+    tool_inputs: dict[str, str] = {}
+    for relative in (
+        "prebuild.py",
+        "tools/build_firmware.py",
+        "tools/generated_sdkconfig.py",
+        "tools/pioarduino_custom_core.py",
+        "tools/firmware_runtime.py",
+    ):
+        path = project_dir / relative
+        if path.is_symlink() or not path.is_file():
+            return None
+        tool_inputs[relative] = _file_sha256(path)
+    declared_inputs: dict[str, str] = {}
+    declared_candidates = {
+        project_dir / "sdkconfig",
+        project_dir / "idf_component.yml",
+        project_dir / "dependencies.lock",
+        *project_dir.glob("*.csv"),
+    }
+    for root_name in ("src", "lib", "components"):
+        root = project_dir / root_name
+        if root.is_dir() and not root.is_symlink():
+            declared_candidates.update(root.rglob("idf_component.yml"))
+            declared_candidates.update(root.rglob("dependencies.lock"))
+    for path in sorted(declared_candidates):
+        if not os.path.lexists(path):
+            continue
+        if ".pio" in path.parts or "managed_components" in path.parts:
+            continue
+        if path.is_symlink() or not path.is_file():
+            return None
+        declared_inputs[path.relative_to(project_dir).as_posix()] = _file_sha256(path)
+    material = {
+        "schema": CORE_CACHE_SCHEMA,
+        "environment": environment,
+        "runtime": runtime,
+        "platformioIniSha256": _file_sha256(platformio_ini),
+        "sdkconfigDefaultsSha256": _file_sha256(defaults),
+        "environmentSdkconfigSha256": environment_sdkconfig_sha256,
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
+        "declaredCoreInputs": declared_inputs,
+        "mcu": WAVESHARE_MCU,
+        "memoryType": WAVESHARE_MEMORY_TYPE,
+        "toolInputs": tool_inputs,
+    }
+    return _canonical_json_sha256(material)
+
+
+def _core_manifest_path(
+    project_dir: Path, environment: str, core_input_key: str
+) -> Path:
+    return (
+        project_dir
+        / ".pio/open-bike-build/core-cache"
+        / environment
+        / core_input_key
+        / "manifest.json"
+    )
+
+
+def core_input_key(project_dir: Path, environment: str) -> str | None:
+    """Return the current custom-core input identity, when fully knowable."""
+    return _core_input_key(project_dir, environment)
+
+
+def _atomic_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise GeneratedSdkconfigError(f"unsafe manifest directory: {path.parent}")
+    temporary_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    except OSError as error:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
+        raise GeneratedSdkconfigError(f"could not record manifest: {error}") from error
 
 
 def _tree_sha256(root: Path, *, allow_empty: bool = False) -> str:
@@ -302,10 +422,24 @@ def _execution_tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
 def _load_manifest(path: Path) -> dict[str, object] | None:
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        manifest = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, ValueError):
         return None
     return manifest if isinstance(manifest, dict) else None
 
@@ -605,6 +739,793 @@ def _path_is_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _core_cache_entry_dir(
+    project_dir: Path, environment: str, core_input_key: str
+) -> Path:
+    entry = _core_manifest_path(project_dir, environment, core_input_key).parent
+    project_root = project_dir.absolute()
+    candidate = entry.absolute()
+    try:
+        relative = candidate.relative_to(project_root)
+    except ValueError as error:
+        raise GeneratedSdkconfigError(
+            f"core cache entry is outside the project-private store: {entry}"
+        ) from error
+    current = project_root
+    for part in relative.parts:
+        current /= part
+        if os.path.lexists(current) and current.is_symlink():
+            raise GeneratedSdkconfigError(
+                f"core cache path contains a symlinked ancestor: {current}"
+            )
+    return entry
+
+
+def _core_artifact_roots(
+    project_dir: Path, environment: str
+) -> tuple[tuple[str, Path, bool], ...]:
+    """Return the only mutable outputs eligible for project-local hydration."""
+    configured_core = os.environ.get("PLATFORMIO_CORE_DIR") or os.environ.get(
+        "PLATFORMIO_HOME_DIR"
+    )
+    core_dir = _resolve_platformio_dir(
+        project_dir, configured_core, _default_platformio_core_dir()
+    )
+    package_root = _resolve_platformio_dir(
+        project_dir,
+        os.environ.get("PLATFORMIO_PACKAGES_DIR"),
+        core_dir / "packages",
+    )
+    platforms_root = _resolve_platformio_dir(
+        project_dir,
+        os.environ.get("PLATFORMIO_PLATFORMS_DIR"),
+        core_dir / "platforms",
+    )
+    globallib_root = _resolve_platformio_dir(
+        project_dir,
+        os.environ.get("PLATFORMIO_GLOBALLIB_DIR"),
+        core_dir / "lib",
+    )
+    boards_root = _resolve_platformio_dir(
+        project_dir,
+        os.environ.get("PLATFORMIO_BOARDS_DIR"),
+        core_dir / "boards",
+    )
+    roots = (
+        (package_root, True),
+        (platforms_root / "espressif32", True),
+        (core_dir / "tools", True),
+        (core_dir / "penv", True),
+        (globallib_root, True),
+        (boards_root, True),
+        (_library_dependencies_root(project_dir, environment), False),
+        (project_dir / "managed_components", False),
+    )
+    project_root = project_dir.resolve()
+    result: list[tuple[str, Path, bool]] = []
+    seen: set[Path] = set()
+    for root, required in roots:
+        absolute = root.resolve(strict=False)
+        try:
+            logical = absolute.relative_to(project_root).as_posix()
+        except ValueError as error:
+            raise GeneratedSdkconfigError(
+                f"custom-core artifact is outside the project-private store: {root}"
+            ) from error
+        if absolute in seen or not logical or logical.startswith("../"):
+            raise GeneratedSdkconfigError(
+                f"custom-core artifact layout is ambiguous: {root}"
+            )
+        seen.add(absolute)
+        result.append((logical, absolute, required))
+    return tuple(result)
+
+
+def _walk_archive_tree(root: Path) -> list[Path]:
+    if root.is_symlink() or not root.is_dir():
+        raise GeneratedSdkconfigError(f"core archive root is missing or unsafe: {root}")
+    paths = [root]
+
+    def visit(directory: Path) -> None:
+        try:
+            children = sorted(
+                (Path(entry.path) for entry in os.scandir(directory)),
+                key=lambda path: path.name,
+            )
+        except OSError as error:
+            raise GeneratedSdkconfigError(
+                f"could not enumerate core archive root {directory}: {error}"
+            ) from error
+        for child in children:
+            paths.append(child)
+            metadata = child.lstat()
+            if stat.S_ISDIR(metadata.st_mode) and not child.is_symlink():
+                visit(child)
+
+    visit(root)
+    return paths
+
+
+def _core_archive_inventory(
+    archive_path: Path,
+    project_dir: Path,
+    environment: str,
+) -> tuple[str, int]:
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise GeneratedSdkconfigError(
+            f"core cache archive is missing or unsafe: {archive_path}"
+        )
+    allowed_roots = tuple(
+        logical for logical, _, _ in _core_artifact_roots(project_dir, environment)
+    )
+    inventory: list[dict[str, object]] = []
+    names: set[str] = set()
+    symlink_names: set[str] = set()
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            members = archive.getmembers()
+            for member in members:
+                name = member.name
+                parts = name.split("/")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or posixpath.normpath(name) != name
+                    or name in names
+                    or not any(
+                        name == root or name.startswith(f"{root}/")
+                        for root in allowed_roots
+                    )
+                    or member.uid != 0
+                    or member.gid != 0
+                    or member.uname not in {"", None}
+                    or member.gname not in {"", None}
+                    or member.mode & ~0o777
+                ):
+                    raise GeneratedSdkconfigError(
+                        f"core cache archive contains an unsafe entry: {name!r}"
+                    )
+                if any(name.startswith(f"{link}/") for link in symlink_names):
+                    raise GeneratedSdkconfigError(
+                        "core cache archive contains an entry below a symlink: "
+                        f"{name}"
+                    )
+                names.add(name)
+                common = {
+                    "name": name,
+                    "mode": member.mode,
+                }
+                if member.isdir():
+                    inventory.append({**common, "type": "directory"})
+                elif member.isfile():
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise GeneratedSdkconfigError(
+                            f"core cache archive file cannot be read: {name}"
+                        )
+                    digest = hashlib.sha256()
+                    total = 0
+                    for chunk in iter(lambda: stream.read(65536), b""):
+                        total += len(chunk)
+                        digest.update(chunk)
+                    if total != member.size:
+                        raise GeneratedSdkconfigError(
+                            f"core cache archive file is truncated: {name}"
+                        )
+                    inventory.append(
+                        {
+                            **common,
+                            "type": "file",
+                            "size": total,
+                            "sha256": digest.hexdigest(),
+                        }
+                    )
+                elif member.issym():
+                    link = member.linkname
+                    if link.startswith(CORE_PROJECT_SYMLINK_PREFIX):
+                        project_relative = link.removeprefix(
+                            CORE_PROJECT_SYMLINK_PREFIX
+                        )
+                        link_parts = project_relative.split("/")
+                        if (
+                            not project_relative
+                            or any(part in {"", ".", ".."} for part in link_parts)
+                            or posixpath.normpath(project_relative)
+                            != project_relative
+                        ):
+                            raise GeneratedSdkconfigError(
+                                f"core cache archive has an unsafe project link: {name}"
+                            )
+                    else:
+                        if not link or posixpath.isabs(link):
+                            raise GeneratedSdkconfigError(
+                                f"core cache archive has an unsafe symlink: {name}"
+                            )
+                        resolved = posixpath.normpath(
+                            posixpath.join(posixpath.dirname(name), link)
+                        )
+                        if resolved == ".." or resolved.startswith("../"):
+                            raise GeneratedSdkconfigError(
+                                f"core cache archive symlink escapes its root: {name}"
+                            )
+                    symlink_names.add(name)
+                    inventory.append({**common, "type": "symlink", "target": link})
+                else:
+                    raise GeneratedSdkconfigError(
+                        f"core cache archive contains a special entry: {name}"
+                    )
+    except (OSError, tarfile.TarError) as error:
+        raise GeneratedSdkconfigError(
+            f"could not inspect core cache archive: {error}"
+        ) from error
+    if not inventory:
+        raise GeneratedSdkconfigError("core cache archive is empty")
+    return _canonical_json_sha256(inventory), len(inventory)
+
+
+def _archive_linkname(project_dir: Path, path: Path) -> str:
+    link = os.readlink(path)
+    try:
+        target = path.resolve(strict=True)
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"core artifact contains a broken symlink: {path}"
+        ) from error
+    project_root = project_dir.resolve()
+    if os.path.isabs(link):
+        try:
+            relative = target.relative_to(project_root).as_posix()
+        except ValueError as error:
+            raise GeneratedSdkconfigError(
+                f"core artifact symlink leaves the project-private store: {path}"
+            ) from error
+        return f"{CORE_PROJECT_SYMLINK_PREFIX}{relative}"
+    resolved = (path.parent / link).resolve()
+    if not _path_is_within(resolved, project_root):
+        raise GeneratedSdkconfigError(
+            f"core artifact symlink leaves the project-private store: {path}"
+        )
+    return link
+
+
+def _write_core_archive(
+    archive_path: Path,
+    project_dir: Path,
+    environment: str,
+) -> tuple[str, int]:
+    roots = _core_artifact_roots(project_dir, environment)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for logical_root, root, required in roots:
+                if not os.path.lexists(root):
+                    if required:
+                        raise GeneratedSdkconfigError(
+                            f"required custom-core output is missing: {root}"
+                        )
+                    continue
+                for path in _walk_archive_tree(root):
+                    relative = path.relative_to(root).as_posix()
+                    name = logical_root if relative == "." else f"{logical_root}/{relative}"
+                    metadata = path.lstat()
+                    info = tarfile.TarInfo(name=name)
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    info.mode = stat.S_IMODE(metadata.st_mode)
+                    if stat.S_ISDIR(metadata.st_mode) and not path.is_symlink():
+                        info.type = tarfile.DIRTYPE
+                        archive.addfile(info)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        info.type = tarfile.REGTYPE
+                        info.size = metadata.st_size
+                        with path.open("rb") as stream:
+                            archive.addfile(info, stream)
+                    elif stat.S_ISLNK(metadata.st_mode):
+                        info.type = tarfile.SYMTYPE
+                        info.linkname = _archive_linkname(project_dir, path)
+                        archive.addfile(info)
+                    else:
+                        raise GeneratedSdkconfigError(
+                            f"core artifact contains a special file: {path}"
+                        )
+    except (OSError, tarfile.TarError) as error:
+        raise GeneratedSdkconfigError(
+            f"could not create core cache archive: {error}"
+        ) from error
+    return _core_archive_inventory(archive_path, project_dir, environment)
+
+
+def _validate_core_cache_entry(
+    project_dir: Path,
+    environment: str,
+    core_input_key: str,
+    *,
+    entry_dir: Path | None = None,
+    require_read_only: bool = True,
+) -> dict[str, object]:
+    entry = entry_dir or _core_cache_entry_dir(
+        project_dir, environment, core_input_key
+    )
+    manifest_path = entry / "manifest.json"
+    archive_path = entry / CORE_ARCHIVE_FILENAME
+    defaults_path = entry / CORE_DEFAULTS_FILENAME
+    expected_names = {"manifest.json", CORE_ARCHIVE_FILENAME, CORE_DEFAULTS_FILENAME}
+    if entry.is_symlink() or not entry.is_dir():
+        raise GeneratedSdkconfigError("core cache entry is missing or unsafe")
+    if (
+        manifest_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.stat().st_size > 1024 * 1024
+    ):
+        raise GeneratedSdkconfigError("core cache manifest is missing or unsafe")
+    manifest = _load_manifest(manifest_path)
+    if manifest is None:
+        raise GeneratedSdkconfigError("core cache manifest is missing or malformed")
+    expected_manifest_fields = {
+        "schema",
+        "environment",
+        "coreInputKey",
+        "runtimeProvenance",
+        "managedComponentsSha256",
+        "libraryDependenciesSha256",
+        "sdkconfigDefaultsSha256",
+        "platformioIniSha256",
+        "platformArchiveSha256",
+        "platformPackagesSha256",
+        "coreAttestation",
+        "coreAttestationSha256",
+        "bootApp0Sha256",
+        "environmentSdkconfigSha256",
+        "coreArchiveFilename",
+        "coreArchiveSize",
+        "coreArchiveSha256",
+        "coreArchiveInventorySha256",
+        "coreArchiveEntryCount",
+    }
+    if set(manifest) != expected_manifest_fields:
+        raise GeneratedSdkconfigError("core cache manifest fields do not match")
+    environment_hash = manifest.get("environmentSdkconfigSha256")
+    environment_name = f"sdkconfig.{environment}"
+    if environment_hash is not None:
+        expected_names.add(environment_name)
+    try:
+        children = tuple(entry.iterdir())
+        if hasattr(os, "getuid"):
+            expected_uid = os.getuid()
+            for owned in (entry, *children):
+                metadata = owned.lstat()
+                if metadata.st_uid != expected_uid:
+                    raise GeneratedSdkconfigError(
+                        f"core cache entry has the wrong owner: {owned}"
+                    )
+                if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                    raise GeneratedSdkconfigError(
+                        f"core cache entry contains a hard-linked file: {owned}"
+                    )
+        actual_names = {path.name for path in children}
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not inspect core cache ownership: {error}"
+        ) from error
+    if actual_names != expected_names:
+        raise GeneratedSdkconfigError("core cache entry has missing or extra files")
+    if require_read_only and (
+        stat.S_IMODE(entry.stat().st_mode) != 0o555
+        or any(
+            path.is_symlink()
+            or not path.is_file()
+            or stat.S_IMODE(path.stat().st_mode) != 0o444
+            for path in children
+        )
+    ):
+        raise GeneratedSdkconfigError("core cache entry permissions changed")
+    if (
+        manifest.get("schema") != CORE_CACHE_SCHEMA
+        or manifest.get("environment") != environment
+        or manifest.get("coreInputKey") != core_input_key
+        or manifest.get("runtimeProvenance") != _runtime_provenance()
+        or manifest.get("platformArchiveSha256")
+        != WAVESHARE_PLATFORM_ARCHIVE_SHA256
+        or manifest.get("platformPackagesSha256")
+        != WAVESHARE_PLATFORM_PACKAGES_SHA256
+    ):
+        raise GeneratedSdkconfigError("core cache manifest identity does not match")
+    if (
+        defaults_path.is_symlink()
+        or not defaults_path.is_file()
+        or not _is_generated_sdkconfig(defaults_path)
+        or manifest.get("sdkconfigDefaultsSha256") != _file_sha256(defaults_path)
+    ):
+        raise GeneratedSdkconfigError("core cache defaults sidecar does not match")
+    environment_path = entry / environment_name
+    if environment_hash is None:
+        if os.path.lexists(environment_path):
+            raise GeneratedSdkconfigError(
+                "core cache contains an unrecorded environment sidecar"
+            )
+    elif (
+        not isinstance(environment_hash, str)
+        or environment_path.is_symlink()
+        or not environment_path.is_file()
+        or not _is_generated_sdkconfig(environment_path)
+        or _file_sha256(environment_path) != environment_hash
+    ):
+        raise GeneratedSdkconfigError(
+            "core cache environment sidecar does not match"
+        )
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise GeneratedSdkconfigError("core cache archive is missing or unsafe")
+    archive_size = archive_path.stat().st_size
+    if (
+        manifest.get("coreArchiveFilename") != CORE_ARCHIVE_FILENAME
+        or manifest.get("coreArchiveSize") != archive_size
+        or manifest.get("coreArchiveSha256") != _file_sha256(archive_path)
+    ):
+        raise GeneratedSdkconfigError("core cache archive digest does not match")
+    inventory_sha256, entry_count = _core_archive_inventory(
+        archive_path, project_dir, environment
+    )
+    if (
+        manifest.get("coreArchiveInventorySha256") != inventory_sha256
+        or manifest.get("coreArchiveEntryCount") != entry_count
+    ):
+        raise GeneratedSdkconfigError("core cache archive inventory does not match")
+    attestation = manifest.get("coreAttestation")
+    if (
+        not isinstance(attestation, dict)
+        or manifest.get("coreAttestationSha256")
+        != _canonical_json_sha256(attestation)
+        or manifest.get("bootApp0Sha256")
+        != attestation.get("bootApp0Sha256")
+    ):
+        raise GeneratedSdkconfigError("core cache attestation is malformed")
+    return manifest
+
+
+def _quarantine_core_cache_entry(
+    project_dir: Path,
+    environment: str,
+    core_input_key: str,
+    reason: str,
+) -> None:
+    entry = _core_cache_entry_dir(project_dir, environment, core_input_key)
+    if not os.path.lexists(entry):
+        return
+    environment_root = entry.parent
+    expected_root = (
+        project_dir / ".pio/open-bike-build/core-cache" / environment
+    ).absolute()
+    if environment_root.absolute() != expected_root or environment_root.is_symlink():
+        raise GeneratedSdkconfigError(
+            f"refusing to quarantine an unsafe core cache path: {entry}"
+        )
+    quarantine_root = environment_root / "quarantine"
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    if quarantine_root.is_symlink() or not quarantine_root.is_dir():
+        raise GeneratedSdkconfigError(
+            f"refusing to use an unsafe core cache quarantine: {quarantine_root}"
+        )
+    destination = quarantine_root / f"{core_input_key}-{time.time_ns()}"
+    try:
+        if entry.is_dir() and not entry.is_symlink():
+            entry.chmod(0o700)
+        os.replace(entry, destination)
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not quarantine the corrupt core cache entry: {error}"
+        ) from error
+    reason_id = hashlib.sha256(reason.encode("utf-8")).hexdigest()
+    print(
+        "FIRMWARE_CORE_CACHE schema=1 status=quarantined "
+        f"environment={environment} coreInputKey={core_input_key} "
+        f"reasonSha256={reason_id}",
+        flush=True,
+    )
+
+
+def _active_core_matches(
+    project_dir: Path,
+    environment: str,
+    manifest: dict[str, object],
+) -> bool:
+    defaults, environment_config = _sdkconfig_paths(project_dir, environment)
+    if not _is_generated_sdkconfig(defaults):
+        return False
+    expected_environment_hash = manifest.get("environmentSdkconfigSha256")
+    if expected_environment_hash is None:
+        if os.path.lexists(environment_config):
+            return False
+    elif (
+        not _is_generated_sdkconfig(environment_config)
+        or _file_sha256(environment_config) != expected_environment_hash
+    ):
+        return False
+    current_core = _core_attestation(project_dir, environment)
+    try:
+        managed_components_sha = _managed_components_sha256(project_dir)
+        library_dependencies_sha = _library_dependencies_sha256(
+            project_dir, environment
+        )
+    except GeneratedSdkconfigError:
+        return False
+    return (
+        current_core is not None
+        and manifest.get("managedComponentsSha256") == managed_components_sha
+        and manifest.get("libraryDependenciesSha256")
+        == library_dependencies_sha
+        and manifest.get("sdkconfigDefaultsSha256") == _file_sha256(defaults)
+        and manifest.get("coreAttestation") == current_core
+        and manifest.get("coreAttestationSha256")
+        == _canonical_json_sha256(current_core)
+    )
+
+
+def _extract_core_archive(
+    archive_path: Path,
+    destination: Path,
+    project_dir: Path,
+) -> None:
+    project_root = project_dir.resolve()
+    names: set[str] = set()
+    symlink_names: set[str] = set()
+    with tarfile.open(archive_path, mode="r:") as archive:
+        for member in archive.getmembers():
+            name = member.name
+            parts = name.split("/")
+            if (
+                not name
+                or name.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+                or posixpath.normpath(name) != name
+                or name in names
+                or any(name.startswith(f"{link}/") for link in symlink_names)
+                or not (member.isdir() or member.isfile() or member.issym())
+            ):
+                raise GeneratedSdkconfigError(
+                    f"core cache archive changed to an unsafe entry: {name!r}"
+                )
+            names.add(name)
+            output = destination.joinpath(*parts)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if member.isdir():
+                output.mkdir(exist_ok=True)
+                output.chmod(member.mode)
+            elif member.isfile():
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise GeneratedSdkconfigError(
+                        f"core cache archive file cannot be read: {member.name}"
+                    )
+                with output.open("xb") as target:
+                    shutil.copyfileobj(stream, target)
+                output.chmod(member.mode)
+            elif member.issym():
+                link = member.linkname
+                if link.startswith(CORE_PROJECT_SYMLINK_PREFIX):
+                    project_relative = link.removeprefix(
+                        CORE_PROJECT_SYMLINK_PREFIX
+                    )
+                    project_parts = project_relative.split("/")
+                    if (
+                        not project_relative
+                        or any(
+                            part in {"", ".", ".."} for part in project_parts
+                        )
+                        or posixpath.normpath(project_relative)
+                        != project_relative
+                    ):
+                        raise GeneratedSdkconfigError(
+                            f"core cache archive changed to an unsafe link: {name}"
+                        )
+                    link = str(project_root / project_relative)
+                else:
+                    resolved = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(name), link)
+                    )
+                    if (
+                        not link
+                        or posixpath.isabs(link)
+                        or resolved == ".."
+                        or resolved.startswith("../")
+                    ):
+                        raise GeneratedSdkconfigError(
+                            f"core cache archive changed to an unsafe link: {name}"
+                        )
+                output.symlink_to(link)
+                symlink_names.add(name)
+            else:
+                raise GeneratedSdkconfigError(
+                    f"core cache archive contains a special entry: {member.name}"
+                )
+
+
+def _hydrate_core_cache_entry(
+    project_dir: Path,
+    environment: str,
+    core_input_key: str,
+    manifest: dict[str, object],
+) -> None:
+    entry = _core_cache_entry_dir(project_dir, environment, core_input_key)
+    hydration_root = project_dir / ".pio/open-bike-build/hydration"
+    hydration_root.mkdir(parents=True, exist_ok=True)
+    if hydration_root.is_symlink() or not hydration_root.is_dir():
+        raise GeneratedSdkconfigError(
+            f"refusing to use an unsafe hydration directory: {hydration_root}"
+        )
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{environment}.", dir=hydration_root)
+    )
+    try:
+        try:
+            _extract_core_archive(
+                entry / CORE_ARCHIVE_FILENAME, temporary, project_dir
+            )
+        except (OSError, tarfile.TarError) as error:
+            raise GeneratedSdkconfigError(
+                f"could not hydrate the core cache archive: {error}"
+            ) from error
+        roots = _core_artifact_roots(project_dir, environment)
+        managed_components_root = (project_dir / "managed_components").resolve()
+        for logical, target, _ in roots:
+            staged = temporary.joinpath(*logical.split("/"))
+            if os.path.lexists(target) and (target.is_symlink() or not target.is_dir()):
+                raise GeneratedSdkconfigError(
+                    f"refusing to replace an unsafe core artifact: {target}"
+                )
+            if target == managed_components_root and _is_tracked(
+                project_dir, target
+            ):
+                raise GeneratedSdkconfigError(
+                    f"refusing to replace tracked managed components: {target}"
+                )
+            if target == managed_components_root and target.is_dir():
+                for child in target.iterdir():
+                    if (
+                        child.is_symlink()
+                        or not child.is_dir()
+                        or (child / ".component_hash").is_symlink()
+                        or not (child / ".component_hash").is_file()
+                    ):
+                        raise GeneratedSdkconfigError(
+                            "refusing to replace unrecognized managed-components "
+                            f"content: {child}"
+                        )
+            if os.path.lexists(staged) and (staged.is_symlink() or not staged.is_dir()):
+                raise GeneratedSdkconfigError(
+                    f"hydrated core artifact is unsafe: {staged}"
+                )
+        for logical, target, _ in roots:
+            staged = temporary.joinpath(*logical.split("/"))
+            if os.path.lexists(target):
+                shutil.rmtree(target)
+            if os.path.lexists(staged):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged, target)
+        defaults, environment_config = _sdkconfig_paths(project_dir, environment)
+        for source, target in (
+            (entry / CORE_DEFAULTS_FILENAME, defaults),
+            (entry / f"sdkconfig.{environment}", environment_config),
+        ):
+            if os.path.lexists(source):
+                temporary_name = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", dir=project_dir, prefix=f".{target.name}.",
+                        delete=False,
+                    ) as stream:
+                        temporary_name = stream.name
+                        stream.write(source.read_bytes())
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary_name, target)
+                finally:
+                    if temporary_name is not None and os.path.lexists(temporary_name):
+                        Path(temporary_name).unlink()
+            elif os.path.lexists(target):
+                if target.is_symlink() or not _is_generated_sdkconfig(target):
+                    raise GeneratedSdkconfigError(
+                        f"refusing to remove an unsafe generated config: {target}"
+                    )
+                target.unlink()
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not hydrate the core cache entry: {error}"
+        ) from error
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+    if not _active_core_matches(project_dir, environment, manifest):
+        raise GeneratedSdkconfigError(
+            "hydrated custom-core outputs do not match their immutable manifest"
+        )
+
+
+def _publish_core_cache_entry(
+    project_dir: Path,
+    environment: str,
+    core_input_key: str,
+    core_manifest: dict[str, object],
+) -> dict[str, object]:
+    entry = _core_cache_entry_dir(project_dir, environment, core_input_key)
+    environment_root = entry.parent
+    environment_root.mkdir(parents=True, exist_ok=True)
+    if environment_root.is_symlink() or not environment_root.is_dir():
+        raise GeneratedSdkconfigError(
+            f"unsafe core cache environment directory: {environment_root}"
+        )
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{core_input_key}.", dir=environment_root)
+    )
+    try:
+        defaults, environment_config = _sdkconfig_paths(project_dir, environment)
+        shutil.copyfile(defaults, temporary / CORE_DEFAULTS_FILENAME)
+        if os.path.lexists(environment_config):
+            shutil.copyfile(
+                environment_config, temporary / f"sdkconfig.{environment}"
+            )
+        archive_path = temporary / CORE_ARCHIVE_FILENAME
+        inventory_sha256, entry_count = _write_core_archive(
+            archive_path, project_dir, environment
+        )
+        published = {
+            **core_manifest,
+            "coreArchiveFilename": CORE_ARCHIVE_FILENAME,
+            "coreArchiveSize": archive_path.stat().st_size,
+            "coreArchiveSha256": _file_sha256(archive_path),
+            "coreArchiveInventorySha256": inventory_sha256,
+            "coreArchiveEntryCount": entry_count,
+        }
+        _atomic_json(temporary / "manifest.json", published)
+        _validate_core_cache_entry(
+            project_dir,
+            environment,
+            core_input_key,
+            entry_dir=temporary,
+            require_read_only=False,
+        )
+        if os.path.lexists(entry):
+            raise GeneratedSdkconfigError(
+                "refusing to replace an existing immutable core-cache entry"
+            )
+        published_entry = False
+        try:
+            os.replace(temporary, entry)
+            published_entry = True
+            for child in entry.iterdir():
+                if child.is_symlink() or not child.is_file():
+                    raise GeneratedSdkconfigError(
+                        "published core-cache entry contains an unsafe child"
+                    )
+                child.chmod(0o444)
+            entry.chmod(0o555)
+            _validate_core_cache_entry(
+                project_dir, environment, core_input_key
+            )
+        except (OSError, GeneratedSdkconfigError) as error:
+            if published_entry and entry.is_dir() and not entry.is_symlink():
+                entry.chmod(0o700)
+                for child in entry.iterdir():
+                    if not child.is_symlink():
+                        child.chmod(0o600)
+                shutil.rmtree(entry)
+            if isinstance(error, GeneratedSdkconfigError):
+                raise
+            raise GeneratedSdkconfigError(
+                f"could not publish immutable core-cache entry: {error}"
+            ) from error
+        return published
+    except OSError as error:
+        raise GeneratedSdkconfigError(
+            f"could not prepare the immutable core-cache entry: {error}"
+        ) from error
+    finally:
+        if os.path.lexists(temporary):
+            shutil.rmtree(temporary)
 
 
 def _application_partition_from_partition_table(path: Path) -> tuple[int, int]:
@@ -1094,63 +2015,16 @@ def _is_tracked(project_dir: Path, path: Path) -> bool:
 def _cached_defaults_match(
     project_dir: Path, defaults: Path, environment: str
 ) -> bool:
-    manifest_path = _cache_manifest_path(project_dir)
-    platformio_ini = project_dir / "platformio.ini"
-    if (
-        not manifest_path.is_file()
-        or manifest_path.is_symlink()
-        or not platformio_ini.is_file()
-        or platformio_ini.is_symlink()
-    ):
+    core_input_key = _core_input_key(project_dir, environment)
+    if core_input_key is None:
         return False
-    manifest = _load_manifest(manifest_path)
-    if manifest is None:
-        return False
-    current_core = _core_attestation(project_dir, environment)
     try:
-        managed_components_sha = _managed_components_sha256(project_dir)
-        library_dependencies_sha = _library_dependencies_sha256(
-            project_dir, environment
+        manifest = _validate_core_cache_entry(
+            project_dir, environment, core_input_key
         )
     except GeneratedSdkconfigError:
         return False
-    source_identity = current_source_identity(project_dir, environment)
-    try:
-        source_date_epoch = git_commit_source_date_epoch(
-            project_dir, source_identity
-        )
-        build_timestamp = build_timestamp_from_source_date_epoch(
-            source_date_epoch
-        )
-    except ValueError:
-        return False
-    return (
-        manifest.get("schema") == CACHE_SCHEMA
-        and manifest.get("environment") == environment
-        and "environmentSdkconfigSha256" in manifest
-        and "managedComponentsSha256" in manifest
-        and "libraryDependenciesSha256" in manifest
-        and manifest.get("platformArchiveSha256")
-        == WAVESHARE_PLATFORM_ARCHIVE_SHA256
-        and manifest.get("platformPackagesSha256")
-        == WAVESHARE_PLATFORM_PACKAGES_SHA256
-        and FULL_GIT_SHA.fullmatch(source_identity) is not None
-        and manifest.get("sourceIdentity") == source_identity
-        and manifest.get("sourceDateEpoch") == source_date_epoch
-        and manifest.get("buildTimestamp") == build_timestamp
-        and manifest.get("runtimeProvenance") == _runtime_provenance()
-        and manifest.get("managedComponentsSha256") == managed_components_sha
-        and manifest.get("libraryDependenciesSha256")
-        == library_dependencies_sha
-        and manifest.get("sdkconfigDefaultsSha256") == _file_sha256(defaults)
-        and manifest.get("platformioIniSha256") == _file_sha256(platformio_ini)
-        and current_core is not None
-        and manifest.get("coreAttestation") == current_core
-        and manifest.get("coreAttestationSha256")
-        == _canonical_json_sha256(current_core)
-        and manifest.get("bootApp0Sha256")
-        == current_core.get("bootApp0Sha256")
-    )
+    return _active_core_matches(project_dir, environment, manifest)
 
 
 def recognized_generated_sdkconfigs(
@@ -1203,15 +2077,16 @@ def remove_generated_sdkconfigs(
 def prepare_generated_sdkconfigs(
     project_dir: Path, environment: str
 ) -> tuple[Path, ...]:
-    """Keep only a helper-validated defaults cache; remove profile outputs.
+    """Keep only helper-validated custom-core inputs; remove other outputs.
 
-    The pinned pioarduino platform uses ``sdkconfig.defaults`` as its custom-core
-    cache key. Removing a known-good file forces a shared framework reinstall,
-    while trusting an arbitrary untracked file can hide effective build input.
-    Preserve it only when its exact contents and ``platformio.ini`` match the
-    helper-owned record from a previous successful real-target build.
+    The pinned pioarduino platform uses ``sdkconfig.defaults`` and the active
+    environment SDK configuration as custom-core inputs. Removing known-good
+    files forces a shared framework reinstall, while trusting arbitrary
+    untracked files can hide effective build input. Preserve both only when
+    their exact contents and ``platformio.ini`` match the helper-owned record
+    from a previous successful real-target build.
     """
-    defaults, _ = _sdkconfig_paths(project_dir, environment)
+    defaults, environment_config = _sdkconfig_paths(project_dir, environment)
     recognized = list(recognized_generated_sdkconfigs(project_dir, environment))
     for path in recognized:
         if _is_tracked(project_dir, path):
@@ -1219,12 +2094,39 @@ def prepare_generated_sdkconfigs(
                 f"refusing to use tracked SDK configuration as generated state: {path}"
             )
 
-    cache_valid = defaults in recognized and _cached_defaults_match(
-        project_dir, defaults, environment
-    )
+    cache_valid = False
+    core_key = _core_input_key(project_dir, environment)
+    if defaults in recognized and core_key is not None:
+        try:
+            core_manifest = _validate_core_cache_entry(
+                project_dir, environment, core_key
+            )
+        except GeneratedSdkconfigError as error:
+            if os.path.lexists(
+                _core_cache_entry_dir(project_dir, environment, core_key)
+            ):
+                _quarantine_core_cache_entry(
+                    project_dir, environment, core_key, str(error)
+                )
+        else:
+            try:
+                if not _active_core_matches(
+                    project_dir, environment, core_manifest
+                ):
+                    _hydrate_core_cache_entry(
+                        project_dir, environment, core_key, core_manifest
+                    )
+                cache_valid = _active_core_matches(
+                    project_dir, environment, core_manifest
+                )
+            except GeneratedSdkconfigError as error:
+                _quarantine_core_cache_entry(
+                    project_dir, environment, core_key, str(error)
+                )
+                cache_valid = False
     preserved: list[Path] = []
     for path in recognized:
-        if path == defaults and cache_valid:
+        if path in (defaults, environment_config) and cache_valid:
             preserved.append(path)
             continue
         path.unlink()
@@ -1250,16 +2152,86 @@ def require_validated_generated_sdkconfig_defaults(
         raise GeneratedSdkconfigError(
             f"refusing AMOLED upload with tracked SDK configuration: {defaults}"
         )
+    manifest_path = _build_manifest_path(project_dir, environment)
+    manifest = _load_manifest(manifest_path)
+    if manifest is None:
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload without an object SDK configuration cache"
+        )
+    expected_environment_hash = manifest.get("environmentSdkconfigSha256")
+    if expected_environment_hash is None:
+        if os.path.lexists(environment_config):
+            raise GeneratedSdkconfigError(
+                "refusing AMOLED upload because an environment SDK "
+                "configuration appeared after the verified build"
+            )
+    elif (
+        not _is_generated_sdkconfig(environment_config)
+        or _file_sha256(environment_config) != expected_environment_hash
+    ):
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload because the environment SDK configuration "
+            "changed after the verified build"
+        )
     if not _cached_defaults_match(project_dir, defaults, environment):
         raise GeneratedSdkconfigError(
             "refusing AMOLED upload because generated SDK config or installed "
             "custom-core state changed after the verified build"
         )
-    manifest_path = _cache_manifest_path(project_dir)
-    manifest = _load_manifest(manifest_path)
-    if manifest is None:
+    source_identity = current_source_identity(project_dir, environment)
+    try:
+        source_date_epoch = git_commit_source_date_epoch(project_dir, source_identity)
+        build_timestamp = build_timestamp_from_source_date_epoch(source_date_epoch)
+    except ValueError as error:
         raise GeneratedSdkconfigError(
-            "refusing AMOLED upload without an object SDK configuration cache"
+            f"refusing AMOLED upload without a valid source-derived build clock: {error}"
+        ) from error
+    core_input_key = _core_input_key(project_dir, environment)
+    if (
+        manifest.get("schema") != BUILD_MANIFEST_SCHEMA
+        or FULL_GIT_SHA.fullmatch(source_identity) is None
+        or manifest.get("sourceIdentity") != source_identity
+        or manifest.get("sourceDateEpoch") != source_date_epoch
+        or manifest.get("buildTimestamp") != build_timestamp
+        or manifest.get("runtimeProvenance") != _runtime_provenance()
+        or core_input_key is None
+        or manifest.get("coreInputKey") != core_input_key
+    ):
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload because exact firmware build identity changed after the verified build"
+        )
+    try:
+        core_manifest = _validate_core_cache_entry(
+            project_dir, environment, core_input_key
+        )
+    except GeneratedSdkconfigError as error:
+        raise GeneratedSdkconfigError(
+            f"refusing AMOLED upload because the firmware build core cache is invalid: {error}"
+        ) from error
+    core_fields = {
+        "coreInputKey",
+        "runtimeProvenance",
+        "managedComponentsSha256",
+        "libraryDependenciesSha256",
+        "sdkconfigDefaultsSha256",
+        "platformioIniSha256",
+        "platformArchiveSha256",
+        "platformPackagesSha256",
+        "coreAttestation",
+        "coreAttestationSha256",
+        "bootApp0Sha256",
+        "environmentSdkconfigSha256",
+        "coreArchiveFilename",
+        "coreArchiveSize",
+        "coreArchiveSha256",
+        "coreArchiveInventorySha256",
+        "coreArchiveEntryCount",
+    }
+    if core_manifest is None or any(
+        manifest.get(key) != core_manifest.get(key) for key in core_fields
+    ):
+        raise GeneratedSdkconfigError(
+            "refusing AMOLED upload because the firmware build core reference changed"
         )
     current_artifacts = _firmware_artifact_hashes(project_dir, environment)
     for key, current_hash in current_artifacts.items():
@@ -1312,7 +2284,11 @@ def require_validated_generated_sdkconfig_defaults(
 
 
 def record_generated_sdkconfig_defaults(
-    project_dir: Path, environment: str
+    project_dir: Path,
+    environment: str,
+    *,
+    core_cache_status: str | None = None,
+    expected_core_input_key: str | None = None,
 ) -> Path | None:
     """Record the generated defaults after a successful real-target build."""
     defaults, environment_config = _sdkconfig_paths(project_dir, environment)
@@ -1333,18 +2309,115 @@ def record_generated_sdkconfig_defaults(
         raise GeneratedSdkconfigError(
             f"cannot fingerprint PlatformIO configuration: {platformio_ini}"
         )
+    if os.path.lexists(environment_config):
+        if not _is_generated_sdkconfig(environment_config):
+            raise GeneratedSdkconfigError(
+                f"cannot cache unrecognized SDK configuration: {environment_config}"
+            )
+        if _is_tracked(project_dir, environment_config):
+            raise GeneratedSdkconfigError(
+                "refusing to cache tracked environment SDK configuration: "
+                f"{environment_config}"
+            )
+        environment_hash: str | None = _file_sha256(environment_config)
+    else:
+        environment_hash = None
+
     core_attestation = _core_attestation(project_dir, environment)
     runtime_provenance = _runtime_provenance()
-    source_identity = current_source_identity(project_dir, environment)
+    core_input_key = _core_input_key(project_dir, environment)
     if (
         core_attestation is None
         or runtime_provenance is None
-        or FULL_GIT_SHA.fullmatch(source_identity) is None
+        or core_input_key is None
     ):
-        manifest_path = _cache_manifest_path(project_dir)
+        manifest_path = _build_manifest_path(project_dir, environment)
         if manifest_path.is_file() or manifest_path.is_symlink():
             manifest_path.unlink()
         return None
+    if core_cache_status == "hit":
+        if expected_core_input_key is None:
+            raise GeneratedSdkconfigError(
+                "verified core-cache hit is missing its selected input key"
+            )
+        if core_input_key != expected_core_input_key:
+            _quarantine_core_cache_entry(
+                project_dir,
+                environment,
+                expected_core_input_key,
+                "core input identity changed during the application build",
+            )
+            raise GeneratedSdkconfigError(
+                "custom-core input identity changed during the application build"
+            )
+    managed_components_sha = _managed_components_sha256(project_dir)
+    library_dependencies_sha = _library_dependencies_sha256(
+        project_dir, environment
+    )
+    core_manifest_base = {
+        "schema": CORE_CACHE_SCHEMA,
+        "environment": environment,
+        "coreInputKey": core_input_key,
+        "runtimeProvenance": runtime_provenance,
+        "managedComponentsSha256": managed_components_sha,
+        "libraryDependenciesSha256": library_dependencies_sha,
+        "sdkconfigDefaultsSha256": _file_sha256(defaults),
+        "platformioIniSha256": _file_sha256(platformio_ini),
+        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
+        "coreAttestation": core_attestation,
+        "coreAttestationSha256": _canonical_json_sha256(core_attestation),
+        "bootApp0Sha256": core_attestation["bootApp0Sha256"],
+        "environmentSdkconfigSha256": environment_hash,
+    }
+    entry = _core_cache_entry_dir(project_dir, environment, core_input_key)
+    existing_core: dict[str, object] | None = None
+    if os.path.lexists(entry):
+        try:
+            existing_core = _validate_core_cache_entry(
+                project_dir, environment, core_input_key
+            )
+        except GeneratedSdkconfigError as error:
+            _quarantine_core_cache_entry(
+                project_dir, environment, core_input_key, str(error)
+            )
+            if core_cache_status == "hit":
+                raise GeneratedSdkconfigError(
+                    "custom-core cache changed after hydration"
+                ) from error
+    if existing_core is not None:
+        if any(
+            existing_core.get(key) != value
+            for key, value in core_manifest_base.items()
+        ):
+            _quarantine_core_cache_entry(
+                project_dir,
+                environment,
+                core_input_key,
+                "post-build core output mismatch",
+            )
+            raise GeneratedSdkconfigError(
+                "hydrated custom-core changed during the application build"
+            )
+        core_manifest = existing_core
+    else:
+        core_manifest = core_manifest_base
+
+    source_identity = current_source_identity(project_dir, environment)
+    manifest_path = _build_manifest_path(project_dir, environment)
+    if FULL_GIT_SHA.fullmatch(source_identity) is None:
+        if manifest_path.is_file() or manifest_path.is_symlink():
+            manifest_path.unlink()
+        return None
+    if existing_core is None:
+        if core_cache_status == "hit":
+            raise GeneratedSdkconfigError(
+                "verified core-cache hit disappeared before publication check"
+            )
+        core_manifest = _publish_core_cache_entry(
+            project_dir, environment, core_input_key, core_manifest_base
+        )
+
     try:
         source_date_epoch = git_commit_source_date_epoch(
             project_dir, source_identity
@@ -1356,28 +2429,15 @@ def record_generated_sdkconfig_defaults(
         raise GeneratedSdkconfigError(
             f"could not derive the verified firmware build clock: {error}"
         ) from error
-    managed_components_sha = _managed_components_sha256(project_dir)
-    library_dependencies_sha = _library_dependencies_sha256(
-        project_dir, environment
-    )
     firmware_artifacts = _firmware_artifact_hashes(project_dir, environment)
     manifest = {
-        "schema": CACHE_SCHEMA,
-        "environment": environment,
+        **core_manifest,
+        "schema": BUILD_MANIFEST_SCHEMA,
         "sourceIdentity": source_identity,
         "sourceDateEpoch": source_date_epoch,
         "buildTimestamp": build_timestamp,
-        "runtimeProvenance": runtime_provenance,
-        "managedComponentsSha256": managed_components_sha,
-        "libraryDependenciesSha256": library_dependencies_sha,
-        "sdkconfigDefaultsSha256": _file_sha256(defaults),
-        "platformioIniSha256": _file_sha256(platformio_ini),
-        "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
-        "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
-        "coreAttestation": core_attestation,
-        "coreAttestationSha256": _canonical_json_sha256(core_attestation),
-        "bootApp0Sha256": core_attestation["bootApp0Sha256"],
-        "environmentSdkconfigSha256": None,
+        "uploadEligible": True,
+        "coreCache": core_cache_status,
         **firmware_artifacts,
     }
     if environment.startswith("WAVESHARE_AMOLED_"):
@@ -1386,43 +2446,6 @@ def record_generated_sdkconfig_defaults(
         )
         manifest["flashPlan"] = flash_plan
         manifest["flashPlanSha256"] = _canonical_json_sha256(flash_plan)
-    if os.path.lexists(environment_config):
-        if not _is_generated_sdkconfig(environment_config):
-            raise GeneratedSdkconfigError(
-                f"cannot cache unrecognized SDK configuration: {environment_config}"
-            )
-        if _is_tracked(project_dir, environment_config):
-            raise GeneratedSdkconfigError(
-                "refusing to cache tracked environment SDK configuration: "
-                f"{environment_config}"
-            )
-        manifest["environmentSdkconfigSha256"] = _file_sha256(environment_config)
-    manifest_path = _cache_manifest_path(project_dir)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    if manifest_path.parent.is_symlink() or not manifest_path.parent.is_dir():
-        raise GeneratedSdkconfigError(
-            f"unsafe SDK configuration cache directory: {manifest_path.parent}"
-        )
-    temporary_name = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=manifest_path.parent,
-            prefix=f".{manifest_path.name}.",
-            delete=False,
-        ) as stream:
-            temporary_name = stream.name
-            json.dump(manifest, stream, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary_name, manifest_path)
-    except OSError as error:
-        if temporary_name is not None:
-            try:
-                Path(temporary_name).unlink()
-            except OSError:
-                pass
-        raise GeneratedSdkconfigError(
-            f"could not record SDK configuration cache: {error}"
-        ) from error
+    manifest_path = _build_manifest_path(project_dir, environment)
+    _atomic_json(manifest_path, manifest)
     return manifest_path

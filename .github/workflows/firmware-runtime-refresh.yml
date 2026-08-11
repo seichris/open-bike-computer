@@ -156,8 +156,8 @@ jobs:
           for environment in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
             env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "$environment" \
               2>&1 | tee "$evidence/${environment}-clean.log"
-            cp .pio/open-bike-build/sdkconfig-defaults.json \
-              "$evidence/${environment}-clean-sdkconfig-defaults.json"
+            cp ".pio/open-bike-build/builds/$environment/current.json" \
+              "$evidence/${environment}-clean-build-manifest.json"
             grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-clean.log" \
               | grep 'uploadEligible=1' \
               | grep 'runtimeTarget=${{ matrix.target }}' \
@@ -166,10 +166,10 @@ jobs:
               | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
               >> "$evidence/provenance.txt"
 
-          env -u LD_LIBRARY_PATH HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= python3 tools/build_firmware.py "$environment" \
-            2>&1 | tee "$evidence/${environment}-warm.log"
-            cp .pio/open-bike-build/sdkconfig-defaults.json \
-              "$evidence/${environment}-warm-sdkconfig-defaults.json"
+            env -u LD_LIBRARY_PATH HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= python3 tools/build_firmware.py "$environment" \
+              2>&1 | tee "$evidence/${environment}-warm.log"
+            cp ".pio/open-bike-build/builds/$environment/current.json" \
+              "$evidence/${environment}-warm-build-manifest.json"
             grep '^FIRMWARE_BUILD_PROVENANCE ' "$evidence/${environment}-warm.log" \
               | grep 'uploadEligible=1' \
               | grep 'runtimeTarget=${{ matrix.target }}' \
@@ -178,8 +178,8 @@ jobs:
               | grep -E 'runtimeTransformedPlatformTreeSha256=[0-9a-f]{64}' \
               >> "$evidence/provenance.txt"
             env -u LD_LIBRARY_PATH python -c 'import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); keys=("sourceIdentity","sourceDateEpoch","buildTimestamp","firmwareBinSha256","firmwareElfSha256","bootloaderBinSha256","partitionTableBinSha256","bootApp0Sha256","flashPlanSha256","coreAttestationSha256","runtimeProvenance"); assert all(a.get(k) == b.get(k) for k in keys)' \
-              "$evidence/${environment}-clean-sdkconfig-defaults.json" \
-              "$evidence/${environment}-warm-sdkconfig-defaults.json"
+              "$evidence/${environment}-clean-build-manifest.json" \
+              "$evidence/${environment}-warm-build-manifest.json"
           done
       - name: Prove runtime tampering fails before PlatformIO
         run: |

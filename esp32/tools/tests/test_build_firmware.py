@@ -18,6 +18,7 @@ from unittest.mock import patch
 from build_firmware import (
     BuildError,
     WAVESHARE_PLATFORM_URL,
+    _bootstrap_build_cache_identity,
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
@@ -253,6 +254,9 @@ class FirmwareBuildTests(unittest.TestCase):
         dummy_dir.mkdir()
         for name, contents in DUMMY_FILES.items():
             (dummy_dir / name).write_text(contents, encoding="utf-8")
+        (self.project_dir / "sdkconfig.defaults").write_text(
+            GENERATED_CONFIG, encoding="utf-8"
+        )
 
     def write_firmware(self, environment=None):
         environment = environment or self.environment
@@ -614,6 +618,17 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(firmware.is_file())
         self.assertFalse((self.project_dir / ".dummy").exists())
+
+    def test_bootstrap_compiler_cache_is_source_and_platform_scoped(self):
+        first = _bootstrap_build_cache_identity(
+            self.environment, "a" * 40
+        )
+        second = _bootstrap_build_cache_identity(
+            self.environment, "b" * 40
+        )
+        self.assertNotEqual(first, second)
+        self.assertIn(WAVESHARE_PLATFORM_ARCHIVE_SHA256, first)
+        self.assertIn(WAVESHARE_PLATFORM_PACKAGES_SHA256, first)
 
     def test_accepts_real_target_when_custom_core_leaves_dummy(self):
         calls = []
@@ -1032,7 +1047,7 @@ build_src_filter =
 
         def second_runner(command, cwd):
             self.assertTrue(defaults.exists())
-            self.assertFalse(current.exists())
+            self.assertTrue(current.exists())
             self.assertFalse((self.project_dir / ".dummy").exists())
             current.write_text(GENERATED_CONFIG, encoding="utf-8")
             self.write_firmware()
@@ -1953,6 +1968,17 @@ build_src_filter =
         retained_package = expected_root / "packages" / "retained-package.txt"
         retained_package.parent.mkdir(parents=True)
         retained_package.write_text("steady core state\n", encoding="utf-8")
+        fake_manifest = (
+            self.project_dir
+            / ".pio/open-bike-build/builds"
+            / self.environment
+            / "current.json"
+        )
+        fake_manifest.parent.mkdir(parents=True)
+        fake_manifest.write_text(
+            json.dumps({"coreInputKey": "c" * 64}) + "\n",
+            encoding="utf-8",
+        )
 
         def runner(command, cwd):
             self.assertTrue(stale_cache.exists())
@@ -1968,9 +1994,16 @@ build_src_filter =
             self.write_firmware()
             return subprocess.CompletedProcess(command, 0)
 
-        with patch(
-            "build_firmware.prepare_generated_sdkconfigs",
-            return_value=(self.project_dir / "sdkconfig.defaults",),
+        with (
+            patch(
+                "build_firmware.prepare_generated_sdkconfigs",
+                return_value=(self.project_dir / "sdkconfig.defaults",),
+            ),
+            patch("build_firmware.core_input_key", return_value="c" * 64),
+            patch(
+                "build_firmware.record_generated_sdkconfig_defaults",
+                return_value=fake_manifest,
+            ),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 

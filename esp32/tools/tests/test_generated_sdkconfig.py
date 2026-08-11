@@ -15,6 +15,8 @@ from generated_sdkconfig import (
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES_SHA256,
     _default_platformio_core_dir,
+    _runtime_provenance,
+    core_input_key,
     prepare_generated_sdkconfigs,
     record_generated_sdkconfig_defaults,
     recognized_generated_sdkconfigs,
@@ -52,6 +54,37 @@ RUNTIME_PROVENANCE = json.dumps(
     },
     sort_keys=True,
 )
+
+
+@contextmanager
+def _file_change(path: Path, contents: str):
+    original = path.read_bytes()
+    try:
+        path.write_text(contents, encoding="utf-8")
+        yield
+    finally:
+        path.write_bytes(original)
+
+
+@contextmanager
+def _platform_pin_change():
+    changed = json.loads(RUNTIME_PROVENANCE)
+    changed["platformArchiveSha256"] = "d" * 64
+    with (
+        patch(
+            "generated_sdkconfig.WAVESHARE_PLATFORM_ARCHIVE_SHA256",
+            "d" * 64,
+        ),
+        patch.dict(
+            os.environ,
+            {
+                "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": json.dumps(
+                    changed, sort_keys=True
+                )
+            },
+        ),
+    ):
+        yield
 
 
 class GeneratedSdkconfigTests(unittest.TestCase):
@@ -121,8 +154,26 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 str(_default_platformio_core_dir()), "C:\\.platformio"
             )
 
+    def test_duplicate_runtime_provenance_key_fails_closed(self) -> None:
+        duplicate = RUNTIME_PROVENANCE.rstrip("}") + ',"lockSetId":"other"}'
+        with patch.dict(
+            os.environ,
+            {"OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": duplicate},
+        ):
+            self.assertIsNone(_runtime_provenance())
+
     @contextmanager
     def fake_core(self, project: Path):
+        for relative in (
+            "prebuild.py",
+            "tools/build_firmware.py",
+            "tools/generated_sdkconfig.py",
+            "tools/pioarduino_custom_core.py",
+            "tools/firmware_runtime.py",
+        ):
+            path = project / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"unit test {relative}\n", encoding="utf-8")
         core = project / "platformio-core"
         package_root = core / "packages"
         platform_root = core / "platforms/espressif32"
@@ -248,7 +299,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
 
                 self.source_date_epoch_mock.return_value = "1712345679"
                 with self.assertRaisesRegex(
-                    GeneratedSdkconfigError, "custom-core state changed"
+                    GeneratedSdkconfigError, "firmware build identity changed"
                 ):
                     require_validated_generated_sdkconfig_defaults(
                         project, "WAVESHARE_AMOLED_175"
@@ -326,7 +377,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         project, "WAVESHARE_AMOLED_175"
                     )
 
-    def test_preserves_only_a_successfully_recorded_defaults_cache(self) -> None:
+    def test_preserves_successfully_recorded_custom_core_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             defaults = project / "sdkconfig.defaults"
@@ -340,6 +391,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 path.write_text(GENERATED_CONFIG, encoding="utf-8")
 
             with self.fake_core(project):
+                selected_core_key = core_input_key(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                self.assertIsNotNone(selected_core_key)
                 record_generated_sdkconfig_defaults(
                     project, "WAVESHARE_AMOLED_175"
                 )
@@ -347,10 +402,22 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (defaults,),
+                    (defaults, current),
+                )
+                self.assertEqual(
+                    core_input_key(project, "WAVESHARE_AMOLED_175"),
+                    selected_core_key,
+                )
+                self.assertIsNotNone(
+                    record_generated_sdkconfig_defaults(
+                        project,
+                        "WAVESHARE_AMOLED_175",
+                        core_cache_status="hit",
+                        expected_core_input_key=selected_core_key,
+                    )
                 )
             self.assertTrue(defaults.is_file())
-            self.assertFalse(current.exists())
+            self.assertTrue(current.is_file())
             self.assertFalse(other.exists())
 
     def test_invalidates_cached_defaults_after_content_or_config_change(self) -> None:
@@ -388,7 +455,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         )
                     self.assertFalse(defaults.exists())
 
-    def test_invalidates_cache_with_missing_environment_state(self) -> None:
+    def test_core_reuse_ignores_stale_exact_build_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             defaults = project / "sdkconfig.defaults"
@@ -411,14 +478,19 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 manifest_path.write_text(
                     json.dumps(manifest) + "\n", encoding="utf-8"
                 )
+                with self.assertRaises(GeneratedSdkconfigError):
+                    require_validated_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
 
                 self.assertEqual(
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults, environment),
                 )
-            self.assertFalse(defaults.exists())
+            self.assertTrue(defaults.exists())
+            self.assertTrue(environment.exists())
 
     def test_non_object_manifest_fails_closed_for_prepare_and_upload(self) -> None:
         for malformed in ([], None, "cache"):
@@ -446,11 +518,11 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                             prepare_generated_sdkconfigs(
                                 project, "WAVESHARE_AMOLED_175"
                             ),
-                            (),
+                            (defaults,),
                         )
-                    self.assertFalse(defaults.exists())
+                    self.assertTrue(defaults.exists())
 
-    def test_cache_is_bound_to_exact_source_identity(self) -> None:
+    def test_core_cache_is_independent_of_exact_source_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             defaults = project / "sdkconfig.defaults"
@@ -471,9 +543,445 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         prepare_generated_sdkconfigs(
                             project, "WAVESHARE_AMOLED_175"
                         ),
-                        (),
+                        (defaults,),
                     )
+            self.assertTrue(defaults.exists())
+
+    def test_core_input_key_covers_every_declared_input_class(self) -> None:
+        changes = {
+            "runtime": lambda project: patch.dict(
+                os.environ,
+                {
+                    "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE": RUNTIME_PROVENANCE.replace(
+                        '"bundleSha256": "' + "2" * 64 + '"',
+                        '"bundleSha256": "' + "c" * 64 + '"',
+                    )
+                },
+            ),
+            "platform-pin": lambda project: _platform_pin_change(),
+            "platformio": lambda project: _file_change(
+                project / "platformio.ini",
+                "[env:WAVESHARE_AMOLED_175]\nplatform = changed\n",
+            ),
+            "generated-sdkconfig": lambda project: _file_change(
+                project / "sdkconfig.defaults",
+                GENERATED_CONFIG + "CONFIG_CHANGED=y\n",
+            ),
+            "core-tool": lambda project: _file_change(
+                project / "tools/pioarduino_custom_core.py",
+                "changed core tool\n",
+            ),
+            "component-input": lambda project: _file_change(
+                project / "components/example/idf_component.yml",
+                "dependencies:\n  vendor/example: 2.0.0\n",
+            ),
+        }
+
+        for label, change in changes.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                (project / "platformio.ini").write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                    encoding="utf-8",
+                )
+                (project / "sdkconfig.defaults").write_text(
+                    GENERATED_CONFIG, encoding="utf-8"
+                )
+                component_input = project / "components/example/idf_component.yml"
+                component_input.parent.mkdir(parents=True)
+                component_input.write_text(
+                    "dependencies:\n  vendor/example: 1.0.0\n",
+                    encoding="utf-8",
+                )
+                with self.fake_core(project):
+                    original = core_input_key(project, "WAVESHARE_AMOLED_175")
+                    self.assertRegex(original or "", r"^[0-9a-f]{64}$")
+                    with change(project):
+                        changed = core_input_key(project, "WAVESHARE_AMOLED_175")
+                    self.assertRegex(changed or "", r"^[0-9a-f]{64}$")
+                    self.assertNotEqual(original, changed)
+
+    def test_legacy_combined_manifest_cannot_authorize_core_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            legacy = project / ".pio/open-bike-build/sdkconfig-defaults.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(
+                json.dumps(
+                    {
+                        "schema": 18,
+                        "sourceIdentity": "a" * 40,
+                        "sdkconfigDefaultsSha256": "b" * 64,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.fake_core(project):
+                self.assertEqual(
+                    prepare_generated_sdkconfigs(
+                        project, "WAVESHARE_AMOLED_175"
+                    ),
+                    (),
+                )
             self.assertFalse(defaults.exists())
+            self.assertTrue(legacy.is_file())
+
+    def test_publishes_and_hydrates_an_immutable_core_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project) as core:
+                manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                build_manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+                entry = (
+                    project
+                    / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                    / build_manifest["coreInputKey"]
+                )
+                archive = entry / "core-artifacts.tar"
+                self.assertTrue(archive.is_file())
+                self.assertEqual(
+                    build_manifest["coreArchiveSize"], archive.stat().st_size
+                )
+                self.assertRegex(
+                    build_manifest["coreArchiveSha256"], r"^[0-9a-f]{64}$"
+                )
+                self.assertEqual(entry.stat().st_mode & 0o777, 0o555)
+                self.assertTrue(
+                    all(
+                        child.stat().st_mode & 0o777 == 0o444
+                        for child in entry.iterdir()
+                    )
+                )
+
+                for child in (
+                    "packages",
+                    "platforms",
+                    "tools",
+                    "penv",
+                    "lib",
+                    "boards",
+                ):
+                    shutil.rmtree(core / child)
+
+                self.assertEqual(
+                    prepare_generated_sdkconfigs(
+                        project, "WAVESHARE_AMOLED_175"
+                    ),
+                    (defaults,),
+                )
+                self.assertTrue((core / "penv/bin/esptool").is_file())
+                self.assertTrue(
+                    (core / "packages/framework-arduinoespressif32/cores/esp32/core.cpp").is_file()
+                )
+
+    def test_interrupted_publication_preserves_the_previous_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            platformio_ini = project / "platformio.ini"
+            platformio_ini.write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                first_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                first = json.loads(first_path.read_text(encoding="utf-8"))
+                environment_root = (
+                    project
+                    / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                )
+                first_entry = environment_root / first["coreInputKey"]
+                self.assertTrue(first_entry.is_dir())
+
+                platformio_ini.write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = changed\n",
+                    encoding="utf-8",
+                )
+                real_replace = os.replace
+
+                def interrupt_final_publish(source, destination):
+                    destination_path = Path(destination)
+                    if (
+                        destination_path.parent == environment_root
+                        and destination_path != first_entry
+                    ):
+                        raise OSError("injected publication interruption")
+                    return real_replace(source, destination)
+
+                with patch(
+                    "generated_sdkconfig.os.replace",
+                    side_effect=interrupt_final_publish,
+                ):
+                    with self.assertRaisesRegex(
+                        GeneratedSdkconfigError, "could not publish"
+                    ):
+                        record_generated_sdkconfig_defaults(
+                            project, "WAVESHARE_AMOLED_175"
+                        )
+
+                self.assertTrue(first_entry.is_dir())
+                self.assertEqual(
+                    sorted(
+                        child.name
+                        for child in environment_root.iterdir()
+                        if child.is_dir() and not child.name.startswith(".")
+                    ),
+                    [first["coreInputKey"]],
+                )
+                self.assertFalse(
+                    any(child.name.startswith(".") for child in environment_root.iterdir())
+                )
+
+    def test_corrupt_archive_is_quarantined_and_forces_a_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                environment_root = (
+                    project
+                    / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                )
+                entry = environment_root / manifest["coreInputKey"]
+                archive = entry / "core-artifacts.tar"
+                archive.chmod(0o644)
+                archive.write_bytes(archive.read_bytes()[:-512])
+
+                self.assertEqual(
+                    prepare_generated_sdkconfigs(
+                        project, "WAVESHARE_AMOLED_175"
+                    ),
+                    (),
+                )
+                self.assertFalse(entry.exists())
+                self.assertEqual(
+                    len(list((environment_root / "quarantine").iterdir())), 1
+                )
+            self.assertFalse(defaults.exists())
+
+    def test_duplicate_core_manifest_key_is_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                build_manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                build_manifest = json.loads(
+                    build_manifest_path.read_text(encoding="utf-8")
+                )
+                environment_root = (
+                    project
+                    / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                )
+                entry = environment_root / build_manifest["coreInputKey"]
+                core_manifest_path = entry / "manifest.json"
+                original = core_manifest_path.read_text(encoding="utf-8").rstrip()
+                core_manifest_path.chmod(0o644)
+                core_manifest_path.write_text(
+                    original[:-1] + ',"schema":2}\n', encoding="utf-8"
+                )
+
+                self.assertEqual(
+                    prepare_generated_sdkconfigs(
+                        project, "WAVESHARE_AMOLED_175"
+                    ),
+                    (),
+                )
+                self.assertFalse(entry.exists())
+                self.assertEqual(
+                    len(list((environment_root / "quarantine").iterdir())), 1
+                )
+            self.assertFalse(defaults.exists())
+
+    def test_extra_symlinked_and_wrong_owner_entries_fail_closed(self) -> None:
+        for attack in (
+            "extra-file",
+            "symlink-archive",
+            "hardlinked-archive",
+            "writable-entry",
+            "wrong-owner",
+        ):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                defaults = project / "sdkconfig.defaults"
+                (project / "platformio.ini").write_text(
+                    "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                    encoding="utf-8",
+                )
+                defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+                with self.fake_core(project):
+                    manifest_path = record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    entry = (
+                        project
+                        / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                        / manifest["coreInputKey"]
+                    )
+                    if attack == "extra-file":
+                        entry.chmod(0o755)
+                        (entry / "injected").write_text("untrusted\n")
+                        owner_context = patch(
+                            "generated_sdkconfig.os.getuid",
+                            wraps=os.getuid,
+                        )
+                    elif attack == "symlink-archive":
+                        archive = entry / "core-artifacts.tar"
+                        external = project / "external-core-artifacts.tar"
+                        shutil.copyfile(archive, external)
+                        entry.chmod(0o755)
+                        archive.chmod(0o644)
+                        archive.unlink()
+                        archive.symlink_to(external)
+                        owner_context = patch(
+                            "generated_sdkconfig.os.getuid",
+                            wraps=os.getuid,
+                        )
+                    elif attack == "hardlinked-archive":
+                        archive = entry / "core-artifacts.tar"
+                        external = project / "external-core-artifacts.tar"
+                        entry.chmod(0o755)
+                        archive.chmod(0o644)
+                        archive.rename(external)
+                        os.link(external, archive)
+                        archive.chmod(0o444)
+                        owner_context = patch(
+                            "generated_sdkconfig.os.getuid",
+                            wraps=os.getuid,
+                        )
+                    elif attack == "writable-entry":
+                        (entry / "manifest.json").chmod(0o644)
+                        owner_context = patch(
+                            "generated_sdkconfig.os.getuid",
+                            wraps=os.getuid,
+                        )
+                    else:
+                        owner_context = patch(
+                            "generated_sdkconfig.os.getuid",
+                            return_value=os.getuid() + 1,
+                        )
+                    with owner_context:
+                        self.assertEqual(
+                            prepare_generated_sdkconfigs(
+                                project, "WAVESHARE_AMOLED_175"
+                            ),
+                            (),
+                        )
+                    self.assertFalse(entry.exists())
+
+    def test_rejects_symlinked_core_cache_ancestor_without_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                manifest_path = record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                cache_root = project / ".pio/open-bike-build/core-cache"
+                external = project / "external-core-cache"
+                cache_root.rename(external)
+                cache_root.symlink_to(external, target_is_directory=True)
+
+                with self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "symlinked ancestor"
+                ):
+                    prepare_generated_sdkconfigs(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+
+                preserved_entry = (
+                    external
+                    / "WAVESHARE_AMOLED_175"
+                    / manifest["coreInputKey"]
+                )
+                self.assertTrue(preserved_entry.is_dir())
+                self.assertFalse(
+                    (external / "WAVESHARE_AMOLED_175/quarantine").exists()
+                )
+
+    def test_dirty_build_consumes_but_cannot_publish_a_core_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            defaults = project / "sdkconfig.defaults"
+            platformio_ini = project / "platformio.ini"
+            platformio_ini.write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+            with self.fake_core(project):
+                record_generated_sdkconfig_defaults(
+                    project, "WAVESHARE_AMOLED_175"
+                )
+                with patch(
+                    "generated_sdkconfig.current_source_identity",
+                    return_value="dirty-diagnostic",
+                ):
+                    self.assertEqual(
+                        prepare_generated_sdkconfigs(
+                            project, "WAVESHARE_AMOLED_175"
+                        ),
+                        (defaults,),
+                    )
+                    platformio_ini.write_text(
+                        "[env:WAVESHARE_AMOLED_175]\nplatform = changed\n",
+                        encoding="utf-8",
+                    )
+                    self.assertIsNone(
+                        record_generated_sdkconfig_defaults(
+                            project, "WAVESHARE_AMOLED_175"
+                        )
+                    )
+            cache_entries = list(
+                (
+                    project
+                    / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+                ).glob("[0-9a-f]*")
+            )
+            self.assertEqual(len(cache_entries), 1)
 
     def test_modified_managed_component_invalidates_and_is_regenerated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -498,10 +1006,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults,),
                 )
-            self.assertFalse(defaults.exists())
-            self.assertFalse((project / "managed_components").exists())
+                self.assertEqual(source.read_text(), "trusted\n")
+            self.assertTrue(defaults.exists())
 
     def test_modified_library_dependency_invalidates_and_is_regenerated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -527,12 +1035,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults,),
                 )
-            self.assertFalse(defaults.exists())
-            self.assertFalse(
-                (project / ".pio/libdeps/WAVESHARE_AMOLED_175").exists()
-            )
+                self.assertEqual(library.read_text(), "trusted\n")
+            self.assertTrue(defaults.exists())
 
     def test_invalidates_cache_after_global_custom_core_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -555,9 +1061,14 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults,),
                 )
-            self.assertFalse(defaults.exists())
+                self.assertEqual(
+                    (core / "packages/framework-arduinoespressif32-libs/esp32s3/"
+                     "lib/libgeneric.a").read_text(),
+                    "attested libgeneric.a\n",
+                )
+            self.assertTrue(defaults.exists())
 
     def test_invalidates_cache_after_compiler_or_runtime_change(self) -> None:
         for relative in (
@@ -587,9 +1098,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                             prepare_generated_sdkconfigs(
                                 project, "WAVESHARE_AMOLED_175"
                             ),
-                            (),
+                            (defaults,),
                         )
-                    self.assertFalse(defaults.exists())
+                        self.assertEqual(target.read_text(), "trusted tool\n")
+                    self.assertTrue(defaults.exists())
 
     def test_core_digest_changes_with_attested_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -607,16 +1119,14 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 first = json.loads(first_path.read_text(encoding="utf-8"))
                 runtime = core / "penv/bin/platformio-runtime.py"
                 runtime.write_text("changed runtime\n", encoding="utf-8")
-                second_path = record_generated_sdkconfig_defaults(
-                    project, "WAVESHARE_AMOLED_175"
-                )
-                second = json.loads(second_path.read_text(encoding="utf-8"))
+                with self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "changed during the application build"
+                ):
+                    record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
 
             self.assertRegex(first["coreAttestationSha256"], r"^[0-9a-f]{64}$")
-            self.assertNotEqual(
-                first["coreAttestationSha256"],
-                second["coreAttestationSha256"],
-            )
 
     def test_global_libraries_and_core_boards_invalidate_attestation(self) -> None:
         for relative in (
@@ -643,9 +1153,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                             prepare_generated_sdkconfigs(
                                 project, "WAVESHARE_AMOLED_175"
                             ),
-                            (),
+                            (defaults,),
                         )
-                    self.assertFalse(defaults.exists())
+                        self.assertFalse(injected.exists())
+                    self.assertTrue(defaults.exists())
 
     def test_rejects_tampered_top_level_bootstrap_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -666,7 +1177,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     json.dumps(manifest) + "\n", encoding="utf-8"
                 )
                 with self.assertRaisesRegex(
-                    GeneratedSdkconfigError, "custom-core state changed"
+                    GeneratedSdkconfigError, "core reference changed"
                 ):
                     require_validated_generated_sdkconfig_defaults(
                         project, "WAVESHARE_AMOLED_175"
@@ -700,9 +1211,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults,),
                 )
-            self.assertFalse(defaults.exists())
+                self.assertFalse(injected.exists())
+            self.assertTrue(defaults.exists())
 
     def test_invalidates_cache_for_symlinked_framework_libs_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -727,9 +1239,10 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     prepare_generated_sdkconfigs(
                         project, "WAVESHARE_AMOLED_175"
                     ),
-                    (),
+                    (defaults,),
                 )
-            self.assertFalse(defaults.exists())
+                self.assertFalse(libs.is_symlink())
+            self.assertTrue(defaults.exists())
 
     def test_honors_independent_package_and_platform_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -754,8 +1267,8 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     record_generated_sdkconfig_defaults(
                         project, "WAVESHARE_AMOLED_175"
                     )
-                    manifest = (
-                        project / ".pio/open-bike-build/sdkconfig-defaults.json"
+                    manifest = record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
                     ).read_text(encoding="utf-8")
                     self.assertIn(str(packages.resolve()), manifest)
                     self.assertIn(str(platforms.resolve()), manifest)
@@ -767,9 +1280,14 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         prepare_generated_sdkconfigs(
                             project, "WAVESHARE_AMOLED_175"
                         ),
-                        (),
+                        (defaults,),
                     )
-            self.assertFalse(defaults.exists())
+                    self.assertEqual(
+                        (packages / "framework-arduinoespressif32-libs/esp32s3/"
+                         "lib/libgeneric.a").read_text(),
+                        "attested libgeneric.a\n",
+                    )
+            self.assertTrue(defaults.exists())
 
     def test_relative_env_store_overrides_resolve_from_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -829,7 +1347,12 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                         prepare_generated_sdkconfigs(
                             project, "WAVESHARE_AMOLED_175"
                         ),
-                        (),
+                        (defaults,),
+                    )
+                    self.assertEqual(
+                        (core / "packages/framework-arduinoespressif32-libs/esp32s3/"
+                         "lib/libgeneric.a").read_text(),
+                        "attested libgeneric.a\n",
                     )
 
     def test_modern_core_environment_takes_priority_over_legacy_alias(self) -> None:
@@ -888,7 +1411,7 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                     self.assertFalse(
                         (
                             project
-                            / ".pio/open-bike-build/sdkconfig-defaults.json"
+                            / ".pio/open-bike-build/builds/WAVESHARE_AMOLED_175/current.json"
                         ).exists()
                     )
 

@@ -118,6 +118,17 @@ verifier. All subsequently executed Python, PlatformIO, uv, pioarduino root
 environment, ESP-IDF environment, and esptool distributions are selected by
 the content-pinned runtime bundle and re-attested after installation.
 
+Custom-core reuse and upload eligibility are separate. A source-only change may
+reuse a validated project-private core entry, while the firmware build manifest
+is always regenerated for the exact Git SHA, commit clock, runtime/core
+identity, generated state, artifacts, and flash plan. Dirty builds may consume
+an existing core but never publish one or become upload eligible. Each clean
+miss atomically publishes generated SDK sidecars plus an inventoried
+`core-artifacts.tar`; each hit rehashes the entry and hydrates a private mutable
+PlatformIO store. Corruption or post-build mutation quarantines only the exact
+core key. Cross-worktree core sharing stays disabled until the recorded
+artifacts pass the absolute-path relocatability gate.
+
 The available production, diagnostics, and test profiles are defined in
 [`platformio.ini`](platformio.ini).
 

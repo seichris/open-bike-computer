@@ -33,6 +33,7 @@ from generated_sdkconfig import (
     WAVESHARE_PLATFORM_PACKAGES,
     WAVESHARE_PLATFORM_PACKAGES_SHA256,
     WAVESHARE_PLATFORM_URL,
+    core_input_key,
     current_source_identity,
     prepare_generated_sdkconfigs,
     record_generated_sdkconfig_defaults,
@@ -1094,21 +1095,6 @@ def _reset_profile_platformio_store(
         _ensure_private_directory(project_dir, relative / child)
 
 
-def _reset_profile_build_cache(project_dir: Path, environment: str) -> None:
-    """Remove compiler-cache output before accepting an existing core store."""
-    relative = (
-        Path(".pio/open-bike-build/platformio") / environment / "build-cache"
-    )
-    cache_dir = project_dir / relative
-    if os.path.lexists(cache_dir):
-        if cache_dir.is_symlink() or not cache_dir.is_dir():
-            raise BuildError(
-                f"refusing to reset unsafe deterministic build cache: {cache_dir}"
-            )
-        shutil.rmtree(cache_dir)
-    _ensure_private_directory(project_dir, relative)
-
-
 def _select_profile_build_cache(
     project_dir: Path,
     environment: str,
@@ -1128,6 +1114,38 @@ def _select_profile_build_cache(
     selected = _ensure_private_directory(project_dir, relative)
     os.environ["PLATFORMIO_BUILD_CACHE_DIR"] = str(selected)
     return selected
+
+
+def _application_build_cache_identity(
+    project_dir: Path,
+    environment: str,
+    source_identity: str,
+    selected_core_input_key: str | None = None,
+) -> str:
+    core_key = selected_core_input_key or core_input_key(project_dir, environment)
+    if core_key is None:
+        raise BuildError(
+            "cannot select the application compiler cache without an exact core input key"
+        )
+    return f"{source_identity}:{core_key}"
+
+
+def _bootstrap_build_cache_identity(
+    environment: str, source_identity: str
+) -> str:
+    # The final core key is not available until pioarduino emits its generated
+    # SDK configuration. Scope cold bootstrap objects to the exact source and
+    # pinned platform/package identities so a different core-producing input
+    # can never consume them. Cache-hit application builds use the reusable
+    # core key in their separate namespace below.
+    return ":".join(
+        (
+            source_identity,
+            environment,
+            WAVESHARE_PLATFORM_ARCHIVE_SHA256,
+            WAVESHARE_PLATFORM_PACKAGES_SHA256,
+        )
+    )
 
 
 def _reset_profile_override_inputs(project_dir: Path, environment: str) -> None:
@@ -1558,6 +1576,7 @@ def build_firmware(
             _remove_pioarduino_dummy(project_dir)
             _remove_environment_build(project_dir, environment)
             _reset_profile_override_inputs(project_dir, environment)
+            selected_core_key = core_input_key(project_dir, environment)
             try:
                 preserved_sdkconfigs = prepare_generated_sdkconfigs(
                     project_dir, environment
@@ -1573,14 +1592,24 @@ def build_firmware(
                 command = bootstrap_command
             if preserved_sdkconfigs:
                 _select_profile_build_cache(
-                    project_dir, environment, "application", expected_identity
+                    project_dir,
+                    environment,
+                    "application",
+                    _application_build_cache_identity(
+                        project_dir,
+                        environment,
+                        expected_identity,
+                        selected_core_key,
+                    ),
                 )
             else:
                 _select_profile_build_cache(
                     project_dir,
                     environment,
                     "bootstrap",
-                    f"{environment}:{WAVESHARE_PLATFORM_ARCHIVE_SHA256}",
+                    _bootstrap_build_cache_identity(
+                        environment, expected_identity
+                    ),
                 )
             toolchain_ready_before_pass = _pioarduino_toolchain_bootstrap_ready(
                 project_dir, environment
@@ -1635,7 +1664,9 @@ def build_firmware(
                             project_dir,
                             environment,
                             "application",
-                            expected_identity,
+                            _application_build_cache_identity(
+                                project_dir, environment, expected_identity
+                            ),
                         )
                     else:
                         command = (
@@ -1650,7 +1681,9 @@ def build_firmware(
                             project_dir,
                             environment,
                             "application",
-                            expected_identity,
+                            _application_build_cache_identity(
+                                project_dir, environment, expected_identity
+                            ),
                         )
                     _remove_pioarduino_dummy(project_dir)
                     _remove_environment_build(project_dir, environment)
@@ -1687,12 +1720,15 @@ def build_firmware(
                         _remove_environment_build(project_dir, environment)
                         toolchain_ready_before_pass = True
                         command = custom_core_command
-                        _select_profile_build_cache(
-                            project_dir,
-                            environment,
-                            "application",
-                            expected_identity,
-                        )
+                        if core_input_key(project_dir, environment) is not None:
+                            _select_profile_build_cache(
+                                project_dir,
+                                environment,
+                                "application",
+                                _application_build_cache_identity(
+                                    project_dir, environment, expected_identity
+                                ),
+                            )
                         print(
                             "Detected completed pioarduino toolchain bootstrap; "
                             "retrying the real firmware target.",
@@ -1726,7 +1762,14 @@ def build_firmware(
                 attestation_started = time.monotonic()
                 try:
                     manifest_path = record_generated_sdkconfig_defaults(
-                        project_dir, environment
+                        project_dir,
+                        environment,
+                        core_cache_status=(
+                            "hit" if preserved_sdkconfigs else "miss"
+                        ),
+                        expected_core_input_key=(
+                            selected_core_key if preserved_sdkconfigs else None
+                        ),
                     )
                 except GeneratedSdkconfigError as error:
                     raise BuildError(str(error)) from error
