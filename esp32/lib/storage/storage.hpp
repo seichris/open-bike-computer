@@ -124,6 +124,7 @@ class Storage {
 private:
   std::atomic<bool> isSdLoaded;
   sdmmc_card_t *card;
+  StaticSemaphore_t mountMutexStorage{};
   SemaphoreHandle_t mountMutex = nullptr;
   uint32_t sdRetryAfterMs = 0;
   bool sdCooldownArmed = false;

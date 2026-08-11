@@ -281,7 +281,7 @@ jobs:
             tools/tests/test_speaker_playback_policy.cpp \
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy
-          g++ -std=c++17 -Wall -Wextra -Werror \
+          g++ -std=c++17 -Wall -Wextra -Werror -pthread \
             tools/tests/test_sd_mount_policy.cpp \
             -o /tmp/test_sd_mount_policy
           /tmp/test_sd_mount_policy

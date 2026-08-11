@@ -61,7 +61,9 @@ std::string formatSize(uint64_t size) {
 /**
  * @brief Storage Class constructor
  */
-Storage::Storage() : isSdLoaded(false), card(nullptr) {}
+Storage::Storage()
+    : isSdLoaded(false), card(nullptr), mountMutexStorage{},
+      mountMutex(xSemaphoreCreateMutexStatic(&mountMutexStorage)) {}
 
 bool Storage::sdMountHealthyLocked() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
@@ -190,8 +192,6 @@ esp_err_t Storage::mountSdLocked(bool ignoreCooldown) {
 
 bool Storage::ensureSdMounted() {
   if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
-  if (mountMutex == nullptr)
     return false;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
 
@@ -231,8 +231,6 @@ void Storage::markSdUnavailable() { isSdLoaded = false; }
  */
 esp_err_t Storage::initSD() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
     return ESP_ERR_NO_MEM;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
@@ -391,8 +389,6 @@ esp_err_t Storage::initSPIFFSLocked() {
 }
 
 esp_err_t Storage::initSPIFFS() {
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
     return ESP_ERR_NO_MEM;
   xSemaphoreTake(mountMutex, portMAX_DELAY);

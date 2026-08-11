@@ -1,8 +1,11 @@
 #include "../../lib/storage/sd_mount_policy.hpp"
 
 #include <cassert>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 int main() {
@@ -106,6 +109,34 @@ int main() {
   assert(!serializedEnsure(3000U));
   assert(sequences == 2U);
   assert(fallbacks == 2U);
+
+  // Two concurrent callers share one single-flight lock. Whichever caller
+  // enters first performs the failed attempt sequence and arms the cooldown;
+  // the other observes that cooldown without starting a second sequence.
+  sequences = 0;
+  fallbacks = 0;
+  cooldownArmed = false;
+  retryAfterMs = 0;
+  std::mutex mountMutex;
+  std::atomic<bool> start{false};
+  auto concurrentEnsure = [&]() {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    std::lock_guard<std::mutex> guard(mountMutex);
+    return serializedEnsure(5000U);
+  };
+  bool firstResult = true;
+  bool secondResult = true;
+  std::thread first([&]() { firstResult = concurrentEnsure(); });
+  std::thread second([&]() { secondResult = concurrentEnsure(); });
+  start.store(true, std::memory_order_release);
+  first.join();
+  second.join();
+  assert(!firstResult);
+  assert(!secondResult);
+  assert(sequences == 1U);
+  assert(fallbacks == 1U);
 
   return 0;
 }
