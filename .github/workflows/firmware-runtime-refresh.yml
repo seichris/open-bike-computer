@@ -29,7 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+      - name: Require a clean exact generator checkout
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+        working-directory: ${{ github.workspace }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
@@ -104,7 +107,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+      - name: Require a clean exact validation checkout
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+        working-directory: ${{ github.workspace }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"

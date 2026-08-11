@@ -341,6 +341,12 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertRegex(runtime_refresh, r"(?m)^on:\n  workflow_dispatch:\n")
         self.assertNotRegex(runtime_refresh, r"(?m)^  pull_request:")
+        self.assertEqual(
+            runtime_refresh.count(
+                'test -z "$(git status --porcelain=v1 --untracked-files=all)"'
+            ),
+            2,
+        )
         self.assertIn("set -o pipefail", runtime_refresh)
         self.assertIn(
             'json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"]',
