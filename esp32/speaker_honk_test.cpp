@@ -5,14 +5,17 @@
 #include "speaker.hpp"
 #include "waveshare_board.hpp"
 
+#include <driver/gpio.h>
+#include <esp_heap_caps.h>
+
 namespace {
 
 using waveshare_board::speaker::Sound;
 
 constexpr uint8_t TEST_VOLUME_PERCENT = 60;
 constexpr uint32_t PLAYBACK_INTERVAL_MS = 5000;
-constexpr uint32_t STARTUP_PLAYBACK_START_TIMEOUT_MS = 5000;
-constexpr uint32_t STARTUP_PLAYBACK_FINISH_TIMEOUT_MS = 15000;
+constexpr uint32_t PLAYBACK_START_TIMEOUT_MS = 5000;
+constexpr uint32_t PLAYBACK_FINISH_TIMEOUT_MS = 15000;
 constexpr Sound TEST_SOUNDS[] = {
     Sound::BellDing,
     Sound::PlasticBicycleHorn,
@@ -22,6 +25,7 @@ constexpr Sound TEST_SOUNDS[] = {
 
 size_t nextSoundIndex = 0;
 size_t startupSoundsCompleted = 0;
+uint32_t completedPlaybackCount = 0;
 uint32_t lastPlaybackMs = 0;
 uint32_t playbackRequestedMs = 0;
 uint8_t currentSoundId = 0;
@@ -83,7 +87,7 @@ void loop() {
 
   const uint32_t now = millis();
 
-  if (!testReady && awaitingPlayback) {
+  if (awaitingPlayback) {
     if (waveshare_board::speaker::isPlaying()) {
       observedPlaybackActive = true;
     }
@@ -95,29 +99,53 @@ void loop() {
     if (playbackResult ==
         waveshare_board::speaker::TrackedPlaybackResult::Succeeded) {
       awaitingPlayback = false;
-      startupSoundsCompleted++;
-      Serial.printf("Speaker test: startup playback %u/%u completed\n",
-                    static_cast<unsigned>(startupSoundsCompleted),
-                    static_cast<unsigned>(sizeof(TEST_SOUNDS) /
-                                          sizeof(TEST_SOUNDS[0])));
-      if (startupSoundsCompleted ==
-          sizeof(TEST_SOUNDS) / sizeof(TEST_SOUNDS[0])) {
-        boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker);
-        boot_diagnostics::enterStage(boot_diagnostics::Stage::Finalization);
-        boot_diagnostics::completeStage(
-            boot_diagnostics::Stage::Finalization);
-        boot_diagnostics::markReady();
-        testReady = true;
-        lastPlaybackMs = now;
-        Serial.println("Speaker test: guarded startup cycle complete");
+      completedPlaybackCount++;
+      const int paLevel = gpio_get_level(GPIO_NUM_46);
+      const size_t heapFree = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+      const size_t heapMinimum =
+          heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+      Serial.printf(
+          "SPEAKER_CYCLE schema=1 count=%lu sound=%u result=success "
+          "paLevel=%d heapFree=%u heapMinimum=%u\n",
+          static_cast<unsigned long>(completedPlaybackCount), currentSoundId,
+          paLevel, static_cast<unsigned>(heapFree),
+          static_cast<unsigned>(heapMinimum));
+      if (paLevel != 0) {
+        Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
+                      "operation=speaker_cycle phase=pa_low count=%lu "
+                      "level=%d\n",
+                      static_cast<unsigned long>(completedPlaybackCount),
+                      paLevel);
+        testInitialized = false;
+      } else if (!testReady) {
+        startupSoundsCompleted++;
+        Serial.printf("Speaker test: startup playback %u/%u completed\n",
+                      static_cast<unsigned>(startupSoundsCompleted),
+                      static_cast<unsigned>(sizeof(TEST_SOUNDS) /
+                                            sizeof(TEST_SOUNDS[0])));
+        if (startupSoundsCompleted ==
+            sizeof(TEST_SOUNDS) / sizeof(TEST_SOUNDS[0])) {
+          boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker);
+          boot_diagnostics::enterStage(boot_diagnostics::Stage::Finalization);
+          boot_diagnostics::completeStage(
+              boot_diagnostics::Stage::Finalization);
+          boot_diagnostics::markReady();
+          testReady = true;
+          lastPlaybackMs = now;
+          Serial.println("Speaker test: guarded startup cycle complete");
+        }
+      }
+      if (testInitialized && completedPlaybackCount == 100U) {
+        Serial.println("Speaker test: 100 tracked playback cycles complete");
       }
     } else if (playbackResult ==
                    waveshare_board::speaker::TrackedPlaybackResult::Failed ||
                playbackResult == waveshare_board::speaker::
                                      TrackedPlaybackResult::Superseded) {
       Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
-                    "operation=speaker_startup_playback phase=result "
+                    "operation=speaker_cycle phase=result count=%lu "
                     "sound=%u request=%lu result=%s\n",
+                    static_cast<unsigned long>(completedPlaybackCount + 1U),
                     currentSoundId,
                     static_cast<unsigned long>(currentPlaybackRequestId),
                     playbackResult == waveshare_board::speaker::
@@ -128,25 +156,27 @@ void loop() {
       testInitialized = false;
     } else if (!observedPlaybackActive &&
                now - playbackRequestedMs >=
-                   STARTUP_PLAYBACK_START_TIMEOUT_MS) {
+                   PLAYBACK_START_TIMEOUT_MS) {
       Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
-                    "operation=speaker_startup_playback phase=start "
+                    "operation=speaker_cycle phase=start count=%lu "
                     "sound=%u timeoutMs=%lu\n",
+                    static_cast<unsigned long>(completedPlaybackCount + 1U),
                     currentSoundId,
                     static_cast<unsigned long>(
-                        STARTUP_PLAYBACK_START_TIMEOUT_MS));
+                        PLAYBACK_START_TIMEOUT_MS));
       awaitingPlayback = false;
       testInitialized = false;
     }
 
-    if (!testReady && awaitingPlayback && observedPlaybackActive &&
-        now - playbackRequestedMs >= STARTUP_PLAYBACK_FINISH_TIMEOUT_MS) {
+    if (awaitingPlayback && observedPlaybackActive &&
+        now - playbackRequestedMs >= PLAYBACK_FINISH_TIMEOUT_MS) {
       Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
-                    "operation=speaker_startup_playback phase=finish "
+                    "operation=speaker_cycle phase=finish count=%lu "
                     "sound=%u timeoutMs=%lu\n",
+                    static_cast<unsigned long>(completedPlaybackCount + 1U),
                     currentSoundId,
                     static_cast<unsigned long>(
-                        STARTUP_PLAYBACK_FINISH_TIMEOUT_MS));
+                        PLAYBACK_FINISH_TIMEOUT_MS));
       awaitingPlayback = false;
       testInitialized = false;
     }
@@ -162,29 +192,22 @@ void loop() {
   const Sound sound = TEST_SOUNDS[nextSoundIndex];
   const uint8_t soundId = static_cast<uint8_t>(sound);
   uint32_t requestId = 0;
-  const bool queued = !testReady
-                          ? waveshare_board::speaker::requestPlayTracked(
-                                sound, TEST_VOLUME_PERCENT, requestId)
-                          : waveshare_board::speaker::requestPlay(
-                                sound, TEST_VOLUME_PERCENT);
+  const bool queued = waveshare_board::speaker::requestPlayTracked(
+      sound, TEST_VOLUME_PERCENT, requestId);
   if (queued) {
     Serial.printf("Speaker test: queued sound ID %u\n", soundId);
-    if (!testReady) {
-      awaitingPlayback = true;
-      observedPlaybackActive = false;
-      playbackRequestedMs = now;
-      currentSoundId = soundId;
-      currentPlaybackRequestId = requestId;
-    }
+    awaitingPlayback = true;
+    observedPlaybackActive = false;
+    playbackRequestedMs = now;
+    currentSoundId = soundId;
+    currentPlaybackRequestId = requestId;
   } else {
     Serial.printf("Speaker test: failed to queue sound ID %u\n", soundId);
-    if (!testReady) {
-      Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
-                    "operation=speaker_startup_playback phase=queue "
-                    "sound=%u\n",
-                    soundId);
-      testInitialized = false;
-    }
+    Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 "
+                  "operation=speaker_cycle phase=queue count=%lu sound=%u\n",
+                  static_cast<unsigned long>(completedPlaybackCount + 1U),
+                  soundId);
+    testInitialized = false;
   }
 
   nextSoundIndex = (nextSoundIndex + 1) %

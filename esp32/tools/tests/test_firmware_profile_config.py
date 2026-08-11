@@ -219,6 +219,11 @@ assert display_probe in diagnostic_workflow
 
 speaker_source = (project_dir / "speaker_honk_test.cpp").read_text()
 speaker_implementation = (project_dir / "lib/speaker/speaker.cpp").read_text()
+assert "SPEAKER_CYCLE schema=1" in speaker_source
+assert "100 tracked playback cycles complete" in speaker_source
+assert "gpio_get_level(GPIO_NUM_46)" in speaker_source
+assert "heap_caps_get_free_size(MALLOC_CAP_DEFAULT)" in speaker_source
+assert "heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT)" in speaker_source
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"
