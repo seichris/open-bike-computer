@@ -246,16 +246,16 @@ else:
 link_started_ns = None
 
 
-def record_link_start(target, source, environment):
+def record_link_start(target, source, env):
     """Start the separately observable final-link phase."""
-    del target, source, environment
+    del target, source, env
     global link_started_ns
     link_started_ns = time.monotonic_ns()
 
 
-def record_link_finish(target, source, environment):
+def record_link_finish(target, source, env):
     """Atomically publish the link duration for the verified wrapper."""
-    del target, source, environment
+    del target, source, env
     if link_started_ns is None:
         raise RuntimeError("firmware link timing started from an invalid state")
     elapsed_ms = max(0, round((time.monotonic_ns() - link_started_ns) / 1_000_000))

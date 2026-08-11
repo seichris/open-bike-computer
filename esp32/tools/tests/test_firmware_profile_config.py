@@ -33,6 +33,8 @@ assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
 assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
 assert 'env.subst("$PROJECT_LIBDEPS_DIR")' in prebuild_source
 assert '".pio/libdeps/" + flavor' not in prebuild_source
+assert "def record_link_start(target, source, env):" in prebuild_source
+assert "def record_link_finish(target, source, env):" in prebuild_source
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
