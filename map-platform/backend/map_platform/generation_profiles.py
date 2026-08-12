@@ -49,6 +49,8 @@ class GenerationProfilePolicy:
         payload = loads_strict_json(raw, description="generation profile policy")
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
             raise ValueError("generation profile policy schemaVersion must be 1")
+        if set(payload) != {"schemaVersion", "profiles", "channels"}:
+            raise ValueError("generation profile policy fields are invalid")
 
         raw_profiles = payload.get("profiles")
         if not isinstance(raw_profiles, list) or not raw_profiles:
@@ -84,6 +86,10 @@ class GenerationProfilePolicy:
                 tuple(features),
             )
             formats.add(renderer_format)
+        if formats != {1, 2, 3}:
+            raise ValueError(
+                "generation profile policy schemaVersion 1 requires renderer formats 1, 2, and 3"
+            )
 
         raw_channels = payload.get("channels")
         if not isinstance(raw_channels, dict) or set(raw_channels) != DEPLOYMENT_CHANNELS:

@@ -75,6 +75,37 @@ class GenerationProfilePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate JSON object key"):
                 GenerationProfilePolicy.load(path)
 
+    def test_unknown_fields_and_missing_formats_fail_at_startup(self):
+        payload = json.loads(self.policy_path.read_text(encoding="utf-8"))
+        payload["deploymentChanel"] = "development"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unknown-field.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "fields are invalid"):
+                GenerationProfilePolicy.load(path)
+
+            payload.pop("deploymentChanel")
+            payload["profiles"] = [
+                profile
+                for profile in payload["profiles"]
+                if profile["rendererFormatVersion"] != 3
+            ]
+            for channel in payload["channels"].values():
+                channel["globalProfiles"] = [
+                    profile_id
+                    for profile_id in channel["globalProfiles"]
+                    if profile_id != "buildings-3d-v1"
+                ]
+                channel["canaryProfiles"] = [
+                    profile_id
+                    for profile_id in channel["canaryProfiles"]
+                    if profile_id != "buildings-3d-v1"
+                ]
+            path = Path(tmp) / "missing-format.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "requires renderer formats"):
+                GenerationProfilePolicy.load(path)
+
 
 if __name__ == "__main__":
     unittest.main()
