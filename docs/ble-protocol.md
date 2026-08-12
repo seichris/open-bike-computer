@@ -1087,9 +1087,11 @@ The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 ```
 
 The frame is exactly 44 bytes. `SampleCount` is non-zero and `SampleIndex` must
-be smaller than it. Firmware accepts a marker only when its hash matches the
-active measurement window. This prevents an otherwise plausible GPS stream
-from being attributed to the pinned fixture.
+be smaller than it. iOS serializes each GPS write before its corresponding
+marker. Firmware accepts a marker only when its hash matches the active
+measurement window. This prevents an otherwise plausible GPS stream from being
+attributed to the pinned fixture and lets a later checkpoint frame be tied to
+the intended position sample.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:

@@ -260,10 +260,12 @@ public:
 
   bool sessionActive() const { return sessionActive_; }
 
-  void beginWindow(uint32_t windowId, const RunIdentity &identity,
+  bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                    renderer_tuning::Profile profile, uint32_t nowMs,
                    const JobCounters &currentJobs,
                    uint32_t currentGpsPacketSequence) {
+    if (!sessionActive_ || windowId == 0)
+      return false;
     resetWindowState();
     measurementWindowId_ = windowId;
     windowStartedAtMs_ = nowMs;
@@ -272,6 +274,7 @@ public:
     jobs_ = currentJobs;
     jobBaseline_ = currentJobs;
     lastGpsPacketSequence_ = currentGpsPacketSequence;
+    return true;
   }
 
   void setProfile(renderer_tuning::Profile profile) { profile_ = profile; }

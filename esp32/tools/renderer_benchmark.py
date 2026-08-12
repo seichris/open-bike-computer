@@ -1455,7 +1455,13 @@ class BenchmarkRunner:
             time.sleep(self.poll_interval_seconds)
 
     def _capture_screenshot(
-        self, *, profile: str, repeat: int, checkpoint: int, sample_index: int
+        self,
+        *,
+        profile: str,
+        repeat: int,
+        checkpoint: int,
+        sample_index: int,
+        marker_received_at_ms: int,
     ) -> dict[str, Any]:
         filename = (
             f"{profile}-repeat-{repeat:02d}-checkpoint-{checkpoint:03d}"
@@ -1464,10 +1470,35 @@ class BenchmarkRunner:
         path = self.output / "screenshots" / filename
         deadline = time.monotonic() + 4
         last_error: Exception | None = None
+        checkpoint_frame_consumed = False
         while time.monotonic() < deadline:
             try:
-                metadata, pixels = self.client.frame(after=self.last_frame_sequence)
+                metadata, pixels = self.client.frame(
+                    after=self.last_frame_sequence
+                )
                 self.last_frame_sequence = metadata["sequence"]
+                if not checkpoint_frame_consumed:
+                    # Even a timestamp-newer cached frame may have been
+                    # captured by another browser request before this metrics
+                    # sample was observed. Consume one frame, then force the
+                    # endpoint to capture a checkpoint-specific successor.
+                    checkpoint_frame_consumed = True
+                    continue
+                capture_lag_ms = _uint32_forward_delta(
+                    metadata["capturedAtMs"], marker_received_at_ms
+                )
+                if capture_lag_ms >= 0x80000000:
+                    # The frame store can still contain a valid image captured
+                    # before this checkpoint. Consume it, then request a newer
+                    # panel frame on the next attempt.
+                    continue
+                if (
+                    capture_lag_ms
+                    > self.gates["absolute"]["maximumRouteMarkerAgeMs"]
+                ):
+                    raise BenchmarkError(
+                        "checkpoint screenshot missed its route-marker window"
+                    )
                 write_rgb565_png(
                     path,
                     metadata["width"],
@@ -1481,6 +1512,8 @@ class BenchmarkRunner:
                     "observedSampleIndex": sample_index,
                     "frameSequence": metadata["sequence"],
                     "capturedAtMs": metadata["capturedAtMs"],
+                    "markerReceivedAtMs": marker_received_at_ms,
+                    "captureLagMs": capture_lag_ms,
                     "path": f"screenshots/{filename}",
                     "bytes": path.stat().st_size,
                     "sha256": sha256_file(path),
@@ -1574,11 +1607,16 @@ class BenchmarkRunner:
             replay = nested(snapshot, "routeReplay")
             sample_index = replay.get("sampleIndex")
             sample_count = replay.get("sampleCount")
+            marker_received_at_ms = replay.get("receivedAtMs")
             if (
                 replay.get("valid") is True
                 and replay.get("fixtureMatches") is True
                 and sample_count == len(self.route_fixture["points"])
                 and isinstance(sample_index, int)
+                and not isinstance(sample_index, bool)
+                and isinstance(marker_received_at_ms, int)
+                and not isinstance(marker_received_at_ms, bool)
+                and 0 <= marker_received_at_ms <= 0xFFFFFFFF
             ):
                 tolerance = self.gates["checkpointToleranceSamples"]
                 for checkpoint in sorted(pending_checkpoints):
@@ -1593,6 +1631,7 @@ class BenchmarkRunner:
                                         repeat=repeat,
                                         checkpoint=checkpoint,
                                         sample_index=sample_index,
+                                        marker_received_at_ms=marker_received_at_ms,
                                     )
                                 )
                             except BenchmarkError as exc:
@@ -1883,6 +1922,9 @@ def is_full_comparison_evidence(
             path_text = screenshot.get("path")
             byte_count = screenshot.get("bytes")
             digest = screenshot.get("sha256")
+            captured_at_ms = screenshot.get("capturedAtMs")
+            marker_received_at_ms = screenshot.get("markerReceivedAtMs")
+            capture_lag_ms = screenshot.get("captureLagMs")
             if (
                 isinstance(checkpoint, bool)
                 or not isinstance(checkpoint, int)
@@ -1902,6 +1944,21 @@ def is_full_comparison_evidence(
                 or not isinstance(byte_count, int)
                 or not 0 < byte_count <= 8 * 1024 * 1024
                 or not valid_lowercase_sha256(digest)
+                or isinstance(captured_at_ms, bool)
+                or not isinstance(captured_at_ms, int)
+                or not 0 <= captured_at_ms <= 0xFFFFFFFF
+                or isinstance(marker_received_at_ms, bool)
+                or not isinstance(marker_received_at_ms, int)
+                or not 0 <= marker_received_at_ms <= 0xFFFFFFFF
+                or isinstance(capture_lag_ms, bool)
+                or not isinstance(capture_lag_ms, int)
+                or capture_lag_ms
+                != _uint32_forward_delta(captured_at_ms, marker_received_at_ms)
+                or not (
+                    0
+                    <= capture_lag_ms
+                    <= gates["absolute"]["maximumRouteMarkerAgeMs"]
+                )
             ):
                 return False
             relative = PurePosixPath(path_text)

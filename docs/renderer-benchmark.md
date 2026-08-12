@@ -9,7 +9,7 @@ candidate selection, not permission to change the default profile.
 ## What is automated
 
 - one checked-in Shanghai route with 120 exact 1 Hz GPS samples and a SHA-256
-  marker on every sample;
+  marker on every sample, serialized after that sample's GPS write;
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
@@ -19,7 +19,8 @@ candidate selection, not permission to change the default profile.
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
   overhead;
-- four deterministic screenshots per comparison window;
+- four deterministic screenshots per comparison window, each captured after
+  and timestamp-bound to its observed route marker;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
   longer soak of the selected candidate;
 - JSON, CSV, Markdown, and PNG evidence tied to device, board, firmware commit,
@@ -103,7 +104,8 @@ The output directory must be empty. A completed sweep writes:
 - `renderer-benchmark.md`: a reviewable result table, failures, screenshots,
   and remaining physical gates;
 - `screenshots/*.png`: target-oriented checkpoints whose rotation matches the
-  browser view.
+  browser view; the JSON records each frame timestamp, marker timestamp,
+  capture lag, byte count, and SHA-256 digest.
 
 Exit status `0` means every automated gate passed, `2` means the run completed
 but at least one gate rejected it, and `1` means setup, identity, transport, or

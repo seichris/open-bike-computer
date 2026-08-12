@@ -533,6 +533,57 @@ class RendererBenchmarkTests(unittest.TestCase):
         runner.restore_current_profile()
         self.assertEqual(len(client.requests), 2)
 
+    def test_checkpoint_screenshot_forces_a_new_frame_after_observation(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+
+        class FrameClient:
+            def __init__(self):
+                self.after = []
+                self.frames = [
+                    ({"sequence": 1, "capturedAtMs": 1005,
+                      "width": 1, "height": 1, "stride": 2}, b"\0\0"),
+                    ({"sequence": 2, "capturedAtMs": 1010,
+                      "width": 1, "height": 1, "stride": 2}, b"\0\0"),
+                ]
+
+            def frame(self, *, after=0):
+                self.after.append(after)
+                return self.frames.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "screenshots").mkdir()
+            client = FrameClient()
+            runner = renderer_benchmark.BenchmarkRunner(
+                client=client,
+                output=output,
+                gates=renderer_benchmark.load_gates(
+                    TOOLS / "renderer_benchmark_gates.json"
+                ),
+                map_fixture_id="shanghai-map",
+                map_fixture_sha256="a" * 64,
+                route_fixture=route,
+                route_fixture_sha256="b" * 64,
+                route_mode="ios-fixture-1hz",
+                warmup_seconds=0,
+                poll_interval_seconds=1,
+                capture_screenshots=True,
+            )
+            result = runner._capture_screenshot(
+                profile="current",
+                repeat=1,
+                checkpoint=0,
+                sample_index=0,
+                marker_received_at_ms=1000,
+            )
+
+        self.assertEqual(client.after, [0, 1])
+        self.assertEqual(result["frameSequence"], 2)
+        self.assertEqual(result["markerReceivedAtMs"], 1000)
+        self.assertEqual(result["captureLagMs"], 10)
+
     def test_uint32_forward_delta_accepts_clock_wrap(self):
         self.assertEqual(
             renderer_benchmark._uint32_forward_delta(3, 0xFFFFFFFE),
@@ -597,6 +648,9 @@ class RendererBenchmarkTests(unittest.TestCase):
                         {
                             "checkpointSampleIndex": checkpoint,
                             "observedSampleIndex": checkpoint,
+                            "capturedAtMs": 1010,
+                            "markerReceivedAtMs": 1000,
+                            "captureLagMs": 10,
                             "path": relative,
                             "bytes": path.stat().st_size,
                             "sha256": renderer_benchmark.sha256_file(path),
@@ -700,6 +754,23 @@ class RendererBenchmarkTests(unittest.TestCase):
                     ),
                 )
             )
+            mismatched_capture = json.loads(
+                comparison_path.read_text(encoding="utf-8")
+            )
+            mismatched_capture["runs"][0]["screenshots"][0][
+                "captureLagMs"
+            ] = 11
+            mismatched_capture_is_full = (
+                renderer_benchmark.is_full_comparison_evidence(
+                    mismatched_capture,
+                    comparison_root=root,
+                    expected_profile="medium",
+                    gates=gates,
+                    gates_sha256=renderer_benchmark.sha256_file(
+                        TOOLS / "renderer_benchmark_gates.json"
+                    ),
+                )
+            )
             missing_screenshot = (
                 root / comparison_runs[0]["screenshots"][0]["path"]
             )
@@ -736,6 +807,7 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertTrue(report["passed"], report["failures"])
         self.assertEqual(report["window"]["profile"], "medium")
         self.assertFalse(shortened_is_full)
+        self.assertFalse(mismatched_capture_is_full)
         self.assertIn(
             "comparison_is_not_full_acceptance_evidence",
             missing_screenshot_report["failures"],

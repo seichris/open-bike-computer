@@ -160,17 +160,6 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         if emittedSampleCount % 2 == 0 {
             bleManager.sendRouteGeometry(routeData)
         }
-        guard bleManager.sendRendererBenchmarkMarker(
-            fixtureSHA256: fixtureSHA256,
-            sampleIndex: sampleIndex,
-            sampleCount: fixture.points.count,
-            loop: loop
-        ) else {
-            errorMessage = "The benchmark marker could not be queued."
-            status = "Stopped"
-            stop()
-            return
-        }
         let now = Date()
         bleManager.sendGPSPosition(
             lat: point.latitude,
@@ -188,6 +177,20 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             horizontalAccuracyMeters: 3,
             locationTimestamp: now
         )
+        // Keep the marker behind its GPS write in the serialized navigation
+        // queue. A frame captured after firmware accepts the marker can then
+        // be attributed to this sample rather than the previous position.
+        guard bleManager.sendRendererBenchmarkMarker(
+            fixtureSHA256: fixtureSHA256,
+            sampleIndex: sampleIndex,
+            sampleCount: fixture.points.count,
+            loop: loop
+        ) else {
+            errorMessage = "The benchmark marker could not be queued."
+            status = "Stopped"
+            stop()
+            return
+        }
         // HTTP owns the remote-debug sweep. Poll BLE only on ordinary
         // diagnostics firmware so the ranking run is not perturbed twice.
         if !bleManager.supportsRemoteDeviceDebug &&

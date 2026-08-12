@@ -1705,24 +1705,32 @@ void loop() {
 #if DEVICE_REMOTE_DEBUG
   device_debug::RendererRunRequest rendererRunRequest;
   if (deviceDebugHttp.takeRendererRunRequest(rendererRunRequest)) {
-    if (rendererRequestMatchesActiveMap(rendererRunRequest.identity)) {
-      mapView.setRendererTuningProfile(rendererRunRequest.profile, now);
+    const device_transfer::HttpTransferStatus rendererTransferStatus =
+        deviceTransferHttp.status();
+    if (rendererTransferStatus.enabled &&
+        rendererTransferStatus.mode == "debug" &&
+        rendererRequestMatchesActiveMap(rendererRunRequest.identity)) {
       const renderer_diagnostics::JobCounters currentJobs =
           mapView.rendererDiagnosticsJobCounters();
       const uint32_t currentGpsPacketSequence =
           bleNavServer.getDebugStats().gpsPacketCount;
-      renderer_diagnostics::beginWindow(
-          rendererRunRequest.requestId, rendererRunRequest.identity,
-          rendererRunRequest.profile, now, currentJobs,
-          currentGpsPacketSequence);
-      device_debug::frameStore().requestNextFrame();
-      if (lv_screen_active() != nullptr)
-        lv_obj_invalidate(lv_screen_active());
-      Serial.printf(
-          "RENDERER_DIAGNOSTICS: window=%lu profile=%s repeat=%u\n",
-          static_cast<unsigned long>(rendererRunRequest.requestId),
-          renderer_tuning::name(rendererRunRequest.profile),
-          static_cast<unsigned>(rendererRunRequest.identity.repeat));
+      if (!renderer_diagnostics::beginWindow(
+              rendererRunRequest.requestId, rendererRunRequest.identity,
+              rendererRunRequest.profile, now, currentJobs,
+              currentGpsPacketSequence)) {
+        Serial.println(
+            "RENDERER_DIAGNOSTICS: rejected inactive remote-debug window");
+      } else {
+        mapView.setRendererTuningProfile(rendererRunRequest.profile, now);
+        device_debug::frameStore().requestNextFrame();
+        if (lv_screen_active() != nullptr)
+          lv_obj_invalidate(lv_screen_active());
+        Serial.printf(
+            "RENDERER_DIAGNOSTICS: window=%lu profile=%s repeat=%u\n",
+            static_cast<unsigned long>(rendererRunRequest.requestId),
+            renderer_tuning::name(rendererRunRequest.profile),
+            static_cast<unsigned>(rendererRunRequest.identity.repeat));
+      }
     }
   }
 #endif
@@ -1913,7 +1921,6 @@ void loop() {
         const renderer_tuning::Profile profile =
             static_cast<renderer_tuning::Profile>(
                 ordinaryWindowRequest.profile);
-        mapView.setRendererTuningProfile(profile, now);
         const renderer_diagnostics::JobCounters currentJobs =
             mapView.rendererDiagnosticsJobCounters();
         const uint32_t currentGpsPacketSequence =
@@ -1924,15 +1931,17 @@ void loop() {
           ordinaryRendererWindowSequence = 1;
         const uint32_t windowId =
             ordinaryRendererWindowSequence | 0x80000000U;
-        renderer_diagnostics::beginWindow(
-            windowId, identity, profile, now, currentJobs,
-            currentGpsPacketSequence);
-        ordinaryRendererSessionActive = true;
-        Serial.printf(
-            "RENDERER_DIAGNOSTICS: ordinary window=%lu profile=%s repeat=%u\n",
-            static_cast<unsigned long>(windowId),
-            renderer_tuning::name(profile),
-            static_cast<unsigned>(identity.repeat));
+        if (renderer_diagnostics::beginWindow(
+                windowId, identity, profile, now, currentJobs,
+                currentGpsPacketSequence)) {
+          mapView.setRendererTuningProfile(profile, now);
+          ordinaryRendererSessionActive = true;
+          Serial.printf(
+              "RENDERER_DIAGNOSTICS: ordinary window=%lu profile=%s repeat=%u\n",
+              static_cast<unsigned long>(windowId),
+              renderer_tuning::name(profile),
+              static_cast<unsigned>(identity.repeat));
+        }
       }
     }
   }

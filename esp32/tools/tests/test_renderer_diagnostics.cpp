@@ -72,8 +72,8 @@ int main() {
   constexpr const char *kRouteHash =
       "000102030405060708090a0b0c0d0e0f"
       "101112131415161718191a1b1c1d1e1f";
-  state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
-                    jobs(0), 10);
+  assert(state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
+                           jobs(0), 10));
   assert(state.measurementWindowId() == 41);
   assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
   assert(!state.noteRenderForWindow(41, Profile::High, {}));
@@ -156,8 +156,8 @@ int main() {
   const Snapshot latchedFailure = state.snapshot(2600);
   assert(latchedFailure.buildings.allocationFallback);
 
-  state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000, jobs(3),
-                    13);
+  assert(state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000,
+                           jobs(3), 13));
   state.noteMemory({0, 0, 0, 0, 0});
   state.noteMemory({100, 100, 100, 100, 100});
   const Snapshot reset = state.snapshot(3001);
@@ -178,6 +178,9 @@ int main() {
   assert(ended.profile == Profile::Current);
   assert(ended.measurementWindowId == 0);
   assert(!ended.remoteDebug.active);
+  assert(!state.beginWindow(43, runIdentity(kRouteHash), Profile::High, 4001,
+                            jobs(3), 13));
+  assert(state.measurementWindowId() == 0);
 
   BoundedText<5> bounded;
   assert(bounded.assign("four"));

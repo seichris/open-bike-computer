@@ -138,16 +138,20 @@ bool sessionActive() {
   return active;
 }
 
-void beginWindow(uint32_t windowId, const RunIdentity &identity,
+bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
                  const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.beginWindow(windowId, identity, profile, nowMs, currentJobs,
-                               currentGpsPacketSequence);
-  lastPeriodicMemorySampleMs = nowMs;
+  const bool accepted = diagnosticsState.beginWindow(
+      windowId, identity, profile, nowMs, currentJobs,
+      currentGpsPacketSequence);
+  if (accepted)
+    lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
-  noteCurrentMemory();
+  if (accepted)
+    noteCurrentMemory();
+  return accepted;
 }
 
 void setProfile(renderer_tuning::Profile profile) {

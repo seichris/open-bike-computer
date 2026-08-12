@@ -19,7 +19,7 @@ void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
 void beginSession(bool remoteDebugActive, uint32_t nowMs);
 void endSession(uint32_t nowMs);
 bool sessionActive();
-void beginWindow(uint32_t windowId, const RunIdentity &identity,
+bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
                  const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence);
@@ -48,9 +48,11 @@ inline void configureBuildIdentity(const char *, const char *, const char *,
 inline void beginSession(bool, uint32_t) {}
 inline void endSession(uint32_t) {}
 inline bool sessionActive() { return false; }
-inline void beginWindow(uint32_t, const RunIdentity &,
+inline bool beginWindow(uint32_t, const RunIdentity &,
                         renderer_tuning::Profile, uint32_t,
-                        const JobCounters &, uint32_t) {}
+                        const JobCounters &, uint32_t) {
+  return false;
+}
 inline void setProfile(renderer_tuning::Profile) {}
 inline renderer_tuning::Profile currentProfile() {
   return renderer_tuning::Profile::Current;
