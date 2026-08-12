@@ -11,7 +11,7 @@ candidate selection, not permission to change the default profile.
 - one checked-in Shanghai route with 120 exact 1 Hz GPS samples and a SHA-256
   marker on every sample;
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
-  least three runs per profile and 60–120 seconds per comparison run;
+  least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
   over HTTP or BLE;
 - internal RAM and PSRAM free/largest-block floors and monotonic-decline checks;
@@ -88,8 +88,8 @@ python3 esp32/tools/renderer_benchmark.py \
 
 The defaults are three balanced repeats, 120-second comparison windows, four
 checkpoint screenshots per window, and a 600-second soak. A full issue #210 run
-requires all four profiles, at least three repeats, 60–120-second windows,
-screenshots, and a soak of at least 300 seconds.
+requires all four profiles, at least three repeats, one complete 120-second
+fixture loop per window, screenshots, and a soak of at least 300 seconds.
 
 For wiring or fixture development only, `--allow-partial` permits shorter runs,
 a subset of profiles, no soak, or `--skip-screenshots`. Partial output is not

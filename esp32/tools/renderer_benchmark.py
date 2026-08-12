@@ -1830,6 +1830,14 @@ def is_full_comparison_evidence(
     repeats = configuration.get("repeats")
     comparison_seconds = configuration.get("comparisonSeconds")
     soak_seconds = configuration.get("soakSeconds")
+    route = nested(comparison, "fixtures", "route")
+    route_sample_count = route.get("sampleCount")
+    if (
+        isinstance(route_sample_count, bool)
+        or not isinstance(route_sample_count, int)
+        or not 60 <= route_sample_count <= 120
+    ):
+        return False
     if (
         configuration.get("partial") is not False
         or not isinstance(profiles, list)
@@ -1841,7 +1849,7 @@ def is_full_comparison_evidence(
         or not 3 <= repeats <= 100
         or isinstance(comparison_seconds, bool)
         or not isinstance(comparison_seconds, int)
-        or not 60 <= comparison_seconds <= 120
+        or comparison_seconds != route_sample_count
         or isinstance(soak_seconds, bool)
         or not isinstance(soak_seconds, int)
         or soak_seconds < 300
@@ -1856,14 +1864,6 @@ def is_full_comparison_evidence(
     ):
         return False
 
-    route = nested(comparison, "fixtures", "route")
-    route_sample_count = route.get("sampleCount")
-    if (
-        isinstance(route_sample_count, bool)
-        or not isinstance(route_sample_count, int)
-        or not 60 <= route_sample_count <= 120
-    ):
-        return False
     expected_checkpoints = set(
         expected_checkpoint_indexes(
             route_sample_count, gates["checkpointFractions"]
@@ -2361,12 +2361,12 @@ def main() -> int:
         if not args.allow_partial and (
             args.repeats < 3
             or set(args.profiles) != set(PROFILES)
-            or not 60 <= duration <= 120
+            or duration != len(route_fixture["points"])
             or args.soak_seconds < 300
             or args.skip_screenshots
         ):
             raise BenchmarkError(
-                "full issue #210 runs require all profiles, 3+ repeats, 60-120 seconds, screenshots, and a 300+ second soak"
+                "full issue #210 runs require all profiles, 3+ repeats, one complete pinned-route loop, screenshots, and a 300+ second soak"
             )
         if (
             args.repeats <= 0

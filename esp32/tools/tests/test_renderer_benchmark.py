@@ -683,7 +683,26 @@ class RendererBenchmarkTests(unittest.TestCase):
                 ),
                 allow_partial=False,
             )
-            missing_screenshot = root / comparison_runs[0]["screenshots"][0]["path"]
+            shortened = json.loads(
+                comparison_path.read_text(encoding="utf-8")
+            )
+            shortened["configuration"]["comparisonSeconds"] = 60
+            for run in shortened["runs"]:
+                run["durationSeconds"] = 60
+            shortened_is_full = (
+                renderer_benchmark.is_full_comparison_evidence(
+                    shortened,
+                    comparison_root=root,
+                    expected_profile="medium",
+                    gates=gates,
+                    gates_sha256=renderer_benchmark.sha256_file(
+                        TOOLS / "renderer_benchmark_gates.json"
+                    ),
+                )
+            )
+            missing_screenshot = (
+                root / comparison_runs[0]["screenshots"][0]["path"]
+            )
             missing_screenshot.unlink()
             missing_screenshot_report = renderer_benchmark.evaluate_ordinary_capture(
                 capture_path=capture_path,
@@ -716,6 +735,7 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
         self.assertTrue(report["passed"], report["failures"])
         self.assertEqual(report["window"]["profile"], "medium")
+        self.assertFalse(shortened_is_full)
         self.assertIn(
             "comparison_is_not_full_acceptance_evidence",
             missing_screenshot_report["failures"],
