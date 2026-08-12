@@ -48,6 +48,13 @@ environment is not the matching `*_PRODUCTION` profile, the Git SHA or flash
 plan differs, an image size/hash changed, images overlap, or the merged image
 exceeds the configured flash capacity.
 
+The release tag must be `v<firmware-version>` or a prerelease below that exact
+version, such as `v0.3.2-ota-test.1`. The signing gate rejects a tag for another
+firmware version. It also opens the completed archive and verifies its safe
+member layout, embedded bundle manifest, declared image hashes, and
+`SHA256SUMS` before signing the archive hash; a corrupt or mixed artifact cannot
+become a validly signed factory release.
+
 The signed factory release manifest binds the target, production environment,
 version/build, full Git SHA, release URL, archive size/SHA-256, and portable
 bundle-manifest name/SHA-256. It uses the same P-256 release key as the OTA manifest,

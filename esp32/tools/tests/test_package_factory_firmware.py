@@ -129,6 +129,7 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
         }
         manifest = {
             "schema": 20,
+            "environment": ENVIRONMENT,
             "sourceIdentity": GIT_SHA,
             "sourceDateEpoch": "1700000000",
             "buildTimestamp": "2023-11-14T22:13:20Z",
@@ -315,6 +316,23 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
                         expected_git_sha=GIT_SHA,
                         output_dir=root / "dist",
                     )
+
+    def test_build_manifest_for_another_environment_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project, manifest_path, _ = self.create_project(root)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["environment"] = "WAVESHARE_AMOLED_206_PRODUCTION"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                package_factory_firmware.BundleError,
+                "another environment",
+            ):
+                self.package(project, root / "dist")
 
     def test_changed_platformio_metadata_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

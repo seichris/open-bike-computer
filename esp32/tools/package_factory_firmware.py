@@ -465,6 +465,8 @@ def package_factory_bundle(
     manifest, manifest_bytes = _load_json(manifest_path)
     if manifest.get("schema") != SUPPORTED_BUILD_MANIFEST_SCHEMA:
         raise BundleError("unsupported verified build-manifest schema")
+    if manifest.get("environment") != environment:
+        raise BundleError("verified build references another environment")
     if manifest.get("sourceIdentity") != expected_git_sha:
         raise BundleError("verified build does not match the expected Git SHA")
     if manifest.get("uploadEligible") is not True:
