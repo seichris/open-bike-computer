@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .strict_json import loads_strict_json
-
 
 DEPLOYMENT_CHANNELS = frozenset({"development", "production"})
 PROFILE_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{2,63}")

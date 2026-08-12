@@ -19,6 +19,10 @@ else:
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .downloads import DownloadSigner, DownloadTokenError
+from .generation_profiles import (
+    configured_deployment_channel,
+    load_generation_profile_policy,
+)
 from .geofabrik_sources import GeofabrikSourceProvider
 from .installations import InstallationCredentialError, InstallationCredentialStore
 from .jobs import (
@@ -31,10 +35,6 @@ from .limits import JobLimits
 from .map_buildings import (
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
-)
-from .generation_profiles import (
-    configured_deployment_channel,
-    load_generation_profile_policy,
 )
 from .map_signing import map_stream_generation_enabled
 from .map_stream_hardware_requirements import load_hardware_requirements
@@ -49,12 +49,12 @@ from .map_stream_rollout import (
     parse_map_stream_trust_capabilities,
 )
 from .map_stream_trust_registry import trusted_key_fingerprints
+from .models import JobStatus
 from .monitoring import (
     DEFAULT_MONITORING_RETENTION_DAYS,
     DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
     MapMonitoringStore,
 )
-from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import (
     PreparationEstimateMode,
@@ -300,8 +300,7 @@ def create_app():
             or path == "/v1/capabilities"
             or path == "/v1/source-regions"
             or path == "/v1/map-jobs"
-            or path.startswith("/v1/map-jobs/")
-            or path.startswith("/v1/map-packs/")
+            or path.startswith(("/v1/map-jobs/", "/v1/map-packs/"))
         )
 
     @app.middleware("http")

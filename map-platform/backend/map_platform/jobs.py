@@ -8,16 +8,16 @@ import os
 import re
 import threading
 import uuid
-from copy import deepcopy
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactRecord
-from .geometry import GeometryError, normalize_geometry
 from .generation_profiles import GenerationProfilePolicy
+from .geometry import GeometryError, normalize_geometry
 from .limits import ACTIVE_STATUSES, JobLimits, LimitError
 from .models import JobStatus, MapDownloadReceipt, MapJob, utc_now_iso
 from .reuse import parent_contains_child_blocks

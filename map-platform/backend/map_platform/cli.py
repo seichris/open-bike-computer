@@ -7,25 +7,25 @@ import time
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
+from .generation_profiles import (
+    configured_deployment_channel,
+    load_generation_profile_policy,
+)
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
 from .map_buildings import (
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
 )
-from .generation_profiles import (
-    configured_deployment_channel,
-    load_generation_profile_policy,
-)
 from .map_signing import load_map_artifact_signer_from_environment
+from .map_stream_build_identity import (
+    image_digest_from_reference,
+    verify_map_stream_build_identity,
+)
 from .monitoring import (
     DEFAULT_MONITORING_RETENTION_DAYS,
     DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
     MapMonitoringStore,
-)
-from .map_stream_build_identity import (
-    image_digest_from_reference,
-    verify_map_stream_build_identity,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import load_estimate_coordinator
