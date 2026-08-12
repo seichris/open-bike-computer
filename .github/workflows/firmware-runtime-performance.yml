@@ -35,13 +35,12 @@ jobs:
     defaults:
       run:
         working-directory: esp32
-    env:
-      OPEN_BIKE_FIRMWARE_RUNTIME_CACHE: ${{ runner.temp }}/firmware-runtime-cache
     steps:
       - uses: actions/checkout@v7
       - name: Warm and measure five verified runtime handoffs
         run: |
           set -euo pipefail
+          export OPEN_BIKE_FIRMWARE_RUNTIME_CACHE="$RUNNER_TEMP/firmware-runtime-cache"
           samples="$RUNNER_TEMP/runtime-handoff-${{ matrix.target }}.log"
           env -u LD_LIBRARY_PATH PYTHONDONTWRITEBYTECODE=1 python3 \
             tools/build_firmware.py WAVESHARE_AMOLED_175 --runtime-check-only \
