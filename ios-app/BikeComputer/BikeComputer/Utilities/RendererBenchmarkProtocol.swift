@@ -205,11 +205,17 @@ struct RendererDiagnosticsChunkReassembler {
     mutating func consume(_ data: Data) -> RendererDiagnosticsChunkResult? {
         let prefix = Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
         guard data.starts(with: prefix) else { return nil }
-        guard data.count >= 7 else { return .rejected }
+        guard data.count >= 7 else {
+            reset()
+            return .rejected
+        }
         let nextTransferID = data[4]
         let index = data[5]
         let count = data[6]
-        guard count > 0, index < count else { return .rejected }
+        guard count > 0, index < count else {
+            reset()
+            return .rejected
+        }
         if transferID != nextTransferID || chunkCount != count {
             reset()
             transferID = nextTransferID

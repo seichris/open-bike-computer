@@ -343,6 +343,9 @@ def load_gates(path: Path) -> dict[str, Any]:
     absolute_keys = {
         "minimumMetricsSampleFraction",
         "minimumRenderSamples",
+        "minimumBuildingCandidates",
+        "minimumSelectedBuildings",
+        "minimumExtrudedBuildingsFor3DProfile",
         "minimumGpsPacketsPerMinute",
         "minimumRouteMarkersPerMinute",
         "maximumRouteMarkerAgeMs",
@@ -703,6 +706,7 @@ def summarize_run(
         "flatBuildings": building_median("flat"),
         "deferredBuildings": building_median("deferred"),
         "oversizedBuildings": building_median("oversized"),
+        "renderedBuildings": building_median("rendered"),
         "extrudedP90DistancePx": building_median("extrudedP90DistancePx"),
         "extrudedFarthestDistancePx": building_median(
             "extrudedFarthestDistancePx"
@@ -758,6 +762,18 @@ def evaluate_run(
         )
     if summary["renderCount"] < absolute["minimumRenderSamples"]:
         failures.append("missing_render_samples")
+    if summary["candidateBuildings"] < absolute["minimumBuildingCandidates"]:
+        failures.append("building_fixture_not_dense_enough")
+    if summary["selectedBuildings"] < absolute["minimumSelectedBuildings"]:
+        failures.append("insufficient_selected_buildings")
+    if (
+        summary["profile"] != "flat"
+        and summary["extrudedBuildings"]
+        < absolute["minimumExtrudedBuildingsFor3DProfile"]
+    ):
+        failures.append("insufficient_extruded_buildings")
+    if summary["profile"] == "flat" and summary["extrudedBuildings"] != 0:
+        failures.append("flat_control_extruded_buildings")
     required_gps_packets = math.floor(
         duration_seconds
         / 60
@@ -989,9 +1005,13 @@ def aggregate_profiles(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         "minimumInternalLargest",
         "minimumPsramFree",
         "minimumPsramLargest",
+        "candidateBuildings",
+        "selectedBuildings",
         "extrudedBuildings",
         "flatBuildings",
         "deferredBuildings",
+        "oversizedBuildings",
+        "renderedBuildings",
         "extrudedP90DistancePx",
         "extrudedFarthestDistancePx",
     )
@@ -1294,6 +1314,30 @@ class BenchmarkRunner:
             route_mode=self.route_mode,
         )
 
+    def restore_current_profile(self) -> None:
+        """Best-effort safety cleanup for completed or interrupted sweeps."""
+        run_id = f"{self.root_run_id}-cleanup"
+        deadline = time.monotonic() + 5
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                window_id = self._begin_window(
+                    profile="current", run_id=run_id, repeat=1
+                )
+                self._wait_for_window(
+                    window_id=window_id,
+                    run_id=run_id,
+                    profile="current",
+                )
+                return
+            except DebugClientError as exc:
+                last_error = exc
+                time.sleep(0.4)
+        raise BenchmarkError(
+            "could not restore the current renderer profile: "
+            f"{last_error or 'timeout'}"
+        )
+
     def _warm_up(self, *, profile: str, repeat: int) -> None:
         run_id = f"{self.root_run_id}-w-{profile[0]}{repeat}"
         window_id = self._begin_window(
@@ -1524,9 +1568,13 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "minimumInternalLargest",
         "minimumPsramFree",
         "minimumPsramLargest",
+        "candidateBuildings",
+        "selectedBuildings",
         "extrudedBuildings",
         "flatBuildings",
         "deferredBuildings",
+        "oversizedBuildings",
+        "renderedBuildings",
         "extrudedP90DistancePx",
         "extrudedFarthestDistancePx",
         "staleRenders",
@@ -1549,7 +1597,13 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
                 "passed": run["passed"],
                 "failures": ";".join(run["failures"]),
             }
-            row.update({key: run["summary"].get(key) for key in csv_fields if key in run["summary"]})
+            row.update(
+                {
+                    key: run["summary"].get(key)
+                    for key in csv_fields
+                    if key in run["summary"]
+                }
+            )
             writer.writerow(row)
 
     lines = [
@@ -1565,8 +1619,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "",
         "## Comparison runs",
         "",
-        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | PSRAM min | Extruded | Flat | Deferred | Reach p90/farthest |",
-        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | PSRAM min | Candidates | Selected | Extruded | Flat | Deferred | Reach p90/farthest |",
+        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for run in report["runs"]:
         summary = run["summary"]
@@ -1575,18 +1629,36 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
             f"{summary['renderP95Ms']} ms | {summary['buildingP95Ms']} ms | "
             f"{summary['uiMaximumGapMs']} ms | {summary['flushP95Ms']} ms | "
             f"{summary['minimumInternalFree']} | {summary['minimumPsramFree']} | "
+            f"{summary['candidateBuildings']:.1f} | {summary['selectedBuildings']:.1f} | "
             f"{summary['extrudedBuildings']:.1f} | {summary['flatBuildings']:.1f} | "
             f"{summary['deferredBuildings']:.1f} | "
             f"{summary['extrudedP90DistancePx']:.1f}/{summary['extrudedFarthestDistancePx']:.1f} px |"
         )
+    lines.extend(["", "## Soak", ""])
+    soak = report.get("soakRun")
+    if soak is None:
+        lines.append("No soak run completed.")
+    else:
+        soak_summary = soak["summary"]
+        lines.append(
+            f"`{soak['profile']}` ran for {soak['durationSeconds']} seconds: "
+            f"**{'PASS' if soak['passed'] else 'FAIL'}**; render p95 "
+            f"{soak_summary['renderP95Ms']} ms, internal minimum "
+            f"{soak_summary['minimumInternalFree']} bytes, PSRAM minimum "
+            f"{soak_summary['minimumPsramFree']} bytes."
+        )
     failed = [run for run in rows if not run["passed"]]
     lines.extend(["", "## Gate failures", ""])
+    if report.get("cleanupFailure"):
+        lines.append(
+            "- `profile_cleanup`: " + str(report["cleanupFailure"])
+        )
     if failed:
         for run in failed:
             lines.append(
                 f"- `{run['runId']}`: " + ", ".join(run["failures"])
             )
-    else:
+    elif not report.get("cleanupFailure"):
         lines.append("None.")
     lines.extend(["", "## Checkpoint screenshots", ""])
     screenshot_count = 0
@@ -1862,6 +1934,12 @@ def write_ordinary_report(report: dict[str, Any], output: Path) -> None:
         f"{summary['minimumInternalLargest']} bytes",
         f"- PSRAM minimum/largest: {summary['minimumPsramFree']} / "
         f"{summary['minimumPsramLargest']} bytes",
+        f"- Buildings candidate/selected/extruded/flat/deferred: "
+        f"{summary['candidateBuildings']:.1f} / "
+        f"{summary['selectedBuildings']:.1f} / "
+        f"{summary['extrudedBuildings']:.1f} / "
+        f"{summary['flatBuildings']:.1f} / "
+        f"{summary['deferredBuildings']:.1f}",
         "",
         "## Gate failures",
         "",
@@ -1938,6 +2016,8 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     token = ""
+    runner: BenchmarkRunner | None = None
+    cleanup_attempted = False
     try:
         gates = load_gates(args.gates)
         duration = args.comparison_seconds or gates["comparisonDurationSeconds"]
@@ -2053,12 +2133,19 @@ def main() -> int:
                     duration_seconds=args.soak_seconds,
                     soak=True,
                 )
+        cleanup_attempted = True
+        cleanup_failure: str | None = None
+        try:
+            runner.restore_current_profile()
+        except (BenchmarkError, DebugClientError) as exc:
+            cleanup_failure = str(exc)
         report = {
             "schema": SCHEMA_VERSION,
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "passed": all(run["passed"] for run in runs)
             and (soak_run is None or soak_run["passed"])
-            and (args.soak_seconds == 0 or soak_run is not None),
+            and (args.soak_seconds == 0 or soak_run is not None)
+            and cleanup_failure is None,
             "identity": runner.baseline_identity,
             "initialResetReason": runner.baseline_identity["resetReason"],
             "fixtures": {
@@ -2092,6 +2179,8 @@ def main() -> int:
             "profileAggregates": aggregate,
             "pareto": pareto,
             "soakRun": soak_run,
+            "profileRestoredToCurrent": cleanup_failure is None,
+            "cleanupFailure": cleanup_failure,
             "manualAcceptanceRequired": [
                 "AMOLED motion, tearing, color, and brightness",
                 "daylight usefulness versus 3D clutter",
@@ -2117,6 +2206,20 @@ def main() -> int:
         message = str(exc).replace(token, "<redacted>") if token else str(exc)
         print(f"renderer_benchmark: {message}", file=sys.stderr)
         return 1
+    finally:
+        if runner is not None and not cleanup_attempted:
+            try:
+                runner.restore_current_profile()
+            except (BenchmarkError, DebugClientError) as exc:
+                message = (
+                    str(exc).replace(token, "<redacted>")
+                    if token
+                    else str(exc)
+                )
+                print(
+                    f"renderer_benchmark: cleanup warning: {message}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":

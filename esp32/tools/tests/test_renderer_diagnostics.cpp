@@ -106,6 +106,9 @@ int main() {
   for (size_t index = 0; index < sizeof(routeHash); ++index)
     routeHash[index] = static_cast<uint8_t>(index);
   assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 90, 90, 1, 2000));
+  routeHash[0] = 0xff;
+  assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2000));
+  routeHash[0] = 0;
   assert(state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2001));
   state.noteRemoteDebug({true, 434312, 7, 1, 2, 0, 1500, 2300, 12, 18,
                          3000000, 2100000, 2550000, 1800000});
@@ -137,7 +140,7 @@ int main() {
   assert(snapshot.limiterPasses[3] == 1);
   assert(snapshot.limiterPasses[5] == 1);
   assert(snapshot.routeMarker.accepted == 1);
-  assert(snapshot.routeMarker.rejected == 1);
+  assert(snapshot.routeMarker.rejected == 2);
   assert(snapshot.routeFixtureMatches);
   assert(snapshot.remoteDebug.snapshotBytes == 434312);
 
@@ -149,6 +152,8 @@ int main() {
   assert(latchedFailure.buildings.allocationFallback);
 
   state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000, jobs(3));
+  state.noteMemory({0, 0, 0, 0, 0});
+  state.noteMemory({100, 100, 100, 100, 100});
   const Snapshot reset = state.snapshot(3001);
   assert(reset.measurementWindowId == 42);
   assert(reset.sequence == 3);
@@ -156,6 +161,8 @@ int main() {
   assert(reset.jobs.requested == 0);
   assert(reset.maximumUiGapMs == 0);
   assert(reset.routeMarker.accepted == 0);
+  assert(reset.windowMinimumInternalFree == 0);
+  assert(reset.windowMinimumPsramFree == 0);
   assert(!reset.buildings.allocationFallback);
   assert(reset.profile == Profile::Flat);
   assert(reset.remoteDebug.active);

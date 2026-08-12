@@ -280,10 +280,22 @@ public:
 
   void noteMemory(const MemorySample &sample) {
     memory_ = sample;
-    noteMinimum(windowMinimumInternalFree_, sample.internalFree);
-    noteMinimum(windowMinimumInternalLargest_, sample.internalLargest);
-    noteMinimum(windowMinimumPsramFree_, sample.psramFree);
-    noteMinimum(windowMinimumPsramLargest_, sample.psramLargest);
+    if (!memoryObserved_) {
+      windowMinimumInternalFree_ = sample.internalFree;
+      windowMinimumInternalLargest_ = sample.internalLargest;
+      windowMinimumPsramFree_ = sample.psramFree;
+      windowMinimumPsramLargest_ = sample.psramLargest;
+      memoryObserved_ = true;
+      return;
+    }
+    windowMinimumInternalFree_ =
+        std::min(windowMinimumInternalFree_, sample.internalFree);
+    windowMinimumInternalLargest_ =
+        std::min(windowMinimumInternalLargest_, sample.internalLargest);
+    windowMinimumPsramFree_ =
+        std::min(windowMinimumPsramFree_, sample.psramFree);
+    windowMinimumPsramLargest_ =
+        std::min(windowMinimumPsramLargest_, sample.psramLargest);
   }
 
   void noteRender(const RenderSample &sample) {
@@ -336,8 +348,9 @@ public:
   bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                        uint16_t sampleIndex, uint16_t sampleCount,
                        uint32_t loop, uint32_t nowMs) {
-    if (fixtureSha256 == nullptr || hashBytes != routeMarker_.fixtureSha256.size() ||
-        sampleCount == 0 || sampleIndex >= sampleCount) {
+    if (fixtureSha256 == nullptr ||
+        hashBytes != routeMarker_.fixtureSha256.size() || sampleCount == 0 ||
+        sampleIndex >= sampleCount || !routeHashMatches(fixtureSha256)) {
       ++routeMarker_.rejected;
       return false;
     }
@@ -397,11 +410,6 @@ public:
   }
 
 private:
-  static void noteMinimum(uint32_t &minimum, uint32_t value) {
-    if (minimum == 0 || value < minimum)
-      minimum = value;
-  }
-
   static uint32_t subtract(uint32_t value, uint32_t baseline) {
     return value >= baseline ? value - baseline : 0;
   }
@@ -429,8 +437,8 @@ private:
     return -1;
   }
 
-  bool routeHashMatches() const {
-    if (!routeMarker_.valid)
+  bool routeHashMatches(const uint8_t *candidate) const {
+    if (candidate == nullptr)
       return false;
     const char *expected = run_.routeFixtureSha256.c_str();
     if (std::strlen(expected) != 64)
@@ -439,11 +447,15 @@ private:
       const int high = hexNibble(expected[index * 2]);
       const int low = hexNibble(expected[index * 2 + 1]);
       if (high < 0 || low < 0 ||
-          routeMarker_.fixtureSha256[index] !=
-              static_cast<uint8_t>((high << 4) | low))
+          candidate[index] != static_cast<uint8_t>((high << 4) | low))
         return false;
     }
     return true;
+  }
+
+  bool routeHashMatches() const {
+    return routeMarker_.valid &&
+           routeHashMatches(routeMarker_.fixtureSha256.data());
   }
 
   void resetWindowState() {
@@ -451,6 +463,7 @@ private:
     windowStartedAtMs_ = 0;
     run_ = {};
     memory_ = {};
+    memoryObserved_ = false;
     windowMinimumInternalFree_ = 0;
     windowMinimumInternalLargest_ = 0;
     windowMinimumPsramFree_ = 0;
@@ -488,6 +501,7 @@ private:
   RunIdentity run_{};
   renderer_tuning::Profile profile_ = renderer_tuning::Profile::Current;
   MemorySample memory_{};
+  bool memoryObserved_ = false;
   uint32_t windowMinimumInternalFree_ = 0;
   uint32_t windowMinimumInternalLargest_ = 0;
   uint32_t windowMinimumPsramFree_ = 0;

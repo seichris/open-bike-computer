@@ -43,9 +43,11 @@ All profiles retain the total building limits of 96 records, 8192 points, and
 | `medium` | 40 | 3840 | 112500 |
 | `high` | 48 | 4608 | 135000 |
 
-Profiles are session-scoped and RAM-only. Disconnecting, ending remote debug,
-or ending an ordinary replay restores `current`; the experiment never writes a
-preference or changes the production default.
+Profiles are session-scoped and RAM-only. The runner performs a checked
+`current` cleanup window on success and a best-effort cleanup after setup or
+transport failure. Disconnecting, ending remote debug, or ending an ordinary
+replay also restores `current`; the experiment never writes a preference or
+changes the production default.
 
 ## Prerequisites
 
@@ -59,8 +61,9 @@ preference or changes the production default.
    unless the active map ID and receipt match.
 3. Connect an authenticated Debug build of the iPhone app. In **Developer
    Settings → Renderer Benchmark Replay**, tap **Start Pinned 1 Hz Replay** and
-   leave it running. The iPhone sends the route window on the app's normal
-   two-second cadence and sends GPS plus the fixture marker at 1 Hz.
+   leave it running on the map-backed navigation screen with 3D buildings
+   enabled. The iPhone sends the route window on the app's normal two-second
+   cadence and sends GPS plus the fixture marker at 1 Hz.
 4. Start **Remote Device Debugging** and put the Mac on the reported LAN or
    device-hotspot network. Store `baseUrl` and `token` in a mode-`0600` JSON
    session file as described in [Remote device debugging](remote-device-debugging.md).
@@ -112,7 +115,10 @@ snapshot fails rather than producing an optimistic ranking.
 The checked-in gate file is
 `esp32/tools/renderer_benchmark_gates.json`. Its initial safety floors include
 32 KiB free/16 KiB largest internal-RAM block and 1.5 MB free/750 KiB largest
-PSRAM block. It also rejects monotonic memory loss, allocation fallback,
+PSRAM block. It requires a dense view (at least 40 median candidates, 24
+selected buildings, and 16 extrusions in every non-flat profile), so a wrong
+map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
+rejects monotonic memory loss, allocation fallback,
 renderer invariant failures, excessive stale/cancelled/interrupted work, route
 marker loss or staleness (2.5-second age and 4-second progress limits), large
 UI/GPS gaps, and display/render latency beyond the declared

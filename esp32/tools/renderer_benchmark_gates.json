@@ -8,6 +8,9 @@
   "absolute": {
     "minimumMetricsSampleFraction": 0.8,
     "minimumRenderSamples": 20,
+    "minimumBuildingCandidates": 40,
+    "minimumSelectedBuildings": 24,
+    "minimumExtrudedBuildingsFor3DProfile": 16,
     "minimumGpsPacketsPerMinute": 48,
     "minimumRouteMarkersPerMinute": 48,
     "maximumRouteMarkerAgeMs": 2500,

@@ -367,6 +367,89 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertIn("stalled_route_marker", failures)
         self.assertIn("missing_gps_packets", failures)
 
+    def test_sparse_or_non_extruded_fixture_cannot_pass_as_a_baseline(self):
+        fixture = {
+            "id": "shanghai-renderer-v1",
+            "manifestReceipt": "a" * 64,
+        }
+        route_hash = "b" * 64
+        snapshots = [
+            snapshot(
+                sequence=index + 1,
+                timestamp_ms=1000 + index * 1000,
+                map_fixture=fixture,
+                route_id="shanghai-center-renderer-v1",
+                route_sha256=route_hash,
+            )
+            for index in range(61)
+        ]
+        for value in snapshots:
+            value["render"]["buildings"]["candidates"] = 8
+            value["render"]["buildings"]["selected"] = 8
+            value["render"]["buildings"]["extruded"] = 0
+        samples = [
+            renderer_benchmark.compact_sample(value, index)
+            for index, value in enumerate(snapshots)
+        ]
+        summary = renderer_benchmark.summarize_run(snapshots, samples)
+        self.assertEqual(summary["renderedBuildings"], 60)
+        failures = renderer_benchmark.evaluate_run(
+            snapshots=snapshots,
+            samples=samples,
+            summary=summary,
+            duration_seconds=60,
+            poll_interval_seconds=1,
+            screenshots=[],
+            checkpoint_count=0,
+            expected_route_sample_count=120,
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            expect_remote_debug=False,
+        )
+        self.assertIn("building_fixture_not_dense_enough", failures)
+        self.assertIn("insufficient_selected_buildings", failures)
+        self.assertIn("insufficient_extruded_buildings", failures)
+
+    def test_cleanup_window_restores_current_profile(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+
+        class CleanupClient:
+            def __init__(self):
+                self.requests = []
+
+            def begin_renderer_window(self, **kwargs):
+                self.requests.append(kwargs)
+                return 17
+
+            def metrics(self):
+                return {
+                    "window": {"id": 17, "runId": self.requests[-1]["run_id"]},
+                    "tuning": {"profile": "current"},
+                }
+
+        client = CleanupClient()
+        runner = renderer_benchmark.BenchmarkRunner(
+            client=client,
+            output=Path("unused"),
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            map_fixture_id="shanghai-map",
+            map_fixture_sha256="a" * 64,
+            route_fixture=route,
+            route_fixture_sha256="b" * 64,
+            route_mode="ios-fixture-1hz",
+            warmup_seconds=0,
+            poll_interval_seconds=1,
+            capture_screenshots=False,
+        )
+        runner.restore_current_profile()
+        self.assertEqual(client.requests[0]["profile"], "current")
+        self.assertTrue(client.requests[0]["run_id"].endswith("-cleanup"))
+
     def test_ordinary_capture_is_bound_to_remote_winner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

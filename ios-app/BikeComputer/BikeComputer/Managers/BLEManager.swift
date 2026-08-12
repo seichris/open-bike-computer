@@ -7659,6 +7659,11 @@ extension BLEManager: CBPeripheralDelegate {
             return false
         }
         if prefix == DeviceBLEProtocol.rendererMetricsChunkPrefix {
+            guard supportsRendererDiagnostics else {
+                rendererDiagnosticsChunks.reset()
+                rendererDiagnosticsStatus = "unsupported"
+                return true
+            }
             guard let result = rendererDiagnosticsChunks.consume(data) else {
                 return false
             }
@@ -7675,6 +7680,12 @@ extension BLEManager: CBPeripheralDelegate {
         guard prefix == DeviceBLEProtocol.rendererMetricsResponsePrefix else {
             return false
         }
+        guard supportsRendererDiagnostics else {
+            rendererDiagnosticsChunks.reset()
+            rendererDiagnosticsStatus = "unsupported"
+            return true
+        }
+        rendererDiagnosticsChunks.reset()
         applyRendererDiagnosticsBody(Data(data.dropFirst(4)))
         return true
     }

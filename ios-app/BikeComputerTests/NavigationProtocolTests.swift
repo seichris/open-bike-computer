@@ -10633,6 +10633,24 @@ struct NavigationProtocolTests {
             RendererDiagnosticsSnapshotEnvelope.normalizedJSONString(body) != nil,
             "shared renderer snapshot envelope validates"
         )
+        var interruptedReassembler = RendererDiagnosticsChunkReassembler()
+        var firstInterruptedChunk = Data(
+            DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8
+        )
+        firstInterruptedChunk.append(contentsOf: [3, 0, 2])
+        firstInterruptedChunk.append(contentsOf: body.prefix(10))
+        assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .pending,
+            "a partial renderer snapshot waits for its remaining chunks"
+        )
+        assertEqual(
+            interruptedReassembler.consume(
+                Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
+            ),
+            .rejected,
+            "malformed renderer chunks clear partial state"
+        )
         guard let ordinaryCapture = RendererOrdinaryDiagnosticsCapture.json(
             fixtureID: fixture.id,
             fixtureSHA256: fixtureHash,
@@ -10693,11 +10711,25 @@ struct NavigationProtocolTests {
                     "RDMS", "renderer metrics request uses the shared prefix")
 
         var direct = Data(DeviceBLEProtocol.rendererMetricsResponsePrefix.utf8)
+        var partial = Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
+        partial.append(contentsOf: [5, 0, 2])
+        partial.append(contentsOf: body.prefix(10))
+        assert(manager.handleRendererDiagnosticsNotification(partial),
+               "BLE manager accepts a partial renderer snapshot")
         direct.append(body)
         assert(manager.handleRendererDiagnosticsNotification(direct),
                "BLE manager consumes direct renderer snapshots")
         assertEqual(manager.rendererDiagnosticsRevision, 1,
                     "valid renderer snapshots advance the observable revision")
+        var staleRemainder = Data(
+            DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8
+        )
+        staleRemainder.append(contentsOf: [5, 1, 2])
+        staleRemainder.append(contentsOf: body.dropFirst(10))
+        assert(manager.handleRendererDiagnosticsNotification(staleRemainder),
+               "stale chunk remainder is consumed as a new incomplete stream")
+        assertEqual(manager.rendererDiagnosticsRevision, 1,
+                    "a newer direct snapshot invalidates older partial chunks")
     }
 
     static func testDeviceBLEProtocolConstants() {

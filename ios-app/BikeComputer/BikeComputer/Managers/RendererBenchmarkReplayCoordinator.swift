@@ -3,7 +3,7 @@ import Combine
 import Foundation
 
 @MainActor
-final class RendererBenchmarkReplayCoordinator: ObservableObject {
+final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var fixtureID = ""
     @Published private(set) var sampleIndex = 0
@@ -29,7 +29,7 @@ final class RendererBenchmarkReplayCoordinator: ObservableObject {
     }
 
     func start(bleManager: BLEManager, bundle: Bundle = .main) {
-        stop(clearRoute: false)
+        stop(clearRoute: false, restoreCurrent: false)
         guard bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics else {
@@ -71,10 +71,13 @@ final class RendererBenchmarkReplayCoordinator: ObservableObject {
             isRunning = true
             emitCurrentSample()
 
-            let timer = Timer(timeInterval: 1, repeats: true) {
-                [weak self] _ in
-                Task { @MainActor in self?.emitCurrentSample() }
-            }
+            let timer = Timer(
+                timeInterval: 1,
+                target: self,
+                selector: #selector(handleReplayTimer(_:)),
+                userInfo: nil,
+                repeats: true
+            )
             timer.tolerance = 0.05
             self.timer = timer
             RunLoop.main.add(timer, forMode: .common)
@@ -84,14 +87,16 @@ final class RendererBenchmarkReplayCoordinator: ObservableObject {
         }
     }
 
-    func stop(clearRoute: Bool = true) {
+    func stop(clearRoute: Bool = true, restoreCurrent: Bool = true) {
         captureLatestOrdinarySnapshot()
         timer?.invalidate()
         timer = nil
         if clearRoute, isRunning {
             bleManager?.clearRouteGeometry()
         }
-        restoreCurrentProfileIfNeeded()
+        if restoreCurrent {
+            restoreCurrentProfileIfNeeded()
+        }
         isRunning = false
         if status == "Running at 1 Hz" {
             status = "Stopped"
@@ -106,6 +111,10 @@ final class RendererBenchmarkReplayCoordinator: ObservableObject {
             fixtureSHA256: fixtureSHA256,
             snapshots: ordinarySnapshots
         )
+    }
+
+    @objc private func handleReplayTimer(_ timer: Timer) {
+        emitCurrentSample()
     }
 
     private func emitCurrentSample() {

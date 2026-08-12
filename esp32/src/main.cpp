@@ -462,18 +462,21 @@ bool startRemoteDeviceDebugSession() {
                                     "remote debug session could not start");
     return false;
   }
-  if (!deviceTransferHttp.setEnabled(true, "debug")) {
-    deviceTransferHttp.clearPreferredNetwork();
-    deviceDebugHttp.cancelSession();
-    deviceDebugHttp.finishSessionTeardown();
-    return false;
-  }
   mapView.setRendererTuningProfile(renderer_tuning::Profile::Current,
                                    millis());
   renderer_diagnostics::beginSession(true, millis());
 #if FIRMWARE_DIAGNOSTICS
   ordinaryRendererSessionActive = false;
 #endif
+  if (!deviceTransferHttp.setEnabled(true, "debug")) {
+    deviceTransferHttp.clearPreferredNetwork();
+    mapView.setRendererTuningProfile(renderer_tuning::Profile::Current,
+                                     millis());
+    renderer_diagnostics::endSession(millis());
+    deviceDebugHttp.cancelSession();
+    deviceDebugHttp.finishSessionTeardown();
+    return false;
+  }
   device_debug::frameStore().requestNextFrame();
   if (lv_screen_active() != nullptr)
     lv_obj_invalidate(lv_screen_active());
