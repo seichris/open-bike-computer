@@ -919,10 +919,10 @@ The implementation is rebased from that exact `origin/main` boundary.
 Local validation covers the root factory signing/release tools, the focused
 184-test firmware runtime/build/factory suite, 49 workflow-policy tests, YAML
 parsing, Python compilation, signing-wheel hash/availability checks, and native
-Apple Silicon warm runtime measurements. The first implementation-PR run must
-replace the conservative checked baselines with the exact five-sample
-`ubuntu-24.04` and `macos-15` medians before this change is considered ready to
-merge.
+Apple Silicon warm runtime measurements. GitHub Actions run `31592912639` on
+implementation PR #244 established the checked five-sample warm-handoff
+medians: 4,636 ms for `linux-x86_64-cp313` on `ubuntu-24.04` and 2,197 ms for
+`macos-arm64-cp313` on `macos-15`.
 
 Only these external or deliberately broader decisions remain:
 
@@ -931,12 +931,9 @@ Only these external or deliberately broader decisions remain:
    product release. The publisher intentionally fails before creating a
    release until this is done. The `firmware-runtime-publication` environment
    must likewise be configured with required human reviewers before use.
-2. **Measured CI baseline:** replace both initial conservative ceilings with
-   the first exact five-sample native runner medians from this implementation
-   PR. Any later change follows the reviewed 20% regression policy.
-3. **Additional host targets:** add none until a concrete supported-developer
+2. **Additional host targets:** add none until a concrete supported-developer
    or release requirement pays for native generation and continuing CI.
-4. **Initial host bootstrap trust:** keep it explicit in the mandatory claim;
+3. **Initial host bootstrap trust:** keep it explicit in the mandatory claim;
    a verified native/shell launcher or independent artifact mirror remains a
    separately reviewed broader-hardening project.
 

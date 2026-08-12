@@ -55,6 +55,9 @@ Runtime-affecting pull requests run five warm handoff checks on
 `ubuntu-24.04` and `macos-15`. The checked baseline is lock-specific; a median
 regression beyond 20% requires a profile and explicit baseline review. The
 existing custom-core source-only/cold-build 35% gate remains separate.
+For lock set `firmware-runtime-2026-08-10-1`, GitHub Actions run
+`31592912639` on PR #244 established medians of 4,636 ms on
+`ubuntu-24.04` and 2,197 ms on `macos-15` from five warm samples per target.
 
 Rollback never edits an accepted asset. Revert the tracked lock to a previous
 accepted lock in a normal pull request, rebuild affected private state, and use
