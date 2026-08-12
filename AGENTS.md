@@ -236,13 +236,14 @@ component checksums. Project-level PlatformIO directory overrides and
 `extra_configs` likewise disable cache/upload attestation. The emitted
 `coreAttestationSha256` summarizes the PlatformIO-installed package, tool,
 nested-runtime, platform, framework, private global-library, and core-board
-state after bootstrap. It does not cover the host Python interpreter, top-level
-`pio` launcher, or pioarduino's first-run online Python dependency resolver
-(including its package registries, external `uv`, private `penv`, and ESP-IDF
-venv before their resulting trees are attested); those remain part of the
-trusted workstation or CI boundary. The attestation detects later mutation or
-cache reuse of those installed trees, but it is not a pre-execution Python
-supply-chain proof. Raw Waveshare
+state after bootstrap. The accepted private CPython, top-level `pio`, `uv`,
+wheelhouse, pioarduino root `penv`, esptool, ESP-IDF venv, and transformed
+platform are content locked before execution and attested again after
+installation. The residual bootstrap boundary is the complete initial caller
+`python3` startup (or the recovery shell, `curl`, hash utility, and `tar`), plus
+the host OS/kernel and repository/GitHub control plane. Do not narrow that
+boundary to only the standard-library source imported by the verifier, and do
+not describe pioarduino's removed online first-run resolver as trusted. Raw Waveshare
 PlatformIO builds fail with a pointer to the helper; raw legacy-board builds are
 stamped `unverified-...` rather than advertising an exact Git SHA. AMOLED upload
 rechecks the clean source identity, generated state, managed components,
@@ -263,6 +264,32 @@ as flashed until a later `BOOT_META` independently confirms the
 embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
+
+### Firmware release and factory-image qualification
+
+When firmware is requested from current or latest GitHub `main`, fetch
+`origin/main`, record the exact SHA, and build from a clean detached worktree.
+Do not let an active checkout, an unpushed commit, or unrelated local changes
+enter the artifact.
+
+Immediately before any flash write, restate the physical board model, selected
+profile, device nickname and stable serial (or the deliberately selected port
+when no serial exists), exact Git SHA, and attested artifact/flash-plan identity.
+Obtain explicit user confirmation at that point. Earlier approval to build,
+inspect, or prepare a release is not approval for the destructive write.
+
+Green CI, a successful build, or a merged pull request is not physical firmware
+acceptance. A production-enabled hardware-path change must retain a visible
+per-target hardware gate and must not be tagged, distributed, or described as a
+factory/golden image until that gate passes. A change with pending physical
+validation may merge only when the affected capability is excluded from
+production or the maintainer explicitly accepts and records the residual risk.
+Treat the 1.75-inch and 2.06-inch boards as separate qualification targets.
+
+Tagged releases package the production images using the attested flash plan;
+see `docs/firmware-factory-release.md`. The factory archive does not waive the
+normal device-identity, confirmation, post-flash `BOOT_META`, ready-state, or
+readback requirements.
 
 ### iOS app
 

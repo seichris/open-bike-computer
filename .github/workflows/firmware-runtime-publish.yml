@@ -1,0 +1,210 @@
+name: Publish reviewed firmware runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Firmware runtime refresh candidate run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: firmware-runtime-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Revalidate reviewed candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Bind publication to the exact successful candidate run
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
+            > "${RUNNER_TEMP}/candidate-run.json"
+          python - "${RUNNER_TEMP}/candidate-run.json" "${GITHUB_SHA}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          run = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_path = ".github/workflows/firmware-runtime-refresh.yml"
+          if (
+              run.get("conclusion") != "success"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("head_sha") != sys.argv[2]
+              or not str(run.get("path", "")).split("@", 1)[0].endswith(expected_path)
+          ):
+              raise SystemExit("candidate run does not match this exact reviewed workflow commit")
+          PY
+      - name: Require configured human publication reviewers
+        run: |
+          set -euo pipefail
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/environments/firmware-runtime-publication" \
+            > "${RUNNER_TEMP}/publication-environment.json"
+          python - "${RUNNER_TEMP}/publication-environment.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          environment = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          reviewer_rules = [
+              rule
+              for rule in environment.get("protection_rules", [])
+              if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
+          ]
+          if (
+              len(reviewer_rules) != 1
+              or not isinstance(reviewer_rules[0].get("reviewers"), list)
+              or not reviewer_rules[0]["reviewers"]
+          ):
+              raise SystemExit("firmware-runtime-publication requires human reviewers")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          pattern: firmware-runtime-candidate-*
+          path: ${{ runner.temp }}/runtime-candidates
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          pattern: firmware-build-validation-*
+          path: ${{ runner.temp }}/firmware-validation
+      - name: Require both native candidate and validation artifacts
+        run: |
+          set -euo pipefail
+          for target in linux-x86_64-cp313 macos-arm64-cp313; do
+            test -d "${RUNNER_TEMP}/runtime-candidates/firmware-runtime-candidate-${target}"
+            test -d "${RUNNER_TEMP}/firmware-validation/firmware-build-validation-${target}"
+          done
+      - name: Stage the exact create-only publication set
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python \
+            tools/firmware_runtime_publication.py stage \
+            --candidates-root "${RUNNER_TEMP}/runtime-candidates" \
+            --asset-dir "${RUNNER_TEMP}/runtime-publication/assets" \
+            --manifest "${RUNNER_TEMP}/runtime-publication/publication-manifest.json"
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python \
+            tools/firmware_runtime_publication.py verify-staged \
+            --asset-dir "${RUNNER_TEMP}/runtime-publication/assets" \
+            --manifest "${RUNNER_TEMP}/runtime-publication/publication-manifest.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-firmware-runtime-publication
+          path: ${{ runner.temp }}/runtime-publication
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Approval-gated create-only publication
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: firmware-runtime-publication
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-firmware-runtime-publication
+          path: ${{ runner.temp }}/runtime-publication
+      - name: Reverify staged assets after artifact transport
+        working-directory: esp32
+        run: |
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python \
+            tools/firmware_runtime_publication.py verify-staged \
+            --asset-dir "${RUNNER_TEMP}/runtime-publication/assets" \
+            --manifest "${RUNNER_TEMP}/runtime-publication/publication-manifest.json"
+      - name: Create, verify, and publish a unique prerelease
+        run: |
+          set -euo pipefail
+          if [ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != true ]; then
+            echo "Repository immutable releases must be enabled before publication" >&2
+            exit 1
+          fi
+          publication_manifest="${RUNNER_TEMP}/runtime-publication/publication-manifest.json"
+          release_tag="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["releaseTag"])' "${publication_manifest}")"
+          generator_commit="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["generatorCommit"])' "${publication_manifest}")"
+          if gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" \
+            >/dev/null 2>&1; then
+            echo "Runtime tag ${release_tag} already exists; refusing ambiguous publication" >&2
+            exit 1
+          fi
+          if gh release view "${release_tag}" >/dev/null 2>&1; then
+            echo "Runtime release ${release_tag} already exists; refusing to replace it" >&2
+            exit 1
+          fi
+          gh release create "${release_tag}" \
+            --draft \
+            --prerelease \
+            --target "${generator_commit}" \
+            --title "${release_tag}" \
+            --notes "Reviewed firmware runtime generated from ${generator_commit}."
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" \
+            > "${RUNNER_TEMP}/runtime-tag.json"
+          python - "${RUNNER_TEMP}/runtime-tag.json" "${generator_commit}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          tag = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          target = tag.get("object")
+          if (
+              not isinstance(target, dict)
+              or target.get("type") != "commit"
+              or target.get("sha") != sys.argv[2]
+          ):
+              raise SystemExit("runtime release tag does not bind the reviewed commit")
+          PY
+          gh release upload "${release_tag}" \
+            "${RUNNER_TEMP}"/runtime-publication/assets/*
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
+            > "${RUNNER_TEMP}/runtime-release.json"
+          python tools/verify_github_release_assets.py \
+            --release-json "${RUNNER_TEMP}/runtime-release.json" \
+            --asset-dir "${RUNNER_TEMP}/runtime-publication/assets"
+          gh release edit "${release_tag}" --draft=false --prerelease
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
+            > "${RUNNER_TEMP}/runtime-release.json"
+          python tools/verify_github_release_assets.py \
+            --release-json "${RUNNER_TEMP}/runtime-release.json" \
+            --asset-dir "${RUNNER_TEMP}/runtime-publication/assets" \
+            --require-immutable \
+            --output "${RUNNER_TEMP}/runtime-publication-receipt.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-runtime-publication-receipt
+          path: ${{ runner.temp }}/runtime-publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90

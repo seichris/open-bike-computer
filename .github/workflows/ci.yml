@@ -17,21 +17,30 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/firmware-diagnostics.yml"
       - ".github/workflows/firmware-release.yml"
+      - ".github/workflows/firmware-runtime-performance.yml"
+      - ".github/workflows/firmware-runtime-publish.yml"
+      - ".github/workflows/firmware-runtime-refresh.yml"
       - ".github/workflows/map-platform-ci.yml"
       - ".github/workflows/map-platform-image.yml"
       - ".github/workflows/speaker-firmware.yml"
       - "docs/app-store-privacy-disclosures.md"
       - "docs/device-ownership-test-vectors.json"
       - "docs/firmware-battery-life-hardware-validation.md"
+      - "docs/firmware-build-provenance.md"
+      - "docs/firmware-factory-release.md"
       - "docs/firmware-map-memory-diagnostics.md"
       - "docs/firmware-map-render-scheduler.md"
       - "docs/firmware-map-rendering-psram.md"
+      - "docs/firmware-runtime-maintenance.md"
       - "docs/releases/watchos-workout-companion.md"
       - "esp32/**"
       - "ios-app/**"
       - "map-platform/**"
       - "test-fixtures/fmb/**"
       - "tools/firmware_manifest.py"
+      - "tools/factory_release_manifest.py"
+      - "tools/firmware-signing-requirements.txt"
+      - "tools/verify_github_release_assets.py"
       - "tools/tests/**"
       - "tools/OSM_Extract/**"
   pull_request:
@@ -129,7 +138,34 @@ jobs:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
-        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          factory_args=()
+          if [[ "${BUILD_ENVIRONMENT}" == *_PRODUCTION ]]; then
+            factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+            factory_args=(
+              --factory-output-dir
+              "${RUNNER_TEMP}/factory-${factory_target}"
+            )
+          fi
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
+            "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
+      - name: Verify production factory bundle packaging
+        if: endsWith(matrix.target, '_PRODUCTION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+          output_dir="${RUNNER_TEMP}/factory-${factory_target}"
+          extract_dir="${RUNNER_TEMP}/factory-extract-${factory_target}"
+          mkdir -p "${extract_dir}"
+          tar -xzf "${output_dir}/${factory_target}.factory.tar.gz" \
+            -C "${extract_dir}"
+          cd "${extract_dir}/${factory_target}.factory"
+          sha256sum --check SHA256SUMS
       - name: Verify ordinary artifacts exclude remote-debug routes
         run: |
           if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then
@@ -248,6 +284,7 @@ jobs:
         run: |
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
+            tools.tests.test_package_factory_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
             tools.tests.test_firmware_runtime \

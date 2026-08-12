@@ -31,7 +31,7 @@ If the host has no usable `python3`, use
 `tools/build_firmware_bootstrap.sh` with the same arguments. It obtains only the
 exact tracked standalone-Python archive and then delegates to the same verifier.
 The checked-in `firmware-runtime-2026-08-10-1` lock accepts exact Linux x86-64
-and Apple Silicon bundles from the matching immutable tooling prerelease.
+and Apple Silicon bundles from the matching content-addressed tooling prerelease.
 Unsupported hosts and any runtime whose locked bytes have changed fail before
 PlatformIO.
 
@@ -125,10 +125,18 @@ therefore the reproducible source commit time, not the local compilation time;
 the manifest records both the epoch and ISO UTC timestamp. Public dependency
 fetches use an empty isolated Git configuration so workstation URL rewrites do
 not change the transport.
-The initial OS and system-Python standard library remain trusted to run the
-verifier. All subsequently executed Python, PlatformIO, uv, pioarduino root
+The host OS/kernel and complete initial system-Python startup remain trusted
+until the locked-runtime handoff; the optional shell bootstrap has its own
+documented shell/download/hash/archive boundary. All subsequently executed
+Python, PlatformIO, uv, pioarduino root
 environment, ESP-IDF environment, and esptool distributions are selected by
 the content-pinned runtime bundle and re-attested after installation.
+
+Production CI and tagged releases request deterministic factory output through
+the same helper with `--factory-output-dir`. Ordinary development and device
+testing omit that option, so they do not package or sign release archives. See
+[`docs/firmware-factory-release.md`](../docs/firmware-factory-release.md) and
+[`docs/firmware-runtime-maintenance.md`](../docs/firmware-runtime-maintenance.md).
 
 Custom-core reuse and upload eligibility are separate. A source-only change may
 reuse a validated project-private core entry, while the firmware build manifest

@@ -67,18 +67,33 @@ def canonical_payload(manifest: dict[str, object]) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def sign_manifest(manifest: dict[str, object], private_key_base64: str) -> str:
+def _private_key(private_key_base64: str) -> ec.EllipticCurvePrivateKey:
     key_bytes = base64.b64decode(private_key_base64, validate=True)
     if len(key_bytes) != 32:
         raise ValueError("P-256 private scalar must be 32 raw bytes encoded as base64")
     private_value = int.from_bytes(key_bytes, byteorder="big")
     if private_value <= 0:
         raise ValueError("P-256 private scalar must be greater than zero")
-    private_key = ec.derive_private_key(private_value, ec.SECP256R1())
-    signature = private_key.sign(
-        canonical_payload(manifest), ec.ECDSA(hashes.SHA256())
-    )
+    return ec.derive_private_key(private_value, ec.SECP256R1())
+
+
+def _sign_payload(
+    payload: bytes, private_key: ec.EllipticCurvePrivateKey
+) -> str:
+    signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
     return base64.b64encode(signature).decode("ascii")
+
+
+def sign_payload(payload: bytes, private_key_base64: str) -> str:
+    """Sign an already canonicalized release payload with the release key."""
+    return _sign_payload(payload, _private_key(private_key_base64))
+
+
+def sign_manifest(manifest: dict[str, object], private_key_base64: str) -> str:
+    # Validate the private scalar before the payload to preserve the fail-closed
+    # key-validation behavior used by release tooling and tests.
+    private_key = _private_key(private_key_base64)
+    return _sign_payload(canonical_payload(manifest), private_key)
 
 
 def write_manifest(args: argparse.Namespace) -> None:
