@@ -728,6 +728,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
+        testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
@@ -8020,6 +8021,171 @@ struct NavigationProtocolTests {
                 managerSource.contains("catch is CancellationError") &&
                 managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
             "preview ZIPs retain resumable background upload through a sanitized archive"
+        )
+    }
+
+    static func testDeviceScreenUISettingsWiring() {
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
+        )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            assert(false, "settings view source should be available to the integration test")
+            return
+        }
+
+        assert(
+            !source.contains("UICustomizationSettingsView") &&
+                !source.contains("UI Customization"),
+            "Settings removes the standalone UI Customization destination"
+        )
+
+        guard let deviceSectionStart = source.range(
+            of: "private struct DeviceScreensSettingsSection"
+        )?.lowerBound,
+        let overlaySectionStart = source.range(
+            of: "private struct NavigationOverlaysSettingsSection",
+            range: deviceSectionStart..<source.endIndex
+        )?.lowerBound,
+        let mapStyleStart = source.range(
+            of: "private enum MapStyleScreen",
+            range: overlaySectionStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "device-screen settings source boundaries should be present")
+            return
+        }
+        let deviceSection = String(source[deviceSectionStart..<overlaySectionStart])
+        let overlaySection = String(source[overlaySectionStart..<mapStyleStart])
+
+        assert(
+            deviceSection.contains("HStack(spacing: 4)") &&
+                deviceSection.contains("Image(systemName: \"gearshape\")") &&
+                deviceSection.contains(
+                    "width: 44,\n" +
+                        "                                    height: 44,\n" +
+                        "                                    alignment: .leading"
+                ) &&
+                deviceSection.contains(".contentShape(Rectangle())") &&
+                deviceSection.contains(".buttonStyle(.borderless)") &&
+                deviceSection.contains(".labelsHidden()"),
+            "map-screen rows keep a close-leading accessible gear and trailing toggle"
+        )
+        guard let rowText = deviceSection.range(
+            of: "Text(screen.title)"
+        ),
+        let gearCondition = deviceSection.range(
+            of: "if let styleScreen = mapStyleScreen(for: screen)",
+            range: rowText.upperBound..<deviceSection.endIndex
+        ),
+        let gearDestination = deviceSection.range(
+            of: "MapStyleSettingsView(",
+            range: gearCondition.upperBound..<deviceSection.endIndex
+        ),
+        let destinationBinding = deviceSection.range(
+            of: "screen: styleScreen",
+            range: gearDestination.upperBound..<deviceSection.endIndex
+        ),
+        let gearImage = deviceSection.range(
+            of: "Image(systemName: \"gearshape\")",
+            range: destinationBinding.upperBound..<deviceSection.endIndex
+        ),
+        let trailingSpacer = deviceSection.range(
+            of: "Spacer()",
+            range: gearImage.upperBound..<deviceSection.endIndex
+        ),
+        let screenToggle = deviceSection.range(
+            of: "Toggle(",
+            range: trailingSpacer.upperBound..<deviceSection.endIndex
+        ),
+        let screenGetter = deviceSection.range(
+            of: "bleManager.isDeviceScreenEnabled(screen)",
+            range: screenToggle.upperBound..<deviceSection.endIndex
+        ),
+        let screenSetter = deviceSection.range(
+            of: "bleManager.setDeviceScreen(",
+            range: screenGetter.upperBound..<deviceSection.endIndex
+        ),
+        let setterScreen = deviceSection.range(
+            of: "screen,",
+            range: screenSetter.upperBound..<deviceSection.endIndex
+        ),
+        let setterValue = deviceSection.range(
+            of: "enabled: $0",
+            range: setterScreen.upperBound..<deviceSection.endIndex
+        ),
+        let lastScreenGuard = deviceSection.range(
+            of: ".disabled(bleManager.isOnlyEnabledDeviceScreen(screen))",
+            range: setterValue.upperBound..<deviceSection.endIndex
+        ) else {
+            assert(
+                false,
+                "each row should keep its routed gear, screen-specific toggle, and last-screen guard"
+            )
+            return
+        }
+        assert(
+            rowText.lowerBound < gearCondition.lowerBound &&
+                gearCondition.lowerBound < gearDestination.lowerBound &&
+                gearDestination.lowerBound < destinationBinding.lowerBound &&
+                destinationBinding.lowerBound < gearImage.lowerBound &&
+                gearImage.lowerBound < trailingSpacer.lowerBound &&
+                trailingSpacer.lowerBound < screenToggle.lowerBound &&
+                screenToggle.lowerBound < screenGetter.lowerBound &&
+                screenGetter.lowerBound < screenSetter.lowerBound &&
+                screenSetter.lowerBound < setterScreen.lowerBound &&
+                setterScreen.lowerBound < setterValue.lowerBound &&
+                setterValue.lowerBound < lastScreenGuard.lowerBound,
+            "each map gear sits beside its label before the trailing screen toggle"
+        )
+        assert(
+            deviceSection.contains("case .map:\n            return .map") &&
+                deviceSection.contains("case .mapPlusNavigation:") &&
+                deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
+                deviceSection.contains(
+                    "case .navigation, .rideStats, .batteryStatus:\n            return nil"
+                ),
+            "only Map rows receive gears and legacy firmware opens the shared map profile"
+        )
+        assert(
+            deviceSection.contains(
+                "This firmware uses one shared style for Map and Map + Navigation."
+            ) &&
+                deviceSection.contains(
+                    "Shared Map Screens UI settings, affects Map and Map + Navigation"
+                ),
+            "legacy shared-profile behavior is visible and accurately announced"
+        )
+
+        guard let developerStart = source.range(
+            of: "private struct DeveloperSettingsView"
+        )?.lowerBound else {
+            assert(false, "developer settings source boundary should be present")
+            return
+        }
+        let developerSource = String(source[developerStart...])
+        assert(
+            developerSource.contains(
+                "NavigationOverlaysSettingsSection()\n        }\n        .navigationTitle(\"Developer Settings\")"
+            ),
+            "Navigation Overlays is the final Developer Settings form section"
+        )
+        assert(
+            overlaySection.contains(
+                "Toggle(\"Route Line\", isOn: $bleManager.showRouteOverlay)\n" +
+                    "                .onChange(of: bleManager.showRouteOverlay) { _ in\n" +
+                    "                    bleManager.sendVisibilityMask()"
+            ) &&
+                overlaySection.contains(
+                    "Toggle(\"Current Position\", isOn: $bleManager.showCurrentPosition)\n" +
+                        "                .onChange(of: bleManager.showCurrentPosition) { _ in\n" +
+                        "                    bleManager.sendVisibilityMask()"
+                ) &&
+                overlaySection.components(
+                    separatedBy: "bleManager.sendVisibilityMask()"
+                ).count - 1 == 2 &&
+                overlaySection.contains(
+                    ".disabled(!bleManager.supportsDeviceSettings)"
+                ),
+            "Navigation Overlays retains both BLE callbacks and its capability guard"
         )
     }
 
