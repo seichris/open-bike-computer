@@ -954,6 +954,7 @@ def evaluate_run(
 
     maximum_marker_age_ms = absolute["maximumRouteMarkerAgeMs"]
     maximum_marker_stall_ms = absolute["maximumRouteMarkerStallMs"]
+    first_marker_position: int | None = None
     last_marker_position: int | None = None
     last_marker_progress_ms: int | None = None
     for snapshot, sample in zip(snapshots, samples):
@@ -989,6 +990,8 @@ def evaluate_run(
             failures.append("stale_route_marker")
         marker_position = loop * sample_count + sample_index
         if last_marker_position is None or marker_position > last_marker_position:
+            if first_marker_position is None:
+                first_marker_position = marker_position
             last_marker_position = marker_position
             last_marker_progress_ms = timestamp_ms
         elif marker_position < last_marker_position:
@@ -997,6 +1000,27 @@ def evaluate_run(
             stalled_ms = _uint32_forward_delta(timestamp_ms, last_marker_progress_ms)
             if stalled_ms >= 0x80000000 or stalled_ms > maximum_marker_stall_ms:
                 failures.append("stalled_route_marker")
+    # A wall-clock-length run is not a complete fixture replay if the iPhone
+    # timer falls materially behind while still producing fresh-looking
+    # markers. Allow only the two unobserved boundary samples around the first
+    # and final HTTP/BLE snapshots; longer runs and soaks must progress for the
+    # rest of their declared duration.
+    minimum_route_progress = max(0, duration_seconds - 2)
+    observed_route_progress = (
+        last_marker_position - first_marker_position
+        if first_marker_position is not None and last_marker_position is not None
+        else 0
+    )
+    if observed_route_progress < minimum_route_progress:
+        failures.append(
+            f"incomplete_route_progress:{observed_route_progress}<"
+            f"{minimum_route_progress}"
+        )
+    if summary["routeMarkersAccepted"] < minimum_route_progress:
+        failures.append(
+            f"incomplete_route_cadence:{summary['routeMarkersAccepted']}<"
+            f"{minimum_route_progress}"
+        )
     if any(
         nested(snapshot, "remoteDebug", "active") is not expect_remote_debug
         for snapshot in snapshots

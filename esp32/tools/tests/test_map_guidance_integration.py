@@ -411,6 +411,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("CourtyardPolicy::SolidRoofFallback", render)
         self.assertIn("const bool preserveCourtyards", render)
         self.assertNotIn("++courtyardDeferred;\n          continue;", render)
+        self.assertNotIn(
+            "admissionDiagnostics.deferred + metadataDeferredBuildings +\n"
+            "        courtyardDeferred",
+            render,
+        )
 
     def test_late_worker_exit_has_an_explicit_restart_handoff(self):
         stop = function_body(MAP_RENDERER_SOURCE, "bool Maps::stopRenderWorker")

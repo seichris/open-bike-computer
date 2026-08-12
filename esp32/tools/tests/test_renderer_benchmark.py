@@ -408,6 +408,48 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertIn("missing_gps_packets", failures)
         self.assertIn("missing_memory_trend_samples:13<20", failures)
 
+    def test_route_progress_must_cover_the_measurement_window(self):
+        fixture = {
+            "id": "shanghai-renderer-v1",
+            "manifestReceipt": "a" * 64,
+        }
+        route_hash = "b" * 64
+        snapshots = [
+            snapshot(
+                sequence=index + 1,
+                timestamp_ms=1000 + index * 1000,
+                map_fixture=fixture,
+                route_id="shanghai-center-renderer-v1",
+                route_sha256=route_hash,
+            )
+            for index in range(121)
+        ]
+        for index, value in enumerate(snapshots):
+            position = index // 2
+            value["routeReplay"]["sampleIndex"] = position % 120
+            value["routeReplay"]["loop"] = position // 120
+            value["routeReplay"]["receivedAtMs"] = value["timestampMs"]
+            value["routeReplay"]["accepted"] = index + 1
+        samples = [
+            renderer_benchmark.compact_sample(value, index)
+            for index, value in enumerate(snapshots)
+        ]
+        failures = renderer_benchmark.evaluate_run(
+            snapshots=snapshots,
+            samples=samples,
+            summary=renderer_benchmark.summarize_run(snapshots, samples),
+            duration_seconds=120,
+            poll_interval_seconds=1,
+            screenshots=[],
+            checkpoint_count=0,
+            expected_route_sample_count=120,
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            expect_remote_debug=False,
+        )
+        self.assertIn("incomplete_route_progress:60<118", failures)
+
     def test_sparse_or_non_extruded_fixture_cannot_pass_as_a_baseline(self):
         fixture = {
             "id": "shanghai-renderer-v1",
@@ -612,6 +654,10 @@ class RendererBenchmarkTests(unittest.TestCase):
                 )
                 for index in range(21)
             ]
+            for index, value in enumerate(snapshots):
+                position = index * 5
+                value["routeReplay"]["sampleIndex"] = position % 120
+                value["routeReplay"]["loop"] = position // 120
             capture_path = root / "capture.json"
             capture_path.write_text(
                 json.dumps(

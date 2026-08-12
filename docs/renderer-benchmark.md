@@ -128,9 +128,9 @@ selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
 rejects monotonic memory loss, allocation fallback,
 renderer invariant failures, excessive stale/cancelled/interrupted work, route
-marker loss or staleness (2.5-second age and 4-second progress limits), large
-UI/GPS gaps, and display/render latency beyond the declared
-limits. Candidate profiles must preserve headroom and latency relative to
+marker loss, incomplete wall-clock route progress, or staleness (2.5-second age
+and 4-second progress limits), large UI/GPS gaps, and display/render latency
+beyond the declared limits. Candidate profiles must preserve headroom and latency relative to
 `current` while gaining at least 5% building reach.
 
 These are intentionally predeclared so results cannot be judged against a

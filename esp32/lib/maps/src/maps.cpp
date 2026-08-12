@@ -3424,9 +3424,12 @@ bool Maps::readVectorMap(
         static_cast<uint32_t>(admissionDiagnostics.extruded);
     diagnostics->flatBuildings =
         static_cast<uint32_t>(admissionDiagnostics.flat);
+    // Courtyard fallback only replaces a hole with a solid roof; the building
+    // remains admitted and rendered. Keep the deferred count limited to
+    // records that were actually excluded from the frame so profile ranking
+    // cannot penalize a successfully rendered building twice.
     diagnostics->deferredBuildings = static_cast<uint32_t>(
-        admissionDiagnostics.deferred + metadataDeferredBuildings +
-        courtyardDeferred);
+        admissionDiagnostics.deferred + metadataDeferredBuildings);
     diagnostics->oversizedBuildings = oversizedBuildings;
     diagnostics->renderedBuildings = renderedBuildings;
     diagnostics->extrudedP90DistancePx = extrudedP90DistancePx;
