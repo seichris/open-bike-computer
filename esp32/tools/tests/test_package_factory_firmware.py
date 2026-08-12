@@ -130,7 +130,7 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
         manifest = {
             "schema": 20,
             "sourceIdentity": GIT_SHA,
-            "sourceDateEpoch": 1_700_000_000,
+            "sourceDateEpoch": "1700000000",
             "buildTimestamp": "2023-11-14T22:13:20Z",
             "uploadEligible": True,
             "platformioIniSha256": sha256(
@@ -197,6 +197,7 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
             self.assertEqual(TARGET, descriptor["target"])
             self.assertEqual(ENVIRONMENT, descriptor["environment"])
             self.assertEqual(GIT_SHA, descriptor["sourceIdentity"])
+            self.assertEqual("1700000000", descriptor["sourceDateEpoch"])
             self.assertEqual(
                 {"version": "2.3.4", "build": 57},
                 descriptor["firmwareVersion"],
@@ -329,6 +330,23 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 package_factory_firmware.BundleError,
                 "PlatformIO configuration changed",
+            ):
+                self.package(project, root / "dist")
+
+    def test_inconsistent_build_clock_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project, manifest_path, _ = self.create_project(root)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["buildTimestamp"] = "2023-11-14T22:13:21Z"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                package_factory_firmware.BundleError,
+                "verified build clock is invalid",
             ):
                 self.package(project, root / "dist")
 

@@ -16,6 +16,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+from firmware_build_identity import build_timestamp_from_source_date_epoch
 from generated_sdkconfig import (
     BUILD_MANIFEST_SCHEMA,
     FLASH_PLAN_SCHEMA,
@@ -474,11 +475,18 @@ def package_factory_bundle(
         )
     source_date_epoch = manifest.get("sourceDateEpoch")
     build_timestamp = manifest.get("buildTimestamp")
+    try:
+        if not isinstance(source_date_epoch, str):
+            raise ValueError("SOURCE_DATE_EPOCH must be a string")
+        expected_build_timestamp = build_timestamp_from_source_date_epoch(
+            source_date_epoch
+        )
+        archive_mtime = int(source_date_epoch)
+    except ValueError as error:
+        raise BundleError("verified build clock is invalid") from error
     if (
-        not isinstance(source_date_epoch, int)
-        or source_date_epoch < 0
-        or not isinstance(build_timestamp, str)
-        or not build_timestamp
+        build_timestamp != expected_build_timestamp
+        or archive_mtime > 0xFFFFFFFF
     ):
         raise BundleError("verified build clock is invalid")
 
@@ -571,7 +579,7 @@ def package_factory_bundle(
 
         temporary_archive = temporary_root / archive_output.name
         _write_deterministic_archive(
-            bundle_root, temporary_archive, source_date_epoch
+            bundle_root, temporary_archive, archive_mtime
         )
         temporary_manifest = temporary_root / manifest_output.name
         temporary_manifest.write_bytes(descriptor_bytes)
