@@ -24,6 +24,7 @@ MAP_WORKFLOW_PATHS = {
 FIRMWARE_CONTRACT_PATHS = {
     "docs/device-ownership-test-vectors.json",
     "docs/firmware-battery-life-hardware-validation.md",
+    "docs/firmware-factory-release.md",
     "docs/firmware-map-memory-diagnostics.md",
     "docs/firmware-map-render-scheduler.md",
     "docs/firmware-map-rendering-psram.md",
@@ -31,6 +32,9 @@ FIRMWARE_CONTRACT_PATHS = {
 FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
     "tools/tests/test_firmware_manifest.py",
+}
+FIRMWARE_RELEASE_TOOL_PATHS = {
+    "tools/factory_release_manifest.py",
 }
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
@@ -65,6 +69,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
             or path.startswith("tools/tests/")
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
+            or path in FIRMWARE_RELEASE_TOOL_PATHS
         ):
             selected["firmware"] = True
 

@@ -46,15 +46,21 @@ jobs:
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
         run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}"
-      - name: Stage firmware image
+      - name: Stage OTA image and factory-flash bundle
         run: |
-          mkdir -p dist
+          set -euo pipefail
+          release_git_sha="$(git rev-parse HEAD)"
+          python3 tools/package_factory_firmware.py \
+            --environment "${{ matrix.environment }}" \
+            --target "${{ matrix.target }}" \
+            --expected-git-sha "${release_git_sha}" \
+            --output-dir dist
           cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/${{ matrix.target }}.bin"
-          shasum -a 256 "dist/${{ matrix.target }}.bin"
+          shasum -a 256 dist/*
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.target }}
-          path: esp32/dist/${{ matrix.target }}.bin
+          path: esp32/dist/
           if-no-files-found: error
 
   publish:
@@ -88,18 +94,38 @@ jobs:
             exit 1
           fi
           mkdir -p release-assets public/firmware
-          git_sha="$(git rev-parse --short=12 HEAD)"
-          find dist -name '*.bin' -exec cp {} release-assets/ \;
+          git_sha_full="$(git rev-parse HEAD)"
+          git_sha_short="$(git rev-parse --short=12 HEAD)"
           for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            artifact_dir="dist/firmware-${target}"
+            for artifact in \
+              "${target}.bin" \
+              "${target}.factory.tar.gz" \
+              "${target}.factory-bundle.json"; do
+              if [ ! -f "${artifact_dir}/${artifact}" ]; then
+                echo "Missing release artifact: ${artifact_dir}/${artifact}" >&2
+                exit 1
+              fi
+              cp "${artifact_dir}/${artifact}" release-assets/
+            done
             python tools/firmware_manifest.py \
               --firmware "release-assets/${target}.bin" \
               --target "${target}" \
               --repository "${{ github.repository }}" \
               --tag "${GITHUB_REF_NAME}" \
-              --git-sha "${git_sha}" \
+              --git-sha "${git_sha_short}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "public/firmware/${target}/manifest.json"
             cp "public/firmware/${target}/manifest.json" "release-assets/${target}.manifest.json"
+            python tools/factory_release_manifest.py \
+              --bundle "release-assets/${target}.factory.tar.gz" \
+              --bundle-manifest "release-assets/${target}.factory-bundle.json" \
+              --target "${target}" \
+              --repository "${{ github.repository }}" \
+              --tag "${GITHUB_REF_NAME}" \
+              --git-sha "${git_sha_full}" \
+              --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
+              --output "release-assets/${target}.factory-release.json"
           done
       - name: Publish GitHub release assets
         run: |

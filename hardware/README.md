@@ -498,6 +498,14 @@ marking establishes the speaker's electrical limits. Do not infer 4/8 ohm or a
 power rating from `F3`; confirm the speaker datasheet or measure it before
 changing the amplifier or gain assumptions.
 
+[PR #223](https://github.com/seichris/open-bike-computer/pull/223) confirmed the
+resource-cleanup fix and audible production playback over 12 repeated cycles;
+the proposed 100-cycle soak was not completed. On 2026-08-12 the maintainer
+accepted that remaining soak coverage as a non-blocking residual risk for the
+1.75-inch release. This acceptance does not establish the `F3` speaker's
+electrical rating or final volume calibration, and it does not qualify the
+separate 2.06-inch target.
+
 ### User Buttons
 
 | Signal | GPIO |

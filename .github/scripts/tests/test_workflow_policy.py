@@ -17,6 +17,7 @@ CORE_FIRMWARE_TARGETS = {
 DIAGNOSTIC_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
     "WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS",
+    "WAVESHARE_AMOLED_175_DISPLAY_TEST",
     "WAVESHARE_AMOLED_175_POWER_METRICS",
     "WAVESHARE_AMOLED_175_LIGHT_SLEEP",
     "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
@@ -29,6 +30,7 @@ SHARED_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
     "docs/device-ownership-test-vectors.json",
     "docs/firmware-battery-life-hardware-validation.md",
+    "docs/firmware-factory-release.md",
     "docs/firmware-map-memory-diagnostics.md",
     "docs/firmware-map-render-scheduler.md",
     "docs/firmware-map-rendering-psram.md",
@@ -313,6 +315,37 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("      - build\n      - diagnostics\n      - validate\n", release)
         self.assertIn("  attestations: read\n", release)
         self.assertIn("  packages: read\n", release)
+
+    def test_release_publishes_signed_factory_flash_bundles(self) -> None:
+        release = workflow_source("firmware-release.yml")
+
+        self.assertIn("tools/package_factory_firmware.py", release)
+        self.assertIn('release_git_sha="$(git rev-parse HEAD)"', release)
+        self.assertIn('--expected-git-sha "${release_git_sha}"', release)
+        self.assertIn('"${target}.factory.tar.gz"', release)
+        self.assertIn('"${target}.factory-bundle.json"', release)
+        self.assertIn("tools/factory_release_manifest.py", release)
+        self.assertIn(
+            '--output "release-assets/${target}.factory-release.json"',
+            release,
+        )
+        self.assertLess(
+            release.index("python3 tools/package_factory_firmware.py"),
+            release.index(
+                'cp ".pio/build/${{ matrix.environment }}/firmware.bin" '
+                '"dist/${{ matrix.target }}.bin"'
+            ),
+        )
+        self.assertNotIn("find dist -name '*.bin'", release)
+
+    def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("Verify production factory bundle packaging", general_ci)
+        self.assertIn("if: endsWith(matrix.target, '_PRODUCTION')", general_ci)
+        self.assertIn("tools/package_factory_firmware.py", general_ci)
+        self.assertIn("tar -xzf", general_ci)
+        self.assertIn("sha256sum --check SHA256SUMS", general_ci)
 
     def test_main_push_filter_includes_shared_contract_inputs(self) -> None:
         general_ci = workflow_source("ci.yml")
