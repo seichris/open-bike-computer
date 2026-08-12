@@ -338,6 +338,15 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("find dist -name '*.bin'", release)
 
+    def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("Verify production factory bundle packaging", general_ci)
+        self.assertIn("if: endsWith(matrix.target, '_PRODUCTION')", general_ci)
+        self.assertIn("tools/package_factory_firmware.py", general_ci)
+        self.assertIn("tar -xzf", general_ci)
+        self.assertIn("sha256sum --check SHA256SUMS", general_ci)
+
     def test_main_push_filter_includes_shared_contract_inputs(self) -> None:
         general_ci = workflow_source("ci.yml")
 

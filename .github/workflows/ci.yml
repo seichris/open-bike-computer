@@ -132,6 +132,26 @@ jobs:
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
         run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
+      - name: Verify production factory bundle packaging
+        if: endsWith(matrix.target, '_PRODUCTION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          release_git_sha="$(git rev-parse HEAD)"
+          factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+          output_dir="${RUNNER_TEMP}/factory-${factory_target}"
+          extract_dir="${RUNNER_TEMP}/factory-extract-${factory_target}"
+          python3 tools/package_factory_firmware.py \
+            --environment "${BUILD_ENVIRONMENT}" \
+            --target "${factory_target}" \
+            --expected-git-sha "${release_git_sha}" \
+            --output-dir "${output_dir}"
+          mkdir -p "${extract_dir}"
+          tar -xzf "${output_dir}/${factory_target}.factory.tar.gz" \
+            -C "${extract_dir}"
+          cd "${extract_dir}/${factory_target}.factory"
+          sha256sum --check SHA256SUMS
       - name: Verify ordinary artifacts exclude remote-debug routes
         run: |
           if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then

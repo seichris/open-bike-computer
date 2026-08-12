@@ -170,6 +170,31 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             self.assertEqual(1, completed.returncode)
             self.assertIn("sourceIdentity does not match", completed.stderr)
 
+    def test_cli_rejects_symlinked_release_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            bundle_link = root / "linked" / bundle.name
+            bundle_link.parent.mkdir()
+            bundle_link.symlink_to(bundle)
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle_link,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("missing or unsafe", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

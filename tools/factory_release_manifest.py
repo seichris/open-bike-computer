@@ -75,10 +75,17 @@ def canonical_payload(manifest: dict[str, object]) -> bytes:
 
 
 def write_manifest(args: argparse.Namespace) -> None:
-    bundle = args.bundle.resolve()
-    bundle_manifest_path = args.bundle_manifest.resolve()
-    if bundle.is_symlink() or not bundle.is_file():
-        raise ValueError(f"factory bundle is missing or unsafe: {bundle}")
+    bundle_input = args.bundle
+    bundle_manifest_input = args.bundle_manifest
+    if bundle_input.is_symlink() or not bundle_input.is_file():
+        raise ValueError(f"factory bundle is missing or unsafe: {bundle_input}")
+    if bundle_manifest_input.is_symlink() or not bundle_manifest_input.is_file():
+        raise ValueError(
+            "factory bundle manifest is missing or unsafe: "
+            f"{bundle_manifest_input}"
+        )
+    bundle = bundle_input.resolve()
+    bundle_manifest_path = bundle_manifest_input.resolve()
     bundle_size = bundle.stat().st_size
     if bundle_size <= 0 or bundle_size > MAX_FACTORY_BUNDLE_BYTES:
         raise ValueError("factory bundle has an invalid size")
