@@ -7811,6 +7811,24 @@ private struct WorkoutContractTestSuite {
 
     private mutating func testWatchWorkoutLaunchRequest() {
         expect(
+            WatchWorkoutLaunchRequest.resolvedURLScheme(
+                configuredScheme: nil
+            ) == "bikecomputer",
+            "a missing bundled URL scheme must retain the production fallback"
+        )
+        expect(
+            WatchWorkoutLaunchRequest.resolvedURLScheme(
+                configuredScheme: "  "
+            ) == "bikecomputer",
+            "an empty bundled URL scheme must retain the production fallback"
+        )
+        expect(
+            WatchWorkoutLaunchRequest.resolvedURLScheme(
+                configuredScheme: "BikeComputer-Dev"
+            ) == "bikecomputer-dev",
+            "the development URL scheme must be normalized"
+        )
+        expect(
             WatchWorkoutLaunchRequest(
                 url: WatchWorkoutLaunchRequest.startOutdoorCyclingURL
             ) == .startOutdoorCycling,
@@ -7827,6 +7845,28 @@ private struct WorkoutContractTestSuite {
                 url: URL(string: "https://workout/start")!
             ) == nil,
             "foreign URL schemes must not start a workout"
+        )
+
+        let developmentURL = WatchWorkoutLaunchRequest.startOutdoorCyclingURL(
+            urlScheme: "bikecomputer-dev"
+        )
+        expect(
+            developmentURL.absoluteString == "bikecomputer-dev://workout/start",
+            "the development complication must generate its registered scheme"
+        )
+        expect(
+            WatchWorkoutLaunchRequest(
+                url: developmentURL,
+                urlScheme: "bikecomputer-dev"
+            ) == .startOutdoorCycling,
+            "the development Watch app must accept its complication URL"
+        )
+        expect(
+            WatchWorkoutLaunchRequest(
+                url: WatchWorkoutLaunchRequest.startOutdoorCyclingURL,
+                urlScheme: "bikecomputer-dev"
+            ) == nil,
+            "the development Watch app must reject production complication URLs"
         )
     }
 

@@ -287,6 +287,45 @@ cd ios-app
   CODE_SIGNING_ALLOWED=NO build
 ```
 
+Debug and Release are separate app families. Debug builds produce `Bicino Dev`
+with iPhone bundle ID `LetItRide.BikeComputer.dev`, Watch bundle ID
+`LetItRide.BikeComputer.dev.watchkitapp`, URL scheme `bikecomputer-dev`, and
+development-branded extensions. Release builds keep the production
+`LetItRide.BikeComputer` family, `Bicino` name, and `bikecomputer` URL scheme.
+The two families can coexist on iPhone and Watch. TestFlight and App Store builds
+share the production identity and replace one another.
+
+Keep the development and production sandboxes, permissions, and Keychains
+isolated. The firmware currently has one owner credential, so use a dedicated
+test bike computer for the development app or deliberately deregister and pair
+again when changing variants. Do not add shared Keychain access groups without
+an explicit security review.
+
+For physical-device delivery from GitHub `main`:
+
+1. Fetch `origin/main`, record its exact SHA, and build from a clean detached
+   worktree so unrelated local changes cannot enter the artifact.
+2. Discover the current iPhone and Watch identifiers with
+   `xcrun devicectl list devices`; never reuse a remembered identifier.
+3. Use a fresh `-derivedDataPath`, the repository build wrapper, the explicit
+   target-device destination, and `-allowProvisioningUpdates`.
+4. Report build, signature verification, install, launch, and installed-metadata
+   query as separate gates. A successful build or embedded Watch app is not an
+   install.
+5. Verify iPhone and Watch installed metadata independently. If the Watch tunnel
+   times out, wake and unlock it, keep it near the iPhone and Mac, repair the
+   connection in Xcode's Devices and Simulators window, and retry the same
+   signed artifact before rebuilding.
+
+The project-local XcodeBuildMCP configuration enables physical-device tools for
+Codex-native discovery, installation, launch, logs, and queries. On Xcode 26.6,
+still use `ios-app/scripts/xcodebuild-cli.sh` for the build itself. Use the Xcode
+GUI for first-time account/signing setup, Developer Mode and trust, pairing,
+interactive debugging, and device-tunnel repair. App Store Connect CLI
+credentials do not satisfy Xcode's automatic-signing account check; a build
+failure that reports `No Accounts` requires adding the team account in Xcode
+Settings.
+
 For physical-device offline-map validation, remember that the firmware renders
 blocks around the WGS-84 position sent by iOS. **No map data** after a completed
 upload can simply mean the phone's real location is outside the installed map.
@@ -299,7 +338,7 @@ xcrun devicectl device process launch \
   --device IPHONE_IDENTIFIER \
   --terminate-existing \
   --console \
-  LetItRide.BikeComputer \
+  LetItRide.BikeComputer.dev \
   --device-map-location=1.305,103.855
 ```
 

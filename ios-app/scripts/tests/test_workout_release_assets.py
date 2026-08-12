@@ -17,6 +17,19 @@ def load_plist(path: Path) -> dict:
         return plistlib.load(handle)
 
 
+def load_xcconfig(path: Path) -> dict[str, str]:
+    values = {}
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        key, separator, value = stripped.partition("=")
+        if not separator:
+            raise AssertionError(f"invalid xcconfig line in {path}: {line}")
+        values[key.strip()] = value.strip()
+    return values
+
+
 def project_object(project: str, object_id: str) -> str:
     match = re.search(
         rf"^\t\t{re.escape(object_id)} /\* [^\n]+ \*/ = \{{\n"
@@ -72,7 +85,7 @@ def target_build_configurations(project: str, target_name: str) -> dict[str, str
 
 
 class WorkoutReleaseAssetsTests(unittest.TestCase):
-    def test_release_identity_advances_the_distributed_app(self):
+    def test_development_and_production_identities_are_separate(self):
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
         ).read_text()
@@ -83,11 +96,68 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             / "watchos-workout-companion.md"
         ).read_text()
 
-        targets = {
-            "BikeComputer": "LetItRide.BikeComputer",
-            "BikeComputerWatch": "LetItRide.BikeComputer.watchkitapp",
+        development = load_xcconfig(
+            IOS_PROJECT / "Configuration" / "Development.xcconfig"
+        )
+        production = load_xcconfig(
+            IOS_PROJECT / "Configuration" / "Production.xcconfig"
+        )
+        expected_development = {
+            "BICINO_IOS_BUNDLE_IDENTIFIER": "LetItRide.BikeComputer.dev",
+            "BICINO_WATCH_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.dev.watchkitapp"
+            ),
+            "BICINO_WATCH_COMPLICATION_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.dev.watchkitapp.complications"
+            ),
+            "BICINO_LIVE_ACTIVITY_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.dev.WorkoutLiveActivity"
+            ),
+            "BICINO_APP_DISPLAY_NAME": "Bicino Dev",
+            "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride Dev",
+            "BICINO_URL_SCHEME": "bikecomputer-dev",
+            "BICINO_APP_ICON_NAME": "AppIconDev",
         }
-        for target_name, bundle_identifier in targets.items():
+        expected_production = {
+            "BICINO_IOS_BUNDLE_IDENTIFIER": "LetItRide.BikeComputer",
+            "BICINO_WATCH_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.watchkitapp"
+            ),
+            "BICINO_WATCH_COMPLICATION_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.watchkitapp.complications"
+            ),
+            "BICINO_LIVE_ACTIVITY_BUNDLE_IDENTIFIER": (
+                "LetItRide.BikeComputer.WorkoutLiveActivity"
+            ),
+            "BICINO_APP_DISPLAY_NAME": "Bicino",
+            "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride",
+            "BICINO_URL_SCHEME": "bikecomputer",
+            "BICINO_APP_ICON_NAME": "AppIcon",
+        }
+        self.assertEqual(development, expected_development)
+        self.assertEqual(production, expected_production)
+
+        self.assertIn(
+            "baseConfigurationReference = D3A000012F10000100000001 "
+            "/* Development.xcconfig */;",
+            project,
+        )
+        self.assertIn(
+            "baseConfigurationReference = D3A000022F10000100000001 "
+            "/* Production.xcconfig */;",
+            project,
+        )
+        target_variables = {
+            "BikeComputer": "BICINO_IOS_BUNDLE_IDENTIFIER",
+            "BikeComputerWatch": "BICINO_WATCH_BUNDLE_IDENTIFIER",
+            "BikeComputerWatchComplications": (
+                "BICINO_WATCH_COMPLICATION_BUNDLE_IDENTIFIER"
+            ),
+            "BikeComputerLiveActivity": (
+                "BICINO_LIVE_ACTIVITY_BUNDLE_IDENTIFIER"
+            ),
+        }
+        for target_name, variable in target_variables.items():
             configurations = target_build_configurations(project, target_name)
             for configuration_name, settings in configurations.items():
                 with self.subTest(
@@ -96,7 +166,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                     self.assertIn("CURRENT_PROJECT_VERSION = 10;", settings)
                     self.assertIn("MARKETING_VERSION = 1.3;", settings)
                     self.assertIn(
-                        f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier};",
+                        f'PRODUCT_BUNDLE_IDENTIFIER = "$({variable})";',
                         settings,
                     )
         self.assertIn("Release candidate: **1.3 (10)**", release_notes)
@@ -182,7 +252,12 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertTrue(watch_info["WKRunsIndependentlyOfCompanionApp"])
         self.assertEqual(
             watch_info["WKCompanionAppBundleIdentifier"],
-            "LetItRide.BikeComputer",
+            "$(BICINO_IOS_BUNDLE_IDENTIFIER)",
+        )
+        self.assertEqual(watch_info["BicinoURLScheme"], "$(BICINO_URL_SCHEME)")
+        self.assertEqual(
+            watch_info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
+            ["$(BICINO_URL_SCHEME)"],
         )
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
@@ -204,13 +279,47 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         )
         self.assertIn(
             "PRODUCT_BUNDLE_IDENTIFIER = "
-            "LetItRide.BikeComputer.WorkoutLiveActivity;",
+            '"$(BICINO_LIVE_ACTIVITY_BUNDLE_IDENTIFIER)";',
             project,
         )
         self.assertEqual(
             project.count("IPHONEOS_DEPLOYMENT_TARGET = 17.0;"),
             2,
             "the Live Activity extension must be iOS 17 in Debug and Release",
+        )
+
+    def test_variant_runtime_helpers_are_wired_to_the_main_bundle(self):
+        launch_request = (
+            IOS_PROJECT.parent
+            / "BikeComputer"
+            / "WorkoutShared"
+            / "WatchWorkoutLaunchRequest.swift"
+        ).read_text()
+        offline_map_platform = (
+            IOS_PROJECT
+            / "BikeComputer"
+            / "Models"
+            / "OfflineMapPlatform.swift"
+        ).read_text()
+
+        self.assertIn(
+            'let configuredScheme = Bundle.main.object(\n'
+            '            forInfoDictionaryKey: "BicinoURLScheme"\n'
+            "        ) as? String",
+            launch_request,
+        )
+        self.assertIn(
+            "static let startOutdoorCyclingURL: URL = {\n"
+            "        startOutdoorCyclingURL(urlScheme: urlScheme)\n"
+            "    }()",
+            launch_request,
+        )
+        self.assertIn(
+            "static let sessionIdentifier = "
+            "BackgroundMapUploadSessionNamespace.identifier(\n"
+            "        bundleIdentifier: Bundle.main.bundleIdentifier\n"
+            "    )",
+            offline_map_platform,
         )
 
     def test_app_intent_descriptions_avoid_reserved_product_names(self):
@@ -316,9 +425,17 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             2,
             "Watch Debug and Release must both reference HealthKit entitlements",
         )
-        self.assertGreaterEqual(
+        self.assertEqual(
+            project.count(
+                'ASSETCATALOG_COMPILER_APPICON_NAME = "$(BICINO_APP_ICON_NAME)";'
+            ),
+            2,
+            "iPhone Debug and Release must select their configured app icon",
+        )
+        self.assertEqual(
             project.count("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"),
-            3,
+            2,
+            "Watch Debug and Release must both use the Watch icon asset",
         )
 
         required_files = [

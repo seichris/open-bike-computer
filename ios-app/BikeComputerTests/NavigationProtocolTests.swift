@@ -676,6 +676,7 @@ struct NavigationProtocolTests {
         testSavedMapRendererCompatibilityPolicy()
         testBackgroundMapUploadRestorationState()
         testBackgroundMapUploadArbitration()
+        testBackgroundMapUploadSessionNamespace()
         testPausedMapUploadResumePolicy()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
@@ -1981,6 +1982,34 @@ struct NavigationProtocolTests {
             ),
             .blockForOther,
             "an active legacy upload blocks a stream transfer"
+        )
+    }
+
+    static func testBackgroundMapUploadSessionNamespace() {
+        assert(
+            BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: "LetItRide.BikeComputer"
+            ) == "LetItRide.BikeComputer.map-transfer.background"
+        )
+        assert(
+            BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: "LetItRide.BikeComputer.dev"
+            ) == "LetItRide.BikeComputer.dev.map-transfer.background"
+        )
+        assert(
+            BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: "example.custom.app"
+            ) == "example.custom.app.map-transfer.background"
+        )
+        assert(
+            BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: nil
+            ) == "LetItRide.BikeComputer.map-transfer.background"
+        )
+        assert(
+            BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: "  "
+            ) == "LetItRide.BikeComputer.map-transfer.background"
         )
     }
 

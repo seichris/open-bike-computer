@@ -58,6 +58,33 @@ require_url_scheme() {
   exit 1
 }
 
+forbid_url_scheme() {
+  local plist_path="$1"
+  local forbidden="$2"
+  local url_type_index=0
+  local scheme_index
+  local actual
+  local actual_lower
+  local forbidden_lower
+  forbidden_lower="$(printf '%s' "${forbidden}" | tr '[:upper:]' '[:lower:]')"
+  while /usr/libexec/PlistBuddy \
+    -c "Print :CFBundleURLTypes:${url_type_index}" \
+    "${plist_path}" >/dev/null 2>&1; do
+    scheme_index=0
+    while actual="$(/usr/libexec/PlistBuddy \
+      -c "Print :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes:${scheme_index}" \
+      "${plist_path}" 2>/dev/null)"; do
+      actual_lower="$(printf '%s' "${actual}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "${actual_lower}" == "${forbidden_lower}" ]]; then
+        echo "forbidden release-container URL scheme: ${plist_path} ${forbidden}" >&2
+        exit 1
+      fi
+      ((scheme_index += 1))
+    done
+    ((url_type_index += 1))
+  done
+}
+
 require_file "${APP_PATH}/Info.plist"
 require_file "${APP_PATH}/BikeComputer"
 require_file "${APP_PATH}/PrivacyInfo.xcprivacy"
@@ -84,6 +111,10 @@ require_plist_value \
   ":CFBundleDisplayName" \
   "Bicino"
 require_plist_value \
+  "${APP_PATH}/Info.plist" \
+  ":CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" \
+  "AppIcon"
+require_plist_value \
   "${WATCH_PATH}/Info.plist" \
   ":CFBundleIdentifier" \
   "LetItRide.BikeComputer.watchkitapp"
@@ -92,9 +123,25 @@ require_plist_value \
   ":CFBundleDisplayName" \
   "Bicino"
 require_plist_value \
+  "${WATCH_PATH}/Info.plist" \
+  ":WKCompanionAppBundleIdentifier" \
+  "LetItRide.BikeComputer"
+require_plist_value \
+  "${WATCH_PATH}/Info.plist" \
+  ":BicinoURLScheme" \
+  "bikecomputer"
+require_plist_value \
   "${COMPLICATION_PATH}/Info.plist" \
   ":CFBundleIdentifier" \
   "LetItRide.BikeComputer.watchkitapp.complications"
+require_plist_value \
+  "${COMPLICATION_PATH}/Info.plist" \
+  ":CFBundleDisplayName" \
+  "Start Ride"
+require_plist_value \
+  "${COMPLICATION_PATH}/Info.plist" \
+  ":BicinoURLScheme" \
+  "bikecomputer"
 require_plist_value \
   "${COMPLICATION_PATH}/Info.plist" \
   ":NSExtension:NSExtensionPointIdentifier" \
@@ -105,6 +152,10 @@ require_plist_value \
   "LetItRide.BikeComputer.WorkoutLiveActivity"
 require_plist_value \
   "${LIVE_ACTIVITY_PATH}/Info.plist" \
+  ":CFBundleDisplayName" \
+  "Bicino"
+require_plist_value \
+  "${LIVE_ACTIVITY_PATH}/Info.plist" \
   ":NSExtension:NSExtensionPointIdentifier" \
   "com.apple.widgetkit-extension"
 require_plist_value \
@@ -112,6 +163,7 @@ require_plist_value \
   ":NSSupportsLiveActivities" \
   "true"
 require_url_scheme "${WATCH_PATH}/Info.plist" "bikecomputer"
+forbid_url_scheme "${WATCH_PATH}/Info.plist" "bikecomputer-dev"
 WATCH_BACKGROUND_MODES="$(
   /usr/libexec/PlistBuddy -c 'Print :WKBackgroundModes' "${WATCH_PATH}/Info.plist"
 )"
