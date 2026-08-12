@@ -236,13 +236,14 @@ component checksums. Project-level PlatformIO directory overrides and
 `extra_configs` likewise disable cache/upload attestation. The emitted
 `coreAttestationSha256` summarizes the PlatformIO-installed package, tool,
 nested-runtime, platform, framework, private global-library, and core-board
-state after bootstrap. It does not cover the host Python interpreter, top-level
-`pio` launcher, or pioarduino's first-run online Python dependency resolver
-(including its package registries, external `uv`, private `penv`, and ESP-IDF
-venv before their resulting trees are attested); those remain part of the
-trusted workstation or CI boundary. The attestation detects later mutation or
-cache reuse of those installed trees, but it is not a pre-execution Python
-supply-chain proof. Raw Waveshare
+state after bootstrap. The accepted private CPython, top-level `pio`, `uv`,
+wheelhouse, pioarduino root `penv`, esptool, ESP-IDF venv, and transformed
+platform are content locked before execution and attested again after
+installation. The residual bootstrap boundary is the complete initial caller
+`python3` startup (or the recovery shell, `curl`, hash utility, and `tar`), plus
+the host OS/kernel and repository/GitHub control plane. Do not narrow that
+boundary to only the standard-library source imported by the verifier, and do
+not describe pioarduino's removed online first-run resolver as trusted. Raw Waveshare
 PlatformIO builds fail with a pointer to the helper; raw legacy-board builds are
 stamped `unverified-...` rather than advertising an exact Git SHA. AMOLED upload
 rechecks the clean source identity, generated state, managed components,

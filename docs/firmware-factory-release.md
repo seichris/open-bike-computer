@@ -8,8 +8,20 @@ or its upload attestation.
 
 `open-bike-computer` is the production firmware source of truth. Build both
 supported targets with `esp32/tools/build_firmware.py` from the exact clean Git
-commit being released. Diagnostic/calibration images stored elsewhere are not
-production inputs.
+commit being released. The authoritative release form is:
+
+```sh
+cd esp32
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175_PRODUCTION \
+  --factory-output-dir dist
+```
+
+The 2.06-inch job selects its matching production environment. The initial
+caller Python performs only the normal locked-runtime handoff; packaging runs
+under the accepted private CPython while the project build lock is still held.
+The option is deliberately absent from ordinary developer and device-test
+builds. Diagnostic/calibration images stored elsewhere are not production
+inputs.
 
 Compilation, host tests, and a merged pull request establish software readiness;
 they do not establish physical acceptance. Before calling an artifact
@@ -46,7 +58,15 @@ current-schema build attestation; the portable factory-bundle manifest; and
 `0xFF`. Packaging fails closed if the build is not upload eligible, the
 environment is not the matching `*_PRODUCTION` profile, the Git SHA or flash
 plan differs, an image size/hash changed, images overlap, or the merged image
-exceeds the configured flash capacity.
+exceeds the configured flash capacity. The packager invokes the same complete
+runtime/core/source/generated-state/artifact/uploader/flash-plan validator used
+by upload; it does not establish a second, weaker authority.
+
+Factory-bundle schema 2 includes `runtimeAttestation`: the accepted lock-set,
+host target, lock-manifest SHA-256, runtime-bundle SHA-256, and canonical
+SHA-256 of the complete `runtimeProvenance` object stored in the embedded build
+manifest. The external descriptor and archived `factory-bundle.json` are
+byte-identical.
 
 The release tag must be `v<firmware-version>` or a prerelease below that exact
 version, such as `v0.3.2-ota-test.1`. The signing gate rejects a tag for another
@@ -55,9 +75,12 @@ member layout, embedded bundle manifest, declared image hashes, and
 `SHA256SUMS` before signing the archive hash; a corrupt or mixed artifact cannot
 become a validly signed factory release.
 
-The signed factory release manifest binds the target, production environment,
-version/build, full Git SHA, release URL, archive size/SHA-256, and portable
-bundle-manifest name/SHA-256. It uses the same P-256 release key as the OTA manifest,
+The schema-2 signed factory release manifest binds the target, production
+environment, version/build, full Git SHA, release URL, archive size/SHA-256,
+portable bundle-manifest name/SHA-256, embedded build-attestation SHA-256, and
+runtime-provenance SHA-256. Before signing it performs bounded safe extraction,
+requires complete checksum inventory, proves the embedded build/runtime chain,
+and rejects internal/external descriptor mixing. It uses the same P-256 release key as the OTA manifest,
 but a separate canonical payload and artifact type so factory archives cannot
 be mistaken for OTA application images. Factory verification must pin the same
 X9.63 public key as
@@ -65,11 +88,18 @@ X9.63 public key as
 `ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift`; a key
 supplied alongside the download is not a trust anchor.
 
+The publisher installs its signing library closure from exact Python 3.13 wheel
+versions and SHA-256 hashes in `tools/firmware-signing-requirements.txt`, with
+binary-only/no-dependency resolution. These dependencies run after compilation
+and cannot change firmware bytes; their lock still prevents a silent signer
+update or live transitive solve.
+
 ## Verification and flashing
 
 Before extracting or flashing, verify the signature on
 `<target>.factory-release.json`, then verify that its archive and bundle-manifest
-hashes match the downloaded files. After extraction, run one of:
+hashes and direct build/runtime digests match the downloaded files. After
+extraction, run one of:
 
 ```sh
 # From the extracted <target>.factory directory:
@@ -90,3 +120,12 @@ target, production profile, stable serial/device identity, exact Git SHA, and
 factory release manifest. Afterward, require matching `BOOT_META` plus the ready
 checkpoint. Use flash readback or a runtime image digest when byte-for-byte
 on-device equality is required.
+
+Tagged GitHub publication is create-only. The workflow creates a draft release,
+uploads without replacement flags, verifies GitHub's reported size and SHA-256
+for every local asset, and only then publishes the draft. Repository immutable
+releases must already be enabled; after publication the workflow requires the
+release to be immutable and re-verifies the exact asset inventory before
+retaining its receipt. An existing release tag or asset, disabled immutable
+release setting, or mutable published release is a hard failure; recovery uses
+a new tag rather than `--clobber`.

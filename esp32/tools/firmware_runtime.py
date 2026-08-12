@@ -1096,9 +1096,17 @@ def ensure_runtime_handoff(
     target = select_target(lock)
     if "--repair-runtime" in argv and HANDOFF_ENV not in os.environ:
         repair_runtime(lock, target, project_dir, cache_root=cache_root)
+    shared_started = time.monotonic()
     shared = ensure_shared_runtime(lock, target, cache_root=cache_root)
+    shared_ms = max(0, round((time.monotonic() - shared_started) * 1000))
+    hydration_started = time.monotonic()
     private = _hydrate_private(shared, project_dir, lock, target)
+    hydration_ms = max(0, round((time.monotonic() - hydration_started) * 1000))
+    verification_started = time.monotonic()
     provenance = _verify_runtime_tree(private, target, require_read_only=True)
+    verification_ms = max(
+        0, round((time.monotonic() - verification_started) * 1000)
+    )
     provenance = RuntimeProvenance(
         lock.lock_set_id, lock.manifest_sha256, provenance.target,
         provenance.bundle_sha256, provenance.python_version,
@@ -1150,6 +1158,11 @@ def ensure_runtime_handoff(
     )
     environment["OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS"] = str(
         max(0, round((time.monotonic() - bootstrap_start) * 1000))
+    )
+    environment["OPEN_BIKE_FIRMWARE_RUNTIME_SHARED_MS"] = str(shared_ms)
+    environment["OPEN_BIKE_FIRMWARE_RUNTIME_HYDRATION_MS"] = str(hydration_ms)
+    environment["OPEN_BIKE_FIRMWARE_RUNTIME_VERIFICATION_MS"] = str(
+        verification_ms
     )
     environment["PATH"] = os.pathsep.join((str(paths.root / "bin"), str(paths.root / "python/bin"), "/usr/bin", "/bin"))
     command = (str(paths.python), str(Path(__file__).resolve().with_name("build_firmware.py")), *argv)

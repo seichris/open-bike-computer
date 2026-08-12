@@ -36,6 +36,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - name: Load the reviewed runtime publication identity
+        run: |
+          publication="$(env -u LD_LIBRARY_PATH PYTHONPATH=tools python tools/firmware_runtime_publication.py identity)"
+          echo "RUNTIME_LOCK_SET_ID=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["lockSetId"])' "$publication")" >> "$GITHUB_ENV"
+          echo "RUNTIME_RELEASE_TAG=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["releaseTag"])' "$publication")" >> "$GITHUB_ENV"
       - name: Validate host and tracked inputs
         run: |
           test "$(uname -m)" = "$(test '${{ matrix.target }}' = linux-x86_64-cp313 && echo x86_64 || echo arm64)"
@@ -54,14 +59,14 @@ jobs:
           env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py build-candidate \
             --target "${{ matrix.target }}" \
             --output-dir runtime-candidate-a \
-            --release-tag firmware-runtime-2026-08-10-1 \
+            --release-tag "${RUNTIME_RELEASE_TAG}" \
             > runtime-candidate-a/build.json
       - name: Build independent candidate B
         run: |
           env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py build-candidate \
             --target "${{ matrix.target }}" \
             --output-dir runtime-candidate-b \
-            --release-tag firmware-runtime-2026-08-10-1 \
+            --release-tag "${RUNTIME_RELEASE_TAG}" \
             > runtime-candidate-b/build.json
       - name: Require byte-identical clean rebuilds
         run: |
@@ -114,6 +119,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - name: Load the reviewed runtime publication identity
+        run: |
+          publication="$(env -u LD_LIBRARY_PATH PYTHONPATH=tools python tools/firmware_runtime_publication.py identity)"
+          echo "RUNTIME_LOCK_SET_ID=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["lockSetId"])' "$publication")" >> "$GITHUB_ENV"
+          echo "RUNTIME_RELEASE_TAG=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["releaseTag"])' "$publication")" >> "$GITHUB_ENV"
       - name: Configure the isolated runtime cache
         run: echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=$RUNNER_TEMP/firmware-runtime-cache" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
@@ -125,7 +135,7 @@ jobs:
           candidates="$RUNNER_TEMP/runtime-candidates"
           env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py assemble-lock \
             --output tools/firmware-runtime/lock-v1.json \
-            --lock-set-id firmware-runtime-2026-08-10-1 \
+            --lock-set-id "${RUNTIME_LOCK_SET_ID}" \
             --contract "$candidates/firmware-runtime-candidate-linux-x86_64-cp313/contract-linux-x86_64-cp313.json" \
             --contract "$candidates/firmware-runtime-candidate-macos-arm64-cp313/contract-macos-arm64-cp313.json"
 
@@ -145,7 +155,7 @@ jobs:
           size="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["size"])' "$contract")"
           env -u LD_LIBRARY_PATH python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.stat().st_size == int(sys.argv[2]); assert hashlib.sha256(p.read_bytes()).hexdigest() == sys.argv[3]' \
             "$bundle" "$size" "$digest"
-          destination="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/firmware-runtime-2026-08-10-1/${{ matrix.target }}"
+          destination="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/${RUNTIME_LOCK_SET_ID}/${{ matrix.target }}"
           mkdir -p "$destination"
           cp "$bundle" "$destination/$digest.tar.gz"
       - name: Prove clean and warm firmware builds
@@ -181,12 +191,55 @@ jobs:
               "$evidence/${environment}-clean-build-manifest.json" \
               "$evidence/${environment}-warm-build-manifest.json"
           done
+      - name: Bind both production factory bundles to the candidate runtime
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" != "linux-x86_64-cp313" ]; then
+            echo "Factory packaging is validated once on the Linux release host"
+            exit 0
+          fi
+          evidence="$RUNNER_TEMP/firmware-build-evidence"
+          lock="tools/firmware-runtime/lock-v1.json"
+          for factory_target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            environment="${factory_target}_PRODUCTION"
+            output="$evidence/factory-${factory_target}"
+            env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "$environment" \
+              --factory-output-dir "$output" \
+              2>&1 | tee "$evidence/${environment}.log"
+            extract="$evidence/extract-${factory_target}"
+            mkdir -p "$extract"
+            tar -xzf "$output/${factory_target}.factory.tar.gz" -C "$extract"
+            (cd "$extract/${factory_target}.factory" && sha256sum --check SHA256SUMS)
+            env -u LD_LIBRARY_PATH python - \
+              "$lock" \
+              "$output/${factory_target}.factory-bundle.json" \
+              "$extract/${factory_target}.factory/attestation/build-manifest.json" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          lock_path, descriptor_path, build_path = map(pathlib.Path, sys.argv[1:])
+          lock = json.loads(lock_path.read_text(encoding="utf-8"))
+          descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+          build = json.loads(build_path.read_text(encoding="utf-8"))
+          runtime = descriptor["runtimeAttestation"]
+          target = next(item for item in lock["targets"] if item["id"] == runtime["target"])
+          canonical_runtime = json.dumps(
+              build["runtimeProvenance"], sort_keys=True, separators=(",", ":")
+          ).encode("utf-8")
+          assert runtime["lockSetId"] == lock["lockSetId"]
+          assert runtime["manifestSha256"] == hashlib.sha256(lock_path.read_bytes()).hexdigest()
+          assert runtime["bundleSha256"] == target["bundle"]["sha256"]
+          assert runtime["runtimeProvenanceSha256"] == hashlib.sha256(canonical_runtime).hexdigest()
+          PY
+          done
       - name: Prove runtime tampering fails before PlatformIO
         run: |
           evidence="$RUNNER_TEMP/firmware-build-evidence"
           contract="$RUNNER_TEMP/runtime-candidates/firmware-runtime-candidate-${{ matrix.target }}/contract-${{ matrix.target }}.json"
           digest="$(env -u LD_LIBRARY_PATH python -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["bundle"]["sha256"])' "$contract")"
-          shared="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/firmware-runtime-2026-08-10-1/${{ matrix.target }}/$digest"
+          shared="$OPEN_BIKE_FIRMWARE_RUNTIME_CACHE/locks/${RUNTIME_LOCK_SET_ID}/${{ matrix.target }}/$digest"
           chmod u+w "$shared/bin/pio"
           printf '\n' >> "$shared/bin/pio"
 
@@ -210,3 +263,61 @@ jobs:
           path: ${{ runner.temp }}/firmware-build-evidence
           if-no-files-found: error
           retention-days: 14
+
+  review-summary:
+    name: Canonical refresh review summary
+    needs:
+      - candidate
+      - firmware-build-validation
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-runtime-candidate-*
+          path: ${{ runner.temp }}/runtime-candidates
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-build-validation-*
+          path: ${{ runner.temp }}/firmware-validation
+      - name: Assemble the proposed lock and obtain baseline licenses
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          publication="$(env -u LD_LIBRARY_PATH PYTHONPATH=tools python tools/firmware_runtime_publication.py identity)"
+          candidate_lock_set="$(python -c 'import json,sys; print(json.loads(sys.argv[1])["lockSetId"])' "$publication")"
+          candidates="$RUNNER_TEMP/runtime-candidates"
+          env -u LD_LIBRARY_PATH python tools/refresh_firmware_runtime.py assemble-lock \
+            --output "$RUNNER_TEMP/candidate-lock.json" \
+            --lock-set-id "$candidate_lock_set" \
+            --contract "$candidates/firmware-runtime-candidate-linux-x86_64-cp313/contract-linux-x86_64-cp313.json" \
+            --contract "$candidates/firmware-runtime-candidate-macos-arm64-cp313/contract-macos-arm64-cp313.json"
+          baseline_lock_set="$(python -c 'import json; print(json.load(open("tools/firmware-runtime/lock-v1.json"))["lockSetId"])')"
+          mkdir -p "$RUNNER_TEMP/baseline-licenses"
+          gh release download "$baseline_lock_set" \
+            --pattern 'licenses-*.json' \
+            --dir "$RUNNER_TEMP/baseline-licenses"
+      - name: Generate the canonical cross-target review artifact
+        working-directory: esp32
+        run: |
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python \
+            tools/firmware_runtime_review_summary.py \
+            --baseline-lock tools/firmware-runtime/lock-v1.json \
+            --candidate-lock "$RUNNER_TEMP/candidate-lock.json" \
+            --baseline-license-dir "$RUNNER_TEMP/baseline-licenses" \
+            --candidate-root "$RUNNER_TEMP/runtime-candidates" \
+            --validation-root "$RUNNER_TEMP/firmware-validation" \
+            --output "$RUNNER_TEMP/firmware-runtime-review-summary.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-runtime-review-summary
+          path: ${{ runner.temp }}/firmware-runtime-review-summary.json
+          if-no-files-found: error
+          retention-days: 90
