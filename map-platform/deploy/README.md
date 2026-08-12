@@ -52,6 +52,14 @@ Compose no longer reads `MAP_PLATFORM_API_IMAGE`,
 three values after the first successful deployment to avoid presenting stale
 configuration as active.
 
+Set `MAP_PLATFORM_DEPLOYMENT_CHANNEL=production`. Renderer availability then
+comes from the pinned `generation-profile-policy-v1.json` in the control-plane
+image. `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` is the only runtime generation
+entitlement and is restricted to the production canary profile; the retired
+`MAP_PLATFORM_LABEL_TARGET2_ENABLED` and
+`MAP_PLATFORM_BUILDING_TARGET3_ENABLED` variables are ignored by the API and
+should be removed after the first successful deployment.
+
 The initial worker lock points at the image already running successfully in
 production. Its control-plane lock contains the same backend revision currently
 deployed from `main`, so changing the Compose location does not introduce a new
@@ -67,6 +75,22 @@ hardware-validation installation. The validation stack always uses its own
 filesystem-backed volume; it must not share the production data volume.
 Production continues to use `compose.yaml` and its independently reviewed image
 pins.
+
+## Development channel
+
+Create a second Coolify Docker Compose application from the same immutable
+`compose.yaml` lock, with `MAP_PLATFORM_DEPLOYMENT_CHANNEL=development` and the
+hostname `maps-dev.8o.vc`. Give it independent installation/download/admin
+secrets, an independent S3 prefix (for example `map-artifacts-dev`), independent
+quotas and monitoring retention, and its own Compose-managed data volume. Do not
+copy production installation credentials or the target-3 canary allowlist.
+
+This makes Bicino Dev a deployment channel rather than a production canary.
+Both channels still advance through the reviewed digest lock, while their
+credentials, queue state, storage namespace, and operational limits remain
+isolated. Signing-key separation remains governed by the existing map-stream
+trust and hardware-promotion contract; do not introduce an untrusted development
+key outside that flow.
 
 ## Promotion flow
 

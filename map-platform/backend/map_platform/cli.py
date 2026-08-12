@@ -12,9 +12,11 @@ from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
 from .map_buildings import (
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
-    building_target3_generation_enabled,
 )
-from .map_labels import label_target2_generation_enabled
+from .generation_profiles import (
+    configured_deployment_channel,
+    load_generation_profile_policy,
+)
 from .map_signing import load_map_artifact_signer_from_environment
 from .monitoring import (
     DEFAULT_MONITORING_RETENTION_DAYS,
@@ -389,13 +391,18 @@ def main() -> int:
         monitoring_store=monitoring_store,
         preprocessing_mode=preprocessing_scope_mode,
     )
+    generation_controls = {}
+    if args.command == "create-job":
+        generation_controls = {
+            "building_target3_allowlist": building_target3_generation_allowlist(),
+            "generation_profile_policy": load_generation_profile_policy(repo_root),
+            "deployment_channel": configured_deployment_channel(),
+        }
     service = MapJobService(
         source_index,
         store,
-        label_target2_enabled=label_target2_generation_enabled(),
-        building_target3_enabled=building_target3_generation_enabled(),
-        building_target3_allowlist=building_target3_generation_allowlist(),
         estimate_coordinator=estimate_coordinator,
+        **generation_controls,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 

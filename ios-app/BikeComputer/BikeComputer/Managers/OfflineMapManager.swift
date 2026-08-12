@@ -422,7 +422,9 @@ private enum OfflineMapFallbackPreviewRenderer {
 #endif
 
 nonisolated enum OfflineMapServerIdentity {
-    private static let managedIdentity = "managed-production"
+    private static var managedIdentity: String {
+        "managed:\(normalized(OfflineMapServiceConfig.defaultServerURLString))"
+    }
 
     static func normalized(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -448,7 +450,10 @@ nonisolated enum OfflineMapServerIdentity {
             return true
         }
         let normalizedValue = normalized(value)
-        return ([OfflineMapServiceConfig.productionServerURLString] + OfflineMapDefaults.legacyServerURLs)
+        return ([
+            OfflineMapServiceConfig.developmentServerURLString,
+            OfflineMapServiceConfig.productionServerURLString,
+        ] + OfflineMapDefaults.legacyServerURLs)
             .contains { normalized($0) == normalizedValue }
     }
 
@@ -1723,6 +1728,10 @@ final class OfflineMapManager: ObservableObject {
                     clientRequestId: UUID().uuidString.lowercased(),
                     installOnDevice: true
                 )
+            try await manager.requireGenerationCapability(
+                for: request,
+                client: client
+            )
             manager.currentJob = try await manager.createJob(request, client: client)
             manager.persistCurrentJob(installOnDevice: true)
             manager.downloadURL = nil
@@ -2311,6 +2320,10 @@ final class OfflineMapManager: ObservableObject {
                 clientRequestId: UUID().uuidString.lowercased(),
                 installOnDevice: false
             )
+            try await manager.requireGenerationCapability(
+                for: identifiedRequest,
+                client: client
+            )
             manager.currentJob = try await manager.createJob(identifiedRequest, client: client)
             manager.persistCurrentJob(installOnDevice: false)
             manager.statusMessage = manager.currentJob?.status ?? ""
@@ -2357,6 +2370,26 @@ final class OfflineMapManager: ObservableObject {
                 self?.statusMessage = "reconnecting to map server"
             }
         )
+    }
+
+    private func requireGenerationCapability(
+        for request: OfflineMapJobRequest,
+        client: OfflineMapPlatformClient
+    ) async throws {
+        guard let rendererFormatVersion = request.target?.rendererFormatVersion else {
+            return
+        }
+        do {
+            let capabilities = try await client.generationCapabilities()
+            try capabilities.require(
+                rendererFormatVersion: rendererFormatVersion
+            )
+        } catch OfflineMapPlatformError.serverStatus(let status, _) where status == 404 {
+            // Preserve compatibility while the production control plane rolls
+            // to the capabilities contract. The create endpoint remains the
+            // authoritative fail-closed gate and never downgrades the request.
+            return
+        }
     }
 
     private func listJobsWithRetry(
@@ -2678,7 +2711,7 @@ final class OfflineMapManager: ObservableObject {
             return serverURLString
         }
         if OfflineMapServerIdentity.isManaged(persistedServerURL) {
-            return OfflineMapServiceConfig.productionServerURLString
+            return OfflineMapServiceConfig.defaultServerURLString
         }
         if OfflineMapServerIdentity.normalized(persistedServerURL) ==
             OfflineMapServerIdentity.normalized(serverURLString) {
@@ -2701,7 +2734,7 @@ final class OfflineMapManager: ObservableObject {
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
         let stored = defaults.string(forKey: OfflineMapDefaults.serverURLKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if OfflineMapServerIdentity.isManaged(stored) {
-            return OfflineMapServiceConfig.productionServerURLString
+            return OfflineMapServiceConfig.defaultServerURLString
         }
         return stored
     }

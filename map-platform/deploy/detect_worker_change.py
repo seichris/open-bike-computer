@@ -33,6 +33,7 @@ IMAGE_INPUT_ROOTS = (
     "map-platform/config/map-stream-hardware-gate.json",
     "map-platform/config/map-stream-rollout-approvals.json",
     "map-platform/config/map-stream-trust.json",
+    "map-platform/config/generation-profile-policy-v1.json",
 )
 PROMOTION_INPUT_ROOTS = IMAGE_INPUT_ROOTS + (
     ".github/workflows/map-platform-ci.yml",

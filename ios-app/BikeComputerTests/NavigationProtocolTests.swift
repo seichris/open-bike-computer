@@ -680,6 +680,8 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
+        testOfflineMapServiceConfigChannels()
+        await testOfflineMapCapabilitiesContract()
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
@@ -5087,6 +5089,113 @@ struct NavigationProtocolTests {
             assert(false, "the legacy rejection retains the typed renderer error")
         }
         assertEqual(rejectedRequestCount, 1, "the legacy rejection is not retried as target 2")
+    }
+
+    static func testOfflineMapServiceConfigChannels() {
+        assertEqual(
+            OfflineMapServiceConfig.serverURLString(
+                infoDictionary: ["BicinoMapServiceHost": "maps-dev.8o.vc"]
+            ),
+            "https://maps-dev.8o.vc",
+            "the Development configuration selects the isolated map service"
+        )
+        assertEqual(
+            OfflineMapServiceConfig.serverURLString(
+                infoDictionary: ["BicinoMapServiceHost": "maps.8o.vc"]
+            ),
+            "https://maps.8o.vc",
+            "the Production configuration selects the production map service"
+        )
+        assertEqual(
+            OfflineMapServiceConfig.serverURLString(
+                infoDictionary: ["BicinoMapServiceHost": "attacker.example"]
+            ),
+            "https://invalid.invalid",
+            "an unexpected managed host fails closed"
+        )
+    }
+
+    static func testOfflineMapCapabilitiesContract() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let installationID = "inst_v2_" + String(repeating: "b", count: 32)
+        let token = "v1." + String(repeating: "B", count: 43)
+        OfflineMapTestURLProtocol.configure { request in
+            assertEqual(request.url?.path, "/v1/capabilities", "capabilities use the advertised endpoint")
+            assertEqual(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "clientInstallationId" })?.value,
+                installationID,
+                "capabilities are installation scoped"
+            )
+            assertEqual(
+                request.value(forHTTPHeaderField: "X-Installation-Token"),
+                token,
+                "capabilities require the installation credential"
+            )
+            return (200, Data(#"""
+            {
+                "schemaVersion":1,
+                "deploymentChannel":"development",
+                "policySha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "generationProfiles":[
+                    {"id":"buildings-3d-v1","rendererFormatVersion":3,"features":["street-labels","3d-buildings"]},
+                    {"id":"street-labels-v1","rendererFormatVersion":2,"features":["street-labels"]},
+                    {"id":"legacy-vector-v1","rendererFormatVersion":1,"features":[]}
+                ]
+            }
+            """#.utf8))
+        }
+        let client = OfflineMapPlatformClient(
+            baseURL: URL(string: "https://maps-dev.example")!,
+            clientInstallationId: installationID,
+            clientInstallationToken: token,
+            session: session
+        )
+        do {
+            let capabilities = try await client.generationCapabilities()
+            try capabilities.require(rendererFormatVersion: 3)
+            assertEqual(
+                capabilities.deploymentChannel,
+                "development",
+                "the client decodes the deployment channel"
+            )
+        } catch {
+            assert(false, "development capabilities should admit renderer format 3")
+        }
+
+        let production = try! JSONDecoder().decode(
+            OfflineMapGenerationCapabilities.self,
+            from: Data(#"""
+            {
+                "schemaVersion":1,
+                "deploymentChannel":"production",
+                "policySha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "generationProfiles":[
+                    {"id":"street-labels-v1","rendererFormatVersion":2,"features":["street-labels"]},
+                    {"id":"legacy-vector-v1","rendererFormatVersion":1,"features":[]}
+                ]
+            }
+            """#.utf8)
+        )
+        do {
+            try production.require(rendererFormatVersion: 3)
+            assert(false, "production capabilities must reject a non-canary format 3 client")
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(
+            let requested,
+            let supported,
+            _
+        ) {
+            assertEqual(requested, 3, "capability rejection reports the requested format")
+            assertEqual(supported, [2, 1], "capability rejection reports server-advertised formats")
+        } catch {
+            assert(false, "unsupported capabilities retain the renderer error type")
+        }
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {

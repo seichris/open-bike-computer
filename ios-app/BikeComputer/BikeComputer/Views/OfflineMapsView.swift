@@ -16,7 +16,7 @@ struct OfflineMapsView: View {
             Section(header: Text("Map Server")) {
                 OfflineMapValueRow(title: "Service", value: manager.serverURLString)
                 Button {
-                    manager.serverURLString = OfflineMapServiceConfig.productionServerURLString
+                    manager.serverURLString = OfflineMapServiceConfig.defaultServerURLString
                 } label: {
                     Label("Use Production Server", systemImage: "checkmark.seal")
                 }

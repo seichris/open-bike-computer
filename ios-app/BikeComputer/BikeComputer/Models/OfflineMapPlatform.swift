@@ -867,6 +867,42 @@ struct OfflineMapSourceRegion: Decodable, Equatable {
     let provider: String
 }
 
+struct OfflineMapGenerationProfile: Decodable, Equatable {
+    let id: String
+    let rendererFormatVersion: Int
+    let features: [String]
+}
+
+struct OfflineMapGenerationCapabilities: Decodable, Equatable {
+    let schemaVersion: Int
+    let deploymentChannel: String
+    let policySha256: String
+    let generationProfiles: [OfflineMapGenerationProfile]
+
+    func require(rendererFormatVersion: Int) throws {
+        let supported = generationProfiles.map(\.rendererFormatVersion)
+        let profileIDs = generationProfiles.map(\.id)
+        guard schemaVersion == 1,
+              ["development", "production"].contains(deploymentChannel),
+              policySha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              Set(supported).count == supported.count,
+              Set(profileIDs).count == profileIDs.count,
+              generationProfiles.allSatisfy({
+                  !$0.id.isEmpty && $0.rendererFormatVersion > 0 &&
+                      Set($0.features).count == $0.features.count
+              }) else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        guard supported.contains(rendererFormatVersion) else {
+            throw OfflineMapPlatformError.unsupportedRendererTarget(
+                requestedRendererFormatVersion: rendererFormatVersion,
+                supportedRendererFormatVersions: supported,
+                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+            )
+        }
+    }
+}
+
 struct OfflineMapDownloadURL: Decodable, Equatable {
     let mapId: String
     let url: String
@@ -2758,6 +2794,17 @@ struct OfflineMapPlatformClient {
             throw OfflineMapPlatformError.invalidResponse
         }
         return credential
+    }
+
+    func generationCapabilities() async throws -> OfflineMapGenerationCapabilities {
+        var request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            path: "/v1/capabilities",
+            method: "GET",
+            clientInstallationId: clientInstallationId
+        )
+        authorizeInstallation(&request)
+        return try await send(request: request)
     }
 
     func canAdoptInstallationCredential(
