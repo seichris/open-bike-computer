@@ -23,6 +23,7 @@ on:
       - "docs/app-store-privacy-disclosures.md"
       - "docs/device-ownership-test-vectors.json"
       - "docs/firmware-battery-life-hardware-validation.md"
+      - "docs/firmware-factory-release.md"
       - "docs/firmware-map-memory-diagnostics.md"
       - "docs/firmware-map-render-scheduler.md"
       - "docs/firmware-map-rendering-psram.md"
@@ -32,6 +33,7 @@ on:
       - "map-platform/**"
       - "test-fixtures/fmb/**"
       - "tools/firmware_manifest.py"
+      - "tools/factory_release_manifest.py"
       - "tools/tests/**"
       - "tools/OSM_Extract/**"
   pull_request:
@@ -248,6 +250,7 @@ jobs:
         run: |
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
+            tools.tests.test_package_factory_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
             tools.tests.test_firmware_runtime \

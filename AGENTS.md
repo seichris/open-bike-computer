@@ -264,6 +264,32 @@ embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
 
+### Firmware release and factory-image qualification
+
+When firmware is requested from current or latest GitHub `main`, fetch
+`origin/main`, record the exact SHA, and build from a clean detached worktree.
+Do not let an active checkout, an unpushed commit, or unrelated local changes
+enter the artifact.
+
+Immediately before any flash write, restate the physical board model, selected
+profile, device nickname and stable serial (or the deliberately selected port
+when no serial exists), exact Git SHA, and attested artifact/flash-plan identity.
+Obtain explicit user confirmation at that point. Earlier approval to build,
+inspect, or prepare a release is not approval for the destructive write.
+
+Green CI, a successful build, or a merged pull request is not physical firmware
+acceptance. A production-enabled hardware-path change must retain a visible
+per-target hardware gate and must not be tagged, distributed, or described as a
+factory/golden image until that gate passes. A change with pending physical
+validation may merge only when the affected capability is excluded from
+production or the maintainer explicitly accepts and records the residual risk.
+Treat the 1.75-inch and 2.06-inch boards as separate qualification targets.
+
+Tagged releases package the production images using the attested flash plan;
+see `docs/firmware-factory-release.md`. The factory archive does not waive the
+normal device-identity, confirmation, post-flash `BOOT_META`, ready-state, or
+readback requirements.
+
 ### iOS app
 
 Open `ios-app/BikeComputer/BikeComputer.xcodeproj` only when GUI-specific setup
