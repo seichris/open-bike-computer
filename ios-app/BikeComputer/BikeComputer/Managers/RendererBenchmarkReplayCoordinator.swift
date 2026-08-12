@@ -200,10 +200,15 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         // Match normal navigation: GPS and the fixture marker are emitted at
         // 1 Hz, while the route window is refreshed every two seconds.
         if emittedSampleCount % 2 == 0 {
-            bleManager.sendRouteGeometry(routeData)
+            guard bleManager.sendRouteGeometry(routeData) else {
+                errorMessage = "The benchmark route window could not be queued."
+                status = "Stopped"
+                stop()
+                return
+            }
         }
         let now = Date()
-        bleManager.sendGPSPosition(
+        guard bleManager.sendGPSPosition(
             lat: point.latitude,
             lon: point.longitude,
             heading: heading,
@@ -218,7 +223,12 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
                 fixture.nominalSpeedMetersPerSecond,
             horizontalAccuracyMeters: 3,
             locationTimestamp: now
-        )
+        ) else {
+            errorMessage = "The benchmark GPS sample could not be queued."
+            status = "Stopped"
+            stop()
+            return
+        }
         // Keep the marker behind its GPS write in the serialized navigation
         // queue. A frame captured after firmware accepts the marker can then
         // be attributed to this sample rather than the previous position.

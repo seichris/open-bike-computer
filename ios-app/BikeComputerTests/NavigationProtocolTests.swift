@@ -303,12 +303,13 @@ final class TestBLEManager: BLEManager {
         return true
     }
 
-    override func sendRouteGeometry(_ data: Data) {
+    override func sendRouteGeometry(_ data: Data) -> Bool {
         guard isConnected, isNavigationReady else {
-            return
+            return false
         }
 
         sentRouteGeometry.append(data)
+        return true
     }
 
     override func sendGPSPosition(
@@ -322,9 +323,9 @@ final class TestBLEManager: BLEManager {
         routeRemainingMeters: Double? = nil,
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
-    ) {
+    ) -> Bool {
         guard isConnected, isNavigationReady else {
-            return
+            return false
         }
 
         sentGPSPositions.append(DeviceGPSPacketBuilder.data(
@@ -340,6 +341,7 @@ final class TestBLEManager: BLEManager {
             locationTimestamp: locationTimestamp,
             includeRideDetectionQuality: supportsGPSPositionQualityV1
         ))
+        return true
     }
 }
 

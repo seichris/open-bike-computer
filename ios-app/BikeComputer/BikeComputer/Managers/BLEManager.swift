@@ -3235,12 +3235,13 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Send route geometry data to ESP32.
     /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
-    func sendRouteGeometry(_ data: Data) {
+    @discardableResult
+    func sendRouteGeometry(_ data: Data) -> Bool {
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
             log("Cannot send geometry: BLE not ready")
-            return
+            return false
         }
 
         let maxLength = navigationWriteEndpoint?.maximumWriteLength ?? 0
@@ -3248,10 +3249,10 @@ class BLEManager: NSObject, ObservableObject {
            let endpoint = navigationWriteEndpoint {
             guard data.count <= endpoint.maximumWriteLength else {
                 log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
-                return
+                return false
             }
 
-            enqueueNavigationWrite(
+            guard enqueueNavigationWrite(
                 data,
                 endpoint: endpoint,
                 label: "native route geometry",
@@ -3261,19 +3262,22 @@ class BLEManager: NSObject, ObservableObject {
                     guard let self, let peripheral, let characteristic else { return }
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
                 }
-            )
+            ) else {
+                log("Route geometry not queued: write queue unavailable")
+                return false
+            }
             log("Queued native route geometry: \(data.count) bytes")
-            return
+            return true
         }
 
         var fallback = Data(DeviceBLEProtocol.routeGeometryFallbackPrefix.utf8)
         fallback.append(data)
         guard fallback.count <= maxLength else {
             log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
-            return
+            return false
         }
 
-        sendFallbackMapPacket(
+        return sendFallbackMapPacket(
             fallback,
             label: "route geometry",
             writeClass: .route,
@@ -3283,7 +3287,7 @@ class BLEManager: NSObject, ObservableObject {
 
     /// Clear route geometry on ESP32.
     func clearRouteGeometry() {
-        sendRouteGeometry(Data())
+        _ = sendRouteGeometry(Data())
     }
 
     /// Temporarily gives one developer workflow ownership of device GPS
@@ -3311,6 +3315,7 @@ class BLEManager: NSObject, ObservableObject {
 
     /// Send GPS position and optional ride telemetry to ESP32.
     /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
+    @discardableResult
     func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -3322,12 +3327,12 @@ class BLEManager: NSObject, ObservableObject {
         routeRemainingMeters: Double? = nil,
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
-    ) {
+    ) -> Bool {
         guard isConnected,
               let endpoint = navigationWriteEndpoint,
               isNavigationReady else {
             log("Cannot send GPS position: BLE not ready")
-            return
+            return false
         }
 
         let wireHeading = DeviceGPSHeadingWirePolicy.heading(
@@ -3405,14 +3410,14 @@ class BLEManager: NSObject, ObservableObject {
                     transportExpectsWriteResponse: expectsWriteResponse
                 ) else {
                     log("GPS position not queued: write queue unavailable")
-                    return
+                    return false
                 }
                 if let heading {
                     log(String(format: "Queued native GPS position: heading=%.0f", heading))
                 } else {
                     log("Queued native GPS position: heading=invalid")
                 }
-                return
+                return true
             }
         }
 
@@ -3426,9 +3431,9 @@ class BLEManager: NSObject, ObservableObject {
         let fallback = buildFallback()
         guard fallback.count <= endpoint.maximumWriteLength else {
             log("Cannot send GPS position fallback: write limit exceeded")
-            return
+            return false
         }
-        sendFallbackMapPacket(
+        return sendFallbackMapPacket(
             fallback,
             label: "GPS position",
             writeClass: .gpsPosition,
