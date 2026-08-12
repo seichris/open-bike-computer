@@ -2,9 +2,11 @@
 
 ## Status and baseline
 
-This is a planning and architecture record only. It does not change the
-firmware runtime, refresh a dependency, publish a release asset, change a
-workflow, build firmware, or access a physical device.
+This is the durable architecture and implementation record. The focused
+runtime closure was delivered by PRs #228/#229/#231; the follow-up branch based
+on PR #240 implements the maintenance, provenance, factory-binding, publication,
+and performance controls described below. It does not refresh an accepted
+dependency, publish a release asset, or access a physical device.
 
 The original version of this document was written from `origin/main` at
 `1392471c3f8e5e267c3f4b4bffba413b2d4fc4b1`, immediately after
@@ -12,12 +14,14 @@ The original version of this document was written from `origin/main` at
 identified pioarduino's online first-run Python resolver as the remaining
 pre-execution supply-chain gap.
 
-This revision was reconciled after freshly fetching GitHub `origin/main` at
-`c4f09db675d5b16bcfcd455d09ddd0e5834b5249` on 2026-08-12. The only change
-from the previous `38bb1bc6882bb717268abe6420d35f33573c4ace` reconciliation
-baseline is the iOS-only PR #241, which does not change the firmware runtime,
-helper, manifests, or workflows. The focused gap is now implemented in
-software:
+The implementation revision was reconciled after freshly fetching GitHub
+`origin/main` at `05cb1d47bb92b93087c521a421a9056b613a35b5` on 2026-08-12.
+That is the merge commit for
+[PR #240](https://github.com/seichris/open-bike-computer/pull/240), “Publish
+attested factory firmware bundles.” Its final head was
+`d0e628ca9e6dcbb23929d056b61d9e9829407ba7`; every reported PR check and the
+aggregate CI gate completed successfully before merge. The focused gap is
+implemented in software by:
 
 - [PR #228](https://github.com/seichris/open-bike-computer/pull/228), merge
   commit `89d13813c3e62b82420aaf8b65a31edd9eacee4b`, added the accepted,
@@ -29,23 +33,13 @@ software:
   commit `7ec1d524d64128164cc562438bbb4e14254af019`, separated immutable
   custom-core cache identity from exact firmware and upload identity.
 
-This revision also projects the post-merge integration required by draft
-[PR #240](https://github.com/seichris/open-bike-computer/pull/240), "Publish
-attested factory firmware bundles." PR #240 was inspected read-only at head
-`46c619481069af38c7a59492f7b605a64cbe848d`, based on the exact `origin/main`
-above. It was still open and under review, so that commit is context rather
-than an accepted baseline. Before implementing this plan, fetch the final
-merge commit and repeat the focused schema/workflow comparison if the PR head
-changes. This planning branch does not merge, cherry-pick, or implement PR
-#240.
-
-PR #240 does not change the accepted runtime, wheel closure, pioarduino
+PR #240 did not change the accepted runtime, wheel closure, pioarduino
 transforms, custom-core identity, or supported host targets. It adds a new
 downstream release boundary: production builds are packaged into deterministic
 factory archives, an external bundle descriptor, and a separately signed
-factory-release manifest. The plan therefore keeps its runtime architecture
-and adds explicit factory-packaging integration instead of designing another
-wheelhouse.
+factory-release manifest. This implementation keeps that architecture and
+closes its post-build authority and publication seams instead of designing a
+second wheelhouse.
 
 Workstream A of
 [`firmware-runtime-cache-sd-hardening-implementation-plan.md`](firmware-runtime-cache-sd-hardening-implementation-plan.md)
@@ -70,8 +64,8 @@ Only maintainers perform runtime refreshes. There is no ordinary-build update
 flag, resolver mode, warning-only fallback, ambient PlatformIO fallback, or
 automatic dependency update path.
 
-After PR #240 merges, keep ordinary local builds and device-test builds on that
-same command. Add a helper-owned, opt-in factory-output mode for CI and tagged
+Ordinary local builds and device-test builds remain on that same command. A
+helper-owned, opt-in factory-output mode serves CI and tagged
 production releases so packaging runs after the locked-runtime handoff and
 while the exact build is still protected by the project lock. Normal builds do
 not package factory artifacts, and ordinary developers do not acquire a second
@@ -209,21 +203,13 @@ are:
 - flash-plan schema 2.
 
 The human-readable `FIRMWARE_BUILD_PROVENANCE` and
-`FIRMWARE_UPLOAD_PROVENANCE` lines currently retain schema 1 while carrying the
-new runtime fields. Any future incompatible consumer contract must bump that
-line schema instead of silently changing its meaning.
-
-At the inspected PR #240 head, `esp32/tools/package_factory_firmware.py`
-accepts current build-manifest schema 20, checks production/source/clock,
-flash-plan, image, and PlatformIO configuration identity, embeds the complete
-build manifest, and records its SHA-256 in factory-bundle schema 1.
-`tools/factory_release_manifest.py` then signs the archive and external
-descriptor identities using factory-release schema 1. Those are useful
-downstream bindings, but the packager currently invokes a selected subset of
-checks rather than `require_validated_generated_sdkconfig_defaults()`, and the
-workflow invokes it with ambient `python3` after the helper exits. The target
-architecture below removes both seams without changing the ordinary build
-command.
+`FIRMWARE_UPLOAD_PROVENANCE` lines use the documented closed-field schema 2.
+Factory bundle and factory-release schemas independently use version 2. The
+packager invokes `require_validated_generated_sdkconfig_defaults()` and runs
+only through the helper-owned factory-output path while its project lock is
+held. The signed release directly binds the external/embedded descriptor,
+build attestation, runtime-provenance digest, archive, and complete safe flash
+layout without changing the ordinary build command.
 
 ### Residual trusted boundary
 
@@ -342,13 +328,12 @@ firmware workflows no longer run `pip install --upgrade platformio`.
 
 ### Firmware-release publisher
 
-The release publisher still installs `cryptography` separately to sign the OTA
-and, after PR #240, factory-release manifests. It runs after compiled artifacts
-exist and does not affect firmware bytes. It remains explicitly outside the
-mandatory pioarduino wheelhouse claim and belongs to broader release-pipeline
-hardening. The factory packager itself is standard-library-only and should run
-inside the already accepted firmware runtime; that does not require adding
-publisher dependencies to the firmware closure.
+The release publisher installs an exact Python 3.13 `cryptography`/cffi/
+pycparser closure by version and SHA-256 to sign OTA and factory-release
+manifests. It runs after compiled artifacts exist and does not affect firmware
+bytes. It remains a separately locked publisher closure outside the mandatory
+pioarduino wheelhouse claim. The standard-library factory packager itself runs
+inside the already accepted firmware runtime.
 
 ## Ordinary fetch, verification, and offline behavior
 
@@ -445,7 +430,7 @@ a new valid build or exact-runtime repair; it never triggers online recovery.
 
 ### Factory bundle and signed release binding
 
-After PR #240, `package_factory_firmware.py` is a downstream consumer of the
+`package_factory_firmware.py` is a downstream consumer of the
 exact build manifest rather than an independent attestation authority. The
 long-term integration is:
 
@@ -503,7 +488,7 @@ The original plan required every diagnostic profile in every PR matrix. Main
 now uses a faster split without weakening runtime ownership:
 
 - PR/push CI builds four representative ordinary/production targets;
-- after PR #240, `.github/workflows/firmware-diagnostics.yml` builds the ten diagnostic
+- `.github/workflows/firmware-diagnostics.yml` builds the ten diagnostic
   profiles on schedule, manual dispatch, and as a tagged-release prerequisite;
 - `.github/workflows/speaker-firmware.yml` builds both speaker profiles on
   manual dispatch; and
@@ -527,7 +512,7 @@ locked production builds for both boards. It preserves `env -u LD_LIBRARY_PATH`
 at the build boundary and stages artifacts only after the helper reports an
 upload-eligible manifest.
 
-After PR #240, each release build also emits `<target>.factory.tar.gz` and
+Each release build also emits `<target>.factory.tar.gz` and
 `<target>.factory-bundle.json`, and the publisher emits
 `<target>.factory-release.json`. The build job must use the helper-owned
 factory-output mode. The publish job must run the archive/descriptor/
@@ -535,7 +520,7 @@ attestation consistency preflight before signing, require the exact full Git
 SHA and matching production environment, and refuse cross-job or cross-target
 artifact mixing.
 
-The separate manifest-signing job's live `cryptography` install remains
+The separate manifest-signing job's exact hashed dependency closure remains
 outside compiled-byte provenance. No document may imply otherwise.
 
 ### Apple Silicon validation
@@ -635,136 +620,60 @@ lock automatically.
 
 The current release
 [`firmware-runtime-2026-08-10-1`](https://github.com/seichris/open-bike-computer/releases/tag/firmware-runtime-2026-08-10-1)
-is a public prerelease with 11 server-digested assets. At this revision,
-GitHub reports `immutable: false`. Local content verification still fails
-closed if an asset changes, but release immutability and publication mechanics
-remain a focused long-term maintenance item below.
+is a public prerelease with 11 server-digested assets. At this revision, GitHub
+reports `immutable: false`. Local content verification still fails closed if an
+asset changes. The implemented publishers therefore refuse to create the next
+runtime or product release until an administrator enables the repository's
+immutable-release control.
 
-## Remaining focused maintenance work
+## Implemented focused maintenance work
 
-The first-run wheelhouse gap must not be reopened while addressing these
-items. None permits live resolution or an automatic lock update.
+The follow-up implementation keeps the first-run closure intact and introduces
+no live resolver or automatic lock update.
 
-### 1. Correct the documented residual boundary
+1. `AGENTS.md`, `CONTRIBUTING.md`, and `esp32/README.md` now name the protected
+   private CPython/PlatformIO/uv/penv/ESP-IDF closure and the complete initial
+   caller/OS/GitHub residual boundary consistently. Policy tests reject the
+   obsolete resolver-boundary wording.
+2. Runtime candidate generation remains read-only. A separate manual publisher
+   rebinds a successful candidate run to the exact workflow commit, requires
+   configured human reviewers, stages the exact 11-asset set create-only,
+   verifies it after Actions-artifact transport, and receives `contents: write`
+   only after environment approval.
+   The publisher also rejects any pre-existing release tag and proves the new
+   lightweight tag resolves to the exact reviewed generator commit.
+3. Both runtime and product-release publication require repository immutable
+   releases before creating anything, upload without `--clobber`, verify the
+   draft inventory before publication, then require `immutable: true` and
+   reverify every server-reported size/SHA-256 for the retained receipt.
+4. One strict tracked `publication-v1.json` owns the prospective lock-set ID and
+   release tag. Changing it is an ordinary review commit; there is no `latest`
+   selector.
+5. Build/upload provenance uses closed-field schema 2 with separate shared,
+   hydration, and verification timings. Factory output emits its own schema-1
+   timing/digest line only when explicitly requested.
+6. Native Linux x86-64 and Apple Silicon performance CI records exactly five
+   warm locked-runtime handoffs and enforces a lock-specific 20% median limit.
+   The existing source-only custom-core 35% gate remains independent.
+7. Refresh CI emits one canonical cross-target summary of root, wheel,
+   distribution, source, license, runner, reproducibility, offline replay,
+   build-validation, and proposed publication-asset changes. It is evidence,
+   never an acceptance action.
+8. `build_firmware.py --factory-output-dir` is the only CI/release factory
+   authority. It runs under the private runtime and project lock, invokes the
+   canonical upload validator before creating output, requires an empty safe
+   destination, and records separate packaging timing.
+9. Factory bundle/release schemas 2 bind the external and embedded descriptors,
+   build manifest, runtime-provenance digest, safe complete checksum inventory,
+   exact flash layout, required images, immutable `keep` write parameters, and
+   signed archive identity. Mixed, changed, overlapping, unsafe, incomplete, or
+   mutable inputs fail before signing or publication.
+10. The release signer itself uses an exact Python 3.13 binary-only,
+    no-dependency, SHA-256-locked closure derived from accepted runtime wheels.
 
-`AGENTS.md` currently contains both the new locked-runtime instructions and a
-stale later paragraph claiming the host Python, top-level `pio`, and
-pioarduino first-run resolver are still outside pre-execution proof. Replace
-that stale paragraph with the precise boundary in this document:
-
-- the accepted private CPython, top-level `pio`, `uv`, wheelhouse, root `penv`,
-  ESP-IDF venv, esptool, and transformed platform are locked and attested;
-- the complete initial host Python startup or recovery shell/toolchain remains
-  trusted until handoff; and
-- the host OS/kernel and repository/GitHub control plane remain trusted.
-
-Update `CONTRIBUTING.md` and `esp32/README.md` only if necessary to keep those
-claims identical. Add a documentation-policy test that rejects the obsolete
-“first-run resolver remains trusted” wording after the correction.
-
-### 2. Make accepted release publication immutable and two-stage
-
-Before the next runtime refresh, choose and document one durable publication
-control:
-
-1. enable GitHub immutable releases for runtime tags; or
-2. add an approval-gated, create-only publication workflow that has
-   `contents: write` only after candidate review, rejects an existing tag or
-   asset name, verifies server-reported digests after upload, and never uses
-   `--clobber`.
-
-The recommended end state is both: repository release immutability plus a
-separate approval-gated publisher. Candidate generation remains unprivileged
-and read-only. Lock acceptance remains a normal human-reviewed PR after assets
-exist.
-
-Move the prospective lock-set ID and release tag out of duplicated hard-coded
-workflow strings into one strict tracked candidate input. Changing it must
-still require a review commit; do not turn it into a “latest” selector.
-
-### 3. Formalize provenance compatibility
-
-Decide whether the printed provenance schema 1 contract explicitly permits
-additive fields. If it does, document that parser rule and add backward/
-forward-compatibility fixtures. If consumers require a closed field set, bump
-both build and upload line schemas to 2 and migrate their tests together.
-
-The lock, inventory, core-cache, build-manifest, flash-plan, printed
-provenance, factory-bundle, and factory-release schemas are independent. A
-change to one must bump that contract only, reject older incompatible state,
-and leave accepted release assets immutable. The planned factory schema-2
-fields are an incompatible closed-field change and therefore must not be added
-silently to PR #240's schema-1 contracts.
-
-### 4. Preserve and measure the fast path
-
-Runtime verification is mandatory, but its cost must be visible and bounded.
-Keep `runtimeBootstrapMs` and the existing build phase timings, and add separate
-timings for download, archive verification, extraction, accepted-tree rehash,
-and private hydration if the aggregate cannot explain a regression.
-
-Record five-run medians for both host targets covering:
-
-- empty-cache download and bootstrap;
-- verified shared-cache/private-cache miss;
-- fully warm runtime handoff;
-- cold custom-core build; and
-- source-only build with a custom-core hit.
-
-The first benchmark revision establishes the accepted runtime baseline. Later
-same-lock changes fail the performance gate if the warm runtime-handoff median
-regresses by more than 20% without an attached profile and explicit review.
-Retain PR #231's core-cache gate: the source-only median must remain no more
-than 35% of the cold-cache median, with `coreCache=hit` and
-`phaseCustomCoreBootstrapMs=0`.
-
-If CI caching is added, cache only content-addressed immutable transport input
-or a complete revalidated read-only runtime entry. Key it by target, lock
-manifest, and bundle digest. Never cache acceptance state independently, never
-skip rehashing, and never share mutable project-private PlatformIO stores.
-
-### 5. Make refresh evidence easier to review
-
-Before the next accepted lock, emit one canonical review summary that compares
-the old and candidate locks across both targets:
-
-- roots and transitive distributions added, removed, or changed;
-- source and wheel digest changes;
-- target/tag changes;
-- license changes and reviewed overrides;
-- candidate-generation commit and native runner images;
-- A/B reproducibility, offline replay, clean/warm build, and tamper results;
-  and
-- final published asset names, sizes, and server-reported digests.
-
-The summary is an artifact and proposed PR input. It does not approve or merge
-the candidate. This removes manual comparison toil without introducing an
-automatic dependency updater.
-
-### 6. Integrate PR #240's factory artifacts through the locked boundary
-
-After PR #240 merges, implement the factory-output mode and schema chain in
-the “Factory bundle and signed release binding” section as one coherent change:
-
-- refetch the final PR #240 merge commit and reconcile any review-driven
-  changes from inspected head `46c619481069af38c7a59492f7b605a64cbe848d`;
-- keep `package_factory_firmware.py` as the packaging library, but make
-  `build_firmware.py` the authoritative CI/release entrypoint and retain the
-  project lock through manifest validation and archive publication;
-- replace the packager's selected manifest checks with the shared strict
-  upload-eligibility validator before copying any bytes;
-- version and bind the factory bundle, external descriptor, embedded build
-  manifest, runtime identity, image checksums, and signed release manifest;
-- update `ci.yml`, `firmware-release.yml`, `changed_components.py`, workflow
-  policy, factory-release documentation, and both factory tool suites
-  together; and
-- benchmark packaging separately from runtime/build timings so its release-CI
-  disk and time cost is visible without treating it as ordinary developer
-  build latency.
-
-Do not make factory packaging the default local action. Developers continue to
-build and test devices with the same helper invocation; only CI, tagged
-releases, factory operators, and maintainers request factory output.
+Ordinary development and device testing omit the factory option and keep the
+same helper command. Only CI, tagged releases, factory operators, and
+maintainers perform release packaging or dependency refresh.
 
 ## Mandatory scope versus optional broader hardening
 
@@ -784,14 +693,14 @@ runtime refresh:
   helper;
 - runtime/core/source/artifact/flash-plan binding for build, upload, and
   `--upload-only`;
-- after PR #240, strict propagation of that same runtime/build identity into
+- strict propagation of that same runtime/build identity into
   each production factory bundle and its signed release identity;
 - manual-only refresh and human-reviewed lock acceptance; and
 - immutable historical lock identities and rollback assets.
 
 The focused documentation, release-publication, provenance-contract, review,
-and performance items above are maintenance hardening around that implemented
-boundary. They must not weaken it while being delivered.
+and performance controls above are implemented maintenance hardening around
+that boundary. They must not be weakened by later refresh work.
 
 ### Optional broader host and GitHub trust hardening
 
@@ -807,13 +716,8 @@ first-run Python resolver has been removed from the supported build path:
   offline-maintainer trust root;
 - mirroring accepted runtime assets to an independently controlled immutable
   store for availability;
-- pinning the release publisher's `cryptography` closure and hardening release
-  signing-key custody;
-- making tagged firmware assets create-only (or accepting an existing asset
-  only after byte-identity verification) instead of PR #240's current
-  `gh release upload --clobber` behavior;
-- running the factory/OTA signer in a separate content-locked publisher
-  runtime;
+- moving release signing-key custody to dedicated hardware-backed key
+  management and running the factory/OTA signer in an isolated attested job;
 - defending against a malicious host kernel, root user, filesystem, compiler,
   or hardware; and
 - adding Windows, Intel macOS, Linux arm64, or another Python ABI.
@@ -834,8 +738,8 @@ Keep and extend the focused suites in:
 - `esp32/tools/tests/test_generated_sdkconfig.py`;
 - `esp32/tools/tests/test_pioarduino_custom_core.py`;
 - `esp32/tools/tests/test_firmware_profile_config.py`;
-- `esp32/tools/tests/test_package_factory_firmware.py` after PR #240;
-- `tools/tests/test_factory_release_manifest.py` after PR #240; and
+- `esp32/tools/tests/test_package_factory_firmware.py`;
+- `tools/tests/test_factory_release_manifest.py`;
 - `.github/scripts/tests/`.
 
 They must cover strict/canonical lock parsing, duplicate keys, exact versions,
@@ -908,8 +812,8 @@ content-addressed subtree and rebuilds affected private runtime/core state.
 Old build/core schemas and old runtime identities become ineligible rather
 than being upgraded in place.
 
-When the PR #240 integration lands, new factory artifacts use factory-bundle
-and factory-release schema 2. Already published schema-1 factory releases stay
+New factory artifacts use factory-bundle and factory-release schema 2. Already
+published schema-1 factory releases stay
 verifiable through an explicitly versioned legacy parser; they are never
 rewritten to look like schema 2. Runtime lock changes do not edit a factory
 release in place: they produce a new exact source commit and release tag whose
@@ -978,12 +882,12 @@ The focused hardening remains complete only while all of these gates hold:
 15. Documentation accurately names the protected closure and the initial
     host/GitHub residual boundary; it contains no stale claim that the online
     pioarduino resolver remains trusted.
-16. Accepted runtime assets are never replaced. Before the next lock refresh,
-    publication is protected by immutable releases or an approval-gated,
-    create-only, digest-verified equivalent.
+16. Accepted runtime assets are never replaced. Publication requires both
+    repository immutable releases and the approval-gated, create-only,
+    digest-verified publisher.
 17. No automatic dependency update, scheduled lock refresh, warning-only mode,
     Linux-only acceptance, or fallback resolver is introduced.
-18. After PR #240, both production profiles package through an opt-in
+18. Both production profiles package through an opt-in
     `build_firmware.py --factory-output-dir` mode under the locked runtime and
     project lock; release workflows do not invoke an ambient-Python packager as
     an authority.
@@ -997,7 +901,7 @@ The focused hardening remains complete only while all of these gates hold:
     work to local coding/device-test loops, and retains the existing runtime
     and core-cache performance gates.
 
-## Current evidence and unresolved decisions
+## Implementation evidence and remaining external decisions
 
 The accepted runtime was generated from commit
 `f354297eb831665ca37bf7ca1edfd23b6b779e35`. PR #228 records 152 focused tests,
@@ -1007,44 +911,39 @@ records workflow-policy validation and successful locked workflow builds. PR
 #231 records a macOS arm64 source-only custom-core-cache median of 19.07% of the
 cold median, with `coreCache=hit` and zero custom-core bootstrap time.
 
-The latest fetched `origin/main` for this reconciliation is
-`c4f09db675d5b16bcfcd455d09ddd0e5834b5249`. Draft PR #240 was inspected at
-`46c619481069af38c7a59492f7b605a64cbe848d`; its live CI was still running.
-That head adds `package_factory_firmware.py`, factory-bundle schema 1,
-`factory_release_manifest.py`, factory-release schema 1, production CI
-package/extract/checksum checks, tagged-release packaging for both production
-targets, and a tenth diagnostic profile. It embeds and hashes the full build
-manifest, but its authoritative workflow still calls the packager with ambient
-`python3` and its packager validates a subset of the canonical upload boundary.
-Those two observed seams are the reason for the explicit post-merge work above;
-they do not change the accepted runtime closure itself.
+The final PR #240 head
+`d0e628ca9e6dcbb23929d056b61d9e9829407ba7` was revalidated after every check
+passed and merged as `05cb1d47bb92b93087c521a421a9056b613a35b5`.
+The implementation is rebased from that exact `origin/main` boundary.
 
-The remaining decisions are deliberately narrow:
+Local validation covers the root factory signing/release tools, the focused
+184-test firmware runtime/build/factory suite, 49 workflow-policy tests, YAML
+parsing, Python compilation, signing-wheel hash/availability checks, and native
+Apple Silicon warm runtime measurements. The first implementation-PR run must
+replace the conservative checked baselines with the exact five-sample
+`ubuntu-24.04` and `macos-15` medians before this change is considered ready to
+merge.
 
-1. **Release immutability and publication:** enable GitHub immutable releases
-   and add an approval-gated create-only publisher, or document an equivalent
-   independently immutable store. The recommendation is to use both GitHub
-   immutability and create-only publication.
-2. **Printed provenance compatibility:** document additive schema-1 parsing or
-   bump build/upload provenance lines to schema 2. The recommendation is a
-   schema-2 bump if any consumer expects a closed field set.
-3. **Performance baseline:** record current per-phase Linux and Apple Silicon
-   runtime bootstrap medians before enforcing the 20% regression threshold.
-4. **Additional host targets:** add none until a concrete supported-developer
+Only these external or deliberately broader decisions remain:
+
+1. **Repository controls:** GitHub currently reports immutable releases as
+   disabled. An administrator must enable them before the next runtime or
+   product release. The publisher intentionally fails before creating a
+   release until this is done. The `firmware-runtime-publication` environment
+   must likewise be configured with required human reviewers before use.
+2. **Measured CI baseline:** replace both initial conservative ceilings with
+   the first exact five-sample native runner medians from this implementation
+   PR. Any later change follows the reviewed 20% regression policy.
+3. **Additional host targets:** add none until a concrete supported-developer
    or release requirement pays for native generation and continuing CI.
-5. **Initial host bootstrap trust:** keep it explicit in the mandatory claim;
-   pursue a verified native/shell launcher only as a separately reviewed
-   broader-hardening project.
-6. **Tagged product-release immutability:** independently of immutable runtime
-   assets, replace PR #240's `--clobber` publication with create-only upload or
-   byte-identical no-op behavior. This is recommended broader release hardening,
-   not a prerequisite for the narrower pioarduino resolver-closure claim.
+4. **Initial host bootstrap trust:** keep it explicit in the mandatory claim;
+   a verified native/shell launcher or independent artifact mirror remains a
+   separately reviewed broader-hardening project.
 
-The factory packaging architecture is not left as an MVP choice: use the
-helper-owned locked-runtime mode, shared strict validator, direct schema-2
-runtime/build digest bindings, and fail-closed publication preflight described
-above. The only PR #240 prerequisite still open is revalidating its eventual
-merge commit against the inspected draft head.
+The factory architecture is the intended long-term version: helper-owned
+locked-runtime packaging, the shared strict validator, direct schema-2
+runtime/build/flash bindings, exact signer dependencies, approval-gated
+create-only publication, and mandatory server-side immutability.
 
 None of these decisions permits live Python resolution, automatic dependency
 updates, asset replacement, or a second ordinary developer build command.

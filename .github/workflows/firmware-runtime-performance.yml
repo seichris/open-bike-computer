@@ -1,0 +1,65 @@
+name: Firmware runtime performance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/firmware-runtime-performance.yml"
+      - "esp32/tools/build_firmware.py"
+      - "esp32/tools/firmware_runtime.py"
+      - "esp32/tools/check_firmware_runtime_performance.py"
+      - "esp32/tools/firmware-runtime/**"
+      - "esp32/tools/tests/test_check_firmware_runtime_performance.py"
+      - "esp32/tools/tests/test_firmware_runtime.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-runtime-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm-handoff:
+    name: Warm handoff (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64-cp313
+          - runner: macos-15
+            target: macos-arm64-cp313
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: esp32
+    env:
+      OPEN_BIKE_FIRMWARE_RUNTIME_CACHE: ${{ runner.temp }}/firmware-runtime-cache
+    steps:
+      - uses: actions/checkout@v7
+      - name: Warm and measure five verified runtime handoffs
+        run: |
+          set -euo pipefail
+          samples="$RUNNER_TEMP/runtime-handoff-${{ matrix.target }}.log"
+          env -u LD_LIBRARY_PATH PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/build_firmware.py WAVESHARE_AMOLED_175 --runtime-check-only \
+            > /dev/null
+          for sample_index in 1 2 3 4 5; do
+            env -u LD_LIBRARY_PATH PYTHONDONTWRITEBYTECODE=1 python3 \
+              tools/build_firmware.py WAVESHARE_AMOLED_175 --runtime-check-only \
+              >> "$samples"
+          done
+          env -u LD_LIBRARY_PATH PYTHONPATH=tools python3 \
+            tools/check_firmware_runtime_performance.py \
+            --baseline tools/firmware-runtime/performance-baselines-v1.json \
+            --samples "$samples" \
+            --target "${{ matrix.target }}" \
+            --output "$RUNNER_TEMP/runtime-performance-${{ matrix.target }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-runtime-performance-${{ matrix.target }}
+          path: ${{ runner.temp }}/runtime-performance-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 30

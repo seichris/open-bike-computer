@@ -98,9 +98,11 @@ canonical file inventory before any bundled code executes. Shared user cache
 entries are content-addressed and read-only; every worktree receives its own
 private mutable PlatformIO store. Use `--repair-runtime` to remove and recreate
 only the selected lock/target subtree after a validation failure. The residual
-trust boundary is the operating system and the initial Python standard library
-that runs the verifier, not mutable global Python packages. Command success is
-not a flash
+trust boundary is the operating system and the complete initial caller-Python
+startup before the locked-runtime handoff, not mutable global Python packages
+and not pioarduino's removed online resolver. The optional shell bootstrap
+instead trusts the recovery shell, download/hash/archive tools, OS, and kernel
+until handoff. Command success is not a flash
 readback; confirm the embedded Git/profile with the later boot capture.
 
 Custom-core reuse is also content addressed, but remains project-private. A
@@ -136,7 +138,8 @@ Ordinary contributors consume accepted runtime locks only. Maintainers use the
 manual **Firmware runtime refresh candidate** workflow as the first bootstrap
 check, then must produce and review both-host offline replay, dependency graphs,
 licenses, clean/warm builds, and tamper evidence before publishing immutable
-assets and marking a target accepted. The checked-in lock now references
+assets through the separate approval-gated create-only publisher and marking a
+target accepted in a later lock PR. The checked-in lock now references
 accepted Linux x86-64 and Apple Silicon bundles in the
 `firmware-runtime-2026-08-10-1` prerelease. Unsupported hosts and any runtime
 whose locked bytes have changed still stop before PlatformIO.

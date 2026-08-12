@@ -94,10 +94,12 @@ class ChangedComponentsTests(unittest.TestCase):
     def test_contract_documents_select_their_consumers(self) -> None:
         firmware_contracts = (
             "docs/firmware-battery-life-hardware-validation.md",
+            "docs/firmware-build-provenance.md",
             "docs/firmware-factory-release.md",
             "docs/firmware-map-memory-diagnostics.md",
             "docs/firmware-map-render-scheduler.md",
             "docs/firmware-map-rendering-psram.md",
+            "docs/firmware-runtime-maintenance.md",
         )
         ios_contracts = (
             "docs/app-store-privacy-disclosures.md",
@@ -131,18 +133,33 @@ class ChangedComponentsTests(unittest.TestCase):
                     changed_components.classify_paths([path]),
                 )
 
-    def test_factory_release_tool_selects_firmware_only(self) -> None:
-        self.assertEqual(
-            {
-                "firmware": True,
-                "ios": False,
-                "map_backend": False,
-                "osm": False,
-            },
-            changed_components.classify_paths(
-                ["tools/factory_release_manifest.py"]
-            ),
-        )
+    def test_release_tools_select_firmware_only(self) -> None:
+        for path in (
+            "tools/factory_release_manifest.py",
+            "tools/firmware-signing-requirements.txt",
+            "tools/verify_github_release_assets.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware": True,
+                        "ios": False,
+                        "map_backend": False,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
+    def test_runtime_workflows_select_firmware_only(self) -> None:
+        for path in (
+            ".github/workflows/firmware-runtime-performance.yml",
+            ".github/workflows/firmware-runtime-publish.yml",
+            ".github/workflows/firmware-runtime-refresh.yml",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware"])
+                self.assertFalse(selected["ios"])
 
     def test_future_root_tool_tests_select_the_firmware_host_job(self) -> None:
         for path in (

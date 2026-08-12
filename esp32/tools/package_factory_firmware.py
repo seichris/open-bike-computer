@@ -20,11 +20,13 @@ from firmware_build_identity import build_timestamp_from_source_date_epoch
 from generated_sdkconfig import (
     BUILD_MANIFEST_SCHEMA,
     FLASH_PLAN_SCHEMA,
+    GeneratedSdkconfigError,
     current_source_identity,
+    require_validated_generated_sdkconfig_defaults,
 )
 
 
-BUNDLE_SCHEMA = 1
+BUNDLE_SCHEMA = 2
 BUNDLE_ARTIFACT_TYPE = "esp32-factory-flash-bundle"
 SUPPORTED_BUILD_MANIFEST_SCHEMA = BUILD_MANIFEST_SCHEMA
 SUPPORTED_FLASH_PLAN_SCHEMA = FLASH_PLAN_SCHEMA
@@ -100,6 +102,25 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(COPY_CHUNK_BYTES), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _safe_output_directory(path: Path) -> Path:
+    requested = Path(os.path.abspath(path))
+    if os.path.lexists(requested) and requested.is_symlink():
+        raise BundleError(f"factory output path is unsafe: {requested}")
+    # Resolve platform-owned aliases such as macOS /var -> /private/var before
+    # checking the real destination chain.
+    absolute = requested.resolve(strict=False)
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if not os.path.lexists(current):
+            continue
+        if current.is_symlink() or not current.is_dir():
+            raise BundleError(f"factory output path is unsafe: {current}")
+    if absolute.exists() and any(absolute.iterdir()):
+        raise BundleError("factory output directory must be empty")
+    return absolute
 
 
 def _parse_offset(value: object) -> int:
@@ -441,7 +462,7 @@ def package_factory_bundle(
 ) -> tuple[Path, Path]:
     """Create and return the deterministic archive and portable bundle manifest."""
     project_dir = project_dir.resolve()
-    output_dir = output_dir.resolve()
+    output_dir = _safe_output_directory(output_dir)
     expected_git_sha = expected_git_sha.lower()
     if target not in SUPPORTED_TARGETS:
         raise BundleError(f"unsupported factory target: {target}")
@@ -463,6 +484,20 @@ def package_factory_bundle(
         / "current.json"
     )
     manifest, manifest_bytes = _load_json(manifest_path)
+    try:
+        validated_manifest = require_validated_generated_sdkconfig_defaults(
+            project_dir, environment
+        )
+    except GeneratedSdkconfigError as error:
+        # Keep generated-state failures inside the packager's public error
+        # contract without weakening the canonical validator.
+        raise BundleError(
+            f"verified build failed strict factory validation: {error}"
+        ) from error
+    if manifest != validated_manifest:
+        raise BundleError(
+            "verified build manifest changed during strict factory validation"
+        )
     if manifest.get("schema") != SUPPORTED_BUILD_MANIFEST_SCHEMA:
         raise BundleError("unsupported verified build-manifest schema")
     if manifest.get("environment") != environment:
@@ -518,6 +553,24 @@ def package_factory_bundle(
     ):
         raise BundleError("PlatformIO flash parameter values are invalid")
     images = _validated_images(project_dir, manifest, flash_plan)
+    runtime_provenance = manifest.get("runtimeProvenance")
+    if not isinstance(runtime_provenance, dict):
+        raise BundleError("verified build is missing locked runtime provenance")
+    runtime_provenance_sha256 = _sha256_bytes(
+        _canonical_json(runtime_provenance)
+    )
+    runtime_attestation_fields = (
+        "lockSetId",
+        "target",
+        "manifestSha256",
+        "bundleSha256",
+    )
+    if any(
+        not isinstance(runtime_provenance.get(field), str)
+        or not runtime_provenance[field]
+        for field in runtime_attestation_fields
+    ):
+        raise BundleError("verified build runtime provenance is incomplete")
     release, flash_capacity = _read_release_metadata(
         project_dir / "platformio.ini",
         manifest.get("platformioIniSha256"),
@@ -526,7 +579,16 @@ def package_factory_bundle(
 
     archive_output = output_dir / f"{target}.factory.tar.gz"
     manifest_output = output_dir / f"{target}.factory-bundle.json"
+    # Creating a repository-local output directory before this point would
+    # make the clean-source identity check fail on its own generated output.
+    # Recheck the destination chain immediately before creation so an unsafe
+    # replacement cannot be accepted between initial argument validation and
+    # publication staging.
+    output_dir = _safe_output_directory(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _safe_output_directory(output_dir)
+    archive_output = output_dir / archive_output.name
+    manifest_output = output_dir / manifest_output.name
     for path in (archive_output, manifest_output):
         if os.path.lexists(path):
             raise BundleError(f"refusing to overwrite factory release artifact: {path}")
@@ -559,6 +621,13 @@ def package_factory_bundle(
                 "size": attestation_path.stat().st_size,
                 "sha256": _sha256_file(attestation_path),
                 "flashPlanSha256": flash_plan_digest,
+            },
+            "runtimeAttestation": {
+                "lockSetId": runtime_provenance["lockSetId"],
+                "target": runtime_provenance["target"],
+                "manifestSha256": runtime_provenance["manifestSha256"],
+                "bundleSha256": runtime_provenance["bundleSha256"],
+                "runtimeProvenanceSha256": runtime_provenance_sha256,
             },
             "flashPlan": {
                 "schemaVersion": BUNDLE_SCHEMA,

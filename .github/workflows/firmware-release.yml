@@ -6,11 +6,7 @@ on:
       - "v*"
 
 permissions:
-  attestations: read
-  contents: write
-  packages: read
-  pages: write
-  id-token: write
+  contents: read
 
 jobs:
   validate:
@@ -45,16 +41,10 @@ jobs:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
-        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}"
+        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}" --factory-output-dir dist
       - name: Stage OTA image and factory-flash bundle
         run: |
           set -euo pipefail
-          release_git_sha="$(git rev-parse HEAD)"
-          python3 tools/package_factory_firmware.py \
-            --environment "${{ matrix.environment }}" \
-            --target "${{ matrix.target }}" \
-            --expected-git-sha "${release_git_sha}" \
-            --output-dir dist
           cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/${{ matrix.target }}.bin"
           shasum -a 256 dist/*
       - uses: actions/upload-artifact@v4
@@ -73,6 +63,10 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: write
+      id-token: write
+      pages: write
     env:
       GH_TOKEN: ${{ github.token }}
       FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
@@ -80,9 +74,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-      - name: Install manifest dependencies
-        run: python -m pip install --upgrade cryptography
+          python-version: "3.13"
+      - name: Install exact hashed manifest dependencies
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all: --no-deps
+          -r tools/firmware-signing-requirements.txt
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -130,10 +126,40 @@ jobs:
       - name: Publish GitHub release assets
         run: |
           set -euo pipefail
-          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          if [ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != true ]; then
+            echo "Repository immutable releases must be enabled before publication" >&2
+            exit 1
           fi
-          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" release-assets/*
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            > "${RUNNER_TEMP}/release.json"
+          python tools/verify_github_release_assets.py \
+            --release-json "${RUNNER_TEMP}/release.json" \
+            --asset-dir release-assets
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            > "${RUNNER_TEMP}/release.json"
+          python tools/verify_github_release_assets.py \
+            --release-json "${RUNNER_TEMP}/release.json" \
+            --asset-dir release-assets \
+            --require-immutable \
+            --output "${RUNNER_TEMP}/publication-receipt.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-release-publication-receipt
+          path: ${{ runner.temp }}/publication-receipt.json
+          if-no-files-found: error
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public

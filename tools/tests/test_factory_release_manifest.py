@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -42,36 +43,141 @@ class FactoryReleaseManifestTests(unittest.TestCase):
 
     def create_inputs(self, root: Path) -> tuple[Path, Path, Path, str]:
         bundle_root = root / f"{TARGET}.factory"
-        image_path = bundle_root / "images" / "00010000-firmware.bin"
-        image_path.parent.mkdir(parents=True)
-        image_path.write_bytes(b"factory application image")
+        images_dir = bundle_root / "images"
+        images_dir.mkdir(parents=True)
+        image_values = {
+            "00000000-bootloader.bin": b"BOOT",
+            "00000010-partitions.bin": b"PART",
+            "00000020-boot_app0.bin": b"APP0",
+            "00000030-firmware.bin": b"factory application image",
+        }
+        image_paths = {}
+        for name, encoded in image_values.items():
+            image_paths[name] = images_dir / name
+            image_paths[name].write_bytes(encoded)
+        image_path = image_paths["00000030-firmware.bin"]
+        merged_size = 0x30 + image_path.stat().st_size
         merged_path = bundle_root / f"{TARGET}.factory.bin"
-        merged_path.write_bytes(b"merged factory image")
+        merged_bytes = bytearray(b"\xff" * merged_size)
+        for index, path in enumerate(image_paths.values()):
+            offset = index * 0x10
+            encoded = path.read_bytes()
+            merged_bytes[offset : offset + len(encoded)] = encoded
+        merged_path.write_bytes(merged_bytes)
         attestation_path = bundle_root / "attestation" / "build-manifest.json"
         attestation_path.parent.mkdir()
-        attestation_path.write_bytes(b'{"schema":20}\n')
+        runtime_provenance = {
+            "lockSetId": "firmware-runtime-test-1",
+            "target": "linux-x86_64-cp313",
+            "manifestSha256": "1" * 64,
+            "bundleSha256": "2" * 64,
+        }
+        runtime_digest = hashlib.sha256(
+            json.dumps(
+                runtime_provenance,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        attested_images = [
+            {
+                "offset": hex(index * 0x10),
+                "path": f"/verified/{name.split('-', 1)[1]}",
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for index, (name, path) in enumerate(image_paths.items())
+        ]
+        attested_flash_plan = {
+            "schema": 2,
+            "environment": ENVIRONMENT,
+            "applicationOffsetSource": "partition-table",
+            "command": [
+                "/verified/esptool",
+                "--chip",
+                "esp32s3",
+                "write-flash",
+                "--flash-mode",
+                "keep",
+                "--flash-freq",
+                "keep",
+                "--flash-size",
+                "keep",
+                *(
+                    item
+                    for image in attested_images
+                    for item in (image["offset"], image["path"])
+                ),
+            ],
+            "images": attested_images,
+        }
+        flash_plan_digest = hashlib.sha256(
+            json.dumps(
+                attested_flash_plan, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        build_manifest_bytes = (
+            json.dumps(
+                {
+                    "schema": 20,
+                    "sourceIdentity": GIT_SHA,
+                    "flashPlan": attested_flash_plan,
+                    "flashPlanSha256": flash_plan_digest,
+                    "runtimeProvenance": runtime_provenance,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        attestation_path.write_bytes(build_manifest_bytes)
         descriptor = root / f"{TARGET}.factory-bundle.json"
         descriptor_value = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "artifactType": "esp32-factory-flash-bundle",
             "target": TARGET,
             "environment": ENVIRONMENT,
             "sourceIdentity": GIT_SHA,
+            "sourceDateEpoch": "1700000000",
+            "buildTimestamp": "2023-11-14T22:13:20Z",
             "firmwareVersion": {"version": "2.3.4", "build": 57},
             "buildAttestation": {
+                "schema": 20,
                 "file": "attestation/build-manifest.json",
                 "size": attestation_path.stat().st_size,
                 "sha256": hashlib.sha256(attestation_path.read_bytes()).hexdigest(),
+                "flashPlanSha256": flash_plan_digest,
+            },
+            "runtimeAttestation": {
+                **runtime_provenance,
+                "runtimeProvenanceSha256": runtime_digest,
             },
             "flashPlan": {
+                "schemaVersion": 2,
+                "chip": "esp32s3",
+                "applicationOffsetSource": "partition-table",
+                "flashCapacity": 1024 * 1024,
+                "writeParameters": {
+                    "flashMode": "keep",
+                    "flashFrequency": "keep",
+                    "flashSize": "keep",
+                },
+                "platformioResolvedParameters": {
+                    "mode": "qio",
+                    "frequency": "80m",
+                    "size": "detect",
+                },
                 "images": [
                     {
-                        "file": "images/00010000-firmware.bin",
-                        "size": image_path.stat().st_size,
-                        "sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
+                        "offset": hex(index * 0x10),
+                        "file": f"images/{name}",
+                        "size": path.stat().st_size,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     }
+                    for index, (name, path) in enumerate(image_paths.items())
                 ],
                 "mergedImage": {
+                    "offset": "0x0",
                     "file": merged_path.name,
                     "size": merged_path.stat().st_size,
                     "sha256": hashlib.sha256(merged_path.read_bytes()).hexdigest(),
@@ -147,8 +253,17 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             )
 
             manifest = json.loads(output.read_text(encoding="utf-8"))
+            descriptor_value = json.loads(
+                descriptor.read_text(encoding="utf-8")
+            )
+            build_manifest_digest = descriptor_value["buildAttestation"][
+                "sha256"
+            ]
+            runtime_digest = descriptor_value["runtimeAttestation"][
+                "runtimeProvenanceSha256"
+            ]
             expected = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "artifactType": "esp32-factory-flash-bundle",
                 "target": TARGET,
                 "environment": ENVIRONMENT,
@@ -162,6 +277,8 @@ class FactoryReleaseManifestTests(unittest.TestCase):
                 "bundleManifestSha256": hashlib.sha256(
                     descriptor.read_bytes()
                 ).hexdigest(),
+                "buildAttestationSha256": build_manifest_digest,
+                "runtimeProvenanceSha256": runtime_digest,
                 "url": (
                     "https://github.com/owner/repository/releases/download/"
                     f"v2.3.4/{bundle.name}"
@@ -172,7 +289,7 @@ class FactoryReleaseManifestTests(unittest.TestCase):
                 {key: value for key, value in manifest.items() if key != "signature"},
             )
             payload = (
-                "schemaVersion=1\n"
+                "schemaVersion=2\n"
                 "artifactType=esp32-factory-flash-bundle\n"
                 f"target={TARGET}\n"
                 f"environment={ENVIRONMENT}\n"
@@ -184,6 +301,8 @@ class FactoryReleaseManifestTests(unittest.TestCase):
                 f"sha256={expected['sha256']}\n"
                 f"bundleManifestName={descriptor.name}\n"
                 f"bundleManifestSha256={expected['bundleManifestSha256']}\n"
+                f"buildAttestationSha256={build_manifest_digest}\n"
+                f"runtimeProvenanceSha256={runtime_digest}\n"
                 f"url={expected['url']}\n"
             ).encode("utf-8")
             public_key = ec.derive_private_key(1, ec.SECP256R1()).public_key()
@@ -250,7 +369,7 @@ class FactoryReleaseManifestTests(unittest.TestCase):
                 archive.add(bundle_root, arcname=bundle_root.name)
                 unsafe = tarfile.TarInfo(f"{bundle_root.name}/../escape")
                 unsafe.size = 1
-                archive.addfile(unsafe, fileobj=None)
+                archive.addfile(unsafe, fileobj=io.BytesIO(b"x"))
 
             completed = subprocess.run(
                 self.command(
@@ -267,14 +386,14 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode)
-            self.assertIn("archive member is unsafe", completed.stderr)
+            self.assertIn("unsafe path", completed.stderr)
 
     def test_cli_rejects_an_archive_with_another_embedded_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             bundle, descriptor, platformio_ini, key = self.create_inputs(root)
             value = json.loads(descriptor.read_text(encoding="utf-8"))
-            value["releaseNote"] = "external manifest changed after packaging"
+            value["sourceDateEpoch"] = "1700000001"
             descriptor.write_text(
                 json.dumps(value, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
@@ -295,7 +414,7 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode)
-            self.assertIn("supplied bundle manifest", completed.stderr)
+            self.assertIn("not identical", completed.stderr)
 
     def test_cli_rejects_archive_checksum_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -324,14 +443,14 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode)
-            self.assertIn("SHA256SUMS does not match", completed.stderr)
+            self.assertIn("checksum mismatch", completed.stderr)
 
     def test_cli_rejects_image_bytes_not_declared_by_bundle_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             bundle, descriptor, platformio_ini, key = self.create_inputs(root)
             bundle_root = root / f"{TARGET}.factory"
-            image_path = bundle_root / "images" / "00010000-firmware.bin"
+            image_path = bundle_root / "images" / "00000030-firmware.bin"
             image_path.write_bytes(b"different but internally checksummed image")
             self.write_checksums(bundle_root)
             self.write_archive(bundle, bundle_root)
@@ -351,7 +470,7 @@ class FactoryReleaseManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode)
-            self.assertIn("in its manifest", completed.stderr)
+            self.assertIn("merged image does not match", completed.stderr)
 
     def test_cli_rejects_a_tag_for_another_firmware_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -421,6 +540,188 @@ class FactoryReleaseManifestTests(unittest.TestCase):
 
             self.assertEqual(1, completed.returncode)
             self.assertIn("missing or unsafe", completed.stderr)
+
+    def test_cli_rejects_external_descriptor_not_in_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            descriptor.write_bytes(descriptor.read_bytes() + b" ")
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("not identical", completed.stderr)
+
+    def test_cli_rejects_runtime_digest_not_bound_to_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            value = json.loads(descriptor.read_text(encoding="utf-8"))
+            value["runtimeAttestation"]["runtimeProvenanceSha256"] = "f" * 64
+            changed_descriptor = json.dumps(
+                value, indent=2, sort_keys=True
+            ) + "\n"
+            descriptor.write_text(changed_descriptor, encoding="utf-8")
+            bundle_root = root / f"{TARGET}.factory"
+            (bundle_root / "factory-bundle.json").write_text(
+                changed_descriptor, encoding="utf-8"
+            )
+            self.write_checksums(bundle_root)
+            self.write_archive(bundle, bundle_root)
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("runtime attestation does not match", completed.stderr)
+
+    def test_cli_rejects_nonattested_flash_write_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            value = json.loads(descriptor.read_text(encoding="utf-8"))
+            value["flashPlan"]["writeParameters"]["flashMode"] = "qio"
+            changed_descriptor = json.dumps(
+                value, indent=2, sort_keys=True
+            ) + "\n"
+            descriptor.write_text(changed_descriptor, encoding="utf-8")
+            bundle_root = root / f"{TARGET}.factory"
+            (bundle_root / "factory-bundle.json").write_text(
+                changed_descriptor, encoding="utf-8"
+            )
+            self.write_checksums(bundle_root)
+            self.write_archive(bundle, bundle_root)
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("flash plan is invalid", completed.stderr)
+
+    def test_cli_rejects_portable_offsets_not_bound_to_attested_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            bundle_root = root / f"{TARGET}.factory"
+            build_path = bundle_root / "attestation/build-manifest.json"
+            build = json.loads(build_path.read_text(encoding="utf-8"))
+            build["flashPlan"]["images"][-1]["offset"] = "0x40"
+            build["flashPlan"]["command"][-2] = "0x40"
+            build["flashPlanSha256"] = hashlib.sha256(
+                json.dumps(
+                    build["flashPlan"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            build_path.write_text(
+                json.dumps(build, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            value = json.loads(descriptor.read_text(encoding="utf-8"))
+            value["buildAttestation"].update(
+                {
+                    "size": build_path.stat().st_size,
+                    "sha256": hashlib.sha256(build_path.read_bytes()).hexdigest(),
+                    "flashPlanSha256": build["flashPlanSha256"],
+                }
+            )
+            changed_descriptor = json.dumps(value, indent=2, sort_keys=True) + "\n"
+            descriptor.write_text(changed_descriptor, encoding="utf-8")
+            (bundle_root / "factory-bundle.json").write_text(
+                changed_descriptor, encoding="utf-8"
+            )
+            self.write_checksums(bundle_root)
+            self.write_archive(bundle, bundle_root)
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("do not match the attested flash plan", completed.stderr)
+
+    def test_cli_rejects_rehashed_non_erased_merged_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bundle, descriptor, platformio_ini, key = self.create_inputs(root)
+            bundle_root = root / f"{TARGET}.factory"
+            merged = bundle_root / f"{TARGET}.factory.bin"
+            merged_bytes = bytearray(merged.read_bytes())
+            merged_bytes[8] = 0
+            merged.write_bytes(merged_bytes)
+            value = json.loads(descriptor.read_text(encoding="utf-8"))
+            value["flashPlan"]["mergedImage"]["sha256"] = hashlib.sha256(
+                merged.read_bytes()
+            ).hexdigest()
+            changed_descriptor = json.dumps(value, indent=2, sort_keys=True) + "\n"
+            descriptor.write_text(changed_descriptor, encoding="utf-8")
+            (bundle_root / "factory-bundle.json").write_text(
+                changed_descriptor, encoding="utf-8"
+            )
+            self.write_checksums(bundle_root)
+            self.write_archive(bundle, bundle_root)
+
+            completed = subprocess.run(
+                self.command(
+                    bundle=bundle,
+                    descriptor=descriptor,
+                    platformio_ini=platformio_ini,
+                    private_key_base64=key,
+                    output=root / "release.json",
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("gap is not erased", completed.stderr)
 
 
 if __name__ == "__main__":
