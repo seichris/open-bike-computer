@@ -406,6 +406,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn('fallbackDiagnostics.allocationFallback = true', render)
         self.assertIn("throw std::bad_alloc()", render)
         self.assertIn("drewFootprint", render)
+        self.assertEqual(
+            render.count("++renderedBuildings;"),
+            2,
+            "normal and bounded-flat passes both report rendered buildings",
+        )
         self.assertNotIn("deadline", render.lower())
         self.assertNotIn("kMaximumBuildingRenderTimeMs", MAP_HEADER_SOURCE)
         self.assertIn("CourtyardPolicy::SolidRoofFallback", render)

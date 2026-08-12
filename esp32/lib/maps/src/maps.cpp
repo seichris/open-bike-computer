@@ -2921,6 +2921,7 @@ bool Maps::readVectorMap(
         if (!rendered || !drewFootprint)
           continue;
         ++selectedRecords;
+        ++renderedBuildings;
         selectedPoints += candidate.pointCount;
         selectedPixels += candidate.projectedPixels;
       }
