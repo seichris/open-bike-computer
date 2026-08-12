@@ -34,6 +34,28 @@ in the verbose Apple clang discovery probe. It changes only that `/dev/null`
 probe; normal compiler and linker invocations continue to use the selected
 Xcode toolchain.
 
+### Development and production apps
+
+The standard `BikeComputer` scheme selects a distinct app family by build
+configuration:
+
+| Configuration | iPhone app | Watch app | URL scheme | Intended use |
+| --- | --- | --- | --- | --- |
+| Debug | `Bicino Dev` (`LetItRide.BikeComputer.dev`) | `LetItRide.BikeComputer.dev.watchkitapp` | `bikecomputer-dev` | Local development and physical-device testing |
+| Release | `Bicino` (`LetItRide.BikeComputer`) | `LetItRide.BikeComputer.watchkitapp` | `bikecomputer` | TestFlight and App Store distribution |
+
+`Bicino Dev` can coexist with the App Store app on both iPhone and Apple Watch.
+It has a separate app sandbox, permissions, Keychain, background URL session,
+Watch companion, complication, and Live Activity extension. TestFlight uses the
+production bundle identifier, so a TestFlight build and the App Store build
+replace one another rather than appearing side by side.
+
+The bike computer currently has one owner credential. Use a dedicated test bike
+computer for `Bicino Dev`, or deliberately deregister and pair it again when
+switching app variants. Do not add a shared Keychain access group merely to
+avoid pairing; that would let a development build read production ownership
+credentials.
+
 For a connected iPhone, replace the generic destination and unsigned setting:
 
 ```sh
@@ -46,10 +68,52 @@ scripts/xcodebuild-cli.sh \
   build
 ```
 
+`-allowProvisioningUpdates` requires the WEB3 FZCO Apple Developer account to
+be configured in **Xcode > Settings > Accounts**. App Store Connect API
+credentials can create bundle IDs and profiles, but they do not satisfy Xcode's
+automatic-signing account check. If the build reports `No Accounts`, complete
+that one-time Xcode setup and rerun the same command.
+
+Use a fresh DerivedData directory for each exact-source deployment, then treat
+build, install, launch, and installed-metadata verification as separate gates:
+
+```sh
+xcrun devicectl list devices
+
+DERIVED_DATA_PATH="$(mktemp -d /tmp/bicino-dev-derived-data.XXXXXX)"
+scripts/xcodebuild-cli.sh \
+  -project BikeComputer/BikeComputer.xcodeproj \
+  -scheme BikeComputer \
+  -configuration Debug \
+  -destination 'platform=iOS,id=IPHONE_IDENTIFIER' \
+  -derivedDataPath "$DERIVED_DATA_PATH" \
+  -allowProvisioningUpdates \
+  build
+
+xcrun devicectl device install app \
+  --device IPHONE_IDENTIFIER \
+  "$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/BikeComputer.app"
+xcrun devicectl device process launch \
+  --device IPHONE_IDENTIFIER \
+  --terminate-existing \
+  LetItRide.BikeComputer.dev
+xcrun devicectl device info apps \
+  --device IPHONE_IDENTIFIER \
+  --bundle-id LetItRide.BikeComputer.dev
+```
+
+The iPhone artifact embeds the Watch app, but that is not proof that the paired
+Watch was updated. Wake and unlock the Watch, verify its installed app record
+separately, and if necessary install the signed nested
+`Watch/BikeComputerWatch.app` artifact directly to the Watch with `devicectl`.
+If the Watch tunnel times out, keep the Watch near the iPhone and Mac, restore
+the connection in Xcode's Devices and Simulators window, then retry the same
+artifact before rebuilding.
+
 ## First run
 
 1. Build the `BikeComputer` scheme for the paired iPhone. The Watch app is
-   embedded and installs to the paired Watch.
+   embedded; verify its installation on the paired Watch separately.
 2. Open BikeComputer on Watch and select **Set Up Health**. Allow the requested
    workout and route permissions.
 3. Allow location while using the Watch app if you want a workout route,
@@ -82,7 +146,7 @@ xcrun devicectl list devices
 xcrun devicectl device process launch \
   --device IPHONE_IDENTIFIER \
   --terminate-existing \
-  LetItRide.BikeComputer \
+  LetItRide.BikeComputer.dev \
   --device-map-location=1.305,103.855
 ```
 

@@ -6,17 +6,19 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>LetItRide.BikeComputer.watchkitapp</string>
+			<string>$(BICINO_WATCH_BUNDLE_IDENTIFIER)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>bikecomputer</string>
+				<string>$(BICINO_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>
+	<key>BicinoURLScheme</key>
+	<string>$(BICINO_URL_SCHEME)</string>
 	<key>WKApplication</key>
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
-	<string>LetItRide.BikeComputer</string>
+	<string>$(BICINO_IOS_BUNDLE_IDENTIFIER)</string>
 	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
 	<key>WKBackgroundModes</key>

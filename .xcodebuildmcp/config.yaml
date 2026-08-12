@@ -1,0 +1,12 @@
+schemaVersion: 1
+enabledWorkflows:
+  - simulator
+  - device
+  - ui-automation
+  - debugging
+sessionDefaults:
+  projectPath: ./ios-app/BikeComputer/BikeComputer.xcodeproj
+  scheme: BikeComputer
+  configuration: Debug
+  platform: iOS
+  bundleId: LetItRide.BikeComputer.dev

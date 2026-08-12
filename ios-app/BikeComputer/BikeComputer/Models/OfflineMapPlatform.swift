@@ -2314,7 +2314,11 @@ final class BackgroundMapUploadCoordinator: NSObject,
                                             URLSessionDataDelegate,
                                             URLSessionTaskDelegate {
     static let shared = BackgroundMapUploadCoordinator()
-    static let sessionIdentifier = "LetItRide.BikeComputer.map-transfer.background"
+    static let sessionIdentifier: String = {
+        let bundleIdentifier = Bundle.main.bundleIdentifier
+            ?? "LetItRide.BikeComputer"
+        return "\(bundleIdentifier).map-transfer.background"
+    }()
 
     private struct PendingUpload {
         let continuation: CheckedContinuation<Void, Error>

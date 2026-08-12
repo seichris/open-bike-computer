@@ -1,0 +1,10 @@
+// Development builds install beside the App Store release and keep their
+// application data, permissions, and Keychain credentials isolated.
+BICINO_IOS_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.dev
+BICINO_WATCH_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.dev.watchkitapp
+BICINO_WATCH_COMPLICATION_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.dev.watchkitapp.complications
+BICINO_LIVE_ACTIVITY_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.dev.WorkoutLiveActivity
+BICINO_APP_DISPLAY_NAME = Bicino Dev
+BICINO_COMPLICATION_DISPLAY_NAME = Start Ride Dev
+BICINO_URL_SCHEME = bikecomputer-dev
+BICINO_APP_ICON_NAME = AppIconDev
