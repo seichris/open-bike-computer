@@ -81,6 +81,10 @@ static lv_obj_t *mapGuidanceArrow;
 static lv_obj_t *mapGuidanceDistance;
 static lv_obj_t *mapGuidanceCycleStrip;
 static map_tile_transition::State mapTileTransition;
+static uint32_t mapTileTransitionStartedMs = 0;
+static bool mapTileTransitionUsedRenderAhead = false;
+static bool mapRenderAheadPending = false;
+static tileName mapRenderAheadTile = MAP;
 struct DestinationRowContext {
   uint32_t generation = 0;
   uint16_t token = 0;
@@ -538,16 +542,27 @@ bool shouldInterruptMapRenderForScreenCycle() {
 #endif
 }
 
-const ScreenMapRenderSettings &currentMapStyleSettings() {
+static const ScreenMapRenderSettings &mapStyleSettingsForTile(tileName tile) {
   return map_profile_protocol::select(mapRenderSettings.mapStyle,
                                       mapRenderSettings.mapNavigationStyle,
-                                      isMapGuidanceScreenActive());
+                                      tile == MAP_GUIDANCE);
+}
+
+const ScreenMapRenderSettings &currentMapStyleSettings() {
+  return mapStyleSettingsForTile(static_cast<tileName>(activeTile));
 }
 
 static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
 static void updateMapGuidanceOverlay();
 static void revealPendingMapTileIfReady();
+
+static void acceptPublishedMapFrame(uint32_t nowMs) {
+  mapTileTransition.noteFramePublished();
+  (void)mapView.takeFramePublication();
+  mapRenderScheduler.markRendered(nowMs, currentMapFix());
+  revealPendingMapTileIfReady();
+}
 
 static int16_t mapInteractionAnchorX() {
   return gui_layout::mapScreenAnchorX(TFT_WIDTH, mapView.mapScrWidth);
@@ -684,6 +699,28 @@ static tileName nextEnabledTile(tileName current) {
   return configuredDefaultTile();
 }
 
+static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
+  const uint8_t currentScreen = deviceScreenForTile(current);
+  uint8_t currentIndex = 0;
+  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
+    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
+      currentIndex = index;
+      break;
+    }
+  }
+
+  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
+    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
+        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
+    const tileName candidate = tileForDeviceScreen(screen);
+    if (isScreenEnabled(candidate) && isMapBackedTile(candidate)) {
+      next = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool isGuidanceNavigating() {
   return routeOverlay.hasRoute() || hasCurrentNavigationData();
 }
@@ -715,8 +752,8 @@ static void setNavigationDistanceLabel(lv_obj_t *label,
   setLabelTextIfChanged(label, text);
 }
 
-static void applyMapRotationForActiveTile() {
-  if (activeTile == MAP_GUIDANCE) {
+static void applyMapRotationForTile(tileName tile) {
+  if (tile == MAP_GUIDANCE) {
     const Maps::RotationMode desiredMode =
         isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
     if (mapView.rotationMode != desiredMode) {
@@ -732,7 +769,7 @@ static void applyMapRotationForActiveTile() {
     return;
   }
 
-  if (activeTile != MAP) {
+  if (tile != MAP) {
     return;
   }
 
@@ -750,6 +787,45 @@ static void applyMapRotationForActiveTile() {
     requestMapRender(map_render_policy::Reason::Style);
     log_i("Creating Map: Syncing rotation to North Up (from settings)");
   }
+}
+
+static void prepareNextMapScreenRenderAhead(tileName current) {
+  if (isMapBackedTile(current) || !mapSet.vectorMap ||
+      !mapView.hasMapCanvas()) {
+    mapRenderAheadPending = false;
+    return;
+  }
+
+  tileName target = MAP;
+  if (!nextEnabledMapBackedTile(current, target)) {
+    mapRenderAheadPending = false;
+    return;
+  }
+  if (mapRenderAheadPending && mapRenderAheadTile == target) {
+    return;
+  }
+
+  // The visible screen is already a lightweight LVGL tile. Prepare the next
+  // map profile on the low-priority worker now, using the existing hidden back
+  // buffer, so a later BOOT press only needs the bounded pointer publication.
+  applyMapRotationForTile(target);
+  const ScreenMapRenderSettings &style = mapStyleSettingsForTile(target);
+  const uint32_t nowMs = millis();
+  if (!mapView.prepareVectorMapForScreen(style.zoomLevel,
+                                         target == MAP_GUIDANCE)) {
+    mapRenderAheadPending = false;
+    return;
+  }
+
+  mapView.isPosMoved = false;
+  mapView.redrawMap = false;
+  noteMapRenderReasons(
+      map_render_policy::reasonMask(map_render_policy::Reason::Screen));
+  mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
+  mapRenderAheadPending = true;
+  mapRenderAheadTile = target;
+  log_i("UI: render-ahead requested for %s screen",
+        target == MAP_GUIDANCE ? "map guidance" : "map");
 }
 
 static uint16_t mapGuidanceOverlayHeight() {
@@ -1071,7 +1147,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
 #ifdef ENABLE_COMPASS
   heading = compass.getHeading();
 #endif
-  applyMapRotationForActiveTile();
+  applyMapRotationForTile(static_cast<tileName>(activeTile));
 
   // Publication, pose interpolation, front-frame translation, live route, and
   // marker work are all bounded LVGL-owner operations and run at display
@@ -1079,16 +1155,21 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
   const bool framePublished = mapView.serviceRenderPipeline(nowMs);
   mapView.updatePositionOverlay();
   if (framePublished) {
-    mapTileTransition.noteFramePublished();
-    (void)mapView.takeFramePublication();
-    mapRenderScheduler.markRendered(nowMs, currentMapFix());
-    revealPendingMapTileIfReady();
+    acceptPublishedMapFrame(nowMs);
   }
   if (mapView.takeRenderFailure()) {
     mapRenderScheduler.markInterrupted();
     noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
     mapView.isPosMoved = true;
     mapView.redrawMap = true;
+  }
+  if (!framePublished && mapTileTransition.pending &&
+      !mapView.isPosMoved && !mapView.redrawMap &&
+      !mapView.hasPendingRenderForCurrentScreen()) {
+    // A render-ahead result can become stale between its off-screen build and
+    // this screen entry. Fall back to the normal latest-state request instead
+    // of leaving the previous non-map tile visible indefinitely.
+    requestMapRender(map_render_policy::Reason::Screen);
   }
 
   bool navigationOverlayChanged = false;
@@ -1848,10 +1929,46 @@ static void showMainTile(tileName tile) {
     // profile remains visible briefly while the replacement renders.
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     mapTileTransition.begin();
+    mapTileTransitionStartedMs = millis();
+    mapTileTransitionUsedRenderAhead =
+        mapRenderAheadPending && mapRenderAheadTile == tile;
     zoom = currentMapStyleSettings().zoomLevel;
-    requestMapRender(map_render_policy::Reason::Screen);
+    if (tile == MAP_GUIDANCE) {
+      mapView.followGps = true;
+    }
+    applyMapRotationForTile(tile);
+
+    bool framePublished = false;
+    bool renderPending = false;
+    if (mapRenderAheadPending && mapRenderAheadTile == tile) {
+      const uint32_t nowMs = millis();
+      framePublished = mapView.serviceRenderPipeline(nowMs);
+      if (framePublished) {
+        // Publication validates current profile semantics and viewport
+        // coverage. Clear the old intake flags so the prepared frame can be
+        // revealed now; ordinary source tracking can schedule a later refresh.
+        mapView.isPosMoved = false;
+        mapView.redrawMap = false;
+        acceptPublishedMapFrame(nowMs);
+        log_i("UI: render-ahead frame published on BOOT press");
+      } else {
+        renderPending = mapView.hasPendingRenderForCurrentScreen();
+        if (renderPending) {
+          // Keep the worker's back buffer intact instead of replacing the
+          // already-correct request with a duplicate screen-cycle request.
+          mapView.isPosMoved = false;
+          mapView.redrawMap = false;
+        }
+      }
+    }
+    mapRenderAheadPending = false;
+    if (!framePublished && !renderPending) {
+      requestMapRender(map_render_policy::Reason::Screen);
+    }
   } else {
     mapTileTransition.cancel();
+    mapTileTransitionStartedMs = 0;
+    mapTileTransitionUsedRenderAhead = false;
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
@@ -1861,8 +1978,6 @@ static void showMainTile(tileName tile) {
   switch (tile) {
   case MAP_GUIDANCE:
     uiChangeTracker.mark(ui_update_policy::Source::Navigation);
-    mapView.followGps = true;
-    applyMapRotationForActiveTile();
     updateMapGuidanceOverlay();
     (void)uiChangeTracker.take(ui_update_policy::Source::Navigation);
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1904,6 +2019,10 @@ static void showMainTile(tileName tile) {
     log_i("UI: switched to map screen");
     break;
   }
+
+  if (!isMapBackedTile(tile)) {
+    prepareNextMapScreenRenderAhead(tile);
+  }
 }
 
 static void revealPendingMapTileIfReady() {
@@ -1926,6 +2045,12 @@ static void revealPendingMapTileIfReady() {
     lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
   }
 
+  const uint32_t visibleAtMs = millis();
+  log_i("UI: map transition visible after %lu ms renderAhead=%u",
+        static_cast<unsigned long>(visibleAtMs - mapTileTransitionStartedMs),
+        mapTileTransitionUsedRenderAhead ? 1U : 0U);
+  mapTileTransitionStartedMs = 0;
+  mapTileTransitionUsedRenderAhead = false;
   mapTileTransition.complete();
 }
 
