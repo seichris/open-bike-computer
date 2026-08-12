@@ -1,4 +1,4 @@
-<img width="2375" height="871" alt="bike_header" src="https://github.com/user-attachments/assets/06dda2a2-b5b1-4a5c-86de-9ac191c8e657" />
+<img width="4168" height="1054" alt="Bike Computer devices and companion apps" src="docs/images/bike_header.jpg" />
 
 A sleek, Garmin-mounted bike computer.
 
@@ -20,7 +20,7 @@ A sleek, Garmin-mounted bike computer.
 Explore proposed and in-progress features on our
 [open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature).
 
-Ideas and feature requests are welcome![ Open an issue](https://github.com/seichris/open-bike-computer/issues/new).
+Ideas and feature requests are welcome! [Open an issue](https://github.com/seichris/open-bike-computer/issues/new).
 
 For code contributions, see
 [CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
