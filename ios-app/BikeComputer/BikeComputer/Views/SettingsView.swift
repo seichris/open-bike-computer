@@ -1075,9 +1075,8 @@ private struct DeviceScreensSettingsSection: View {
             footer: Text(mapStyleFooter)
         ) {
             ForEach(bleManager.availableDeviceScreens) { screen in
-                HStack(spacing: 8) {
+                HStack(spacing: 4) {
                     Text(screen.title)
-                    Spacer()
 
                     if let styleScreen = mapStyleScreen(for: screen) {
                         NavigationLink {
@@ -1087,7 +1086,11 @@ private struct DeviceScreensSettingsSection: View {
                             )
                         } label: {
                             Image(systemName: "gearshape")
-                                .frame(width: 44, height: 44)
+                                .frame(
+                                    width: 44,
+                                    height: 44,
+                                    alignment: .leading
+                                )
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.borderless)
@@ -1095,6 +1098,8 @@ private struct DeviceScreensSettingsSection: View {
                             mapStyleAccessibilityLabel(for: screen)
                         )
                     }
+
+                    Spacer()
 
                     Toggle(
                         screen.title,

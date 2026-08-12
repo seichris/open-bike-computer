@@ -8057,15 +8057,24 @@ struct NavigationProtocolTests {
         let overlaySection = String(source[overlaySectionStart..<mapStyleStart])
 
         assert(
-            deviceSection.contains("Image(systemName: \"gearshape\")") &&
-                deviceSection.contains(".frame(width: 44, height: 44)") &&
+            deviceSection.contains("HStack(spacing: 4)") &&
+                deviceSection.contains("Image(systemName: \"gearshape\")") &&
+                deviceSection.contains(
+                    "width: 44,\n" +
+                        "                                    height: 44,\n" +
+                        "                                    alignment: .leading"
+                ) &&
                 deviceSection.contains(".contentShape(Rectangle())") &&
                 deviceSection.contains(".buttonStyle(.borderless)") &&
                 deviceSection.contains(".labelsHidden()"),
-            "map-screen rows keep distinct accessible gear and toggle controls"
+            "map-screen rows keep a close-leading accessible gear and trailing toggle"
         )
-        guard let gearCondition = deviceSection.range(
-            of: "if let styleScreen = mapStyleScreen(for: screen)"
+        guard let rowText = deviceSection.range(
+            of: "Text(screen.title)"
+        ),
+        let gearCondition = deviceSection.range(
+            of: "if let styleScreen = mapStyleScreen(for: screen)",
+            range: rowText.upperBound..<deviceSection.endIndex
         ),
         let gearDestination = deviceSection.range(
             of: "MapStyleSettingsView(",
@@ -8079,9 +8088,13 @@ struct NavigationProtocolTests {
             of: "Image(systemName: \"gearshape\")",
             range: destinationBinding.upperBound..<deviceSection.endIndex
         ),
+        let trailingSpacer = deviceSection.range(
+            of: "Spacer()",
+            range: gearImage.upperBound..<deviceSection.endIndex
+        ),
         let screenToggle = deviceSection.range(
             of: "Toggle(",
-            range: gearImage.upperBound..<deviceSection.endIndex
+            range: trailingSpacer.upperBound..<deviceSection.endIndex
         ),
         let screenGetter = deviceSection.range(
             of: "bleManager.isDeviceScreenEnabled(screen)",
@@ -8110,16 +8123,18 @@ struct NavigationProtocolTests {
             return
         }
         assert(
-            gearCondition.lowerBound < gearDestination.lowerBound &&
+            rowText.lowerBound < gearCondition.lowerBound &&
+                gearCondition.lowerBound < gearDestination.lowerBound &&
                 gearDestination.lowerBound < destinationBinding.lowerBound &&
                 destinationBinding.lowerBound < gearImage.lowerBound &&
-                gearImage.lowerBound < screenToggle.lowerBound &&
+                gearImage.lowerBound < trailingSpacer.lowerBound &&
+                trailingSpacer.lowerBound < screenToggle.lowerBound &&
                 screenToggle.lowerBound < screenGetter.lowerBound &&
                 screenGetter.lowerBound < screenSetter.lowerBound &&
                 screenSetter.lowerBound < setterScreen.lowerBound &&
                 setterScreen.lowerBound < setterValue.lowerBound &&
                 setterValue.lowerBound < lastScreenGuard.lowerBound,
-            "each map gear precedes an independent toggle wired to the same screen"
+            "each map gear sits beside its label before the trailing screen toggle"
         )
         assert(
             deviceSection.contains("case .map:\n            return .map") &&
