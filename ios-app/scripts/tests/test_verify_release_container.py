@@ -9,6 +9,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IOS_ROOT = REPO_ROOT / "ios-app"
 VERIFY_SCRIPT = IOS_ROOT / "scripts" / "verify-release-container.sh"
+DEVELOPMENT_VERIFY_SCRIPT = (
+    IOS_ROOT / "scripts" / "verify-development-container.sh"
+)
 
 
 class ReleaseContainerVerifierTests(unittest.TestCase):
@@ -43,6 +46,9 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                 {
                     "CFBundleIdentifier": "LetItRide.BikeComputer",
                     "CFBundleDisplayName": "Bicino",
+                    "CFBundleIcons": {
+                        "CFBundlePrimaryIcon": {"CFBundleIconName": "AppIcon"}
+                    },
                     "NSSupportsLiveActivities": True,
                 },
                 handle,
@@ -52,6 +58,8 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                 {
                     "CFBundleIdentifier": "LetItRide.BikeComputer.watchkitapp",
                     "CFBundleDisplayName": "Bicino",
+                    "BicinoURLScheme": "bikecomputer",
+                    "WKCompanionAppBundleIdentifier": "LetItRide.BikeComputer",
                     "CFBundleURLTypes": [
                         {"CFBundleURLSchemes": ["another-scheme"]},
                         {"CFBundleURLSchemes": ["bikecomputer"]},
@@ -69,6 +77,8 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                     "CFBundleIdentifier": (
                         "LetItRide.BikeComputer.watchkitapp.complications"
                     ),
+                    "CFBundleDisplayName": "Start Ride",
+                    "BicinoURLScheme": "bikecomputer",
                     "NSExtension": {
                         "NSExtensionPointIdentifier": "com.apple.widgetkit-extension"
                     },
@@ -81,6 +91,7 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                     "CFBundleIdentifier": (
                         "LetItRide.BikeComputer.WorkoutLiveActivity"
                     ),
+                    "CFBundleDisplayName": "Bicino",
                     "NSExtension": {
                         "NSExtensionPointIdentifier": (
                             "com.apple.widgetkit-extension"
@@ -91,9 +102,90 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             )
         return app
 
+    def make_development_fixture(self, root: Path) -> Path:
+        app = self.make_fixture(root)
+        watch = app / "Watch" / "BikeComputerWatch.app"
+        complication = watch / "PlugIns" / "BikeComputerWatchComplications.appex"
+        live_activity = app / "PlugIns" / "BikeComputerLiveActivity.appex"
+
+        replacements = [
+            (
+                app / "Info.plist",
+                {
+                    "CFBundleIdentifier": "LetItRide.BikeComputer.dev",
+                    "CFBundleDisplayName": "Bicino Dev",
+                    "CFBundleIcons": {
+                        "CFBundlePrimaryIcon": {
+                            "CFBundleIconName": "AppIconDev"
+                        }
+                    },
+                    "NSSupportsLiveActivities": True,
+                },
+            ),
+            (
+                watch / "Info.plist",
+                {
+                    "CFBundleIdentifier": (
+                        "LetItRide.BikeComputer.dev.watchkitapp"
+                    ),
+                    "CFBundleDisplayName": "Bicino Dev",
+                    "BicinoURLScheme": "bikecomputer-dev",
+                    "WKCompanionAppBundleIdentifier": (
+                        "LetItRide.BikeComputer.dev"
+                    ),
+                    "CFBundleURLTypes": [
+                        {"CFBundleURLSchemes": ["bikecomputer-dev"]}
+                    ],
+                },
+            ),
+            (
+                complication / "Info.plist",
+                {
+                    "CFBundleIdentifier": (
+                        "LetItRide.BikeComputer.dev.watchkitapp.complications"
+                    ),
+                    "CFBundleDisplayName": "Start Ride Dev",
+                    "BicinoURLScheme": "bikecomputer-dev",
+                    "NSExtension": {
+                        "NSExtensionPointIdentifier": (
+                            "com.apple.widgetkit-extension"
+                        )
+                    },
+                },
+            ),
+            (
+                live_activity / "Info.plist",
+                {
+                    "CFBundleIdentifier": (
+                        "LetItRide.BikeComputer.dev.WorkoutLiveActivity"
+                    ),
+                    "CFBundleDisplayName": "Bicino Dev",
+                    "NSExtension": {
+                        "NSExtensionPointIdentifier": (
+                            "com.apple.widgetkit-extension"
+                        )
+                    },
+                },
+            ),
+        ]
+        for plist_path, payload in replacements:
+            with plist_path.open("wb") as handle:
+                plistlib.dump(payload, handle)
+        return app
+
     def run_verifier(self, app: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(VERIFY_SCRIPT), str(app)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def run_development_verifier(
+        self, app: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(DEVELOPMENT_VERIFY_SCRIPT), str(app)],
             check=False,
             capture_output=True,
             text=True,
@@ -104,6 +196,48 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
             app = self.make_fixture(Path(temporary))
             result = self.run_verifier(app)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_accepts_complete_development_container_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_development_fixture(Path(temporary))
+            result = self.run_development_verifier(app)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_development_verifier_rejects_production_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_fixture(Path(temporary))
+            result = self.run_development_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_development_verifier_rejects_production_url_scheme(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_development_fixture(Path(temporary))
+            watch_info = app / "Watch" / "BikeComputerWatch.app" / "Info.plist"
+            with watch_info.open("rb") as handle:
+                payload = plistlib.load(handle)
+            payload["CFBundleURLTypes"][0]["CFBundleURLSchemes"].append(
+                "BikeComputer"
+            )
+            with watch_info.open("wb") as handle:
+                plistlib.dump(payload, handle)
+
+            result = self.run_development_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_release_verifier_rejects_development_url_scheme(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_fixture(Path(temporary))
+            watch_info = app / "Watch" / "BikeComputerWatch.app" / "Info.plist"
+            with watch_info.open("rb") as handle:
+                payload = plistlib.load(handle)
+            payload["CFBundleURLTypes"][0]["CFBundleURLSchemes"].append(
+                "BikeComputer-Dev"
+            )
+            with watch_info.open("wb") as handle:
+                plistlib.dump(payload, handle)
+
+            result = self.run_verifier(app)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_rejects_watch_bundle_without_primary_icon_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:

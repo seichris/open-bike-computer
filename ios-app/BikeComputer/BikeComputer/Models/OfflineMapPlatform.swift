@@ -2309,16 +2309,28 @@ nonisolated enum BackgroundMapUploadStateStore {
     }
 }
 
+nonisolated enum BackgroundMapUploadSessionNamespace {
+    static func identifier(bundleIdentifier: String?) -> String {
+        let normalizedIdentifier = bundleIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedIdentifier: String
+        if let normalizedIdentifier, !normalizedIdentifier.isEmpty {
+            resolvedIdentifier = normalizedIdentifier
+        } else {
+            resolvedIdentifier = "LetItRide.BikeComputer"
+        }
+        return "\(resolvedIdentifier).map-transfer.background"
+    }
+}
+
 #if os(iOS)
 final class BackgroundMapUploadCoordinator: NSObject,
                                             URLSessionDataDelegate,
                                             URLSessionTaskDelegate {
     static let shared = BackgroundMapUploadCoordinator()
-    static let sessionIdentifier: String = {
-        let bundleIdentifier = Bundle.main.bundleIdentifier
-            ?? "LetItRide.BikeComputer"
-        return "\(bundleIdentifier).map-transfer.background"
-    }()
+    static let sessionIdentifier = BackgroundMapUploadSessionNamespace.identifier(
+        bundleIdentifier: Bundle.main.bundleIdentifier
+    )
 
     private struct PendingUpload {
         let continuation: CheckedContinuation<Void, Error>

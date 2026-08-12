@@ -288,23 +288,38 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "the Live Activity extension must be iOS 17 in Debug and Release",
         )
 
-    def test_background_transfer_namespace_follows_the_app_variant(self):
-        source = (
+    def test_variant_runtime_helpers_are_wired_to_the_main_bundle(self):
+        launch_request = (
+            IOS_PROJECT.parent
+            / "BikeComputer"
+            / "WorkoutShared"
+            / "WatchWorkoutLaunchRequest.swift"
+        ).read_text()
+        offline_map_platform = (
             IOS_PROJECT
             / "BikeComputer"
             / "Models"
             / "OfflineMapPlatform.swift"
         ).read_text()
 
-        self.assertIn("Bundle.main.bundleIdentifier", source)
         self.assertIn(
-            'return "\\(bundleIdentifier).map-transfer.background"',
-            source,
+            'let configuredScheme = Bundle.main.object(\n'
+            '            forInfoDictionaryKey: "BicinoURLScheme"\n'
+            "        ) as? String",
+            launch_request,
         )
-        self.assertNotIn(
-            'static let sessionIdentifier = '
-            '"LetItRide.BikeComputer.map-transfer.background"',
-            source,
+        self.assertIn(
+            "static let startOutdoorCyclingURL: URL = {\n"
+            "        startOutdoorCyclingURL(urlScheme: urlScheme)\n"
+            "    }()",
+            launch_request,
+        )
+        self.assertIn(
+            "static let sessionIdentifier = "
+            "BackgroundMapUploadSessionNamespace.identifier(\n"
+            "        bundleIdentifier: Bundle.main.bundleIdentifier\n"
+            "    )",
+            offline_map_platform,
         )
 
     def test_app_intent_descriptions_avoid_reserved_product_names(self):

@@ -170,7 +170,7 @@ jobs:
         working-directory: ios-app
       - name: Build watch app
         run: |
-          xcodebuild \
+          ./scripts/xcodebuild-cli.sh \
             -project BikeComputer/BikeComputer.xcodeproj \
             -target BikeComputerWatch \
             -configuration Release \
@@ -185,7 +185,7 @@ jobs:
         working-directory: ios-app
       - name: Build Release app container
         run: |
-          xcodebuild \
+          ./scripts/xcodebuild-cli.sh \
             -project BikeComputer/BikeComputer.xcodeproj \
             -scheme BikeComputer \
             -configuration Release \
@@ -193,6 +193,22 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/bike-computer-release" \
             CODE_SIGNING_ALLOWED=NO \
             build
+        working-directory: ios-app
+      - name: Build Debug app container
+        run: |
+          ./scripts/xcodebuild-cli.sh \
+            -project BikeComputer/BikeComputer.xcodeproj \
+            -scheme BikeComputer \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/bike-computer-development" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        working-directory: ios-app
+      - name: Validate Debug app container
+        run: >-
+          bash ./scripts/verify-development-container.sh
+          "$RUNNER_TEMP/bike-computer-development/Build/Products/Debug-iphoneos/BikeComputer.app"
         working-directory: ios-app
       - name: Validate Release app container
         run: >-
