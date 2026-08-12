@@ -67,6 +67,19 @@ class DeviceDebugPageTests(unittest.TestCase):
         self.assertIsNone(re.search(r"<(?:script|link)[^>]+src=", PAGE))
         self.assertNotIn("@import", PAGE)
 
+    def test_device_info_is_a_responsive_sibling_of_the_panel(self):
+        self.assertRegex(
+            PAGE,
+            r'</p></main>\s*<pre id="info">No device information yet\.</pre>',
+        )
+        self.assertIn(
+            "grid-template-columns:minmax(0,720px) minmax(320px,520px)",
+            PAGE,
+        )
+        self.assertIn("#info{grid-column:2;grid-row:2", PAGE)
+        self.assertIn("@media(max-width:1100px)", PAGE)
+        self.assertIn("header,.panel,#info{grid-column:1}", PAGE)
+
     def test_rotation_and_pointer_inverse_execute_on_asymmetric_geometry(self):
         definitions = []
         for name in ("displayPoint", "panelPoint"):
