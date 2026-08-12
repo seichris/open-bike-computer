@@ -29,6 +29,7 @@ struct SettingsView: View {
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
+    let isNavigationActive: Bool
     let onRequestLocationAuthorization: () -> Void
     let onStartTestNavigation: (String) -> Void
 
@@ -36,6 +37,7 @@ struct SettingsView: View {
         locationAuthorizationStatus: CLAuthorizationStatus = .authorizedAlways,
         locationAccuracyAuthorization: CLAccuracyAuthorization = .fullAccuracy,
         currentLocation: CLLocation?,
+        isNavigationActive: Bool = false,
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
         routeLibrary: PhoneRouteLibrary,
@@ -52,6 +54,7 @@ struct SettingsView: View {
         self.locationAuthorizationStatus = locationAuthorizationStatus
         self.locationAccuracyAuthorization = locationAccuracyAuthorization
         self.currentLocation = currentLocation
+        self.isNavigationActive = isNavigationActive
         self.onRequestLocationAuthorization = onRequestLocationAuthorization
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
@@ -159,6 +162,7 @@ struct SettingsView: View {
                             cyclingSensorDetectionCoordinator:
                                 cyclingSensorDetectionCoordinator,
                             currentLocation: currentLocation,
+                            isNavigationActive: isNavigationActive,
                             onStartTestNavigation: { destination in
                                 onStartTestNavigation(destination)
                                 dismiss()
@@ -2258,6 +2262,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
 private struct RendererBenchmarkReplaySettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @StateObject private var replay = RendererBenchmarkReplayCoordinator()
+    let isNavigationActive: Bool
 
     var body: some View {
         Section {
@@ -2289,7 +2294,10 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                 if replay.isRunning {
                     replay.stop()
                 } else {
-                    replay.start(bleManager: bleManager)
+                    replay.start(
+                        bleManager: bleManager,
+                        isNavigationActive: isNavigationActive
+                    )
                 }
             } label: {
                 Label(
@@ -2299,14 +2307,14 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                         "location.fill.viewfinder"
                 )
             }
-            .disabled(!replay.isRunning && !canStart)
+            .disabled(!replay.isRunning && !canStartReplay)
 
             Button {
                 _ = bleManager.requestRendererDiagnosticsSnapshot()
             } label: {
                 Label("Request Diagnostics Snapshot", systemImage: "waveform.path.ecg")
             }
-            .disabled(!canStart)
+            .disabled(!canRequestSnapshot)
 
             if let snapshot = bleManager.rendererDiagnosticsSnapshotJSON {
                 Button {
@@ -2347,12 +2355,19 @@ private struct RendererBenchmarkReplaySettingsSection: View {
         .onChange(of: bleManager.supportsRendererDiagnostics) { supported in
             if !supported { replay.stop(clearRoute: false) }
         }
+        .onChange(of: isNavigationActive) { active in
+            if active { replay.stop() }
+        }
         .onDisappear { replay.stop() }
     }
 
-    private var canStart: Bool {
+    private var canRequestSnapshot: Bool {
         bleManager.isConnected && bleManager.isNavigationReady &&
             bleManager.supportsRendererDiagnostics
+    }
+
+    private var canStartReplay: Bool {
+        canRequestSnapshot && !isNavigationActive
     }
 }
 #endif
@@ -2366,6 +2381,7 @@ private struct DeveloperSettingsView: View {
     @ObservedObject var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
     let currentLocation: CLLocation?
+    let isNavigationActive: Bool
     let onStartTestNavigation: (String) -> Void
 
     var body: some View {
@@ -2417,7 +2433,9 @@ private struct DeveloperSettingsView: View {
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
 #if DEBUG
             RemoteDeviceDebugSettingsSection()
-            RendererBenchmarkReplaySettingsSection()
+            RendererBenchmarkReplaySettingsSection(
+                isNavigationActive: isNavigationActive
+            )
 #endif
             TestNavigationSettingsSection(
                 currentLocation: currentLocation,

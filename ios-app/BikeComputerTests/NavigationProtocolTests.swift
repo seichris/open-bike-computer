@@ -613,6 +613,7 @@ struct NavigationProtocolTests {
         testRouteGeometryTransmissionPolicy()
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
+        testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testGPSQueuePolicy()
@@ -4900,6 +4901,53 @@ struct NavigationProtocolTests {
         assertEqual(testEngine.routeCoordinateExtractionCount, 1,
                     "test navigation uses the same cached MKRoute polyline")
         testEngine.stopNavigation()
+    }
+
+    @MainActor
+    static func testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2304,
+            longitude: 121.4737
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "an idle physical fix normally reaches the device")
+
+        guard let token = manager.beginDeviceGPSOverride() else {
+            assert(false, "renderer replay acquires the device GPS override")
+            return
+        }
+        assert(manager.beginDeviceGPSOverride() == nil,
+               "device GPS override has one scoped owner")
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2305,
+            longitude: 121.4738
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "physical fixes do not interleave with renderer replay GPS")
+
+        manager.endDeviceGPSOverride(UUID())
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2306,
+            longitude: 121.4739
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "a non-owner cannot release the GPS override")
+
+        manager.endDeviceGPSOverride(token)
+        assertEqual(manager.sentGPSPositions.count, 2,
+                    "override cleanup immediately restores the latest physical GPS")
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2307,
+            longitude: 121.4740
+        ))
+        assertEqual(manager.sentGPSPositions.count, 3,
+                    "physical GPS resumes after renderer replay cleanup")
     }
 
     static func testOfflineMapCustomBBoxRequest() {

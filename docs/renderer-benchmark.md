@@ -48,7 +48,9 @@ Profiles are session-scoped and RAM-only. The runner performs a checked
 `current` cleanup window on success and a best-effort cleanup after setup or
 transport failure. Disconnecting, ending remote debug, or ending an ordinary
 replay also restores `current`; the experiment never writes a preference or
-changes the production default.
+changes the production default. Firmware likewise restores `current` if a
+queued window cannot be applied because its session or active-map identity is
+no longer valid.
 
 ## Prerequisites
 
@@ -66,6 +68,9 @@ changes the production default.
    active. Put the Bike Computer itself on the map-backed navigation screen
    with 3D buildings enabled. The iPhone sends the route window on the app's
    normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
+   Stop any active navigation first. While replay is active, a scoped GPS
+   override prevents live Core Location fixes from interleaving with the
+   fixture; starting navigation stops replay and releases the override.
 4. Start **Remote Device Debugging** and put the Mac on the reported LAN or
    device-hotspot network. Store `baseUrl` and `token` in a mode-`0600` JSON
    session file as described in [Remote device debugging](remote-device-debugging.md).
@@ -137,7 +142,9 @@ in a separate reviewed change before rerunning the experiment.
 After a remote-debug report selects a Pareto candidate, flash the corresponding
 ordinary developer/diagnostic build for the same board and firmware commit.
 The browser service is absent, but CAP2 bit 18 exposes the bounded metrics over
-the authenticated BLE session.
+the authenticated BLE session. Keep map, firmware, and debug transfers stopped;
+firmware rejects a new ordinary window and ends an active one if any device
+transfer becomes active.
 
 1. In **Renderer Benchmark Replay**, select the remote report's candidate under
    **Ordinary Profile** and start the replay.

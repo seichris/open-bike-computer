@@ -541,6 +541,7 @@ struct ContentView: View {
                 locationAccuracyAuthorization:
                     coordinator.locationAccuracyAuthorization,
                 currentLocation: coordinator.currentLocation,
+                isNavigationActive: coordinator.isNavigating,
                 offlineMapManager: offlineMapManager,
                 firmwareUpdateManager: coordinator.firmwareUpdateManager,
                 routeLibrary: routeLibrary,

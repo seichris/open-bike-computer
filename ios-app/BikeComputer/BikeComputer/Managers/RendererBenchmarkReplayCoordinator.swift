@@ -25,14 +25,40 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private var ordinaryRepeatNumber: UInt16 = 0
     private var idleTimerWasDisabled = false
     private var ownsIdleTimerOverride = false
+    private var deviceGPSOverrideToken: UUID?
+
+    deinit {
+        timer?.invalidate()
+        let manager = bleManager
+        let token = deviceGPSOverrideToken
+        let shouldRestoreIdleTimer = ownsIdleTimerOverride
+        let priorIdleTimerState = idleTimerWasDisabled
+        Task { @MainActor [weak manager] in
+            if let token {
+                manager?.endDeviceGPSOverride(token)
+            }
+            if shouldRestoreIdleTimer {
+                UIApplication.shared.isIdleTimerDisabled = priorIdleTimerState
+            }
+        }
+    }
 
     var progressDescription: String {
         guard isRunning, sampleCount > 0 else { return status }
         return "Sample \(sampleIndex + 1)/\(sampleCount), loop \(loop + 1)"
     }
 
-    func start(bleManager: BLEManager, bundle: Bundle = .main) {
+    func start(
+        bleManager: BLEManager,
+        isNavigationActive: Bool,
+        bundle: Bundle = .main
+    ) {
         stop(clearRoute: false, restoreCurrent: false)
+        guard !isNavigationActive else {
+            errorMessage = "Stop navigation before starting the renderer replay."
+            status = "Navigation active"
+            return
+        }
         guard bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics else {
@@ -55,6 +81,13 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             capturedRendererRevision = bleManager.rendererDiagnosticsRevision
             ordinarySnapshots.removeAll(keepingCapacity: true)
             ordinarySnapshotCount = 0
+            guard let overrideToken = bleManager.beginDeviceGPSOverride() else {
+                errorMessage = "Another developer GPS override is already active."
+                status = "GPS unavailable"
+                self.bleManager = nil
+                return
+            }
+            deviceGPSOverrideToken = overrideToken
             if !bleManager.supportsRemoteDeviceDebug {
                 advanceOrdinaryRepeatNumber()
                 guard bleManager.beginRendererBenchmarkWindow(
@@ -66,6 +99,8 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
                 ) else {
                     errorMessage = "The ordinary benchmark window could not be queued."
                     status = "Window failed"
+                    releaseDeviceGPSOverride()
+                    self.bleManager = nil
                     return
                 }
             }
@@ -104,6 +139,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         if restoreCurrent {
             restoreCurrentProfileIfNeeded()
         }
+        releaseDeviceGPSOverride()
         if ownsIdleTimerOverride {
             UIApplication.shared.isIdleTimerDisabled = idleTimerWasDisabled
             ownsIdleTimerOverride = false
@@ -114,6 +150,12 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         }
         bleManager = nil
         fixture = nil
+    }
+
+    private func releaseDeviceGPSOverride() {
+        guard let token = deviceGPSOverrideToken else { return }
+        bleManager?.endDeviceGPSOverride(token)
+        deviceGPSOverrideToken = nil
     }
 
     func ordinaryCaptureJSON() -> String? {

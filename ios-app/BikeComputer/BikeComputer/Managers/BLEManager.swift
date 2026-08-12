@@ -956,6 +956,7 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
     private var rendererDiagnosticsChunks =
         RendererDiagnosticsChunkReassembler()
+    private var deviceGPSOverrideToken: UUID?
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var navigationWriteWithResponseLabel: String?
@@ -1000,6 +1001,7 @@ class BLEManager: NSObject, ObservableObject {
     var onWorkoutStartRequest: (() -> Void)?
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
+    var onDeviceGPSOverrideEnded: (() -> Void)?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -3284,6 +3286,29 @@ class BLEManager: NSObject, ObservableObject {
         sendRouteGeometry(Data())
     }
 
+    /// Temporarily gives one developer workflow ownership of device GPS
+    /// writes. NavigationEngine keeps its latest physical fix while this lease
+    /// is held, but does not enqueue physical fixes during the override.
+    func beginDeviceGPSOverride() -> UUID? {
+        guard deviceGPSOverrideToken == nil else {
+            log("Cannot begin device GPS override: another owner is active")
+            return nil
+        }
+        let token = UUID()
+        deviceGPSOverrideToken = token
+        return token
+    }
+
+    func endDeviceGPSOverride(_ token: UUID) {
+        guard deviceGPSOverrideToken == token else { return }
+        deviceGPSOverrideToken = nil
+        onDeviceGPSOverrideEnded?()
+    }
+
+    var allowsAutomaticDeviceGPSWrites: Bool {
+        deviceGPSOverrideToken == nil
+    }
+
     /// Send GPS position and optional ride telemetry to ESP32.
     /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
     func sendGPSPosition(
@@ -4726,6 +4751,7 @@ class BLEManager: NSObject, ObservableObject {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil
@@ -4794,6 +4820,7 @@ class BLEManager: NSObject, ObservableObject {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         resetNavigationWriteResponseWait()
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -6895,6 +6922,7 @@ extension BLEManager: CBCentralManagerDelegate {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil

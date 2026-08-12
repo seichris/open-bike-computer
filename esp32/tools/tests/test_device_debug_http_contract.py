@@ -127,10 +127,15 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         )
         self.assertLess(
             renderer_loop.index("beginWindow"),
-            renderer_loop.index("setRendererTuningProfile"),
+            renderer_loop.index(
+                "setRendererTuningProfile(rendererRunRequest.profile"
+            ),
         )
         self.assertIn("rendererTransferStatus.enabled", renderer_loop)
         self.assertIn('rendererTransferStatus.mode == "debug"', renderer_loop)
+        self.assertIn(
+            "rejected window restored current profile", renderer_loop
+        )
 
     def test_generic_status_exposes_network_selection_without_password(self):
         status = BLE[
