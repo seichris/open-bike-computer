@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 int main() {
   using namespace gps_input_freshness;
@@ -64,6 +65,29 @@ int main() {
   assert(gps_position_protocol::capturedAtMs(500U, 1'000U) ==
          std::numeric_limits<uint32_t>::max() - 499U);
 
+  std::vector<uint8_t> qualityPacket(36, 0);
+  qualityPacket[14] = 0x64;
+  qualityPacket[30] = 1;
+  qualityPacket[31] = 3;
+  qualityPacket[32] = 50;
+  qualityPacket[34] = 10;
+  gps_position_protocol::Packet decodedQuality{};
+  assert(gps_position_protocol::decode(qualityPacket.data(),
+                                       qualityPacket.size(), decodedQuality));
+  assert(decodedQuality.fixValid && decodedQuality.hasSpeed);
+  assert(!gps_position_protocol::decode(qualityPacket.data(), 31,
+                                        decodedQuality));
+  assert(!gps_position_protocol::decode(qualityPacket.data(), 35,
+                                        decodedQuality));
+  qualityPacket.push_back(0);
+  assert(!gps_position_protocol::decode(qualityPacket.data(),
+                                        qualityPacket.size(), decodedQuality));
+  qualityPacket.resize(36);
+  qualityPacket[14] = 0xFF;
+  qualityPacket[15] = 0xFF;
+  assert(!gps_position_protocol::decode(qualityPacket.data(),
+                                        qualityPacket.size(), decodedQuality));
+
   GpsRideObservation hardware{};
   hardware.source = RidePositionSource::HardwareNmea;
   hardware.fixAvailable = true;
@@ -92,6 +116,7 @@ int main() {
 
   // Selection returns a complete source sample; fields from the losing slot
   // are never combined with the winner.
+  hardware.capturedAtMs = 9'000;
   phone = hardware;
   phone.source = RidePositionSource::AuthenticatedBle;
   phone.fixValid = true;
@@ -103,6 +128,32 @@ int main() {
   assert(selected.source == RidePositionSource::AuthenticatedBle);
   assert(selected.speedMetersPerSecond == 0.0F);
   assert(selected.horizontalUncertaintyMeters == 4.0F);
+
+  // A nominally valid position without speed cannot suppress a complete
+  // detector sample from another source.
+  phone.speedAvailable = false;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000).source ==
+         RidePositionSource::HardwareNmea);
+
+  // Once selected, small accuracy noise does not flap sources and reset the
+  // detector evidence window. A material improvement still switches.
+  phone.speedAvailable = true;
+  phone.horizontalUncertaintyMeters = 8.0F;
+  hardware.horizontalUncertaintyMeters = 9.0F;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000,
+                                  RidePositionSource::HardwareNmea)
+             .source == RidePositionSource::HardwareNmea);
+  phone.horizontalUncertaintyMeters = 5.0F;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000,
+                                  RidePositionSource::HardwareNmea)
+             .source == RidePositionSource::AuthenticatedBle);
+
+  GpsRideObservation older = phone;
+  GpsRideObservation newer = phone;
+  newer.capturedAtMs = 20'000;
+  older.capturedAtMs = 19'000;
+  assert(gpsRideObservationIsNewerOrEqual(newer, older));
+  assert(!gpsRideObservationIsNewerOrEqual(older, newer));
 
   return 0;
 }

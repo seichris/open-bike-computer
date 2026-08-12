@@ -136,6 +136,7 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       "\"gps_stationary\":%s,"
       "\"gps_displacement_m\":%s,\"imu_motion_score\":%s},"
       "\"output\":{\"decision\":\"%s\",\"evidence_mask\":%u,"
+      "\"source_health_mask\":%u,"
       "\"decision_sequence\":%lu,\"candidate_began_at_ms\":%lu,"
       "\"decided_at_ms\":%lu,\"counters\":{\"start\":%lu,"
       "\"pause\":%lu,\"resume\":%lu,\"conflict\":%lu}}}",
@@ -148,6 +149,7 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       uncertainty, stationary, displacement, imu,
       transitionName(record.decision.transition),
       static_cast<unsigned>(record.evidenceMask),
+      static_cast<unsigned>(record.decision.sourceHealthMask),
       static_cast<unsigned long>(record.decision.sequence),
       static_cast<unsigned long>(record.decision.candidateBeganAtMs),
       static_cast<unsigned long>(record.decision.decidedAtMs),

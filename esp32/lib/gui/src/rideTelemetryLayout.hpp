@@ -13,6 +13,7 @@ constexpr int32_t kMetricValueOffsetY =
 constexpr int32_t kMetricRowGap = 8;
 constexpr int32_t kStartWorkoutButtonGap = 16;
 constexpr int32_t kStartWorkoutButtonHeight = 52;
+constexpr int32_t kRideDetectionMessageGap = 8;
 constexpr int32_t kStartWorkoutButtonHorizontalInset = 42;
 constexpr int32_t kRoundStartWorkoutButtonHorizontalInset = 76;
 constexpr int32_t kRoundStartWorkoutButtonBottomInset = 104;
@@ -73,6 +74,7 @@ struct MetricPlacement {
   Rect bottomLeft{};
   Rect bottomRight{};
   Rect startWorkoutButton{};
+  Rect rideDetectionMessage{};
 };
 
 enum class MetricLayoutMode : uint8_t {
@@ -357,6 +359,12 @@ constexpr MetricPlacement makeMetricPlacement(const Layout &layout,
       buttonY,
       layout.screenWidth - 2 * horizontalInset,
       kStartWorkoutButtonHeight,
+  };
+  placement.rideDetectionMessage = {
+      placement.startWorkoutButton.x,
+      placement.startWorkoutButton.bottom() + kRideDetectionMessageGap,
+      placement.startWorkoutButton.width,
+      placement.startWorkoutButton.height,
   };
   return placement;
 }

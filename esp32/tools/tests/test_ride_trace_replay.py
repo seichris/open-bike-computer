@@ -103,6 +103,7 @@ class RideTraceReplayTests(unittest.TestCase):
             {"schema": 1, "profile": 1, "t_ms": 0, "lifecycle": "idle", "evidence": {"gps_fix_valid": 1}},
             {"schema": 1, "profile": 1, "t_ms": 0, "lifecycle": "idle", "evidence": {"gps_hdop": float("nan")}},
             {"schema": 1, "profile": 1, "t_ms": 0x1_0000_0000, "lifecycle": "idle"},
+            {"schema": 2, "profile": 2, "t_ms": 0, "lifecycle": "idle", "output": {"source_health_mask": -1}},
         ]
         for record in invalid_records:
             with self.subTest(record=record), tempfile.TemporaryDirectory() as directory:

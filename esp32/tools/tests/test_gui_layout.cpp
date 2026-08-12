@@ -184,6 +184,15 @@ int main() {
   static_assert(navigationMetrics.startWorkoutButton.y -
                     navigationMetrics.bottomLeft.bottom() >=
                 ride_telemetry_layout::kStartWorkoutButtonGap);
+  static_assert(navigationMetrics.rideDetectionMessage.x ==
+                navigationMetrics.startWorkoutButton.x);
+  static_assert(navigationMetrics.rideDetectionMessage.y ==
+                navigationMetrics.startWorkoutButton.bottom() +
+                    ride_telemetry_layout::kRideDetectionMessageGap);
+  static_assert(navigationMetrics.rideDetectionMessage.width ==
+                navigationMetrics.startWorkoutButton.width);
+  static_assert(navigationMetrics.rideDetectionMessage.height ==
+                navigationMetrics.startWorkoutButton.height);
   constexpr auto idleMetrics =
       ride_telemetry_layout::makeMetricPlacement(
           rideLayout, ride_telemetry_layout::MetricLayoutMode::Idle);
@@ -217,6 +226,12 @@ int main() {
       rideLayout.screenHeight));
   static_assert(ride_telemetry_layout::fits(
       idleMetrics.startWorkoutButton, rideLayout.screenWidth,
+      rideLayout.screenHeight));
+  static_assert(ride_telemetry_layout::fits(
+      navigationMetrics.rideDetectionMessage, rideLayout.screenWidth,
+      rideLayout.screenHeight));
+  static_assert(ride_telemetry_layout::fits(
+      idleMetrics.rideDetectionMessage, rideLayout.screenWidth,
       rideLayout.screenHeight));
   constexpr int32_t representativeHeartRateTextWidth = 100;
   const auto unavailableHeartRate =

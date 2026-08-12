@@ -36,8 +36,8 @@ EVIDENCE_KEYS = {
 }
 METRIC_KEYS = {"value", "age_ms"}
 OUTPUT_KEYS = {
-    "decision", "evidence_mask", "decision_sequence", "candidate_began_at_ms",
-    "decided_at_ms", "counters",
+    "decision", "evidence_mask", "source_health_mask", "decision_sequence",
+    "candidate_began_at_ms", "decided_at_ms", "counters",
 }
 COUNTER_KEYS = {"start", "pause", "resume", "conflict"}
 
@@ -181,6 +181,10 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
                 output["evidence_mask"], 0xFFFF
             ):
                 raise TraceError(f"{path}:{line_number}: evidence_mask must be uint16")
+            if "source_health_mask" in output and not _is_uint(
+                output["source_health_mask"], 0xFFFF
+            ):
+                raise TraceError(f"{path}:{line_number}: source_health_mask must be uint16")
             for field in (
                 "decision_sequence",
                 "candidate_began_at_ms",

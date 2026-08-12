@@ -403,11 +403,12 @@ detection evaluates freshness. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
 
 Quality-v1 is accepted only as a complete 36-byte payload. Unknown schemas,
-reserved flag bits, mismatched accuracy availability/sentinels, invalid
-coordinates, and a valid-fix claim without both accuracy and sample age reject
-the entire packet before map or detector state changes. Legacy packets continue
-to update navigation/map state but cannot refresh ride-detection evidence.
-Authenticated BLE evidence is cleared when the session or owner lease ends.
+reserved flag bits, truncated or oversized extensions, mismatched accuracy
+availability/sentinels, invalid coordinates, and a valid-fix claim without
+measured speed, accuracy, and sample age reject the entire packet before map or
+detector state changes. Legacy packets continue to update navigation/map state
+but cannot refresh ride-detection evidence. Authenticated BLE evidence is
+cleared when the session or owner lease ends.
 
 Example quality tail for a valid fix with 7.3 m accuracy and 1234 ms age:
 

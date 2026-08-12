@@ -22,6 +22,7 @@ NMEAGPS GPS;
 static portMUX_TYPE gpsRideObservationMux = portMUX_INITIALIZER_UNLOCKED;
 static GpsRideObservation hardwareRideObservation;
 static GpsRideObservation authenticatedBleRideObservation;
+static RidePositionSource selectedRidePositionSource = RidePositionSource::None;
 
 static const char* TAG PROGMEM = "GPS";
 
@@ -244,13 +245,18 @@ void publishHardwareGpsRideObservation(
 void publishAuthenticatedBleGpsRideObservation(
     const GpsRideObservation &observation) {
   portENTER_CRITICAL(&gpsRideObservationMux);
-  authenticatedBleRideObservation = observation;
+  if (gpsRideObservationIsNewerOrEqual(observation,
+                                       authenticatedBleRideObservation)) {
+    authenticatedBleRideObservation = observation;
+  }
   portEXIT_CRITICAL(&gpsRideObservationMux);
 }
 
 void clearAuthenticatedBleGpsRideObservation() {
   portENTER_CRITICAL(&gpsRideObservationMux);
   authenticatedBleRideObservation = {};
+  if (selectedRidePositionSource == RidePositionSource::AuthenticatedBle)
+    selectedRidePositionSource = RidePositionSource::None;
   portEXIT_CRITICAL(&gpsRideObservationMux);
 }
 
@@ -259,9 +265,15 @@ GpsRideObservation currentGpsRideObservation(uint32_t nowMs,
   portENTER_CRITICAL(&gpsRideObservationMux);
   const GpsRideObservation hardware = hardwareRideObservation;
   const GpsRideObservation ble = authenticatedBleRideObservation;
+  const RidePositionSource preferred = selectedRidePositionSource;
   portEXIT_CRITICAL(&gpsRideObservationMux);
 
-  return selectGpsRideObservation(hardware, ble, nowMs, maximumAgeMs);
+  const GpsRideObservation selected = selectGpsRideObservation(
+      hardware, ble, nowMs, maximumAgeMs, preferred);
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  selectedRidePositionSource = selected.source;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+  return selected;
 }
 
 /**

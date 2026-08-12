@@ -50,7 +50,7 @@ ride_automation_runtime::UiError uiError =
     ride_automation_runtime::UiError::None;
 uint32_t uiErrorUntilMs = 0;
 uint32_t resumedMessageUntilMs = 0;
-bool sensorFallbackDegraded = false;
+ride_automation::DetectionHealth detectionHealth;
 ride_automation::ConfirmedLifecycle retainedLifecycle =
     ride_automation::ConfirmedLifecycle::Idle;
 uint16_t runningStartGraceSessionToken = 0;
@@ -82,7 +82,8 @@ struct GpsWindow {
   void clear() { *this = {}; }
 
   void append(const Point &point) {
-    if (count > 0 && point.capturedAtMs == lastCapturedAtMs)
+    if (count > 0 &&
+        static_cast<int32_t>(point.capturedAtMs - lastCapturedAtMs) <= 0)
       return;
     lastCapturedAtMs = point.capturedAtMs;
     if (count == kCapacity) {
@@ -415,9 +416,8 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
 }
 
 void appendGpsEvidence(uint32_t nowMs,
+                       const GpsRideObservation &value,
                        ride_automation::RideEvidenceObservation &out) {
-  const GpsRideObservation value = currentGpsRideObservation(
-      nowMs, ride_automation::kRideDetectionProfile.gpsFreshnessMs);
   out.gpsPositionSource = static_cast<uint8_t>(value.source);
   out.gpsFixValid = {value.fixAvailable, value.fixValid,
                      value.capturedAtMs,
@@ -430,6 +430,11 @@ void appendGpsEvidence(uint32_t nowMs,
       value.horizontalUncertaintyMeters,
       value.capturedAtMs,
       ride_automation::kRideDetectionProfile.gpsFreshnessMs};
+
+  if (value.source == RidePositionSource::None ||
+      nowMs - value.capturedAtMs >
+          ride_automation::kRideDetectionProfile.gpsFreshnessMs)
+    return;
 
   const bool goodLocation = value.locationAvailable && value.fixAvailable &&
                             value.fixValid &&
@@ -688,7 +693,7 @@ void beginFirmwareShadow() {
   uiError = ride_automation_runtime::UiError::None;
   uiErrorUntilMs = 0;
   resumedMessageUntilMs = 0;
-  sensorFallbackDegraded = false;
+  detectionHealth = {};
   retainedLifecycle = ride_automation::ConfirmedLifecycle::Idle;
   runningStartGraceSessionToken = 0;
   decisionAcknowledged = false;
@@ -718,7 +723,12 @@ void processFirmwareShadow(uint32_t nowMs) {
   appendWorkoutSensorEvidence(nowMs, observation);
   if (cyclingMotionSource != nullptr)
     cyclingMotionSource->appendEvidence(nowMs, observation);
-  appendGpsEvidence(nowMs, observation);
+  GpsRideObservation gpsObservation = currentGpsRideObservation(
+      nowMs, ride_automation::kRideDetectionProfile.gpsFreshnessMs);
+  if (gpsObservation.source == RidePositionSource::None) {
+    gpsObservation = currentGpsRideObservation(nowMs, UINT32_MAX);
+  }
+  appendGpsEvidence(nowMs, gpsObservation, observation);
   appendImuEvidence(observation);
   const bool directEvidenceAvailable =
       (ride_automation::metricFresh(
@@ -730,12 +740,11 @@ void processFirmwareShadow(uint32_t nowMs) {
            observation.cadenceRpm, nowMs,
            ride_automation::kRideDetectionProfile.cadenceFreshnessMs) &&
        ride_automation::nonnegativeFinite(observation.cadenceRpm.value));
-  const bool gpsImuEvidenceAvailable =
-      ride_automation::metricFresh(
+  const bool imuEvidenceAvailable = ride_automation::metricFresh(
           observation.imuMotionScore, nowMs,
           ride_automation::kRideDetectionProfile.imuFreshnessMs) &&
-      ride_automation::nonnegativeFinite(observation.imuMotionScore.value) &&
-      ride_automation::flagFresh(
+      ride_automation::nonnegativeFinite(observation.imuMotionScore.value);
+  const bool gpsEvidenceAvailable = ride_automation::flagFresh(
           observation.gpsFixValid, nowMs,
           ride_automation::kRideDetectionProfile.gpsFreshnessMs) &&
       observation.gpsFixValid.value &&
@@ -750,8 +759,16 @@ void processFirmwareShadow(uint32_t nowMs) {
       observation.gpsHorizontalUncertaintyMeters.value <=
           ride_automation::kRideDetectionProfile
               .maximumGpsHorizontalUncertaintyMeters;
-  sensorFallbackDegraded =
-      !directEvidenceAvailable && !gpsImuEvidenceAvailable;
+  detectionHealth = ride_automation::resolveDetectionHealth({
+      directEvidenceAvailable,
+      gpsObservation.source != RidePositionSource::None &&
+          gpsObservation.fixAvailable,
+      gpsObservation.source != RidePositionSource::None &&
+          nowMs - gpsObservation.capturedAtMs <=
+              ride_automation::kRideDetectionProfile.gpsFreshnessMs,
+      gpsEvidenceAvailable,
+      imuEvidenceAvailable,
+  });
 
   const ride_automation::Settings settings = configuredSettings;
   const workout_telemetry::Snapshot workout =
@@ -957,11 +974,12 @@ UiSnapshot uiSnapshot(uint32_t nowMs) {
   case ride_automation::DetectorPhase::Quiet:
     break;
   }
-  if (sensorFallbackDegraded && nowMs > 15'000 &&
+  if (!detectionHealth.healthy() && nowMs > 15'000 &&
       configuredSettings.startMode != ride_automation::StartMode::Off) {
-    return {UiPhase::SensorDegraded, UiError::None, 0, 0};
+    return {UiPhase::SensorDegraded, UiError::None, 0, 0, 0,
+            detectionHealth};
   }
-  return {};
+  return {UiPhase::Hidden, UiError::None, 0, 0, 0, detectionHealth};
 }
 
 bool respondToStartPrompt(bool accept, uint32_t nowMs) {

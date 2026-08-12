@@ -35,7 +35,10 @@ inline bool validGpsRideObservation(const GpsRideObservation &value,
   }
   if (!value.fixValid)
     return true;
-  return value.locationAvailable && std::isfinite(value.latitude) &&
+  return value.speedAvailable &&
+         std::isfinite(value.speedMetersPerSecond) &&
+         value.speedMetersPerSecond >= 0.0F && value.locationAvailable &&
+         std::isfinite(value.latitude) &&
          std::isfinite(value.longitude) && value.latitude >= -90.0 &&
          value.latitude <= 90.0 && value.longitude >= -180.0 &&
          value.longitude <= 180.0 &&
@@ -44,9 +47,18 @@ inline bool validGpsRideObservation(const GpsRideObservation &value,
          value.horizontalUncertaintyMeters >= 0.0F;
 }
 
+inline bool gpsRideObservationIsNewerOrEqual(
+    const GpsRideObservation &incoming,
+    const GpsRideObservation &current) {
+  return current.source == RidePositionSource::None ||
+         static_cast<int32_t>(incoming.capturedAtMs - current.capturedAtMs) >= 0;
+}
+
 inline GpsRideObservation selectGpsRideObservation(
     const GpsRideObservation &hardware, const GpsRideObservation &ble,
-    uint32_t nowMs, uint32_t maximumAgeMs) {
+    uint32_t nowMs, uint32_t maximumAgeMs,
+    RidePositionSource preferredSource = RidePositionSource::None,
+    float switchImprovementMeters = 3.0F) {
   const bool hardwareValid =
       validGpsRideObservation(hardware, nowMs, maximumAgeMs);
   const bool bleValid = validGpsRideObservation(ble, nowMs, maximumAgeMs);
@@ -59,6 +71,20 @@ inline GpsRideObservation selectGpsRideObservation(
   if (hardware.fixValid &&
       hardware.horizontalUncertaintyMeters !=
           ble.horizontalUncertaintyMeters) {
+    const GpsRideObservation *preferred = nullptr;
+    const GpsRideObservation *challenger = nullptr;
+    if (preferredSource == RidePositionSource::HardwareNmea) {
+      preferred = &hardware;
+      challenger = &ble;
+    } else if (preferredSource == RidePositionSource::AuthenticatedBle) {
+      preferred = &ble;
+      challenger = &hardware;
+    }
+    if (preferred != nullptr &&
+        challenger->horizontalUncertaintyMeters + switchImprovementMeters >=
+            preferred->horizontalUncertaintyMeters) {
+      return *preferred;
+    }
     return hardware.horizontalUncertaintyMeters <
                    ble.horizontalUncertaintyMeters
                ? hardware

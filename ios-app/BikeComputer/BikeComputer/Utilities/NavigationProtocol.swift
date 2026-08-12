@@ -914,8 +914,10 @@ enum DeviceGPSPacketBuilder {
             }
             let timestampAvailable = ageSeconds?.isFinite == true &&
                 (ageSeconds ?? 0) >= -futureTimestampTolerance
+            let speedAvailable = speedMetersPerSecond?.isFinite == true &&
+                (speedMetersPerSecond ?? -1) >= 0
             let fixValid = validCoordinate && accuracyAvailable &&
-                timestampAvailable
+                timestampAvailable && speedAvailable
             var flags: UInt8 = 0
             if fixValid { flags |= qualityFixValid }
             if accuracyAvailable { flags |= qualityAccuracyAvailable }

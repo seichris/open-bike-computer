@@ -467,6 +467,24 @@ enum RideSharedTests {
                 delayedQualityPacket[35] == 0x07,
             "Watch GPS quality accounts for time spent in the BLE queue"
         )
+        let missingSpeedSample = NavigationLocationSampleV1(
+            coordinate: location.coordinate,
+            horizontalAccuracyMeters: location.horizontalAccuracyMeters,
+            courseDegrees: location.courseDegrees,
+            speedMetersPerSecond: -1,
+            altitudeMeters: location.altitudeMeters,
+            timestamp: location.timestamp
+        )
+        let missingSpeedQuality = WatchRidePacketEncoderV1.gps(
+            missingSpeedSample,
+            snapshot: nil,
+            includeRideDetectionQuality: true,
+            now: location.timestamp
+        )
+        expect(
+            missingSpeedQuality[31] == 2,
+            "Watch quality without measured speed never claims a detector-ready fix"
+        )
         let invalidCourse = NavigationLocationSampleV1(
             coordinate: location.coordinate,
             horizontalAccuracyMeters: location.horizontalAccuracyMeters,

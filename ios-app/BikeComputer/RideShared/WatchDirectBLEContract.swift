@@ -605,8 +605,11 @@ enum WatchRidePacketEncoderV1 {
                 sample.horizontalAccuracyMeters >= 0
             let ageSeconds = now.timeIntervalSince(sample.timestamp)
             let timestampAvailable = ageSeconds.isFinite && ageSeconds >= -1
+            let speedAvailable = sample.speedMetersPerSecond.isFinite &&
+                sample.speedMetersPerSecond >= 0
             var flags: UInt8 = 0
-            if validCoordinate && accuracyAvailable && timestampAvailable {
+            if validCoordinate && accuracyAvailable && timestampAvailable &&
+                speedAvailable {
                 flags |= 1 << 0
             }
             if accuracyAvailable { flags |= 1 << 1 }

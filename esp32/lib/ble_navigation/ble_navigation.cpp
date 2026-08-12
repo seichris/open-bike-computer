@@ -1235,6 +1235,10 @@ static void handleAuthPayload(const std::string &frame) {
               case device_ownership::Event::WatchControllerRevoked:
                 Serial.println("BLE: Watch controller credential revoked");
                 break;
+              case device_ownership::Event::LeaseReleased:
+                clearAuthenticatedBleGpsRideObservation();
+                Serial.println("BLE: Controller lease released; GPS evidence cleared");
+                break;
               case device_ownership::Event::Renamed:
                 ownershipAdvertisingDirty = true;
                 Serial.println("BLE: Device name updated");
@@ -2485,8 +2489,9 @@ static void handleGpsPayload(
   gps_position_protocol::Packet packet{};
   if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
                                              &packet)) {
-    Serial.printf("BLE: Rejected %s GPS position: expected at least 8 bytes\n",
-                  source == nullptr ? "unknown" : source);
+    Serial.printf("BLE: Rejected malformed %s GPS position (%u bytes)\n",
+                  source == nullptr ? "unknown" : source,
+                  static_cast<unsigned>(len));
     return;
   }
 

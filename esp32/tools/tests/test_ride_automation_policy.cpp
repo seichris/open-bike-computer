@@ -55,6 +55,16 @@ Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
 } // namespace
 
 int main() {
+  using ride_automation_runtime::UiPhase;
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      UiPhase::SensorDegraded));
+  assert(ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::SensorDegraded, true));
+  assert(!ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::SensorDegraded, false));
+  assert(!ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::StartCandidate, true));
+
   Settings ask;
   ask.startMode = StartMode::Ask;
   ask.autoPauseEnabled = true;
@@ -444,6 +454,28 @@ int main() {
   runtime.update(1'000, wheel(2.0F, 1'000), ConfirmedLifecycle::Idle, ask);
   assert((runtime.lastEvidenceMask() & EvidenceWheelMoving) != 0);
 
+  DetectionHealth health = resolveDetectionHealth({});
+  assert(health.state == DetectionHealthState::NoExternalPosition);
+  assert(!health.directSensorAvailable && !health.healthy());
+  health = resolveDetectionHealth({false, true, false, false, false});
+  assert(health.state == DetectionHealthState::PositionStale);
+  health = resolveDetectionHealth({false, true, true, false, true});
+  assert(health.state == DetectionHealthState::PositionLowQuality);
+  health = resolveDetectionHealth({false, true, true, true, false});
+  assert(health.state == DetectionHealthState::MotionUnavailable);
+  health = resolveDetectionHealth({false, true, true, true, true});
+  assert(health.state == DetectionHealthState::HealthyGpsAndMotion);
+  assert(health.healthy() && !health.directSensorAvailable);
+  health = resolveDetectionHealth({true, false, false, false, false});
+  assert(health.state == DetectionHealthState::HealthyDirectSensor);
+  assert(health.healthy() && health.directSensorAvailable);
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::SensorDegraded));
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::Hidden));
+  assert(ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::StartPrompt));
+
   TraceRecord trace;
   trace.timestampMs = 123;
   trace.lifecycle = ConfirmedLifecycle::Idle;
@@ -462,6 +494,7 @@ int main() {
   assert(std::strstr(json, "\"lifecycle\":\"idle\"") != nullptr);
   assert(std::strstr(json, "\"wheel_mps\":{") != nullptr);
   assert(std::strstr(json, "\"decision\":\"start\"") != nullptr);
+  assert(std::strstr(json, "\"source_health_mask\":1") != nullptr);
   assert(std::strstr(json, "latitude") == nullptr);
   assert(std::strstr(json, "accelerometer") == nullptr);
   char tooSmall[8];

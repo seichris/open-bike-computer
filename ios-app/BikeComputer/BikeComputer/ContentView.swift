@@ -536,7 +536,10 @@ struct ContentView: View {
         switch destination {
         case .settings:
             SettingsView(
-                locationAuthorized: coordinator.isLocationAuthorized,
+                locationAuthorizationStatus:
+                    coordinator.locationAuthorizationStatus,
+                locationAccuracyAuthorization:
+                    coordinator.locationAccuracyAuthorization,
                 currentLocation: coordinator.currentLocation,
                 offlineMapManager: offlineMapManager,
                 firmwareUpdateManager: coordinator.firmwareUpdateManager,
@@ -547,6 +550,9 @@ struct ContentView: View {
                     cyclingSensorDetectionCoordinator,
                 rideDetectionSettingsStore:
                     rideDetectionSettingsStore,
+                onRequestLocationAuthorization: {
+                    coordinator.requestLocationAuthorization()
+                },
                 onStartTestNavigation: { destination in
                     coordinator.startNavigation(
                         from: .currentLocation,

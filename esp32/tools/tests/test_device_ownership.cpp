@@ -599,8 +599,9 @@ int main() {
                          watchControllerKeyHex,
                      68)
              .response == "ERROR|watch_controller_stage_rejected");
-  assert(watchDevice.handle("LEASE_RELEASE", 69).response ==
-         "LEASE_RELEASED");
+  const auto leaseReleased = watchDevice.handle("LEASE_RELEASE", 69);
+  assert(leaseReleased.response == "LEASE_RELEASED");
+  assert(leaseReleased.event == Event::LeaseReleased);
   assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Navigation,
                                          70));
   watchDevice.resetConnection();

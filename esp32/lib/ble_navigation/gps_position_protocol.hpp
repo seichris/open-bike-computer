@@ -58,6 +58,13 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
   if (bytes == nullptr || length < 8) {
     return false;
   }
+  // The quality extension is an atomic negotiated schema. Treat truncated or
+  // oversized extensions as malformed instead of silently downgrading them to
+  // a legacy map packet.
+  if (length > LEGACY_PACKET_LENGTH &&
+      length != QUALITY_V1_PACKET_LENGTH) {
+    return false;
+  }
 
   Packet decoded{};
   decoded.latitudeMicrodegrees =
@@ -96,7 +103,7 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
     decoded.hasRouteRemaining = remaining != UINT32_MAX;
     decoded.routeRemainingMeters = remaining;
   }
-  if (length >= QUALITY_V1_PACKET_LENGTH) {
+  if (length == QUALITY_V1_PACKET_LENGTH) {
     const uint8_t schema = bytes[30];
     const uint8_t flags = bytes[31];
     const uint16_t accuracy = readUInt16LE(bytes, 32);
@@ -113,7 +120,7 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
     if (schema != QUALITY_V1_SCHEMA || (flags & ~QUALITY_KNOWN_FLAGS) != 0 ||
         accuracyAvailable == accuracySentinel || !validCoordinates ||
         (((flags & QUALITY_FIX_VALID) != 0) &&
-         (!accuracyAvailable || !sampleAgeAvailable))) {
+         (!decoded.hasSpeed || !accuracyAvailable || !sampleAgeAvailable))) {
       return false;
     }
     decoded.hasRideDetectionQuality = true;

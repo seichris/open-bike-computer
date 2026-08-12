@@ -126,8 +126,10 @@ demand on iPhone.
   Stats metrics with a full foreground panel.
 - Start prompts, start-in-progress, pause/resume candidates, confirmations, and
   actionable errors may continue to use the automation panel.
-- A prolonged unavailable-source state should use a compact status or settings
-  diagnostic with reason-specific copy, for example:
+- A prolonged unavailable-source state on Ride Stats should show a
+  button-width text row immediately below **Start Workout** with the exact copy
+  `Waiting for GPS + motion to auto-start ride`.
+- The iPhone settings diagnostic should keep reason-specific copy, for example:
   - `Open Bicino on iPhone for ride detection`;
   - `Allow precise location for ride detection`;
   - `Waiting for a more accurate location`;
@@ -406,8 +408,10 @@ copy must not change transition thresholds.
 ### 6. Make degraded UI non-blocking
 
 Update `rideTelemetryScr.cpp` so only decision/action phases move the automation
-panel to the foreground. A degraded source state should use a compact status
-surface or a row in device ride-detection settings.
+panel to the foreground. A degraded source state should use a text row with the
+same width, height, and font sizing as **Start Workout**, positioned immediately
+below the button. Its copy is
+`Waiting for GPS + motion to auto-start ride`.
 
 The UI should become hidden promptly after the health resolver reports fresh
 iPhone GPS plus IMU. It should also remain hidden when Ride Start is Off.
@@ -623,7 +627,8 @@ navigation, and workout state.
 
 ### Phase 4: UI and diagnostics
 
-1. Replace the full-screen degraded overlay with non-blocking status.
+1. Replace the full-screen degraded overlay with the specified button-sized,
+   inline waiting message below **Start Workout**.
 2. Map source-health reasons to honest device/iPhone copy.
 3. Ensure healthy stationary data clears degraded state.
 4. Preserve current prompts, confirmations, and errors.
@@ -820,6 +825,9 @@ Implementation is complete only when all of the following are true:
       fail closed.
 - [ ] Healthy stationary iPhone GPS plus device IMU clears the current warning.
 - [ ] Ride Stats remain readable during non-actionable source degradation.
+- [ ] Degraded Ride Stats show
+      `Waiting for GPS + motion to auto-start ride` below **Start Workout** and
+      never open the automation panel.
 - [ ] Ask, Not Now, start confirmation, auto-pause/resume, manual precedence,
       and Watch-owned HealthKit behavior remain intact.
 - [ ] iPhone/Watch/firmware compatibility and malformed-packet tests pass.

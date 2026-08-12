@@ -110,6 +110,8 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
     @Published var locationAuthorizationStatus: CLAuthorizationStatus = .notDetermined
+    @Published var locationAccuracyAuthorization: CLAccuracyAuthorization =
+        .fullAccuracy
 
     // Route Calculation
     @Published var routeCalculation = RouteCalculationState()
@@ -410,6 +412,9 @@ class BikeComputerCoordinator: ObservableObject {
         locationManager.$authorizationStatus
             .assign(to: &$locationAuthorizationStatus)
 
+        locationManager.$accuracyAuthorization
+            .assign(to: &$locationAccuracyAuthorization)
+
         // Current firmware exposes only the navigation packet characteristic.
     }
 
@@ -631,6 +636,7 @@ class BikeComputerCoordinator: ObservableObject {
 
     func setApplicationActive(_ isActive: Bool) {
         bleManager.setApplicationActive(isActive)
+        locationManager.applicationStateDidChange()
     }
 
     func requestLocationAuthorization() {
