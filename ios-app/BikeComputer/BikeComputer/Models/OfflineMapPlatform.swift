@@ -882,14 +882,24 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
     func require(rendererFormatVersion: Int) throws {
         let supported = generationProfiles.map(\.rendererFormatVersion)
         let profileIDs = generationProfiles.map(\.id)
+        let profileContracts: [Int: (id: String, features: Set<String>)] = [
+            1: ("legacy-vector-v1", []),
+            2: ("street-labels-v1", ["street-labels"]),
+            3: ("buildings-3d-v1", ["street-labels", "3d-buildings"]),
+        ]
         guard schemaVersion == 1,
               ["development", "production"].contains(deploymentChannel),
               policySha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
               Set(supported).count == supported.count,
               Set(profileIDs).count == profileIDs.count,
               generationProfiles.allSatisfy({
-                  !$0.id.isEmpty && $0.rendererFormatVersion > 0 &&
-                      Set($0.features).count == $0.features.count
+                  guard let contract = profileContracts[$0.rendererFormatVersion] else {
+                      return false
+                  }
+                  let features = Set($0.features)
+                  return $0.id == contract.id &&
+                      contract.features.isSubset(of: features) &&
+                      features.count == $0.features.count
               }) else {
             throw OfflineMapPlatformError.invalidResponse
         }

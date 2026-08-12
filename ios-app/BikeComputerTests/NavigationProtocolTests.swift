@@ -5196,6 +5196,30 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "unsupported capabilities retain the renderer error type")
         }
+
+        let malformed3D = try! JSONDecoder().decode(
+            OfflineMapGenerationCapabilities.self,
+            from: Data(#"""
+            {
+                "schemaVersion":1,
+                "deploymentChannel":"development",
+                "policySha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "generationProfiles":[
+                    {"id":"format-three-in-name-only","rendererFormatVersion":3,"features":["street-labels"]},
+                    {"id":"street-labels-v1","rendererFormatVersion":2,"features":["street-labels"]},
+                    {"id":"legacy-vector-v1","rendererFormatVersion":1,"features":[]}
+                ]
+            }
+            """#.utf8)
+        )
+        do {
+            try malformed3D.require(rendererFormatVersion: 3)
+            assert(false, "format 3 must bind to the named 3D feature profile")
+        } catch OfflineMapPlatformError.invalidResponse {
+            // Expected: malformed capability documents fail closed.
+        } catch {
+            assert(false, "malformed capability profiles are invalid responses")
+        }
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {

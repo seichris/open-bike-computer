@@ -141,11 +141,14 @@ class GenerationProfilePolicy:
             )
         )
 
-    def canary_profile_ids(self, channel: str) -> frozenset[str]:
-        try:
-            return frozenset(self.channels[channel].canary_profile_ids)
-        except KeyError as exc:
-            raise ValueError(f"unsupported deployment channel: {channel}") from exc
+    def profile_id_for_renderer_format(self, renderer_format_version: int) -> str:
+        for profile in self.profiles_by_id.values():
+            if profile.renderer_format_version == renderer_format_version:
+                return profile.profile_id
+        raise ValueError(
+            f"generation profile policy does not define renderer format "
+            f"{renderer_format_version}"
+        )
 
 
 def configured_deployment_channel() -> str:

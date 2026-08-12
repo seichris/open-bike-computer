@@ -65,6 +65,16 @@ class GenerationProfilePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "development or production"):
                 configured_deployment_channel()
 
+    def test_duplicate_json_keys_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            path.write_text(
+                '{"schemaVersion":1,"schemaVersion":1}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON object key"):
+                GenerationProfilePolicy.load(path)
+
 
 if __name__ == "__main__":
     unittest.main()

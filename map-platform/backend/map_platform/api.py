@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Request
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
     from fastapi.responses import FileResponse, JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without the API extra
-    Depends = FastAPI = Header = HTTPException = Request = None  # type: ignore[assignment]
+    Depends = FastAPI = Header = HTTPException = Request = Response = None  # type: ignore[assignment]
     FileResponse = JSONResponse = None  # type: ignore[assignment]
     _FASTAPI_IMPORT_ERROR: ImportError | None = exc
 else:
@@ -441,6 +441,7 @@ def create_app():
     @app.get("/v1/capabilities")
     def capabilities(
         clientInstallationId: str,
+        response: Response,
         x_installation_token: str | None = Header(
             default=None,
             alias="X-Installation-Token",
@@ -452,6 +453,7 @@ def create_app():
             required=True,
         )
         assert installation_id is not None
+        response.headers["Cache-Control"] = "private, no-store"
         return service.generation_capabilities(installation_id)
 
     @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])

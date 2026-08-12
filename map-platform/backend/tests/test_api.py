@@ -343,6 +343,7 @@ class MapJobRunAPITests(unittest.TestCase):
             },
         )
         self.assertEqual(production.status_code, 200)
+        self.assertEqual(production.headers["Cache-Control"], "private, no-store")
         payload = production.json()
         self.assertEqual(payload["schemaVersion"], 1)
         self.assertEqual(payload["deploymentChannel"], "production")
@@ -353,6 +354,37 @@ class MapJobRunAPITests(unittest.TestCase):
                 for profile in payload["generationProfiles"]
             ],
             [2, 1],
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": credential[
+                    "clientInstallationId"
+                ],
+            },
+            clear=False,
+        ):
+            canary_client = TestClient(create_app())
+            try:
+                canary = canary_client.get(
+                    "/v1/capabilities",
+                    params=params,
+                    headers={
+                        "X-Installation-Token": credential[
+                            "clientInstallationToken"
+                        ],
+                    },
+                )
+            finally:
+                canary_client.close()
+        self.assertEqual(canary.status_code, 200)
+        self.assertEqual(
+            [
+                profile["rendererFormatVersion"]
+                for profile in canary.json()["generationProfiles"]
+            ],
+            [3, 2, 1],
         )
 
         with patch.dict(

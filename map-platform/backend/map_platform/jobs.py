@@ -1472,9 +1472,9 @@ class MapJobService:
         if self.generation_profile_policy is not None:
             canary_profiles = frozenset()
             if client_installation_id in self.building_target3_allowlist:
-                canary_profiles = self.generation_profile_policy.canary_profile_ids(
-                    self.deployment_channel
-                )
+                canary_profiles = frozenset({
+                    self.generation_profile_policy.profile_id_for_renderer_format(3)
+                })
             return [
                 profile.renderer_format_version
                 for profile in self.generation_profile_policy.available_profiles(
@@ -1499,9 +1499,9 @@ class MapJobService:
             raise RuntimeError("generation profile policy is not configured")
         canary_profiles = frozenset()
         if client_installation_id in self.building_target3_allowlist:
-            canary_profiles = self.generation_profile_policy.canary_profile_ids(
-                self.deployment_channel
-            )
+            canary_profiles = frozenset({
+                self.generation_profile_policy.profile_id_for_renderer_format(3)
+            })
         profiles = self.generation_profile_policy.available_profiles(
             self.deployment_channel,
             canary_profile_ids=canary_profiles,
