@@ -204,9 +204,13 @@ assert "pull_request:" not in speaker_workflow
 assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in speaker_workflow
 assert '.pio/open-bike-build/builds/$environment/current.json' in runtime_refresh_workflow
 assert ".pio/open-bike-build/sdkconfig-defaults.json" not in runtime_refresh_workflow
-for environment in (*light_sleep_profiles, *remote_debug_profiles):
+for environment in light_sleep_profiles:
     profile = environment.removeprefix("env:")
     assert profile not in ci_workflow
+    assert profile in diagnostic_workflow
+for environment in remote_debug_profiles:
+    profile = environment.removeprefix("env:")
+    assert profile in ci_workflow
     assert profile in diagnostic_workflow
 
 battery_validation = (
