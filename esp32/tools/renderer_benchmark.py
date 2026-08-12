@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import statistics
 import struct
 import sys
@@ -1482,6 +1482,8 @@ class BenchmarkRunner:
                     "frameSequence": metadata["sequence"],
                     "capturedAtMs": metadata["capturedAtMs"],
                     "path": f"screenshots/{filename}",
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256_file(path),
                 }
             except DebugClientError as exc:
                 last_error = exc
@@ -1809,6 +1811,7 @@ def _uint32_forward_delta(current: int, previous: int) -> int:
 def is_full_comparison_evidence(
     comparison: dict[str, Any],
     *,
+    comparison_root: Path,
     expected_profile: str | None,
     gates: dict[str, Any],
     gates_sha256: str,
@@ -1853,13 +1856,82 @@ def is_full_comparison_evidence(
     ):
         return False
 
+    route = nested(comparison, "fixtures", "route")
+    route_sample_count = route.get("sampleCount")
+    if (
+        isinstance(route_sample_count, bool)
+        or not isinstance(route_sample_count, int)
+        or not 60 <= route_sample_count <= 120
+    ):
+        return False
+    expected_checkpoints = set(
+        expected_checkpoint_indexes(
+            route_sample_count, gates["checkpointFractions"]
+        )
+    )
+    seen_screenshot_paths: set[str] = set()
+
+    def screenshots_are_complete(value: Any) -> bool:
+        if not isinstance(value, list) or len(value) != len(expected_checkpoints):
+            return False
+        observed_checkpoints: set[int] = set()
+        for screenshot in value:
+            if not isinstance(screenshot, dict):
+                return False
+            checkpoint = screenshot.get("checkpointSampleIndex")
+            observed = screenshot.get("observedSampleIndex")
+            path_text = screenshot.get("path")
+            byte_count = screenshot.get("bytes")
+            digest = screenshot.get("sha256")
+            if (
+                isinstance(checkpoint, bool)
+                or not isinstance(checkpoint, int)
+                or checkpoint not in expected_checkpoints
+                or isinstance(observed, bool)
+                or not isinstance(observed, int)
+                or not 0 <= observed < route_sample_count
+                or circular_sample_distance(
+                    checkpoint, observed, route_sample_count
+                ) > gates["checkpointToleranceSamples"]
+                or not isinstance(path_text, str)
+                or not path_text
+                or len(path_text) > 255
+                or "\\" in path_text
+                or path_text in seen_screenshot_paths
+                or isinstance(byte_count, bool)
+                or not isinstance(byte_count, int)
+                or not 0 < byte_count <= 8 * 1024 * 1024
+                or not valid_lowercase_sha256(digest)
+            ):
+                return False
+            relative = PurePosixPath(path_text)
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or relative.parts[0] != "screenshots"
+                or any(part in ("", ".", "..") for part in relative.parts)
+            ):
+                return False
+            candidate = comparison_root.joinpath(*relative.parts)
+            try:
+                if (
+                    not candidate.is_file()
+                    or candidate.stat().st_size != byte_count
+                    or sha256_file(candidate) != digest
+                ):
+                    return False
+            except OSError:
+                return False
+            seen_screenshot_paths.add(path_text)
+            observed_checkpoints.add(checkpoint)
+        return observed_checkpoints == expected_checkpoints
+
     expected_pairs = {
         (profile, repeat)
         for profile in profiles
         for repeat in range(1, repeats + 1)
     }
     observed_pairs: set[tuple[str, int]] = set()
-    checkpoint_count = len(gates["checkpointFractions"])
     for run in runs:
         if not isinstance(run, dict):
             return False
@@ -1874,14 +1946,7 @@ def is_full_comparison_evidence(
             or run.get("passed") is not True
             or run.get("soak") is not False
             or run.get("durationSeconds") != comparison_seconds
-            or not isinstance(screenshots, list)
-            or len(screenshots) != checkpoint_count
-            or any(
-                not isinstance(screenshot, dict)
-                or not isinstance(screenshot.get("path"), str)
-                or not screenshot["path"]
-                for screenshot in screenshots
-            )
+            or not screenshots_are_complete(screenshots)
         ):
             return False
         observed_pairs.add((profile, repeat))
@@ -1895,6 +1960,7 @@ def is_full_comparison_evidence(
         and soak.get("profile") == expected_profile
         and soak.get("repeat") == repeats + 1
         and soak.get("durationSeconds") == soak_seconds
+        and screenshots_are_complete(soak.get("screenshots"))
     )
 
 
@@ -2060,6 +2126,7 @@ def evaluate_ordinary_capture(
         comparison_route = nested(comparison, "fixtures", "route")
         if not allow_partial and not is_full_comparison_evidence(
             comparison,
+            comparison_root=comparison_path.parent,
             expected_profile=expected_profile,
             gates=gates,
             gates_sha256=gates_sha256,
@@ -2268,7 +2335,6 @@ def main() -> int:
             )
             if output.exists() and any(output.iterdir()):
                 raise BenchmarkError("output directory already contains files")
-            output.mkdir(parents=True, exist_ok=True)
             report = evaluate_ordinary_capture(
                 capture_path=args.ordinary_capture,
                 comparison_path=args.comparison_report,
@@ -2279,6 +2345,7 @@ def main() -> int:
                 gates_sha256=sha256_file(args.gates),
                 allow_partial=args.allow_partial,
             )
+            output.mkdir(parents=True, exist_ok=True)
             write_ordinary_report(report, output)
             print(
                 "renderer benchmark: wrote "
@@ -2316,8 +2383,6 @@ def main() -> int:
         )
         if output.exists() and any(output.iterdir()):
             raise BenchmarkError("output directory already contains files")
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "screenshots").mkdir(exist_ok=True)
         base_url, token = resolve_session(args)
         runner = BenchmarkRunner(
             client=DebugClient(base_url, token, timeout=args.timeout),
@@ -2333,6 +2398,8 @@ def main() -> int:
             capture_screenshots=not args.skip_screenshots,
         )
         preflight = runner.preflight()
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "screenshots").mkdir(exist_ok=True)
         runs: list[dict[str, Any]] = []
         schedule = balanced_profile_schedule(args.repeats, args.profiles)
         for repeat_index, order in enumerate(schedule, start=1):

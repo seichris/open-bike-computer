@@ -582,10 +582,28 @@ class RendererBenchmarkTests(unittest.TestCase):
             repeats = 3
             comparison_seconds = 120
             soak_seconds = 600
-            screenshots = [
-                {"path": f"screenshots/checkpoint-{index}.png"}
-                for index in range(len(gates["checkpointFractions"]))
-            ]
+            screenshot_root = root / "screenshots"
+            screenshot_root.mkdir()
+
+            def screenshots(label):
+                values = []
+                for checkpoint in renderer_benchmark.expected_checkpoint_indexes(
+                    len(route["points"]), gates["checkpointFractions"]
+                ):
+                    relative = f"screenshots/{label}-{checkpoint}.png"
+                    path = root / relative
+                    path.write_bytes(f"png:{label}:{checkpoint}".encode())
+                    values.append(
+                        {
+                            "checkpointSampleIndex": checkpoint,
+                            "observedSampleIndex": checkpoint,
+                            "path": relative,
+                            "bytes": path.stat().st_size,
+                            "sha256": renderer_benchmark.sha256_file(path),
+                        }
+                    )
+                return values
+
             comparison_runs = [
                 {
                     "schema": 1,
@@ -594,7 +612,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                     "durationSeconds": comparison_seconds,
                     "soak": False,
                     "passed": True,
-                    "screenshots": screenshots,
+                    "screenshots": screenshots(f"{profile}-{repeat}"),
                 }
                 for profile in profiles
                 for repeat in range(1, repeats + 1)
@@ -637,6 +655,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                             "repeat": repeats + 1,
                             "durationSeconds": soak_seconds,
                             "soak": True,
+                            "screenshots": screenshots("medium-soak"),
                         },
                         "profileRestoredToCurrent": True,
                         "cleanupFailure": None,
@@ -645,6 +664,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                             "route": {
                                 "id": route["id"],
                                 "sha256": route_hash,
+                                "sampleCount": len(route["points"]),
                             },
                         },
                     }
@@ -652,6 +672,20 @@ class RendererBenchmarkTests(unittest.TestCase):
                 encoding="utf-8",
             )
             report = renderer_benchmark.evaluate_ordinary_capture(
+                capture_path=capture_path,
+                comparison_path=comparison_path,
+                map_fixture=fixture,
+                route_fixture=route,
+                route_fixture_sha256=route_hash,
+                gates=gates,
+                gates_sha256=renderer_benchmark.sha256_file(
+                    TOOLS / "renderer_benchmark_gates.json"
+                ),
+                allow_partial=False,
+            )
+            missing_screenshot = root / comparison_runs[0]["screenshots"][0]["path"]
+            missing_screenshot.unlink()
+            missing_screenshot_report = renderer_benchmark.evaluate_ordinary_capture(
                 capture_path=capture_path,
                 comparison_path=comparison_path,
                 map_fixture=fixture,
@@ -682,6 +716,10 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
         self.assertTrue(report["passed"], report["failures"])
         self.assertEqual(report["window"]["profile"], "medium")
+        self.assertIn(
+            "comparison_is_not_full_acceptance_evidence",
+            missing_screenshot_report["failures"],
+        )
         self.assertIn(
             "comparison_is_not_full_acceptance_evidence",
             malformed_report["failures"],
