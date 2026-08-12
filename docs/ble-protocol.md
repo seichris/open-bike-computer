@@ -385,13 +385,36 @@ Altitude: Int16 meters (optional)
 DistanceTraveled: UInt32 meters (optional)
 ElapsedTime: UInt32 seconds (optional)
 RouteRemaining: UInt32 meters, 0xFFFFFFFF invalid (optional)
+QualitySchema: UInt8, value 1 (optional; requires complete quality tail)
+QualityFlags: UInt8, bit 0 fix valid, bit 1 horizontal accuracy available
+HorizontalAccuracy: UInt16 decimeters, 0xFFFF unavailable
+SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 ```
 
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
 coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
-14-byte payload with Unix time, and the extended 30-byte telemetry payload. The
+14-byte payload with Unix time, and the extended 30-byte telemetry payload. A
+client that negotiated CAP2 bit `17` appends the six-byte quality-v1 tail for a
+36-byte payload. The quality tail carries the original Core Location horizontal
+accuracy and sample age; it never fabricates HDOP. `SampleAge`, rather than the
+sender's wall clock, is subtracted from the BLE arrival timestamp before ride
+detection evaluates freshness. The
 Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+
+Quality-v1 is accepted only as a complete 36-byte payload. Unknown schemas,
+reserved flag bits, truncated or oversized extensions, mismatched accuracy
+availability/sentinels, invalid coordinates, and a valid-fix claim without
+measured speed, accuracy, and sample age reject the entire packet before map or
+detector state changes. Legacy packets continue to update navigation/map state
+but cannot refresh ride-detection evidence. Authenticated BLE evidence is
+cleared when the session or owner lease ends.
+
+Example quality tail for a valid fix with 7.3 m accuracy and 1234 ms age:
+
+```text
+01 03 49 00 d2 04
+```
 
 Client version `11` and CAP2 feature bit `13` negotiate the explicit invalid
 heading sentinel. Without that bit, the app preserves the legacy missing-course
@@ -971,10 +994,11 @@ bird's-eye projection, bit `10` to its first three perspective presets, bit
 and renderer target 3, bit `13` to the explicit invalid GPS-heading sentinel,
 bit `14` to scoped Watch control, bit `15` to the complete RAUT v2
 characteristic/fallback, persistence, and UI/control path, and bit `16` to the
-session-scoped real-device browser-debug service. Client version `11` requests
+session-scoped real-device browser-debug service. Bit `17` negotiates the
+GPS-position quality-v1 tail used by ride detection. Client version `11` requests
 bit `13`, version `12` requests bit `14`, version `13` requests bit `15`, and
-version `14` requests bit `16`; version `10` remains a valid CAP2 client without
-the newer features. Production builds keep bit `15` clear until the
+version `14` requests bit `16`; version `15` requests bit `17`. Version `10`
+remains a valid CAP2 client without the newer features. Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
@@ -1002,6 +1026,9 @@ CAP2 schema 1, flags 0, no TLVs:
 
 Internal RAUT v2 build, CAP2 schema 1, only feature bit 15:
 43 41 50 32 01 00 80 00 00
+
+GPS quality v1, CAP2 schema 1, only feature bit 17:
+43 41 50 32 01 00 00 02 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

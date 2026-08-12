@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ride_automation_policy.hpp"
+#include "ride_detection_health.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -70,12 +71,22 @@ enum class UiError : uint8_t {
   SessionMismatch,
 };
 
+inline bool shouldShowAutomationPanel(UiPhase phase) {
+  return phase != UiPhase::Hidden && phase != UiPhase::SensorDegraded;
+}
+
+inline bool shouldShowDetectionWaitingMessage(UiPhase phase,
+                                              bool startWorkoutVisible) {
+  return startWorkoutVisible && phase == UiPhase::SensorDegraded;
+}
+
 struct UiSnapshot {
   UiPhase phase = UiPhase::Hidden;
   UiError error = UiError::None;
   uint8_t progressPercent = 0;
   uint32_t decisionSequence = 0;
   uint8_t remainingSeconds = 0;
+  ride_automation::DetectionHealth detectionHealth{};
 };
 
 struct ConfigurationSnapshot {

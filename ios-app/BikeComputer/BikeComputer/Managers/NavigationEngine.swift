@@ -104,6 +104,25 @@ class NavigationEngine: NSObject, ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        manager.$supportsGPSPositionQualityV1
+            .removeDuplicates()
+            .dropFirst()
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak manager] _ in
+                // Capability notifications arrive after authentication
+                // readiness. Rebuild the cached location once bit 17 commits
+                // so an idle phone does not have to wait for Core Location to
+                // produce another fix before ride detection receives quality.
+                DispatchQueue.main.async { [weak self, weak manager] in
+                    guard let self, let manager,
+                          manager.isNavigationReady,
+                          manager.supportsGPSPositionQualityV1 else { return }
+                    self.resendCurrentDeviceGpsPosition()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     @discardableResult
@@ -749,11 +768,17 @@ class NavigationEngine: NSObject, ObservableObject {
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,
-                                    speedMetersPerSecond: includeRideTelemetry ? location.speed : nil,
+                                    // Core Location speed is ride-detection
+                                    // evidence even when navigation is idle.
+                                    // Only session-derived counters are gated
+                                    // by includeRideTelemetry.
+                                    speedMetersPerSecond: location.speed,
                                     altitudeMeters: includeRideTelemetry ? location.altitude : nil,
                                     distanceTraveledMeters: includeRideTelemetry ? rideDistanceMeters : nil,
                                     elapsedSeconds: includeRideTelemetry ? rideStartDate.map { now().timeIntervalSince($0) } : nil,
-                                    routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil)
+                                    routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil,
+                                    horizontalAccuracyMeters: location.horizontalAccuracy,
+                                    locationTimestamp: location.timestamp)
     }
 
     private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {

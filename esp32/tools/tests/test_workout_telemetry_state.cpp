@@ -1111,7 +1111,7 @@ int main() {
   assert(!idleLegacyModel.hasActiveNavigation);
   assert(!idleLegacyModel.routeRemainingMeters.available);
 
-  uint8_t gpsPacket[30]{};
+  uint8_t gpsPacket[36]{};
   writeUInt32LE(gpsPacket, 0, static_cast<uint32_t>(12345678));
   writeUInt32LE(gpsPacket, 4, static_cast<uint32_t>(-23456789));
   writeUInt16LE(gpsPacket, 8, 270);
@@ -1140,6 +1140,35 @@ int main() {
   assert(decoded.hasDistance && decoded.distanceMeters == 12345);
   assert(decoded.hasElapsed && decoded.elapsedSeconds == 3661);
   assert(decoded.hasRouteRemaining && decoded.routeRemainingMeters == 4321);
+
+  gpsPacket[30] = gps_position_protocol::QUALITY_V1_SCHEMA;
+  gpsPacket[31] = gps_position_protocol::QUALITY_FIX_VALID |
+                  gps_position_protocol::QUALITY_ACCURACY_AVAILABLE;
+  writeUInt16LE(gpsPacket, 32, 73);
+  writeUInt16LE(gpsPacket, 34, 1234);
+  assert(gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  assert(decoded.hasRideDetectionQuality && decoded.fixValid);
+  assert(decoded.hasHorizontalAccuracy &&
+         decoded.horizontalAccuracyDecimeters == 73);
+  assert(decoded.hasSampleAge && decoded.sampleAgeMs == 1234);
+
+  gpsPacket[30] = 2;
+  assert(!gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  gpsPacket[30] = gps_position_protocol::QUALITY_V1_SCHEMA;
+  gpsPacket[31] |= 1U << 7;
+  assert(!gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  gpsPacket[31] = gps_position_protocol::QUALITY_FIX_VALID |
+                  gps_position_protocol::QUALITY_ACCURACY_AVAILABLE;
+  writeUInt16LE(gpsPacket, 32, UINT16_MAX);
+  assert(!gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  writeUInt16LE(gpsPacket, 32, 73);
+  writeUInt16LE(gpsPacket, 34, UINT16_MAX);
+  assert(!gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  writeUInt16LE(gpsPacket, 34, 1234);
+  writeUInt32LE(gpsPacket, 0, static_cast<uint32_t>(91'000'000));
+  assert(!gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
+  writeUInt32LE(gpsPacket, 0, static_cast<uint32_t>(12'345'678));
+  assert(gps_position_protocol::decode(gpsPacket, sizeof(gpsPacket), decoded));
 
   Reducer independentReducer;
   assert(independentReducer.applyFrame(core, sizeof(core), 7000, true) ==

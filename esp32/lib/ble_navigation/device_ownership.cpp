@@ -834,11 +834,11 @@ CommandResult DeviceOwnership::handle(const std::string &payload,
 
   if (parts[0] == "LEASE_RELEASE" && parts.size() == 1) {
     result.matched = true;
-    result.response =
-        sessionAuthenticated_ &&
-                rideLease_.release(currentControllerIdentity())
-            ? "LEASE_RELEASED"
-            : "ERROR|lease_not_held";
+    const bool released = sessionAuthenticated_ &&
+                          rideLease_.release(currentControllerIdentity());
+    result.response = released ? "LEASE_RELEASED" : "ERROR|lease_not_held";
+    if (released)
+      result.event = Event::LeaseReleased;
     return result;
   }
 

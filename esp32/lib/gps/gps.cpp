@@ -20,6 +20,9 @@ bool nmea_output_enable = false;
 gps_fix fix;
 NMEAGPS GPS;
 static portMUX_TYPE gpsRideObservationMux = portMUX_INITIALIZER_UNLOCKED;
+static GpsRideObservation hardwareRideObservation;
+static GpsRideObservation authenticatedBleRideObservation;
+static RidePositionSource selectedRidePositionSource = RidePositionSource::None;
 
 static const char* TAG PROGMEM = "GPS";
 
@@ -126,12 +129,13 @@ void Gps::getGPSData()
 {
   const uint32_t capturedAtMs = millis();
   GpsRideObservation ride;
+  ride.source = RidePositionSource::HardwareNmea;
+  ride.capturedAtMs = capturedAtMs;
   ride.fixAvailable = true;
   // NeoGPS orders statuses by increasing accuracy. Estimated and time-only
   // reports are not spatial fixes and must never satisfy the detector's
   // 2D/3D-quality gate.
   ride.fixValid = fix.status >= gps_fix::STATUS_STD;
-  ride.fixCapturedAtMs = capturedAtMs;
 
   // GPS Fix
   if (fix.status != gps_fix::STATUS_NONE)
@@ -173,7 +177,6 @@ void Gps::getGPSData()
     gpsData.speed = (uint16_t)fix.speed_kph();
     ride.speedAvailable = true;
     ride.speedMetersPerSecond = static_cast<float>(fix.speed_kph()) / 3.6F;
-    ride.speedCapturedAtMs = capturedAtMs;
   }
 
   // Latitude and Longitude
@@ -184,7 +187,6 @@ void Gps::getGPSData()
     ride.locationAvailable = true;
     ride.latitude = gpsData.latitude;
     ride.longitude = gpsData.longitude;
-    ride.locationCapturedAtMs = capturedAtMs;
   }
 
   // Heading validity is explicit. A missing/invalid course must never be
@@ -198,9 +200,8 @@ void Gps::getGPSData()
   if (fix.valid.hdop)
   {
     gpsData.hdop = (float)fix.hdop / 1000;
-    ride.hdopAvailable = true;
-    ride.hdop = gpsData.hdop;
-    ride.hdopCapturedAtMs = capturedAtMs;
+    ride.horizontalUncertaintyAvailable = gpsData.hdop > 0.0F;
+    ride.horizontalUncertaintyMeters = gpsData.hdop * 5.0F;
   }
 #endif
 #ifdef GPS_FIX_PDOP
@@ -231,23 +232,48 @@ void Gps::getGPSData()
   gpsData.satInView = 0;
 #endif
 
+  publishHardwareGpsRideObservation(ride);
+}
+
+void publishHardwareGpsRideObservation(
+    const GpsRideObservation &observation) {
   portENTER_CRITICAL(&gpsRideObservationMux);
-  rideObservation_ = ride;
+  hardwareRideObservation = observation;
   portEXIT_CRITICAL(&gpsRideObservationMux);
 }
 
-GpsRideObservation Gps::rideObservation() const
-{
+void publishAuthenticatedBleGpsRideObservation(
+    const GpsRideObservation &observation) {
   portENTER_CRITICAL(&gpsRideObservationMux);
-  const GpsRideObservation snapshot = rideObservation_;
+  if (gpsRideObservationIsNewerOrEqual(observation,
+                                       authenticatedBleRideObservation)) {
+    authenticatedBleRideObservation = observation;
+  }
   portEXIT_CRITICAL(&gpsRideObservationMux);
-  return snapshot;
 }
 
-extern Gps gps;
+void clearAuthenticatedBleGpsRideObservation() {
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  authenticatedBleRideObservation = {};
+  if (selectedRidePositionSource == RidePositionSource::AuthenticatedBle)
+    selectedRidePositionSource = RidePositionSource::None;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+}
 
-GpsRideObservation currentGpsRideObservation() {
-  return gps.rideObservation();
+GpsRideObservation currentGpsRideObservation(uint32_t nowMs,
+                                             uint32_t maximumAgeMs) {
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  const GpsRideObservation hardware = hardwareRideObservation;
+  const GpsRideObservation ble = authenticatedBleRideObservation;
+  const RidePositionSource preferred = selectedRidePositionSource;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+
+  const GpsRideObservation selected = selectGpsRideObservation(
+      hardware, ble, nowMs, maximumAgeMs, preferred);
+  portENTER_CRITICAL(&gpsRideObservationMux);
+  selectedRidePositionSource = selected.source;
+  portEXIT_CRITICAL(&gpsRideObservationMux);
+  return selected;
 }
 
 /**

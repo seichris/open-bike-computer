@@ -74,6 +74,7 @@ class BikeComputerCoordinator: ObservableObject {
     let firmwareUpdateManager = FirmwareUpdateManager()
     let destinationStore: SavedDestinationStore
     let workoutMetricsStore: WorkoutMetricsStore
+    private let rideDetectionSettingsStore: RideDetectionSettingsStore?
     private let navEngine = NavigationEngine()
     private let locationManager: CurrentLocationManager
     private let directionsFactory: NavigationDirectionsFactory
@@ -109,6 +110,8 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
     @Published var locationAuthorizationStatus: CLAuthorizationStatus = .notDetermined
+    @Published var locationAccuracyAuthorization: CLAccuracyAuthorization =
+        .fullAccuracy
 
     // Route Calculation
     @Published var routeCalculation = RouteCalculationState()
@@ -167,6 +170,7 @@ class BikeComputerCoordinator: ObservableObject {
         destinationStore: SavedDestinationStore,
         workoutMetricsStore: WorkoutMetricsStore? = nil,
         locationManager: CurrentLocationManager? = nil,
+        rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
         directionsFactory: @escaping NavigationDirectionsFactory = {
             MapKitNavigationDirectionsTask(request: $0)
         },
@@ -177,6 +181,7 @@ class BikeComputerCoordinator: ObservableObject {
         self.workoutMetricsStore = workoutMetricsStore
             ?? WorkoutMetricsStore(now: now)
         self.locationManager = locationManager ?? CurrentLocationManager()
+        self.rideDetectionSettingsStore = rideDetectionSettingsStore
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
@@ -225,6 +230,31 @@ class BikeComputerCoordinator: ObservableObject {
             .assign(to: &$isSimulationMode)
 
         locationManager.bindWorkoutMetricsStore(workoutMetricsStore)
+
+        if let rideDetectionSettingsStore {
+            Publishers.CombineLatest4(
+                bleManager.$isNavigationReady,
+                bleManager.$supportsRideAutomation,
+                bleManager.$supportsGPSPositionQualityV1,
+                rideDetectionSettingsStore.$settings
+            )
+            .combineLatest(
+                rideDetectionSettingsStore.$hasAcknowledgedLocationUse
+            )
+            .map { runtime, locationUseAcknowledged in
+                let (navigationReady, supportsRideAutomation,
+                     supportsGPSQuality, settings) = runtime
+                return navigationReady && supportsRideAutomation &&
+                    supportsGPSQuality && settings.startMode != .off &&
+                    locationUseAcknowledged
+            }
+            .removeDuplicates()
+            .sink { [weak self] armed in
+                guard let self, self.startServices else { return }
+                self.locationManager.setRideDetectionArmed(armed)
+            }
+            .store(in: &cancellables)
+        }
 
         navEngine.$simulatedPosition
             .assign(to: &$simulatedPosition)
@@ -381,6 +411,9 @@ class BikeComputerCoordinator: ObservableObject {
 
         locationManager.$authorizationStatus
             .assign(to: &$locationAuthorizationStatus)
+
+        locationManager.$accuracyAuthorization
+            .assign(to: &$locationAccuracyAuthorization)
 
         // Current firmware exposes only the navigation packet characteristic.
     }
@@ -603,6 +636,7 @@ class BikeComputerCoordinator: ObservableObject {
 
     func setApplicationActive(_ isActive: Bool) {
         bleManager.setApplicationActive(isActive)
+        locationManager.applicationStateDidChange()
     }
 
     func requestLocationAuthorization() {

@@ -17,21 +17,35 @@ nonisolated enum RideActivityPolicy {
         isNavigating: Bool,
         isViewingMap: Bool,
         isWorkoutActive: Bool,
-        isRefreshingDeviceDestinationLocation: Bool
+        isRefreshingDeviceDestinationLocation: Bool,
+        isRideDetectionArmed: Bool = false
     ) -> Bool {
         isNavigating ||
             isViewingMap ||
             isWorkoutActive ||
-            isRefreshingDeviceDestinationLocation
+            isRefreshingDeviceDestinationLocation ||
+            isRideDetectionArmed
     }
 
     static func shouldTrackLocationInBackground(
         isNavigating: Bool,
         isWorkoutActive: Bool,
-        isRefreshingDeviceDestinationLocation: Bool
+        isRefreshingDeviceDestinationLocation: Bool,
+        isRideDetectionArmed: Bool = false
     ) -> Bool {
         isNavigating ||
             isWorkoutActive ||
+            isRefreshingDeviceDestinationLocation ||
+            isRideDetectionArmed
+    }
+
+    static func shouldReverseGeocodeLocation(
+        isNavigating: Bool,
+        isViewingMap: Bool,
+        isWorkoutActive: Bool,
+        isRefreshingDeviceDestinationLocation: Bool
+    ) -> Bool {
+        isNavigating || isViewingMap || isWorkoutActive ||
             isRefreshingDeviceDestinationLocation
     }
 
@@ -58,6 +72,79 @@ nonisolated enum RideIdleTimerController {
                 isApplicationActive: isApplicationActive
             )
         )
+    }
+}
+
+nonisolated enum RideDetectionLocationStatus: Equatable {
+    case disabled
+    case waitingForCompatibleDevice
+    case permissionNeeded
+    case foregroundOnly
+    case waitingForPreciseLocation
+    case sending
+    case stale
+
+    var label: String {
+        switch self {
+        case .disabled: "Disabled"
+        case .waitingForCompatibleDevice: "Waiting for compatible device"
+        case .permissionNeeded: "Permission needed"
+        case .foregroundOnly: "Foreground only"
+        case .waitingForPreciseLocation: "Waiting for precise location"
+        case .sending: "Sending"
+        case .stale: "Location stale"
+        }
+    }
+}
+
+nonisolated enum RideDetectionLocationStatusResolver {
+    static let freshnessInterval: TimeInterval = 3
+    static let maximumHorizontalAccuracyMeters: CLLocationAccuracy = 12.5
+    static let futureTimestampTolerance: TimeInterval = 1
+
+    static func resolve(
+        startMode: RideStartMode,
+        locationUseAcknowledged: Bool,
+        isNavigationReady: Bool,
+        supportsRideAutomation: Bool,
+        supportsGPSPositionQualityV1: Bool,
+        authorizationLevel: LocationAuthorizationLevel,
+        accuracyAuthorization: CLAccuracyAuthorization,
+        location: CLLocation?,
+        now: Date = Date()
+    ) -> RideDetectionLocationStatus {
+        guard startMode != .off, locationUseAcknowledged else {
+            return .disabled
+        }
+        guard isNavigationReady, supportsRideAutomation,
+              supportsGPSPositionQualityV1 else {
+            return .waitingForCompatibleDevice
+        }
+        guard authorizationLevel == .always ||
+                authorizationLevel == .whenInUse else {
+            return .permissionNeeded
+        }
+        guard authorizationLevel == .always else {
+            return .foregroundOnly
+        }
+        guard accuracyAuthorization == .fullAccuracy,
+              let location else {
+            return .waitingForPreciseLocation
+        }
+        let age = now.timeIntervalSince(location.timestamp)
+        guard age.isFinite,
+              age >= -futureTimestampTolerance else {
+            return .waitingForPreciseLocation
+        }
+        guard age <= freshnessInterval else { return .stale }
+        guard location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0,
+              location.horizontalAccuracy <= maximumHorizontalAccuracyMeters,
+              location.speed.isFinite,
+              location.speed >= 0 else {
+            return .waitingForPreciseLocation
+        }
+        return .sending
     }
 }
 
@@ -103,7 +190,7 @@ nonisolated enum DeveloperLocationOverride {
     }
 }
 
-enum LocationAuthorizationLevel {
+nonisolated enum LocationAuthorizationLevel {
     case denied
     case whenInUse
     case always
@@ -112,9 +199,11 @@ enum LocationAuthorizationLevel {
 protocol LocationManagerClient: AnyObject {
     var authorizationStatus: CLAuthorizationStatus { get }
     var authorizationLevel: LocationAuthorizationLevel { get }
+    var accuracyAuthorization: CLAccuracyAuthorization { get }
 
     func setDelegate(_ delegate: CLLocationManagerDelegate?)
     func configureForCycling()
+    func setRideDetectionTrackingEnabled(_ enabled: Bool)
     func setBackgroundTrackingEnabled(_ enabled: Bool)
     func requestLocation()
     func requestWhenInUseAuthorization()
@@ -145,6 +234,10 @@ final class CoreLocationManagerClient: LocationManagerClient {
         }
     }
 
+    var accuracyAuthorization: CLAccuracyAuthorization {
+        manager.accuracyAuthorization
+    }
+
     func setDelegate(_ delegate: CLLocationManagerDelegate?) {
         manager.delegate = delegate
     }
@@ -166,6 +259,12 @@ final class CoreLocationManagerClient: LocationManagerClient {
         manager.pausesLocationUpdatesAutomatically = !enabled
         manager.showsBackgroundLocationIndicator = enabled
 #endif
+    }
+
+    func setRideDetectionTrackingEnabled(_ enabled: Bool) {
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = enabled ? kCLDistanceFilterNone : 5
+        manager.activityType = .fitness
     }
 
     func requestLocation() {
@@ -193,6 +292,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     @Published var currentLocation: CLLocation?
     @Published var currentAddress: String = "Current Location"
     @Published var authorizationStatus: CLAuthorizationStatus
+    @Published var accuracyAuthorization: CLAccuracyAuthorization
     
     private let locationManager: LocationManagerClient
     private let applicationIsActive: () -> Bool
@@ -204,6 +304,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isNavigating = false
     private var isViewingMap = false
     private var isWorkoutActive = false
+    private var isRideDetectionArmed = false
     private var isLocationUpdating = false
     private var isDeviceDestinationRequestsEnabled = false
     private var isRefreshingDeviceDestinationLocation = false
@@ -217,12 +318,20 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     init(
         locationManager: LocationManagerClient = CoreLocationManagerClient(),
-        applicationIsActive: @escaping () -> Bool =
-            CurrentLocationManager.defaultApplicationIsActive
+        applicationIsActive: (() -> Bool)? = nil
     ) {
         self.locationManager = locationManager
-        self.applicationIsActive = applicationIsActive
+        self.applicationIsActive = applicationIsActive ?? {
+#if canImport(UIKit) && !HOST_TESTING
+            MainActor.assumeIsolated {
+                UIApplication.shared.applicationState == .active
+            }
+#else
+            true
+#endif
+        }
         authorizationStatus = locationManager.authorizationStatus
+        accuracyAuthorization = locationManager.accuracyAuthorization
         super.init()
         locationManager.setDelegate(self)
         locationManager.configureForCycling()
@@ -305,6 +414,13 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         updateLocationTracking()
     }
 
+    func setRideDetectionArmed(_ armed: Bool) {
+        guard isRideDetectionArmed != armed else { return }
+        isRideDetectionArmed = armed
+        locationManager.setRideDetectionTrackingEnabled(armed)
+        updateLocationTracking()
+    }
+
     @MainActor
     func bindWorkoutMetricsStore(_ store: WorkoutMetricsStore) {
         workoutActivityCancellable = store.$shouldMaintainWorkoutServices
@@ -314,8 +430,12 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             }
     }
 
-    func applicationDidBecomeActive() {
+    func applicationStateDidChange() {
         updateLocationTracking()
+    }
+
+    func applicationDidBecomeActive() {
+        applicationStateDidChange()
     }
     
     public func updateLocationTracking(restart: Bool = false) {
@@ -325,14 +445,16 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             isViewingMap: isViewingMap && isApplicationActive,
             isWorkoutActive: isWorkoutActive,
             isRefreshingDeviceDestinationLocation:
-                isRefreshingDeviceDestinationLocation
+                isRefreshingDeviceDestinationLocation,
+            isRideDetectionArmed: isRideDetectionArmed
         )
         let shouldTrackInBackground =
             RideActivityPolicy.shouldTrackLocationInBackground(
                 isNavigating: isNavigating,
                 isWorkoutActive: isWorkoutActive,
                 isRefreshingDeviceDestinationLocation:
-                    isRefreshingDeviceDestinationLocation
+                    isRefreshingDeviceDestinationLocation,
+                isRideDetectionArmed: isRideDetectionArmed
             )
 
         if shouldTrackInBackground &&
@@ -343,7 +465,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             locationManager.requestAlwaysAuthorization()
         }
 
-        locationManager.setBackgroundTrackingEnabled(shouldTrackInBackground)
+        let canTrackInBackground = shouldTrackInBackground &&
+            locationManager.authorizationLevel == .always
+        locationManager.setBackgroundTrackingEnabled(canTrackInBackground)
 
         let canStartUpdates =
             locationManager.authorizationLevel == .always
@@ -356,10 +480,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
-            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(isWorkoutActive), device destination request: \(isRefreshingDeviceDestinationLocation))")
+            print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(isWorkoutActive), ride detection: \(isRideDetectionArmed), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
-        } else if (!shouldTrack || !isLocationAuthorized) && isLocationUpdating {
+        } else if (!shouldTrack || !isLocationAuthorized || !canStartUpdates) &&
+                    isLocationUpdating {
             print("🌍 Stopping location updates (not needed)")
             locationManager.stopUpdatingLocation()
             isLocationUpdating = false
@@ -391,6 +516,17 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 #endif
         
         currentLocation = location
+
+        // Ride detection consumes raw location only. Reverse geocoding every
+        // minute during an otherwise headless all-day detector session adds
+        // network, energy, and privacy cost without any visible consumer.
+        guard RideActivityPolicy.shouldReverseGeocodeLocation(
+            isNavigating: isNavigating,
+            isViewingMap: isViewingMap && applicationIsActive(),
+            isWorkoutActive: isWorkoutActive,
+            isRefreshingDeviceDestinationLocation:
+                isRefreshingDeviceDestinationLocation
+        ) else { return }
         
         // Only reverse geocode if:
         // 1. We haven't geocoded yet, OR
@@ -453,16 +589,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorizationStatus = manager.authorizationStatus
+        accuracyAuthorization = self.locationManager.accuracyAuthorization
         prepareDeviceDestinationRequestsIfNeeded()
         updateLocationTracking()
-    }
-
-    private static func defaultApplicationIsActive() -> Bool {
-#if canImport(UIKit) && !HOST_TESTING
-        return UIApplication.shared.applicationState == .active
-#else
-        return true
-#endif
     }
 
 }

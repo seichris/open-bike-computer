@@ -26,12 +26,15 @@ struct SettingsView: View {
     @ObservedObject private var rideDetectionSettingsStore:
         RideDetectionSettingsStore
     @FocusState private var focusedSavedMapFilename: String?
-    let locationAuthorized: Bool
+    let locationAuthorizationStatus: CLAuthorizationStatus
+    let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
+    let onRequestLocationAuthorization: () -> Void
     let onStartTestNavigation: (String) -> Void
 
     init(
-        locationAuthorized: Bool = true,
+        locationAuthorizationStatus: CLAuthorizationStatus = .authorizedAlways,
+        locationAccuracyAuthorization: CLAccuracyAuthorization = .fullAccuracy,
         currentLocation: CLLocation?,
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
@@ -41,12 +44,15 @@ struct SettingsView: View {
         cyclingSensorDetectionCoordinator:
             CyclingSensorDetectionCoordinator? = nil,
         rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
+        onRequestLocationAuthorization: @escaping () -> Void = {},
         onStartTestNavigation: @escaping (String) -> Void
     ) {
         let cyclingSensorStore =
             cyclingSensorStore ?? CyclingSensorStore()
-        self.locationAuthorized = locationAuthorized
+        self.locationAuthorizationStatus = locationAuthorizationStatus
+        self.locationAccuracyAuthorization = locationAccuracyAuthorization
         self.currentLocation = currentLocation
+        self.onRequestLocationAuthorization = onRequestLocationAuthorization
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
         self.routeLibrary = routeLibrary
@@ -124,7 +130,13 @@ struct SettingsView: View {
 
                     NavigationLink {
                         RideDetectionSettingsView(
-                            store: rideDetectionSettingsStore
+                            store: rideDetectionSettingsStore,
+                            authorizationStatus: locationAuthorizationStatus,
+                            accuracyAuthorization:
+                                locationAccuracyAuthorization,
+                            currentLocation: currentLocation,
+                            onRequestLocationAuthorization:
+                                onRequestLocationAuthorization
                         )
                     } label: {
                         Label("Ride Detection", systemImage: "figure.outdoor.cycle")
@@ -174,11 +186,23 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
     }
+
+    private var locationAuthorized: Bool {
+        locationAuthorizationStatus == .authorizedAlways ||
+            locationAuthorizationStatus == .authorizedWhenInUse
+    }
 }
 
 private struct RideDetectionSettingsView: View {
+    @Environment(\.openURL) private var openURL
+    @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var store: RideDetectionSettingsStore
+    let authorizationStatus: CLAuthorizationStatus
+    let accuracyAuthorization: CLAccuracyAuthorization
+    let currentLocation: CLLocation?
+    let onRequestLocationAuthorization: () -> Void
     @State private var showAutomaticStartWarning = false
+    @State private var showLocationUseWarning = false
 
     var body: some View {
         Form {
@@ -219,10 +243,77 @@ private struct RideDetectionSettingsView: View {
                         + "Manual controls always take precedence."
                     )
                 }
+
+                if store.settings.startMode != .off &&
+                    !store.hasAcknowledgedLocationUse {
+                    Button("Enable iPhone GPS for Detection") {
+                        showLocationUseWarning = true
+                    }
+                    .alert(
+                        "Use iPhone GPS for Ride Detection?",
+                        isPresented: $showLocationUseWarning
+                    ) {
+                        Button("Not Now", role: .cancel) {}
+                        Button("Enable") {
+                            store.acknowledgeLocationUse()
+                            if authorizationStatus == .notDetermined {
+                                onRequestLocationAuthorization()
+                            }
+                        }
+                    } message: {
+                        Text(
+                            "When Ride Start is enabled and your bike "
+                            + "computer is connected, Bicino keeps precise "
+                            + "location active in the background so GPS and "
+                            + "motion can detect a ride. You can turn Ride "
+                            + "Start off at any time."
+                        )
+                    }
+                }
+
+                if store.settings.startMode != .off &&
+                    rideDetectionLocationStatus == .permissionNeeded {
+                    Button {
+                        if authorizationStatus == .notDetermined {
+                            onRequestLocationAuthorization()
+                        } else {
+                            openApplicationSettings()
+                        }
+                    } label: {
+                        Label(
+                            "Enable Location Access",
+                            systemImage: "location"
+                        )
+                    }
+                }
+
+                if store.settings.startMode != .off &&
+                    rideDetectionLocationStatus == .foregroundOnly {
+                    Button("Allow Background Location") {
+                        openApplicationSettings()
+                    }
+                }
+
+                if store.settings.startMode != .off &&
+                    accuracyAuthorization == .reducedAccuracy {
+                    Button("Enable Precise Location") {
+                        openApplicationSettings()
+                    }
+                }
             } header: {
                 Text("Detect Ride Start")
             } footer: {
                 Text(rideDetectionFooterText)
+            }
+
+            Section("iPhone GPS") {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let status = rideDetectionLocationStatus(at: context.date)
+                    LabeledContent("Status", value: status.label)
+                    Text(rideDetectionLocationStatusDetail(status))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {
@@ -260,12 +351,78 @@ private struct RideDetectionSettingsView: View {
 
     private var rideDetectionFooterText: String {
         if RideAutomationRollout.allowsAutomaticStart {
-            return "Automatic start requires a separate opt-in and the bike "
+            return "Ride detection uses iPhone GPS in the background while "
+                + "the compatible bike computer is connected. Automatic "
+                + "start requires a separate opt-in and the bike "
                 + "computer, iPhone, and Apple Watch to be reachable."
         }
-        return "Ask to Start is the current rollout ceiling. Automatic start "
+        return "Ride detection uses iPhone GPS in the background while the "
+            + "compatible bike computer is connected. Ask to Start is the "
+            + "current rollout ceiling. Automatic start "
             + "remains gated until the physical false-start validation is "
             + "complete."
+    }
+
+    private var rideDetectionLocationStatus: RideDetectionLocationStatus {
+        rideDetectionLocationStatus(at: Date())
+    }
+
+    private func rideDetectionLocationStatus(
+        at now: Date
+    ) -> RideDetectionLocationStatus {
+        RideDetectionLocationStatusResolver.resolve(
+            startMode: store.settings.startMode,
+            locationUseAcknowledged: store.hasAcknowledgedLocationUse,
+            isNavigationReady: bleManager.isNavigationReady,
+            supportsRideAutomation: bleManager.supportsRideAutomation,
+            supportsGPSPositionQualityV1:
+                bleManager.supportsGPSPositionQualityV1,
+            authorizationLevel: locationAuthorizationLevel,
+            accuracyAuthorization: accuracyAuthorization,
+            location: currentLocation,
+            now: now
+        )
+    }
+
+    private func rideDetectionLocationStatusDetail(
+        _ status: RideDetectionLocationStatus
+    ) -> String {
+        switch status {
+        case .disabled:
+            "Enable Ride Start and confirm iPhone GPS use to arm detection."
+        case .waitingForCompatibleDevice:
+            "Connect a bike computer that supports ride detection and GPS quality."
+        case .permissionNeeded:
+            "Location permission is required before iPhone GPS can be used."
+        case .foregroundOnly:
+            "Detection works while Bicino is open. Allow Always access for reliable background detection."
+        case .waitingForPreciseLocation:
+            "Waiting for a fresh precise fix with measured cycling speed."
+        case .sending:
+            "Fresh iPhone GPS and quality are being sent to the connected bike computer."
+        case .stale:
+            "The last fix is too old for detection; the device will fail closed until GPS refreshes."
+        }
+    }
+
+    private var locationAuthorizationLevel: LocationAuthorizationLevel {
+        switch authorizationStatus {
+        case .authorizedAlways:
+            .always
+        case .authorizedWhenInUse:
+            .whenInUse
+        case .notDetermined, .restricted, .denied:
+            .denied
+        @unknown default:
+            .denied
+        }
+    }
+
+    private func openApplicationSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else {
+            return
+        }
+        openURL(url)
     }
 }
 

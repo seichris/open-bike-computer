@@ -768,10 +768,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 target: .gps,
                 payload: WatchRidePacketEncoderV1.gps(
                     latestLocation,
-                    snapshot: latestNavigationSnapshot
+                    snapshot: latestNavigationSnapshot,
+                    includeRideDetectionQuality:
+                        capabilities?.supportsGPSPositionQualityV1 == true
                 ),
                 priority: 1,
-                coalescingKey: "gps"
+                coalescingKey: "gps",
+                gpsSampleTimestamp: latestLocation.timestamp
             ))
         } else {
             enqueueWorkoutGPSIfNeeded()
@@ -800,10 +803,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             target: .gps,
             payload: WatchRidePacketEncoderV1.gps(
                 location,
-                snapshot: snapshot
+                snapshot: snapshot,
+                includeRideDetectionQuality:
+                    capabilities?.supportsGPSPositionQualityV1 == true
             ),
             priority: 1,
-            coalescingKey: "gps"
+            coalescingKey: "gps",
+            gpsSampleTimestamp: location.timestamp
         ))
         _ = queue.enqueue(.init(
             target: .route,
@@ -884,10 +890,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 snapshot: nil,
                 distanceTraveledMeters:
                     latestWorkoutGPS.distanceTraveledMeters,
-                elapsedSeconds: latestWorkoutGPS.elapsedSeconds
+                elapsedSeconds: latestWorkoutGPS.elapsedSeconds,
+                includeRideDetectionQuality:
+                    capabilities?.supportsGPSPositionQualityV1 == true
             ),
             priority: 1,
-            coalescingKey: "gps"
+            coalescingKey: "gps",
+            gpsSampleTimestamp: latestWorkoutGPS.capturedAt
         ))
     }
 
@@ -918,10 +927,16 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 fail("Bike Computer characteristic disappeared")
                 return
             }
+            let payload = write.gpsSampleTimestamp.map {
+                WatchRidePacketEncoderV1.refreshingQualityAge(
+                    in: write.payload,
+                    sampleTimestamp: $0
+                )
+            } ?? write.payload
             let frame: Data
             do {
                 frame = try session.frame(
-                    payload: write.payload,
+                    payload: payload,
                     channel: write.target.channel
                 )
             } catch {

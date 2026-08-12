@@ -69,12 +69,13 @@ struct TimedFlag {
 };
 
 struct RideEvidenceObservation {
+  uint8_t gpsPositionSource = 0;
   TimedMetric wheelSpeedMetersPerSecond;
   TimedMetric cadenceRpm;
   TimedMetric gpsSpeedMetersPerSecond;
   TimedMetric imuMotionScore;
   TimedFlag gpsFixValid;
-  TimedMetric gpsHdop;
+  TimedMetric gpsHorizontalUncertaintyMeters;
   TimedFlag gpsStationaryWindowValid;
   TimedMetric gpsNetDisplacementMeters;
 };
@@ -130,7 +131,7 @@ inline bool nonnegativeFinite(float value) {
 class RideAutomationPolicy {
 public:
   explicit RideAutomationPolicy(
-      RideDetectionProfile profile = kRideDetectionProfileV1)
+      RideDetectionProfile profile = kRideDetectionProfile)
       : profile_(profile) {}
 
   Decision update(uint32_t nowMs, const RideEvidenceObservation &observation,
@@ -370,16 +371,18 @@ private:
         observation.gpsSpeedMetersPerSecond, nowMs, profile_.gpsFreshnessMs);
     const bool gpsFixFresh =
         flagFresh(observation.gpsFixValid, nowMs, profile_.gpsFreshnessMs);
-    const bool gpsHdopFresh =
-        metricFresh(observation.gpsHdop, nowMs, profile_.gpsFreshnessMs);
+    const bool gpsUncertaintyFresh = metricFresh(
+        observation.gpsHorizontalUncertaintyMeters, nowMs,
+        profile_.gpsFreshnessMs);
     result.gpsKnown = gpsSpeedFresh &&
                       nonnegativeFinite(
                           observation.gpsSpeedMetersPerSecond.value) &&
                       gpsFixFresh && observation.gpsFixValid.value &&
-                      gpsHdopFresh &&
-                      nonnegativeFinite(observation.gpsHdop.value) &&
-                      observation.gpsHdop.value > 0.0F &&
-                      observation.gpsHdop.value <= profile_.maximumGpsHdop;
+                      gpsUncertaintyFresh &&
+                      nonnegativeFinite(
+                          observation.gpsHorizontalUncertaintyMeters.value) &&
+                      observation.gpsHorizontalUncertaintyMeters.value <=
+                          profile_.maximumGpsHorizontalUncertaintyMeters;
     result.gpsMoving =
         result.gpsKnown && observation.gpsSpeedMetersPerSecond.value >=
                                profile_.gpsStartMetersPerSecond;

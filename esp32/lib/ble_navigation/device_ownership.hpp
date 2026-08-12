@@ -37,6 +37,7 @@ enum class Event {
   WatchControllerStaged,
   WatchControllerCommitted,
   WatchControllerRevoked,
+  LeaseReleased,
 };
 
 enum class SessionRole : uint8_t {

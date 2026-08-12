@@ -45,6 +45,7 @@ int8_t displayedZoneIndex = -2;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutButton = nullptr;
+lv_obj_t *rideDetectionWaitingMessage = nullptr;
 lv_obj_t *rideAutomationPanel = nullptr;
 lv_obj_t *rideAutomationTitle = nullptr;
 lv_obj_t *rideAutomationDetail = nullptr;
@@ -493,7 +494,7 @@ void createAutomationPanel(lv_obj_t *page) {
 void updateAutomationPanel(uint32_t nowMs) {
   const ride_automation_runtime::UiSnapshot snapshot =
       ride_automation_runtime::uiSnapshot(nowMs);
-  if (snapshot.phase == ride_automation_runtime::UiPhase::Hidden) {
+  if (!ride_automation_runtime::shouldShowAutomationPanel(snapshot.phase)) {
     lv_obj_add_flag(rideAutomationPanel, LV_OBJ_FLAG_HIDDEN);
     return;
   }
@@ -548,9 +549,8 @@ void updateAutomationPanel(uint32_t nowMs) {
     detail = "Apple Watch confirmed moving time is running";
     break;
   case ride_automation_runtime::UiPhase::SensorDegraded:
-    title = "Detection limited";
-    detail = "Waiting for GPS + motion, or a direct cycling sensor.";
-    borderColor = 0xFFCC55;
+    // Source health is diagnostic state, not a modal ride action. Keep the
+    // stats page unobstructed until there is a candidate or decision to show.
     break;
   case ride_automation_runtime::UiPhase::Error:
     title = "Ride not started";
@@ -629,6 +629,12 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
   lv_obj_set_size(rideStartWorkoutButton,
                   rideMetricPlacement.startWorkoutButton.width,
                   rideMetricPlacement.startWorkoutButton.height);
+  lv_obj_set_pos(rideDetectionWaitingMessage,
+                 rideMetricPlacement.rideDetectionMessage.x,
+                 rideMetricPlacement.rideDetectionMessage.y);
+  lv_obj_set_size(rideDetectionWaitingMessage,
+                  rideMetricPlacement.rideDetectionMessage.width,
+                  rideMetricPlacement.rideDetectionMessage.height);
 
   if (rideMetricPlacement.showWorkoutOnlyMetrics) {
     lv_obj_clear_flag(rideHeartRate.title, LV_OBJ_FLAG_HIDDEN);
@@ -698,6 +704,27 @@ void updateStatusLabel(lv_obj_t *label,
     color = lv_color_hex(0x66CCFF);
   }
   lv_obj_set_style_text_color(label, color, 0);
+}
+
+void updateDetectionWaitingMessage(uint32_t nowMs) {
+  bool shouldShow = false;
+#if defined(RIDE_AUTOMATION_SHADOW)
+  const ride_automation_runtime::ConfigurationSnapshot configuration =
+      ride_automation_runtime::configurationSnapshot();
+  const ride_automation_runtime::UiSnapshot automation =
+      ride_automation_runtime::uiSnapshot(nowMs);
+  shouldShow = configuration.startMode != ride_automation::StartMode::Off &&
+               ride_automation_runtime::shouldShowDetectionWaitingMessage(
+                   automation.phase,
+                   rideMetricPlacement.showStartWorkoutButton);
+#else
+  (void)nowMs;
+#endif
+  if (shouldShow) {
+    lv_obj_clear_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void updateBottomMetric(
@@ -781,6 +808,21 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_color(startWorkoutLabel, lv_color_black(), 0);
   lv_label_set_text_static(startWorkoutLabel, "Start Workout");
 
+  rideDetectionWaitingMessage = lv_label_create(ridePage);
+  lv_obj_set_style_text_font(
+      rideDetectionWaitingMessage,
+      useRoundStartWorkoutContent ? &lv_font_montserrat_24
+                                  : &lv_font_montserrat_18,
+      0);
+  lv_obj_set_style_text_color(rideDetectionWaitingMessage,
+                              lv_color_hex(0xBBBBBB), 0);
+  lv_obj_set_style_text_align(rideDetectionWaitingMessage,
+                              LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(rideDetectionWaitingMessage, LV_LABEL_LONG_WRAP);
+  lv_label_set_text_static(rideDetectionWaitingMessage,
+                           "Waiting for GPS + motion to auto-start ride");
+  lv_obj_add_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
+
   createAutomationPanel(ridePage);
 
   displayedMetricLayout = -1;
@@ -798,6 +840,7 @@ void updateRideTelemetryEvent(lv_event_t *) {
     }
   }
   updateStatusLabel(rideStatus, model);
+  updateDetectionWaitingMessage(millis());
 
   char value[24];
   ride_telemetry_presenter::formatSpeed(model, value, sizeof(value));

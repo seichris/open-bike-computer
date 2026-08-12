@@ -149,11 +149,12 @@ int main() {
     std::string startModeValue;
     std::string autoPauseValue;
     std::string wheel, wheelAge, cadence, cadenceAge, gps, gpsAge;
-    std::string gpsFix, gpsFixAge, hdop, hdopAge, stationary;
+    std::string gpsFix, gpsFixAge, uncertainty, uncertaintyAge, stationary;
     std::string stationaryAge, displacement, displacementAge, imu, imuAge;
     if (!(input >> timestampValue >> lifecycleValue >> startModeValue >>
           autoPauseValue >> wheel >> wheelAge >> cadence >> cadenceAge >>
-          gps >> gpsAge >> gpsFix >> gpsFixAge >> hdop >> hdopAge >>
+          gps >> gpsAge >> gpsFix >> gpsFixAge >> uncertainty >>
+          uncertaintyAge >>
           stationary >> stationaryAge >> displacement >> displacementAge >>
           imu >> imuAge)) {
       std::cerr << "invalid replay row " << lineNumber << '\n';
@@ -190,7 +191,8 @@ int main() {
         !parseMetric(gps, gpsAge, nowMs,
                      observation.gpsSpeedMetersPerSecond) ||
         !parseFlag(gpsFix, gpsFixAge, nowMs, observation.gpsFixValid) ||
-        !parseMetric(hdop, hdopAge, nowMs, observation.gpsHdop) ||
+        !parseMetric(uncertainty, uncertaintyAge, nowMs,
+                     observation.gpsHorizontalUncertaintyMeters) ||
         !parseFlag(stationary, stationaryAge, nowMs,
                    observation.gpsStationaryWindowValid) ||
         !parseMetric(displacement, displacementAge, nowMs,

@@ -63,7 +63,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     lazy var coordinator = BikeComputerCoordinator(
         destinationStore: destinationStore,
         workoutMetricsStore: workoutMirrorManager.store,
-        locationManager: locationManager
+        locationManager: locationManager,
+        rideDetectionSettingsStore: rideDetectionSettingsStore
     )
     lazy var rideAutomationCoordinator = RideAutomationCoordinator(
         bleManager: coordinator.bleManager,

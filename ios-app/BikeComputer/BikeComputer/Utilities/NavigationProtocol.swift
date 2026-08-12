@@ -847,6 +847,11 @@ enum DeviceGPSPacketBuilder {
     static let invalidHeadingDegrees = UInt16.max
     static let invalidSpeedCmps = UInt16.max
     static let invalidRouteRemainingMeters = UInt32.max
+    static let unavailableQualityValue = UInt16.max
+    static let qualityV1Schema: UInt8 = 1
+    static let qualityFixValid: UInt8 = 1 << 0
+    static let qualityAccuracyAvailable: UInt8 = 1 << 1
+    static let futureTimestampTolerance: TimeInterval = 1
 
     static func data(
         lat: Double,
@@ -857,7 +862,11 @@ enum DeviceGPSPacketBuilder {
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
         elapsedSeconds: TimeInterval? = nil,
-        routeRemainingMeters: Double? = nil
+        routeRemainingMeters: Double? = nil,
+        horizontalAccuracyMeters: Double? = nil,
+        locationTimestamp: Date? = nil,
+        includeRideDetectionQuality: Bool = false,
+        now: Date = Date()
     ) -> Data {
         var data = Data()
         let latInt = Int32(lat * 1_000_000)
@@ -893,6 +902,52 @@ enum DeviceGPSPacketBuilder {
         withUnsafeBytes(of: distanceInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
+
+        if includeRideDetectionQuality {
+            let validCoordinate = lat.isFinite && lon.isFinite &&
+                (-90...90).contains(lat) && (-180...180).contains(lon)
+            let accuracyAvailable = horizontalAccuracyMeters.map {
+                $0.isFinite && $0 >= 0
+            } ?? false
+            let ageSeconds = locationTimestamp.map {
+                now.timeIntervalSince($0)
+            }
+            let timestampAvailable = ageSeconds?.isFinite == true &&
+                (ageSeconds ?? 0) >= -futureTimestampTolerance
+            let speedAvailable = speedMetersPerSecond?.isFinite == true &&
+                (speedMetersPerSecond ?? -1) >= 0
+            let fixValid = validCoordinate && accuracyAvailable &&
+                timestampAvailable && speedAvailable
+            var flags: UInt8 = 0
+            if fixValid { flags |= qualityFixValid }
+            if accuracyAvailable { flags |= qualityAccuracyAvailable }
+            let accuracyDecimeters: UInt16 = {
+                guard let horizontalAccuracyMeters, accuracyAvailable else {
+                    return unavailableQualityValue
+                }
+                return UInt16(min(
+                    (horizontalAccuracyMeters * 10).rounded(),
+                    Double(UInt16.max - 1)
+                ))
+            }()
+            let sampleAgeMs: UInt16 = {
+                guard timestampAvailable, let ageSeconds else {
+                    return unavailableQualityValue
+                }
+                return UInt16(min(
+                    max((ageSeconds * 1_000).rounded(), 0),
+                    Double(UInt16.max - 1)
+                ))
+            }()
+            data.append(qualityV1Schema)
+            data.append(flags)
+            withUnsafeBytes(of: accuracyDecimeters.littleEndian) {
+                data.append(contentsOf: $0)
+            }
+            withUnsafeBytes(of: sampleAgeMs.littleEndian) {
+                data.append(contentsOf: $0)
+            }
+        }
         return data
     }
 }

@@ -70,6 +70,32 @@ class RideTraceReplayTests(unittest.TestCase):
         fields = row.split("\t")
         self.assertEqual(fields[4:10], ["-", "-", "-", "-", "-", "-"])
 
+    def test_schema_one_hdop_migrates_to_schema_two_uncertainty(self):
+        legacy = {
+            "schema": 1,
+            "profile": 1,
+            "t_ms": 42,
+            "lifecycle": "idle",
+            "evidence": {"gps_hdop": {"value": 2.5, "age_ms": 7}},
+        }
+        fields = replay_module.encode_record(legacy).split("\t")
+        self.assertEqual(fields[12:14], ["12.5", "7"])
+
+        modern = {
+            "schema": 2,
+            "profile": 2,
+            "t_ms": 43,
+            "lifecycle": "idle",
+            "evidence": {
+                "gps_source": 2,
+                "gps_horizontal_uncertainty_m": 7.3,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "modern.jsonl"
+            path.write_text(json.dumps(modern) + "\n", encoding="utf-8")
+            self.assertEqual(replay_module.load_trace(path), [modern])
+
     def test_schema_rejects_wrong_types_and_nonfinite_values(self):
         invalid_records = [
             {"schema": 1, "profile": 1, "t_ms": 0, "lifecycle": "idle", "settings": []},
@@ -77,6 +103,7 @@ class RideTraceReplayTests(unittest.TestCase):
             {"schema": 1, "profile": 1, "t_ms": 0, "lifecycle": "idle", "evidence": {"gps_fix_valid": 1}},
             {"schema": 1, "profile": 1, "t_ms": 0, "lifecycle": "idle", "evidence": {"gps_hdop": float("nan")}},
             {"schema": 1, "profile": 1, "t_ms": 0x1_0000_0000, "lifecycle": "idle"},
+            {"schema": 2, "profile": 2, "t_ms": 0, "lifecycle": "idle", "output": {"source_health_mask": -1}},
         ]
         for record in invalid_records:
             with self.subTest(record=record), tempfile.TemporaryDirectory() as directory:

@@ -292,14 +292,16 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 13 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 15 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
-                WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15,
-            "Watch requests RAUT CAP2 version 13 without moving scoped control from bit 14"
+                WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
+                WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17,
+            "Watch requests GPS quality v1 without moving existing capabilities"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature |
-            WatchDirectBLEProtocolV1.rideAutomationFeature
+            WatchDirectBLEProtocolV1.rideAutomationFeature |
+            WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature
         cap2.append(UInt8(flags & 0xFF))
         cap2.append(UInt8((flags >> 8) & 0xFF))
         cap2.append(UInt8((flags >> 16) & 0xFF))
@@ -308,8 +310,9 @@ enum RideSharedTests {
         expect(
             capabilities?.supportsScopedController == true &&
                 capabilities?.supportsWorkoutTelemetry == true &&
-                capabilities?.supportsRideAutomation == true,
-            "Watch recognizes direct-controller, workout, and ride-automation capabilities"
+                capabilities?.supportsRideAutomation == true &&
+                capabilities?.supportsGPSPositionQualityV1 == true,
+            "Watch recognizes direct-controller, workout, ride-automation, and GPS-quality capabilities"
         )
         var malformed = cap2
         malformed.append(contentsOf: [1, 4, 0, 0, 0])
@@ -441,6 +444,46 @@ enum RideSharedTests {
                 snapshot: nil
             ).count == 30,
             "Watch GPS payload matches the firmware binary schema"
+        )
+        let qualityPacket = WatchRidePacketEncoderV1.gps(
+            location,
+            snapshot: nil,
+            includeRideDetectionQuality: true,
+            now: location.timestamp.addingTimeInterval(0.75)
+        )
+        expect(
+            qualityPacket.count == 36 && qualityPacket[30] == 1 &&
+                qualityPacket[31] == 3,
+            "Watch GPS quality payload matches the negotiated v1 schema"
+        )
+        let delayedQualityPacket =
+            WatchRidePacketEncoderV1.refreshingQualityAge(
+                in: qualityPacket,
+                sampleTimestamp: location.timestamp,
+                now: location.timestamp.addingTimeInterval(2)
+            )
+        expect(
+            delayedQualityPacket[34] == 0xD0 &&
+                delayedQualityPacket[35] == 0x07,
+            "Watch GPS quality accounts for time spent in the BLE queue"
+        )
+        let missingSpeedSample = NavigationLocationSampleV1(
+            coordinate: location.coordinate,
+            horizontalAccuracyMeters: location.horizontalAccuracyMeters,
+            courseDegrees: location.courseDegrees,
+            speedMetersPerSecond: -1,
+            altitudeMeters: location.altitudeMeters,
+            timestamp: location.timestamp
+        )
+        let missingSpeedQuality = WatchRidePacketEncoderV1.gps(
+            missingSpeedSample,
+            snapshot: nil,
+            includeRideDetectionQuality: true,
+            now: location.timestamp
+        )
+        expect(
+            missingSpeedQuality[31] == 2,
+            "Watch quality without measured speed never claims a detector-ready fix"
         )
         let invalidCourse = NavigationLocationSampleV1(
             coordinate: location.coordinate,

@@ -5,10 +5,10 @@
 namespace ride_automation {
 
 // All detector constants live in this profile so traces remain attributable to
-// the policy that produced them. Profile 1 may control only internal builds;
+// the policy that produced them. Profile 2 may control only internal builds;
 // production remains capability-off until the physical trace gates pass.
 struct RideDetectionProfile {
-  uint16_t version = 1;
+  uint16_t version = 2;
 
   uint32_t wheelFreshnessMs = 3'000;
   uint32_t cadenceFreshnessMs = 3'000;
@@ -22,7 +22,7 @@ struct RideDetectionProfile {
   float gpsStartMetersPerSecond = 2.8F;
   float gpsResumeMetersPerSecond = 2.0F;
   float gpsStoppedMetersPerSecond = 0.8F;
-  float maximumGpsHdop = 2.5F;
+  float maximumGpsHorizontalUncertaintyMeters = 12.5F;
   float imuMovingScore = 0.55F;
   float imuStoppedScore = 0.25F;
 
@@ -47,6 +47,6 @@ struct RideDetectionProfile {
   uint32_t promptSnoozeMaximumMs = 900'000;
 };
 
-constexpr RideDetectionProfile kRideDetectionProfileV1{};
+constexpr RideDetectionProfile kRideDetectionProfile{};
 
 } // namespace ride_automation

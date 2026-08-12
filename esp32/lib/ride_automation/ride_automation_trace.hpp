@@ -8,14 +8,14 @@
 
 namespace ride_automation {
 
-constexpr uint8_t kRideAutomationTraceSchemaVersion = 1;
+constexpr uint8_t kRideAutomationTraceSchemaVersion = 2;
 
 // One canonical, privacy-safe schema serves both firmware capture and host
 // replay. It contains normalized policy inputs and output, never coordinates or
 // raw accelerometer/gyroscope samples.
 struct TraceRecord {
   uint32_t timestampMs = 0;
-  uint16_t profileVersion = kRideDetectionProfileV1.version;
+  uint16_t profileVersion = kRideDetectionProfile.version;
   ConfirmedLifecycle lifecycle = ConfirmedLifecycle::Idle;
   Settings settings{};
   RideEvidenceObservation observation{};
@@ -99,7 +99,7 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
   if (output == nullptr || outputSize == 0)
     return -1;
 
-  char wheel[64], cadence[64], gps[64], gpsFix[64], hdop[64];
+  char wheel[64], cadence[64], gps[64], gpsFix[64], uncertainty[64];
   char stationary[64], displacement[64], imu[64];
   if (!formatTimedMetric(wheel, sizeof(wheel),
                          record.observation.wheelSpeedMetersPerSecond,
@@ -113,7 +113,8 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       !formatTimedFlag(gpsFix, sizeof(gpsFix),
                        record.observation.gpsFixValid,
                        record.timestampMs) ||
-      !formatTimedMetric(hdop, sizeof(hdop), record.observation.gpsHdop,
+      !formatTimedMetric(uncertainty, sizeof(uncertainty),
+                         record.observation.gpsHorizontalUncertaintyMeters,
                          record.timestampMs) ||
       !formatTimedFlag(stationary, sizeof(stationary),
                        record.observation.gpsStationaryWindowValid,
@@ -131,9 +132,11 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       "\"lifecycle\":\"%s\",\"settings\":{\"start_mode\":\"%s\","
       "\"auto_pause\":%s},\"evidence\":{\"wheel_mps\":%s,"
       "\"cadence_rpm\":%s,\"gps_mps\":%s,\"gps_fix_valid\":%s,"
-      "\"gps_hdop\":%s,\"gps_stationary\":%s,"
+      "\"gps_source\":%u,\"gps_horizontal_uncertainty_m\":%s,"
+      "\"gps_stationary\":%s,"
       "\"gps_displacement_m\":%s,\"imu_motion_score\":%s},"
       "\"output\":{\"decision\":\"%s\",\"evidence_mask\":%u,"
+      "\"source_health_mask\":%u,"
       "\"decision_sequence\":%lu,\"candidate_began_at_ms\":%lu,"
       "\"decided_at_ms\":%lu,\"counters\":{\"start\":%lu,"
       "\"pause\":%lu,\"resume\":%lu,\"conflict\":%lu}}}",
@@ -142,9 +145,11 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       static_cast<unsigned long>(record.timestampMs),
       lifecycleName(record.lifecycle), startModeName(record.settings.startMode),
       record.settings.autoPauseEnabled ? "true" : "false", wheel, cadence,
-      gps, gpsFix, hdop, stationary, displacement, imu,
+      gps, gpsFix, static_cast<unsigned>(record.observation.gpsPositionSource),
+      uncertainty, stationary, displacement, imu,
       transitionName(record.decision.transition),
       static_cast<unsigned>(record.evidenceMask),
+      static_cast<unsigned>(record.decision.sourceHealthMask),
       static_cast<unsigned long>(record.decision.sequence),
       static_cast<unsigned long>(record.decision.candidateBeganAtMs),
       static_cast<unsigned long>(record.decision.decidedAtMs),

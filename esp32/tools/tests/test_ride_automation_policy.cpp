@@ -33,7 +33,7 @@ RideEvidenceObservation gpsImu(float gpsMetersPerSecond, float motionScore,
   RideEvidenceObservation observation;
   observation.gpsSpeedMetersPerSecond = metric(gpsMetersPerSecond, nowMs);
   observation.gpsFixValid = flag(true, nowMs);
-  observation.gpsHdop = metric(1.0F, nowMs);
+  observation.gpsHorizontalUncertaintyMeters = metric(5.0F, nowMs);
   observation.gpsStationaryWindowValid = flag(stationary, nowMs);
   observation.gpsNetDisplacementMeters = metric(displacementMeters, nowMs);
   observation.imuMotionScore = metric(motionScore, nowMs);
@@ -55,6 +55,16 @@ Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
 } // namespace
 
 int main() {
+  using ride_automation_runtime::UiPhase;
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      UiPhase::SensorDegraded));
+  assert(ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::SensorDegraded, true));
+  assert(!ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::SensorDegraded, false));
+  assert(!ride_automation_runtime::shouldShowDetectionWaitingMessage(
+      UiPhase::StartCandidate, true));
+
   Settings ask;
   ask.startMode = StartMode::Ask;
   ask.autoPauseEnabled = true;
@@ -110,7 +120,7 @@ int main() {
                               ConfirmedLifecycle::Idle, ask);
   assert(decision.transition == Transition::Start);
   assert(decision.sequence != 0);
-  assert(decision.profileVersion == 1);
+  assert(decision.profileVersion == 2);
   assert(sensorAsk.detectorStatus().phase ==
          DetectorPhase::AwaitingConfirmation);
   assert(sensorAsk.detectorStatus().progressPercent == 100);
@@ -182,25 +192,25 @@ int main() {
       ConfirmedLifecycle::Idle, automatic);
   assert(decision.transition == Transition::Start);
 
-  RideAutomationPolicy badHdop;
+  RideAutomationPolicy badAccuracy;
   for (uint32_t second = 0; second < 20; ++second) {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
-    observation.gpsHdop.value = 2.51F;
-    assert(!badHdop.update(nowMs, observation, ConfirmedLifecycle::Idle,
-                           ask));
+    observation.gpsHorizontalUncertaintyMeters.value = 12.51F;
+    assert(!badAccuracy.update(nowMs, observation, ConfirmedLifecycle::Idle,
+                               ask));
   }
-  RideAutomationPolicy boundaryHdop;
+  RideAutomationPolicy boundaryAccuracy;
   for (uint32_t second = 0; second < 8; ++second) {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
-    observation.gpsHdop.value = 2.5F;
-    assert(!boundaryHdop.update(nowMs, observation,
-                                ConfirmedLifecycle::Idle, ask));
+    observation.gpsHorizontalUncertaintyMeters.value = 12.5F;
+    assert(!boundaryAccuracy.update(nowMs, observation,
+                                    ConfirmedLifecycle::Idle, ask));
   }
   auto boundaryObservation = gpsImu(4.0F, 0.9F, 100.0F, 8'000);
-  boundaryObservation.gpsHdop.value = 2.5F;
-  assert(boundaryHdop
+  boundaryObservation.gpsHorizontalUncertaintyMeters.value = 12.5F;
+  assert(boundaryAccuracy
              .update(8'000, boundaryObservation, ConfirmedLifecycle::Idle,
                      ask)
              .transition == Transition::Start);
@@ -210,7 +220,7 @@ int main() {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
     observation.gpsFixValid.capturedAtMs = 0;
-    observation.gpsHdop.capturedAtMs = 0;
+    observation.gpsHorizontalUncertaintyMeters.capturedAtMs = 0;
     observation.gpsNetDisplacementMeters.capturedAtMs = 0;
     assert(!staleGpsQuality.update(nowMs, observation,
                                    ConfirmedLifecycle::Idle, ask));
@@ -444,6 +454,28 @@ int main() {
   runtime.update(1'000, wheel(2.0F, 1'000), ConfirmedLifecycle::Idle, ask);
   assert((runtime.lastEvidenceMask() & EvidenceWheelMoving) != 0);
 
+  DetectionHealth health = resolveDetectionHealth({});
+  assert(health.state == DetectionHealthState::NoExternalPosition);
+  assert(!health.directSensorAvailable && !health.healthy());
+  health = resolveDetectionHealth({false, true, false, false, false});
+  assert(health.state == DetectionHealthState::PositionStale);
+  health = resolveDetectionHealth({false, true, true, false, true});
+  assert(health.state == DetectionHealthState::PositionLowQuality);
+  health = resolveDetectionHealth({false, true, true, true, false});
+  assert(health.state == DetectionHealthState::MotionUnavailable);
+  health = resolveDetectionHealth({false, true, true, true, true});
+  assert(health.state == DetectionHealthState::HealthyGpsAndMotion);
+  assert(health.healthy() && !health.directSensorAvailable);
+  health = resolveDetectionHealth({true, false, false, false, false});
+  assert(health.state == DetectionHealthState::HealthyDirectSensor);
+  assert(health.healthy() && health.directSensorAvailable);
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::SensorDegraded));
+  assert(!ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::Hidden));
+  assert(ride_automation_runtime::shouldShowAutomationPanel(
+      ride_automation_runtime::UiPhase::StartPrompt));
+
   TraceRecord trace;
   trace.timestampMs = 123;
   trace.lifecycle = ConfirmedLifecycle::Idle;
@@ -455,11 +487,14 @@ int main() {
   char json[2'048];
   const int length = formatTraceJsonLine(trace, json, sizeof(json));
   assert(length > 0 && static_cast<std::size_t>(length) < sizeof(json));
-  assert(std::strstr(json, "\"schema\":1") != nullptr);
-  assert(std::strstr(json, "\"profile\":1") != nullptr);
+  assert(std::strstr(json, "\"schema\":2") != nullptr);
+  assert(std::strstr(json, "\"profile\":2") != nullptr);
+  assert(std::strstr(json, "\"gps_horizontal_uncertainty_m\"") !=
+         nullptr);
   assert(std::strstr(json, "\"lifecycle\":\"idle\"") != nullptr);
   assert(std::strstr(json, "\"wheel_mps\":{") != nullptr);
   assert(std::strstr(json, "\"decision\":\"start\"") != nullptr);
+  assert(std::strstr(json, "\"source_health_mask\":1") != nullptr);
   assert(std::strstr(json, "latitude") == nullptr);
   assert(std::strstr(json, "accelerometer") == nullptr);
   char tooSmall[8];
