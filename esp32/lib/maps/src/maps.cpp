@@ -24,6 +24,7 @@
 #include "../../gui/src/navigationContentMode.hpp"
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
+#include "../../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 #include "../../ui_scheduler/ui_scheduler.hpp"
 
@@ -64,6 +65,21 @@ const char *TAG PROGMEM = "Maps";
 #include <unordered_map>
 
 namespace {
+
+#if FIRMWARE_DIAGNOSTICS
+renderer_diagnostics::JobCounters rendererJobCounters(
+    const map_render_job::Diagnostics &value) {
+  return {
+      value.submitted,
+      value.started,
+      value.completed,
+      value.published,
+      value.stalePublications,
+      value.cancelled,
+      value.invariantFailures,
+  };
+}
+#endif
 
 // Keep the main-branch memory diagnostics stable while moving raster work off
 // the LVGL task. These samples are observational only and do not alter the
@@ -2657,7 +2673,11 @@ bool Maps::readVectorMap(
     bool extruded = false;
   };
   map_building_admission::Diagnostics admissionDiagnostics{};
+  uint32_t candidateBuildings = 0;
   uint32_t renderedBuildings = 0;
+  uint32_t oversizedBuildings = 0;
+  uint32_t extrudedP90DistancePx = 0;
+  uint32_t extrudedFarthestDistancePx = 0;
   uint32_t courtyardDeferred = 0;
   uint32_t buildingProjectionMs = 0;
   uint32_t buildingDrawMs = 0;
@@ -2755,8 +2775,10 @@ bool Maps::readVectorMap(
             pointCount += ring.points.size();
           if (pointCount < 3 ||
               pointCount >
-                  map_building_renderer::kMaximumRenderedBuildingPointsPerRecord)
+                  map_building_renderer::kMaximumRenderedBuildingPointsPerRecord) {
+            ++oversizedBuildings;
             continue;
+          }
 
           const double centerX = static_cast<double>(block->offset.x) +
                                  (building.minX + building.maxX) * 0.5;
@@ -2903,6 +2925,7 @@ bool Maps::readVectorMap(
         selectedPixels += candidate.projectedPixels;
       }
       admissionDiagnostics.candidates = fallbackVisible;
+      candidateBuildings = static_cast<uint32_t>(fallbackVisible);
       admissionDiagnostics.selected = selectedRecords;
       admissionDiagnostics.flat = selectedRecords;
       admissionDiagnostics.deferred = fallbackVisible - selectedRecords;
@@ -2928,8 +2951,7 @@ bool Maps::readVectorMap(
                   PsramAllocator<map_building_admission::Candidate>>
           candidates;
       candidates.reserve(kMaximumCandidateMetadata);
-      size_t visibleRecords = 0;
-      size_t oversizedRecords = 0;
+      uint32_t visibleRecords = 0;
 
       for (MapBlock *block : memCache.blocks) {
         if (shouldCancelMapRenderWork())
@@ -2964,7 +2986,7 @@ bool Maps::readVectorMap(
           if (pointCount < 3 ||
               pointCount >
                   map_building_renderer::kMaximumRenderedBuildingPointsPerRecord) {
-            ++oversizedRecords;
+            ++oversizedBuildings;
             continue;
           }
           // Discovery must stay independent of ring complexity. FMB v4
@@ -3021,7 +3043,7 @@ bool Maps::readVectorMap(
               mayExtrude &&
               map_building_renderer::eligibleExtrusionZoom(zoom) &&
               projectedArea >=
-                  map_building_renderer::kMinimumBuildingExtrusionAreaPixels;
+                  context.tuning.minimumExtrusionAreaPixels;
           map_building_admission::retainNearest(
               candidates, candidate, kMaximumCandidateMetadata);
         }
@@ -3070,7 +3092,7 @@ bool Maps::readVectorMap(
             map_building_renderer::usesExtrusion(true, building.flags) &&
             map_building_renderer::eligibleExtrusionZoom(zoom) &&
             projectedArea >=
-                map_building_renderer::kMinimumBuildingExtrusionAreaPixels;
+                context.tuning.minimumExtrusionAreaPixels;
         candidates[usefulCandidateCount++] = candidate;
       }
       candidates.resize(usefulCandidateCount);
@@ -3083,23 +3105,49 @@ bool Maps::readVectorMap(
       for (size_t index = 0; index < candidates.size(); ++index)
         candidates[index].sourceIndex = index;
 
-      // These fixed quotas are intentionally conservative for the 8 MiB PSRAM
-      // target. Nearest records keep 3D; farther admitted records degrade to
-      // flat roofs, and records beyond the quota are explicitly deferred.
-      const map_building_admission::Quotas quotas;
+      // The profile is copied into the immutable render request. A debug
+      // session can therefore cancel and replace a job between bounded units,
+      // but can never change its admission limits halfway through a pass.
+      const map_building_admission::Quotas &quotas = context.tuning.buildings;
       const auto decisions = map_building_admission::select(
           candidates, quotas, &admissionDiagnostics);
+      candidateBuildings = visibleRecords;
       const size_t metadataDeferred =
           visibleRecords > candidates.size() ? visibleRecords - candidates.size()
                                              : 0U;
       metadataDeferredBuildings = static_cast<uint32_t>(metadataDeferred);
       std::vector<uint8_t> admission(candidates.size(), 0);
+#if FIRMWARE_DIAGNOSTICS
+      std::array<uint32_t, 96> extrudedDistancesPx{};
+      size_t extrudedDistanceCount = 0;
+#endif
       for (const auto &decision : decisions) {
         if (decision.sourceIndex >= admission.size())
           continue;
         admission[decision.sourceIndex] =
             decision.admitted ? (decision.extruded ? 2U : 1U) : 0U;
+#if FIRMWARE_DIAGNOSTICS
+        if (decision.extruded &&
+            extrudedDistanceCount < extrudedDistancesPx.size()) {
+          const double distancePx =
+              std::sqrt(candidates[decision.sourceIndex].key.distanceSquared) *
+              map_transform::worldToScreenScale(zoom);
+          extrudedDistancesPx[extrudedDistanceCount++] =
+              static_cast<uint32_t>(std::max(0.0, std::round(distancePx)));
+        }
+#endif
       }
+#if FIRMWARE_DIAGNOSTICS
+      if (extrudedDistanceCount != 0) {
+        std::sort(extrudedDistancesPx.begin(),
+                  extrudedDistancesPx.begin() + extrudedDistanceCount);
+        const size_t p90Index =
+            (extrudedDistanceCount * 90U + 99U) / 100U - 1U;
+        extrudedP90DistancePx = extrudedDistancesPx[p90Index];
+        extrudedFarthestDistancePx =
+            extrudedDistancesPx[extrudedDistanceCount - 1U];
+      }
+#endif
 
       std::vector<BuildingItem, PsramAllocator<BuildingItem>> items;
       items.reserve(admissionDiagnostics.selected);
@@ -3342,7 +3390,7 @@ bool Maps::readVectorMap(
           (unsigned)admissionDiagnostics.flat,
           (unsigned)(admissionDiagnostics.deferred + metadataDeferred),
           (unsigned)visibleRecords,
-          (unsigned)oversizedRecords, (unsigned)renderedBuildings,
+          (unsigned)oversizedBuildings, (unsigned)renderedBuildings,
           (unsigned)courtyardDeferred, (unsigned long)buildingProjectionMs,
           (unsigned long)buildingDrawMs,
           (unsigned)courtyardSnapshotCount,
@@ -3369,6 +3417,7 @@ bool Maps::readVectorMap(
   }
 
   if (diagnostics != nullptr) {
+    diagnostics->candidateBuildings = candidateBuildings;
     diagnostics->selectedBuildings =
         static_cast<uint32_t>(admissionDiagnostics.selected);
     diagnostics->extrudedBuildings =
@@ -3378,6 +3427,14 @@ bool Maps::readVectorMap(
     diagnostics->deferredBuildings = static_cast<uint32_t>(
         admissionDiagnostics.deferred + metadataDeferredBuildings +
         courtyardDeferred);
+    diagnostics->oversizedBuildings = oversizedBuildings;
+    diagnostics->renderedBuildings = renderedBuildings;
+    diagnostics->extrudedP90DistancePx = extrudedP90DistancePx;
+    diagnostics->extrudedFarthestDistancePx =
+        extrudedFarthestDistancePx;
+    diagnostics->buildingProjectionMs = buildingProjectionMs;
+    diagnostics->buildingDrawMs = buildingDrawMs;
+    diagnostics->buildingLimiterFlags = admissionDiagnostics.limiterFlags;
     diagnostics->allocationFallback = buildingAllocationFailed;
   }
 
@@ -3443,6 +3500,7 @@ Maps::RenderContext Maps::captureRenderContext(uint32_t nowMs) {
 Maps::RenderContext Maps::captureRenderContextForScreen(
     uint32_t nowMs, bool mapVisible, bool guidanceScreenActive) {
   RenderContext context;
+  context.tuning = renderer_tuning::definition(rendererTuningProfile_);
   context.style = map_profile_protocol::select(
       mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
       guidanceScreenActive);
@@ -3572,7 +3630,38 @@ uint64_t Maps::styleSignature(const ScreenMapRenderSettings &style) const {
                   mapRenderSettings.mapNavigationBirdsEyeEnabled ? 1U : 0U);
   hash = fnvMix64(hash,
                   mapRenderSettings.mapNavigationBirdsEyePerspective);
+  hash = fnvMix64(
+      hash,
+      renderer_tuning::fingerprint(
+          renderer_tuning::definition(rendererTuningProfile_)));
   return hash;
+}
+
+bool Maps::setRendererTuningProfile(renderer_tuning::Profile profile,
+                                    uint32_t nowMs) {
+  if (rendererTuningProfile_ == profile) {
+    renderer_diagnostics::setProfile(profile);
+    return true;
+  }
+  rendererTuningProfile_ = profile;
+  renderer_diagnostics::setProfile(profile);
+  invalidateRenderSemantics(nowMs);
+  return true;
+}
+
+renderer_diagnostics::JobCounters Maps::rendererDiagnosticsJobCounters() const {
+#if !FIRMWARE_DIAGNOSTICS
+  return {};
+#else
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE) {
+    return {};
+  }
+  const renderer_diagnostics::JobCounters counters =
+      rendererJobCounters(renderJobs.diagnostics());
+  xSemaphoreGive(renderStateMutex);
+  return counters;
+#endif
 }
 
 uint64_t
@@ -3970,6 +4059,9 @@ bool Maps::submitRenderRequest(const RenderRequest &immutableRequest) {
   gMapRenderLatestSequence.store(request.version.sequence,
                                  std::memory_order_release);
   const TaskHandle_t worker = renderWorkerTaskHandle;
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
+#endif
   xSemaphoreGive(renderStateMutex);
   if (worker != nullptr)
     xTaskNotifyGive(worker);
@@ -4006,6 +4098,9 @@ bool Maps::takeWorkerRequest(RenderRequest &request) {
       renderJobs.cancelActive();
     }
   }
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
+#endif
   xSemaphoreGive(renderStateMutex);
   return available;
 }
@@ -4235,6 +4330,31 @@ void Maps::renderWorkerLoop() {
       result.psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
       result.psramLargest =
           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+#if FIRMWARE_DIAGNOSTICS
+      if (completed) {
+        renderer_diagnostics::RenderSample diagnosticsSample;
+        diagnosticsSample.totalMs = result.durationMs;
+        diagnosticsSample.blockLoadMs = result.blocksMs;
+        diagnosticsSample.drawMs = result.drawMs;
+        diagnosticsSample.buildingProjectionMs =
+            result.raster.buildingProjectionMs;
+        diagnosticsSample.buildingDrawMs = result.raster.buildingDrawMs;
+        diagnosticsSample.buildings = {
+            result.raster.candidateBuildings,
+            result.raster.selectedBuildings,
+            result.raster.extrudedBuildings,
+            result.raster.flatBuildings,
+            result.raster.deferredBuildings,
+            result.raster.oversizedBuildings,
+            result.raster.renderedBuildings,
+            result.raster.extrudedP90DistancePx,
+            result.raster.extrudedFarthestDistancePx,
+            result.raster.buildingLimiterFlags,
+            result.raster.allocationFallback,
+        };
+        renderer_diagnostics::noteRender(diagnosticsSample);
+      }
+#endif
 
       if (renderStateMutex != nullptr &&
           xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
@@ -4266,6 +4386,10 @@ void Maps::renderWorkerLoop() {
               (unsigned long)result.psramLargest);
         } else {
           renderJobs.cancelActive();
+#if FIRMWARE_DIAGNOSTICS
+          if (stopReason != map_render_job::StopReason::None)
+            renderer_diagnostics::noteInterrupted();
+#endif
           // Supersession and shutdown are normal scheduling events. Only an
           // actual render/invariant failure asks the UI to retry the last good
           // frame and records recovery diagnostics.
@@ -4279,6 +4403,10 @@ void Maps::renderWorkerLoop() {
               completed ? 1U : 0U, static_cast<unsigned>(stopReason),
               (unsigned long)(millis() - startMs));
         }
+#if FIRMWARE_DIAGNOSTICS
+        renderer_diagnostics::noteJobs(
+            rendererJobCounters(renderJobs.diagnostics()));
+#endif
         xSemaphoreGive(renderStateMutex);
       }
 
@@ -4296,6 +4424,10 @@ void Maps::renderWorkerLoop() {
     readyRenderResultValid = false;
     latestRenderRequestValid = false;
     renderWorkerTaskHandle = nullptr;
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobs(
+        rendererJobCounters(renderJobs.diagnostics()));
+#endif
     xSemaphoreGive(renderStateMutex);
   } else {
     renderWorkerTaskHandle = nullptr;
@@ -4323,6 +4455,10 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   if (!renderResultStillCurrent(readyRenderResult)) {
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobs(
+        rendererJobCounters(renderJobs.diagnostics()));
+#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     xSemaphoreGive(renderStateMutex);
     if (worker != nullptr)
@@ -4360,6 +4496,11 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
       readyRenderResultValid = false;
       isPosMoved = true;
       redrawMap = true;
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteCoverageRejected();
+      renderer_diagnostics::noteJobs(
+          rendererJobCounters(renderJobs.diagnostics()));
+#endif
       const TaskHandle_t worker = renderWorkerTaskHandle;
       xSemaphoreGive(renderStateMutex);
       if (worker != nullptr)
@@ -4380,6 +4521,10 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     renderJobs.rejectReadyAsInvariant();
     readyRenderResultValid = false;
     renderFailurePending = true;
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobs(
+        rendererJobCounters(renderJobs.diagnostics()));
+#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     ESP_LOGE(TAG,
              "Map render publication invariant failed required=%u front=%u "
@@ -4405,6 +4550,9 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   std::swap(bufMapScreen, bufMapTemp);
   std::swap(bufMapScreenSize, bufMapTempSize);
   const map_render_job::Diagnostics jobDiagnostics = renderJobs.diagnostics();
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobs(rendererJobCounters(jobDiagnostics));
+#endif
   xSemaphoreGive(renderStateMutex);
 
   const uint32_t swapStartedUs = micros();

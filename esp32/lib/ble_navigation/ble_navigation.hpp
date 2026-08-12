@@ -17,6 +17,7 @@
 #include "ble_radio_policy.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
+#include "renderer_diagnostics_ble_protocol.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -271,6 +272,11 @@ public:
    * sentinel. Older clients use route-first guidance because their zero value
    * is ambiguous between north and a missing Core Location course. */
   bool supportsExplicitInvalidGpsHeading() const;
+
+  /** Consume the latest authenticated, session-scoped renderer benchmark
+   * window request on the UI task. */
+  bool takeRendererBenchmarkWindowRequest(
+      renderer_diagnostics_ble_protocol::WindowRequest &request);
 
 private:
   bool initialized = false;

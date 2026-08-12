@@ -23,6 +23,7 @@
 #include "device_capabilities_protocol.hpp"
 #include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
+#include "renderer_diagnostics_ble_protocol.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -44,6 +45,7 @@
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
 #include "../power_metrics/power_metrics.hpp"
+#include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -106,6 +108,13 @@ static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
+static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
+static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
+static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
+static portMUX_TYPE rendererWindowRequestMux = portMUX_INITIALIZER_UNLOCKED;
+static renderer_diagnostics_ble_protocol::WindowRequest
+    pendingRendererWindowRequest;
+static bool rendererWindowRequestPending = false;
 static constexpr uint8_t CAPABILITY_EXTENDED_MAP_VISIBILITY =
     map_profile_protocol::EXTENDED_VISIBILITY_CAPABILITY_MASK;
 static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
@@ -178,6 +187,22 @@ static uint32_t destinationStatusUpdatedMs = 0;
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
+
+static void clearRendererWindowRequest() {
+  portENTER_CRITICAL(&rendererWindowRequestMux);
+  pendingRendererWindowRequest = {};
+  rendererWindowRequestPending = false;
+  portEXIT_CRITICAL(&rendererWindowRequestMux);
+}
+
+static void queueRendererWindowRequest(
+    const renderer_diagnostics_ble_protocol::WindowRequest &request) {
+  portENTER_CRITICAL(&rendererWindowRequestMux);
+  pendingRendererWindowRequest = request;
+  rendererWindowRequestPending = true;
+  portEXIT_CRITICAL(&rendererWindowRequestMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+}
 
 #if BLE_RADIO_CHARACTERIZATION
 static const char *advertisingModeName(
@@ -934,6 +959,9 @@ static bool unwrapOwnerAuthenticatedPayload(
     clearAuthenticatedBleGpsRideObservation();
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
+    bleSessionSupportsRendererDiagnostics.store(false,
+                                                std::memory_order_release);
+    clearRendererWindowRequest();
     bleDebugStats.authenticated = false;
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
@@ -1205,6 +1233,9 @@ static void handleAuthPayload(const std::string &frame) {
       clearAuthenticatedBleGpsRideObservation();
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
+      bleSessionSupportsRendererDiagnostics.store(false,
+                                                  std::memory_order_release);
+      clearRendererWindowRequest();
       bleDebugStats.authenticated = false;
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
@@ -1248,6 +1279,9 @@ static void handleAuthPayload(const std::string &frame) {
                 clearAuthenticatedBleGpsRideObservation();
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
+                bleSessionSupportsRendererDiagnostics.store(
+                    false, std::memory_order_release);
+                clearRendererWindowRequest();
                 bleDebugStats.authenticated = false;
                 ownershipAdvertisingDirty = true;
                 ownershipRestartRequested = true;
@@ -1316,6 +1350,11 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionSupports3DBuildings = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
+    bleSessionSupportsRendererDiagnostics.store(false,
+                                                std::memory_order_release);
+    lastRendererMetricsRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    clearRendererWindowRequest();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     snprintf(message, sizeof(message), "server|%s", nonce);
@@ -1768,10 +1807,173 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
   }
 }
 
+static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
+#if FIRMWARE_DIAGNOSTICS
+  if (pChar == nullptr) {
+    pChar = mapTransferStatusCharacteristic;
+  }
+  if (pChar == nullptr ||
+      !bleSessionSupportsRendererDiagnostics.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  const std::string body = renderer_diagnostics::toJson(
+      renderer_diagnostics::snapshot(millis()));
+  uint16_t peerMtu = 23;
+  NimBLEService *service = pChar->getService();
+  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
+  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+    peerMtu = server->getPeerMTU(activeConnHandle);
+  }
+  if (peerMtu >= 25 &&
+      body.size() + renderer_diagnostics_ble_protocol::PREFIX_BYTES <=
+          peerMtu - 25) {
+    const std::string direct =
+        std::string(
+            renderer_diagnostics_ble_protocol::METRICS_RESPONSE_PREFIX) +
+        body;
+    if (notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(direct.data()),
+            direct.size())) {
+      Serial.printf(
+          "BLE Renderer Diagnostics: snapshot notified (%u bytes)\n",
+          static_cast<unsigned>(body.size()));
+      return;
+    }
+  }
+
+  const size_t chunkBytes =
+      map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
+  const size_t chunkCount =
+      chunkBytes == 0 ? 0 : (body.size() + chunkBytes - 1) / chunkBytes;
+  if (chunkCount == 0 || chunkCount > 255) {
+    Serial.printf(
+        "BLE Renderer Diagnostics: snapshot cannot fit MTU %u (%u bytes)\n",
+        static_cast<unsigned>(peerMtu), static_cast<unsigned>(body.size()));
+    return;
+  }
+  static uint8_t transferId = 0;
+  ++transferId;
+  for (size_t index = 0; index < chunkCount; ++index) {
+    const size_t offset = index * chunkBytes;
+    const size_t length = std::min(chunkBytes, body.size() - offset);
+    std::string frame =
+        renderer_diagnostics_ble_protocol::METRICS_CHUNK_PREFIX;
+    frame.push_back(static_cast<char>(transferId));
+    frame.push_back(static_cast<char>(index));
+    frame.push_back(static_cast<char>(chunkCount));
+    frame.append(body.data() + offset, length);
+    if (!notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(frame.data()),
+            frame.size())) {
+      Serial.println(
+          "BLE Renderer Diagnostics: protected snapshot chunk failed");
+      return;
+    }
+    delay(2);
+  }
+  Serial.printf(
+      "BLE Renderer Diagnostics: snapshot notified (%u bytes, %u chunks)\n",
+      static_cast<unsigned>(body.size()),
+      static_cast<unsigned>(chunkCount));
+#else
+  (void)pChar;
+#endif
+}
+
 static void queueTransferControl(ble_transfer::Action action,
                                  uint8_t notifications) {
   pendingTransferControl.merge(action, notifications);
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+}
+
+static bool handleRendererDiagnosticsCommand(const std::string &value,
+                                             const char *authLabel) {
+  const bool metricsPrefix =
+      value.size() >= renderer_diagnostics_ble_protocol::PREFIX_BYTES &&
+      std::memcmp(value.data(),
+                  renderer_diagnostics_ble_protocol::METRICS_REQUEST_PREFIX,
+                  renderer_diagnostics_ble_protocol::PREFIX_BYTES) == 0;
+  const bool markerPrefix =
+      renderer_diagnostics_ble_protocol::hasRouteMarkerPrefix(
+          reinterpret_cast<const uint8_t *>(value.data()), value.size());
+  const bool windowPrefix =
+      renderer_diagnostics_ble_protocol::hasWindowRequestPrefix(
+          reinterpret_cast<const uint8_t *>(value.data()), value.size());
+  if (!metricsPrefix && !markerPrefix && !windowPrefix)
+    return false;
+
+  power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+  if (!requireAuthenticated(authLabel))
+    return true;
+
+#if !FIRMWARE_DIAGNOSTICS
+  Serial.println("BLE Renderer Diagnostics: unavailable in this build");
+  return true;
+#else
+  if (!bleSessionSupportsRendererDiagnostics.load(std::memory_order_acquire)) {
+    Serial.println("BLE Renderer Diagnostics: capability was not negotiated");
+    return true;
+  }
+  if (metricsPrefix) {
+    if (!renderer_diagnostics_ble_protocol::isMetricsRequest(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      Serial.println("BLE Renderer Diagnostics: malformed metrics request");
+      return true;
+    }
+    constexpr uint32_t kMinimumMetricsRequestIntervalMs = 1000;
+    const uint32_t nowMs = millis();
+    const uint32_t previousMs =
+        lastRendererMetricsRequestMs.load(std::memory_order_acquire);
+    if (previousMs != 0 &&
+        static_cast<uint32_t>(nowMs - previousMs) <
+            kMinimumMetricsRequestIntervalMs) {
+      Serial.println("BLE Renderer Diagnostics: metrics request rate limited");
+      return true;
+    }
+    lastRendererMetricsRequestMs.store(nowMs, std::memory_order_release);
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyRendererDiagnostics);
+    return true;
+  }
+
+  if (windowPrefix) {
+    renderer_diagnostics_ble_protocol::WindowRequest request;
+    if (!renderer_diagnostics_ble_protocol::decodeWindowRequest(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size(),
+            request)) {
+      Serial.println("BLE Renderer Diagnostics: malformed window request");
+      return true;
+    }
+    constexpr uint32_t kMinimumWindowRequestIntervalMs = 1000;
+    const uint32_t nowMs = millis();
+    const uint32_t previousMs =
+        lastRendererWindowRequestMs.load(std::memory_order_acquire);
+    if (previousMs != 0 &&
+        static_cast<uint32_t>(nowMs - previousMs) <
+            kMinimumWindowRequestIntervalMs) {
+      Serial.println("BLE Renderer Diagnostics: window request rate limited");
+      return true;
+    }
+    lastRendererWindowRequestMs.store(nowMs, std::memory_order_release);
+    queueRendererWindowRequest(request);
+    return true;
+  }
+
+  renderer_diagnostics_ble_protocol::RouteMarker marker;
+  if (!renderer_diagnostics_ble_protocol::decodeRouteMarker(
+          reinterpret_cast<const uint8_t *>(value.data()), value.size(),
+          marker)) {
+    Serial.println("BLE Renderer Diagnostics: malformed route marker");
+    return true;
+  }
+  const bool accepted = renderer_diagnostics::noteRouteMarker(
+      marker.fixtureSha256, sizeof(marker.fixtureSha256), marker.sampleIndex,
+      marker.sampleCount, marker.loop, millis());
+  if (!accepted)
+    Serial.println("BLE Renderer Diagnostics: route marker rejected");
+  return true;
+#endif
 }
 
 static void processPendingTransferControl() {
@@ -1897,6 +2099,9 @@ static void processPendingTransferControl() {
   if (request.notifications & ble_transfer::NotifyGeneric) {
     notifyGenericTransferStatus(mapTransferStatusCharacteristic);
   }
+  if (request.notifications & ble_transfer::NotifyRendererDiagnostics) {
+    notifyRendererDiagnosticsStatus(mapTransferStatusCharacteristic);
+  }
 }
 
 static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
@@ -1994,6 +2199,13 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::GPS_POSITION_QUALITY_V1_FEATURE;
     }
+#if FIRMWARE_DIAGNOSTICS
+    if (clientVersion >= device_capabilities_protocol::
+                             RENDERER_DIAGNOSTICS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::RENDERER_DIAGNOSTICS_FEATURE;
+    }
+#endif
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -2066,6 +2278,15 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >=
             device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
         std::memory_order_release);
+#if FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsRendererDiagnostics.store(
+        clientVersion >= device_capabilities_protocol::
+                             RENDERER_DIAGNOSTICS_CLIENT_VERSION,
+        std::memory_order_release);
+#else
+    bleSessionSupportsRendererDiagnostics.store(false,
+                                                std::memory_order_release);
+#endif
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
   return true;
@@ -3102,6 +3323,11 @@ public:
     bleSessionSupports3DBuildings = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
+    bleSessionSupportsRendererDiagnostics.store(false,
+                                                std::memory_order_release);
+    lastRendererMetricsRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    clearRendererWindowRequest();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -3166,6 +3392,11 @@ public:
     bleSessionSupports3DBuildings = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
+    bleSessionSupportsRendererDiagnostics.store(false,
+                                                std::memory_order_release);
+    lastRendererMetricsRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    clearRendererWindowRequest();
     clearAuthenticatedBleGpsRideObservation();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
@@ -3235,6 +3466,11 @@ public:
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+      return;
+    }
+
+    if (handleRendererDiagnosticsCommand(
+            value, "renderer diagnostics fallback")) {
       return;
     }
 
@@ -3470,6 +3706,11 @@ public:
 
     if (handleDestinationPickerPayload(value, "native destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+      return;
+    }
+
+    if (handleRendererDiagnosticsCommand(value,
+                                         "native renderer diagnostics")) {
       return;
     }
 
@@ -3959,6 +4200,21 @@ bool BLENavigationServer::supportsExplicitInvalidGpsHeading() const {
       std::memory_order_acquire);
 }
 
+bool BLENavigationServer::takeRendererBenchmarkWindowRequest(
+    renderer_diagnostics_ble_protocol::WindowRequest &request) {
+  bool available = false;
+  portENTER_CRITICAL(&rendererWindowRequestMux);
+  if (rendererWindowRequestPending) {
+    request = pendingRendererWindowRequest;
+    pendingRendererWindowRequest = {};
+    rendererWindowRequestPending = false;
+    available = true;
+  }
+  portEXIT_CRITICAL(&rendererWindowRequestMux);
+  return available && bleSessionAuthenticated &&
+         bleSessionSupportsRendererDiagnostics.load(std::memory_order_acquire);
+}
+
 bool BLENavigationServer::forgetOwner() {
   bool cleared = false;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
@@ -3972,6 +4228,11 @@ bool BLENavigationServer::forgetOwner() {
   bleSessionAuthenticated = false;
   bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                     std::memory_order_release);
+  bleSessionSupportsRendererDiagnostics.store(false,
+                                              std::memory_order_release);
+  lastRendererMetricsRequestMs.store(0, std::memory_order_release);
+  lastRendererWindowRequestMs.store(0, std::memory_order_release);
+  clearRendererWindowRequest();
   clearAuthenticatedBleGpsRideObservation();
   bleDebugStats.authenticated = false;
   // Physical owner recovery is an immediate authorization boundary. Revoke

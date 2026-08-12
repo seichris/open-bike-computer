@@ -3,6 +3,7 @@
 #include "device_debug_page.hpp"
 #include "../display_power/display_power.hpp"
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 
 #include <ArduinoJson.h>
@@ -11,6 +12,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <sstream>
 
 namespace device_debug {
@@ -20,6 +22,8 @@ namespace device_debug {
 namespace {
 
 constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
+constexpr uint32_t kMetricsResponseMinimumIntervalMs = 250;
+constexpr uint32_t kRendererWindowMinimumIntervalMs = 1000;
 
 const char *displayStateName(display_power::State state) {
   switch (state) {
@@ -99,8 +103,11 @@ bool DeviceDebugHttp::configure(device_transfer::HttpTransferServer *server) {
     return false;
   server_ = server;
   configured_ = server_->registerHandler("/device-debug/", this);
+  if (rendererRunQueue_ == nullptr)
+    rendererRunQueue_ = xQueueCreate(1, sizeof(RendererRunRequest));
   runtimeReady_ =
-      configured_ && frameStore().prepare() && pointerInput().begin();
+      configured_ && rendererRunQueue_ != nullptr && frameStore().prepare() &&
+      pointerInput().begin();
   pointerInput().cancelSession();
   return configured_ && runtimeReady_;
 #endif
@@ -126,6 +133,9 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
   lastFrameResponseDurationMs_ = 0;
   maxFrameResponseDurationMs_ = 0;
   lastFrameResponseBytes_ = 0;
+  lastMetricsResponseMs_ = 0;
+  lastRendererWindowRequestMs_ = 0;
+  xQueueReset(rendererRunQueue_);
   return result;
 }
 
@@ -135,6 +145,8 @@ void DeviceDebugHttp::cancelSession() {
   bootPressRequested_.clear();
   exitRequested_.store(false, std::memory_order_release);
   exitResponsePending_.store(false, std::memory_order_release);
+  if (rendererRunQueue_ != nullptr)
+    xQueueReset(rendererRunQueue_);
 }
 
 void DeviceDebugHttp::finishSessionTeardown() { frameStore().end(); }
@@ -192,6 +204,12 @@ bool DeviceDebugHttp::handleRequest(
   if (request.method == "GET" && request.path == "/device-debug/v1/info")
     return handleInfo(client);
   if (request.method == "GET" &&
+      request.path == "/device-debug/v1/metrics")
+    return handleRendererMetrics(client);
+  if (request.method == "POST" &&
+      request.path == "/device-debug/v1/metrics/window")
+    return handleRendererWindow(request, client);
+  if (request.method == "GET" &&
       request.path.compare(0, sizeof(kFrameRoutePrefix) - 1,
                            kFrameRoutePrefix) == 0)
     return handleFrame(request, client);
@@ -232,6 +250,7 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
       heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   const uint32_t currentLargestPsram =
       heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  updateRendererDebugOverhead();
   char deviceId[17] = {};
   std::snprintf(deviceId, sizeof(deviceId), "%016llx",
                 static_cast<unsigned long long>(ESP.getEfuseMac()));
@@ -281,6 +300,156 @@ bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
        << static_cast<uint32_t>(geometry.width) * geometry.height * 2U
        << "}}";
   return device_transfer::sendHttpJson(client, 200, body.str());
+}
+
+void DeviceDebugHttp::updateRendererDebugOverhead() {
+  const TargetGeometry geometry = frameStore().geometry();
+  const FrameStoreCounters frames = frameStore().counters();
+  const FrameStoreMemory memory = frameStore().memory();
+  renderer_diagnostics::RemoteDebugOverhead overhead;
+  overhead.active = frameStore().active();
+  overhead.snapshotBytes =
+      static_cast<uint32_t>(geometry.width) * geometry.height * 2U;
+  overhead.captured = frames.captured;
+  overhead.skippedCadence = frames.skippedCadence;
+  overhead.skippedLocked = frames.skippedLocked;
+  overhead.captureErrors = frames.captureErrors;
+  overhead.lastCopyUs = frames.lastCopyDurationUs;
+  overhead.maximumCopyUs = frames.maxCopyDurationUs;
+  overhead.lastHttpResponseMs = lastFrameResponseDurationMs_;
+  overhead.maximumHttpResponseMs = maxFrameResponseDurationMs_;
+  overhead.freeBefore = memory.freeBefore;
+  overhead.largestBefore = memory.largestBefore;
+  overhead.freeAfterAllocate = memory.freeAfterAllocate;
+  overhead.largestAfterAllocate = memory.largestAfterAllocate;
+  renderer_diagnostics::noteRemoteDebug(overhead);
+}
+
+bool DeviceDebugHttp::handleRendererMetrics(WiFiClient &client) {
+  const uint32_t nowMs = millis();
+  if (lastMetricsResponseMs_ != 0 &&
+      !intervalElapsed(nowMs, lastMetricsResponseMs_,
+                       kMetricsResponseMinimumIntervalMs)) {
+    return device_transfer::sendHttpError(
+        client, 429, "metrics_rate_limited",
+        "renderer metrics requests are too frequent");
+  }
+  updateRendererDebugOverhead();
+  const std::string body =
+      renderer_diagnostics::toJson(renderer_diagnostics::snapshot(nowMs));
+  const bool sent = device_transfer::sendHttpJson(client, 200, body);
+  if (sent)
+    lastMetricsResponseMs_ = nowMs;
+  return sent;
+}
+
+bool DeviceDebugHttp::handleRendererWindow(
+    const device_transfer::HttpRequest &request, WiFiClient &client) {
+  const uint32_t nowMs = millis();
+  if (lastRendererWindowRequestMs_ != 0 &&
+      !intervalElapsed(nowMs, lastRendererWindowRequestMs_,
+                       kRendererWindowMinimumIntervalMs)) {
+    return device_transfer::sendHttpError(
+        client, 429, "renderer_window_rate_limited",
+        "renderer window requests are too frequent");
+  }
+  if (!request.hasContentLength)
+    return device_transfer::sendHttpError(
+        client, 400, "content_length_required",
+        "renderer window body needs Content-Length");
+  if (request.contentType != "application/json")
+    return device_transfer::sendHttpError(
+        client, 415, "content_type",
+        "renderer window body must be application/json");
+  if (request.contentLength == 0 ||
+      request.contentLength > kRendererWindowBodyMaximumBytes)
+    return device_transfer::sendHttpError(
+        client, 413, "renderer_window_body_size",
+        "renderer window body exceeds device limits");
+  std::string body;
+  if (!device_transfer::readHttpBody(client, request.contentLength,
+                                     kRendererWindowBodyMaximumBytes, body))
+    return device_transfer::sendHttpError(
+        client, 408, "renderer_window_body_timeout",
+        "renderer window body was not received");
+  if (!server_->isRequestAuthorized(request))
+    return device_transfer::sendHttpError(client, 401, "session_revoked",
+                                          "debug session was revoked");
+
+  JsonDocument document;
+  if (deserializeJson(document, body))
+    return device_transfer::sendHttpError(
+        client, 400, "invalid_json",
+        "renderer window body is invalid JSON");
+  const JsonObjectConst object = document.as<JsonObjectConst>();
+  const JsonObjectConst mapFixture = object["mapFixture"].as<JsonObjectConst>();
+  const JsonObjectConst routeFixture =
+      object["routeFixture"].as<JsonObjectConst>();
+  if (object.size() != 7 || !object["schema"].is<uint8_t>() ||
+      object["schema"].as<uint8_t>() != 1 ||
+      !object["profile"].is<const char *>() ||
+      !object["runId"].is<const char *>() ||
+      !object["repeat"].is<uint16_t>() ||
+      object["repeat"].as<uint16_t>() == 0 || mapFixture.size() != 2 ||
+      routeFixture.size() != 2 || !mapFixture["id"].is<const char *>() ||
+      !mapFixture["sha256"].is<const char *>() ||
+      !routeFixture["id"].is<const char *>() ||
+      !routeFixture["sha256"].is<const char *>() ||
+      !object["routeMode"].is<const char *>()) {
+    return device_transfer::sendHttpError(
+        client, 400, "renderer_window_schema",
+        "renderer window fields are invalid");
+  }
+
+  const char *profileName = object["profile"].as<const char *>();
+  const char *runId = object["runId"].as<const char *>();
+  const char *mapId = mapFixture["id"].as<const char *>();
+  const char *mapHash = mapFixture["sha256"].as<const char *>();
+  const char *routeId = routeFixture["id"].as<const char *>();
+  const char *routeHash = routeFixture["sha256"].as<const char *>();
+  const char *routeMode = object["routeMode"].as<const char *>();
+  renderer_tuning::Profile profile;
+  if (!renderer_tuning::parse(profileName, profile) ||
+      !validRendererIdentityText(
+          runId, renderer_diagnostics::kIdentityTextBytes - 1U) ||
+      !validRendererIdentityText(
+          mapId, renderer_diagnostics::kIdentityTextBytes - 1U) ||
+      !validLowercaseSha256(mapHash) ||
+      !validRendererIdentityText(
+          routeId, renderer_diagnostics::kIdentityTextBytes - 1U) ||
+      !validLowercaseSha256(routeHash) ||
+      !validRendererRouteMode(routeMode)) {
+    return device_transfer::sendHttpError(
+        client, 400, "renderer_window_identity",
+        "renderer profile or fixture identity is invalid");
+  }
+
+  RendererRunRequest pending;
+  uint32_t requestId =
+      nextRendererRequestId_.fetch_add(1, std::memory_order_acq_rel) + 1U;
+  if (requestId == 0)
+    requestId =
+        nextRendererRequestId_.fetch_add(1, std::memory_order_acq_rel) + 1U;
+  pending.requestId = requestId;
+  pending.profile = profile;
+  const bool copied = pending.identity.runId.assign(runId) &&
+                      pending.identity.mapFixtureId.assign(mapId) &&
+                      pending.identity.mapFixtureSha256.assign(mapHash) &&
+                      pending.identity.routeFixtureId.assign(routeId) &&
+                      pending.identity.routeFixtureSha256.assign(routeHash) &&
+                      pending.identity.routeMode.assign(routeMode);
+  pending.identity.repeat = object["repeat"].as<uint16_t>();
+  if (!copied || rendererRunQueue_ == nullptr ||
+      xQueueOverwrite(rendererRunQueue_, &pending) != pdPASS) {
+    return device_transfer::sendHttpError(
+        client, 503, "renderer_window_queue",
+        "renderer window request could not be queued");
+  }
+  lastRendererWindowRequestMs_ = nowMs;
+  ui_scheduler::notify(ui_scheduler::WakeReason::RemoteDebug);
+  std::ostringstream response;
+  response << "{\"ok\":true,\"requestId\":" << requestId << "}";
+  return device_transfer::sendHttpJson(client, 202, response.str());
 }
 
 bool DeviceDebugHttp::handleFrame(
@@ -470,6 +639,11 @@ bool DeviceDebugHttp::takeAutomaticExitRequest() {
   return exitRequested_.exchange(false, std::memory_order_acq_rel);
 }
 
+bool DeviceDebugHttp::takeRendererRunRequest(RendererRunRequest &request) {
+  return rendererRunQueue_ != nullptr &&
+         xQueueReceive(rendererRunQueue_, &request, 0) == pdTRUE;
+}
+
 #else
 
 bool DeviceDebugHttp::configure(device_transfer::HttpTransferServer *server) {
@@ -513,6 +687,11 @@ bool DeviceDebugHttp::bootPressRequested() const { return false; }
 bool DeviceDebugHttp::takeBootPressRequest() { return false; }
 
 bool DeviceDebugHttp::takeAutomaticExitRequest() { return false; }
+
+bool DeviceDebugHttp::takeRendererRunRequest(RendererRunRequest &request) {
+  (void)request;
+  return false;
+}
 
 #endif
 

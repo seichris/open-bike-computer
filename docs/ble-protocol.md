@@ -998,9 +998,13 @@ session-scoped real-device browser-debug service. Bit `17` negotiates the
 GPS-position quality-v1 tail used by ride detection. Client version `11` requests
 bit `13`, version `12` requests bit `14`, version `13` requests bit `15`, and
 version `14` requests bit `16`; version `15` requests bit `17`. Version `10`
-remains a valid CAP2 client without the newer features. Production builds keep bit `15` clear until the
+remains a valid CAP2 client without the newer features. Client version `16`
+requests bit `18`, the authenticated renderer-diagnostics and benchmark-fixture
+contract below. Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
+Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
+therefore expose neither the snapshot nor experimental profile control.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
@@ -1029,6 +1033,9 @@ Internal RAUT v2 build, CAP2 schema 1, only feature bit 15:
 
 GPS quality v1, CAP2 schema 1, only feature bit 17:
 43 41 50 32 01 00 00 02 00
+
+Renderer diagnostics, CAP2 schema 1, only feature bit 18:
+43 41 50 32 01 00 00 04 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1039,6 +1046,76 @@ machine is not sufficient to advertise support.
 Bit `16` (`0x00010000`) reports the real-device browser-debug service. Firmware
 keeps it clear outside dedicated `DEVICE_REMOTE_DEBUG=1` profiles and when the
 debug frame/input service does not initialize.
+
+Bit `18` (`0x00040000`) reports the complete bounded renderer-diagnostics
+contract. It is independent of bit `16`: remote-debug diagnostic builds support
+HTTP plus BLE, ordinary diagnostic builds support BLE only, and production
+builds support neither.
+
+## Renderer diagnostics and benchmark fixture
+
+After authentication and CAP2 bit `18` negotiation, iOS can request the same
+schema-1 snapshot used by the remote-debug HTTP runner:
+
+```text
+iOS -> ESP32: "RDMS"
+ESP32 -> iOS: "RDMT" | JSON
+ESP32 -> iOS: "RDMC" | TransferID: UInt8 | ChunkIndex: UInt8 |
+              ChunkCount: UInt8 | JSON chunk
+```
+
+The direct form is used only when it fits the negotiated MTU. Otherwise the
+JSON is split into at most 255 indexed chunks and reassembled to at most 32768
+bytes by iOS. Requests are limited to one per second and notifications use the
+existing authenticated navigation envelope. Missing authentication, missing
+capability negotiation, malformed frames, duplicate/oversized chunks, and
+production builds fail closed.
+
+The snapshot is generated from one fixed-size state object: no per-render trace
+is retained on the device. It includes build/boot identity, measurement-window
+identity, active profile and immutable tuning values, internal RAM and PSRAM,
+bounded timing histograms, building selection/reach and limiter counters,
+render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
+freshness, and remote-debug overhead. It intentionally contains no route
+coordinates, network credentials, or transfer token.
+
+The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
+
+```text
+"RBM1" | RouteFixtureSHA256: 32 bytes |
+         SampleIndex: UInt16LE | SampleCount: UInt16LE | Loop: UInt32LE
+```
+
+The frame is exactly 44 bytes. `SampleCount` is non-zero and `SampleIndex` must
+be smaller than it. Firmware accepts a marker only when its hash matches the
+active measurement window. This prevents an otherwise plausible GPS stream
+from being attributed to the pinned fixture.
+
+For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
+measurement window with:
+
+```text
+"RBW1" | Schema: UInt8 (= 1) | Profile: UInt8 |
+         Repeat: UInt16LE | RunNonce: UInt64LE |
+         RouteFixtureSHA256: 32 bytes | RouteIDLength: UInt8 |
+         RouteFixtureID: RouteIDLength UTF-8 bytes
+```
+
+Profile values are `0` flat, `1` current, `2` medium, and `3` high. `Repeat` and
+`RunNonce` are non-zero. The route ID is 1–48 bytes and restricted to ASCII
+letters, digits, `.`, `-`, `_`, and `:`; the complete frame is at most 97
+bytes. Window requests are limited to one per second, copied into bounded
+storage, and consumed on the UI task. Firmware obtains the active map ID and
+canonical manifest receipt itself rather than trusting values supplied by the
+phone, and labels the route mode `ordinary-ble-1hz`.
+
+Experimental profile selection is RAM-only and scoped to the authenticated BLE
+session. A disconnect, authentication reset, remote-debug transition, or
+session end clears the pending window and restores `current`; no NVS setting is
+written. The iPhone requests snapshots every five seconds during ordinary
+replay and exports at most 128 snapshots for offline validation. The complete
+procedure and rejection gates are in
+[Renderer building benchmark](renderer-benchmark.md).
 
 IDs `27...34` are sent only after a valid `CAP2` response advertises bit `8`.
 Older sessions therefore never receive label-only setting IDs. Missing NVS

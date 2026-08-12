@@ -395,7 +395,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         render = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         self.assertIn("map_building_admission::retainNearest", render)
         self.assertIn("map_building_admission::select", render)
-        self.assertIn("const map_building_admission::Quotas quotas", render)
+        self.assertIn(
+            "const map_building_admission::Quotas &quotas = context.tuning.buildings",
+            render,
+        )
         self.assertIn("maximumExtrudedRecords", BUILDING_ADMISSION_SOURCE)
         self.assertIn("admissionDiagnostics.flat", render)
         self.assertIn("buildingAllocationFailed", render)

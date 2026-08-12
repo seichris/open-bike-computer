@@ -5,7 +5,10 @@ target:
 
 - `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` are developer/diagnostic
   builds. They keep USB CDC active, emit low-rate diagnostics, and pause for up
-  to two seconds during boot so a serial monitor can attach.
+  to two seconds during boot so a serial monitor can attach. After authenticated
+  CAP2 bit `18` negotiation they also provide the bounded, session-scoped BLE
+  renderer snapshot and ordinary-profile confirmation described in
+  [Renderer building benchmark](renderer-benchmark.md).
 - `*_POWER_METRICS` adds the structured `PWRMET` stream and optional timing
   pulse to the corresponding diagnostic build.
 - `*_REMOTE_DEBUG` extends the ordinary developer build with

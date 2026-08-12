@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../renderer_tuning/renderer_tuning.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -25,14 +27,7 @@ inline bool nearer(const SpatialKey &left, const SpatialKey &right) {
   return left.recordIndex < right.recordIndex;
 }
 
-struct Quotas {
-  size_t maximumRecords = 96;
-  size_t maximumPoints = 8192;
-  uint64_t maximumProjectedPixels = 220000;
-  size_t maximumExtrudedRecords = 32;
-  size_t maximumExtrudedPoints = 3072;
-  uint64_t maximumExtrudedPixels = 90000;
-};
+using Quotas = renderer_tuning::BuildingQuotas;
 
 struct Candidate {
   SpatialKey key{};
@@ -82,6 +77,17 @@ struct Diagnostics {
   size_t deferred = 0;
   size_t selectedPoints = 0;
   uint64_t selectedPixels = 0;
+  uint8_t limiterFlags = 0;
+};
+
+enum Limiter : uint8_t {
+  LimiterNone = 0,
+  LimiterRecords = 1U << 0,
+  LimiterPoints = 1U << 1,
+  LimiterProjectedPixels = 1U << 2,
+  LimiterExtrudedRecords = 1U << 3,
+  LimiterExtrudedPoints = 1U << 4,
+  LimiterExtrudedPixels = 1U << 5,
 };
 
 /**
@@ -112,23 +118,32 @@ inline std::vector<Decision> select(CandidateVector candidates,
 
   for (const Candidate &candidate : candidates) {
     Decision decision{candidate.sourceIndex, false, false};
-    const bool fitsBase = records < quotas.maximumRecords &&
-                          candidate.pointCount <=
-                              quotas.maximumPoints - points &&
-                          candidate.projectedPixels <=
-                              quotas.maximumProjectedPixels - pixels;
+    const bool fitsRecords = records < quotas.maximumRecords;
+    const bool fitsPoints = points <= quotas.maximumPoints &&
+                            candidate.pointCount <=
+                                quotas.maximumPoints - points;
+    const bool fitsPixels = pixels <= quotas.maximumProjectedPixels &&
+                            candidate.projectedPixels <=
+                                quotas.maximumProjectedPixels - pixels;
+    const bool fitsBase = fitsRecords && fitsPoints && fitsPixels;
     if (fitsBase) {
       decision.admitted = true;
       records++;
       points += candidate.pointCount;
       pixels += candidate.projectedPixels;
-      const bool fitsExtrusion =
-          candidate.extrusionEligible &&
-          extrudedRecords < quotas.maximumExtrudedRecords &&
+      const bool fitsExtrudedRecords =
+          extrudedRecords < quotas.maximumExtrudedRecords;
+      const bool fitsExtrudedPoints =
+          extrudedPoints <= quotas.maximumExtrudedPoints &&
           candidate.pointCount <=
-              quotas.maximumExtrudedPoints - extrudedPoints &&
+              quotas.maximumExtrudedPoints - extrudedPoints;
+      const bool fitsExtrudedPixels =
+          extrudedPixels <= quotas.maximumExtrudedPixels &&
           candidate.projectedPixels <=
               quotas.maximumExtrudedPixels - extrudedPixels;
+      const bool fitsExtrusion = candidate.extrusionEligible &&
+                                 fitsExtrudedRecords && fitsExtrudedPoints &&
+                                 fitsExtrudedPixels;
       if (fitsExtrusion) {
         decision.extruded = true;
         extrudedRecords++;
@@ -137,10 +152,24 @@ inline std::vector<Decision> select(CandidateVector candidates,
         local.extruded++;
       } else {
         local.flat++;
+        if (candidate.extrusionEligible) {
+          if (!fitsExtrudedRecords)
+            local.limiterFlags |= LimiterExtrudedRecords;
+          if (!fitsExtrudedPoints)
+            local.limiterFlags |= LimiterExtrudedPoints;
+          if (!fitsExtrudedPixels)
+            local.limiterFlags |= LimiterExtrudedPixels;
+        }
       }
       local.selected++;
     } else {
       local.deferred++;
+      if (!fitsRecords)
+        local.limiterFlags |= LimiterRecords;
+      if (!fitsPoints)
+        local.limiterFlags |= LimiterPoints;
+      if (!fitsPixels)
+        local.limiterFlags |= LimiterProjectedPixels;
     }
     decisions.push_back(decision);
   }

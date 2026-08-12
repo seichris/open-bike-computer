@@ -96,6 +96,8 @@ same-origin page. All versioned API routes require the existing
 | Method | Route | Result |
 | --- | --- | --- |
 | `GET` | `/device-debug/v1/info` | Target, identity, dimensions, display/network state, sequence, and counters. |
+| `GET` | `/device-debug/v1/metrics` | One bounded schema-1 renderer/RAM snapshot; responses are limited to four per second. |
+| `POST` | `/device-debug/v1/metrics/window` | Queue one validated renderer profile and fixture identity for the UI task, at most once per second; the active map ID and manifest receipt must match before it is applied. |
 | `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. |
 | `POST` | `/device-debug/v1/pointer` | Queue one schema-1 down/move/up/cancel event. |
 | `POST` | `/device-debug/v1/display/wake` | Queue a UI-task display wake and full refresh. |
@@ -129,10 +131,15 @@ BICINO_DEVICE_DEBUG_TOKEN='session-token' \
   screenshot --output /tmp/bicino.png
 ```
 
-Other commands are `tap X Y`, `long-press X Y --duration-ms N`,
+Other commands are `metrics`, `begin-window`, `tap X Y`, `long-press X Y --duration-ms N`,
 `swipe X1 Y1 X2 Y2 --duration-ms N`, `boot`, `wake`, and `exit`. The CLI validates the
 device identity/dimensions before input and validates frame metadata, length,
 CRC, and PNG output. It never discovers, selects, flashes, or pairs hardware.
+
+For repeatable 3D-building profile sweeps, fixture replay, RAM/performance
+gates, balanced runs, screenshots, soak testing, and ordinary-firmware
+confirmation, use the [renderer building benchmark](renderer-benchmark.md)
+runner instead of assembling individual CLI calls.
 
 ## Evidence boundary
 

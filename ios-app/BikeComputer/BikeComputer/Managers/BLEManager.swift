@@ -135,6 +135,11 @@ enum DeviceBLEProtocol {
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
     static let deviceTransferStatusChunkPrefix = "DSTC"
+    static let rendererMetricsRequestPrefix = "RDMS"
+    static let rendererMetricsResponsePrefix = "RDMT"
+    static let rendererMetricsChunkPrefix = "RDMC"
+    static let rendererBenchmarkMarkerPrefix = "RBM1"
+    static let rendererBenchmarkWindowPrefix = "RBW1"
     static let deviceCapabilitiesPrefix = "CAPS"
     static let deviceCapabilitiesV2Prefix = "CAP2"
     static let soundPlayPrefix = "SNDP"
@@ -165,7 +170,8 @@ enum DeviceBLEProtocol {
     static let rideAutomationCapabilityMask: UInt32 = 1 << 15
     static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
     static let gpsPositionQualityV1CapabilityMask: UInt32 = 1 << 17
-    static let deviceCapabilitiesVersion: UInt8 = 15
+    static let rendererDiagnosticsCapabilityMask: UInt32 = 1 << 18
+    static let deviceCapabilitiesVersion: UInt8 = 16
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -667,6 +673,10 @@ class BLEManager: NSObject, ObservableObject {
         PhoneWatchConnectivityStateV1()
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
+    @Published private(set) var supportsRendererDiagnostics: Bool = false
+    @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
+    @Published private(set) var rendererDiagnosticsStatus = "unavailable"
+    @Published private(set) var rendererDiagnosticsRevision: UInt64 = 0
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -944,6 +954,8 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunkTransferID: UInt8?
     private var deviceTransferStatusChunkCount: UInt8 = 0
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
+    private var rendererDiagnosticsChunks =
+        RendererDiagnosticsChunkReassembler()
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var navigationWriteWithResponseLabel: String?
@@ -3994,6 +4006,10 @@ class BLEManager: NSObject, ObservableObject {
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "unsupported"
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -4411,6 +4427,96 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestRendererDiagnosticsSnapshot() -> Bool {
+        guard supportsRendererDiagnostics else {
+            rendererDiagnosticsStatus = "unsupported"
+            return false
+        }
+        let packet = Data(DeviceBLEProtocol.rendererMetricsRequestPrefix.utf8)
+        let queued = sendTransferControlPacket(
+            packet,
+            label: "renderer diagnostics metrics",
+            coalescingKey: "renderer.diagnostics.metrics"
+        )
+        rendererDiagnosticsStatus = queued ? "requested" : "request failed"
+        return queued
+    }
+
+    @discardableResult
+    func sendRendererBenchmarkMarker(
+        fixtureSHA256: Data,
+        sampleIndex: Int,
+        sampleCount: Int,
+        loop: UInt32
+    ) -> Bool {
+        guard supportsRendererDiagnostics,
+              let packet = RendererBenchmarkMarkerPacket.data(
+                fixtureSHA256: fixtureSHA256,
+                sampleIndex: sampleIndex,
+                sampleCount: sampleCount,
+                loop: loop
+              ) else {
+            return false
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    packet,
+                    label: "renderer benchmark marker",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.marker"
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    packet,
+                    label: "renderer benchmark marker",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.marker"
+                )
+            }
+        )
+    }
+
+    @discardableResult
+    func beginRendererBenchmarkWindow(
+        profile: RendererBenchmarkProfile,
+        repeatNumber: UInt16,
+        runNonce: UInt64,
+        fixtureSHA256: Data,
+        fixtureID: String
+    ) -> Bool {
+        guard supportsRendererDiagnostics,
+              let packet = RendererBenchmarkWindowPacket.data(
+                profile: profile,
+                repeatNumber: repeatNumber,
+                runNonce: runNonce,
+                fixtureSHA256: fixtureSHA256,
+                fixtureID: fixtureID
+              ) else {
+            return false
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    packet,
+                    label: "renderer benchmark window",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.window"
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    packet,
+                    label: "renderer benchmark window",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.window"
+                )
+            }
+        )
+    }
+
+    @discardableResult
     func sendDestinationCatalog(_ payload: DeviceDestinationCatalogPayload) -> Bool {
         guard supportsDestinationPicker,
               let endpoint = navigationWriteEndpoint,
@@ -4791,6 +4897,11 @@ class BLEManager: NSObject, ObservableObject {
         watchControllerOperationStatus = nil
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "unavailable"
+        rendererDiagnosticsRevision = 0
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -7251,6 +7362,10 @@ extension BLEManager: CBPeripheralDelegate {
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "invalid capabilities"
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -7372,6 +7487,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.remoteDeviceDebugCapabilityMask != 0
         let hasGPSPositionQualityV1 =
             flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
+        let hasRendererDiagnostics =
+            flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -7453,6 +7570,14 @@ extension BLEManager: CBPeripheralDelegate {
         supportsScopedWatchController = hasScopedWatchController
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
+        supportsRendererDiagnostics = hasRendererDiagnostics
+        if !hasRendererDiagnostics {
+            rendererDiagnosticsChunks.reset()
+            rendererDiagnosticsSnapshotJSON = nil
+            rendererDiagnosticsStatus = "unsupported"
+        } else if rendererDiagnosticsSnapshotJSON == nil {
+            rendererDiagnosticsStatus = "ready"
+        }
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
@@ -7518,10 +7643,54 @@ extension BLEManager: CBPeripheralDelegate {
         if handleDeviceCapabilitiesNotification(data) {
             return true
         }
+        if handleRendererDiagnosticsNotification(data) {
+            return true
+        }
         if handleDeviceTransferStatusNotification(data) {
             return true
         }
         return handleMapTransferStatusNotification(data)
+    }
+
+    @discardableResult
+    func handleRendererDiagnosticsNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              let prefix = String(data: data.prefix(4), encoding: .utf8) else {
+            return false
+        }
+        if prefix == DeviceBLEProtocol.rendererMetricsChunkPrefix {
+            guard let result = rendererDiagnosticsChunks.consume(data) else {
+                return false
+            }
+            switch result {
+            case .pending:
+                rendererDiagnosticsStatus = "receiving"
+            case let .complete(body):
+                applyRendererDiagnosticsBody(body)
+            case .rejected:
+                rendererDiagnosticsStatus = "invalid snapshot"
+            }
+            return true
+        }
+        guard prefix == DeviceBLEProtocol.rendererMetricsResponsePrefix else {
+            return false
+        }
+        applyRendererDiagnosticsBody(Data(data.dropFirst(4)))
+        return true
+    }
+
+    private func applyRendererDiagnosticsBody(_ body: Data) {
+        guard supportsRendererDiagnostics,
+              let json = RendererDiagnosticsSnapshotEnvelope
+                .normalizedJSONString(body) else {
+            rendererDiagnosticsStatus = "invalid snapshot"
+            log("Received invalid renderer diagnostics snapshot")
+            return
+        }
+        rendererDiagnosticsSnapshotJSON = json
+        rendererDiagnosticsRevision &+= 1
+        rendererDiagnosticsStatus = "snapshot received"
+        log("Renderer diagnostics snapshot received: \(body.count) bytes")
     }
 
     @discardableResult

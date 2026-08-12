@@ -23,6 +23,7 @@ class StubClient(device_debug.DebugClient):
             "deviceId": "abc",
             "width": 2,
             "height": 1,
+            "viewRotation": 0,
         }
 
     def _request(self, *args, **kwargs):
@@ -78,6 +79,32 @@ class DeviceDebugCliTests(unittest.TestCase):
                     Path(directory) / "frame.png", 2, 1, 4, b"\x00\x00"
                 )
 
+    def test_rgb565_png_applies_validated_panel_rotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "rotated.png"
+            device_debug.write_rgb565_png(
+                output,
+                2,
+                1,
+                4,
+                bytes((0x00, 0xF8, 0xE0, 0x07)),
+                1,
+            )
+            png = output.read_bytes()
+            self.assertEqual(struct.unpack(">II", png[16:24]), (1, 2))
+            offset = 8
+            idat = bytearray()
+            while offset < len(png):
+                length = struct.unpack(">I", png[offset : offset + 4])[0]
+                if png[offset + 4 : offset + 8] == b"IDAT":
+                    idat.extend(png[offset + 8 : offset + 8 + length])
+                offset += 12 + length
+            self.assertEqual(
+                zlib.decompress(idat),
+                b"\x00\x00\xff\x00\x00\xff\x00\x00",
+                "quarter-turn output matches the browser's panel transform",
+            )
+
     def test_session_file_permissions_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             session = Path(directory) / "session.json"
@@ -106,6 +133,7 @@ class DeviceDebugCliTests(unittest.TestCase):
                     "deviceId": "abc",
                     "width": 2,
                     "height": 1,
+                    "viewRotation": 0,
                 }
             ).encode()
         )
@@ -143,6 +171,7 @@ class DeviceDebugCliTests(unittest.TestCase):
             "deviceId": "abc",
             "width": 410,
             "height": 502,
+            "viewRotation": 0,
             "counters": {
                 "pointerLastSequence": 41,
                 "pointerSequenceInitialized": True,
@@ -160,6 +189,58 @@ class DeviceDebugCliTests(unittest.TestCase):
         client.pointer("down", 10, 20)
         pointer_body = calls[-1][1]["body"]
         self.assertEqual(pointer_body["eventSequence"], 42)
+
+    def test_metrics_requires_shared_schema_and_identity(self):
+        client = StubClient(
+            json.dumps(
+                {
+                    "ok": True,
+                    "schema": 1,
+                    "sequence": 9,
+                    "timestampMs": 10,
+                    "window": {},
+                    "identity": {},
+                    "tuning": {"profile": "current"},
+                    "memory": {},
+                    "render": {},
+                    "ui": {},
+                    "displayFlush": {},
+                    "gps": {},
+                    "routeReplay": {},
+                    "remoteDebug": {},
+                }
+            ).encode()
+        )
+        self.assertEqual(client.metrics()["sequence"], 9)
+        client.response = b'{"ok":true,"schema":2}'
+        with self.assertRaisesRegex(device_debug.DebugClientError, "schema"):
+            client.metrics()
+
+    def test_begin_renderer_window_sends_exact_fixture_identity(self):
+        calls = []
+        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+
+        def fake_request(path, **kwargs):
+            calls.append((path, kwargs))
+            return b'{"ok":true,"requestId":17}'
+
+        client._request = fake_request
+        request_id = client.begin_renderer_window(
+            profile="medium",
+            run_id="run-17",
+            repeat=2,
+            map_fixture_id="shanghai-map",
+            map_fixture_sha256="a" * 64,
+            route_fixture_id="shanghai-route",
+            route_fixture_sha256="b" * 64,
+        )
+        self.assertEqual(request_id, 17)
+        self.assertEqual(calls[0][0], "/device-debug/v1/metrics/window")
+        self.assertEqual(calls[0][1]["method"], "POST")
+        self.assertEqual(calls[0][1]["body"]["profile"], "medium")
+        self.assertEqual(
+            calls[0][1]["body"]["routeFixture"]["sha256"], "b" * 64
+        )
 
 
 if __name__ == "__main__":

@@ -9,9 +9,13 @@
 #include <Arduino.h>
 
 #include <algorithm>
+#include <cstdio>
 
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
+#endif
+#if DEVICE_REMOTE_DEBUG && !FIRMWARE_DIAGNOSTICS
+#error "remote renderer debugging requires firmware diagnostics"
 #endif
 #include <SPI.h>
 #include <WiFi.h>
@@ -70,8 +74,10 @@ extern xSemaphoreHandle gpsMutex;
 #include "device_transfer_http.hpp"
 #include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
+#include "firmware_metadata.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
+#include "renderer_diagnostics.hpp"
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
@@ -397,6 +403,10 @@ struct PendingMapRendererActivation {
 };
 static PendingMapRendererActivation pendingMapRendererActivation;
 static constexpr uint32_t kMapRendererActivationQueueTimeoutMs = 10000U;
+#if FIRMWARE_DIAGNOSTICS
+static bool ordinaryRendererSessionActive = false;
+static uint32_t ordinaryRendererWindowSequence = 0;
+#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 static display_inactivity::Policy displayInactivityPolicy;
 static display_inactivity::Mode currentDisplayMode =
@@ -458,6 +468,12 @@ bool startRemoteDeviceDebugSession() {
     deviceDebugHttp.finishSessionTeardown();
     return false;
   }
+  mapView.setRendererTuningProfile(renderer_tuning::Profile::Current,
+                                   millis());
+  renderer_diagnostics::beginSession(true, millis());
+#if FIRMWARE_DIAGNOSTICS
+  ordinaryRendererSessionActive = false;
+#endif
   device_debug::frameStore().requestNextFrame();
   if (lv_screen_active() != nullptr)
     lv_obj_invalidate(lv_screen_active());
@@ -476,6 +492,12 @@ bool stopActiveDeviceTransfer() {
     // state and snapshot are reclaimed.
     const bool revoked = deviceTransferHttp.setEnabled(false);
     deviceDebugHttp.cancelSession();
+    mapView.setRendererTuningProfile(renderer_tuning::Profile::Current,
+                                     millis());
+    renderer_diagnostics::endSession(millis());
+#if FIRMWARE_DIAGNOSTICS
+    ordinaryRendererSessionActive = false;
+#endif
     const bool stopped = deviceTransferHttp.waitUntilStopped(5500);
     if (stopped) {
       // A handler that passed authorization immediately before revocation can
@@ -491,6 +513,75 @@ bool stopActiveDeviceTransfer() {
   }
   return deviceTransferHttp.setEnabled(false);
 }
+
+#if FIRMWARE_DIAGNOSTICS
+static bool readActiveRendererMap(
+    map_transfer::ActiveMapSelection &active) {
+  map_transfer::MapTransferInstaller installer("/sdcard");
+  const map_transfer::InstallStatus status = installer.readActiveMap(active);
+  if (!status.ok) {
+    Serial.printf(
+        "RENDERER_DIAGNOSTICS: rejected map fixture active_status=%s\n",
+        status.code.c_str());
+    return false;
+  }
+  return true;
+}
+
+static bool populateOrdinaryRendererIdentity(
+    const renderer_diagnostics_ble_protocol::WindowRequest &request,
+    renderer_diagnostics::RunIdentity &identity) {
+  map_transfer::ActiveMapSelection active;
+  if (!readActiveRendererMap(active) || active.manifestReceipt.empty())
+    return false;
+  char runId[renderer_diagnostics::kIdentityTextBytes] = {};
+  std::snprintf(runId, sizeof(runId), "ble-%016llx",
+                static_cast<unsigned long long>(request.runNonce));
+  char routeHash[renderer_diagnostics::kSha256TextBytes] = {};
+  static constexpr char kHex[] = "0123456789abcdef";
+  for (size_t index = 0;
+       index < renderer_diagnostics_ble_protocol::SHA256_BYTES; ++index) {
+    routeHash[index * 2] = kHex[request.routeFixtureSha256[index] >> 4U];
+    routeHash[index * 2 + 1] =
+        kHex[request.routeFixtureSha256[index] & 0x0fU];
+  }
+  const bool copied = identity.runId.assign(runId) &&
+                      identity.mapFixtureId.assign(active.mapId.c_str()) &&
+                      identity.mapFixtureSha256.assign(
+                          active.manifestReceipt.c_str()) &&
+                      identity.routeFixtureId.assign(request.routeFixtureId) &&
+                      identity.routeFixtureSha256.assign(routeHash) &&
+                      identity.routeMode.assign("ordinary-ble-1hz");
+  identity.repeat = request.repeat;
+  if (!copied) {
+    Serial.println(
+        "RENDERER_DIAGNOSTICS: active map or route identity is too long");
+  }
+  return copied;
+}
+#endif
+
+#if DEVICE_REMOTE_DEBUG
+static bool rendererRequestMatchesActiveMap(
+    const renderer_diagnostics::RunIdentity &identity) {
+  map_transfer::ActiveMapSelection active;
+  if (!readActiveRendererMap(active))
+    return false;
+  const bool matches =
+      active.mapId == identity.mapFixtureId.c_str() &&
+      !active.manifestReceipt.empty() &&
+      active.manifestReceipt == identity.mapFixtureSha256.c_str();
+  if (!matches) {
+    Serial.printf(
+        "RENDERER_DIAGNOSTICS: rejected map fixture requested=%s/%.*s "
+        "active=%s/%.*s\n",
+        identity.mapFixtureId.c_str(), 12,
+        identity.mapFixtureSha256.c_str(), active.mapId.c_str(), 12,
+        active.manifestReceipt.c_str());
+  }
+  return matches;
+}
+#endif
 
 void appRemoteDebugPointerActivity() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -1163,6 +1254,15 @@ void setup() {
 #else
   esp_log_level_set("*", ESP_LOG_NONE);
 #endif
+#if FIRMWARE_DIAGNOSTICS
+  char rendererDeviceId[17] = {};
+  std::snprintf(rendererDeviceId, sizeof(rendererDeviceId), "%016llx",
+                static_cast<unsigned long long>(ESP.getEfuseMac()));
+  renderer_diagnostics::configureBuildIdentity(
+      rendererDeviceId, firmware_metadata::gitSha(),
+      firmware_metadata::target(), firmware_metadata::buildProfile(),
+      esp_random(), static_cast<uint32_t>(esp_reset_reason()));
+#endif
 
   // Initialize Serial for debug. BOOT_PREVIOUS and complete PWRMET reports are
   // larger than the default 256-byte HWCDC queue. Reserve enough room before
@@ -1581,14 +1681,45 @@ void loop() {
   }
 #endif
   power_metrics::noteLoop(now);
+#if FIRMWARE_DIAGNOSTICS
+  uint32_t rendererLoopGapMs = 0;
+#endif
   if (lastLoopMs != 0) {
     uint32_t gap = now - lastLoopMs;
+#if FIRMWARE_DIAGNOSTICS
+    rendererLoopGapMs = gap;
+#endif
     if (gap > maxLoopGapMs) {
       maxLoopGapMs = gap;
     }
   }
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteLoop(now, rendererLoopGapMs);
+#endif
   lastLoopMs = now;
   loopCount++;
+
+#if DEVICE_REMOTE_DEBUG
+  device_debug::RendererRunRequest rendererRunRequest;
+  if (deviceDebugHttp.takeRendererRunRequest(rendererRunRequest)) {
+    if (rendererRequestMatchesActiveMap(rendererRunRequest.identity)) {
+      mapView.setRendererTuningProfile(rendererRunRequest.profile, now);
+      const renderer_diagnostics::JobCounters currentJobs =
+          mapView.rendererDiagnosticsJobCounters();
+      renderer_diagnostics::beginWindow(
+          rendererRunRequest.requestId, rendererRunRequest.identity,
+          rendererRunRequest.profile, now, currentJobs);
+      device_debug::frameStore().requestNextFrame();
+      if (lv_screen_active() != nullptr)
+        lv_obj_invalidate(lv_screen_active());
+      Serial.printf(
+          "RENDERER_DIAGNOSTICS: window=%lu profile=%s repeat=%u\n",
+          static_cast<unsigned long>(rendererRunRequest.requestId),
+          renderer_tuning::name(rendererRunRequest.profile),
+          static_cast<unsigned>(rendererRunRequest.identity.repeat));
+    }
+  }
+#endif
 
   constexpr uint32_t kStaticHousekeepingPeriodMs =
       ui_scheduler::kStaticMaximumWaitMs;
@@ -1736,6 +1867,14 @@ void loop() {
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteGpsPacket(
+      bleStatsBeforeWork.gpsPacketCount,
+      bleStatsBeforeWork.lastGpsPacketGapMs);
+  renderer_diagnostics::notePrediction(
+      mapView.debugPredictionGraceActive(),
+      mapView.debugPredictionExhausted());
+#endif
   const bool navigatingBeforeBleWork =
       bleStatsBeforeWork.connected && bleStatsBeforeWork.authenticated &&
       (routeOverlay.hasRoute() || hasCurrentNavigationData());
@@ -1752,6 +1891,51 @@ void loop() {
     lastBleHousekeepingMs = now;
     bleNavServer.process();
   }
+
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics_ble_protocol::WindowRequest ordinaryWindowRequest;
+  if (bleNavServer.takeRendererBenchmarkWindowRequest(
+          ordinaryWindowRequest)) {
+    if (deviceTransferHttp.status().mode == "debug") {
+      Serial.println(
+          "RENDERER_DIAGNOSTICS: ordinary BLE window rejected during remote debug");
+    } else {
+      renderer_diagnostics::RunIdentity identity;
+      if (populateOrdinaryRendererIdentity(ordinaryWindowRequest, identity)) {
+        if (!ordinaryRendererSessionActive)
+          renderer_diagnostics::beginSession(false, now);
+        const renderer_tuning::Profile profile =
+            static_cast<renderer_tuning::Profile>(
+                ordinaryWindowRequest.profile);
+        mapView.setRendererTuningProfile(profile, now);
+        const renderer_diagnostics::JobCounters currentJobs =
+            mapView.rendererDiagnosticsJobCounters();
+        ordinaryRendererWindowSequence =
+            (ordinaryRendererWindowSequence + 1U) & 0x7fffffffU;
+        if (ordinaryRendererWindowSequence == 0)
+          ordinaryRendererWindowSequence = 1;
+        const uint32_t windowId =
+            ordinaryRendererWindowSequence | 0x80000000U;
+        renderer_diagnostics::beginWindow(
+            windowId, identity, profile, now, currentJobs);
+        ordinaryRendererSessionActive = true;
+        Serial.printf(
+            "RENDERER_DIAGNOSTICS: ordinary window=%lu profile=%s repeat=%u\n",
+            static_cast<unsigned long>(windowId),
+            renderer_tuning::name(profile),
+            static_cast<unsigned>(identity.repeat));
+      }
+    }
+  }
+  const BLEDebugStats rendererSessionBleStats = bleNavServer.getDebugStats();
+  if (ordinaryRendererSessionActive &&
+      (!rendererSessionBleStats.connected ||
+       !rendererSessionBleStats.authenticated)) {
+    mapView.setRendererTuningProfile(renderer_tuning::Profile::Current, now);
+    renderer_diagnostics::endSession(now);
+    ordinaryRendererSessionActive = false;
+  }
+#endif
 
   if (ui_scheduler::isDue(now, lastShutdownHousekeepingMs,
                           kStaticHousekeepingPeriodMs)) {

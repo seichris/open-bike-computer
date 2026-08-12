@@ -416,7 +416,10 @@ jobs:
             test_gps_input_freshness \
             test_map_building_admission \
             test_map_route_geometry \
-            test_map_building_workspace; do
+            test_map_building_workspace \
+            test_renderer_diagnostics \
+            test_renderer_diagnostics_ble_protocol \
+            test_renderer_diagnostics_request; do
             g++ -std=c++17 -Wall -Wextra -Werror \
               "tools/tests/${test}.cpp" \
               -o "/tmp/${test}"
@@ -465,7 +468,8 @@ jobs:
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_device_debug_cli \
             tools.tests.test_device_debug_http_contract \
-            tools.tests.test_device_debug_page
+            tools.tests.test_device_debug_page \
+            tools.tests.test_renderer_benchmark
       - name: Filled line rasterizer host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

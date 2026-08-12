@@ -2253,6 +2253,108 @@ private struct RemoteDeviceDebugSettingsSection: View {
         self.copiedHotspotPassphrase = nil
     }
 }
+
+@MainActor
+private struct RendererBenchmarkReplaySettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @StateObject private var replay = RendererBenchmarkReplayCoordinator()
+
+    var body: some View {
+        Section {
+            SettingsValueRow(
+                title: "Replay",
+                value: replay.progressDescription
+            )
+            SettingsValueRow(
+                title: "Diagnostics",
+                value: bleManager.rendererDiagnosticsStatus
+            )
+            if !replay.fixtureID.isEmpty {
+                SettingsValueRow(title: "Fixture", value: replay.fixtureID)
+            }
+
+            if !bleManager.supportsRemoteDeviceDebug {
+                Picker(
+                    "Ordinary Profile",
+                    selection: $replay.selectedOrdinaryProfile
+                ) {
+                    ForEach(RendererBenchmarkProfile.allCases) { profile in
+                        Text(profile.title).tag(profile)
+                    }
+                }
+                .disabled(replay.isRunning)
+            }
+
+            Button {
+                if replay.isRunning {
+                    replay.stop()
+                } else {
+                    replay.start(bleManager: bleManager)
+                }
+            } label: {
+                Label(
+                    replay.isRunning ? "Stop Pinned Replay" :
+                        "Start Pinned 1 Hz Replay",
+                    systemImage: replay.isRunning ? "stop.fill" :
+                        "location.fill.viewfinder"
+                )
+            }
+            .disabled(!replay.isRunning && !canStart)
+
+            Button {
+                _ = bleManager.requestRendererDiagnosticsSnapshot()
+            } label: {
+                Label("Request Diagnostics Snapshot", systemImage: "waveform.path.ecg")
+            }
+            .disabled(!canStart)
+
+            if let snapshot = bleManager.rendererDiagnosticsSnapshotJSON {
+                Button {
+                    UIPasteboard.general.string = snapshot
+                } label: {
+                    Label("Copy Latest Snapshot JSON", systemImage: "doc.on.doc")
+                }
+            }
+
+            if replay.ordinarySnapshotCount > 0 {
+                Button {
+                    if let capture = replay.ordinaryCaptureJSON() {
+                        UIPasteboard.general.string = capture
+                    }
+                } label: {
+                    Label(
+                        "Copy Ordinary Capture (\(replay.ordinarySnapshotCount))",
+                        systemImage: "doc.on.clipboard"
+                    )
+                }
+            }
+
+            if let errorMessage = replay.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Renderer Benchmark Replay")
+        } footer: {
+            Text(
+                "Replays the checked-in Shanghai route at exactly 1 Hz, including its SHA-256 marker and GPS sample; the route window follows the app's normal two-second cadence. Snapshot requests also work with ordinary diagnostics firmware."
+            )
+        }
+        .onChange(of: bleManager.isNavigationReady) { ready in
+            if !ready { replay.stop(clearRoute: false) }
+        }
+        .onChange(of: bleManager.supportsRendererDiagnostics) { supported in
+            if !supported { replay.stop(clearRoute: false) }
+        }
+        .onDisappear { replay.stop() }
+    }
+
+    private var canStart: Bool {
+        bleManager.isConnected && bleManager.isNavigationReady &&
+            bleManager.supportsRendererDiagnostics
+    }
+}
 #endif
 
 private struct DeveloperSettingsView: View {
@@ -2315,6 +2417,7 @@ private struct DeveloperSettingsView: View {
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
 #if DEBUG
             RemoteDeviceDebugSettingsSection()
+            RendererBenchmarkReplaySettingsSection()
 #endif
             TestNavigationSettingsSection(
                 currentLocation: currentLocation,
