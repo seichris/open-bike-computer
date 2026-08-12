@@ -8,14 +8,15 @@ import os
 import re
 import threading
 import uuid
-from copy import deepcopy
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactRecord
+from .generation_profiles import GenerationProfilePolicy
 from .geometry import GeometryError, normalize_geometry
 from .limits import ACTIVE_STATUSES, JobLimits, LimitError
 from .models import JobStatus, MapDownloadReceipt, MapJob, utc_now_iso
@@ -1450,6 +1451,8 @@ class MapJobService:
         label_target2_enabled: bool = False,
         building_target3_enabled: bool = False,
         building_target3_allowlist: frozenset[str] = frozenset(),
+        generation_profile_policy: GenerationProfilePolicy | None = None,
+        deployment_channel: str = "production",
         estimate_coordinator=None,
     ):
         self.source_index = source_index
@@ -1458,7 +1461,57 @@ class MapJobService:
         self.label_target2_enabled = label_target2_enabled
         self.building_target3_enabled = building_target3_enabled
         self.building_target3_allowlist = building_target3_allowlist
+        self.generation_profile_policy = generation_profile_policy
+        self.deployment_channel = deployment_channel
         self.estimate_coordinator = estimate_coordinator
+
+    def supported_renderer_format_versions(
+        self,
+        client_installation_id: str | None,
+    ) -> list[int]:
+        if self.generation_profile_policy is not None:
+            canary_profiles = frozenset()
+            if client_installation_id in self.building_target3_allowlist:
+                canary_profiles = frozenset({
+                    self.generation_profile_policy.profile_id_for_renderer_format(3)
+                })
+            return [
+                profile.renderer_format_version
+                for profile in self.generation_profile_policy.available_profiles(
+                    self.deployment_channel,
+                    canary_profile_ids=canary_profiles,
+                )
+            ]
+        supported = [1]
+        if self.label_target2_enabled:
+            supported.insert(0, 2)
+        if (
+            self.building_target3_enabled and not self.building_target3_allowlist
+        ) or client_installation_id in self.building_target3_allowlist:
+            supported.insert(0, 3)
+        return supported
+
+    def generation_capabilities(
+        self,
+        client_installation_id: str,
+    ) -> dict[str, Any]:
+        if self.generation_profile_policy is None:
+            raise RuntimeError("generation profile policy is not configured")
+        canary_profiles = frozenset()
+        if client_installation_id in self.building_target3_allowlist:
+            canary_profiles = frozenset({
+                self.generation_profile_policy.profile_id_for_renderer_format(3)
+            })
+        profiles = self.generation_profile_policy.available_profiles(
+            self.deployment_channel,
+            canary_profile_ids=canary_profiles,
+        )
+        return {
+            "schemaVersion": 1,
+            "deploymentChannel": self.deployment_channel,
+            "policySha256": self.generation_profile_policy.sha256,
+            "generationProfiles": [profile.public_dict() for profile in profiles],
+        }
 
     def create_job(self, request: dict[str, Any]) -> MapJob:
         client_installation_id, client_request_id, existing = self.resolve_client_request(
@@ -1541,8 +1594,7 @@ class MapJobService:
     ) -> tuple[str | None, str | None, MapJob | None]:
         """Validate idempotency fields and return an existing matching request."""
         _validate_map_job_fields(request)
-        from .map_buildings import BUILDING_RENDERER_FORMAT_VERSION
-        from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
+        from .map_labels import renderer_format_version
 
         client_installation_id = _client_identifier(request, "clientInstallationId")
         client_request_id = _client_identifier(request, "clientRequestId")
@@ -1570,22 +1622,10 @@ class MapJobService:
                 return client_installation_id, client_request_id, existing
 
         requested_format = renderer_format_version(request)
-        if (
-            requested_format == LABEL_RENDERER_FORMAT_VERSION
-            and not self.label_target2_enabled
-        ):
-            raise UnsupportedRendererTargetError(requested_format, [1])
-        if (
-            requested_format == BUILDING_RENDERER_FORMAT_VERSION
-            and not (
-                self.building_target3_enabled
-                and not self.building_target3_allowlist
-                or client_installation_id in self.building_target3_allowlist
-            )
-        ):
-            supported_formats = [1]
-            if self.label_target2_enabled:
-                supported_formats.insert(0, LABEL_RENDERER_FORMAT_VERSION)
+        supported_formats = self.supported_renderer_format_versions(
+            client_installation_id
+        )
+        if requested_format not in supported_formats:
             raise UnsupportedRendererTargetError(
                 requested_format,
                 supported_formats,

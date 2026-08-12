@@ -31,8 +31,13 @@ class HardwareValidationComposeTests(unittest.TestCase):
             compose,
         )
         self.assertIn(
-            "MAP_PLATFORM_LABEL_TARGET2_ENABLED: "
-            "${MAP_PLATFORM_LABEL_TARGET2_ENABLED:-0}",
+            "MAP_PLATFORM_DEPLOYMENT_CHANNEL: "
+            "${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-development}",
+            compose,
+        )
+        self.assertIn(
+            "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
+            "/app/config/generation-profile-policy-v1.json",
             compose,
         )
         self.assertEqual(

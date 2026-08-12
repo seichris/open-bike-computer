@@ -144,6 +144,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 "MAP_PLATFORM_ARTIFACT_STORE": "filesystem",
                 "MAP_PLATFORM_ARTIFACT_ROOT": str(Path(self.tmp.name) / "artifacts"),
                 "MAP_PLATFORM_MAP_STREAM_ENABLED": "0",
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
                 "MAP_PLATFORM_LABEL_TARGET2_ENABLED": "0",
                 "MAP_PLATFORM_BUILDING_TARGET3_ENABLED": "0",
                 "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": "",
@@ -225,7 +226,7 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(observations["shadow"], (False, True))
         self.assertEqual(observations["public"], (True, True))
 
-    def test_target_two_generation_requires_explicit_rollout_enablement(self):
+    def test_production_policy_enables_target_two_globally(self):
         payload = {
             "mode": "custom_bbox",
             "bbox": [103.75, 1.24, 103.93, 1.37],
@@ -240,28 +241,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 "internationalFallback": "en",
             },
         }
-        blocked = self.client.post("/v1/map-jobs", json=payload)
-        self.assertEqual(blocked.status_code, 400)
-        self.assertEqual(
-            blocked.json()["detail"],
-            {
-                "code": "unsupported_renderer_target",
-                "message": "renderer format 2 generation is not available for this installation",
-                "requestedRendererFormatVersion": 2,
-                "supportedRendererFormatVersions": [1],
-            },
-        )
-
-        with patch.dict(
-            os.environ,
-            {"MAP_PLATFORM_LABEL_TARGET2_ENABLED": "1"},
-            clear=False,
-        ):
-            enabled_client = TestClient(create_app())
-            try:
-                enabled = enabled_client.post("/v1/map-jobs", json=payload)
-            finally:
-                enabled_client.close()
+        enabled = self.client.post("/v1/map-jobs", json=payload)
         self.assertEqual(enabled.status_code, 200)
 
     def test_target_three_returns_typed_fallback_and_honors_allowlist(self):
@@ -295,15 +275,13 @@ class MapJobRunAPITests(unittest.TestCase):
                 "code": "unsupported_renderer_target",
                 "message": "renderer format 3 generation is not available for this installation",
                 "requestedRendererFormatVersion": 3,
-                "supportedRendererFormatVersions": [1],
+                "supportedRendererFormatVersions": [2, 1],
             },
         )
 
         with patch.dict(
             os.environ,
             {
-                "MAP_PLATFORM_LABEL_TARGET2_ENABLED": "1",
-                "MAP_PLATFORM_BUILDING_TARGET3_ENABLED": "1",
                 "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": allowed[
                     "clientInstallationId"
                 ],
@@ -347,6 +325,104 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(
             allowed_job.request["target"]["rendererFormatVersion"],
             3,
+        )
+
+    def test_capabilities_are_authenticated_and_channel_scoped(self):
+        credential = self.client.post("/v1/installations").json()
+        params = {
+            "clientInstallationId": credential["clientInstallationId"],
+        }
+        unauthenticated = self.client.get("/v1/capabilities", params=params)
+        self.assertEqual(unauthenticated.status_code, 401)
+
+        production = self.client.get(
+            "/v1/capabilities",
+            params=params,
+            headers={
+                "X-Installation-Token": credential["clientInstallationToken"],
+            },
+        )
+        self.assertEqual(production.status_code, 200)
+        self.assertEqual(production.headers["Cache-Control"], "private, no-store")
+        payload = production.json()
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["deploymentChannel"], "production")
+        self.assertRegex(payload["policySha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            [
+                profile["rendererFormatVersion"]
+                for profile in payload["generationProfiles"]
+            ],
+            [2, 1],
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": credential[
+                    "clientInstallationId"
+                ],
+            },
+            clear=False,
+        ):
+            canary_client = TestClient(create_app())
+            try:
+                canary = canary_client.get(
+                    "/v1/capabilities",
+                    params=params,
+                    headers={
+                        "X-Installation-Token": credential[
+                            "clientInstallationToken"
+                        ],
+                    },
+                )
+            finally:
+                canary_client.close()
+        self.assertEqual(canary.status_code, 200)
+        self.assertEqual(
+            [
+                profile["rendererFormatVersion"]
+                for profile in canary.json()["generationProfiles"]
+            ],
+            [3, 2, 1],
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "development",
+                "MAP_PLATFORM_DATA_ROOT": str(Path(self.tmp.name) / "development"),
+            },
+            clear=False,
+        ):
+            development_client = TestClient(create_app())
+            try:
+                development_credential = development_client.post(
+                    "/v1/installations"
+                ).json()
+                development = development_client.get(
+                    "/v1/capabilities",
+                    params={
+                        "clientInstallationId": development_credential[
+                            "clientInstallationId"
+                        ],
+                    },
+                    headers={
+                        "X-Installation-Token": development_credential[
+                            "clientInstallationToken"
+                        ],
+                    },
+                )
+            finally:
+                development_client.close()
+        self.assertEqual(development.status_code, 200)
+        self.assertEqual(development.json()["deploymentChannel"], "development")
+        self.assertEqual(
+            [
+                profile["rendererFormatVersion"]
+                for profile in development.json()["generationProfiles"]
+            ],
+            [3, 2, 1],
         )
 
     def update_job(self, job_id: str, **values) -> None:
