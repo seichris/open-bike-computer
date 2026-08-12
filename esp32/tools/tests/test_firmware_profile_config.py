@@ -226,6 +226,15 @@ assert display_probe in diagnostic_workflow
 
 speaker_source = (project_dir / "speaker_honk_test.cpp").read_text()
 speaker_implementation = (project_dir / "lib/speaker/speaker.cpp").read_text()
+codec_data_i2s = (
+    project_dir
+    / "lib/esp_codec_dev/src/platform/audio_codec_data_i2s.c"
+).read_text()
+assert "SPEAKER_CYCLE schema=1" in speaker_source
+assert "100 tracked playback cycles complete" in speaker_source
+assert "gpio_get_level(GPIO_NUM_46)" in speaker_source
+assert "heap_caps_get_free_size(MALLOC_CAP_DEFAULT)" in speaker_source
+assert "heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT)" in speaker_source
 for board in ("175", "206"):
     profile = f"env:WAVESHARE_AMOLED_{board}_SPEAKER_HONK"
     assert config.get(profile, "extends") == f"env:WAVESHARE_AMOLED_{board}"
@@ -246,12 +255,44 @@ assert "TrackedPlaybackResult::Succeeded" in speaker_source
 assert "TrackedPlaybackResult::Failed" in speaker_source
 assert "playbackSucceeded = playNow(sound)" in speaker_implementation
 cleanup_call = speaker_implementation.index(
-    "!cleanupRequired || releaseCodecResources();"
+    "cleanupSucceeded = releaseCodecResources();"
 )
 completion_publish = speaker_implementation.index(
     "recordPlaybackCompletion(\n        request.requestId"
 )
 assert cleanup_call < completion_publish
+assert "retrying retained cleanup state once" in speaker_implementation
+assert "codecInterface->close" not in speaker_implementation
+assert "dataInterface->close" not in speaker_implementation
+assert "i2s_channel_enable(txChannel)" not in speaker_implementation
+assert "_i2s_disable_for_reconfiguration" in codec_data_i2s
+assert "if (*enabled == false)" in codec_data_i2s
+assert codec_data_i2s.index("if (*enabled == false)") < codec_data_i2s.index(
+    "_i2s_drv_enable(i2s_data, playback, false)"
+)
+format_setup = codec_data_i2s[
+    codec_data_i2s.index("static int _i2s_data_set_fmt("):
+    codec_data_i2s.index("static int _i2s_data_read(")
+]
+assert "_i2s_disable_for_reconfiguration(i2s_data, true)" in format_setup
+assert "_i2s_disable_for_reconfiguration(i2s_data, false)" in format_setup
+assert "_i2s_drv_enable(i2s_data, true, false);" not in format_setup
+assert "_i2s_drv_enable(i2s_data, false, false);" not in format_setup
+codec_open = speaker_implementation.index("esp_codec_dev_open(speakerDevice")
+channel_enabled = speaker_implementation.index(
+    "resourceState.channelEnabled = true;", codec_open
+)
+assert codec_open < channel_enabled
+failed_init = speaker_implementation[
+    speaker_implementation.index("bool failInitialization("):
+    speaker_implementation.index("bool initializeCodec()")
+]
+assert "releaseCodecResources()" not in failed_init
+assert "!codecReady || uxQueueMessagesWaiting(soundQueue) == 0" in (
+    speaker_implementation
+)
+assert "cleanupSucceeded = releaseCodecResources();" in speaker_implementation
+assert "(void)releaseCodecResources();" in speaker_implementation
 assert "playbackRequestLifecycleSucceeded(" in speaker_implementation[
     completion_publish:
 ]

@@ -207,6 +207,19 @@ static int _i2s_drv_enable(i2s_data_t *i2s_data, bool playback, bool enable)
     return ESP_CODEC_DEV_OK;
 }
 
+static int _i2s_disable_for_reconfiguration(i2s_data_t *i2s_data, bool playback)
+{
+    bool *enabled = playback ? &i2s_data->out_enable : &i2s_data->in_enable;
+    if (*enabled == false) {
+        return ESP_CODEC_DEV_OK;
+    }
+    int ret = _i2s_drv_enable(i2s_data, playback, false);
+    if (ret == ESP_CODEC_DEV_OK) {
+        *enabled = false;
+    }
+    return ret;
+}
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 static uint8_t get_active_channel(esp_codec_dev_sample_info_t *fs)
 {
@@ -644,14 +657,20 @@ static int _i2s_data_set_fmt(const audio_codec_data_if_t *h, esp_codec_dev_type_
         return ESP_CODEC_DEV_NOT_SUPPORT;
     }
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    int ret;
+    int ret = ESP_CODEC_DEV_OK;
     _i2s_lock(i2s_data, __func__);
-    // disable internally
+    // Format changes require a stopped channel, but a newly initialized
+    // channel has never been enabled. Avoid issuing an invalid driver disable
+    // and keep the interface's enable state aligned with successful calls.
     if (dev_type & ESP_CODEC_DEV_TYPE_OUT) {
-        _i2s_drv_enable(i2s_data, true, false);
+        ret = _i2s_disable_for_reconfiguration(i2s_data, true);
     }
-    if (dev_type & ESP_CODEC_DEV_TYPE_IN) {
-        _i2s_drv_enable(i2s_data, false, false);
+    if (ret == ESP_CODEC_DEV_OK && (dev_type & ESP_CODEC_DEV_TYPE_IN)) {
+        ret = _i2s_disable_for_reconfiguration(i2s_data, false);
+    }
+    if (ret != ESP_CODEC_DEV_OK) {
+        _i2s_unlock(i2s_data);
+        return ret;
     }
     if ((dev_type & ESP_CODEC_DEV_TYPE_IN) != 0 &&
         (dev_type & ESP_CODEC_DEV_TYPE_OUT) != 0) {

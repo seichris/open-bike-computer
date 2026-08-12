@@ -5,6 +5,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "speaker_gain.h"
+#include "speaker_resource_state.hpp"
 #include "../waveshare_board/axp2101.hpp"
 #include "../waveshare_board/i2c_bus.hpp"
 
@@ -92,6 +93,7 @@ bool powerButtonMonitoringConfigured = false;
 float codecHardwareGainDb = 0.0f;
 float currentDacGainDb = 0.0f;
 speaker_limiter_t playbackLimiter{};
+SpeakerResourceState resourceState{};
 PowerButtonHonkConfig powerButtonHonkConfig{
     false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
 uint32_t lastPowerButtonConfigureAttemptMs = 0;
@@ -270,44 +272,96 @@ bool releaseCodecResources() {
   codecHardwareGainDb = 0.0f;
   currentDacGainDb = 0.0f;
   playbackLimiter = {};
-  gpio_set_level(PA_ENABLE, 0);
+  if (resourceState.any() && gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
+    Serial.println("Speaker: PA shutdown failed; cleanup will retry");
+    return false;
+  }
+  resourceState.powerAmplifierEnabled = false;
 
-  if (speakerDevice != nullptr) {
-    if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
-      Serial.println("Speaker: codec shutdown failed; cleanup will retry");
-      return false;
+  while (true) {
+    switch (nextCleanupAction(resourceState)) {
+    case CleanupAction::LowerPowerAmplifier:
+      // The PA is lowered before the loop, including after partial opens.
+      resourceState.powerAmplifierEnabled = false;
+      break;
+    case CleanupAction::CloseCodecDevice:
+      if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
+        Serial.println("Speaker: codec shutdown failed; cleanup will retry");
+        return false;
+      }
+      resourceState.codecDeviceOpened = false;
+      // A successful device close also disables its data interface. Keep the
+      // I2S lifecycle state aligned so cleanup does not issue a second disable
+      // and mistake ESP_ERR_INVALID_STATE for a retryable teardown failure.
+      resourceState.channelEnabled = false;
+      break;
+    case CleanupAction::DeleteCodecDevice:
+      // A failed open can leave an internally tracked disable pending even
+      // though codecDeviceOpened was never published. close() is a no-op when
+      // no stage remains enabled and retains this device on a real failure.
+      if (esp_codec_dev_close(speakerDevice) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: codec partial-open cleanup failed; cleanup will retry");
+        return false;
+      }
+      esp_codec_dev_delete(speakerDevice);
+      speakerDevice = nullptr;
+      resourceState.codecDeviceCreated = false;
+      break;
+    case CleanupAction::DeleteCodecInterface:
+      if (audio_codec_delete_codec_if(codecInterface) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: codec interface deletion failed; cleanup will retry");
+        return false;
+      }
+      codecInterface = nullptr;
+      resourceState.codecInterfaceCreated = false;
+      break;
+    case CleanupAction::DeleteDataInterface:
+      if (audio_codec_delete_data_if(dataInterface) != ESP_CODEC_DEV_OK) {
+        Serial.println(
+            "Speaker: data interface deletion failed; cleanup will retry");
+        return false;
+      }
+      dataInterface = nullptr;
+      resourceState.dataInterfaceCreated = false;
+      break;
+    case CleanupAction::DeleteGpioInterface:
+      if (audio_codec_delete_gpio_if(gpioInterface) != ESP_CODEC_DEV_OK) {
+        gpioInterface = nullptr;
+        resourceState.gpioInterfaceCreated = false;
+        Serial.println("Speaker: GPIO interface deletion reported an error");
+        return false;
+      }
+      gpioInterface = nullptr;
+      resourceState.gpioInterfaceCreated = false;
+      break;
+    case CleanupAction::DisableI2sChannel:
+      if (i2s_channel_disable(txChannel) != ESP_OK) {
+        Serial.println(
+            "Speaker: I2S channel disable failed; cleanup will retry");
+        return false;
+      }
+      resourceState.channelEnabled = false;
+      break;
+    case CleanupAction::DeleteI2sChannel:
+      if (i2s_del_channel(txChannel) != ESP_OK) {
+        Serial.println(
+            "Speaker: I2S channel cleanup failed; cleanup will retry");
+        return false;
+      }
+      txChannel = nullptr;
+      resourceState.channelAllocated = false;
+      resourceState.standardModeInitialized = false;
+      break;
+    case CleanupAction::None:
+      return true;
     }
-    esp_codec_dev_delete(speakerDevice);
-    speakerDevice = nullptr;
   }
-  if (codecInterface != nullptr) {
-    audio_codec_delete_codec_if(codecInterface);
-    codecInterface = nullptr;
-  }
-  if (dataInterface != nullptr) {
-    audio_codec_delete_data_if(dataInterface);
-    dataInterface = nullptr;
-  }
-  if (gpioInterface != nullptr) {
-    audio_codec_delete_gpio_if(gpioInterface);
-    gpioInterface = nullptr;
-  }
-
-  if (txChannel != nullptr) {
-    i2s_channel_disable(txChannel);
-    if (i2s_del_channel(txChannel) != ESP_OK) {
-      Serial.println("Speaker: I2S channel cleanup failed; cleanup will retry");
-      return false;
-    }
-    txChannel = nullptr;
-  }
-
-  return true;
 }
 
 bool failInitialization(const char *message) {
   Serial.println(message);
-  releaseCodecResources();
   return false;
 }
 
@@ -315,9 +369,7 @@ bool initializeCodec() {
   if (initialized) {
     return true;
   }
-  if (speakerDevice != nullptr || codecInterface != nullptr ||
-      dataInterface != nullptr || gpioInterface != nullptr ||
-      txChannel != nullptr) {
+  if (resourceState.any()) {
     if (!releaseCodecResources()) {
       return false;
     }
@@ -328,8 +380,10 @@ bool initializeCodec() {
     return false;
   }
 
-  gpio_set_direction(PA_ENABLE, GPIO_MODE_OUTPUT);
-  gpio_set_level(PA_ENABLE, 0);
+  if (gpio_set_direction(PA_ENABLE, GPIO_MODE_OUTPUT) != ESP_OK ||
+      gpio_set_level(PA_ENABLE, 0) != ESP_OK) {
+    return failInitialization("Speaker: failed to hold PA disabled");
+  }
 
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -337,6 +391,7 @@ bool initializeCodec() {
   if (i2s_new_channel(&channelConfig, &txChannel, nullptr) != ESP_OK) {
     return failInitialization("Speaker: failed to allocate I2S channels");
   }
+  resourceState.channelAllocated = true;
 
   i2s_std_config_t standardConfig{};
   standardConfig.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(22050);
@@ -348,17 +403,19 @@ bool initializeCodec() {
   standardConfig.gpio_cfg.dout = I2S_DOUT;
   standardConfig.gpio_cfg.din = I2S_DIN;
 
-  if (i2s_channel_init_std_mode(txChannel, &standardConfig) != ESP_OK ||
-      i2s_channel_enable(txChannel) != ESP_OK) {
+  if (i2s_channel_init_std_mode(txChannel, &standardConfig) != ESP_OK) {
     return failInitialization("Speaker: failed to configure I2S");
   }
+  resourceState.standardModeInitialized = true;
 
   audio_codec_i2s_cfg_t i2sConfig{};
   i2sConfig.port = I2S_NUM_0;
   i2sConfig.rx_handle = nullptr;
   i2sConfig.tx_handle = txChannel;
   dataInterface = audio_codec_new_i2s_data(&i2sConfig);
+  resourceState.dataInterfaceCreated = dataInterface != nullptr;
   gpioInterface = audio_codec_new_gpio();
+  resourceState.gpioInterfaceCreated = gpioInterface != nullptr;
   if (dataInterface == nullptr || gpioInterface == nullptr) {
     return failInitialization("Speaker: failed to create codec interfaces");
   }
@@ -386,6 +443,7 @@ bool initializeCodec() {
   if (codecInterface == nullptr) {
     return failInitialization("Speaker: failed to initialize ES8311");
   }
+  resourceState.codecInterfaceCreated = true;
 
   esp_codec_dev_cfg_t deviceConfig{};
   deviceConfig.dev_type = ESP_CODEC_DEV_TYPE_OUT;
@@ -395,6 +453,7 @@ bool initializeCodec() {
   if (speakerDevice == nullptr) {
     return failInitialization("Speaker: failed to create codec device");
   }
+  resourceState.codecDeviceCreated = true;
 
   esp_codec_dev_vol_map_t volumeMap[SPEAKER_VOLUME_CURVE_POINT_COUNT]{};
   speaker_build_volume_map(volumeMap, codecHardwareGainDb,
@@ -414,10 +473,16 @@ bool initializeCodec() {
   sampleInfo.mclk_multiple = 256;
 
   if (esp_codec_dev_set_out_vol(speakerDevice, DEFAULT_VOLUME_PERCENT) !=
-          ESP_CODEC_DEV_OK ||
-      esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
+      ESP_CODEC_DEV_OK) {
+    return failInitialization("Speaker: failed to configure codec volume");
+  }
+  if (esp_codec_dev_open(speakerDevice, &sampleInfo) != ESP_CODEC_DEV_OK) {
     return failInitialization("Speaker: failed to open codec device");
   }
+  resourceState.codecDeviceOpened = true;
+  // esp_codec_dev_open() owns data-interface activation and enables I2S.
+  resourceState.channelEnabled = true;
+  resourceState.powerAmplifierEnabled = true;
 
   initialized = true;
   currentDacGainDb = speaker_dac_gain_db(
@@ -555,7 +620,8 @@ void speakerTask(void *) {
         power_management::LockDomain::Audio);
     Sound sound = static_cast<Sound>(request.sound);
     bool playbackSucceeded = false;
-    if (!initializeCodec()) {
+    const bool codecReady = initializeCodec();
+    if (!codecReady) {
       playbackActive.store(false, std::memory_order_relaxed);
       Serial.println("Speaker: playback skipped because initialization failed");
     } else {
@@ -580,9 +646,20 @@ void speakerTask(void *) {
       playbackActive.store(false, std::memory_order_relaxed);
       ui_scheduler::notify(ui_scheduler::WakeReason::Audio);
     }
-    const bool cleanupRequired = uxQueueMessagesWaiting(soundQueue) == 0;
-    const bool cleanupSucceeded =
-        !cleanupRequired || releaseCodecResources();
+    // A partial initialization is always torn down immediately. A successful
+    // codec stays open only while another already-queued request can reuse it.
+    const bool cleanupRequired =
+        !codecReady || uxQueueMessagesWaiting(soundQueue) == 0;
+    bool cleanupSucceeded = true;
+    if (cleanupRequired) {
+      cleanupSucceeded = releaseCodecResources();
+      if (!cleanupSucceeded && resourceState.any()) {
+        Serial.println("Speaker: retrying retained cleanup state once");
+        // Preserve the first failure in playback completion even if the
+        // controlled retry finishes releasing the retained state.
+        (void)releaseCodecResources();
+      }
+    }
     recordPlaybackCompletion(
         request.requestId,
         playbackRequestLifecycleSucceeded(

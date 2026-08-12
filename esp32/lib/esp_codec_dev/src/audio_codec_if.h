@@ -39,6 +39,7 @@ struct audio_codec_if_t {
  * @param         codec_if: Codec interface
  * @return        ESP_CODEC_DEV_OK: Delete success
  *                ESP_CODEC_DEV_INVALID_ARG: Input is NULL pointer
+ *                Other: Close failed and the interface remains owned by caller
  */
 int audio_codec_delete_codec_if(const audio_codec_if_t *codec_if);
 

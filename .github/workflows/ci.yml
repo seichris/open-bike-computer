@@ -301,6 +301,17 @@ jobs:
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_speaker_resource_state.cpp \
+            -o /tmp/test_speaker_resource_state
+          /tmp/test_speaker_resource_state
+          gcc -std=c11 -Wall -Wextra -Werror \
+            -Itools/tests/host_stubs \
+            -Ilib/esp_codec_dev/src \
+            tools/tests/test_codec_interface_delete.c \
+            lib/esp_codec_dev/src/esp_codec_dev_if.c \
+            -o /tmp/test_codec_interface_delete
+          /tmp/test_codec_interface_delete
+          g++ -std=c++17 -Wall -Wextra -Werror \
             -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \
             tools/tests/test_power_management_policy.cpp \
             -o /tmp/test_power_management_policy_light_sleep

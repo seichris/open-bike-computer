@@ -132,12 +132,16 @@ static void _update_codec_setting(codec_dev_t *dev)
 static int _abort_codec_open(codec_dev_t *dev, int ret)
 {
     const audio_codec_if_t *codec = dev->codec_if;
-    if (codec && codec->enable) {
-        codec->enable(codec, false);
+    if (!dev->codec_disabled && codec && codec->enable) {
+        if (codec->enable(codec, false) == ESP_CODEC_DEV_OK) {
+            dev->codec_disabled = true;
+        }
     }
     const audio_codec_data_if_t *data_if = dev->data_if;
-    if (data_if && data_if->enable) {
-        data_if->enable(data_if, dev->dev_caps, false);
+    if (!dev->data_disabled && data_if && data_if->enable) {
+        if (data_if->enable(data_if, dev->dev_caps, false) == ESP_CODEC_DEV_OK) {
+            dev->data_disabled = true;
+        }
     }
     dev->input_opened = false;
     dev->output_opened = false;
@@ -159,6 +163,9 @@ esp_codec_dev_handle_t esp_codec_dev_new(esp_codec_dev_cfg_t *cfg)
     if (cfg->dev_type & ESP_CODEC_DEV_TYPE_OUT) {
         _get_default_vol_curve(&dev->vol_curve);
     }
+    dev->codec_disabled = true;
+    dev->data_disabled = true;
+    dev->sw_vol_closed = true;
     dev->disable_when_closed = true;
     return (esp_codec_dev_handle_t) dev;
 }
@@ -173,9 +180,6 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         ESP_LOGI(TAG, "Input already open");
         return ESP_CODEC_DEV_OK;
     }
-    dev->codec_disabled = false;
-    dev->data_disabled = false;
-    dev->sw_vol_closed = false;
     bool input_opened = false;
     bool output_opened = false;
     if ((dev->dev_caps & ESP_CODEC_DEV_TYPE_IN)) {
@@ -210,6 +214,7 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         if (ret != ESP_CODEC_DEV_OK) {
             return _abort_codec_open(dev, ret);
         }
+        dev->data_disabled = false;
     }
     if (codec) {
         // TODO not set codec fs
@@ -225,6 +230,7 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
                 ESP_LOGE(TAG, "Fail to enable codec");
                 return _abort_codec_open(dev, ret);
             }
+            dev->codec_disabled = false;
         }
     }
     dev->input_opened = input_opened;
@@ -238,6 +244,7 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
         }
         if (dev->sw_vol) {
             dev->sw_vol->open(dev->sw_vol, fs, VOL_TRANSITION_TIME);
+            dev->sw_vol_closed = false;
         }
     }
     // update settings to avoid lost after re-enable
@@ -539,7 +546,8 @@ int esp_codec_dev_close(esp_codec_dev_handle_t handle)
     if (dev == NULL) {
         return ESP_CODEC_DEV_INVALID_ARG;
     }
-    if (dev->output_opened == false && dev->input_opened == false) {
+    if (dev->output_opened == false && dev->input_opened == false &&
+        dev->codec_disabled && dev->data_disabled && dev->sw_vol_closed) {
         return ESP_CODEC_DEV_OK;
     }
     int ret = ESP_CODEC_DEV_OK;
