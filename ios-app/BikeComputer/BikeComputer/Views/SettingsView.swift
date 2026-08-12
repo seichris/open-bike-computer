@@ -91,7 +91,9 @@ struct SettingsView: View {
                 }
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
-                DeviceScreensSettingsSection()
+                DeviceScreensSettingsSection(
+                    offlineMapManager: offlineMapManager
+                )
                 SavedMapsSettingsSection(
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
@@ -140,14 +142,6 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Ride Detection", systemImage: "figure.outdoor.cycle")
-                    }
-
-                    NavigationLink {
-                        UICustomizationSettingsView(
-                            offlineMapManager: offlineMapManager
-                        )
-                    } label: {
-                        Label("UI Customization", systemImage: "slider.horizontal.3")
                     }
 
                     NavigationLink {
@@ -1073,15 +1067,53 @@ private struct FirmwareUpdateSettingsSection: View {
 
 private struct DeviceScreensSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
+    let offlineMapManager: OfflineMapManager
 
     var body: some View {
-        Section(header: Text("Device Screens")) {
+        Section(
+            header: Text("Device Screens"),
+            footer: Text(mapStyleFooter)
+        ) {
             ForEach(bleManager.availableDeviceScreens) { screen in
-                Toggle(screen.title, isOn: Binding(
-                    get: { bleManager.isDeviceScreenEnabled(screen) },
-                    set: { bleManager.setDeviceScreen(screen, enabled: $0) }
-                ))
-                .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
+                HStack(spacing: 8) {
+                    Text(screen.title)
+                    Spacer()
+
+                    if let styleScreen = mapStyleScreen(for: screen) {
+                        NavigationLink {
+                            MapStyleSettingsView(
+                                screen: styleScreen,
+                                offlineMapManager: offlineMapManager
+                            )
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel(
+                            mapStyleAccessibilityLabel(for: screen)
+                        )
+                    }
+
+                    Toggle(
+                        screen.title,
+                        isOn: Binding(
+                            get: {
+                                bleManager.isDeviceScreenEnabled(screen)
+                            },
+                            set: {
+                                bleManager.setDeviceScreen(
+                                    screen,
+                                    enabled: $0
+                                )
+                            }
+                        )
+                    )
+                    .labelsHidden()
+                    .accessibilityLabel("\(screen.title) screen")
+                    .disabled(bleManager.isOnlyEnabledDeviceScreen(screen))
+                }
             }
 
             Picker("Default Screen", selection: Binding(
@@ -1099,59 +1131,59 @@ private struct DeviceScreensSettingsSection: View {
         .disabled(!bleManager.supportsDeviceSettings ||
                   !bleManager.hasReceivedDeviceCapabilities)
     }
-}
 
-private struct UICustomizationSettingsView: View {
-    @EnvironmentObject private var bleManager: BLEManager
-    @ObservedObject var offlineMapManager: OfflineMapManager
-
-    private var screenStylesFooter: String {
+    private var mapStyleFooter: String {
         if !bleManager.hasReceivedDeviceCapabilities {
             return "Checking whether the connected firmware supports independent map styles."
         }
         if bleManager.supportsIndependentMapProfiles {
-            return "Configure map appearance independently for each device screen."
+            return "Use the gear buttons to configure Map and Map + Navigation independently."
         }
-        return "This firmware uses one shared style for both map screens. Update the firmware to configure them independently."
+        return "This firmware uses one shared style for Map and Map + Navigation. Either gear opens the shared Map Screens settings."
     }
 
-    var body: some View {
-        Form {
-            Section(header: Text("Screen Styles"), footer: Text(screenStylesFooter)) {
-                NavigationLink {
-                    MapStyleSettingsView(
-                        screen: .map,
-                        offlineMapManager: offlineMapManager
-                    )
-                } label: {
-                    Label(bleManager.supportsIndependentMapProfiles ? "Map" : "Map Screens",
-                          systemImage: "map")
-                }
-
-                if bleManager.supportsIndependentMapProfiles {
-                    NavigationLink {
-                        MapStyleSettingsView(
-                            screen: .mapPlusNavigation,
-                            offlineMapManager: offlineMapManager
-                        )
-                    } label: {
-                        Label("Map + Navigation", systemImage: "location.north.line")
-                    }
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings ||
-                      !bleManager.hasReceivedDeviceCapabilities)
-
-            Section(header: Text("Navigation Overlays"), footer: Text("Show or hide live navigation layers drawn above both map screens.")) {
-                Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
-                    .onChange(of: bleManager.showRouteOverlay) { _ in bleManager.sendVisibilityMask() }
-                Toggle("Current Position", isOn: $bleManager.showCurrentPosition)
-                    .onChange(of: bleManager.showCurrentPosition) { _ in bleManager.sendVisibilityMask() }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
+    private func mapStyleAccessibilityLabel(for screen: DeviceScreen) -> String {
+        if !bleManager.supportsIndependentMapProfiles {
+            return "Shared Map Screens UI settings, affects Map and Map + Navigation"
         }
-        .navigationTitle("UI Customization")
-        .navigationBarTitleDisplayMode(.inline)
+        return "\(screen.title) UI settings"
+    }
+
+    private func mapStyleScreen(for screen: DeviceScreen) -> MapStyleScreen? {
+        switch screen {
+        case .map:
+            return .map
+        case .mapPlusNavigation:
+            return bleManager.supportsIndependentMapProfiles
+                ? .mapPlusNavigation
+                : .map
+        case .navigation, .rideStats, .batteryStatus:
+            return nil
+        }
+    }
+}
+
+private struct NavigationOverlaysSettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+
+    var body: some View {
+        Section {
+            Toggle("Route Line", isOn: $bleManager.showRouteOverlay)
+                .onChange(of: bleManager.showRouteOverlay) { _ in
+                    bleManager.sendVisibilityMask()
+                }
+            Toggle("Current Position", isOn: $bleManager.showCurrentPosition)
+                .onChange(of: bleManager.showCurrentPosition) { _ in
+                    bleManager.sendVisibilityMask()
+                }
+        } header: {
+            Text("Navigation Overlays")
+        } footer: {
+            Text(
+                "Show or hide live navigation layers drawn above both map screens."
+            )
+        }
+        .disabled(!bleManager.supportsDeviceSettings)
     }
 }
 
@@ -2343,6 +2375,8 @@ private struct DeveloperSettingsView: View {
                     }
                 }
             }
+
+            NavigationOverlaysSettingsSection()
         }
         .navigationTitle("Developer Settings")
         .navigationBarTitleDisplayMode(.inline)
