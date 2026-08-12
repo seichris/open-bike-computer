@@ -297,6 +297,7 @@ struct OfflineMapJob: Decodable, Equatable {
     let status: String
     let createdAt: String?
     let error: String?
+    let errorCode: String?
     let mapId: String?
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
@@ -940,6 +941,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         supportedRendererFormatVersions: [Int],
         message: String
     )
+    case mapJobFailed(code: String?, message: String)
     case serverStatus(Int, String)
 
     var errorDescription: String? {
@@ -974,6 +976,11 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Map server returned an invalid response"
         case .unsupportedRendererTarget(_, _, let message):
             return message
+        case .mapJobFailed(let code, let message):
+            if code == "building_scope_exceeded" {
+                return "This selection is too large for 3D buildings. Choose a smaller area and try again. The processing limit includes the required buffer, and water inside the selection counts."
+            }
+            return "Map generation failed: \(message)"
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }

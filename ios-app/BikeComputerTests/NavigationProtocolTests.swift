@@ -7571,7 +7571,11 @@ struct NavigationProtocolTests {
 
     @MainActor
     static func testOfflineMapPollerStopsOnTerminalAndCancellation() async {
-        guard let failed = offlineMapJob(status: "failed", error: "conversion failed"),
+        guard let failed = offlineMapJob(
+            status: "failed",
+            error: "selected building scope exceeds policy; jobId=failed-job",
+            errorCode: "building_scope_exceeded"
+        ),
               let running = offlineMapJob(status: "converting_features") else {
             assert(false, "terminal poller test jobs should decode")
             return
@@ -7587,9 +7591,20 @@ struct NavigationProtocolTests {
                 onRetry: {}
             )
             assert(false, "terminal map job should throw")
-        } catch OfflineMapPlatformError.serverStatus(let status, let body) {
-            assertEqual(status, 409, "terminal map job uses conflict status")
-            assert(body.contains("conversion failed"), "terminal map job preserves server error")
+        } catch OfflineMapPlatformError.mapJobFailed(let code, let message) {
+            assertEqual(code, "building_scope_exceeded", "terminal map job preserves typed server code")
+            assert(message.contains("selected building scope"), "terminal map job preserves diagnostic detail")
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: message)
+                .localizedDescription
+            assert(
+                displayMessage.contains("Choose a smaller area"),
+                "building scope failure provides an actionable recovery"
+            )
+            assert(
+                !displayMessage.contains("jobId="),
+                "building scope failure hides internal diagnostics from the user"
+            )
         } catch {
             assert(false, "terminal map job should use platform error")
         }
@@ -7616,6 +7631,7 @@ struct NavigationProtocolTests {
         status: String,
         mapId: String? = nil,
         error: String? = nil,
+        errorCode: String? = nil,
         createdAt: String? = nil,
         clientInstallationId: String? = nil,
         clientRequestId: String? = nil,
@@ -7624,6 +7640,7 @@ struct NavigationProtocolTests {
         var payload: [String: Any] = ["jobId": jobId ?? "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
+        if let errorCode { payload["errorCode"] = errorCode }
         if let createdAt { payload["createdAt"] = createdAt }
         if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
         if let clientRequestId { payload["clientRequestId"] = clientRequestId }

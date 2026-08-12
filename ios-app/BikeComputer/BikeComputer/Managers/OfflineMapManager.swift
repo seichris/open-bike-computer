@@ -902,9 +902,9 @@ enum OfflineMapJobPoller {
                 return job
             }
             if job.isTerminal {
-                throw OfflineMapPlatformError.serverStatus(
-                    409,
-                    job.error ?? "Map job ended with status \(job.status)"
+                throw OfflineMapPlatformError.mapJobFailed(
+                    code: job.errorCode,
+                    message: job.error ?? "Map job ended with status \(job.status)"
                 )
             }
             try await sleep(pollIntervalNanoseconds)
