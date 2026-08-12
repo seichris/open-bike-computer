@@ -124,7 +124,8 @@ struct SettingsView: View {
 
                     NavigationLink {
                         RideDetectionSettingsView(
-                            store: rideDetectionSettingsStore
+                            store: rideDetectionSettingsStore,
+                            locationAuthorized: locationAuthorized
                         )
                     } label: {
                         Label("Ride Detection", systemImage: "figure.outdoor.cycle")
@@ -177,8 +178,11 @@ struct SettingsView: View {
 }
 
 private struct RideDetectionSettingsView: View {
+    @Environment(\.openURL) private var openURL
     @ObservedObject var store: RideDetectionSettingsStore
+    let locationAuthorized: Bool
     @State private var showAutomaticStartWarning = false
+    @State private var showLocationUseWarning = false
 
     var body: some View {
         Form {
@@ -218,6 +222,46 @@ private struct RideDetectionSettingsView: View {
                         + "workout on Apple Watch without another prompt. "
                         + "Manual controls always take precedence."
                     )
+                }
+
+                if store.settings.startMode != .off &&
+                    !store.hasAcknowledgedLocationUse {
+                    Button("Enable iPhone GPS for Detection") {
+                        showLocationUseWarning = true
+                    }
+                    .alert(
+                        "Use iPhone GPS for Ride Detection?",
+                        isPresented: $showLocationUseWarning
+                    ) {
+                        Button("Not Now", role: .cancel) {}
+                        Button("Enable") {
+                            store.acknowledgeLocationUse()
+                        }
+                    } message: {
+                        Text(
+                            "When Ride Start is enabled and your bike "
+                            + "computer is connected, Bicino keeps precise "
+                            + "location active in the background so GPS and "
+                            + "motion can detect a ride. You can turn Ride "
+                            + "Start off at any time."
+                        )
+                    }
+                }
+
+                if store.settings.startMode != .off &&
+                    !locationAuthorized {
+                    Button {
+                        if let url = URL(
+                            string: UIApplication.openSettingsURLString
+                        ) {
+                            openURL(url)
+                        }
+                    } label: {
+                        Label(
+                            "Enable Location Access",
+                            systemImage: "location"
+                        )
+                    }
                 }
             } header: {
                 Text("Detect Ride Start")
@@ -260,10 +304,14 @@ private struct RideDetectionSettingsView: View {
 
     private var rideDetectionFooterText: String {
         if RideAutomationRollout.allowsAutomaticStart {
-            return "Automatic start requires a separate opt-in and the bike "
+            return "Ride detection uses iPhone GPS in the background while "
+                + "the compatible bike computer is connected. Automatic "
+                + "start requires a separate opt-in and the bike "
                 + "computer, iPhone, and Apple Watch to be reachable."
         }
-        return "Ask to Start is the current rollout ceiling. Automatic start "
+        return "Ride detection uses iPhone GPS in the background while the "
+            + "compatible bike computer is connected. Ask to Start is the "
+            + "current rollout ceiling. Automatic start "
             + "remains gated until the physical false-start validation is "
             + "complete."
     }

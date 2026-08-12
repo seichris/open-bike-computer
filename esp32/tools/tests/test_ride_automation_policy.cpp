@@ -33,7 +33,7 @@ RideEvidenceObservation gpsImu(float gpsMetersPerSecond, float motionScore,
   RideEvidenceObservation observation;
   observation.gpsSpeedMetersPerSecond = metric(gpsMetersPerSecond, nowMs);
   observation.gpsFixValid = flag(true, nowMs);
-  observation.gpsHdop = metric(1.0F, nowMs);
+  observation.gpsHorizontalUncertaintyMeters = metric(5.0F, nowMs);
   observation.gpsStationaryWindowValid = flag(stationary, nowMs);
   observation.gpsNetDisplacementMeters = metric(displacementMeters, nowMs);
   observation.imuMotionScore = metric(motionScore, nowMs);
@@ -110,7 +110,7 @@ int main() {
                               ConfirmedLifecycle::Idle, ask);
   assert(decision.transition == Transition::Start);
   assert(decision.sequence != 0);
-  assert(decision.profileVersion == 1);
+  assert(decision.profileVersion == 2);
   assert(sensorAsk.detectorStatus().phase ==
          DetectorPhase::AwaitingConfirmation);
   assert(sensorAsk.detectorStatus().progressPercent == 100);
@@ -182,25 +182,25 @@ int main() {
       ConfirmedLifecycle::Idle, automatic);
   assert(decision.transition == Transition::Start);
 
-  RideAutomationPolicy badHdop;
+  RideAutomationPolicy badAccuracy;
   for (uint32_t second = 0; second < 20; ++second) {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
-    observation.gpsHdop.value = 2.51F;
-    assert(!badHdop.update(nowMs, observation, ConfirmedLifecycle::Idle,
-                           ask));
+    observation.gpsHorizontalUncertaintyMeters.value = 12.51F;
+    assert(!badAccuracy.update(nowMs, observation, ConfirmedLifecycle::Idle,
+                               ask));
   }
-  RideAutomationPolicy boundaryHdop;
+  RideAutomationPolicy boundaryAccuracy;
   for (uint32_t second = 0; second < 8; ++second) {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
-    observation.gpsHdop.value = 2.5F;
-    assert(!boundaryHdop.update(nowMs, observation,
-                                ConfirmedLifecycle::Idle, ask));
+    observation.gpsHorizontalUncertaintyMeters.value = 12.5F;
+    assert(!boundaryAccuracy.update(nowMs, observation,
+                                    ConfirmedLifecycle::Idle, ask));
   }
   auto boundaryObservation = gpsImu(4.0F, 0.9F, 100.0F, 8'000);
-  boundaryObservation.gpsHdop.value = 2.5F;
-  assert(boundaryHdop
+  boundaryObservation.gpsHorizontalUncertaintyMeters.value = 12.5F;
+  assert(boundaryAccuracy
              .update(8'000, boundaryObservation, ConfirmedLifecycle::Idle,
                      ask)
              .transition == Transition::Start);
@@ -210,7 +210,7 @@ int main() {
     const uint32_t nowMs = second * 1'000;
     auto observation = gpsImu(4.0F, 0.9F, 100.0F, nowMs);
     observation.gpsFixValid.capturedAtMs = 0;
-    observation.gpsHdop.capturedAtMs = 0;
+    observation.gpsHorizontalUncertaintyMeters.capturedAtMs = 0;
     observation.gpsNetDisplacementMeters.capturedAtMs = 0;
     assert(!staleGpsQuality.update(nowMs, observation,
                                    ConfirmedLifecycle::Idle, ask));
@@ -455,8 +455,10 @@ int main() {
   char json[2'048];
   const int length = formatTraceJsonLine(trace, json, sizeof(json));
   assert(length > 0 && static_cast<std::size_t>(length) < sizeof(json));
-  assert(std::strstr(json, "\"schema\":1") != nullptr);
-  assert(std::strstr(json, "\"profile\":1") != nullptr);
+  assert(std::strstr(json, "\"schema\":2") != nullptr);
+  assert(std::strstr(json, "\"profile\":2") != nullptr);
+  assert(std::strstr(json, "\"gps_horizontal_uncertainty_m\"") !=
+         nullptr);
   assert(std::strstr(json, "\"lifecycle\":\"idle\"") != nullptr);
   assert(std::strstr(json, "\"wheel_mps\":{") != nullptr);
   assert(std::strstr(json, "\"decision\":\"start\"") != nullptr);

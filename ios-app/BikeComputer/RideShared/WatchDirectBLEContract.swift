@@ -10,10 +10,11 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
     static let rideAutomationUUID =
         "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
-    static let capabilityClientVersion: UInt8 = 13
+    static let capabilityClientVersion: UInt8 = 15
     static let scopedControllerFeature: UInt32 = 1 << 14
     static let workoutTelemetryFeature: UInt32 = 1 << 7
     static let rideAutomationFeature: UInt32 = 1 << 15
+    static let gpsPositionQualityV1Feature: UInt32 = 1 << 17
     static let protectedFrameOverhead = 22
 }
 
@@ -302,6 +303,10 @@ struct WatchDeviceCapabilitiesV1: Equatable {
         featureFlags & WatchDirectBLEProtocolV1.rideAutomationFeature != 0
     }
 
+    var supportsGPSPositionQualityV1: Bool {
+        featureFlags & WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature != 0
+    }
+
     static func decode(_ data: Data) -> Self? {
         guard data.count >= 9,
               data.prefix(4) == Data("CAP2".utf8),
@@ -453,6 +458,7 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let payload: Data
     let priority: UInt8
     let coalescingKey: String?
+    let gpsSampleTimestamp: Date?
     fileprivate let sequence: UInt64
 
     init(
@@ -460,12 +466,14 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
         payload: Data,
         priority: UInt8,
         coalescingKey: String? = nil,
+        gpsSampleTimestamp: Date? = nil,
         sequence: UInt64 = 0
     ) {
         self.target = target
         self.payload = payload
         self.priority = priority
         self.coalescingKey = coalescingKey
+        self.gpsSampleTimestamp = gpsSampleTimestamp
         self.sequence = sequence
     }
 }
@@ -489,6 +497,7 @@ struct WatchBLEOutboundQueueV1: Equatable {
             payload: write.payload,
             priority: write.priority,
             coalescingKey: write.coalescingKey,
+            gpsSampleTimestamp: write.gpsSampleTimestamp,
             sequence: nextSequence
         )
         if let key = sequenced.coalescingKey,
@@ -554,7 +563,9 @@ enum WatchRidePacketEncoderV1 {
         _ sample: NavigationLocationSampleV1,
         snapshot: NavigationSnapshotV1?,
         distanceTraveledMeters: Double? = nil,
-        elapsedSeconds: TimeInterval? = nil
+        elapsedSeconds: TimeInterval? = nil,
+        includeRideDetectionQuality: Bool = false,
+        now: Date = Date()
     ) -> Data {
         var result = Data()
         result.appendInt32LE(Int32(sample.coordinate.latitude * 1_000_000))
@@ -584,6 +595,55 @@ enum WatchRidePacketEncoderV1 {
         result.appendUInt32LE(snapshot.map {
             Self.nonnegativeUInt32($0.routeRemainingDistanceMeters)
         } ?? UInt32.max)
+        if includeRideDetectionQuality {
+            let validCoordinate =
+                sample.coordinate.latitude.isFinite &&
+                sample.coordinate.longitude.isFinite &&
+                (-90...90).contains(sample.coordinate.latitude) &&
+                (-180...180).contains(sample.coordinate.longitude)
+            let accuracyAvailable = sample.horizontalAccuracyMeters.isFinite &&
+                sample.horizontalAccuracyMeters >= 0
+            let ageSeconds = now.timeIntervalSince(sample.timestamp)
+            let timestampAvailable = ageSeconds.isFinite && ageSeconds >= -1
+            var flags: UInt8 = 0
+            if validCoordinate && accuracyAvailable && timestampAvailable {
+                flags |= 1 << 0
+            }
+            if accuracyAvailable { flags |= 1 << 1 }
+            result.append(1)
+            result.append(flags)
+            result.appendUInt16LE(accuracyAvailable ? UInt16(min(
+                (sample.horizontalAccuracyMeters * 10).rounded(),
+                Double(UInt16.max - 1)
+            )) : UInt16.max)
+            result.appendUInt16LE(timestampAvailable ? UInt16(min(
+                max((ageSeconds * 1_000).rounded(), 0),
+                Double(UInt16.max - 1)
+            )) : UInt16.max)
+        }
+        return result
+    }
+
+    static func refreshingQualityAge(
+        in packet: Data,
+        sampleTimestamp: Date,
+        now: Date = Date()
+    ) -> Data {
+        guard packet.count >= 36, packet[30] == 1 else { return packet }
+        var result = packet
+        let ageSeconds = now.timeIntervalSince(sampleTimestamp)
+        guard ageSeconds.isFinite, ageSeconds >= -1 else {
+            result[31] &= ~(1 << 0)
+            result[34] = 0xFF
+            result[35] = 0xFF
+            return result
+        }
+        let ageMs = UInt16(min(
+            max((ageSeconds * 1_000).rounded(), 0),
+            Double(UInt16.max - 1)
+        ))
+        result[34] = UInt8(ageMs & 0xFF)
+        result[35] = UInt8((ageMs >> 8) & 0xFF)
         return result
     }
 

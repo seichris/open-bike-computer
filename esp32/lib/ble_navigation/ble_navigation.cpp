@@ -931,6 +931,7 @@ static bool unwrapOwnerAuthenticatedPayload(
   xSemaphoreGive(deviceOwnershipMutex);
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
+    clearAuthenticatedBleGpsRideObservation();
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleDebugStats.authenticated = false;
@@ -1201,6 +1202,7 @@ static void handleAuthPayload(const std::string &frame) {
     }
     if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
       bleSessionAuthenticated = false;
+      clearAuthenticatedBleGpsRideObservation();
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleDebugStats.authenticated = false;
@@ -1239,6 +1241,7 @@ static void handleAuthPayload(const std::string &frame) {
                 break;
               case device_ownership::Event::Unpaired:
                 bleSessionAuthenticated = false;
+                clearAuthenticatedBleGpsRideObservation();
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleDebugStats.authenticated = false;
@@ -1303,6 +1306,7 @@ static void handleAuthPayload(const std::string &frame) {
     char mac[65];
     char response[112];
     bleSessionAuthenticated = false;
+    clearAuthenticatedBleGpsRideObservation();
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -1981,6 +1985,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
           device_capabilities_protocol::REMOTE_DEVICE_DEBUG_FEATURE;
     }
 #endif
+    if (clientVersion >= device_capabilities_protocol::
+                             GPS_POSITION_QUALITY_V1_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::GPS_POSITION_QUALITY_V1_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -2503,6 +2512,29 @@ static void handleGpsPayload(
   bleDebugStats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
   bleDebugStats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
   bleDebugStats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+
+  if (packet.hasRideDetectionQuality && arrivals.packetCount > 0) {
+    GpsRideObservation observation{};
+    observation.source = RidePositionSource::AuthenticatedBle;
+    observation.fixAvailable = true;
+    observation.fixValid = packet.fixValid;
+    observation.speedAvailable = packet.hasSpeed;
+    observation.speedMetersPerSecond =
+        static_cast<float>(packet.speedCentimetersPerSecond) / 100.0F;
+    observation.locationAvailable = true;
+    observation.latitude =
+        static_cast<double>(packet.latitudeMicrodegrees) / 1'000'000.0;
+    observation.longitude =
+        static_cast<double>(packet.longitudeMicrodegrees) / 1'000'000.0;
+    observation.horizontalUncertaintyAvailable =
+        packet.hasHorizontalAccuracy;
+    observation.horizontalUncertaintyMeters =
+        static_cast<float>(packet.horizontalAccuracyDecimeters) / 10.0F;
+    observation.capturedAtMs = gps_position_protocol::capturedAtMs(
+        arrivals.lastPacketMs,
+        packet.hasSampleAge ? packet.sampleAgeMs : 0U);
+    publishAuthenticatedBleGpsRideObservation(observation);
+  }
 
 #if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE: %s GPS position received: heading=%u rtcSync=%d "
@@ -3057,6 +3089,7 @@ public:
   }
 
   void acceptConnection() {
+    clearAuthenticatedBleGpsRideObservation();
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
@@ -3128,6 +3161,7 @@ public:
     bleSessionSupports3DBuildings = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
+    clearAuthenticatedBleGpsRideObservation();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -3933,6 +3967,7 @@ bool BLENavigationServer::forgetOwner() {
   bleSessionAuthenticated = false;
   bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                     std::memory_order_release);
+  clearAuthenticatedBleGpsRideObservation();
   bleDebugStats.authenticated = false;
   // Physical owner recovery is an immediate authorization boundary. Revoke
   // the token before the scheduled restart rather than relying on that later

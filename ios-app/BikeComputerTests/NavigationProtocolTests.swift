@@ -319,7 +319,9 @@ final class TestBLEManager: BLEManager {
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
         elapsedSeconds: TimeInterval? = nil,
-        routeRemainingMeters: Double? = nil
+        routeRemainingMeters: Double? = nil,
+        horizontalAccuracyMeters: Double? = nil,
+        locationTimestamp: Date? = nil
     ) {
         guard isConnected, isNavigationReady else {
             return
@@ -333,7 +335,10 @@ final class TestBLEManager: BLEManager {
             altitudeMeters: altitudeMeters,
             distanceTraveledMeters: distanceTraveledMeters,
             elapsedSeconds: elapsedSeconds,
-            routeRemainingMeters: routeRemainingMeters
+            routeRemainingMeters: routeRemainingMeters,
+            horizontalAccuracyMeters: horizontalAccuracyMeters,
+            locationTimestamp: locationTimestamp,
+            includeRideDetectionQuality: supportsGPSPositionQualityV1
         ))
     }
 }
@@ -521,6 +526,7 @@ final class TestLocationManagerClient: LocationManagerClient {
     var authorizationLevel: LocationAuthorizationLevel
     private(set) weak var delegate: CLLocationManagerDelegate?
     private(set) var backgroundTrackingEnabledHistory: [Bool] = []
+    private(set) var rideDetectionTrackingEnabledHistory: [Bool] = []
     private(set) var requestLocationCallCount = 0
     private(set) var requestWhenInUseAuthorizationCallCount = 0
     private(set) var requestAlwaysAuthorizationCallCount = 0
@@ -539,6 +545,10 @@ final class TestLocationManagerClient: LocationManagerClient {
     }
 
     func configureForCycling() {}
+
+    func setRideDetectionTrackingEnabled(_ enabled: Bool) {
+        rideDetectionTrackingEnabledHistory.append(enabled)
+    }
 
     func setBackgroundTrackingEnabled(_ enabled: Bool) {
         backgroundTrackingEnabledHistory.append(enabled)
@@ -3081,6 +3091,56 @@ struct NavigationProtocolTests {
             "backgrounding the visible map should release its location claim"
         )
 
+        let detectionClient = TestLocationManagerClient(
+            authorizationLevel: .always
+        )
+        let detectionLocationManager = CurrentLocationManager(
+            locationManager: detectionClient,
+            applicationIsActive: { false }
+        )
+        detectionLocationManager.setRideDetectionArmed(true)
+        assertEqual(
+            detectionClient.startUpdatingLocationCallCount,
+            1,
+            "armed ride detection starts Always-authorized background GPS"
+        )
+        assert(
+            detectionClient.backgroundTrackingEnabledHistory.last == true,
+            "armed ride detection enables background location delivery"
+        )
+        assert(
+            detectionClient.rideDetectionTrackingEnabledHistory.last == true,
+            "armed ride detection selects the continuous cycling GPS profile"
+        )
+        detectionLocationManager.setRideDetectionArmed(false)
+        assertEqual(
+            detectionClient.stopUpdatingLocationCallCount,
+            1,
+            "disarming ride detection releases its location demand"
+        )
+        assert(
+            detectionClient.rideDetectionTrackingEnabledHistory.last == false,
+            "disarming ride detection restores the ordinary distance filter"
+        )
+
+        let consentSuite =
+            "RideDetectionLocationConsentTests.\(UUID().uuidString)"
+        guard let consentDefaults = UserDefaults(suiteName: consentSuite) else {
+            assertionFailure("could not create location consent defaults")
+            return
+        }
+        consentDefaults.removePersistentDomain(forName: consentSuite)
+        let consentStore = RideDetectionSettingsStore(
+            defaults: consentDefaults
+        )
+        assert(!consentStore.hasAcknowledgedLocationUse,
+               "ride detection background GPS requires explicit acknowledgement")
+        consentStore.acknowledgeLocationUse()
+        assert(RideDetectionSettingsStore(defaults: consentDefaults)
+            .hasAcknowledgedLocationUse,
+               "ride detection location acknowledgement persists")
+        consentDefaults.removePersistentDomain(forName: consentSuite)
+
         var idleTimerValues: [Bool] = []
         RideIdleTimerController.update(
             isNavigating: false,
@@ -4347,6 +4407,41 @@ struct NavigationProtocolTests {
         assertEqual(readUInt16LE(invalidData, offset: 8), DeviceGPSPacketBuilder.invalidHeadingDegrees, "missing heading uses invalid sentinel")
         assertEqual(readUInt16LE(invalidData, offset: 14), DeviceGPSPacketBuilder.invalidSpeedCmps, "missing speed uses invalid sentinel")
         assertEqual(readUInt32LE(invalidData, offset: 26), DeviceGPSPacketBuilder.invalidRouteRemainingMeters, "missing route remaining uses invalid sentinel")
+
+        let sampleTime = Date(timeIntervalSince1970: 1_000)
+        let qualityData = DeviceGPSPacketBuilder.data(
+            lat: 37.123456,
+            lon: -122.654321,
+            unixTime: 1_001,
+            speedMetersPerSecond: 0,
+            horizontalAccuracyMeters: 7.25,
+            locationTimestamp: sampleTime,
+            includeRideDetectionQuality: true,
+            now: sampleTime.addingTimeInterval(1.234)
+        )
+        assertEqual(qualityData.count, 36,
+                    "negotiated GPS quality packet has expected byte length")
+        assertEqual(Int(qualityData[30]), 1,
+                    "GPS quality packet identifies schema v1")
+        assertEqual(Int(qualityData[31]), 3,
+                    "valid GPS quality advertises fix and accuracy")
+        assertEqual(readUInt16LE(qualityData, offset: 32), 73,
+                    "GPS quality stores horizontal accuracy in decimeters")
+        assertEqual(readUInt16LE(qualityData, offset: 34), 1234,
+                    "GPS quality retains source sample age")
+
+        let futureData = DeviceGPSPacketBuilder.data(
+            lat: 1,
+            lon: 2,
+            horizontalAccuracyMeters: 5,
+            locationTimestamp: sampleTime.addingTimeInterval(2),
+            includeRideDetectionQuality: true,
+            now: sampleTime
+        )
+        assertEqual(Int(futureData[31]), 2,
+                    "materially future locations never claim a valid fix")
+        assertEqual(readUInt16LE(futureData, offset: 34), UInt16.max,
+                    "materially future locations use the unavailable age sentinel")
 
         let legacyHeading = DeviceGPSHeadingWirePolicy.heading(
             nil,
@@ -9760,6 +9855,15 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
+            payloadLength: 36,
+            protectionOverhead: 22,
+            withResponseMaximum: 58,
+            withoutResponseMaximum: 58
+        ), .nativeWithResponse,
+                    "protected 36-byte GPS quality packets fit the acknowledged route")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 512,
@@ -10051,7 +10155,8 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.scopedWatchControllerCapabilityMask, 1 << 14, "CAP2 bit 14 advertises scoped Watch control")
         assertEqual(DeviceBLEProtocol.rideAutomationCapabilityMask, 1 << 15, "CAP2 bit 15 advertises ride automation without colliding with Watch control")
         assertEqual(DeviceBLEProtocol.remoteDeviceDebugCapabilityMask, 1 << 16, "CAP2 bit 16 advertises remote device debugging without colliding with ride automation")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 14, "capability version negotiates remote device debugging after ride automation in version 13")
+        assertEqual(DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask, 1 << 17, "CAP2 bit 17 advertises GPS quality v1")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 15, "capability version negotiates GPS quality after remote debugging in version 14")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -11782,6 +11887,8 @@ struct NavigationProtocolTests {
                "malformed CAPS clears stronger bird's-eye perspective support")
         assert(!manager.supportsRemoteDeviceDebug,
                "malformed CAPS clears remote-debug support")
+        assert(!manager.supportsGPSPositionQualityV1,
+               "malformed CAPS clears GPS-quality support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -11826,6 +11933,15 @@ struct NavigationProtocolTests {
                "CAP2 bit 16 enables remote device debugging")
         assert(!manager.supportsScopedWatchController,
                "CAP2 bit 16 does not collide with scoped Watch enrollment")
+
+        let cap2WithGPSQuality = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 2, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithGPSQuality),
+               "CAP2 GPS-quality notification should be consumed")
+        assert(manager.supportsGPSPositionQualityV1,
+               "CAP2 bit 17 enables the GPS quality v1 tail")
+        assert(!manager.supportsRemoteDeviceDebug,
+               "CAP2 bit 17 does not collide with remote debugging")
 
         let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
@@ -16203,6 +16319,21 @@ struct NavigationProtocolTests {
                 isRefreshingDeviceDestinationLocation: false
             ),
             "an idle map view should not enable background location tracking"
+        )
+        assert(
+            RideActivityPolicy.shouldTrackLocation(
+                isNavigating: false,
+                isViewingMap: false,
+                isWorkoutActive: false,
+                isRefreshingDeviceDestinationLocation: false,
+                isRideDetectionArmed: true
+            ) && RideActivityPolicy.shouldTrackLocationInBackground(
+                isNavigating: false,
+                isWorkoutActive: false,
+                isRefreshingDeviceDestinationLocation: false,
+                isRideDetectionArmed: true
+            ),
+            "armed ride detection keeps iPhone GPS active in the background"
         )
         assert(
             RideActivityPolicy.shouldKeepScreenAwake(

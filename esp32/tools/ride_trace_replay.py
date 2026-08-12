@@ -14,7 +14,8 @@ import tempfile
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 FORBIDDEN_KEYS = {
     "latitude",
     "longitude",
@@ -30,7 +31,8 @@ RECORD_KEYS = {"schema", "profile", "label", "t_ms", "lifecycle", "settings", "e
 SETTINGS_KEYS = {"start_mode", "auto_pause"}
 EVIDENCE_KEYS = {
     "wheel_mps", "cadence_rpm", "gps_mps", "gps_fix_valid", "gps_hdop",
-    "gps_stationary", "gps_displacement_m", "imu_motion_score",
+    "gps_source", "gps_horizontal_uncertainty_m", "gps_stationary",
+    "gps_displacement_m", "imu_motion_score",
 }
 METRIC_KEYS = {"value", "age_ms"}
 OUTPUT_KEYS = {
@@ -97,9 +99,14 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
         if forbidden:
             names = ", ".join(sorted(forbidden))
             raise TraceError(f"{path}:{line_number}: raw/private fields forbidden: {names}")
-        if not _is_uint(record.get("schema"), 0xFF) or record["schema"] != SCHEMA_VERSION:
-            raise TraceError(f"{path}:{line_number}: expected schema {SCHEMA_VERSION}")
-        if not _is_uint(record.get("profile"), 0xFFFF) or record["profile"] != 1:
+        schema = record.get("schema")
+        if not _is_uint(schema, 0xFF) or schema not in SUPPORTED_SCHEMA_VERSIONS:
+            raise TraceError(
+                f"{path}:{line_number}: expected schema 1 or {SCHEMA_VERSION}"
+            )
+        expected_profile = 1 if schema == 1 else 2
+        if (not _is_uint(record.get("profile"), 0xFFFF)
+                or record["profile"] != expected_profile):
             raise TraceError(f"{path}:{line_number}: unsupported or missing profile")
         if record.get("lifecycle") not in LIFECYCLES:
             raise TraceError(f"{path}:{line_number}: invalid lifecycle")
@@ -109,6 +116,12 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
             raise TraceError(f"{path}:{line_number}: settings and evidence must be objects")
         _reject_unknown_keys(settings, SETTINGS_KEYS, path, line_number, "settings")
         _reject_unknown_keys(evidence, EVIDENCE_KEYS, path, line_number, "evidence")
+        if schema == 1 and ({"gps_source", "gps_horizontal_uncertainty_m"} & evidence.keys()):
+            raise TraceError(f"{path}:{line_number}: schema 1 contains schema 2 GPS quality")
+        if schema == 2 and "gps_hdop" in evidence:
+            raise TraceError(f"{path}:{line_number}: schema 2 must use horizontal uncertainty")
+        if "gps_source" in evidence and not _is_uint(evidence["gps_source"], 2):
+            raise TraceError(f"{path}:{line_number}: gps_source must be 0, 1, or 2")
         for metric_name, metric in evidence.items():
             if isinstance(metric, dict):
                 _reject_unknown_keys(
@@ -139,7 +152,7 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
             "wheel_mps",
             "cadence_rpm",
             "gps_mps",
-            "gps_hdop",
+            "gps_hdop" if schema == 1 else "gps_horizontal_uncertainty_m",
             "gps_displacement_m",
             "imu_motion_score",
         ):
@@ -234,7 +247,14 @@ def encode_record(record: dict[str, Any]) -> str:
     cadence, cadence_age = _metric(evidence, "cadence_rpm")
     gps, gps_age = _metric(evidence, "gps_mps")
     gps_fix, gps_fix_age = _flag(evidence, "gps_fix_valid")
-    hdop, hdop_age = _metric(evidence, "gps_hdop")
+    if record.get("schema") == 1:
+        uncertainty, uncertainty_age = _metric(evidence, "gps_hdop")
+        if uncertainty != "-":
+            uncertainty = str(float(uncertainty) * 5.0)
+    else:
+        uncertainty, uncertainty_age = _metric(
+            evidence, "gps_horizontal_uncertainty_m"
+        )
     stationary, stationary_age = _flag(evidence, "gps_stationary")
     displacement, displacement_age = _metric(evidence, "gps_displacement_m")
     imu, imu_age = _metric(evidence, "imu_motion_score")
@@ -251,8 +271,8 @@ def encode_record(record: dict[str, Any]) -> str:
         gps_age,
         gps_fix,
         gps_fix_age,
-        hdop,
-        hdop_age,
+        uncertainty,
+        uncertainty_age,
         stationary,
         stationary_age,
         displacement,

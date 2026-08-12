@@ -22,7 +22,25 @@ struct Packet {
   uint32_t elapsedSeconds = 0;
   bool hasRouteRemaining = false;
   uint32_t routeRemainingMeters = 0;
+  bool hasRideDetectionQuality = false;
+  bool fixValid = false;
+  bool hasHorizontalAccuracy = false;
+  uint16_t horizontalAccuracyDecimeters = 0;
+  bool hasSampleAge = false;
+  uint16_t sampleAgeMs = 0;
 };
+
+constexpr std::size_t LEGACY_PACKET_LENGTH = 30;
+constexpr std::size_t QUALITY_V1_PACKET_LENGTH = 36;
+constexpr uint8_t QUALITY_V1_SCHEMA = 1;
+constexpr uint8_t QUALITY_FIX_VALID = 1U << 0;
+constexpr uint8_t QUALITY_ACCURACY_AVAILABLE = 1U << 1;
+constexpr uint8_t QUALITY_KNOWN_FLAGS =
+    QUALITY_FIX_VALID | QUALITY_ACCURACY_AVAILABLE;
+
+inline uint32_t capturedAtMs(uint32_t arrivalMs, uint16_t sampleAgeMs) {
+  return arrivalMs - static_cast<uint32_t>(sampleAgeMs);
+}
 
 inline uint16_t readUInt16LE(const uint8_t *bytes, std::size_t offset) {
   return static_cast<uint16_t>(bytes[offset]) |
@@ -77,6 +95,34 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
     const uint32_t remaining = readUInt32LE(bytes, 26);
     decoded.hasRouteRemaining = remaining != UINT32_MAX;
     decoded.routeRemainingMeters = remaining;
+  }
+  if (length >= QUALITY_V1_PACKET_LENGTH) {
+    const uint8_t schema = bytes[30];
+    const uint8_t flags = bytes[31];
+    const uint16_t accuracy = readUInt16LE(bytes, 32);
+    const uint16_t sampleAge = readUInt16LE(bytes, 34);
+    const bool accuracyAvailable =
+        (flags & QUALITY_ACCURACY_AVAILABLE) != 0;
+    const bool accuracySentinel = accuracy == UINT16_MAX;
+    const bool sampleAgeAvailable = sampleAge != UINT16_MAX;
+    const bool validCoordinates =
+        decoded.latitudeMicrodegrees >= -90'000'000 &&
+        decoded.latitudeMicrodegrees <= 90'000'000 &&
+        decoded.longitudeMicrodegrees >= -180'000'000 &&
+        decoded.longitudeMicrodegrees <= 180'000'000;
+    if (schema != QUALITY_V1_SCHEMA || (flags & ~QUALITY_KNOWN_FLAGS) != 0 ||
+        accuracyAvailable == accuracySentinel || !validCoordinates ||
+        (((flags & QUALITY_FIX_VALID) != 0) &&
+         (!accuracyAvailable || !sampleAgeAvailable))) {
+      return false;
+    }
+    decoded.hasRideDetectionQuality = true;
+    decoded.fixValid = (flags & QUALITY_FIX_VALID) != 0;
+    decoded.hasHorizontalAccuracy = accuracyAvailable;
+    decoded.horizontalAccuracyDecimeters =
+        accuracyAvailable ? accuracy : 0U;
+    decoded.hasSampleAge = sampleAgeAvailable;
+    decoded.sampleAgeMs = sampleAgeAvailable ? sampleAge : 0U;
   }
   packet = decoded;
   return true;

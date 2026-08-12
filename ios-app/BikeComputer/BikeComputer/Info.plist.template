@@ -20,13 +20,13 @@
 	
 	<!-- Location Permissions -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Bicino needs your location to provide turn-by-turn navigation while you ride.</string>
+	<string>Bicino uses background location for navigation and, when Ride Start is enabled, to detect cycling motion for your bike computer while the app is not visible.</string>
 	
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Bicino needs your location to provide turn-by-turn navigation.</string>
+	<string>Bicino uses your location for turn-by-turn navigation and optional ride detection on your bike computer.</string>
 	
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>Bicino needs background location access to continue navigation when the app is not visible.</string>
+	<string>Bicino uses background location to continue navigation and optional ride detection when the app is not visible.</string>
 
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
@@ -49,7 +49,7 @@
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
 	<dict>
 		<key>Navigation</key>
-			<string>Bicino needs precise location for accurate turn-by-turn navigation.</string>
+			<string>Bicino uses precise location for accurate navigation and ride detection.</string>
 	</dict>
 	
 	<!-- Supported Interface Orientations -->

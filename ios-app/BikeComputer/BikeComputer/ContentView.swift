@@ -119,12 +119,13 @@ struct ContentView: View {
             ?? CyclingSensorDetectionCoordinator(
                 sensorStore: cyclingSensorStore
             )
-        let coordinator = coordinator ?? BikeComputerCoordinator(
-            destinationStore: SavedDestinationStore(),
-            workoutMetricsStore: workoutMirrorManager.store
-        )
         let rideDetectionSettingsStore =
             rideDetectionSettingsStore ?? RideDetectionSettingsStore()
+        let coordinator = coordinator ?? BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(),
+            workoutMetricsStore: workoutMirrorManager.store,
+            rideDetectionSettingsStore: rideDetectionSettingsStore
+        )
         let watchAvailability = watchAvailability
             ?? WorkoutWatchAvailabilityMonitor(
                 heartRateZoneDefaults: .standard,

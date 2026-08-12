@@ -753,7 +753,9 @@ class NavigationEngine: NSObject, ObservableObject {
                                     altitudeMeters: includeRideTelemetry ? location.altitude : nil,
                                     distanceTraveledMeters: includeRideTelemetry ? rideDistanceMeters : nil,
                                     elapsedSeconds: includeRideTelemetry ? rideStartDate.map { now().timeIntervalSince($0) } : nil,
-                                    routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil)
+                                    routeRemainingMeters: includeRideTelemetry ? lastRouteRemainingMeters : nil,
+                                    horizontalAccuracyMeters: location.horizontalAccuracy,
+                                    locationTimestamp: location.timestamp)
     }
 
     private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {

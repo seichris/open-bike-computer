@@ -1,4 +1,5 @@
 #include "../../lib/ble_navigation/gps_input_freshness.hpp"
+#include "../../lib/gps/gps_ride_observation.hpp"
 #include "../../lib/maps/src/mapPresentation.hpp"
 
 #include <cassert>
@@ -60,6 +61,48 @@ int main() {
   assert(wrapState.packetCount == 2);
   assert(wrapState.lastGapMs == 1001U);
   assert(wrapState.maximumGapMs == 1001U);
+  assert(gps_position_protocol::capturedAtMs(500U, 1'000U) ==
+         std::numeric_limits<uint32_t>::max() - 499U);
+
+  GpsRideObservation hardware{};
+  hardware.source = RidePositionSource::HardwareNmea;
+  hardware.fixAvailable = true;
+  hardware.fixValid = true;
+  hardware.speedAvailable = true;
+  hardware.speedMetersPerSecond = 3.0F;
+  hardware.locationAvailable = true;
+  hardware.latitude = 1.0;
+  hardware.longitude = 2.0;
+  hardware.horizontalUncertaintyAvailable = true;
+  hardware.horizontalUncertaintyMeters = 10.0F;
+  hardware.capturedAtMs = 9'000;
+  GpsRideObservation phone = hardware;
+  phone.source = RidePositionSource::AuthenticatedBle;
+  phone.horizontalUncertaintyMeters = 5.0F;
+  phone.capturedAtMs = 8'500;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000).source ==
+         RidePositionSource::AuthenticatedBle);
+  phone.fixValid = false;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000).source ==
+         RidePositionSource::HardwareNmea);
+  hardware.capturedAtMs = 1'000;
+  phone.capturedAtMs = 2'000;
+  assert(selectGpsRideObservation(hardware, phone, 10'000, 3'000).source ==
+         RidePositionSource::None);
+
+  // Selection returns a complete source sample; fields from the losing slot
+  // are never combined with the winner.
+  phone = hardware;
+  phone.source = RidePositionSource::AuthenticatedBle;
+  phone.fixValid = true;
+  phone.capturedAtMs = 9'500;
+  phone.speedMetersPerSecond = 0.0F;
+  phone.horizontalUncertaintyMeters = 4.0F;
+  const GpsRideObservation selected =
+      selectGpsRideObservation(hardware, phone, 10'000, 3'000);
+  assert(selected.source == RidePositionSource::AuthenticatedBle);
+  assert(selected.speedMetersPerSecond == 0.0F);
+  assert(selected.horizontalUncertaintyMeters == 4.0F);
 
   return 0;
 }

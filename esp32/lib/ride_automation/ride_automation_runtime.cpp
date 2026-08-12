@@ -107,6 +107,7 @@ struct GpsWindow {
 };
 
 GpsWindow gpsWindow;
+RidePositionSource gpsWindowSource = RidePositionSource::None;
 
 constexpr char kPreferencesNamespace[] = "rideDetect";
 constexpr char kConfigurationBlobKey[] = "configV1";
@@ -401,7 +402,7 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
         static_cast<float>(workout.state.speedCentimetersPerSecond.value) /
             100.0F,
         workout.state.lastCoreReceivedAtMs,
-        ride_automation::kRideDetectionProfileV1.wheelFreshnessMs};
+        ride_automation::kRideDetectionProfile.wheelFreshnessMs};
   }
   if (workout.state.cyclingCadenceTenthsRpm.available) {
     out.cadenceRpm = {
@@ -409,47 +410,57 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
         static_cast<float>(workout.state.cyclingCadenceTenthsRpm.value) /
             10.0F,
         workout.state.lastExtendedReceivedAtMs,
-        ride_automation::kRideDetectionProfileV1.cadenceFreshnessMs};
+        ride_automation::kRideDetectionProfile.cadenceFreshnessMs};
   }
 }
 
 void appendGpsEvidence(uint32_t nowMs,
                        ride_automation::RideEvidenceObservation &out) {
-  const GpsRideObservation value = currentGpsRideObservation();
+  const GpsRideObservation value = currentGpsRideObservation(
+      nowMs, ride_automation::kRideDetectionProfile.gpsFreshnessMs);
+  out.gpsPositionSource = static_cast<uint8_t>(value.source);
   out.gpsFixValid = {value.fixAvailable, value.fixValid,
-                     value.fixCapturedAtMs,
-                     ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
+                     value.capturedAtMs,
+                     ride_automation::kRideDetectionProfile.gpsFreshnessMs};
   out.gpsSpeedMetersPerSecond = {
-      value.speedAvailable, value.speedMetersPerSecond, value.speedCapturedAtMs,
-      ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
-  out.gpsHdop = {value.hdopAvailable, value.hdop, value.hdopCapturedAtMs,
-                 ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
+      value.speedAvailable, value.speedMetersPerSecond, value.capturedAtMs,
+      ride_automation::kRideDetectionProfile.gpsFreshnessMs};
+  out.gpsHorizontalUncertaintyMeters = {
+      value.horizontalUncertaintyAvailable,
+      value.horizontalUncertaintyMeters,
+      value.capturedAtMs,
+      ride_automation::kRideDetectionProfile.gpsFreshnessMs};
 
   const bool goodLocation = value.locationAvailable && value.fixAvailable &&
-                            value.fixValid && value.hdopAvailable &&
-                            value.hdop > 0.0F && value.hdop <=
-                                                      ride_automation::
-                                                          kRideDetectionProfileV1
-                                                              .maximumGpsHdop;
+                            value.fixValid &&
+                            value.horizontalUncertaintyAvailable &&
+                            value.horizontalUncertaintyMeters <=
+                                ride_automation::kRideDetectionProfile
+                                    .maximumGpsHorizontalUncertaintyMeters;
   if (!goodLocation)
     return;
 
-  gpsWindow.append({value.locationCapturedAtMs, value.latitude,
+  if (gpsWindowSource != value.source) {
+    gpsWindow.clear();
+    gpsWindowSource = value.source;
+  }
+
+  gpsWindow.append({value.capturedAtMs, value.latitude,
                     value.longitude});
-  gpsWindow.prune(value.locationCapturedAtMs, 25'000);
+  gpsWindow.prune(value.capturedAtMs, 25'000);
   if (gpsWindow.count == 0)
     return;
   const GpsWindow::Point &oldest = gpsWindow.at(0);
   const float displacement = distanceMeters(oldest.latitude, oldest.longitude,
                                             value.latitude, value.longitude);
   out.gpsNetDisplacementMeters = {
-      true, displacement, value.locationCapturedAtMs,
-      ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
+      true, displacement, value.capturedAtMs,
+      ride_automation::kRideDetectionProfile.gpsFreshnessMs};
 
   float stationaryDisplacement = 0.0F;
   for (std::size_t index = 0; index < gpsWindow.count; ++index) {
     const GpsWindow::Point &point = gpsWindow.at(index);
-    if (static_cast<uint32_t>(value.locationCapturedAtMs -
+    if (static_cast<uint32_t>(value.capturedAtMs -
                               point.capturedAtMs) > 10'000)
       continue;
     stationaryDisplacement = std::max(
@@ -457,13 +468,12 @@ void appendGpsEvidence(uint32_t nowMs,
         distanceMeters(point.latitude, point.longitude, value.latitude,
                        value.longitude));
   }
-  const float estimatedHorizontalUncertaintyMeters = value.hdop * 5.0F;
   const float stationaryRadiusMeters =
-      fmaxf(8.0F, estimatedHorizontalUncertaintyMeters * 2.0F);
+      fmaxf(8.0F, value.horizontalUncertaintyMeters * 2.0F);
   const bool stationary = stationaryDisplacement <= stationaryRadiusMeters;
   out.gpsStationaryWindowValid = {
-      true, stationary, value.locationCapturedAtMs,
-      ride_automation::kRideDetectionProfileV1.gpsFreshnessMs};
+      true, stationary, value.capturedAtMs,
+      ride_automation::kRideDetectionProfile.gpsFreshnessMs};
 }
 
 void appendImuEvidence(ride_automation::RideEvidenceObservation &out) {
@@ -472,7 +482,7 @@ void appendImuEvidence(ride_automation::RideEvidenceObservation &out) {
                       imu.motionWindowSamples >= 10;
   out.imuMotionScore = {
       usable, imu.motionScore, imu.lastSampleMs,
-      ride_automation::kRideDetectionProfileV1.imuFreshnessMs};
+      ride_automation::kRideDetectionProfile.imuFreshnessMs};
 }
 
 bool matchesOutstandingResponse(
@@ -611,7 +621,7 @@ bool processInboundTransportFrame(
             : ride_automation_protocol::Result::Rejected;
     response.rideGeneration = rideGeneration;
     response.profileVersion =
-        ride_automation::kRideDetectionProfileV1.version;
+        ride_automation::kRideDetectionProfile.version;
     response.watermarkOrConfigGeneration = configGeneration;
     response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
     response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
@@ -623,7 +633,7 @@ bool processInboundTransportFrame(
     response.kind = ride_automation_protocol::Kind::Resynchronize;
     response.rideGeneration = rideGeneration;
     response.profileVersion =
-        ride_automation::kRideDetectionProfileV1.version;
+        ride_automation::kRideDetectionProfile.version;
     response.watermarkOrConfigGeneration =
         ride_automation_protocol::outstandingDecisionWatermark(
             hasOutstandingDecision, outstandingDecision);
@@ -713,33 +723,33 @@ void processFirmwareShadow(uint32_t nowMs) {
   const bool directEvidenceAvailable =
       (ride_automation::metricFresh(
            observation.wheelSpeedMetersPerSecond, nowMs,
-           ride_automation::kRideDetectionProfileV1.wheelFreshnessMs) &&
+           ride_automation::kRideDetectionProfile.wheelFreshnessMs) &&
        ride_automation::nonnegativeFinite(
            observation.wheelSpeedMetersPerSecond.value)) ||
       (ride_automation::metricFresh(
            observation.cadenceRpm, nowMs,
-           ride_automation::kRideDetectionProfileV1.cadenceFreshnessMs) &&
+           ride_automation::kRideDetectionProfile.cadenceFreshnessMs) &&
        ride_automation::nonnegativeFinite(observation.cadenceRpm.value));
   const bool gpsImuEvidenceAvailable =
       ride_automation::metricFresh(
           observation.imuMotionScore, nowMs,
-          ride_automation::kRideDetectionProfileV1.imuFreshnessMs) &&
+          ride_automation::kRideDetectionProfile.imuFreshnessMs) &&
       ride_automation::nonnegativeFinite(observation.imuMotionScore.value) &&
       ride_automation::flagFresh(
           observation.gpsFixValid, nowMs,
-          ride_automation::kRideDetectionProfileV1.gpsFreshnessMs) &&
+          ride_automation::kRideDetectionProfile.gpsFreshnessMs) &&
       observation.gpsFixValid.value &&
       ride_automation::metricFresh(
           observation.gpsSpeedMetersPerSecond, nowMs,
-          ride_automation::kRideDetectionProfileV1.gpsFreshnessMs) &&
+          ride_automation::kRideDetectionProfile.gpsFreshnessMs) &&
       ride_automation::nonnegativeFinite(
           observation.gpsSpeedMetersPerSecond.value) &&
       ride_automation::metricFresh(
-          observation.gpsHdop, nowMs,
-          ride_automation::kRideDetectionProfileV1.gpsFreshnessMs) &&
-      observation.gpsHdop.value > 0.0F &&
-      observation.gpsHdop.value <=
-          ride_automation::kRideDetectionProfileV1.maximumGpsHdop;
+          observation.gpsHorizontalUncertaintyMeters, nowMs,
+          ride_automation::kRideDetectionProfile.gpsFreshnessMs) &&
+      observation.gpsHorizontalUncertaintyMeters.value <=
+          ride_automation::kRideDetectionProfile
+              .maximumGpsHorizontalUncertaintyMeters;
   sensorFallbackDegraded =
       !directEvidenceAvailable && !gpsImuEvidenceAvailable;
 

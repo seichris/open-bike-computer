@@ -68,7 +68,6 @@ public:
   bool hasLocationChange();
   bool isDOPChanged();
   void setLocalTime(NeoGPS::time_t gpsTime, const char *tz);
-  GpsRideObservation rideObservation() const;
 
   struct GPSDATA {
     uint8_t satellites;
@@ -104,7 +103,6 @@ public:
   } satTracker[MAX_SATELLITES];
 
 private:
-  GpsRideObservation rideObservation_{};
   uint16_t previousSpeed;
   int16_t previousAltitude;
   double previousLatitude;

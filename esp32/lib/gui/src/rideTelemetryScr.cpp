@@ -493,7 +493,8 @@ void createAutomationPanel(lv_obj_t *page) {
 void updateAutomationPanel(uint32_t nowMs) {
   const ride_automation_runtime::UiSnapshot snapshot =
       ride_automation_runtime::uiSnapshot(nowMs);
-  if (snapshot.phase == ride_automation_runtime::UiPhase::Hidden) {
+  if (snapshot.phase == ride_automation_runtime::UiPhase::Hidden ||
+      snapshot.phase == ride_automation_runtime::UiPhase::SensorDegraded) {
     lv_obj_add_flag(rideAutomationPanel, LV_OBJ_FLAG_HIDDEN);
     return;
   }
@@ -548,9 +549,8 @@ void updateAutomationPanel(uint32_t nowMs) {
     detail = "Apple Watch confirmed moving time is running";
     break;
   case ride_automation_runtime::UiPhase::SensorDegraded:
-    title = "Detection limited";
-    detail = "Waiting for GPS + motion, or a direct cycling sensor.";
-    borderColor = 0xFFCC55;
+    // Source health is diagnostic state, not a modal ride action. Keep the
+    // stats page unobstructed until there is a candidate or decision to show.
     break;
   case ride_automation_runtime::UiPhase::Error:
     title = "Ride not started";

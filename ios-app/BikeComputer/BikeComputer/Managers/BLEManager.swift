@@ -164,7 +164,8 @@ enum DeviceBLEProtocol {
     static let scopedWatchControllerCapabilityMask: UInt32 = 1 << 14
     static let rideAutomationCapabilityMask: UInt32 = 1 << 15
     static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
-    static let deviceCapabilitiesVersion: UInt8 = 14
+    static let gpsPositionQualityV1CapabilityMask: UInt32 = 1 << 17
+    static let deviceCapabilitiesVersion: UInt8 = 15
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -665,6 +666,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var watchConnectivityState =
         PhoneWatchConnectivityStateV1()
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
+    @Published private(set) var supportsGPSPositionQualityV1: Bool = false
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -3271,7 +3273,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     /// Send GPS position and optional ride telemetry to ESP32.
-    /// Format: [Lat:4][Lon:4][Heading:2][UnixTime:4][SpeedCmps:2][Altitude:2][Distance:4][Elapsed:4][RouteRemaining:4].
+    /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
     func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -3280,7 +3282,9 @@ class BLEManager: NSObject, ObservableObject {
         altitudeMeters: Double? = nil,
         distanceTraveledMeters: Double? = nil,
         elapsedSeconds: TimeInterval? = nil,
-        routeRemainingMeters: Double? = nil
+        routeRemainingMeters: Double? = nil,
+        horizontalAccuracyMeters: Double? = nil,
+        locationTimestamp: Date? = nil
     ) {
         guard isConnected,
               let endpoint = navigationWriteEndpoint,
@@ -3289,19 +3293,27 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        let data = DeviceGPSPacketBuilder.data(
-            lat: lat,
-            lon: lon,
-            heading: DeviceGPSHeadingWirePolicy.heading(
-                heading,
-                supportsExplicitInvalidHeading: supportsExplicitInvalidGPSHeading
-            ),
-            speedMetersPerSecond: speedMetersPerSecond,
-            altitudeMeters: altitudeMeters,
-            distanceTraveledMeters: distanceTraveledMeters,
-            elapsedSeconds: elapsedSeconds,
-            routeRemainingMeters: routeRemainingMeters
+        let wireHeading = DeviceGPSHeadingWirePolicy.heading(
+            heading,
+            supportsExplicitInvalidHeading: supportsExplicitInvalidGPSHeading
         )
+        let includeRideDetectionQuality = supportsGPSPositionQualityV1
+        let buildData = {
+            DeviceGPSPacketBuilder.data(
+                lat: lat,
+                lon: lon,
+                heading: wireHeading,
+                speedMetersPerSecond: speedMetersPerSecond,
+                altitudeMeters: altitudeMeters,
+                distanceTraveledMeters: distanceTraveledMeters,
+                elapsedSeconds: elapsedSeconds,
+                routeRemainingMeters: routeRemainingMeters,
+                horizontalAccuracyMeters: horizontalAccuracyMeters,
+                locationTimestamp: locationTimestamp,
+                includeRideDetectionQuality: includeRideDetectionQuality
+            )
+        }
+        let data = buildData()
 
         if let peripheral = connectedPeripheral,
            let characteristic = gpsPositionCharacteristic {
@@ -3338,10 +3350,10 @@ class BLEManager: NSObject, ObservableObject {
                     label: "native GPS position",
                     writeClass: .gpsPosition,
                     coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey,
-                    transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    transportWrite: { [weak self, weak peripheral, weak characteristic] _ in
                         guard let self, let peripheral, let characteristic else { return }
                         self.writeDeviceData(
-                            payload,
+                            buildData(),
                             to: characteristic,
                             on: peripheral,
                             type: writeType
@@ -3367,8 +3379,14 @@ class BLEManager: NSObject, ObservableObject {
             }
         }
 
-        var fallback = Data(DeviceBLEProtocol.gpsPositionFallbackPrefix.utf8)
-        fallback.append(data)
+        let buildFallback = {
+            var fallback = Data(
+                DeviceBLEProtocol.gpsPositionFallbackPrefix.utf8
+            )
+            fallback.append(buildData())
+            return fallback
+        }
+        let fallback = buildFallback()
         guard fallback.count <= endpoint.maximumWriteLength else {
             log("Cannot send GPS position fallback: write limit exceeded")
             return
@@ -3377,7 +3395,8 @@ class BLEManager: NSObject, ObservableObject {
             fallback,
             label: "GPS position",
             writeClass: .gpsPosition,
-            coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey
+            coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey,
+            payloadProvider: buildFallback
         )
     }
 
@@ -3974,6 +3993,7 @@ class BLEManager: NSObject, ObservableObject {
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
+        supportsGPSPositionQualityV1 = false
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -4770,6 +4790,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingWatchControllerOperation = nil
         watchControllerOperationStatus = nil
         supportsRemoteDeviceDebug = false
+        supportsGPSPositionQualityV1 = false
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -6034,6 +6055,7 @@ class BLEManager: NSObject, ObservableObject {
         coalescingKey: String? = nil,
         prioritized: Bool = false,
         atomically: Bool = false,
+        payloadProvider: (() -> Data)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil
     ) -> Bool {
@@ -6057,6 +6079,9 @@ class BLEManager: NSObject, ObservableObject {
             coalescingKey: coalescingKey,
             prioritized: prioritized,
             atomically: atomically,
+            transportWrite: payloadProvider.map { provider in
+                { _ in endpoint.write(provider()) }
+            },
             onWrite: onWrite,
             onDrop: onDrop
         ) else {
@@ -7225,6 +7250,7 @@ extension BLEManager: CBPeripheralDelegate {
         hasReceivedWatchControllerStatus = false
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
+        supportsGPSPositionQualityV1 = false
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -7344,6 +7370,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =
             flags & DeviceBLEProtocol.remoteDeviceDebugCapabilityMask != 0
+        let hasGPSPositionQualityV1 =
+            flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -7424,6 +7452,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
+        supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
