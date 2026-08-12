@@ -1,6 +1,7 @@
 # BikeComputer for iPhone and Apple Watch
 
-Open `BikeComputer/BikeComputer.xcodeproj` in Xcode.
+The Xcode project is `BikeComputer/BikeComputer.xcodeproj`. Routine builds do
+not require opening Xcode; use the command-line entry point below.
 
 ## Requirements
 
@@ -12,6 +13,38 @@ Open `BikeComputer/BikeComputer.xcodeproj` in Xcode.
   cannot be accepted from Simulator results alone.
 - The Watch must be worn and unlocked for setup and normal workout collection.
   Enable Developer Mode on both devices for Xcode installation and debugging.
+
+## Command-line Xcode builds
+
+Use the repository's `xcodebuild` entry point instead of opening Xcode for
+routine builds:
+
+```sh
+scripts/xcodebuild-cli.sh \
+  -project BikeComputer/BikeComputer.xcodeproj \
+  -scheme BikeComputer \
+  -configuration Debug \
+  -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+The entry point works around a build-service deadlock observed with Xcode 26.6
+in the verbose Apple clang discovery probe. It changes only that `/dev/null`
+probe; normal compiler and linker invocations continue to use the selected
+Xcode toolchain.
+
+For a connected iPhone, replace the generic destination and unsigned setting:
+
+```sh
+scripts/xcodebuild-cli.sh \
+  -project BikeComputer/BikeComputer.xcodeproj \
+  -scheme BikeComputer \
+  -configuration Debug \
+  -destination 'id=<iPhone UDID>' \
+  -allowProvisioningUpdates \
+  build
+```
 
 ## First run
 
