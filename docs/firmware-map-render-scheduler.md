@@ -97,6 +97,15 @@ and projection semantics. During a direct transition between those profiles,
 the shared canvas is concealed against the neutral screen background until a
 new worker publication for the destination profile arrives; the prior
 profile's already-published frame is never accepted as transition completion.
+While a non-map main screen is visible, the UI predicts the next enabled
+map-backed screen in the configured cycle and submits that destination profile
+to the same low-priority worker. The worker reuses the existing hidden back
+buffer, so this adds no persistent frame allocation. A BOOT press publishes a
+ready frame with the ordinary semantic and viewport-coverage checks. An
+unfinished current preparation continues without being restarted, while a
+stale or failed preparation falls back to the normal destination-screen
+request. Transition logs report the press-to-visible duration and whether
+render-ahead was available for physical validation.
 The oversized base object stays LVGL center-aligned. Its style position is an
 offset from the centered origin, not an absolute parent coordinate; the
 presenter explicitly converts the desired parent-space pivot target to that

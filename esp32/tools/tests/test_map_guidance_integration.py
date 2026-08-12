@@ -220,15 +220,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_guidance_session_accepts_route_or_maneuver_packets(self):
         navigation_signature = function_body(
-            MAP_RENDERER_SOURCE, "uint64_t Maps::navigationSignature"
+            MAP_RENDERER_SOURCE, "Maps::navigationSignatureForScreen"
         )
-        pose = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedPose")
+        pose = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::updatePresentedPoseForScreen"
+        )
         self.assertIn("routeOverlay.hasRoute() || hasCurrentNavigationData()", navigation_signature)
         self.assertIn("routeActive || maneuverActive", pose)
         self.assertIn("headingResolver.resolve", pose)
         self.assertIn("gps.gpsData.heading < 360U", pose)
         semantics = function_body(
-            MAP_RENDERER_SOURCE, "void Maps::invalidateRenderSemantics"
+            MAP_RENDERER_SOURCE, "void Maps::invalidateRenderSemanticsForScreen"
         )
         self.assertNotIn("routeOverlay.revision()", semantics)
         self.assertIn("posePresenter.resetHeading(nowMs)", semantics)
@@ -240,7 +242,9 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("graceElapsedMs * graceElapsedMs", MAP_PRESENTATION_SOURCE)
         self.assertIn("predictionExhausted", MAP_PRESENTATION_SOURCE)
 
-        pose = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedPose")
+        pose = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::updatePresentedPoseForScreen"
+        )
         self.assertIn("bleStats.lastGpsPacketMs", pose)
         self.assertIn("bleStats.gpsPacketCount", pose)
         self.assertIn("fix.timestampMs", pose)
@@ -340,16 +344,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_idle_guidance_screen_keeps_birdseye_3d_enabled(self):
         capture = function_body(
-            MAP_RENDERER_SOURCE, "Maps::RenderContext Maps::captureRenderContext"
+            MAP_RENDERER_SOURCE,
+            "Maps::RenderContext Maps::captureRenderContextForScreen",
         )
         render = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::readVectorMap"
         )
         request = function_body(
-            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequest"
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
         )
         self.assertIn(
-            "context.guidanceScreenActive = isMapGuidanceScreenActive()",
+            "context.guidanceScreenActive = guidanceScreenActive",
             capture,
         )
         self.assertIn(
@@ -539,11 +544,68 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         prepare = function_body(
             MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate"
         )
-        self.assertIn("mapTileTransition.noteFramePublished()", prepare)
-        self.assertLess(
-            prepare.index("mapTileTransition.noteFramePublished()"),
-            prepare.index("revealPendingMapTileIfReady()"),
+        self.assertIn("acceptPublishedMapFrame(nowMs)", prepare)
+        accept = function_body(
+            MAIN_SCREEN_SOURCE, "static void acceptPublishedMapFrame"
         )
+        self.assertIn("mapTileTransition.noteFramePublished()", accept)
+        self.assertLess(
+            accept.index("mapTileTransition.noteFramePublished()"),
+            accept.index("revealPendingMapTileIfReady()"),
+        )
+
+    def test_non_map_screens_render_ahead_without_overwriting_ready_frame(self):
+        show = function_body(MAIN_SCREEN_SOURCE, "static void showMainTile")
+        self.assertIn("prepareNextMapScreenRenderAhead(tile);", show)
+        self.assertLess(
+            show.index("mapView.serviceRenderPipeline(nowMs)"),
+            show.index("requestMapRender(map_render_policy::Reason::Screen)"),
+        )
+        self.assertIn("mapView.hasPendingRenderForCurrentScreen()", show)
+
+        render_ahead = function_body(
+            MAIN_SCREEN_SOURCE, "static void prepareNextMapScreenRenderAhead"
+        )
+        self.assertIn("mapView.prepareVectorMapForScreen", render_ahead)
+        self.assertIn("mapView.isPosMoved = false", render_ahead)
+        self.assertIn("mapView.redrawMap = false", render_ahead)
+        self.assertIn("noteMapRenderReasons", render_ahead)
+
+        renderer_prepare = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::prepareVectorMapForScreen"
+        )
+        self.assertIn("buildRenderRequestForScreen", renderer_prepare)
+        self.assertIn("submitRenderRequest(request)", renderer_prepare)
+        for forbidden in (
+            "heap_caps_malloc",
+            "ensureMapScreenBuffer",
+            "ensureMapTempBuffer",
+            "readVectorMap",
+            "lv_canvas_set_buffer",
+        ):
+            self.assertNotIn(forbidden, renderer_prepare)
+
+        pending = function_body(
+            MAP_RENDERER_SOURCE,
+            "bool Maps::hasPendingRenderForCurrentScreen",
+        )
+        self.assertIn("renderRequestStillCurrent(latestRenderRequest)", pending)
+
+    def test_render_ahead_captures_destination_profile_semantics(self):
+        build = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn("guidanceScreenActive", build)
+        self.assertIn("captureRenderContextForScreen", build)
+        self.assertIn("navigationSignatureForScreen", build)
+        self.assertIn("request.birdsEye", build)
+
+    def test_map_transition_logs_render_ahead_latency(self):
+        reveal = function_body(
+            MAIN_SCREEN_SOURCE, "static void revealPendingMapTileIfReady() {"
+        )
+        self.assertIn("map transition visible after %lu ms", reveal)
+        self.assertIn("mapTileTransitionUsedRenderAhead", reveal)
 
 
 if __name__ == "__main__":

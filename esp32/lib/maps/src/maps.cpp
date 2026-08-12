@@ -3435,25 +3435,35 @@ bool Maps::readVectorMap(
 }
 
 Maps::RenderContext Maps::captureRenderContext(uint32_t nowMs) {
+  return captureRenderContextForScreen(
+      nowMs, isMapScreenActive() || isMapGuidanceScreenActive(),
+      isMapGuidanceScreenActive());
+}
+
+Maps::RenderContext Maps::captureRenderContextForScreen(
+    uint32_t nowMs, bool mapVisible, bool guidanceScreenActive) {
   RenderContext context;
-  context.style = currentMapStyleSettings();
+  context.style = map_profile_protocol::select(
+      mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
+      guidanceScreenActive);
   context.measuredGpsWorld = {lon2x(gps.gpsData.longitude),
                               lat2y(gps.gpsData.latitude)};
   if (nowMs != 0)
-    updatePresentedPose(nowMs);
+    updatePresentedPoseForScreen(nowMs, mapVisible);
   context.presentedWorld = hasPresentedPose
                                ? map_transform::WorldPoint{
                                      presentedPose.position.x,
                                      presentedPose.position.y}
                                : context.measuredGpsWorld;
-  context.guidanceScreenActive = isMapGuidanceScreenActive();
+  context.guidanceScreenActive = guidanceScreenActive;
   context.navigationSessionActive =
       routeOverlay.hasRoute() || hasCurrentNavigationData();
-  context.followPosition = followGps || isMapGuidanceScreenActive();
+  context.followPosition = followGps || guidanceScreenActive;
   context.showCurrentPosition = isCurrentPositionVisible(mapRenderSettings);
   context.buildings3DEnabled =
       mapRenderSettings.mapNavigation3DBuildingsEnabled;
-  context.markerScale = currentMarkerScale();
+  context.markerScale = static_cast<uint8_t>(std::min(
+      std::max(static_cast<int>(context.style.positionMarkerScale), 1), 5));
   context.birdsEyePerspective =
       mapRenderSettings.mapNavigationBirdsEyePerspective;
   return context;
@@ -3565,7 +3575,8 @@ uint64_t Maps::styleSignature(const ScreenMapRenderSettings &style) const {
   return hash;
 }
 
-uint64_t Maps::navigationSignature() const {
+uint64_t
+Maps::navigationSignatureForScreen(bool guidanceScreenActive) const {
   // Only state that changes the base-frame contract belongs here. Maneuver
   // text/distance remains a lightweight LVGL overlay and must not cancel an
   // expensive base render every time its packet advances.
@@ -3573,7 +3584,7 @@ uint64_t Maps::navigationSignature() const {
   const bool guidanceSession =
       routeOverlay.hasRoute() || hasCurrentNavigationData();
   hash = fnvMix64(hash, guidanceSession ? 1U : 0U);
-  hash = fnvMix64(hash, isMapGuidanceScreenActive() ? 1U : 0U);
+  hash = fnvMix64(hash, guidanceScreenActive ? 1U : 0U);
   hash = fnvMix64(hash, static_cast<uint8_t>(rotationMode));
   return hash;
 }
@@ -3593,8 +3604,19 @@ uint64_t Maps::projectionSignature(uint8_t requestedZoom,
 }
 
 void Maps::invalidateRenderSemantics(uint32_t nowMs) {
+  invalidateRenderSemanticsForScreen(
+      nowMs, zoom, isMapScreenActive() || isMapGuidanceScreenActive(),
+      isMapGuidanceScreenActive());
+}
+
+void Maps::invalidateRenderSemanticsForScreen(uint32_t nowMs,
+                                              uint8_t requestedZoom,
+                                              bool mapVisible,
+                                              bool guidanceScreenActive) {
   bool semanticChanged = false;
-  const ScreenMapRenderSettings &style = currentMapStyleSettings();
+  const ScreenMapRenderSettings &style = map_profile_protocol::select(
+      mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
+      guidanceScreenActive);
   const uint64_t currentStyle = styleSignature(style);
   if (lastStyleSignature == 0) {
     lastStyleSignature = currentStyle;
@@ -3606,7 +3628,8 @@ void Maps::invalidateRenderSemantics(uint32_t nowMs) {
     semanticChanged = true;
   }
 
-  const uint64_t currentNavigation = navigationSignature();
+  const uint64_t currentNavigation =
+      navigationSignatureForScreen(guidanceScreenActive);
   if (lastNavigationSignature == 0) {
     lastNavigationSignature = currentNavigation;
   } else if (lastNavigationSignature != currentNavigation) {
@@ -3623,12 +3646,11 @@ void Maps::invalidateRenderSemantics(uint32_t nowMs) {
   // rider jump back to the last raw GPS coordinate. A newly received route
   // bearing still replaces remembered heading through resolve().
   uint64_t headingSession = 1469598103934665603ULL;
-  const bool mapVisible = isMapScreenActive() || isMapGuidanceScreenActive();
   const bool routeActive = routeOverlay.hasRoute();
   const bool maneuverActive = hasCurrentNavigationData();
   headingSession = fnvMix64(headingSession, mapVisible ? 1U : 0U);
-  headingSession = fnvMix64(headingSession,
-                            isMapGuidanceScreenActive() ? 1U : 0U);
+  headingSession =
+      fnvMix64(headingSession, guidanceScreenActive ? 1U : 0U);
   headingSession = fnvMix64(
       headingSession, (routeActive || maneuverActive) ? 1U : 0U);
   headingSession = fnvMix64(headingSession,
@@ -3650,10 +3672,10 @@ void Maps::invalidateRenderSemantics(uint32_t nowMs) {
   const uint16_t viewportHeight =
       mapSet.mapFullScreen ? mapScrFull : mapScrHeight;
   const bool birdsEye = navigation_content_mode::usesMapGuidanceBirdsEye(
-      isMapGuidanceScreenActive(),
+      guidanceScreenActive,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
   const uint64_t currentProjection = projectionSignature(
-      zoom, mapScrWidth, viewportHeight, birdsEye,
+      requestedZoom, mapScrWidth, viewportHeight, birdsEye,
       mapRenderSettings.mapNavigationBirdsEyePerspective);
   if (lastProjectionSignature == 0) {
     lastProjectionSignature = currentProjection;
@@ -3685,9 +3707,13 @@ void Maps::cancelActiveRenderWork() {
 }
 
 void Maps::updatePresentedPose(uint32_t nowMs) {
+  updatePresentedPoseForScreen(
+      nowMs, isMapScreenActive() || isMapGuidanceScreenActive());
+}
+
+void Maps::updatePresentedPoseForScreen(uint32_t nowMs, bool mapVisible) {
   const bool routeActive = routeOverlay.hasRoute();
   const bool maneuverActive = hasCurrentNavigationData();
-  const bool mapVisible = isMapScreenActive() || isMapGuidanceScreenActive();
   // The session is explicit and screen-scoped. A route window or a maneuver
   // snapshot is independently sufficient to make guidance course-up valid.
   const bool sessionActive =
@@ -3809,8 +3835,19 @@ Maps::makeRequestProjection(const RenderRequest &request) const {
 
 bool Maps::buildRenderRequest(uint8_t requestedZoom, uint32_t nowMs,
                               RenderRequest &request) {
-  invalidateRenderSemantics(nowMs);
-  updatePresentedPose(nowMs);
+  return buildRenderRequestForScreen(
+      requestedZoom, nowMs,
+      isMapScreenActive() || isMapGuidanceScreenActive(),
+      isMapGuidanceScreenActive(), request);
+}
+
+bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
+                                       bool mapVisible,
+                                       bool guidanceScreenActive,
+                                       RenderRequest &request) {
+  invalidateRenderSemanticsForScreen(nowMs, requestedZoom, mapVisible,
+                                     guidanceScreenActive);
+  updatePresentedPoseForScreen(nowMs, mapVisible);
 
   const uint16_t viewportHeight =
       mapSet.mapFullScreen ? mapScrFull : mapScrHeight;
@@ -3831,11 +3868,13 @@ bool Maps::buildRenderRequest(uint8_t requestedZoom, uint32_t nowMs,
                                   LV_COLOR_FORMAT_RGB565) /
       sizeof(uint16_t);
   request.birdsEye = navigation_content_mode::usesMapGuidanceBirdsEye(
-      isMapGuidanceScreenActive(),
+      guidanceScreenActive,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
-  request.context = captureRenderContext(nowMs);
+  request.context = captureRenderContextForScreen(
+      nowMs, mapVisible, guidanceScreenActive);
   request.styleSignature = styleSignature(request.context.style);
-  request.navigationSignature = navigationSignature();
+  request.navigationSignature =
+      navigationSignatureForScreen(guidanceScreenActive);
   request.projectionSignature = projectionSignature(
       request.zoom, request.viewportWidth, request.viewportHeight,
       request.birdsEye, request.context.birdsEyePerspective);
@@ -3972,16 +4011,21 @@ bool Maps::takeWorkerRequest(RenderRequest &request) {
 }
 
 bool Maps::renderRequestStillCurrent(const RenderRequest &request) const {
+  const bool guidanceScreenActive = isMapGuidanceScreenActive();
+  const ScreenMapRenderSettings &style = map_profile_protocol::select(
+      mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
+      guidanceScreenActive);
   return request.version.navigationEpoch == navigationEpoch &&
          request.version.styleEpoch == styleEpoch &&
          request.version.mapEpoch == mapEpoch &&
          request.version.projectionEpoch == projectionEpoch &&
-         request.styleSignature == styleSignature(currentMapStyleSettings()) &&
-         request.navigationSignature == navigationSignature() &&
+         request.styleSignature == styleSignature(style) &&
+         request.navigationSignature ==
+             navigationSignatureForScreen(guidanceScreenActive) &&
          request.projectionSignature == projectionSignature(
              request.zoom, request.viewportWidth, request.viewportHeight,
              navigation_content_mode::usesMapGuidanceBirdsEye(
-                 isMapGuidanceScreenActive(),
+                 guidanceScreenActive,
                  mapRenderSettings.mapNavigationBirdsEyeEnabled),
              mapRenderSettings.mapNavigationBirdsEyePerspective);
 }
@@ -4701,6 +4745,27 @@ bool Maps::serviceRenderPipeline(uint32_t nowMs) {
   updatePresentedFrameTransform();
   renderLiveForeground();
   return published;
+}
+
+bool Maps::hasPendingRenderForCurrentScreen() const {
+  if (renderStateMutex == nullptr)
+    return false;
+  if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE) {
+    // The worker holds this mutex only around short state transitions. Treat a
+    // transient miss as pending so a BOOT press cannot supersede a render-ahead
+    // frame at the instant it becomes ready.
+    return true;
+  }
+
+  const map_render_job::State state = renderJobs.state();
+  const bool queued = latestRenderRequestValid &&
+                      (state == map_render_job::State::Rendering ||
+                       state == map_render_job::State::Ready ||
+                       renderJobs.hasRequestNewerThan(lastTakenRenderSequence));
+  const bool current =
+      queued && renderRequestStillCurrent(latestRenderRequest);
+  xSemaphoreGive(renderStateMutex);
+  return current;
 }
 
 bool Maps::takeFramePublication() {
@@ -7050,6 +7115,24 @@ bool Maps::generateVectorMap(uint8_t requestedZoom) {
     // state, not an allocation/render failure and must never become north-up.
     // Return false so the UI scheduler does not mark a request as submitted or
     // clear the dirty state when no immutable job was actually queued.
+    return false;
+  }
+  return submitRenderRequest(request);
+}
+
+bool Maps::prepareVectorMapForScreen(uint8_t requestedZoom,
+                                     bool guidanceScreenActive) {
+  (void)recoverRenderWorkerIfNeeded();
+  if (canvasMap == nullptr || canvasMapTemp == nullptr ||
+      renderWorkerTaskHandle == nullptr) {
+    return false;
+  }
+
+  mapTileSize = vectorMapTileSize;
+  zoomLevel = map_transform::clampRuntimeZoom(requestedZoom);
+  RenderRequest request;
+  if (!buildRenderRequestForScreen(zoomLevel, millis(), true,
+                                   guidanceScreenActive, request)) {
     return false;
   }
   return submitRenderRequest(request);

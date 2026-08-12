@@ -325,6 +325,9 @@ private:
                         lv_obj_t *canvas, uint8_t zoom, double rotation,
                         const ScreenMapRenderSettings &style);
   RenderContext captureRenderContext(uint32_t nowMs = 0);
+  RenderContext captureRenderContextForScreen(uint32_t nowMs,
+                                              bool mapVisible,
+                                              bool guidanceScreenActive);
   static void renderWorkerTaskThunk(void *argument);
   void renderWorkerLoop();
   struct VectorMapActivationRequest {
@@ -346,6 +349,10 @@ private:
   bool recoverRenderWorkerIfNeeded();
   bool buildRenderRequest(uint8_t zoom, uint32_t nowMs,
                           RenderRequest &request);
+  bool buildRenderRequestForScreen(uint8_t zoom, uint32_t nowMs,
+                                   bool mapVisible,
+                                   bool guidanceScreenActive,
+                                   RenderRequest &request);
   bool submitRenderRequest(const RenderRequest &request);
   void cancelActiveRenderWork();
   bool takeWorkerRequest(RenderRequest &request);
@@ -353,12 +360,16 @@ private:
   bool renderRequestStillCurrent(const RenderRequest &request) const;
   bool renderResultStillCurrent(const RenderResult &result) const;
   void updatePresentedPose(uint32_t nowMs);
+  void updatePresentedPoseForScreen(uint32_t nowMs, bool mapVisible);
   void updatePresentedFrameTransform();
   void renderLiveForeground();
   void invalidateRenderSemantics(uint32_t nowMs);
+  void invalidateRenderSemanticsForScreen(uint32_t nowMs, uint8_t zoom,
+                                          bool mapVisible,
+                                          bool guidanceScreenActive);
   bool presentationGestureOwnsTransforms() const;
   uint64_t styleSignature(const ScreenMapRenderSettings &style) const;
-  uint64_t navigationSignature() const;
+  uint64_t navigationSignatureForScreen(bool guidanceScreenActive) const;
   uint64_t projectionSignature(uint8_t zoom, uint16_t viewportWidth,
                                uint16_t viewportHeight, bool birdsEye,
                                uint8_t perspective) const;
@@ -565,7 +576,9 @@ public:
   void createMapScrSprites();
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
+  bool prepareVectorMapForScreen(uint8_t zoom, bool guidanceScreenActive);
   bool serviceRenderPipeline(uint32_t nowMs);
+  bool hasPendingRenderForCurrentScreen() const;
   bool takeFramePublication();
   bool takeRenderFailure();
   bool hasPublishedMapFrame() const { return publishedMapFrame; }
