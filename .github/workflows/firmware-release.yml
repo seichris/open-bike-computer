@@ -6,7 +6,9 @@ on:
       - "v*"
 
 permissions:
+  attestations: read
   contents: read
+  packages: read
 
 jobs:
   validate:
