@@ -148,6 +148,49 @@ cd esp32
 pio device monitor -b 115200
 ```
 
+### Debug a physical device in the browser
+
+Remote device debugging displays and controls the real Bicino framebuffer in a
+browser; it is not a simulator. It supports live screen viewing, taps and
+drags, display wake, a short BOOT-button press, and PNG screenshots. The service
+exists only in the opt-in `*_REMOTE_DEBUG` firmware profiles and is excluded
+from ordinary and production builds.
+
+![Remote device debugger showing the live Bicino map](docs/images/remote-device-debugging.jpg)
+
+First identify the connected board and its stable hardware serial:
+
+```sh
+cd esp32
+pio device list
+```
+
+Then build and flash the matching debugger profile:
+
+```sh
+python3 tools/build_firmware.py WAVESHARE_AMOLED_175_REMOTE_DEBUG \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST
+```
+
+Use `WAVESHARE_AMOLED_206_REMOTE_DEBUG` for the 2.06-inch board.
+
+To start a session:
+
+1. Run a Debug build of the iPhone app and connect to the Bicino normally.
+2. Open **Developer Settings -> Remote Device Debugging**.
+3. Keep **Prefer Local Wi-Fi** enabled and enter a 2.4 GHz Wi-Fi network, or
+   disable it to use the device hotspot directly.
+4. Tap **Start Remote Debugging** and follow the displayed connection details.
+5. Tap **Copy Browser URL** and open it in Brave. Keep the iPhone connected over
+   BLE for the entire session.
+
+The copied URL contains a temporary authentication token. Do not include it,
+network credentials, or the device-hotspot password in logs or screenshots.
+Select **End Debug Session** when finished.
+
+See [Remote device debugging](docs/remote-device-debugging.md) for the security
+model, HTTP API, automation CLI, and troubleshooting details.
+
 Run the iOS navigation/BLE protocol tests from the repo root:
 
 ```sh
