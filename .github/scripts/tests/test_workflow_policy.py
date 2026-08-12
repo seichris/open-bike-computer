@@ -14,13 +14,16 @@ CORE_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_206",
     "WAVESHARE_AMOLED_206_PRODUCTION",
 }
-DIAGNOSTIC_FIRMWARE_TARGETS = {
+REMOTE_DEBUG_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
+    "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
+}
+DIAGNOSTIC_FIRMWARE_TARGETS = {
+    *REMOTE_DEBUG_FIRMWARE_TARGETS,
     "WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS",
     "WAVESHARE_AMOLED_175_DISPLAY_TEST",
     "WAVESHARE_AMOLED_175_POWER_METRICS",
     "WAVESHARE_AMOLED_175_LIGHT_SLEEP",
-    "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
     "WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS",
     "WAVESHARE_AMOLED_206_DISPLAY_TEST",
     "WAVESHARE_AMOLED_206_POWER_METRICS",
@@ -267,14 +270,29 @@ class WorkflowPolicyTests(unittest.TestCase):
                 )
         self.assertEqual((), tuple(violations))
 
-    def test_default_and_diagnostic_firmware_matrices_stay_separate(self) -> None:
+    def test_pull_requests_compile_remote_debug_and_weekly_diagnostics(self) -> None:
         default_targets = matrix_targets(workflow_source("ci.yml"))
         diagnostic_targets = matrix_targets(
             workflow_source("firmware-diagnostics.yml")
         )
 
-        self.assertEqual(CORE_FIRMWARE_TARGETS, default_targets)
+        self.assertEqual(
+            CORE_FIRMWARE_TARGETS | REMOTE_DEBUG_FIRMWARE_TARGETS,
+            default_targets,
+        )
         self.assertEqual(DIAGNOSTIC_FIRMWARE_TARGETS, diagnostic_targets)
+
+    def test_pull_request_remote_debug_builds_verify_metrics_routes(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn(
+            "Verify remote-debug artifacts include renderer metrics routes",
+            general_ci,
+        )
+        self.assertIn("if: contains(matrix.target, '_REMOTE_DEBUG')", general_ci)
+        self.assertIn('"/device-debug/v1/metrics"', general_ci)
+        self.assertIn('"/device-debug/v1/metrics/window"', general_ci)
+        self.assertIn('route.encode("utf-8") + b"\\0"', general_ci)
 
     def test_feature_branch_pushes_do_not_duplicate_pull_request_ci(self) -> None:
         general_ci = workflow_source("ci.yml")
