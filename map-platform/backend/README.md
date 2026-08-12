@@ -185,32 +185,31 @@ evidence; exact worker, signing-key, app, and firmware identities remain
 mandatory. When generation is set to `1`, missing or invalid signing
 configuration fails closed; the backend never emits an unsigned stream artifact.
 
-Street-label target-2 job creation has an independent fail-closed gate:
-`MAP_PLATFORM_LABEL_TARGET2_ENABLED=0` is the default. Enable it first for
-allowlisted validation installations, then for explicitly approved production
-identities. The two-board acceptance matrix is available as optional manual
-evidence rather than a deployment prerequisite. Disabling the gate does not
-remove or invalidate existing artifacts; it prevents new target-2 jobs.
+Map-generation availability is defined in the reviewed, image-pinned
+`map-platform/config/generation-profile-policy-v1.json` contract. Set
+`MAP_PLATFORM_DEPLOYMENT_CHANNEL` explicitly to `development` or `production`;
+invalid values fail startup. Development exposes renderer formats 1, 2, and 3
+globally. Production exposes formats 1 and 2 globally and keeps format 3 in a
+canary state. The authenticated `GET /v1/capabilities` response is generated
+from the same policy used to admit jobs and includes the policy digest, so
+clients never need to infer server support from an installation ID or a failed
+job request.
 
-OSM 3D-building target-3 generation has a separate fail-closed gate:
-`MAP_PLATFORM_BUILDING_TARGET3_ENABLED=0` is the default. Target 3 retains the
-target-2 label/FMA1 contract, emits FMB v4 building sections and a signed
-artifact-derived height-provenance summary. The independent
+OSM 3D-building target 3 retains the target-2 label/FMA1 contract, emits FMB v4
+building sections and a signed artifact-derived height-provenance summary. The independent
 `MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE` rollout control defaults to
 `shadow`: it records the bounded selected-area plan while preserving the legacy
 expanded source cut-out. Set it to `selected` to use the immutable source index,
 sealed calibration generation, relation closure, and selected/aligned blocks
 plus the bounded correctness buffer. Set it to `legacy` for emergency rollback
-without shadow planning. Invalid values fail startup. Enable target 3 only for
-hardware validation and approved production identities.
-Set `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` to a comma-separated list of exact
-registered installation IDs during the limited rollout. A nonempty allowlist
-authorizes only those canary installations even while the global gate remains
-off; with an empty allowlist, `MAP_PLATFORM_BUILDING_TARGET3_ENABLED=1` enables
-the target globally. Rejected clients receive a typed list of compatible
-renderer targets so they can retry without mislabeling the resulting artifact.
-Changing either setting does not affect renderer-format-1/2 requests or existing
-artifacts.
+without shadow planning. Invalid values fail startup.
+`MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` is reserved for production canaries
+and accepts exact registered installation IDs. It has no effect in development,
+where target 3 is already globally available, and it cannot enable a profile the
+checked-in channel policy does not name as canary-capable. Rejected clients
+receive a typed list of compatible renderer targets; Bicino intentionally does
+not silently downgrade a requested 3D map. Changing rollout state does not
+invalidate existing artifacts.
 
 During selected-area preprocessing the public job status remains
 `converting_features` for client compatibility. Its optional `progress` object

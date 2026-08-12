@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Request
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
     from fastapi.responses import FileResponse, JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without the API extra
-    Depends = FastAPI = Header = HTTPException = Request = None  # type: ignore[assignment]
+    Depends = FastAPI = Header = HTTPException = Request = Response = None  # type: ignore[assignment]
     FileResponse = JSONResponse = None  # type: ignore[assignment]
     _FASTAPI_IMPORT_ERROR: ImportError | None = exc
 else:
@@ -19,6 +19,10 @@ else:
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .downloads import DownloadSigner, DownloadTokenError
+from .generation_profiles import (
+    configured_deployment_channel,
+    load_generation_profile_policy,
+)
 from .geofabrik_sources import GeofabrikSourceProvider
 from .installations import InstallationCredentialError, InstallationCredentialStore
 from .jobs import (
@@ -31,9 +35,7 @@ from .limits import JobLimits
 from .map_buildings import (
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
-    building_target3_generation_enabled,
 )
-from .map_labels import label_target2_generation_enabled
 from .map_signing import map_stream_generation_enabled
 from .map_stream_hardware_requirements import load_hardware_requirements
 from .map_stream_rollout import (
@@ -47,12 +49,12 @@ from .map_stream_rollout import (
     parse_map_stream_trust_capabilities,
 )
 from .map_stream_trust_registry import trusted_key_fingerprints
+from .models import JobStatus
 from .monitoring import (
     DEFAULT_MONITORING_RETENTION_DAYS,
     DEFAULT_MONITORING_SUMMARY_RUN_LIMIT,
     MapMonitoringStore,
 )
-from .models import JobStatus
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import (
     PreparationEstimateMode,
@@ -226,13 +228,15 @@ def create_app():
         monitoring_store=monitoring_store,
         preprocessing_mode=preprocessing_scope_mode,
     )
+    deployment_channel = configured_deployment_channel()
+    generation_profile_policy = load_generation_profile_policy(repo_root)
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
         limits=limits,
-        label_target2_enabled=label_target2_generation_enabled(),
-        building_target3_enabled=building_target3_generation_enabled(),
         building_target3_allowlist=building_target3_generation_allowlist(),
+        generation_profile_policy=generation_profile_policy,
+        deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
@@ -293,10 +297,10 @@ def create_app():
             return False
         return (
             path == "/v1/installations"
+            or path == "/v1/capabilities"
             or path == "/v1/source-regions"
             or path == "/v1/map-jobs"
-            or path.startswith("/v1/map-jobs/")
-            or path.startswith("/v1/map-packs/")
+            or path.startswith(("/v1/map-jobs/", "/v1/map-packs/"))
         )
 
     @app.middleware("http")
@@ -427,9 +431,29 @@ def create_app():
     def healthz() -> dict[str, Any]:
         return {
             "status": "ok",
+            "deploymentChannel": deployment_channel,
+            "generationProfilePolicySha256": generation_profile_policy.sha256,
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
         }
+
+    @app.get("/v1/capabilities")
+    def capabilities(
+        clientInstallationId: str,
+        response: Response,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        response.headers["Cache-Control"] = "private, no-store"
+        return service.generation_capabilities(installation_id)
 
     @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])
     def admin_maps(includeUndownloaded: bool = False) -> dict[str, Any]:

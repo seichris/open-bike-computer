@@ -3,6 +3,7 @@
 __all__ = [
     "artifacts",
     "geometry",
+    "generation_profiles",
     "installations",
     "downloads",
     "jobs",

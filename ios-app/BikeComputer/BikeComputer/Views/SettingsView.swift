@@ -2276,7 +2276,7 @@ private struct DeveloperSettingsView: View {
             Section(header: Text("Map Server")) {
                 SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
                 Button {
-                    offlineMapManager.serverURLString = OfflineMapServiceConfig.productionServerURLString
+                    offlineMapManager.serverURLString = OfflineMapServiceConfig.defaultServerURLString
                 } label: {
                     Label("Use Production Server", systemImage: "checkmark.seal")
                 }

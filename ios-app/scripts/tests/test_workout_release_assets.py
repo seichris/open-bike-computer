@@ -117,6 +117,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride Dev",
             "BICINO_URL_SCHEME": "bikecomputer-dev",
             "BICINO_APP_ICON_NAME": "AppIconDev",
+            "BICINO_MAP_SERVICE_HOST": "maps-dev.8o.vc",
         }
         expected_production = {
             "BICINO_IOS_BUNDLE_IDENTIFIER": "LetItRide.BikeComputer",
@@ -133,6 +134,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride",
             "BICINO_URL_SCHEME": "bikecomputer",
             "BICINO_APP_ICON_NAME": "AppIcon",
+            "BICINO_MAP_SERVICE_HOST": "maps.8o.vc",
         }
         self.assertEqual(development, expected_development)
         self.assertEqual(production, expected_production)
@@ -258,6 +260,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(
             watch_info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
             ["$(BICINO_URL_SCHEME)"],
+        )
+        self.assertEqual(
+            ios_info["BicinoMapServiceHost"],
+            "$(BICINO_MAP_SERVICE_HOST)",
         )
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
