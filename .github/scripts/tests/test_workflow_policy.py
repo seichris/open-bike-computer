@@ -319,7 +319,10 @@ class WorkflowPolicyTests(unittest.TestCase):
             "uses: ./.github/workflows/firmware-diagnostics.yml", release
         )
         self.assertIn("      - build\n      - diagnostics\n      - validate\n", release)
-        self.assertIn("permissions:\n  contents: read\n", release)
+        release_permissions = mapping_block(release, "permissions", indent=0)
+        self.assertIn("  attestations: read", release_permissions)
+        self.assertIn("  contents: read", release_permissions)
+        self.assertIn("  packages: read", release_permissions)
         publish_job = mapping_block(release, "publish", indent=2)
         self.assertIn("contents: write", publish_job)
         self.assertIn("pages: write", publish_job)
