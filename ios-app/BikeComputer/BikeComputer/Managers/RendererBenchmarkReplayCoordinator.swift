@@ -1,6 +1,7 @@
 #if DEBUG
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
@@ -22,6 +23,8 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private var capturedRendererRevision: UInt64 = 0
     private var ordinarySnapshots: [String] = []
     private var ordinaryRepeatNumber: UInt16 = 0
+    private var idleTimerWasDisabled = false
+    private var ownsIdleTimerOverride = false
 
     var progressDescription: String {
         guard isRunning, sampleCount > 0 else { return status }
@@ -69,7 +72,11 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             errorMessage = nil
             status = "Running at 1 Hz"
             isRunning = true
+            idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
+            ownsIdleTimerOverride = true
             emitCurrentSample()
+            guard isRunning else { return }
 
             let timer = Timer(
                 timeInterval: 1,
@@ -96,6 +103,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         }
         if restoreCurrent {
             restoreCurrentProfileIfNeeded()
+        }
+        if ownsIdleTimerOverride {
+            UIApplication.shared.isIdleTimerDisabled = idleTimerWasDisabled
+            ownsIdleTimerOverride = false
         }
         isRunning = false
         if status == "Running at 1 Hz" {
@@ -222,13 +233,18 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             return
         }
         advanceOrdinaryRepeatNumber()
-        _ = bleManager.beginRendererBenchmarkWindow(
+        let queued = bleManager.beginRendererBenchmarkWindow(
             profile: .current,
             repeatNumber: ordinaryRepeatNumber,
             runNonce: UInt64.random(in: 1...UInt64.max),
             fixtureSHA256: fixtureSHA256,
             fixtureID: fixtureID
         )
+        if !queued {
+            errorMessage =
+                "Current-profile cleanup could not be queued; disconnect the Bike Computer to restore it."
+            status = "Cleanup failed"
+        }
     }
 
     private func advanceOrdinaryRepeatNumber() {

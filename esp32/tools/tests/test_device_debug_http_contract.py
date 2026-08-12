@@ -97,6 +97,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("kMetricsResponseMinimumIntervalMs", metrics)
         self.assertIn("metrics_rate_limited", metrics)
+        self.assertIn("metrics_memory", metrics)
+        self.assertIn("body.empty()", metrics)
 
         window = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleRendererWindow") :

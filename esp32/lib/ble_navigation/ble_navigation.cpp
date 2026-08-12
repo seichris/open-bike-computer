@@ -111,6 +111,8 @@ static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
 static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
+static std::atomic<uint8_t> lastRendererWindowRequestProfile{
+    renderer_diagnostics_ble_protocol::CURRENT_PROFILE};
 static portMUX_TYPE rendererWindowRequestMux = portMUX_INITIALIZER_UNLOCKED;
 static renderer_diagnostics_ble_protocol::WindowRequest
     pendingRendererWindowRequest;
@@ -1354,6 +1356,9 @@ static void handleAuthPayload(const std::string &frame) {
                                                 std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestProfile.store(
+        renderer_diagnostics_ble_protocol::CURRENT_PROFILE,
+        std::memory_order_release);
     clearRendererWindowRequest();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
@@ -1819,6 +1824,11 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
 
   const std::string body = renderer_diagnostics::toJson(
       renderer_diagnostics::snapshot(millis()));
+  if (body.empty()) {
+    Serial.println(
+        "BLE Renderer Diagnostics: snapshot serialization unavailable");
+    return;
+  }
   uint16_t peerMtu = 23;
   NimBLEService *service = pChar->getService();
   NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
@@ -1949,13 +1959,21 @@ static bool handleRendererDiagnosticsCommand(const std::string &value,
     const uint32_t nowMs = millis();
     const uint32_t previousMs =
         lastRendererWindowRequestMs.load(std::memory_order_acquire);
+    const uint8_t previousProfile =
+        lastRendererWindowRequestProfile.load(std::memory_order_acquire);
+    const bool cleanup =
+        renderer_diagnostics_ble_protocol::isCurrentProfileCleanup(
+            request, previousProfile);
     if (previousMs != 0 &&
         static_cast<uint32_t>(nowMs - previousMs) <
-            kMinimumWindowRequestIntervalMs) {
+            kMinimumWindowRequestIntervalMs &&
+        !cleanup) {
       Serial.println("BLE Renderer Diagnostics: window request rate limited");
       return true;
     }
     lastRendererWindowRequestMs.store(nowMs, std::memory_order_release);
+    lastRendererWindowRequestProfile.store(request.profile,
+                                           std::memory_order_release);
     queueRendererWindowRequest(request);
     return true;
   }
@@ -3327,6 +3345,9 @@ public:
                                                 std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestProfile.store(
+        renderer_diagnostics_ble_protocol::CURRENT_PROFILE,
+        std::memory_order_release);
     clearRendererWindowRequest();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
@@ -3396,6 +3417,9 @@ public:
                                                 std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
+    lastRendererWindowRequestProfile.store(
+        renderer_diagnostics_ble_protocol::CURRENT_PROFILE,
+        std::memory_order_release);
     clearRendererWindowRequest();
     clearAuthenticatedBleGpsRideObservation();
     phoneBatteryLevelPercent = -1;
@@ -4232,6 +4256,9 @@ bool BLENavigationServer::forgetOwner() {
                                               std::memory_order_release);
   lastRendererMetricsRequestMs.store(0, std::memory_order_release);
   lastRendererWindowRequestMs.store(0, std::memory_order_release);
+  lastRendererWindowRequestProfile.store(
+      renderer_diagnostics_ble_protocol::CURRENT_PROFILE,
+      std::memory_order_release);
   clearRendererWindowRequest();
   clearAuthenticatedBleGpsRideObservation();
   bleDebugStats.authenticated = false;

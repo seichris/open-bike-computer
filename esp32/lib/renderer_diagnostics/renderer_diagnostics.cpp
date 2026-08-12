@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <new>
 #include <sstream>
 
 namespace renderer_diagnostics {
@@ -139,9 +140,11 @@ bool sessionActive() {
 
 void beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
-                 const JobCounters &currentJobs) {
+                 const JobCounters &currentJobs,
+                 uint32_t currentGpsPacketSequence) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.beginWindow(windowId, identity, profile, nowMs, currentJobs);
+  diagnosticsState.beginWindow(windowId, identity, profile, nowMs, currentJobs,
+                               currentGpsPacketSequence);
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
   noteCurrentMemory();
@@ -158,6 +161,13 @@ renderer_tuning::Profile currentProfile() {
   const renderer_tuning::Profile profile = diagnosticsState.profile();
   portEXIT_CRITICAL(&diagnosticsMux);
   return profile;
+}
+
+uint32_t currentWindowId() {
+  portENTER_CRITICAL(&diagnosticsMux);
+  const uint32_t windowId = diagnosticsState.measurementWindowId();
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return windowId;
 }
 
 void noteLoop(uint32_t nowMs, uint32_t gapMs) {
@@ -180,12 +190,17 @@ void noteDisplayFlushUs(uint32_t microseconds) {
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-void noteRender(const RenderSample &sample) {
+bool noteRenderForWindow(uint32_t windowId,
+                         renderer_tuning::Profile profile,
+                         const RenderSample &sample) {
   const MemorySample memory = memorySample();
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteRender(sample);
-  diagnosticsState.noteMemory(memory);
+  const bool accepted =
+      diagnosticsState.noteRenderForWindow(windowId, profile, sample);
+  if (accepted)
+    diagnosticsState.noteMemory(memory);
   portEXIT_CRITICAL(&diagnosticsMux);
+  return accepted;
 }
 
 void noteJobs(const JobCounters &jobs) {
@@ -244,9 +259,10 @@ Snapshot snapshot(uint32_t nowMs) {
 }
 
 std::string toJson(const Snapshot &value) {
-  const renderer_tuning::BuildingQuotas &quotas = value.tuning.buildings;
-  std::ostringstream body;
-  body << "{\"ok\":true,\"schema\":" << static_cast<unsigned>(value.schema)
+  try {
+    const renderer_tuning::BuildingQuotas &quotas = value.tuning.buildings;
+    std::ostringstream body;
+    body << "{\"ok\":true,\"schema\":" << static_cast<unsigned>(value.schema)
        << ",\"sequence\":" << value.sequence
        << ",\"timestampMs\":" << value.timestampMs
        << ",\"window\":{\"id\":" << value.measurementWindowId
@@ -297,18 +313,18 @@ std::string toJson(const Snapshot &value) {
        << ",\"windowMinimumLargestBlock\":"
        << value.windowMinimumPsramLargest << "}}"
        << ",\"render\":{\"timings\":{\"total\":";
-  appendTiming(body, value.totalRender);
-  body << ",\"blockLoad\":";
-  appendTiming(body, value.blockLoad);
-  body << ",\"draw\":";
-  appendTiming(body, value.draw);
-  body << ",\"buildingProjection\":";
-  appendTiming(body, value.buildingProjection);
-  body << ",\"buildingDraw\":";
-  appendTiming(body, value.buildingDraw);
-  body << ",\"buildingTotal\":";
-  appendTiming(body, value.buildingTotal);
-  body << "},\"buildings\":{\"candidates\":" << value.buildings.candidates
+    appendTiming(body, value.totalRender);
+    body << ",\"blockLoad\":";
+    appendTiming(body, value.blockLoad);
+    body << ",\"draw\":";
+    appendTiming(body, value.draw);
+    body << ",\"buildingProjection\":";
+    appendTiming(body, value.buildingProjection);
+    body << ",\"buildingDraw\":";
+    appendTiming(body, value.buildingDraw);
+    body << ",\"buildingTotal\":";
+    appendTiming(body, value.buildingTotal);
+    body << "},\"buildings\":{\"candidates\":" << value.buildings.candidates
        << ",\"selected\":" << value.buildings.selected
        << ",\"extruded\":" << value.buildings.extruded
        << ",\"flat\":" << value.buildings.flat
@@ -340,8 +356,8 @@ std::string toJson(const Snapshot &value) {
        << ",\"invariantFailed\":" << value.jobs.invariantFailed << "}}"
        << ",\"ui\":{\"maximumGapMs\":" << value.maximumUiGapMs << "}"
        << ",\"displayFlush\":";
-  appendTiming(body, value.displayFlush);
-  body << ",\"gps\":{\"packets\":" << value.gpsPackets
+    appendTiming(body, value.displayFlush);
+    body << ",\"gps\":{\"packets\":" << value.gpsPackets
        << ",\"latestPacketGapMs\":" << value.latestGpsPacketGapMs
        << ",\"maximumPacketGapMs\":"
        << value.maximumGpsPacketGapMs << ",\"predictionGraceEntries\":"
@@ -378,7 +394,10 @@ std::string toJson(const Snapshot &value) {
        << value.remoteDebug.freeAfterAllocate
        << ",\"largestAfterAllocate\":"
        << value.remoteDebug.largestAfterAllocate << "}}";
-  return body.str();
+    return body.str();
+  } catch (const std::bad_alloc &) {
+    return {};
+  }
 }
 
 } // namespace renderer_diagnostics

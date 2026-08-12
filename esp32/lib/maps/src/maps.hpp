@@ -139,6 +139,7 @@ private:
   struct RenderContext {
     ScreenMapRenderSettings style{};
     renderer_tuning::Definition tuning = renderer_tuning::kCurrent;
+    uint32_t rendererDiagnosticsWindowId = 0;
     map_transform::WorldPoint measuredGpsWorld{};
     map_transform::WorldPoint presentedWorld{};
     // Screen mode and route/session availability are distinct. The guidance

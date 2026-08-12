@@ -16,9 +16,9 @@ candidate selection, not permission to change the default profile.
   over HTTP or BLE;
 - internal RAM and PSRAM free/largest-block floors and monotonic-decline checks;
 - render/building/display timings, UI and GPS gaps, render job outcomes,
-building selection/reach, quota limiters, allocation fallback, GPS packet
-cadence, route-marker freshness, reset identity, and remote-debug capture
-overhead;
+  building selection/reach, quota limiters, allocation fallback, GPS packet
+  cadence, route-marker freshness, reset identity, and remote-debug capture
+  overhead;
 - four deterministic screenshots per comparison window;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
   longer soak of the selected candidate;
@@ -61,9 +61,10 @@ changes the production default.
    unless the active map ID and receipt match.
 3. Connect an authenticated Debug build of the iPhone app. In **Developer
    Settings → Renderer Benchmark Replay**, tap **Start Pinned 1 Hz Replay** and
-   leave it running on the map-backed navigation screen with 3D buildings
-   enabled. The iPhone sends the route window on the app's normal two-second
-   cadence and sends GPS plus the fixture marker at 1 Hz.
+   leave that Developer Settings page open; replay keeps the iPhone awake while
+   active. Put the Bike Computer itself on the map-backed navigation screen
+   with 3D buildings enabled. The iPhone sends the route window on the app's
+   normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
 4. Start **Remote Device Debugging** and put the Mac on the reported LAN or
    device-hotspot network. Store `baseUrl` and `token` in a mode-`0600` JSON
    session file as described in [Remote device debugging](remote-device-debugging.md).
@@ -138,10 +139,11 @@ the authenticated BLE session.
 
 1. In **Renderer Benchmark Replay**, select the remote report's candidate under
    **Ordinary Profile** and start the replay.
-2. Let it run for at least 70 seconds. The app defers the first snapshot until
+2. Let it run for at least 110 seconds. The app defers the first snapshot until
    the BLE window is active, then requests one every five seconds while
-   continuing the exact 1 Hz fixture. Seventy seconds yields at least 60
-   seconds between retained snapshots.
+   continuing the exact 1 Hz fixture. This provides the 20 retained samples
+   required by the shared memory-trend gate, with at least 60 seconds between
+   the first and last snapshots.
 3. Stop the replay and tap **Copy Ordinary Capture**. Save the clipboard JSON to
    a file without editing it.
 4. Evaluate it against the original report and exact map artifact:

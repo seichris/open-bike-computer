@@ -1105,9 +1105,12 @@ Profile values are `0` flat, `1` current, `2` medium, and `3` high. `Repeat` and
 `RunNonce` are non-zero. The route ID is 1–48 bytes and restricted to ASCII
 letters, digits, `.`, `-`, `_`, and `:`; the complete frame is at most 97
 bytes. Window requests are limited to one per second, copied into bounded
-storage, and consumed on the UI task. Firmware obtains the active map ID and
-canonical manifest receipt itself rather than trusting values supplied by the
-phone, and labels the route mode `ordinary-ble-1hz`.
+storage, and consumed on the UI task. One immediate `current` cleanup is allowed
+only when the last accepted request selected a non-current profile, so a quick
+stop cannot strand an experimental profile while repeated cleanup traffic
+remains rate-limited. Firmware obtains the active map ID and canonical manifest
+receipt itself rather than trusting values supplied by the phone, and labels
+the route mode `ordinary-ble-1hz`.
 
 Experimental profile selection is RAM-only and scoped to the authenticated BLE
 session. A disconnect, authentication reset, remote-debug transition, or

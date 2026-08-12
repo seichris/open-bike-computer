@@ -6,6 +6,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 TOOLS = Path(__file__).parents[1]
@@ -222,6 +223,29 @@ class RendererBenchmarkTests(unittest.TestCase):
             ],
         )
 
+    def test_full_evidence_rejects_custom_route_or_gates(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+        gates = renderer_benchmark.load_gates(
+            TOOLS / "renderer_benchmark_gates.json"
+        )
+        renderer_benchmark.validate_acceptance_inputs(
+            route_fixture=route,
+            route_fixture_sha256=renderer_benchmark.PINNED_ROUTE_SHA256,
+            gates=gates,
+            allow_partial=False,
+        )
+        with self.assertRaisesRegex(
+            renderer_benchmark.BenchmarkError, "checked-in Shanghai"
+        ):
+            renderer_benchmark.validate_acceptance_inputs(
+                route_fixture=route,
+                route_fixture_sha256="b" * 64,
+                gates=gates,
+                allow_partial=False,
+            )
+
     def test_map_fixture_receipt_matches_firmware_canonical_shape(self):
         manifest = map_manifest()
         with tempfile.TemporaryDirectory() as directory:
@@ -243,12 +267,13 @@ class RendererBenchmarkTests(unittest.TestCase):
 
     def test_signed_map_stream_uses_exact_embedded_manifest_receipt(self):
         manifest = map_manifest()
+        payload = b"p" * 123
+        manifest["files"][0]["sha256"] = hashlib.sha256(payload).hexdigest()
         manifest_bytes = json.dumps(
             manifest, sort_keys=True, separators=(",", ":")
         ).encode()
         key_id = b"test-key"
         envelope = struct.pack("<BBH", 1, len(key_id), 64) + key_id + b"s" * 64
-        payload = b"p" * 123
         header = struct.pack(
             "<8sHHIHHIQ",
             b"BIKEMAP1",
@@ -276,6 +301,21 @@ class RendererBenchmarkTests(unittest.TestCase):
                 + envelope
             ).hexdigest(),
         )
+
+    def test_map_artifact_payload_must_match_the_manifest(self):
+        manifest = map_manifest()
+        payload = b"p" * 123
+        manifest["files"][0]["sha256"] = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "shanghai.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("manifest.json", json.dumps(manifest))
+                archive.writestr(manifest["files"][0]["path"], b"x" * 123)
+            with self.assertRaisesRegex(
+                renderer_benchmark.BenchmarkError, "payload digest"
+            ):
+                renderer_benchmark.load_map_fixture(archive_path)
 
     def test_monotonic_decline_detects_leak_shape_not_stable_noise(self):
         self.assertTrue(
@@ -366,6 +406,7 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertIn("stale_route_marker", failures)
         self.assertIn("stalled_route_marker", failures)
         self.assertIn("missing_gps_packets", failures)
+        self.assertIn("missing_memory_trend_samples:13<20", failures)
 
     def test_sparse_or_non_extruded_fixture_cannot_pass_as_a_baseline(self):
         fixture = {
@@ -450,6 +491,54 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertEqual(client.requests[0]["profile"], "current")
         self.assertTrue(client.requests[0]["run_id"].endswith("-cleanup"))
 
+    def test_cleanup_window_retries_failed_confirmation(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+
+        class CleanupClient:
+            def __init__(self):
+                self.requests = []
+
+            def begin_renderer_window(self, **kwargs):
+                self.requests.append(kwargs)
+                return len(self.requests)
+
+        client = CleanupClient()
+        runner = renderer_benchmark.BenchmarkRunner(
+            client=client,
+            output=Path("unused"),
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            map_fixture_id="shanghai-map",
+            map_fixture_sha256="a" * 64,
+            route_fixture=route,
+            route_fixture_sha256="b" * 64,
+            route_mode="ios-fixture-1hz",
+            warmup_seconds=0,
+            poll_interval_seconds=1,
+            capture_screenshots=False,
+        )
+        confirmations = 0
+
+        def confirm(**_kwargs):
+            nonlocal confirmations
+            confirmations += 1
+            if confirmations == 1:
+                raise renderer_benchmark.BenchmarkError("stale window")
+            return {}
+
+        runner._wait_for_window = confirm
+        runner.restore_current_profile()
+        self.assertEqual(len(client.requests), 2)
+
+    def test_uint32_forward_delta_accepts_clock_wrap(self):
+        self.assertEqual(
+            renderer_benchmark._uint32_forward_delta(3, 0xFFFFFFFE),
+            5,
+        )
+
     def test_ordinary_capture_is_bound_to_remote_winner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -459,6 +548,9 @@ class RendererBenchmarkTests(unittest.TestCase):
             route_path = renderer_benchmark.DEFAULT_ROUTE_FIXTURE
             route = renderer_benchmark.validate_route_fixture(route_path)
             route_hash = renderer_benchmark.sha256_file(route_path)
+            gates = renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            )
             snapshots = [
                 snapshot(
                     sequence=index + 1,
@@ -467,7 +559,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                     route_id=route["id"],
                     route_sha256=route_hash,
                 )
-                for index in range(13)
+                for index in range(21)
             ]
             capture_path = root / "capture.json"
             capture_path.write_text(
@@ -486,6 +578,27 @@ class RendererBenchmarkTests(unittest.TestCase):
                 encoding="utf-8",
             )
             comparison_path = root / "renderer-benchmark.json"
+            profiles = list(renderer_benchmark.PROFILES)
+            repeats = 3
+            comparison_seconds = 120
+            soak_seconds = 600
+            screenshots = [
+                {"path": f"screenshots/checkpoint-{index}.png"}
+                for index in range(len(gates["checkpointFractions"]))
+            ]
+            comparison_runs = [
+                {
+                    "schema": 1,
+                    "profile": profile,
+                    "repeat": repeat,
+                    "durationSeconds": comparison_seconds,
+                    "soak": False,
+                    "passed": True,
+                    "screenshots": screenshots,
+                }
+                for profile in profiles
+                for repeat in range(1, repeats + 1)
+            ]
             comparison_path.write_text(
                 json.dumps(
                     {
@@ -497,6 +610,36 @@ class RendererBenchmarkTests(unittest.TestCase):
                             "board": "WAVESHARE_AMOLED_175",
                         },
                         "pareto": {"selected": "medium"},
+                        "configuration": {
+                            "profiles": profiles,
+                            "repeats": repeats,
+                            "schedule": renderer_benchmark.balanced_profile_schedule(
+                                repeats, profiles
+                            ),
+                            "comparisonSeconds": comparison_seconds,
+                            "soakSeconds": soak_seconds,
+                            "gates": gates,
+                            "partial": False,
+                        },
+                        "tool": {
+                            "sha256": renderer_benchmark.sha256_file(
+                                TOOLS / "renderer_benchmark.py"
+                            ),
+                            "gatesSha256": renderer_benchmark.sha256_file(
+                                TOOLS / "renderer_benchmark_gates.json"
+                            ),
+                        },
+                        "runs": comparison_runs,
+                        "soakRun": {
+                            "schema": 1,
+                            "passed": True,
+                            "profile": "medium",
+                            "repeat": repeats + 1,
+                            "durationSeconds": soak_seconds,
+                            "soak": True,
+                        },
+                        "profileRestoredToCurrent": True,
+                        "cleanupFailure": None,
                         "fixtures": {
                             "map": fixture,
                             "route": {
@@ -514,13 +657,35 @@ class RendererBenchmarkTests(unittest.TestCase):
                 map_fixture=fixture,
                 route_fixture=route,
                 route_fixture_sha256=route_hash,
-                gates=renderer_benchmark.load_gates(
+                gates=gates,
+                gates_sha256=renderer_benchmark.sha256_file(
+                    TOOLS / "renderer_benchmark_gates.json"
+                ),
+                allow_partial=False,
+            )
+            malformed = json.loads(comparison_path.read_text(encoding="utf-8"))
+            malformed["configuration"]["profiles"] = (
+                "flat,current,medium,high"
+            )
+            comparison_path.write_text(json.dumps(malformed), encoding="utf-8")
+            malformed_report = renderer_benchmark.evaluate_ordinary_capture(
+                capture_path=capture_path,
+                comparison_path=comparison_path,
+                map_fixture=fixture,
+                route_fixture=route,
+                route_fixture_sha256=route_hash,
+                gates=gates,
+                gates_sha256=renderer_benchmark.sha256_file(
                     TOOLS / "renderer_benchmark_gates.json"
                 ),
                 allow_partial=False,
             )
         self.assertTrue(report["passed"], report["failures"])
         self.assertEqual(report["window"]["profile"], "medium")
+        self.assertIn(
+            "comparison_is_not_full_acceptance_evidence",
+            malformed_report["failures"],
+        )
 
 
 if __name__ == "__main__":

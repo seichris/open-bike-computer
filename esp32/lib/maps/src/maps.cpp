@@ -3501,6 +3501,10 @@ Maps::RenderContext Maps::captureRenderContextForScreen(
     uint32_t nowMs, bool mapVisible, bool guidanceScreenActive) {
   RenderContext context;
   context.tuning = renderer_tuning::definition(rendererTuningProfile_);
+#if FIRMWARE_DIAGNOSTICS
+  context.rendererDiagnosticsWindowId =
+      renderer_diagnostics::currentWindowId();
+#endif
   context.style = map_profile_protocol::select(
       mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
       guidanceScreenActive);
@@ -4352,7 +4356,9 @@ void Maps::renderWorkerLoop() {
             result.raster.buildingLimiterFlags,
             result.raster.allocationFallback,
         };
-        renderer_diagnostics::noteRender(diagnosticsSample);
+        renderer_diagnostics::noteRenderForWindow(
+            request.context.rendererDiagnosticsWindowId,
+            request.context.tuning.profile, diagnosticsSample);
       }
 #endif
 

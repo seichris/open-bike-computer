@@ -7,7 +7,7 @@
 #include <string>
 
 #ifndef FIRMWARE_DIAGNOSTICS
-#define FIRMWARE_DIAGNOSTICS 0
+#define FIRMWARE_DIAGNOSTICS 1
 #endif
 
 namespace renderer_diagnostics {
@@ -21,12 +21,16 @@ void endSession(uint32_t nowMs);
 bool sessionActive();
 void beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
-                 const JobCounters &currentJobs);
+                 const JobCounters &currentJobs,
+                 uint32_t currentGpsPacketSequence);
 void setProfile(renderer_tuning::Profile profile);
 renderer_tuning::Profile currentProfile();
+uint32_t currentWindowId();
 void noteLoop(uint32_t nowMs, uint32_t gapMs);
 void noteDisplayFlushUs(uint32_t microseconds);
-void noteRender(const RenderSample &sample);
+bool noteRenderForWindow(uint32_t windowId,
+                         renderer_tuning::Profile profile,
+                         const RenderSample &sample);
 void noteJobs(const JobCounters &jobs);
 void noteInterrupted();
 void noteCoverageRejected();
@@ -46,14 +50,18 @@ inline void endSession(uint32_t) {}
 inline bool sessionActive() { return false; }
 inline void beginWindow(uint32_t, const RunIdentity &,
                         renderer_tuning::Profile, uint32_t,
-                        const JobCounters &) {}
+                        const JobCounters &, uint32_t) {}
 inline void setProfile(renderer_tuning::Profile) {}
 inline renderer_tuning::Profile currentProfile() {
   return renderer_tuning::Profile::Current;
 }
+inline uint32_t currentWindowId() { return 0; }
 inline void noteLoop(uint32_t, uint32_t) {}
 inline void noteDisplayFlushUs(uint32_t) {}
-inline void noteRender(const RenderSample &) {}
+inline bool noteRenderForWindow(uint32_t, renderer_tuning::Profile,
+                                const RenderSample &) {
+  return false;
+}
 inline void noteJobs(const JobCounters &) {}
 inline void noteInterrupted() {}
 inline void noteCoverageRejected() {}

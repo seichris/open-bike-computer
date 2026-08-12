@@ -73,16 +73,21 @@ int main() {
       "000102030405060708090a0b0c0d0e0f"
       "101112131415161718191a1b1c1d1e1f";
   state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
-                    jobs(0));
+                    jobs(0), 10);
+  assert(state.measurementWindowId() == 41);
+  assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
+  assert(!state.noteRenderForWindow(41, Profile::High, {}));
   state.noteMemory({48000, 41000, 30000, 2800000, 1900000});
   state.noteMemory({47000, 40000, 29000, 2700000, 1800000});
   state.noteUiLoopGap(87);
   state.noteUiLoopGap(42);
   state.noteDisplayFlushUs(84001);
   state.noteDisplayFlushUs(114000);
-  state.noteGpsPacket(1, 0);
-  state.noteGpsPacket(2, 1005);
-  state.noteGpsPacket(2, 9999);
+  state.noteGpsPacket(11, 0);
+  state.noteGpsPacket(13, 1005);
+  state.noteGpsPacket(13, 9999);
+  state.noteGpsPacket(12, 9999);
+  state.noteGpsPacket(14, 1100);
   state.notePrediction(true, false);
   state.notePrediction(true, false);
   state.notePrediction(false, true);
@@ -99,7 +104,7 @@ int main() {
                       static_cast<uint8_t>(LimiterExtrudedRecords |
                                            LimiterExtrudedPixels),
                       false};
-  state.noteRender(render);
+  assert(state.noteRenderForWindow(41, Profile::Medium, render));
   state.noteJobs(jobs(3));
 
   uint8_t routeHash[32]{};
@@ -127,9 +132,9 @@ int main() {
   assert(snapshot.buildingTotal.lastMs == 420);
   assert(snapshot.displayFlush.p95Ms == 125);
   assert(snapshot.maximumUiGapMs == 87);
-  assert(snapshot.gpsPackets == 2);
-  assert(snapshot.latestGpsPacketGapMs == 1005);
-  assert(snapshot.maximumGpsPacketGapMs == 1005);
+  assert(snapshot.gpsPackets == 4);
+  assert(snapshot.latestGpsPacketGapMs == 1100);
+  assert(snapshot.maximumGpsPacketGapMs == 1100);
   assert(snapshot.predictionGraceEntries == 1);
   assert(snapshot.predictionExhaustionEntries == 1);
   assert(snapshot.jobs.requested == 3);
@@ -146,12 +151,13 @@ int main() {
 
   RenderSample allocationFailure;
   allocationFailure.buildings.allocationFallback = true;
-  state.noteRender(allocationFailure);
-  state.noteRender(RenderSample{});
+  assert(state.noteRenderForWindow(41, Profile::Medium, allocationFailure));
+  assert(state.noteRenderForWindow(41, Profile::Medium, RenderSample{}));
   const Snapshot latchedFailure = state.snapshot(2600);
   assert(latchedFailure.buildings.allocationFallback);
 
-  state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000, jobs(3));
+  state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000, jobs(3),
+                    13);
   state.noteMemory({0, 0, 0, 0, 0});
   state.noteMemory({100, 100, 100, 100, 100});
   const Snapshot reset = state.snapshot(3001);

@@ -337,6 +337,10 @@ bool DeviceDebugHttp::handleRendererMetrics(WiFiClient &client) {
   updateRendererDebugOverhead();
   const std::string body =
       renderer_diagnostics::toJson(renderer_diagnostics::snapshot(nowMs));
+  if (body.empty())
+    return device_transfer::sendHttpError(
+        client, 503, "metrics_memory",
+        "renderer metrics could not be serialized safely");
   const bool sent = device_transfer::sendHttpJson(client, 200, body);
   if (sent)
     lastMetricsResponseMs_ = nowMs;

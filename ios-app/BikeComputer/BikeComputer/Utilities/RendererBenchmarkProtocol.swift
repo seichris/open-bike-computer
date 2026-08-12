@@ -223,8 +223,9 @@ struct RendererDiagnosticsChunkReassembler {
         }
 
         let chunk = Data(data.dropFirst(7))
-        if let existing = chunks[index] {
-            accumulatedBytes -= existing.count
+        guard chunks[index] == nil else {
+            reset()
+            return .rejected
         }
         guard accumulatedBytes + chunk.count <= Self.maximumBodyBytes else {
             reset()

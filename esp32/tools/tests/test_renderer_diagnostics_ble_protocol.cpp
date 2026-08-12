@@ -61,6 +61,12 @@ int main() {
   assert(windowBytes[4] == 1 && windowBytes[5] == 2);
   assert(windowBytes[6] == 7 && windowBytes[7] == 0);
   assert(windowBytes[8] == 0x08 && windowBytes[15] == 0x01);
+  assert(!protocol::isCurrentProfileCleanup(window, 1));
+  window.profile = protocol::CURRENT_PROFILE;
+  assert(protocol::isCurrentProfileCleanup(window, 2));
+  assert(!protocol::isCurrentProfileCleanup(window,
+                                            protocol::CURRENT_PROFILE));
+  window.profile = 2;
 
   protocol::WindowRequest decodedWindow;
   assert(protocol::decodeWindowRequest(windowBytes, windowLength,

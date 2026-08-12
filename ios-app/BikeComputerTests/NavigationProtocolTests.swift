@@ -10645,6 +10645,16 @@ struct NavigationProtocolTests {
             "a partial renderer snapshot waits for its remaining chunks"
         )
         assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .rejected,
+            "duplicate renderer chunks fail closed and clear partial state"
+        )
+        assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .pending,
+            "a fresh renderer transfer can start after duplicate rejection"
+        )
+        assertEqual(
             interruptedReassembler.consume(
                 Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
             ),

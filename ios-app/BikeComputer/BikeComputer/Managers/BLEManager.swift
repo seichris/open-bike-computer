@@ -4502,7 +4502,8 @@ class BLEManager: NSObject, ObservableObject {
                     packet,
                     label: "renderer benchmark window",
                     writeClass: .settingsControl,
-                    coalescingKey: "renderer.benchmark.window"
+                    coalescingKey: "renderer.benchmark.window",
+                    prioritized: true
                 )
             },
             fallback: {
@@ -4510,7 +4511,8 @@ class BLEManager: NSObject, ObservableObject {
                     packet,
                     label: "renderer benchmark window",
                     writeClass: .settingsControl,
-                    coalescingKey: "renderer.benchmark.window"
+                    coalescingKey: "renderer.benchmark.window",
+                    prioritized: true
                 )
             }
         )

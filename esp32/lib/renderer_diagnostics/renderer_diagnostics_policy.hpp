@@ -262,7 +262,8 @@ public:
 
   void beginWindow(uint32_t windowId, const RunIdentity &identity,
                    renderer_tuning::Profile profile, uint32_t nowMs,
-                   const JobCounters &currentJobs) {
+                   const JobCounters &currentJobs,
+                   uint32_t currentGpsPacketSequence) {
     resetWindowState();
     measurementWindowId_ = windowId;
     windowStartedAtMs_ = nowMs;
@@ -270,11 +271,14 @@ public:
     profile_ = profile;
     jobs_ = currentJobs;
     jobBaseline_ = currentJobs;
+    lastGpsPacketSequence_ = currentGpsPacketSequence;
   }
 
   void setProfile(renderer_tuning::Profile profile) { profile_ = profile; }
 
   renderer_tuning::Profile profile() const { return profile_; }
+
+  uint32_t measurementWindowId() const { return measurementWindowId_; }
 
   JobCounters currentJobs() const { return jobs_; }
 
@@ -298,20 +302,15 @@ public:
         std::min(windowMinimumPsramLargest_, sample.psramLargest);
   }
 
-  void noteRender(const RenderSample &sample) {
-    totalRender_.note(sample.totalMs);
-    blockLoad_.note(sample.blockLoadMs);
-    draw_.note(sample.drawMs);
-    buildingProjection_.note(sample.buildingProjectionMs);
-    buildingDraw_.note(sample.buildingDrawMs);
-    buildingTotal_.note(sample.buildingProjectionMs + sample.buildingDrawMs);
-    buildings_ = sample.buildings;
-    allocationFallbackObserved_ =
-        allocationFallbackObserved_ || sample.buildings.allocationFallback;
-    for (size_t index = 0; index < limiterPasses_.size(); ++index) {
-      if ((sample.buildings.limiterFlags & (1U << index)) != 0)
-        ++limiterPasses_[index];
+  bool noteRenderForWindow(uint32_t windowId,
+                           renderer_tuning::Profile profile,
+                           const RenderSample &sample) {
+    if (!sessionActive_ || windowId == 0 ||
+        windowId != measurementWindowId_ || profile != profile_) {
+      return false;
     }
+    noteRenderUnchecked(sample);
+    return true;
   }
 
   void noteJobs(const JobCounters &jobs) { jobs_ = jobs; }
@@ -330,8 +329,11 @@ public:
   void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs) {
     if (packetSequence == 0 || packetSequence == lastGpsPacketSequence_)
       return;
+    const uint32_t delta = packetSequence - lastGpsPacketSequence_;
+    if (delta >= 0x80000000U)
+      return;
     lastGpsPacketSequence_ = packetSequence;
-    ++gpsPackets_;
+    gpsPackets_ += delta;
     latestGpsPacketGapMs_ = packetGapMs;
     maximumGpsPacketGapMs_ = std::max(maximumGpsPacketGapMs_, packetGapMs);
   }
@@ -410,6 +412,22 @@ public:
   }
 
 private:
+  void noteRenderUnchecked(const RenderSample &sample) {
+    totalRender_.note(sample.totalMs);
+    blockLoad_.note(sample.blockLoadMs);
+    draw_.note(sample.drawMs);
+    buildingProjection_.note(sample.buildingProjectionMs);
+    buildingDraw_.note(sample.buildingDrawMs);
+    buildingTotal_.note(sample.buildingProjectionMs + sample.buildingDrawMs);
+    buildings_ = sample.buildings;
+    allocationFallbackObserved_ =
+        allocationFallbackObserved_ || sample.buildings.allocationFallback;
+    for (size_t index = 0; index < limiterPasses_.size(); ++index) {
+      if ((sample.buildings.limiterFlags & (1U << index)) != 0)
+        ++limiterPasses_[index];
+    }
+  }
+
   static uint32_t subtract(uint32_t value, uint32_t baseline) {
     return value >= baseline ? value - baseline : 0;
   }

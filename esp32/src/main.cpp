@@ -1709,9 +1709,12 @@ void loop() {
       mapView.setRendererTuningProfile(rendererRunRequest.profile, now);
       const renderer_diagnostics::JobCounters currentJobs =
           mapView.rendererDiagnosticsJobCounters();
+      const uint32_t currentGpsPacketSequence =
+          bleNavServer.getDebugStats().gpsPacketCount;
       renderer_diagnostics::beginWindow(
           rendererRunRequest.requestId, rendererRunRequest.identity,
-          rendererRunRequest.profile, now, currentJobs);
+          rendererRunRequest.profile, now, currentJobs,
+          currentGpsPacketSequence);
       device_debug::frameStore().requestNextFrame();
       if (lv_screen_active() != nullptr)
         lv_obj_invalidate(lv_screen_active());
@@ -1913,6 +1916,8 @@ void loop() {
         mapView.setRendererTuningProfile(profile, now);
         const renderer_diagnostics::JobCounters currentJobs =
             mapView.rendererDiagnosticsJobCounters();
+        const uint32_t currentGpsPacketSequence =
+            bleNavServer.getDebugStats().gpsPacketCount;
         ordinaryRendererWindowSequence =
             (ordinaryRendererWindowSequence + 1U) & 0x7fffffffU;
         if (ordinaryRendererWindowSequence == 0)
@@ -1920,7 +1925,8 @@ void loop() {
         const uint32_t windowId =
             ordinaryRendererWindowSequence | 0x80000000U;
         renderer_diagnostics::beginWindow(
-            windowId, identity, profile, now, currentJobs);
+            windowId, identity, profile, now, currentJobs,
+            currentGpsPacketSequence);
         ordinaryRendererSessionActive = true;
         Serial.printf(
             "RENDERER_DIAGNOSTICS: ordinary window=%lu profile=%s repeat=%u\n",

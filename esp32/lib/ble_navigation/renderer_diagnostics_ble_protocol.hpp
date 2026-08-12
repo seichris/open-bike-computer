@@ -21,6 +21,7 @@ constexpr size_t WINDOW_REQUEST_FIXED_BYTES =
     PREFIX_BYTES + 1 + 1 + 2 + 8 + SHA256_BYTES + 1;
 constexpr size_t WINDOW_REQUEST_MAX_BYTES =
     WINDOW_REQUEST_FIXED_BYTES + WINDOW_ROUTE_ID_MAX_BYTES;
+constexpr uint8_t CURRENT_PROFILE = 1;
 
 struct RouteMarker {
   uint8_t fixtureSha256[SHA256_BYTES]{};
@@ -36,6 +37,12 @@ struct WindowRequest {
   uint8_t routeFixtureSha256[SHA256_BYTES]{};
   char routeFixtureId[WINDOW_ROUTE_ID_MAX_BYTES + 1]{};
 };
+
+inline bool isCurrentProfileCleanup(const WindowRequest &request,
+                                    uint8_t lastAcceptedProfile) {
+  return request.profile == CURRENT_PROFILE &&
+         lastAcceptedProfile != CURRENT_PROFILE;
+}
 
 inline void writeUInt16LE(uint16_t value, uint8_t *output) {
   output[0] = static_cast<uint8_t>(value);

@@ -48,6 +48,10 @@ DEFAULT_ROUTE_FIXTURE = (
     / "renderer-benchmark-shanghai-v1.json"
 )
 DEFAULT_GATES = Path(__file__).with_name("renderer_benchmark_gates.json")
+PINNED_ROUTE_ID = "shanghai-center-renderer-v1"
+PINNED_ROUTE_SHA256 = (
+    "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e"
+)
 
 
 class BenchmarkError(RuntimeError):
@@ -101,6 +105,7 @@ def load_map_fixture(path: Path) -> dict[str, Any]:
     artifact_bytes = path.stat().st_size
     signed_manifest_receipt: str | None = None
     stream_header: dict[str, int] | None = None
+    stream_payload_offset: int | None = None
     try:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:
@@ -177,6 +182,9 @@ def load_map_fixture(path: Path) -> dict[str, Any]:
                         "fileCount": file_count,
                         "payloadBytes": payload_bytes,
                     }
+                    stream_payload_offset = (
+                        32 + manifest_length + envelope_length
+                    )
                     source_type = "bike-map-stream-v1"
                 else:
                     if artifact_bytes == 0 or artifact_bytes > 2 * 1024 * 1024:
@@ -242,6 +250,54 @@ def load_map_fixture(path: Path) -> dict[str, Any]:
         != sum(value[2] for value in canonical_files)
     ):
         raise BenchmarkError("map stream header disagrees with its manifest")
+
+    def hash_chunks(source: Any, byte_count: int) -> str:
+        digest = hashlib.sha256()
+        remaining = byte_count
+        while remaining:
+            chunk = source.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise BenchmarkError("map fixture payload is truncated")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        return digest.hexdigest()
+
+    if source_type == "zip-artifact":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members: dict[str, list[zipfile.ZipInfo]] = {}
+                for info in archive.infolist():
+                    members.setdefault(info.filename, []).append(info)
+                for file_path, _publish_path, byte_count, digest in canonical_files:
+                    matches = members.get(file_path, [])
+                    if len(matches) != 1 or matches[0].file_size != byte_count:
+                        raise BenchmarkError(
+                            "map fixture ZIP payload identity is invalid"
+                        )
+                    with archive.open(matches[0]) as source:
+                        if hash_chunks(source, byte_count) != digest:
+                            raise BenchmarkError(
+                                "map fixture ZIP payload digest does not match its manifest"
+                            )
+        except BenchmarkError:
+            raise
+        except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+            raise BenchmarkError(f"could not verify map fixture ZIP: {exc}") from exc
+    elif stream_header is not None:
+        if stream_payload_offset is None:
+            raise BenchmarkError("map stream payload offset is unavailable")
+        try:
+            with path.open("rb") as source:
+                source.seek(stream_payload_offset)
+                for _file_path, _publish_path, byte_count, digest in canonical_files:
+                    if hash_chunks(source, byte_count) != digest:
+                        raise BenchmarkError(
+                            "map stream payload digest does not match its manifest"
+                        )
+        except BenchmarkError:
+            raise
+        except OSError as exc:
+            raise BenchmarkError(f"could not verify map stream payload: {exc}") from exc
 
     labels = target.get("labelLanguages", [])
     buildings = manifest.get("buildings", {})
@@ -456,6 +512,28 @@ def load_gates(path: Path) -> dict[str, Any]:
     ):
         raise BenchmarkError("checkpoint fractions must be numbers in [0, 1)")
     return gates
+
+
+def validate_acceptance_inputs(
+    *,
+    route_fixture: dict[str, Any],
+    route_fixture_sha256: str,
+    gates: dict[str, Any],
+    allow_partial: bool,
+) -> None:
+    if allow_partial:
+        return
+    if (
+        route_fixture.get("id") != PINNED_ROUTE_ID
+        or route_fixture_sha256 != PINNED_ROUTE_SHA256
+    ):
+        raise BenchmarkError(
+            "full issue #210 evidence requires the checked-in Shanghai route fixture"
+        )
+    if gates != load_gates(DEFAULT_GATES):
+        raise BenchmarkError(
+            "full issue #210 evidence requires the checked-in benchmark gates"
+        )
 
 
 def balanced_profile_schedule(
@@ -943,6 +1021,11 @@ def evaluate_run(
             "psram_largest_decline",
         ),
     )
+    if len(samples) < trend["minimumSamples"]:
+        failures.append(
+            f"missing_memory_trend_samples:{len(samples)}<"
+            f"{trend['minimumSamples']}"
+        )
     for field, allowed_key, label in trends:
         if monotonic_decline(
             [sample[field] for sample in samples],
@@ -1270,6 +1353,7 @@ class BenchmarkRunner:
             or not 0 <= identity["bootId"] <= 0xFFFFFFFF
             or isinstance(identity["resetReason"], bool)
             or not isinstance(identity["resetReason"], int)
+            or not 0 <= identity["resetReason"] <= 0xFFFFFFFF
         ):
             raise BenchmarkError("renderer metrics boot identity is invalid")
         if "REMOTE_DEBUG" not in str(identity["buildProfile"]).upper():
@@ -1290,11 +1374,17 @@ class BenchmarkRunner:
         )
 
     def _wait_for_window(
-        self, *, window_id: int, run_id: str, profile: str
+        self,
+        *,
+        window_id: int,
+        run_id: str,
+        profile: str,
+        timeout_seconds: float = 10,
     ) -> dict[str, Any]:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            snapshot = self._metrics()
+            remaining = max(0.1, deadline - time.monotonic())
+            snapshot = self._metrics(timeout_seconds=min(1, remaining))
             if self._window_matches(
                 snapshot, window_id=window_id, run_id=run_id, profile=profile
             ):
@@ -1328,9 +1418,10 @@ class BenchmarkRunner:
                     window_id=window_id,
                     run_id=run_id,
                     profile="current",
+                    timeout_seconds=1.5,
                 )
                 return
-            except DebugClientError as exc:
+            except (BenchmarkError, DebugClientError) as exc:
                 last_error = exc
                 time.sleep(0.4)
         raise BenchmarkError(
@@ -1456,10 +1547,22 @@ class BenchmarkRunner:
                 raise BenchmarkError(", ".join(identity_failures))
             sequence = snapshot["sequence"]
             timestamp = snapshot["timestampMs"]
-            if previous_sequence is not None and sequence <= previous_sequence:
-                raise BenchmarkError("metrics sequence regressed; reset or stale response")
-            if previous_timestamp is not None and timestamp < previous_timestamp:
-                raise BenchmarkError("device timestamp regressed; reset detected")
+            if previous_sequence is not None:
+                sequence_delta = _uint32_forward_delta(
+                    sequence, previous_sequence
+                )
+                if sequence_delta == 0 or sequence_delta >= 0x80000000:
+                    raise BenchmarkError(
+                        "metrics sequence regressed; reset or stale response"
+                    )
+            if previous_timestamp is not None:
+                timestamp_delta = _uint32_forward_delta(
+                    timestamp, previous_timestamp
+                )
+                if timestamp_delta == 0 or timestamp_delta >= 0x80000000:
+                    raise BenchmarkError(
+                        "device timestamp regressed; reset detected"
+                    )
             previous_sequence = sequence
             previous_timestamp = timestamp
             elapsed = time.monotonic() - started
@@ -1703,6 +1806,98 @@ def _uint32_forward_delta(current: int, previous: int) -> int:
     return (current - previous) & 0xFFFFFFFF
 
 
+def is_full_comparison_evidence(
+    comparison: dict[str, Any],
+    *,
+    expected_profile: str | None,
+    gates: dict[str, Any],
+    gates_sha256: str,
+) -> bool:
+    configuration = comparison.get("configuration")
+    soak = comparison.get("soakRun")
+    runs = comparison.get("runs")
+    tool = comparison.get("tool")
+    if not all(
+        isinstance(value, dict)
+        for value in (configuration, soak, tool)
+    ) or not isinstance(runs, list):
+        return False
+
+    profiles = configuration.get("profiles")
+    repeats = configuration.get("repeats")
+    comparison_seconds = configuration.get("comparisonSeconds")
+    soak_seconds = configuration.get("soakSeconds")
+    if (
+        configuration.get("partial") is not False
+        or not isinstance(profiles, list)
+        or len(profiles) != len(PROFILES)
+        or any(not isinstance(profile, str) for profile in profiles)
+        or set(profiles) != set(PROFILES)
+        or isinstance(repeats, bool)
+        or not isinstance(repeats, int)
+        or not 3 <= repeats <= 100
+        or isinstance(comparison_seconds, bool)
+        or not isinstance(comparison_seconds, int)
+        or not 60 <= comparison_seconds <= 120
+        or isinstance(soak_seconds, bool)
+        or not isinstance(soak_seconds, int)
+        or soak_seconds < 300
+        or configuration.get("gates") != gates
+        or configuration.get("schedule")
+        != balanced_profile_schedule(repeats, profiles)
+        or tool.get("sha256") != sha256_file(Path(__file__))
+        or tool.get("gatesSha256") != gates_sha256
+        or comparison.get("profileRestoredToCurrent") is not True
+        or comparison.get("cleanupFailure") is not None
+        or expected_profile not in PROFILES
+    ):
+        return False
+
+    expected_pairs = {
+        (profile, repeat)
+        for profile in profiles
+        for repeat in range(1, repeats + 1)
+    }
+    observed_pairs: set[tuple[str, int]] = set()
+    checkpoint_count = len(gates["checkpointFractions"])
+    for run in runs:
+        if not isinstance(run, dict):
+            return False
+        profile = run.get("profile")
+        repeat = run.get("repeat")
+        screenshots = run.get("screenshots")
+        if (
+            profile not in PROFILES
+            or isinstance(repeat, bool)
+            or not isinstance(repeat, int)
+            or run.get("schema") != SCHEMA_VERSION
+            or run.get("passed") is not True
+            or run.get("soak") is not False
+            or run.get("durationSeconds") != comparison_seconds
+            or not isinstance(screenshots, list)
+            or len(screenshots) != checkpoint_count
+            or any(
+                not isinstance(screenshot, dict)
+                or not isinstance(screenshot.get("path"), str)
+                or not screenshot["path"]
+                for screenshot in screenshots
+            )
+        ):
+            return False
+        observed_pairs.add((profile, repeat))
+    if len(runs) != len(expected_pairs) or observed_pairs != expected_pairs:
+        return False
+
+    return (
+        soak.get("schema") == SCHEMA_VERSION
+        and soak.get("passed") is True
+        and soak.get("soak") is True
+        and soak.get("profile") == expected_profile
+        and soak.get("repeat") == repeats + 1
+        and soak.get("durationSeconds") == soak_seconds
+    )
+
+
 def evaluate_ordinary_capture(
     *,
     capture_path: Path,
@@ -1711,6 +1906,7 @@ def evaluate_ordinary_capture(
     route_fixture: dict[str, Any],
     route_fixture_sha256: str,
     gates: dict[str, Any],
+    gates_sha256: str,
     allow_partial: bool,
 ) -> dict[str, Any]:
     capture = load_json_object(capture_path, "ordinary diagnostics capture")
@@ -1760,6 +1956,7 @@ def evaluate_ordinary_capture(
         or not 0 <= baseline["bootId"] <= 0xFFFFFFFF
         or isinstance(baseline["resetReason"], bool)
         or not isinstance(baseline["resetReason"], int)
+        or not 0 <= baseline["resetReason"] <= 0xFFFFFFFF
     ):
         raise BenchmarkError("ordinary capture lacks exact build identity")
     window_id = window.get("id")
@@ -1768,12 +1965,14 @@ def evaluate_ordinary_capture(
     if (
         isinstance(window_id, bool)
         or not isinstance(window_id, int)
-        or window_id & 0x80000000 == 0
+        or not 0x80000000 <= window_id <= 0xFFFFFFFF
         or not isinstance(run_id, str)
+        or len(run_id) != 20
         or not run_id.startswith("ble-")
+        or not valid_lowercase_hex(run_id[4:], 16)
         or isinstance(repeat, bool)
         or not isinstance(repeat, int)
-        or repeat <= 0
+        or not 1 <= repeat <= 0xFFFF
     ):
         raise BenchmarkError("ordinary capture lacks a BLE measurement window")
 
@@ -1816,10 +2015,10 @@ def evaluate_ordinary_capture(
         previous_sequence = sequence
         previous_timestamp = timestamp
 
-    duration_seconds = max(1, round(total_elapsed_ms / 1000))
+    duration_seconds = total_elapsed_ms // 1000
     if any(value > 8000 for value in gap_ms):
         failures.append("missing_ordinary_snapshot")
-    if not allow_partial and duration_seconds < 60:
+    if not allow_partial and total_elapsed_ms < 60_000:
         failures.append("ordinary_capture_shorter_than_60_seconds")
     summary = summarize_run(snapshots, samples)
     failures.extend(
@@ -1859,10 +2058,19 @@ def evaluate_ordinary_capture(
                     failures.append(f"comparison_identity:{key}")
         comparison_map = nested(comparison, "fixtures", "map")
         comparison_route = nested(comparison, "fixtures", "route")
+        if not allow_partial and not is_full_comparison_evidence(
+            comparison,
+            expected_profile=expected_profile,
+            gates=gates,
+            gates_sha256=gates_sha256,
+        ):
+            failures.append("comparison_is_not_full_acceptance_evidence")
         if (
             comparison_map.get("id") != map_fixture["id"]
             or comparison_map.get("manifestReceipt")
             != map_fixture["manifestReceipt"]
+            or comparison_map.get("artifactSha256")
+            != map_fixture["artifactSha256"]
         ):
             failures.append("comparison_map_fixture")
         if (
@@ -1904,6 +2112,14 @@ def evaluate_ordinary_capture(
         "comparisonReport": (
             comparison_path.name if comparison_path is not None else None
         ),
+        "comparisonReportSha256": (
+            sha256_file(comparison_path) if comparison_path is not None else None
+        ),
+        "partial": allow_partial,
+        "tool": {
+            "sha256": sha256_file(Path(__file__)),
+            "gatesSha256": gates_sha256,
+        },
     }
 
 
@@ -2020,7 +2236,11 @@ def main() -> int:
     cleanup_attempted = False
     try:
         gates = load_gates(args.gates)
-        duration = args.comparison_seconds or gates["comparisonDurationSeconds"]
+        duration = (
+            args.comparison_seconds
+            if args.comparison_seconds is not None
+            else gates["comparisonDurationSeconds"]
+        )
         if not args.map_fixture.is_file():
             raise BenchmarkError("map fixture must be an existing artifact or manifest file")
         if not args.route_fixture.is_file():
@@ -2028,6 +2248,12 @@ def main() -> int:
         route_fixture = validate_route_fixture(args.route_fixture)
         route_fixture_sha256 = sha256_file(args.route_fixture)
         map_fixture = load_map_fixture(args.map_fixture)
+        validate_acceptance_inputs(
+            route_fixture=route_fixture,
+            route_fixture_sha256=route_fixture_sha256,
+            gates=gates,
+            allow_partial=args.allow_partial,
+        )
         if args.ordinary_capture is not None:
             if not args.ordinary_capture.is_file():
                 raise BenchmarkError("ordinary capture file does not exist")
@@ -2050,6 +2276,7 @@ def main() -> int:
                 route_fixture=route_fixture,
                 route_fixture_sha256=route_fixture_sha256,
                 gates=gates,
+                gates_sha256=sha256_file(args.gates),
                 allow_partial=args.allow_partial,
             )
             write_ordinary_report(report, output)
@@ -2074,7 +2301,12 @@ def main() -> int:
             raise BenchmarkError(
                 "full issue #210 runs require all profiles, 3+ repeats, 60-120 seconds, screenshots, and a 300+ second soak"
             )
-        if args.repeats <= 0 or duration <= 0 or args.soak_seconds < 0:
+        if (
+            args.repeats <= 0
+            or args.repeats > 100
+            or duration <= 0
+            or args.soak_seconds < 0
+        ):
             raise BenchmarkError("repeat and duration values are invalid")
         if len(set(args.profiles)) != len(args.profiles):
             raise BenchmarkError("profiles must not be repeated")
@@ -2169,6 +2401,10 @@ def main() -> int:
                 "soakSeconds": args.soak_seconds,
                 "gates": gates,
                 "partial": args.allow_partial,
+            },
+            "tool": {
+                "sha256": sha256_file(Path(__file__)),
+                "gatesSha256": sha256_file(args.gates),
             },
             "preflight": {
                 "target": preflight["info"]["target"],
