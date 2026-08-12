@@ -57,8 +57,11 @@ comes from the pinned `generation-profile-policy-v1.json` in the control-plane
 image. `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` is the only runtime generation
 entitlement and is restricted to the production canary profile; the retired
 `MAP_PLATFORM_LABEL_TARGET2_ENABLED` and
-`MAP_PLATFORM_BUILDING_TARGET3_ENABLED` variables are ignored by the API and
-should be removed after the first successful deployment.
+`MAP_PLATFORM_BUILDING_TARGET3_ENABLED` variables are passed temporarily so the
+currently pinned pre-policy API remains available during the rolling image
+promotion. The policy-aware API ignores them. Remove them only after `/healthz`
+reports both `deploymentChannel` and `generationProfilePolicySha256` from the
+promoted control plane.
 
 The initial worker lock points at the image already running successfully in
 production. Its control-plane lock contains the same backend revision currently
@@ -84,6 +87,10 @@ hostname `maps-dev.8o.vc`. Give it independent installation/download/admin
 secrets, an independent S3 prefix (for example `map-artifacts-dev`), independent
 quotas and monitoring retention, and its own Compose-managed data volume. Do not
 copy production installation credentials or the target-3 canary allowlist.
+Until `/healthz` exposes the generation-policy digest, set both legacy
+compatibility flags to `1` on this new application so the pinned pre-policy API
+can generate formats 2 and 3. They become inert after the control-plane image
+promotion and can then be removed.
 
 This makes Bicino Dev a deployment channel rather than a production canary.
 Both channels still advance through the reviewed digest lock, while their

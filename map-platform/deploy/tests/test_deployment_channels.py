@@ -20,8 +20,8 @@ class DeploymentChannelComposeTests(unittest.TestCase):
             "/app/config/generation-profile-policy-v1.json",
             api_environment,
         )
-        self.assertNotIn("MAP_PLATFORM_LABEL_TARGET2_ENABLED", api_environment)
-        self.assertNotIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
+        self.assertIn("MAP_PLATFORM_LABEL_TARGET2_ENABLED", api_environment)
+        self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
         self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST", api_environment)
 
     def test_validation_api_defaults_to_development_channel(self):
@@ -35,7 +35,7 @@ class DeploymentChannelComposeTests(unittest.TestCase):
             "${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-development}",
             api_environment,
         )
-        self.assertNotIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
+        self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
 
 
 if __name__ == "__main__":
