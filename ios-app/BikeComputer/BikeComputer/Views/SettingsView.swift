@@ -77,6 +77,8 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 if shouldPromoteBikeComputerSettings {
+                    BicinoOneStoreSection()
+
                     Section {
                         bikeComputerSettingsLink
                     }
@@ -104,8 +106,6 @@ struct SettingsView: View {
                     DeviceScreensSettingsSection(
                         offlineMapManager: offlineMapManager
                     )
-                } else {
-                    BicinoOneStoreSection()
                 }
                 SavedMapsSettingsSection(
                     manager: offlineMapManager,
