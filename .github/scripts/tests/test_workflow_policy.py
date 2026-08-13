@@ -351,6 +351,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--draft", release)
         self.assertIn("tools/verify_github_release_assets.py", release)
         self.assertIn("already exists; refusing to replace assets", release)
+        self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${release_id}"', release)
+        self.assertIn("expected exactly one matching draft release", release)
         self.assertIn(
             "uses: ./.github/actions/require-immutable-releases", release
         )
@@ -368,6 +370,25 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--require-hashes --only-binary=:all: --no-deps", release)
         self.assertIn("tools/firmware-signing-requirements.txt", release)
         self.assertNotIn("pip install --upgrade cryptography", release)
+
+    def test_release_pages_recovery_accepts_only_attested_immutable_assets(self) -> None:
+        release = workflow_source("firmware-release.yml")
+        recovery = mapping_block(release, "recover-pages", indent=2)
+
+        self.assertIn("  workflow_dispatch:\n", release)
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", recovery)
+        self.assertIn("attestations: read", recovery)
+        self.assertIn("contents: read", recovery)
+        self.assertNotIn("contents: write", recovery)
+        self.assertIn("must run from the default branch", recovery)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", recovery)
+        self.assertNotIn("ref: ${{ inputs.release_tag }}", recovery)
+        self.assertIn("--require-immutable", recovery)
+        self.assertIn('gh release verify "${RELEASE_TAG}"', recovery)
+        self.assertIn('gh release verify-asset "${RELEASE_TAG}"', recovery)
+        self.assertIn("actions/upload-pages-artifact@v3", recovery)
+        self.assertIn("actions/deploy-pages@v4", recovery)
+        self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
 
     def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
         general_ci = workflow_source("ci.yml")
