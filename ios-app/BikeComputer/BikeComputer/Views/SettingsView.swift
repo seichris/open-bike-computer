@@ -77,8 +77,6 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 if shouldPromoteBikeComputerSettings {
-                    BicinoOneStoreSection()
-
                     Section {
                         bikeComputerSettingsLink
                     }
@@ -181,6 +179,11 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if shouldPromoteBikeComputerSettings {
+                    BicinoOneStoreHero()
+                }
+            }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -235,45 +238,41 @@ struct SettingsView: View {
     }
 }
 
-private struct BicinoOneStoreSection: View {
+private struct BicinoOneStoreHero: View {
     private static let storeURL = URL(string: "https://bicino.com")!
 
     var body: some View {
-        Section {
-            Link(destination: Self.storeURL) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Image("BicinoOneSettingsPromo")
-                        .resizable()
-                        .scaledToFill()
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 180)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+        Link(destination: Self.storeURL) {
+            VStack(alignment: .leading, spacing: 0) {
+                Image("BicinoOneSettingsPromo")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 200)
+                    .clipped()
 
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Get your Bicino One")
-                                .font(.headline)
-                            Text("Plan on your iPhone. Ride with Bicino One.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Get your Bicino One")
+                        .font(.headline)
 
-                        Spacer(minLength: 8)
+                    Spacer(minLength: 8)
 
-                        Image(systemName: "arrow.up.right")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
+                    Image(systemName: "arrow.up.right")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
-            .buttonStyle(.plain)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Get your Bicino One")
-            .accessibilityHint("Opens bicino.com")
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Get your Bicino One")
+        .accessibilityHint("Opens bicino.com")
     }
 }
 
