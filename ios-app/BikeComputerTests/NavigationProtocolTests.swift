@@ -722,6 +722,7 @@ struct NavigationProtocolTests {
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
+        testOfflineMapJobFailureMessages()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapListJobsURLRequest()
         testOfflineMapInventoryMutationURLRequests()
@@ -7623,6 +7624,34 @@ struct NavigationProtocolTests {
             // Expected.
         } catch {
             assert(false, "cancelled polling should preserve CancellationError")
+        }
+    }
+
+    static func testOfflineMapJobFailureMessages() {
+        let internalDiagnostic = "internal details; jobId=failed-job; /private/server/path"
+        let expectations = [
+            ("building_scope_exceeded", "Choose a smaller area"),
+            ("building_source_snapshot_changed", "Retry the same area"),
+            ("source_cache_unavailable", "temporarily unavailable"),
+            ("building_relation_incomplete", "Adjust the selected area slightly"),
+            ("building_calibration_unavailable", "3D building data could not be prepared"),
+            ("building_scope_policy_invalid", "temporarily misconfigured"),
+            ("map_build_failed", "after several attempts"),
+        ]
+
+        for (code, recoveryText) in expectations {
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: internalDiagnostic)
+                .localizedDescription
+            assert(
+                displayMessage.contains(recoveryText),
+                "\(code) provides actionable recovery guidance"
+            )
+            assert(
+                !displayMessage.contains("jobId=") &&
+                    !displayMessage.contains("/private/server/path"),
+                "\(code) hides internal diagnostics from the user"
+            )
         }
     }
 

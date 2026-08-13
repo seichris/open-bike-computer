@@ -977,10 +977,24 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .unsupportedRendererTarget(_, _, let message):
             return message
         case .mapJobFailed(let code, let message):
-            if code == "building_scope_exceeded" {
+            switch code {
+            case "building_scope_exceeded":
                 return "This selection is too large for 3D buildings. Choose a smaller area and try again. The processing limit includes the required buffer, and water inside the selection counts."
+            case "building_source_snapshot_changed":
+                return "Map data changed while your map was being built. Retry the same area."
+            case "source_cache_unavailable":
+                return "Map data for this area is temporarily unavailable. Try again later."
+            case "building_relation_incomplete":
+                return "Some buildings could not be included completely. Adjust the selected area slightly and try again."
+            case "building_calibration_unavailable":
+                return "3D building data could not be prepared. Try again later."
+            case "building_scope_policy_invalid":
+                return "The map service is temporarily misconfigured. Try again later."
+            case "map_build_failed":
+                return "We couldn't build this map after several attempts. Try again. If it keeps failing, report the problem."
+            default:
+                return "Map generation failed: \(message)"
             }
-            return "Map generation failed: \(message)"
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }
