@@ -5404,102 +5404,14 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: false,
-                isLocationAuthorized: false,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
                 confirmedDeviceMapMissing: false
             ),
-            .step(.location),
-            "first launch starts with location"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.device),
-            "skipping location advances directly to device connection"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: false,
-                isLocationAuthorized: true,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.device),
-            "authorizing location advances directly to device connection"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: true,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.checkingDevice),
-            "the modal remains visible while connected map status loads"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.download),
-            "a connected device with no map advances to download even when location was skipped"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: false,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.storageUnavailable),
-            "missing storage keeps onboarding visible with recovery guidance"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "installed-map",
-                confirmedDeviceMapMissing: false
-            ),
-            .completeFirstRun,
-            "an installed map completes first-run onboarding"
+            .step(.welcome),
+            "first launch starts with the Bicino welcome"
         )
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "",
                 confirmedDeviceMapMissing: true
             ),
             .step(.download),
@@ -5508,11 +5420,6 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "installed-map",
                 confirmedDeviceMapMissing: false
             ),
             .hidden,
