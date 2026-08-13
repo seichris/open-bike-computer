@@ -13120,7 +13120,7 @@ struct NavigationProtocolTests {
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 0
             ),
-            "Add a Bicino Bike Computer!",
+            "Connect a Bicino Bike Computer!",
             "empty settings presents a clear add-device action"
         )
         assertEqual(

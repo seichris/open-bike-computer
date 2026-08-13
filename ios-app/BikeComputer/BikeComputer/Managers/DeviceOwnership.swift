@@ -514,7 +514,7 @@ enum BikeComputerSettingsDiscoveryLifecyclePolicy {
 enum BikeComputerSettingsPresentationPolicy {
     static func settingsLinkTitle(knownDeviceCount: Int) -> String {
         if knownDeviceCount == 0 {
-            return "Add a Bicino Bike Computer!"
+            return "Connect a Bicino Bike Computer!"
         }
         return knownDeviceCount > 1
             ? "My Bike Computers"
