@@ -1835,7 +1835,7 @@ def _validated_flash_plan(
                 raise GeneratedSdkconfigError(
                     "verified PlatformIO flash plan contains an invalid image offset"
                 ) from error
-            normalized_offset_token = offset_token
+            normalized_offset_token = hex(offset)
         if offset < 0 or offset > 0xFFFFFFFF or offset in offsets:
             raise GeneratedSdkconfigError(
                 "verified PlatformIO flash plan contains a duplicate or out-of-range "

@@ -1240,6 +1240,37 @@ build_src_filter =
         self.assertNotIn("nobuild", command)
         self.assertNotIn("upload", command)
 
+    def test_attestation_canonicalizes_platformio_flash_offsets(self):
+        core = self.write_core_attestation().resolve()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        plan_path = (
+            self.project_dir
+            / ".pio/build"
+            / self.environment
+            / FLASH_PLAN_FILENAME
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["images"][0]["offset"] = "0x0000"
+        image_tail = [
+            value
+            for image in plan["images"]
+            for value in (image["offset"], image["path"])
+        ]
+        plan["command"][-len(image_tail) :] = image_tail
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            manifest_path = record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        flash_plan = manifest["flashPlan"]
+        self.assertEqual(flash_plan["images"][0]["offset"], "0x0")
+        self.assertEqual(flash_plan["command"][-8], "0x0")
+
     def test_attestation_rejects_platformio_app_offset_mismatch(self):
         core = self.write_core_attestation()
         defaults = self.project_dir / "sdkconfig.defaults"
