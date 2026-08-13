@@ -987,6 +987,8 @@ def build_map_job_monitoring_event(
     }
     if job.reuse_strategy is not None:
         event["reuseStrategy"] = job.reuse_strategy
+    if job.error_code is not None:
+        event["errorCode"] = job.error_code
     if isinstance(job.preparation_estimate, dict):
         estimate = job.preparation_estimate
         event["preparationEstimate"] = {

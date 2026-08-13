@@ -877,9 +877,15 @@ enum OfflineMapJobPoller {
         fetch: @escaping (String) async throws -> OfflineMapJob,
         sleep: @escaping (UInt64) async throws -> Void,
         onUpdate: @escaping (OfflineMapJob) -> Void,
-        onRetry: @escaping () -> Void
+        onRetry: @escaping () -> Void,
+        legacyFailedGraceSeconds: TimeInterval = 30,
+        monotonicNow: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
     ) async throws -> OfflineMapJob {
         var consecutiveFailures = 0
+        var legacyFailedAttempt: Int?
+        var legacyFailedDeadline: TimeInterval?
         while !Task.isCancelled {
             let job: OfflineMapJob
             do {
@@ -897,9 +903,39 @@ enum OfflineMapJobPoller {
                 continue
             }
 
+            if job.status != "failed" {
+                legacyFailedAttempt = nil
+                legacyFailedDeadline = nil
+            }
+            if job.mayBeLegacyRetryTransition,
+               let attempt = job.attempts {
+                // Older workers briefly persisted FAILED before QUEUED. Confirm
+                // this ambiguous state for a bounded grace window so rolling
+                // deployments do not discard a job the server is retrying.
+                // Inline-worker failures remain terminal when the window ends.
+                let observedAt = monotonicNow()
+                if legacyFailedAttempt != attempt || legacyFailedDeadline == nil {
+                    legacyFailedAttempt = attempt
+                    legacyFailedDeadline = observedAt + max(
+                        0,
+                        legacyFailedGraceSeconds
+                    )
+                }
+                if let deadline = legacyFailedDeadline, observedAt < deadline {
+                    try await sleep(pollIntervalNanoseconds)
+                    continue
+                }
+            }
+
             onUpdate(job)
             if job.status == "ready", job.mapId != nil {
                 return job
+            }
+            if job.status == "cancelled" {
+                throw OfflineMapPlatformError.mapJobCancelled
+            }
+            if job.status == "expired" {
+                throw OfflineMapPlatformError.mapJobExpired
             }
             if job.isTerminal {
                 throw OfflineMapPlatformError.mapJobFailed(
